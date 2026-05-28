@@ -1,0 +1,26 @@
+# escape=`
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+SHELL ["powershell", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+ARG ZIG_VERSION=0.16.0
+ARG ZIG_ARCH=x86_64-windows
+
+ENV ZIG_VERSION=${ZIG_VERSION}
+ENV ZIG_ARCH=${ZIG_ARCH}
+
+RUN Set-ExecutionPolicy Bypass -Scope Process -Force; `
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; `
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')); `
+    choco install -y git cmake ninja python; `
+    New-Item -ItemType Directory -Force C:\tools\zig | Out-Null; `
+    Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/zig-$env:ZIG_ARCH-$env:ZIG_VERSION.zip" -OutFile C:\zig.zip; `
+    Expand-Archive C:\zig.zip -DestinationPath C:\zig-expanded; `
+    $ZigRoot = Get-ChildItem C:\zig-expanded | Select-Object -First 1; `
+    Copy-Item "$($ZigRoot.FullName)\*" C:\tools\zig -Recurse; `
+    Remove-Item C:\zig.zip,C:\zig-expanded -Recurse -Force; `
+    setx PATH ('C:\tools\zig;C:\Program Files\CMake\bin;C:\ProgramData\chocolatey\bin;' + $env:PATH)
+
+WORKDIR C:\workspace
+
+CMD ["powershell", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\ci\\windows-build.ps1"]

@@ -1,0 +1,68 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-flatpak:
+    name: Linux Qt / Flatpak Environment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install container engine
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build in Linux container
+        run: ./ci/container-build.sh linux-flatpak
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auqw-linux-x64
+          path: build/linux-flatpak/bin/auqw
+
+  android-linux:
+    name: Android Linux Environment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install container engine
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build in Android container
+        run: ./ci/container-build.sh android-linux
+
+  windows-container:
+    name: Windows Container Environment
+    if: ${{ vars.AUQW_ENABLE_WINDOWS_CONTAINER == 'true' }}
+    runs-on:
+      - self-hosted
+      - Windows
+      - containers
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in Windows container
+        shell: pwsh
+        run: .\ci\container-build.ps1 windows
+
+  macos:
+    name: macOS Environment
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Homebrew dependencies
+        run: brew bundle --file containers/macos/Brewfile
+      - name: Build macOS
+        run: ./ci/macos-build.sh
+
+  ios:
+    name: iOS Environment
+    if: ${{ vars.AUQW_ENABLE_IOS == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Homebrew dependencies
+        run: brew bundle --file containers/ios/Brewfile
+      - name: Build iOS
+        run: ./ci/ios-build.sh

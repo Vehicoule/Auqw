@@ -1,0 +1,17 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+.zig-cache/
+zig-cache/
+zig-out/
+auqw-core/.zig-cache/
+auqw-core/zig-out/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe

@@ -1,0 +1,59 @@
+FROM ubuntu:26.04
+
+ARG ZIG_VERSION=0.16.0
+ARG ZIG_ARCH=x86_64-linux
+ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
+ARG ANDROID_PLATFORM=android-34
+ARG ANDROID_BUILD_TOOLS=34.0.0
+ARG ANDROID_NDK=28.2.13676358
+ARG QT_VERSION=6.7.3
+ARG QT_ANDROID_ARCH=android_arm64_v8a
+ARG AQT_VERSION=3.3.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV QT_ROOT=/opt/Qt
+ENV QT_ANDROID_ABI=arm64-v8a
+ENV QT_ANDROID_PREFIX=/opt/Qt/${QT_VERSION}/${QT_ANDROID_ARCH}
+ENV QT_HOST_PATH=/opt/Qt/${QT_VERSION}/gcc_64
+ENV CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_ANDROID_ARCH}
+ENV PATH="/opt/zig:/opt/aqt/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        python3 \
+        python3-venv \
+        unzip \
+        xz-utils \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        openjdk-17-jdk \
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
+    && mkdir -p /opt/zig \
+    && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig \
+    && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
+    && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android-tools.zip \
+    && unzip -q /tmp/android-tools.zip -d /tmp/android-tools \
+    && mv /tmp/android-tools/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
+    && yes | sdkmanager --licenses >/dev/null \
+    && sdkmanager \
+        "platform-tools" \
+        "platforms;${ANDROID_PLATFORM}" \
+        "build-tools;${ANDROID_BUILD_TOOLS}" \
+        "ndk;${ANDROID_NDK}" \
+    && python3 -m venv /opt/aqt \
+    && /opt/aqt/bin/pip install --no-cache-dir "aqtinstall==${AQT_VERSION}" \
+    && /opt/aqt/bin/aqt install-qt linux android "${QT_VERSION}" "${QT_ANDROID_ARCH}" --autodesktop -O "${QT_ROOT}" \
+    && rm -rf /tmp/zig.tar.xz /tmp/android-tools.zip /tmp/android-tools /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+CMD ["./ci/android-build.sh"]

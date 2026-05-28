@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Auqw
+Exec=auqw
+Icon=com.Vehicoule.auqw
+Terminal=false
+Categories=Audio;Music;Player;
+StartupWMClass=Auqw
+

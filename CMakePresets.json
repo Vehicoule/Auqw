@@ -1,0 +1,47 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "bridge",
+      "displayName": "Bridge only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/bridge",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AUQW_BUILD_QT": "OFF",
+        "AUQW_CORE_LIB": "${sourceDir}/auqw-core/zig-out/lib/libauqw_core.a"
+      }
+    },
+    {
+      "name": "qt",
+      "displayName": "Qt shell",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/qt",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AUQW_BUILD_QT": "ON",
+        "AUQW_CORE_LIB": "${sourceDir}/auqw-core/zig-out/lib/libauqw_core.a"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "bridge",
+      "configurePreset": "bridge"
+    },
+    {
+      "name": "qt",
+      "configurePreset": "qt"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "bridge",
+      "configurePreset": "bridge",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
+
