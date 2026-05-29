@@ -150,6 +150,9 @@ ApplicationWindow {
     }
 
     component QueueDelegate: ItemDelegate {
+        id: queueDelegate
+
+        required property int index
         required property string queue_item_id
         required property string title
         required property string artist
@@ -169,11 +172,11 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 2
 
-                    Label {
-                        text: title.length > 0 ? title : "Untitled track"
-                        font.weight: Font.Medium
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
+                Label {
+                    text: title.length > 0 ? title : "Untitled track"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                 }
 
                 Label {
@@ -184,15 +187,36 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
 
-                    Label {
-                        text: local_path
-                        color: root.palette.placeholderText
-                        font.pixelSize: 11
-                        elide: Text.ElideMiddle
-                        visible: text.length > 0 && !root.compact
-                        Layout.fillWidth: true
-                    }
+                Label {
+                    text: local_path
+                    color: root.palette.placeholderText
+                    font.pixelSize: 11
+                    elide: Text.ElideMiddle
+                    visible: text.length > 0 && !root.compact
+                    Layout.fillWidth: true
                 }
+            }
+
+            ColumnLayout {
+                spacing: 4
+                visible: !root.compact
+
+                Button {
+                    objectName: "queueMoveUpButton"
+                    text: "Up"
+                    enabled: queue_item_id.length > 0 && queueDelegate.index > 0
+                    implicitHeight: 28
+                    onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index - 1)
+                }
+
+                Button {
+                    objectName: "queueMoveDownButton"
+                    text: "Down"
+                    enabled: queue_item_id.length > 0 && queueDelegate.ListView.view !== null && queueDelegate.index < queueDelegate.ListView.view.count - 1
+                    implicitHeight: 28
+                    onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index + 1)
+                }
+            }
 
             Button {
                 text: "Remove"
@@ -602,6 +626,15 @@ ApplicationWindow {
                 }
 
                 Button {
+                    objectName: "miniPreviousButton"
+                    text: "Prev"
+                    enabled: coreController.playbackState !== "loading"
+                    implicitHeight: root.density
+                    visible: !root.compact || root.width > 560
+                    onClicked: coreController.playPreviousQueuedTrack()
+                }
+
+                Button {
                     objectName: "miniPlayPauseButton"
                     text: coreController.playbackState === "playing" ? "Pause" : "Play"
                     enabled: coreController.playbackState !== "loading"
@@ -619,12 +652,41 @@ ApplicationWindow {
                 }
 
                 Button {
+                    objectName: "miniNextButton"
+                    text: "Next"
+                    enabled: coreController.playbackState !== "loading"
+                    implicitHeight: root.density
+                    visible: !root.compact || root.width > 560
+                    onClicked: coreController.playNextQueuedTrack()
+                }
+
+                Button {
                     objectName: "miniStopButton"
                     text: "Stop"
                     enabled: coreController.playbackState !== "stopped"
                     implicitHeight: root.density
                     visible: !root.compact || root.width > 500
                     onClicked: coreController.stopPlayback()
+                }
+
+                Button {
+                    objectName: "miniRepeatButton"
+                    text: coreController.repeatMode === "off" ? "Repeat" : "Repeat " + coreController.repeatMode
+                    checkable: true
+                    checked: coreController.repeatMode !== "off"
+                    implicitHeight: root.density
+                    visible: !root.compact || root.width > 640
+                    onClicked: coreController.toggleRepeatMode()
+                }
+
+                Button {
+                    objectName: "miniShuffleButton"
+                    text: "Shuffle"
+                    checkable: true
+                    checked: coreController.shuffleEnabled
+                    implicitHeight: root.density
+                    visible: !root.compact || root.width > 700
+                    onClicked: coreController.toggleShuffle()
                 }
             }
         }

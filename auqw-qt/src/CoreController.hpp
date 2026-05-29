@@ -3,6 +3,7 @@
 #include <auqw/CoreBridge.hpp>
 
 #include <QAbstractItemModel>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
@@ -39,6 +40,8 @@ class CoreController final : public QObject {
     Q_PROPERTY(qint64 playbackPositionMs READ playbackPositionMs NOTIFY playbackStateChanged)
     Q_PROPERTY(qint64 playbackDurationMs READ playbackDurationMs NOTIFY playbackStateChanged)
     Q_PROPERTY(QString playbackErrorMessage READ playbackErrorMessage NOTIFY playbackStateChanged)
+    Q_PROPERTY(QString repeatMode READ repeatMode NOTIFY playbackOptionsChanged)
+    Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY playbackOptionsChanged)
 
 public:
     explicit CoreController(QObject* parent = nullptr);
@@ -68,18 +71,25 @@ public:
     [[nodiscard]] qint64 playbackPositionMs() const;
     [[nodiscard]] qint64 playbackDurationMs() const;
     [[nodiscard]] QString playbackErrorMessage() const;
+    [[nodiscard]] QString repeatMode() const;
+    [[nodiscard]] bool shuffleEnabled() const;
 
     Q_INVOKABLE void setThemeSetting(const QString& value);
     Q_INVOKABLE void importLocalFolder(const QUrl& folderUrl);
     Q_INVOKABLE void addTrackToQueue(const QString& trackId);
     Q_INVOKABLE void removeQueueItem(const QString& queueItemId);
+    Q_INVOKABLE void moveQueueItem(const QString& queueItemId, int toIndex);
     Q_INVOKABLE void clearQueue();
     Q_INVOKABLE void playQueueItem(const QString& queueItemId);
     Q_INVOKABLE void playFirstQueuedTrack();
+    Q_INVOKABLE void playNextQueuedTrack();
+    Q_INVOKABLE void playPreviousQueuedTrack();
     Q_INVOKABLE void pausePlayback();
     Q_INVOKABLE void resumePlayback();
     Q_INVOKABLE void stopPlayback();
     Q_INVOKABLE void seekPlayback(qint64 positionMs);
+    Q_INVOKABLE void toggleRepeatMode();
+    Q_INVOKABLE void toggleShuffle();
     Q_INVOKABLE void refreshState();
 
 signals:
@@ -88,6 +98,7 @@ signals:
     void themeSettingChanged();
     void importStatusChanged();
     void playbackStateChanged();
+    void playbackOptionsChanged();
 
 private:
     struct CommandResult;
@@ -99,13 +110,18 @@ private:
     void loadInitialState();
     bool refreshQueueFromCore();
     bool refreshPlaybackFromCore();
+    bool refreshPlaybackOptionsFromCore();
     void setCoreStatus(const QString& status);
     void setThemeSettingFromCore(const QString& value);
     void setImportResult(const QString& status, int importedTrackCount);
     void configurePlaybackBackend();
     bool applyPlaybackObject(const QJsonObject& playback);
+    bool applyPlaybackOptionsObject(const QJsonObject& options);
     void updatePlaybackFromBackend(const QString& playbackState, std::optional<qint64> positionMs, std::optional<qint64> durationMs, const QString& errorMessage = {});
     void recordRecentIfNeeded();
+    [[nodiscard]] int queueIndexForItem(const QString& queueItemId) const;
+    [[nodiscard]] QString queueItemIdAt(int row) const;
+    void applyQueueItems(const QJsonArray& items);
 
     std::optional<auqw::CoreBridge> core_;
     std::unique_ptr<PlaybackBackend> playbackBackend_;
@@ -133,4 +149,7 @@ private:
     qint64 playbackDurationMs_ = 0;
     QString playbackErrorMessage_;
     QString recentRecordedQueueItemId_;
+    QString repeatMode_ = QStringLiteral("off");
+    bool shuffleEnabled_ = false;
+    bool stopRequested_ = false;
 };

@@ -26,9 +26,12 @@ pub fn invoke(state: *AppState, request_json: []const u8) errors.CoreError![]u8 
     if (std.mem.eql(u8, command, "queue.list")) return queueList(state, id);
     if (std.mem.eql(u8, command, "queue.remove")) return queueRemove(state, id, params);
     if (std.mem.eql(u8, command, "queue.clear")) return queueClear(state, id);
+    if (std.mem.eql(u8, command, "queue.move")) return queueMove(state, id, params);
     if (std.mem.eql(u8, command, "playback.get")) return playbackGet(state, id);
     if (std.mem.eql(u8, command, "playback.load_queue_item")) return playbackLoadQueueItem(state, id, params);
     if (std.mem.eql(u8, command, "playback.update")) return playbackUpdate(state, id, params);
+    if (std.mem.eql(u8, command, "playback.options.get")) return playbackOptionsGet(state, id);
+    if (std.mem.eql(u8, command, "playback.options.update")) return playbackOptionsUpdate(state, id, params);
     if (std.mem.eql(u8, command, "playlists.create")) return playlistsCreate(state, id, params);
     if (std.mem.eql(u8, command, "playlists.list")) return playlistsList(state, id);
     if (std.mem.eql(u8, command, "recent.add")) return recentAdd(state, id, params);
@@ -203,6 +206,62 @@ fn queueClear(state: *AppState, id: []const u8) errors.CoreError![]u8 {
     return queueList(state, id);
 }
 
+fn queueMove(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
+    const item_id = requiredString(params, "id") catch return error.InvalidJson;
+    const to_index = requiredInt(params, "to_index") catch return error.InvalidJson;
+
+    const items = listQueue(state) catch return error.Database;
+    defer freeQueueItems(state.allocator, items);
+    if (items.len == 0) return error.Database;
+
+    var from_index: ?usize = null;
+    for (items, 0..) |item, index| {
+        if (std.mem.eql(u8, item.id, item_id)) {
+            from_index = index;
+            break;
+        }
+    }
+    const source_index = from_index orelse return error.Database;
+
+    const target_index: usize = if (to_index <= 0)
+        0
+    else
+        @min(@as(usize, @intCast(to_index)), items.len - 1);
+
+    const ordered_ids = state.allocator.alloc([]const u8, items.len) catch return error.AllocationFailed;
+    defer state.allocator.free(ordered_ids);
+
+    var write_index: usize = 0;
+    for (items, 0..) |item, index| {
+        if (index == source_index) {
+            continue;
+        }
+        if (write_index == target_index) {
+            ordered_ids[write_index] = items[source_index].id;
+            write_index += 1;
+        }
+        ordered_ids[write_index] = item.id;
+        write_index += 1;
+    }
+    if (write_index == target_index) {
+        ordered_ids[write_index] = items[source_index].id;
+        write_index += 1;
+    }
+
+    state.db.exec("BEGIN IMMEDIATE;") catch return error.Database;
+    var committed = false;
+    errdefer if (!committed) state.db.exec("ROLLBACK;") catch {};
+
+    for (ordered_ids, 0..) |queue_item_id, index| {
+        updateQueueItemPosition(state, queue_item_id, @intCast(index)) catch return error.Database;
+    }
+
+    state.db.exec("COMMIT;") catch return error.Database;
+    committed = true;
+
+    return queueList(state, id);
+}
+
 fn playbackGet(state: *AppState, id: []const u8) errors.CoreError![]u8 {
     const playback = getPlaybackState(state) catch return error.Database;
     defer playback.deinit(state.allocator);
@@ -266,6 +325,37 @@ fn playbackUpdate(state: *AppState, id: []const u8, params: ObjectMap) errors.Co
     const playback = getPlaybackState(state) catch return error.Database;
     defer playback.deinit(state.allocator);
     return makeSuccess(state.allocator, id, .{ .playback = playback });
+}
+
+const PlaybackOptions = struct {
+    repeat_mode: []const u8,
+    shuffle_enabled: bool,
+};
+
+fn playbackOptionsGet(state: *AppState, id: []const u8) errors.CoreError![]u8 {
+    const options = getPlaybackOptions(state) catch return error.Database;
+    return makeSuccess(state.allocator, id, .{ .options = options });
+}
+
+fn playbackOptionsUpdate(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
+    if (params.get("repeat_mode")) |value| {
+        if (value != .null) {
+            const repeat_mode = requiredString(params, "repeat_mode") catch return error.InvalidJson;
+            if (!isValidRepeatMode(repeat_mode)) return error.InvalidJson;
+            setSettingValue(state, "playback.repeat_mode", repeat_mode) catch return error.Database;
+        }
+    }
+
+    if (params.get("shuffle_enabled")) |value| {
+        if (value != .null) {
+            const shuffle_enabled = optionalBool(params, "shuffle_enabled") catch return error.InvalidJson;
+            const shuffle_text = if (shuffle_enabled orelse false) "true" else "false";
+            setSettingValue(state, "playback.shuffle_enabled", shuffle_text) catch return error.Database;
+        }
+    }
+
+    const options = getPlaybackOptions(state) catch return error.Database;
+    return makeSuccess(state.allocator, id, .{ .options = options });
 }
 
 fn playlistsCreate(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
@@ -574,6 +664,14 @@ fn queueItemFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqli
     };
 }
 
+fn updateQueueItemPosition(state: *AppState, item_id: []const u8, position: i64) sqlite.DbError!void {
+    var stmt = try state.db.prepare("UPDATE queue_items SET position = ? WHERE id = ?");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, position);
+    try stmt.bindText(2, item_id);
+    if ((try stmt.step()) != .done) return error.Database;
+}
+
 fn getPlaybackState(state: *AppState) sqlite.DbError!models.PlaybackState {
     var stmt = try state.db.prepare(
         \\SELECT
@@ -689,6 +787,12 @@ fn isValidPlaybackState(value: []const u8) bool {
         or std.mem.eql(u8, value, "playing")
         or std.mem.eql(u8, value, "paused")
         or std.mem.eql(u8, value, "error");
+}
+
+fn isValidRepeatMode(value: []const u8) bool {
+    return std.mem.eql(u8, value, "off")
+        or std.mem.eql(u8, value, "one")
+        or std.mem.eql(u8, value, "all");
 }
 
 fn getPlaylistById(state: *AppState, id: []const u8) sqlite.DbError!models.Playlist {
@@ -809,6 +913,44 @@ fn getSettingByKey(state: *AppState, key: []const u8) sqlite.DbError!models.Sett
     };
 }
 
+fn setSettingValue(state: *AppState, key: []const u8, value: []const u8) sqlite.DbError!void {
+    var stmt = try state.db.prepare(
+        \\INSERT INTO settings(key, value, updated_at)
+        \\VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        \\ON CONFLICT(key) DO UPDATE SET
+        \\    value = excluded.value,
+        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, key);
+    try stmt.bindText(2, value);
+    if ((try stmt.step()) != .done) return error.Database;
+}
+
+fn getPlaybackOptions(state: *AppState) sqlite.DbError!PlaybackOptions {
+    const repeat_setting = try getSettingByKey(state, "playback.repeat_mode");
+    defer repeat_setting.deinit(state.allocator);
+    const shuffle_setting = try getSettingByKey(state, "playback.shuffle_enabled");
+    defer shuffle_setting.deinit(state.allocator);
+
+    return .{
+        .repeat_mode = normalizeRepeatMode(repeat_setting.value),
+        .shuffle_enabled = isTrueSetting(shuffle_setting.value),
+    };
+}
+
+fn normalizeRepeatMode(value: ?[]const u8) []const u8 {
+    const text = value orelse return "off";
+    if (std.mem.eql(u8, text, "one")) return "one";
+    if (std.mem.eql(u8, text, "all")) return "all";
+    return "off";
+}
+
+fn isTrueSetting(value: ?[]const u8) bool {
+    const text = value orelse return false;
+    return std.mem.eql(u8, text, "true");
+}
+
 fn freeTracks(allocator: std.mem.Allocator, items: []models.Track) void {
     for (items) |item| item.deinit(allocator);
     allocator.free(items);
@@ -844,6 +986,10 @@ fn requiredString(object: ObjectMap, key: []const u8) ![]const u8 {
     return optionalString(object, key) orelse error.InvalidJson;
 }
 
+fn requiredInt(object: ObjectMap, key: []const u8) !i64 {
+    return (try optionalInt(object, key)) orelse error.InvalidJson;
+}
+
 fn optionalString(object: ObjectMap, key: []const u8) ?[]const u8 {
     const value = object.get(key) orelse return null;
     return switch (value) {
@@ -857,6 +1003,15 @@ fn optionalInt(object: ObjectMap, key: []const u8) !?i64 {
     const value = object.get(key) orelse return null;
     return switch (value) {
         .integer => |number| number,
+        .null => null,
+        else => error.InvalidJson,
+    };
+}
+
+fn optionalBool(object: ObjectMap, key: []const u8) !?bool {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .bool => |boolean| boolean,
         .null => null,
         else => error.InvalidJson,
     };

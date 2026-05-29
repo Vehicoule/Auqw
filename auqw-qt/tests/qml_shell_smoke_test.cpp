@@ -98,10 +98,16 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queuePanel")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueList")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueClearButton")) != nullptr);
+        QVERIFY(findObjectByName(root, QStringLiteral("queueMoveUpButton")) != nullptr);
+        QVERIFY(findObjectByName(root, QStringLiteral("queueMoveDownButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("importFolderButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("importStatusLabel")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPreviousButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayPauseButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniNextButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniStopButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniRepeatButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniShuffleButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerTitle")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerState")) != nullptr);
 

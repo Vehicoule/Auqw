@@ -72,6 +72,10 @@ public:
         emitState(QStringLiteral("playing"), positionMs, std::nullopt);
     }
 
+    void emitBackendState(const QString& state, std::optional<qint64> positionMs, std::optional<qint64> durationMs) {
+        emitState(state, positionMs, durationMs);
+    }
+
     void setStateChangedCallback(StateChangedCallback callback) override {
         stateChangedCallback = std::move(callback);
     }
@@ -251,9 +255,19 @@ private slots:
         QVERIFY(queueLocalPathRole > 0);
 
         const QString firstQueueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        const QString secondQueueItemId = queue->data(queue->index(1, 0), queueIdRole).toString();
         QVERIFY(!firstQueueItemId.isEmpty());
+        QVERIFY(!secondQueueItemId.isEmpty());
         QCOMPARE(queue->data(queue->index(0, 0), queueTitleRole).toString(), QStringLiteral("alpha"));
         QVERIFY(queue->data(queue->index(0, 0), queueLocalPathRole).toString().endsWith(QStringLiteral("alpha.mp3")));
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "moveQueueItem",
+            Q_ARG(QString, secondQueueItemId),
+            Q_ARG(int, 0)));
+        QCOMPARE(queue->data(queue->index(0, 0), queueIdRole).toString(), secondQueueItemId);
+        QCOMPARE(queue->data(queue->index(0, 0), queueTitleRole).toString(), QStringLiteral("beta"));
 
         QVERIFY(QMetaObject::invokeMethod(
             &controller,
@@ -335,6 +349,152 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(&controller, "stopPlayback"));
         QCOMPARE(fakeBackend->stopCalls, 1);
         QCOMPARE(controller.property("playbackState").toString(), QStringLiteral("stopped"));
+    }
+
+    void advancesToNextQueuedTrackWhenBackendStopsAtEnd() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+
+        QDir dir(library.path());
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("alpha.mp3"))));
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("beta.flac"))));
+
+        auto backend = std::make_unique<FakePlaybackBackend>();
+        auto* fakeBackend = backend.get();
+        CoreController controller(std::move(backend));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        QVERIFY(queue != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        QCOMPARE(tracks->rowCount(), 2);
+
+        const int trackIdRole = roleForName(tracks, "id");
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(trackIdRole > 0);
+        QVERIFY(queueIdRole > 0);
+
+        for (int row = 0; row < tracks->rowCount(); ++row) {
+            const QString trackId = tracks->data(tracks->index(row, 0), trackIdRole).toString();
+            QVERIFY(QMetaObject::invokeMethod(
+                &controller,
+                "addTrackToQueue",
+                Q_ARG(QString, trackId)));
+        }
+        QCOMPARE(queue->rowCount(), 2);
+
+        const QString firstQueueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        const QString secondQueueItemId = queue->data(queue->index(1, 0), queueIdRole).toString();
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "playQueueItem",
+            Q_ARG(QString, firstQueueItemId)));
+        QCOMPARE(fakeBackend->playCalls, 1);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("alpha.mp3")));
+
+        fakeBackend->emitBackendState(QStringLiteral("stopped"), 2000, 2000);
+
+        QCOMPARE(fakeBackend->playCalls, 2);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("beta.flac")));
+        QCOMPARE(controller.property("playbackQueueItemId").toString(), secondQueueItemId);
+        QCOMPARE(controller.property("playbackTitle").toString(), QStringLiteral("beta"));
+        QCOMPARE(controller.property("playbackState").toString(), QStringLiteral("playing"));
+    }
+
+    void playbackNavigationAndOptionsRoundTrip() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+
+        QDir dir(library.path());
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("alpha.mp3"))));
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("beta.flac"))));
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("gamma.wav"))));
+
+        auto backend = std::make_unique<FakePlaybackBackend>();
+        auto* fakeBackend = backend.get();
+        CoreController controller(std::move(backend));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        QVERIFY(queue != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        QCOMPARE(tracks->rowCount(), 3);
+
+        const int trackIdRole = roleForName(tracks, "id");
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(trackIdRole > 0);
+        QVERIFY(queueIdRole > 0);
+        for (int row = 0; row < tracks->rowCount(); ++row) {
+            const QString trackId = tracks->data(tracks->index(row, 0), trackIdRole).toString();
+            QVERIFY(QMetaObject::invokeMethod(
+                &controller,
+                "addTrackToQueue",
+                Q_ARG(QString, trackId)));
+        }
+        QCOMPARE(queue->rowCount(), 3);
+
+        const QString firstQueueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        const QString secondQueueItemId = queue->data(queue->index(1, 0), queueIdRole).toString();
+        const QString thirdQueueItemId = queue->data(queue->index(2, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "playQueueItem",
+            Q_ARG(QString, secondQueueItemId)));
+        QCOMPARE(fakeBackend->playCalls, 1);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("beta.flac")));
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playNextQueuedTrack"));
+        QCOMPARE(fakeBackend->playCalls, 2);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("gamma.wav")));
+        QCOMPARE(controller.property("playbackQueueItemId").toString(), thirdQueueItemId);
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playPreviousQueuedTrack"));
+        QCOMPARE(fakeBackend->playCalls, 3);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("beta.flac")));
+        QCOMPARE(controller.property("playbackQueueItemId").toString(), secondQueueItemId);
+
+        QCOMPARE(controller.property("repeatMode").toString(), QStringLiteral("off"));
+        QCOMPARE(controller.property("shuffleEnabled").toBool(), false);
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "toggleRepeatMode"));
+        QCOMPARE(controller.property("repeatMode").toString(), QStringLiteral("one"));
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playNextQueuedTrack"));
+        QCOMPARE(fakeBackend->playCalls, 4);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("beta.flac")));
+        QCOMPARE(controller.property("playbackQueueItemId").toString(), secondQueueItemId);
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "toggleRepeatMode"));
+        QCOMPARE(controller.property("repeatMode").toString(), QStringLiteral("all"));
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "playQueueItem",
+            Q_ARG(QString, thirdQueueItemId)));
+        QCOMPARE(fakeBackend->playCalls, 5);
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playNextQueuedTrack"));
+        QCOMPARE(fakeBackend->playCalls, 6);
+        QVERIFY(fakeBackend->lastPath.endsWith(QStringLiteral("alpha.mp3")));
+        QCOMPARE(controller.property("playbackQueueItemId").toString(), firstQueueItemId);
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "toggleRepeatMode"));
+        QCOMPARE(controller.property("repeatMode").toString(), QStringLiteral("off"));
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "toggleShuffle"));
+        QCOMPARE(controller.property("shuffleEnabled").toBool(), true);
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playNextQueuedTrack"));
+        QCOMPARE(fakeBackend->playCalls, 7);
+        QVERIFY(controller.property("playbackQueueItemId").toString() != firstQueueItemId);
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "toggleShuffle"));
+        QCOMPARE(controller.property("shuffleEnabled").toBool(), false);
     }
 };
 

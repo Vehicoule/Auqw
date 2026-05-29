@@ -356,6 +356,163 @@ test "queue commands append duplicate local tracks and return joined items" {
     try std.testing.expectEqual(@as(usize, 0), (try expectOk(empty, "queue-empty")).get("items").?.array.items.len);
 }
 
+test "queue move reorders items and compacts positions" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var alpha = try expectInvoke(core.?, "{\"id\":\"local-alpha\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/alpha.mp3\",\"title\":\"Alpha\"}}");
+    defer alpha.deinit();
+    const alpha_track_id = (try expectOk(alpha, "local-alpha")).get("track").?.object.get("id").?.string;
+
+    var beta = try expectInvoke(core.?, "{\"id\":\"local-beta\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/beta.flac\",\"title\":\"Beta\"}}");
+    defer beta.deinit();
+    const beta_track_id = (try expectOk(beta, "local-beta")).get("track").?.object.get("id").?.string;
+
+    var gamma = try expectInvoke(core.?, "{\"id\":\"local-gamma\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/gamma.wav\",\"title\":\"Gamma\"}}");
+    defer gamma.deinit();
+    const gamma_track_id = (try expectOk(gamma, "local-gamma")).get("track").?.object.get("id").?.string;
+
+    const add_alpha_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-alpha\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{alpha_track_id}, 0);
+    defer allocator.free(add_alpha_request);
+    var add_alpha = try expectInvoke(core.?, add_alpha_request);
+    defer add_alpha.deinit();
+    const alpha_queue_id = try allocator.dupe(u8, (try expectOk(add_alpha, "add-alpha")).get("item").?.object.get("id").?.string);
+    defer allocator.free(alpha_queue_id);
+
+    const add_beta_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-beta\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{beta_track_id}, 0);
+    defer allocator.free(add_beta_request);
+    var add_beta = try expectInvoke(core.?, add_beta_request);
+    defer add_beta.deinit();
+    const beta_queue_id = try allocator.dupe(u8, (try expectOk(add_beta, "add-beta")).get("item").?.object.get("id").?.string);
+    defer allocator.free(beta_queue_id);
+
+    const add_gamma_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-gamma\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{gamma_track_id}, 0);
+    defer allocator.free(add_gamma_request);
+    var add_gamma = try expectInvoke(core.?, add_gamma_request);
+    defer add_gamma.deinit();
+    const gamma_queue_id = try allocator.dupe(u8, (try expectOk(add_gamma, "add-gamma")).get("item").?.object.get("id").?.string);
+    defer allocator.free(gamma_queue_id);
+
+    const move_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"queue-move\",\"command\":\"queue.move\",\"params\":{{\"id\":\"{s}\",\"to_index\":0}}}}", .{gamma_queue_id}, 0);
+    defer allocator.free(move_request);
+    var moved = try expectInvoke(core.?, move_request);
+    defer moved.deinit();
+    const moved_items = (try expectOk(moved, "queue-move")).get("items").?.array.items;
+
+    try std.testing.expectEqual(@as(usize, 3), moved_items.len);
+    try std.testing.expectEqualStrings(gamma_queue_id, moved_items[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 0), moved_items[0].object.get("position").?.integer);
+    try std.testing.expectEqualStrings(alpha_queue_id, moved_items[1].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 1), moved_items[1].object.get("position").?.integer);
+    try std.testing.expectEqualStrings(beta_queue_id, moved_items[2].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 2), moved_items[2].object.get("position").?.integer);
+}
+
+test "playback options default update and persist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var data_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const data_dir_len = try tmp.dir.realPath(std.testing.io, &data_dir_buf);
+    const data_dir_z = try allocator.dupeZ(u8, data_dir_buf[0..data_dir_len]);
+    defer allocator.free(data_dir_z);
+
+    const options = api.AuqwInitOptions{
+        .app_id = "com.Vehicoule.auqw",
+        .app_name = "Auqw",
+        .data_dir = data_dir_z.ptr,
+        .cache_dir = null,
+    };
+
+    var first: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &first));
+
+    var defaults = try expectInvoke(first.?, "{\"id\":\"options-default\",\"command\":\"playback.options.get\",\"params\":{}}");
+    defer defaults.deinit();
+    var options_object = (try expectOk(defaults, "options-default")).get("options").?.object;
+    try std.testing.expectEqualStrings("off", options_object.get("repeat_mode").?.string);
+    try std.testing.expectEqual(false, options_object.get("shuffle_enabled").?.bool);
+
+    var updated = try expectInvoke(first.?, "{\"id\":\"options-update\",\"command\":\"playback.options.update\",\"params\":{\"repeat_mode\":\"all\",\"shuffle_enabled\":true}}");
+    defer updated.deinit();
+    options_object = (try expectOk(updated, "options-update")).get("options").?.object;
+    try std.testing.expectEqualStrings("all", options_object.get("repeat_mode").?.string);
+    try std.testing.expectEqual(true, options_object.get("shuffle_enabled").?.bool);
+    api.auqw_core_destroy(first);
+
+    var second: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &second));
+    defer api.auqw_core_destroy(second);
+
+    var persisted = try expectInvoke(second.?, "{\"id\":\"options-persisted\",\"command\":\"playback.options.get\",\"params\":{}}");
+    defer persisted.deinit();
+    options_object = (try expectOk(persisted, "options-persisted")).get("options").?.object;
+    try std.testing.expectEqualStrings("all", options_object.get("repeat_mode").?.string);
+    try std.testing.expectEqual(true, options_object.get("shuffle_enabled").?.bool);
+}
+
+test "queue order survives close and reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var data_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const data_dir_len = try tmp.dir.realPath(std.testing.io, &data_dir_buf);
+    const data_dir_z = try allocator.dupeZ(u8, data_dir_buf[0..data_dir_len]);
+    defer allocator.free(data_dir_z);
+
+    const options = api.AuqwInitOptions{
+        .app_id = "com.Vehicoule.auqw",
+        .app_name = "Auqw",
+        .data_dir = data_dir_z.ptr,
+        .cache_dir = null,
+    };
+
+    var first: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &first));
+
+    var alpha = try expectInvoke(first.?, "{\"id\":\"local-alpha\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/alpha.mp3\",\"title\":\"Alpha\"}}");
+    defer alpha.deinit();
+    const alpha_track_id = (try expectOk(alpha, "local-alpha")).get("track").?.object.get("id").?.string;
+
+    var beta = try expectInvoke(first.?, "{\"id\":\"local-beta\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/beta.flac\",\"title\":\"Beta\"}}");
+    defer beta.deinit();
+    const beta_track_id = (try expectOk(beta, "local-beta")).get("track").?.object.get("id").?.string;
+
+    const add_alpha_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-alpha\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{alpha_track_id}, 0);
+    defer allocator.free(add_alpha_request);
+    var add_alpha = try expectInvoke(first.?, add_alpha_request);
+    defer add_alpha.deinit();
+    const alpha_queue_id = try allocator.dupe(u8, (try expectOk(add_alpha, "add-alpha")).get("item").?.object.get("id").?.string);
+    defer allocator.free(alpha_queue_id);
+
+    const add_beta_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-beta\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{beta_track_id}, 0);
+    defer allocator.free(add_beta_request);
+    var add_beta = try expectInvoke(first.?, add_beta_request);
+    defer add_beta.deinit();
+    const beta_queue_id = try allocator.dupe(u8, (try expectOk(add_beta, "add-beta")).get("item").?.object.get("id").?.string);
+    defer allocator.free(beta_queue_id);
+
+    const move_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"queue-move\",\"command\":\"queue.move\",\"params\":{{\"id\":\"{s}\",\"to_index\":0}}}}", .{beta_queue_id}, 0);
+    defer allocator.free(move_request);
+    var moved = try expectInvoke(first.?, move_request);
+    moved.deinit();
+    api.auqw_core_destroy(first);
+
+    var second: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &second));
+    defer api.auqw_core_destroy(second);
+
+    var list = try expectInvoke(second.?, "{\"id\":\"queue-list\",\"command\":\"queue.list\",\"params\":{}}");
+    defer list.deinit();
+    const items = (try expectOk(list, "queue-list")).get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings(beta_queue_id, items[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 0), items[0].object.get("position").?.integer);
+    try std.testing.expectEqualStrings(alpha_queue_id, items[1].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 1), items[1].object.get("position").?.integer);
+}
+
 test "playlists create and list round trip" {
     var core: ?*api.AuqwCore = null;
     try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));

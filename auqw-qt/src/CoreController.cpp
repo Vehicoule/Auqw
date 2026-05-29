@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QVariantMap>
 
@@ -290,6 +291,14 @@ QString CoreController::playbackErrorMessage() const {
     return playbackErrorMessage_;
 }
 
+QString CoreController::repeatMode() const {
+    return repeatMode_;
+}
+
+bool CoreController::shuffleEnabled() const {
+    return shuffleEnabled_;
+}
+
 void CoreController::setThemeSetting(const QString& value) {
     const CommandResult result = invokeCommand(
         QStringLiteral("settings.set.theme"),
@@ -393,10 +402,29 @@ void CoreController::removeQueueItem(const QString& queueItemId) {
         return;
     }
 
-    queueModel_->setItems(mapsWithAliasFromArray(
-        result.data.value(QStringLiteral("items")).toArray(),
-        QStringLiteral("queue_item_id"),
-        QStringLiteral("id")));
+    applyQueueItems(result.data.value(QStringLiteral("items")).toArray());
+    setCoreStatus(QStringLiteral("Ready"));
+}
+
+void CoreController::moveQueueItem(const QString& queueItemId, int toIndex) {
+    if (queueItemId.isEmpty()) {
+        return;
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("queue.move"),
+        QStringLiteral("queue.move"),
+        QJsonObject{
+            {QStringLiteral("id"), queueItemId},
+            {QStringLiteral("to_index"), toIndex},
+        });
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    applyQueueItems(result.data.value(QStringLiteral("items")).toArray());
     setCoreStatus(QStringLiteral("Ready"));
 }
 
@@ -410,10 +438,7 @@ void CoreController::clearQueue() {
         return;
     }
 
-    queueModel_->setItems(mapsWithAliasFromArray(
-        result.data.value(QStringLiteral("items")).toArray(),
-        QStringLiteral("queue_item_id"),
-        QStringLiteral("id")));
+    applyQueueItems(result.data.value(QStringLiteral("items")).toArray());
     setCoreStatus(QStringLiteral("Ready"));
 }
 
@@ -453,6 +478,71 @@ void CoreController::playFirstQueuedTrack() {
     playQueueItem(queueItemId);
 }
 
+void CoreController::playNextQueuedTrack() {
+    const int count = queueModel_->rowCount();
+    if (count <= 0) {
+        setCoreStatus(QStringLiteral("Queue empty"));
+        return;
+    }
+
+    const int currentIndex = queueIndexForItem(playbackQueueItemId_);
+    if (repeatMode_ == QStringLiteral("one") && !playbackQueueItemId_.isEmpty()) {
+        playQueueItem(playbackQueueItemId_);
+        return;
+    }
+
+    if (shuffleEnabled_ && count > 1) {
+        int nextIndex = QRandomGenerator::global()->bounded(currentIndex >= 0 ? count - 1 : count);
+        if (currentIndex >= 0 && nextIndex >= currentIndex) {
+            ++nextIndex;
+        }
+        playQueueItem(queueItemIdAt(nextIndex));
+        return;
+    }
+
+    if (currentIndex < 0) {
+        playQueueItem(queueItemIdAt(0));
+        return;
+    }
+
+    int nextIndex = currentIndex + 1;
+    if (nextIndex >= count) {
+        if (repeatMode_ == QStringLiteral("all")) {
+            nextIndex = 0;
+        } else {
+            setCoreStatus(QStringLiteral("Queue ended"));
+            return;
+        }
+    }
+
+    playQueueItem(queueItemIdAt(nextIndex));
+}
+
+void CoreController::playPreviousQueuedTrack() {
+    const int count = queueModel_->rowCount();
+    if (count <= 0) {
+        setCoreStatus(QStringLiteral("Queue empty"));
+        return;
+    }
+
+    const int currentIndex = queueIndexForItem(playbackQueueItemId_);
+    if (currentIndex < 0) {
+        playQueueItem(queueItemIdAt(0));
+        return;
+    }
+
+    int previousIndex = currentIndex - 1;
+    if (previousIndex < 0) {
+        if (repeatMode_ == QStringLiteral("all")) {
+            previousIndex = count - 1;
+        } else {
+            previousIndex = 0;
+        }
+    }
+
+    playQueueItem(queueItemIdAt(previousIndex));
+}
+
 void CoreController::pausePlayback() {
     playbackBackend_->pause();
 }
@@ -462,11 +552,48 @@ void CoreController::resumePlayback() {
 }
 
 void CoreController::stopPlayback() {
+    stopRequested_ = true;
     playbackBackend_->stop();
 }
 
 void CoreController::seekPlayback(qint64 positionMs) {
     playbackBackend_->seek(positionMs);
+}
+
+void CoreController::toggleRepeatMode() {
+    const QString nextMode = repeatMode_ == QStringLiteral("off")
+        ? QStringLiteral("one")
+        : repeatMode_ == QStringLiteral("one")
+            ? QStringLiteral("all")
+            : QStringLiteral("off");
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("playback.options.update.repeat"),
+        QStringLiteral("playback.options.update"),
+        QJsonObject{{QStringLiteral("repeat_mode"), nextMode}});
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    applyPlaybackOptionsObject(result.data.value(QStringLiteral("options")).toObject());
+    setCoreStatus(QStringLiteral("Ready"));
+}
+
+void CoreController::toggleShuffle() {
+    const CommandResult result = invokeCommand(
+        QStringLiteral("playback.options.update.shuffle"),
+        QStringLiteral("playback.options.update"),
+        QJsonObject{{QStringLiteral("shuffle_enabled"), !shuffleEnabled_}});
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    applyPlaybackOptionsObject(result.data.value(QStringLiteral("options")).toObject());
+    setCoreStatus(QStringLiteral("Ready"));
 }
 
 void CoreController::refreshState() {
@@ -560,6 +687,10 @@ void CoreController::loadInitialState() {
         return;
     }
 
+    if (!refreshPlaybackOptionsFromCore()) {
+        return;
+    }
+
     const CommandResult theme = invokeCommand(
         QStringLiteral("settings.get.theme"),
         QStringLiteral("settings.get"),
@@ -583,10 +714,7 @@ bool CoreController::refreshQueueFromCore() {
         return false;
     }
 
-    queueModel_->setItems(mapsWithAliasFromArray(
-        queue.data.value(QStringLiteral("items")).toArray(),
-        QStringLiteral("queue_item_id"),
-        QStringLiteral("id")));
+    applyQueueItems(queue.data.value(QStringLiteral("items")).toArray());
     return true;
 }
 
@@ -600,6 +728,19 @@ bool CoreController::refreshPlaybackFromCore() {
     }
 
     applyPlaybackObject(playback.data.value(QStringLiteral("playback")).toObject());
+    return true;
+}
+
+bool CoreController::refreshPlaybackOptionsFromCore() {
+    const CommandResult options = invokeCommand(
+        QStringLiteral("playback.options.get"),
+        QStringLiteral("playback.options.get"));
+    if (!options.ok) {
+        setCoreStatus(options.error);
+        return false;
+    }
+
+    applyPlaybackOptionsObject(options.data.value(QStringLiteral("options")).toObject());
     return true;
 }
 
@@ -687,11 +828,36 @@ bool CoreController::applyPlaybackObject(const QJsonObject& playback) {
     return changed;
 }
 
+bool CoreController::applyPlaybackOptionsObject(const QJsonObject& options) {
+    const QString nextRepeatMode = options.value(QStringLiteral("repeat_mode")).toString(QStringLiteral("off"));
+    const bool nextShuffleEnabled = options.value(QStringLiteral("shuffle_enabled")).toBool(false);
+
+    const bool changed = repeatMode_ != nextRepeatMode
+        || shuffleEnabled_ != nextShuffleEnabled;
+
+    repeatMode_ = nextRepeatMode;
+    shuffleEnabled_ = nextShuffleEnabled;
+
+    if (changed) {
+        emit playbackOptionsChanged();
+    }
+    return changed;
+}
+
 void CoreController::updatePlaybackFromBackend(
     const QString& playbackState,
     std::optional<qint64> positionMs,
     std::optional<qint64> durationMs,
     const QString& errorMessage) {
+    const bool wasPlaying = playbackState_ == QStringLiteral("playing");
+    const bool endedNaturally = playbackState == QStringLiteral("stopped")
+        && wasPlaying
+        && positionMs.has_value()
+        && durationMs.has_value()
+        && *durationMs > 0
+        && *positionMs >= *durationMs;
+    const bool skipAutoAdvance = stopRequested_;
+
     QJsonObject params{
         {QStringLiteral("state"), playbackState},
     };
@@ -716,16 +882,49 @@ void CoreController::updatePlaybackFromBackend(
     }
 
     applyPlaybackObject(result.data.value(QStringLiteral("playback")).toObject());
+    if (endedNaturally && !skipAutoAdvance) {
+        stopRequested_ = false;
+        playNextQueuedTrack();
+        return;
+    }
+
     if (playbackState_ == QStringLiteral("playing")) {
         recordRecentIfNeeded();
         setCoreStatus(QStringLiteral("Playing"));
     } else if (playbackState_ == QStringLiteral("paused")) {
         setCoreStatus(QStringLiteral("Paused"));
     } else if (playbackState_ == QStringLiteral("stopped")) {
+        stopRequested_ = false;
         setCoreStatus(QStringLiteral("Stopped"));
     } else if (playbackState_ == QStringLiteral("error")) {
+        stopRequested_ = false;
         setCoreStatus(playbackErrorMessage_.isEmpty() ? QStringLiteral("Playback error") : playbackErrorMessage_);
     }
+}
+
+int CoreController::queueIndexForItem(const QString& queueItemId) const {
+    if (queueItemId.isEmpty()) {
+        return -1;
+    }
+
+    const int count = queueModel_->rowCount();
+    for (int row = 0; row < count; ++row) {
+        if (queueItemIdAt(row) == queueItemId) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+QString CoreController::queueItemIdAt(int row) const {
+    return queueModel_->itemAt(row).value(QStringLiteral("id")).toString();
+}
+
+void CoreController::applyQueueItems(const QJsonArray& items) {
+    queueModel_->setItems(mapsWithAliasFromArray(
+        items,
+        QStringLiteral("queue_item_id"),
+        QStringLiteral("id")));
 }
 
 void CoreController::recordRecentIfNeeded() {
