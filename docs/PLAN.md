@@ -318,6 +318,8 @@ Acceptance:
 
 ## 7. Milestone 3: Local Library And Queue
 
+Status: complete on `main` as of `feat: add queue playback polish`.
+
 Goal:
 
 ```text
@@ -355,6 +357,8 @@ Acceptance:
 
 ## 8. Milestone 4: Platform Playback
 
+Status: in progress. Slice 1 starts with desktop platform playback around the existing Qt shell.
+
 Goal:
 
 ```text
@@ -364,9 +368,9 @@ Keep playback state in Zig while real playback is handled natively.
 Desktop:
 
 - Qt Multimedia player.
-- Media keys.
+- App-focused media keys.
 - Tray controls.
-- Notifications.
+- Track-change notifications.
 - Window state restore.
 
 Android:
@@ -542,32 +546,32 @@ Testing:
 
 ## 13. Immediate Next Actions
 
-1. Install missing Qt QML dev package:
+1. Finish Milestone 4 slice 1 desktop platform playback:
 
-```bash
-sudo apt install qt6-declarative-dev qml6-module-qtquick-window
+```text
+DesktopPlatformController
+tray actions
+track notifications
+window state restore
+app-focused media keys
 ```
 
-2. Rebuild GUI shell:
+2. Verify the desktop slice locally:
 
 ```bash
-rm -rf build/local
 AUQW_BUILD_QT=ON ./ci/build-local.sh
 ```
 
-3. Run GUI:
+3. Smoke-run the GUI:
 
 ```bash
-./build/local/bin/auqw
+QT_QPA_PLATFORM=offscreen timeout 3s ./build/local/bin/auqw
 ```
 
-4. Add follow-up developer tooling:
+4. Run platform container gates:
 
-```text
-ci/run-local-gui.sh
-CMake install rules
-README GUI run section
-Qt dependency preflight docs
+```bash
+./ci/container-build.sh linux-flatpak
 ```
 
-5. After hello-world shell displays, start Milestone 1 core foundation.
+5. After desktop slice lands, start Android MediaSession/foreground-service spike.

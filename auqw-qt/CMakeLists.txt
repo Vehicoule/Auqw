@@ -5,6 +5,11 @@ if(Qt6Multimedia_FOUND AND NOT ANDROID)
     set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND ON)
 endif()
 
+set(AUQW_ENABLE_DESKTOP_PLATFORM OFF)
+if(Qt6Widgets_FOUND AND NOT ANDROID)
+    set(AUQW_ENABLE_DESKTOP_PLATFORM ON)
+endif()
+
 qt_add_executable(Auqw
     src/main.cpp
     src/CoreController.cpp
@@ -12,6 +17,14 @@ qt_add_executable(Auqw
     src/PlaybackBackend.cpp
     src/PlaybackBackend.hpp
 )
+
+if(AUQW_ENABLE_DESKTOP_PLATFORM)
+    target_sources(Auqw
+        PRIVATE
+            src/DesktopPlatformController.cpp
+            src/DesktopPlatformController.hpp
+    )
+endif()
 
 qt_add_qml_module(Auqw
     URI Auqw
@@ -34,10 +47,15 @@ target_link_libraries(Auqw
 target_compile_definitions(Auqw
     PRIVATE
         AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+        AUQW_ENABLE_DESKTOP_PLATFORM=$<BOOL:${AUQW_ENABLE_DESKTOP_PLATFORM}>
 )
 
 if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
     target_link_libraries(Auqw PRIVATE Qt6::Multimedia)
+endif()
+
+if(AUQW_ENABLE_DESKTOP_PLATFORM)
+    target_link_libraries(Auqw PRIVATE Qt6::Widgets)
 endif()
 
 target_compile_definitions(Auqw
@@ -145,4 +163,44 @@ if(BUILD_TESTING AND NOT ANDROID)
     set_tests_properties(auqw_qt_qml_shell_smoke_test PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+
+    if(AUQW_ENABLE_DESKTOP_PLATFORM)
+        qt_add_executable(auqw_qt_desktop_platform_controller_test
+            tests/desktop_platform_controller_test.cpp
+            src/CoreController.cpp
+            src/CoreController.hpp
+            src/DesktopPlatformController.cpp
+            src/DesktopPlatformController.hpp
+            src/PlaybackBackend.cpp
+            src/PlaybackBackend.hpp
+        )
+
+        target_link_libraries(auqw_qt_desktop_platform_controller_test
+            PRIVATE
+                Qt6::Core
+                Qt6::Test
+                Qt6::Widgets
+                auqw_bridge
+        )
+
+        target_compile_definitions(auqw_qt_desktop_platform_controller_test
+            PRIVATE
+                AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+        )
+
+        if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+            target_link_libraries(auqw_qt_desktop_platform_controller_test PRIVATE Qt6::Multimedia)
+        endif()
+
+        target_compile_definitions(auqw_qt_desktop_platform_controller_test
+            PRIVATE
+                AUQW_APP_ID="com.Vehicoule.auqw"
+                AUQW_APP_NAME="Auqw"
+        )
+
+        add_test(NAME auqw_qt_desktop_platform_controller_test COMMAND auqw_qt_desktop_platform_controller_test)
+        set_tests_properties(auqw_qt_desktop_platform_controller_test PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        )
+    endif()
 endif()
