@@ -16,6 +16,7 @@ public final class AuqwMediaSessionBridge {
     public static final String EXTRA_DURATION_MS = "duration_ms";
 
     private static Context applicationContext;
+    private static final long UNSET_POSITION_MS = -1;
 
     private AuqwMediaSessionBridge() {
     }
@@ -76,6 +77,22 @@ public final class AuqwMediaSessionBridge {
         context.startService(intent);
     }
 
+    public static void dispatchPlaybackCommand(String command) {
+        dispatchPlaybackCommand(command, UNSET_POSITION_MS);
+    }
+
+    public static void dispatchPlaybackCommand(String command, long positionMs) {
+        if (command == null || command.isEmpty()) {
+            return;
+        }
+
+        try {
+            nativeDispatchPlaybackCommand(command, positionMs);
+        } catch (UnsatisfiedLinkError ignored) {
+            // Qt native library may not be loaded if Android replays service events early.
+        }
+    }
+
     private static synchronized Context context() {
         return applicationContext;
     }
@@ -87,4 +104,6 @@ public final class AuqwMediaSessionBridge {
     private static boolean startsForeground(String state) {
         return "playing".equals(state) || "loading".equals(state);
     }
+
+    private static native void nativeDispatchPlaybackCommand(String command, long positionMs);
 }

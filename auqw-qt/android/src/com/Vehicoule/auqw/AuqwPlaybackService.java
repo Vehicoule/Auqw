@@ -5,8 +5,13 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
@@ -25,37 +30,65 @@ public class AuqwPlaybackService extends Service {
     private String album = "";
     private long positionMs = 0;
     private long durationMs = 0;
+    private AudioManager audioManager;
+    private AudioFocusRequest audioFocusRequest;
+    private boolean hasAudioFocus;
+    private boolean noisyReceiverRegistered;
+
+    private final AudioManager.OnAudioFocusChangeListener audioFocusChangeListener = focusChange -> {
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            dispatchPlaybackCommand("pause");
+        }
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+            abandonPlaybackAudioFocus();
+        }
+    };
+
+    private final BroadcastReceiver noisyAudioReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent != null && AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                dispatchPlaybackCommand("pause");
+            }
+        }
+    };
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         mediaSession = new MediaSession(this, "Auqw");
         mediaSession.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
         mediaSession.setCallback(new MediaSession.Callback() {
             @Override
             public void onPlay() {
-                publishCommand("play");
+                dispatchPlaybackCommand("play");
             }
 
             @Override
             public void onPause() {
-                publishCommand("pause");
+                dispatchPlaybackCommand("pause");
             }
 
             @Override
             public void onStop() {
-                publishCommand("stop");
+                dispatchPlaybackCommand("stop");
             }
 
             @Override
             public void onSkipToNext() {
-                publishCommand("next");
+                dispatchPlaybackCommand("next");
             }
 
             @Override
             public void onSkipToPrevious() {
-                publishCommand("previous");
+                dispatchPlaybackCommand("previous");
+            }
+
+            @Override
+            public void onSeekTo(long pos) {
+                dispatchPlaybackCommand("seek", pos);
             }
         });
         mediaSession.setActive(true);
@@ -83,8 +116,12 @@ public class AuqwPlaybackService extends Service {
 
         updateSession();
         if (isForegroundState(playbackState)) {
+            requestPlaybackAudioFocus();
+            registerNoisyAudioReceiver();
             startForeground(NOTIFICATION_ID, buildNotification());
         } else {
+            unregisterNoisyAudioReceiver();
+            abandonPlaybackAudioFocus();
             stopForegroundCompat();
         }
 
@@ -98,6 +135,8 @@ public class AuqwPlaybackService extends Service {
 
     @Override
     public void onDestroy() {
+        unregisterNoisyAudioReceiver();
+        abandonPlaybackAudioFocus();
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();
@@ -188,11 +227,69 @@ public class AuqwPlaybackService extends Service {
         }
     }
 
-    private void publishCommand(String command) {
-        Intent intent = new Intent("com.Vehicoule.auqw.playback.COMMAND");
-        intent.setPackage(getPackageName());
-        intent.putExtra("command", command);
-        sendBroadcast(intent);
+    private void dispatchPlaybackCommand(String command) {
+        AuqwMediaSessionBridge.dispatchPlaybackCommand(command);
+    }
+
+    private void dispatchPlaybackCommand(String command, long commandPositionMs) {
+        AuqwMediaSessionBridge.dispatchPlaybackCommand(command, commandPositionMs);
+    }
+
+    private void requestPlaybackAudioFocus() {
+        if (audioManager == null || hasAudioFocus) {
+            return;
+        }
+
+        int result;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            AudioAttributes attributes = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build();
+            audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(attributes)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build();
+            result = audioManager.requestAudioFocus(audioFocusRequest);
+        } else {
+            result = audioManager.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN);
+        }
+
+        hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+    private void abandonPlaybackAudioFocus() {
+        if (audioManager == null || !hasAudioFocus) {
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
+            audioManager.abandonAudioFocusRequest(audioFocusRequest);
+        } else {
+            audioManager.abandonAudioFocus(audioFocusChangeListener);
+        }
+        hasAudioFocus = false;
+    }
+
+    private void registerNoisyAudioReceiver() {
+        if (noisyReceiverRegistered) {
+            return;
+        }
+
+        registerReceiver(noisyAudioReceiver, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
+        noisyReceiverRegistered = true;
+    }
+
+    private void unregisterNoisyAudioReceiver() {
+        if (!noisyReceiverRegistered) {
+            return;
+        }
+
+        unregisterReceiver(noisyAudioReceiver);
+        noisyReceiverRegistered = false;
     }
 
     private String fallbackTitle() {

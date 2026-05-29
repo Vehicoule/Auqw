@@ -51,6 +51,34 @@ private slots:
         QVERIFY2(service.contains(QStringLiteral("startForeground(")), "service should enter foreground while playback is active");
     }
 
+    void bridgeDispatchesAndroidControlsToNativeController() {
+        const QString bridge = readTextFile(packageSourcePath(u"src/com/Vehicoule/auqw/AuqwMediaSessionBridge.java"));
+        const QString service = readTextFile(packageSourcePath(u"src/com/Vehicoule/auqw/AuqwPlaybackService.java"));
+
+        QVERIFY2(bridge.contains(QStringLiteral("dispatchPlaybackCommand")), "bridge should expose Java command dispatch");
+        QVERIFY2(bridge.contains(QStringLiteral("nativeDispatchPlaybackCommand")), "bridge should call native playback command dispatch");
+        QVERIFY2(bridge.contains(QStringLiteral("UnsatisfiedLinkError")), "bridge should no-op safely before the native library is ready");
+        QVERIFY2(service.contains(QStringLiteral("dispatchPlaybackCommand(\"play\"")), "MediaSession play should dispatch to native controller");
+        QVERIFY2(service.contains(QStringLiteral("dispatchPlaybackCommand(\"pause\"")), "MediaSession pause should dispatch to native controller");
+        QVERIFY2(service.contains(QStringLiteral("dispatchPlaybackCommand(\"stop\"")), "MediaSession stop should dispatch to native controller");
+        QVERIFY2(service.contains(QStringLiteral("dispatchPlaybackCommand(\"next\"")), "MediaSession next should dispatch to native controller");
+        QVERIFY2(service.contains(QStringLiteral("dispatchPlaybackCommand(\"previous\"")), "MediaSession previous should dispatch to native controller");
+        QVERIFY2(!service.contains(QStringLiteral("sendBroadcast(intent)")), "Android controls should not stop at an unhandled broadcast");
+    }
+
+    void serviceHandlesSeekAudioFocusAndNoisyAudio() {
+        const QString service = readTextFile(packageSourcePath(u"src/com/Vehicoule/auqw/AuqwPlaybackService.java"));
+
+        QVERIFY2(service.contains(QStringLiteral("onSeekTo")), "MediaSession seek should be handled");
+        QVERIFY2(service.contains(QStringLiteral("ACTION_AUDIO_BECOMING_NOISY")), "headset or Bluetooth disconnect should be observed");
+        QVERIFY2(service.contains(QStringLiteral("registerReceiver")), "service should register noisy-audio receiver while active");
+        QVERIFY2(service.contains(QStringLiteral("unregisterReceiver")), "service should unregister noisy-audio receiver when inactive");
+        QVERIFY2(service.contains(QStringLiteral("requestAudioFocus")), "service should request audio focus for active playback");
+        QVERIFY2(service.contains(QStringLiteral("abandonAudioFocus")), "service should abandon audio focus when playback is inactive");
+        QVERIFY2(service.contains(QStringLiteral("AUDIOFOCUS_LOSS")), "full audio focus loss should be handled");
+        QVERIFY2(service.contains(QStringLiteral("AUDIOFOCUS_LOSS_TRANSIENT")), "transient audio focus loss should be handled");
+    }
+
     void nativeControllerSyncsFromCorePlaybackState() {
         const QString controller = readTextFile(QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../src/AndroidPlaybackController.cpp"));
         const QString main = readTextFile(QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../src/main.cpp"));
@@ -61,6 +89,20 @@ private slots:
         QVERIFY2(main.contains(QStringLiteral("AUQW_ENABLE_ANDROID_PLATFORM")), "main should guard Android playback integration");
         QVERIFY2(!main.contains(QStringLiteral("DesktopPlatformController desktopPlatformController(coreController);\n#endif\n#if AUQW_ENABLE_ANDROID_PLATFORM")),
             "Android integration should not sit inside desktop platform guard");
+    }
+
+    void nativeControllerRoutesAndroidCommandsToCorePlayback() {
+        const QString controller = readTextFile(QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../src/AndroidPlaybackController.cpp"));
+
+        QVERIFY2(controller.contains(QStringLiteral("nativeDispatchPlaybackCommand")), "native JNI entrypoint should receive Android commands");
+        QVERIFY2(controller.contains(QStringLiteral("QMetaObject::invokeMethod")), "Android commands should be marshalled onto the Qt object thread");
+        QVERIFY2(controller.contains(QStringLiteral("resumePlayback")), "Android play command should resume paused playback");
+        QVERIFY2(controller.contains(QStringLiteral("playFirstQueuedTrack")), "Android play command should start queue playback when not paused");
+        QVERIFY2(controller.contains(QStringLiteral("pausePlayback")), "Android pause command should pause core playback");
+        QVERIFY2(controller.contains(QStringLiteral("stopPlayback")), "Android stop command should stop core playback");
+        QVERIFY2(controller.contains(QStringLiteral("playNextQueuedTrack")), "Android next command should use core queue navigation");
+        QVERIFY2(controller.contains(QStringLiteral("playPreviousQueuedTrack")), "Android previous command should use core queue navigation");
+        QVERIFY2(controller.contains(QStringLiteral("seekPlayback")), "Android seek command should use core seeking");
     }
 };
 
