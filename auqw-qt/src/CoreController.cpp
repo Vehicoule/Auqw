@@ -1,4 +1,5 @@
 #include "CoreController.hpp"
+#include "PlaybackBackend.hpp"
 
 #include <QAbstractListModel>
 #include <QDir>
@@ -51,6 +52,13 @@ public:
         beginResetModel();
         items_ = std::move(items);
         endResetModel();
+    }
+
+    [[nodiscard]] QVariantMap itemAt(int row) const {
+        if (row < 0 || row >= items_.size()) {
+            return {};
+        }
+        return items_.at(row);
     }
 
 private:
@@ -123,7 +131,11 @@ bool isSupportedAudioFile(const QFileInfo& fileInfo) {
 } // namespace
 
 CoreController::CoreController(QObject* parent)
+    : CoreController(createDefaultPlaybackBackend(), parent) {}
+
+CoreController::CoreController(std::unique_ptr<PlaybackBackend> playbackBackend, QObject* parent)
     : QObject(parent),
+      playbackBackend_(std::move(playbackBackend)),
       tracksModel_(std::make_unique<JsonListModel>(QStringList{
           QStringLiteral("id"),
           QStringLiteral("track_id"),
@@ -156,6 +168,11 @@ CoreController::CoreController(QObject* parent)
       })),
       coreStatus_(QStringLiteral("Starting")),
       importStatus_(QStringLiteral("Import a folder")) {
+    if (!playbackBackend_) {
+        playbackBackend_ = createDefaultPlaybackBackend();
+    }
+    configurePlaybackBackend();
+
     try {
         auqw::InitOptions options;
         const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -227,6 +244,50 @@ QString CoreController::importStatus() const {
 
 int CoreController::importedTrackCount() const {
     return importedTrackCount_;
+}
+
+QString CoreController::playbackState() const {
+    return playbackState_;
+}
+
+QString CoreController::playbackQueueItemId() const {
+    return playbackQueueItemId_;
+}
+
+QString CoreController::playbackTrackId() const {
+    return playbackTrackId_;
+}
+
+QString CoreController::playbackTitle() const {
+    return playbackTitle_;
+}
+
+QString CoreController::playbackArtist() const {
+    return playbackArtist_;
+}
+
+QString CoreController::playbackAlbum() const {
+    return playbackAlbum_;
+}
+
+QString CoreController::playbackArtworkUrl() const {
+    return playbackArtworkUrl_;
+}
+
+QString CoreController::playbackLocalPath() const {
+    return playbackLocalPath_;
+}
+
+qint64 CoreController::playbackPositionMs() const {
+    return playbackPositionMs_;
+}
+
+qint64 CoreController::playbackDurationMs() const {
+    return playbackDurationMs_;
+}
+
+QString CoreController::playbackErrorMessage() const {
+    return playbackErrorMessage_;
 }
 
 void CoreController::setThemeSetting(const QString& value) {
@@ -356,6 +417,58 @@ void CoreController::clearQueue() {
     setCoreStatus(QStringLiteral("Ready"));
 }
 
+void CoreController::playQueueItem(const QString& queueItemId) {
+    if (queueItemId.isEmpty()) {
+        setCoreStatus(QStringLiteral("Queue item unavailable"));
+        return;
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("playback.load_queue_item"),
+        QStringLiteral("playback.load_queue_item"),
+        QJsonObject{{QStringLiteral("id"), queueItemId}});
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    applyPlaybackObject(result.data.value(QStringLiteral("playback")).toObject());
+    if (playbackLocalPath_.isEmpty()) {
+        setCoreStatus(playbackErrorMessage_.isEmpty() ? QStringLiteral("Playback unsupported") : playbackErrorMessage_);
+        return;
+    }
+
+    setCoreStatus(QStringLiteral("Loading playback"));
+    playbackBackend_->playLocalFile(playbackLocalPath_);
+}
+
+void CoreController::playFirstQueuedTrack() {
+    const QVariantMap first = queueModel_->itemAt(0);
+    const QString queueItemId = first.value(QStringLiteral("id")).toString();
+    if (queueItemId.isEmpty()) {
+        setCoreStatus(QStringLiteral("Queue empty"));
+        return;
+    }
+    playQueueItem(queueItemId);
+}
+
+void CoreController::pausePlayback() {
+    playbackBackend_->pause();
+}
+
+void CoreController::resumePlayback() {
+    playbackBackend_->resume();
+}
+
+void CoreController::stopPlayback() {
+    playbackBackend_->stop();
+}
+
+void CoreController::seekPlayback(qint64 positionMs) {
+    playbackBackend_->seek(positionMs);
+}
+
 void CoreController::refreshState() {
     loadInitialState();
 }
@@ -443,6 +556,10 @@ void CoreController::loadInitialState() {
         return;
     }
 
+    if (!refreshPlaybackFromCore()) {
+        return;
+    }
+
     const CommandResult theme = invokeCommand(
         QStringLiteral("settings.get.theme"),
         QStringLiteral("settings.get"),
@@ -473,6 +590,19 @@ bool CoreController::refreshQueueFromCore() {
     return true;
 }
 
+bool CoreController::refreshPlaybackFromCore() {
+    const CommandResult playback = invokeCommand(
+        QStringLiteral("playback.get"),
+        QStringLiteral("playback.get"));
+    if (!playback.ok) {
+        setCoreStatus(playback.error);
+        return false;
+    }
+
+    applyPlaybackObject(playback.data.value(QStringLiteral("playback")).toObject());
+    return true;
+}
+
 void CoreController::setCoreStatus(const QString& status) {
     if (coreStatus_ == status) {
         return;
@@ -499,4 +629,121 @@ void CoreController::setImportResult(const QString& status, int importedTrackCou
     importStatus_ = status;
     importedTrackCount_ = importedTrackCount;
     emit importStatusChanged();
+}
+
+void CoreController::configurePlaybackBackend() {
+    playbackBackend_->setStateChangedCallback([this](const PlaybackBackendState& state) {
+        updatePlaybackFromBackend(state.state, state.positionMs, state.durationMs);
+    });
+    playbackBackend_->setErrorCallback([this](const QString& message) {
+        updatePlaybackFromBackend(QStringLiteral("error"), std::nullopt, std::nullopt, message);
+    });
+}
+
+bool CoreController::applyPlaybackObject(const QJsonObject& playback) {
+    const QString nextState = playback.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
+    const QString nextQueueItemId = playback.value(QStringLiteral("queue_item_id")).toString();
+    const QString nextTrackId = playback.value(QStringLiteral("track_id")).toString();
+    const QString nextTitle = playback.value(QStringLiteral("title")).toString();
+    const QString nextArtist = playback.value(QStringLiteral("artist")).toString();
+    const QString nextAlbum = playback.value(QStringLiteral("album")).toString();
+    const QString nextArtworkUrl = playback.value(QStringLiteral("artwork_url")).toString();
+    const QString nextLocalPath = playback.value(QStringLiteral("local_path")).toString();
+    const qint64 nextPositionMs = playback.value(QStringLiteral("position_ms")).isDouble()
+        ? static_cast<qint64>(playback.value(QStringLiteral("position_ms")).toDouble())
+        : 0;
+    const qint64 nextDurationMs = playback.value(QStringLiteral("duration_ms")).isDouble()
+        ? static_cast<qint64>(playback.value(QStringLiteral("duration_ms")).toDouble())
+        : 0;
+    const QString nextErrorMessage = playback.value(QStringLiteral("error_message")).toString();
+
+    const bool changed = playbackState_ != nextState
+        || playbackQueueItemId_ != nextQueueItemId
+        || playbackTrackId_ != nextTrackId
+        || playbackTitle_ != nextTitle
+        || playbackArtist_ != nextArtist
+        || playbackAlbum_ != nextAlbum
+        || playbackArtworkUrl_ != nextArtworkUrl
+        || playbackLocalPath_ != nextLocalPath
+        || playbackPositionMs_ != nextPositionMs
+        || playbackDurationMs_ != nextDurationMs
+        || playbackErrorMessage_ != nextErrorMessage;
+
+    playbackState_ = nextState;
+    playbackQueueItemId_ = nextQueueItemId;
+    playbackTrackId_ = nextTrackId;
+    playbackTitle_ = nextTitle;
+    playbackArtist_ = nextArtist;
+    playbackAlbum_ = nextAlbum;
+    playbackArtworkUrl_ = nextArtworkUrl;
+    playbackLocalPath_ = nextLocalPath;
+    playbackPositionMs_ = nextPositionMs;
+    playbackDurationMs_ = nextDurationMs;
+    playbackErrorMessage_ = nextErrorMessage;
+
+    if (changed) {
+        emit playbackStateChanged();
+    }
+    return changed;
+}
+
+void CoreController::updatePlaybackFromBackend(
+    const QString& playbackState,
+    std::optional<qint64> positionMs,
+    std::optional<qint64> durationMs,
+    const QString& errorMessage) {
+    QJsonObject params{
+        {QStringLiteral("state"), playbackState},
+    };
+    if (positionMs.has_value()) {
+        params.insert(QStringLiteral("position_ms"), *positionMs);
+    }
+    if (durationMs.has_value()) {
+        params.insert(QStringLiteral("duration_ms"), *durationMs);
+    }
+    if (!errorMessage.isEmpty()) {
+        params.insert(QStringLiteral("error_message"), errorMessage);
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("playback.update"),
+        QStringLiteral("playback.update"),
+        params);
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    applyPlaybackObject(result.data.value(QStringLiteral("playback")).toObject());
+    if (playbackState_ == QStringLiteral("playing")) {
+        recordRecentIfNeeded();
+        setCoreStatus(QStringLiteral("Playing"));
+    } else if (playbackState_ == QStringLiteral("paused")) {
+        setCoreStatus(QStringLiteral("Paused"));
+    } else if (playbackState_ == QStringLiteral("stopped")) {
+        setCoreStatus(QStringLiteral("Stopped"));
+    } else if (playbackState_ == QStringLiteral("error")) {
+        setCoreStatus(playbackErrorMessage_.isEmpty() ? QStringLiteral("Playback error") : playbackErrorMessage_);
+    }
+}
+
+void CoreController::recordRecentIfNeeded() {
+    if (playbackQueueItemId_.isEmpty()
+        || playbackTrackId_.isEmpty()
+        || recentRecordedQueueItemId_ == playbackQueueItemId_) {
+        return;
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("recent.add.playback"),
+        QStringLiteral("recent.add"),
+        QJsonObject{{QStringLiteral("track_id"), playbackTrackId_}});
+
+    if (!result.ok) {
+        setCoreStatus(result.error);
+        return;
+    }
+
+    recentRecordedQueueItemId_ = playbackQueueItemId_;
 }

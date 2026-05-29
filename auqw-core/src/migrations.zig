@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const latest_version: i64 = 2;
+pub const latest_version: i64 = 3;
 
 pub fn run(db: *sqlite.Database) sqlite.DbError!void {
     try db.exec(
@@ -118,8 +118,27 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\CREATE INDEX IF NOT EXISTS idx_queue_items_order
         \\ON queue_items(position ASC, added_at ASC, id ASC);
         \\
+        \\CREATE TABLE IF NOT EXISTS playback_state (
+        \\    id INTEGER PRIMARY KEY CHECK (id = 1),
+        \\    state TEXT NOT NULL CHECK (state IN ('stopped', 'loading', 'playing', 'paused', 'error')),
+        \\    queue_item_id TEXT REFERENCES queue_items(id) ON DELETE SET NULL,
+        \\    track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
+        \\    title TEXT,
+        \\    artist TEXT,
+        \\    album TEXT,
+        \\    artwork_url TEXT,
+        \\    local_path TEXT,
+        \\    position_ms INTEGER,
+        \\    duration_ms INTEGER,
+        \\    error_message TEXT,
+        \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        \\);
+        \\
+        \\INSERT OR IGNORE INTO playback_state(id, state) VALUES (1, 'stopped');
+        \\
         \\INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
         \\INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
+        \\INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
         \\
         \\COMMIT;
     );

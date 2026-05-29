@@ -30,6 +30,9 @@ Reproducible container build:
 ./build/linux-flatpak/bin/auqw
 ```
 
+The Linux container build copies its Qt Multimedia runtime dependency into
+`build/linux-flatpak/lib` and checks the resulting executable with `ldd`.
+
 ## Bridge-Only Baseline
 
 ```bash

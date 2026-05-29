@@ -21,10 +21,12 @@ RUN apt-get update \
         qt6-base-dev-tools \
         qt6-declarative-dev \
         qt6-declarative-dev-tools \
+        qt6-multimedia-dev \
         qml6-module-qtqml \
         qml6-module-qtquick \
         qml6-module-qtquick-window \
         qml6-module-qtquick-controls \
+        qml6-module-qtmultimedia \
         flatpak \
         flatpak-builder \
     && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \

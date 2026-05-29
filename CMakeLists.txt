@@ -15,6 +15,7 @@ add_subdirectory(auqw-bridge)
 
 if(AUQW_BUILD_QT)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Core Qml Quick QuickControls2 QuickDialogs2 QuickLayouts)
+    find_package(Qt6 6.5 QUIET COMPONENTS Multimedia)
     if(BUILD_TESTING AND NOT ANDROID)
         find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
     endif()

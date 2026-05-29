@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QAbstractItemModel>
 #include <QMetaObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -20,6 +21,16 @@ bool writeTestFile(const QString& path) {
         return false;
     }
     return file.write("test") == 4;
+}
+
+int roleForName(const QAbstractItemModel* model, const QByteArray& name) {
+    const QHash<int, QByteArray> roles = model->roleNames();
+    for (auto it = roles.cbegin(); it != roles.cend(); ++it) {
+        if (it.value() == name) {
+            return it.key();
+        }
+    }
+    return -1;
 }
 
 QObject* findObjectByName(QObject* root, const QString& name) {
@@ -60,6 +71,16 @@ private slots:
             &controller,
             "importLocalFolder",
             Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        QCOMPARE(tracks->rowCount(), 1);
+        const int trackIdRole = roleForName(tracks, "id");
+        QVERIFY(trackIdRole > 0);
+        const QString trackId = tracks->data(tracks->index(0, 0), trackIdRole).toString();
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "addTrackToQueue",
+            Q_ARG(QString, trackId)));
 
         QQmlApplicationEngine engine;
         engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
@@ -79,10 +100,18 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueClearButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("importFolderButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("importStatusLabel")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayPauseButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniStopButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerTitle")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerState")) != nullptr);
 
         QObject* libraryTrackDelegate = nullptr;
         QTRY_VERIFY((libraryTrackDelegate = findObjectByName(root, QStringLiteral("libraryTrackDelegate"))) != nullptr);
         QVERIFY(libraryTrackDelegate->property("enabled").toBool());
+
+        QObject* queueTrackDelegate = nullptr;
+        QTRY_VERIFY((queueTrackDelegate = findObjectByName(root, QStringLiteral("queueTrackDelegate"))) != nullptr);
+        QVERIFY(queueTrackDelegate->property("enabled").toBool());
     }
 };
 

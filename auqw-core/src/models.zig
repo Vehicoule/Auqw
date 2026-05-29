@@ -100,6 +100,32 @@ pub const QueueItem = struct {
     }
 };
 
+pub const PlaybackState = struct {
+    state: []const u8,
+    queue_item_id: ?[]const u8 = null,
+    track_id: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+    album: ?[]const u8 = null,
+    artwork_url: ?[]const u8 = null,
+    local_path: ?[]const u8 = null,
+    position_ms: ?i64 = null,
+    duration_ms: ?i64 = null,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: PlaybackState, allocator: std.mem.Allocator) void {
+        allocator.free(self.state);
+        if (self.queue_item_id) |value| allocator.free(value);
+        if (self.track_id) |value| allocator.free(value);
+        if (self.title) |value| allocator.free(value);
+        if (self.artist) |value| allocator.free(value);
+        if (self.album) |value| allocator.free(value);
+        if (self.artwork_url) |value| allocator.free(value);
+        if (self.local_path) |value| allocator.free(value);
+        if (self.error_message) |value| allocator.free(value);
+    }
+};
+
 pub const Setting = struct {
     key: []const u8,
     value: ?[]const u8,

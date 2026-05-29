@@ -43,7 +43,8 @@ case "$target" in
       -e AUQW_ZIG_CACHE_DIR=/tmp/auqw-zig-cache \
       -e AUQW_ZIG_GLOBAL_CACHE_DIR=/tmp/auqw-zig-global-cache \
       "$image" \
-      ./ci/build-local.sh
+      bash -lc './ci/build-local.sh && ./ci/deploy-linux-runtime.sh "$AUQW_BUILD_DIR"'
+    bash "$root/ci/check-linux-runtime.sh" "$root/build/$target/bin/auqw"
     ;;
   android-linux)
     "$engine" run --rm \

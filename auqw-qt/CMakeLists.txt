@@ -1,9 +1,16 @@
 qt_standard_project_setup(REQUIRES 6.5)
 
+set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND OFF)
+if(Qt6Multimedia_FOUND AND NOT ANDROID)
+    set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND ON)
+endif()
+
 qt_add_executable(Auqw
     src/main.cpp
     src/CoreController.cpp
     src/CoreController.hpp
+    src/PlaybackBackend.cpp
+    src/PlaybackBackend.hpp
 )
 
 qt_add_qml_module(Auqw
@@ -26,6 +33,15 @@ target_link_libraries(Auqw
 
 target_compile_definitions(Auqw
     PRIVATE
+        AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+)
+
+if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+    target_link_libraries(Auqw PRIVATE Qt6::Multimedia)
+endif()
+
+target_compile_definitions(Auqw
+    PRIVATE
         AUQW_APP_ID="com.Vehicoule.auqw"
         AUQW_APP_NAME="Auqw"
 )
@@ -38,6 +54,11 @@ set_target_properties(Auqw PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER com.Vehicoule.auqw
     MACOSX_BUNDLE_BUNDLE_NAME Auqw
 )
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    set_property(TARGET Auqw APPEND PROPERTY BUILD_RPATH "$ORIGIN/../lib")
+    set_property(TARGET Auqw APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 
 if(ANDROID)
     set_target_properties(Auqw PROPERTIES
@@ -56,6 +77,8 @@ if(BUILD_TESTING AND NOT ANDROID)
         tests/core_controller_test.cpp
         src/CoreController.cpp
         src/CoreController.hpp
+        src/PlaybackBackend.cpp
+        src/PlaybackBackend.hpp
     )
 
     target_link_libraries(auqw_qt_core_controller_test
@@ -64,6 +87,15 @@ if(BUILD_TESTING AND NOT ANDROID)
             Qt6::Test
             auqw_bridge
     )
+
+    target_compile_definitions(auqw_qt_core_controller_test
+        PRIVATE
+            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+    )
+
+    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+        target_link_libraries(auqw_qt_core_controller_test PRIVATE Qt6::Multimedia)
+    endif()
 
     target_compile_definitions(auqw_qt_core_controller_test
         PRIVATE
@@ -77,6 +109,8 @@ if(BUILD_TESTING AND NOT ANDROID)
         tests/qml_shell_smoke_test.cpp
         src/CoreController.cpp
         src/CoreController.hpp
+        src/PlaybackBackend.cpp
+        src/PlaybackBackend.hpp
     )
 
     target_link_libraries(auqw_qt_qml_shell_smoke_test
@@ -90,6 +124,15 @@ if(BUILD_TESTING AND NOT ANDROID)
             Qt6::Test
             auqw_bridge
     )
+
+    target_compile_definitions(auqw_qt_qml_shell_smoke_test
+        PRIVATE
+            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+    )
+
+    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+        target_link_libraries(auqw_qt_qml_shell_smoke_test PRIVATE Qt6::Multimedia)
+    endif()
 
     target_compile_definitions(auqw_qt_qml_shell_smoke_test
         PRIVATE

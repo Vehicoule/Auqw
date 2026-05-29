@@ -3,6 +3,7 @@ const api = @import("api.zig");
 
 const allocator = std.testing.allocator;
 const error_ok: c_int = 0;
+const error_database: c_int = 3;
 const error_invalid_json: c_int = 4;
 const error_unknown_command: c_int = 5;
 
@@ -58,7 +59,7 @@ test "core metadata reports app details and migrated schema" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 2), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
 }
 
 test "migrations are idempotent for file databases" {
@@ -88,7 +89,135 @@ test "migrations are idempotent for file databases" {
     var response = try expectInvoke(second.?, "{\"id\":\"meta\",\"command\":\"core.get_metadata\",\"params\":{}}");
     defer response.deinit();
     const data = try expectOk(response, "meta");
-    try std.testing.expectEqual(@as(i64, 2), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
+}
+
+test "playback get starts stopped" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var response = try expectInvoke(core.?, "{\"id\":\"playback-get\",\"command\":\"playback.get\",\"params\":{}}");
+    defer response.deinit();
+    const playback = (try expectOk(response, "playback-get")).get("playback").?.object;
+    try std.testing.expectEqualStrings("stopped", playback.get("state").?.string);
+    try std.testing.expect(playback.get("queue_item_id").? == .null);
+    try std.testing.expect(playback.get("track_id").? == .null);
+    try std.testing.expect(playback.get("position_ms").? == .null);
+    try std.testing.expect(playback.get("duration_ms").? == .null);
+    try std.testing.expect(playback.get("error_message").? == .null);
+}
+
+test "playback load queue item joins local display fields" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var local = try expectInvoke(core.?, "{\"id\":\"local\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/alpha.mp3\",\"title\":\"Alpha\",\"artist\":\"Vela\",\"album\":\"North\",\"duration_ms\":1234}}");
+    defer local.deinit();
+    const track_id = (try expectOk(local, "local")).get("track").?.object.get("id").?.string;
+
+    const add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(add_request);
+    var add = try expectInvoke(core.?, add_request);
+    defer add.deinit();
+    const queue_id = (try expectOk(add, "add")).get("item").?.object.get("id").?.string;
+
+    const load_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"load\",\"command\":\"playback.load_queue_item\",\"params\":{{\"id\":\"{s}\"}}}}", .{queue_id}, 0);
+    defer allocator.free(load_request);
+    var load = try expectInvoke(core.?, load_request);
+    defer load.deinit();
+    const load_data = try expectOk(load, "load");
+    const playback = load_data.get("playback").?.object;
+    const item = load_data.get("item").?.object;
+
+    try std.testing.expectEqualStrings("loading", playback.get("state").?.string);
+    try std.testing.expectEqualStrings(queue_id, playback.get("queue_item_id").?.string);
+    try std.testing.expectEqualStrings(track_id, playback.get("track_id").?.string);
+    try std.testing.expectEqualStrings("Alpha", playback.get("title").?.string);
+    try std.testing.expectEqualStrings("Vela", playback.get("artist").?.string);
+    try std.testing.expectEqualStrings("North", playback.get("album").?.string);
+    try std.testing.expectEqual(@as(i64, 1234), playback.get("duration_ms").?.integer);
+    try std.testing.expectEqualStrings("/music/alpha.mp3", playback.get("local_path").?.string);
+    try std.testing.expect(playback.get("error_message").? == .null);
+    try std.testing.expectEqualStrings(queue_id, item.get("id").?.string);
+}
+
+test "playback update persists playing paused stopped and error" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var local = try expectInvoke(core.?, "{\"id\":\"local\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/beta.flac\",\"title\":\"Beta\",\"duration_ms\":5000}}");
+    defer local.deinit();
+    const track_id = (try expectOk(local, "local")).get("track").?.object.get("id").?.string;
+
+    const add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(add_request);
+    var add = try expectInvoke(core.?, add_request);
+    defer add.deinit();
+    const queue_id = (try expectOk(add, "add")).get("item").?.object.get("id").?.string;
+
+    const load_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"load\",\"command\":\"playback.load_queue_item\",\"params\":{{\"id\":\"{s}\"}}}}", .{queue_id}, 0);
+    defer allocator.free(load_request);
+    var load = try expectInvoke(core.?, load_request);
+    load.deinit();
+
+    var playing = try expectInvoke(core.?, "{\"id\":\"playing\",\"command\":\"playback.update\",\"params\":{\"state\":\"playing\",\"position_ms\":250,\"duration_ms\":5000}}");
+    defer playing.deinit();
+    var playback = (try expectOk(playing, "playing")).get("playback").?.object;
+    try std.testing.expectEqualStrings("playing", playback.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 250), playback.get("position_ms").?.integer);
+    try std.testing.expectEqual(@as(i64, 5000), playback.get("duration_ms").?.integer);
+    try std.testing.expect(playback.get("error_message").? == .null);
+
+    var paused = try expectInvoke(core.?, "{\"id\":\"paused\",\"command\":\"playback.update\",\"params\":{\"state\":\"paused\",\"position_ms\":300}}");
+    defer paused.deinit();
+    playback = (try expectOk(paused, "paused")).get("playback").?.object;
+    try std.testing.expectEqualStrings("paused", playback.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 300), playback.get("position_ms").?.integer);
+    try std.testing.expectEqual(@as(i64, 5000), playback.get("duration_ms").?.integer);
+
+    var stopped = try expectInvoke(core.?, "{\"id\":\"stopped\",\"command\":\"playback.update\",\"params\":{\"state\":\"stopped\",\"position_ms\":0}}");
+    defer stopped.deinit();
+    playback = (try expectOk(stopped, "stopped")).get("playback").?.object;
+    try std.testing.expectEqualStrings("stopped", playback.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 0), playback.get("position_ms").?.integer);
+    try std.testing.expectEqualStrings(queue_id, playback.get("queue_item_id").?.string);
+
+    var failed = try expectInvoke(core.?, "{\"id\":\"error\",\"command\":\"playback.update\",\"params\":{\"state\":\"error\",\"error_message\":\"decoder failed\"}}");
+    defer failed.deinit();
+    playback = (try expectOk(failed, "error")).get("playback").?.object;
+    try std.testing.expectEqualStrings("error", playback.get("state").?.string);
+    try std.testing.expectEqualStrings("decoder failed", playback.get("error_message").?.string);
+}
+
+test "playback load rejects missing or non local queue item" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    try expectErrorInvoke(core.?, "{\"id\":\"missing\",\"command\":\"playback.load_queue_item\",\"params\":{\"id\":\"missing\"}}", error_database, "database");
+
+    var remote = try expectInvoke(core.?, "{\"id\":\"remote\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"Stream Only\",\"provider\":\"remote\",\"provider_track_id\":\"42\"}}");
+    defer remote.deinit();
+    const track_id = (try expectOk(remote, "remote")).get("track").?.object.get("id").?.string;
+
+    const add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-remote\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(add_request);
+    var add = try expectInvoke(core.?, add_request);
+    defer add.deinit();
+    const queue_id = (try expectOk(add, "add-remote")).get("item").?.object.get("id").?.string;
+
+    const load_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"load-remote\",\"command\":\"playback.load_queue_item\",\"params\":{{\"id\":\"{s}\"}}}}", .{queue_id}, 0);
+    defer allocator.free(load_request);
+    var load = try expectInvoke(core.?, load_request);
+    defer load.deinit();
+    const playback = (try expectOk(load, "load-remote")).get("playback").?.object;
+    try std.testing.expectEqualStrings("error", playback.get("state").?.string);
+    try std.testing.expectEqualStrings(queue_id, playback.get("queue_item_id").?.string);
+    try std.testing.expect(playback.get("local_path").? == .null);
+    try std.testing.expectEqualStrings("Queue item has no local file", playback.get("error_message").?.string);
 }
 
 test "tracks upsert and list round trip" {

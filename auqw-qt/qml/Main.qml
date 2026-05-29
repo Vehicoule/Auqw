@@ -32,6 +32,15 @@ ApplicationWindow {
         currentPageIndex = index
     }
 
+    function playbackDetailText() {
+        if (coreController.playbackErrorMessage.length > 0) {
+            return coreController.playbackErrorMessage
+        }
+        var detail = coreController.playbackState.length > 0 ? coreController.playbackState : "stopped"
+        var byline = [coreController.playbackArtist, coreController.playbackAlbum].filter(function(item) { return item.length > 0 }).join(" | ")
+        return byline.length > 0 ? detail + " | " + byline : detail
+    }
+
     color: palette.window
 
     component PageHeader: ColumnLayout {
@@ -147,8 +156,11 @@ ApplicationWindow {
         required property string album
         required property string local_path
 
+        objectName: "queueTrackDelegate"
         width: ListView.view.width
         implicitHeight: root.compact ? 70 : 64
+        enabled: queue_item_id.length > 0
+        onClicked: coreController.playQueueItem(queue_item_id)
 
         contentItem: RowLayout {
             spacing: 10
@@ -157,11 +169,11 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 2
 
-                Label {
-                    text: title.length > 0 ? title : "Untitled track"
-                    font.weight: Font.Medium
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
+                    Label {
+                        text: title.length > 0 ? title : "Untitled track"
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
                 }
 
                 Label {
@@ -172,15 +184,15 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
 
-                Label {
-                    text: local_path
-                    color: root.palette.placeholderText
-                    font.pixelSize: 11
-                    elide: Text.ElideMiddle
-                    visible: text.length > 0 && !root.compact
-                    Layout.fillWidth: true
+                    Label {
+                        text: local_path
+                        color: root.palette.placeholderText
+                        font.pixelSize: 11
+                        elide: Text.ElideMiddle
+                        visible: text.length > 0 && !root.compact
+                        Layout.fillWidth: true
+                    }
                 }
-            }
 
             Button {
                 text: "Remove"
@@ -573,14 +585,16 @@ ApplicationWindow {
                     spacing: 2
 
                     Label {
-                        text: "Nothing playing"
+                        objectName: "miniPlayerTitle"
+                        text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
                         font.weight: Font.DemiBold
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
 
                     Label {
-                        text: "Queue empty"
+                        objectName: "miniPlayerState"
+                        text: root.playbackDetailText()
                         color: root.palette.placeholderText
                         elide: Text.ElideRight
                         Layout.fillWidth: true
@@ -588,10 +602,29 @@ ApplicationWindow {
                 }
 
                 Button {
-                    text: "Play"
-                    enabled: false
+                    objectName: "miniPlayPauseButton"
+                    text: coreController.playbackState === "playing" ? "Pause" : "Play"
+                    enabled: coreController.playbackState !== "loading"
                     implicitHeight: root.density
                     visible: !root.compact || root.width > 420
+                    onClicked: {
+                        if (coreController.playbackState === "playing") {
+                            coreController.pausePlayback()
+                        } else if (coreController.playbackState === "paused") {
+                            coreController.resumePlayback()
+                        } else {
+                            coreController.playFirstQueuedTrack()
+                        }
+                    }
+                }
+
+                Button {
+                    objectName: "miniStopButton"
+                    text: "Stop"
+                    enabled: coreController.playbackState !== "stopped"
+                    implicitHeight: root.density
+                    visible: !root.compact || root.width > 500
+                    onClicked: coreController.stopPlayback()
                 }
             }
         }
