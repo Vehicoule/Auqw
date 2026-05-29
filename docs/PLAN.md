@@ -357,7 +357,7 @@ Acceptance:
 
 ## 8. Milestone 4: Platform Playback
 
-Status: in progress. Slice 1 desktop platform playback landed. Slice 2 has the initial Android MediaSession and foreground-service spike on `milestone4-slice2-android-mediasession`; device smoke is still needed before marking it complete.
+Status: in progress. Desktop platform playback, Android MediaSession, Android foreground service, Android remote control routing, audio focus, and noisy-audio handling have landed on `main`. Android device/emulator smoke is still needed before marking Android complete. iOS platform playback is not started.
 
 Goal:
 
@@ -375,11 +375,13 @@ Desktop:
 
 Android:
 
-- MediaSession bridge from Qt/C++ playback state. Initial spike added.
-- Foreground media playback service. Initial spike added.
-- Background playback.
-- Audio focus.
-- Bluetooth/headset events.
+- MediaSession bridge from Qt/C++ playback state. Landed on `main`.
+- Foreground media playback service. Landed on `main`.
+- Background playback service wiring. Landed on `main`.
+- Remote MediaSession commands routed back into Qt/C++ controls. Landed on `main`.
+- Audio focus handling. Landed on `main`.
+- Bluetooth/headset disconnect handling through noisy-audio receiver. Landed on `main`.
+- Device/emulator smoke. Pending attached Android target.
 
 iOS:
 
@@ -546,14 +548,23 @@ Testing:
 
 ## 13. Immediate Next Actions
 
-1. Device-smoke Milestone 4 slice 2 Android MediaSession/foreground-service spike:
+1. Device-smoke Milestone 4 Android platform playback on an attached Android target:
 
 ```text
-AndroidPlaybackController
-AuqwActivity
-AuqwMediaSessionBridge
-AuqwPlaybackService
-foreground media service manifest wiring
+install build/android-linux/apk/auqw-android-arm64-debug.apk
+verify foreground media notification
+verify background playback
+verify media key play/pause/stop/next/previous
+verify seek routing
+inspect dumpsys media_session
+capture relevant logcat
+```
+
+Local status on 2026-05-29:
+
+```text
+/mnt/c/Users/Owner/AppData/Local/Android/Sdk/platform-tools/adb.exe devices -l
+returned no attached Android devices.
 ```
 
 2. Keep local and container verification green:
@@ -565,10 +576,12 @@ AUQW_BUILD_QT=ON ./ci/build-local.sh
 ./ci/container-build.sh linux-flatpak
 ```
 
-3. Continue Android platform playback:
+3. Start iOS platform playback after Android device smoke:
 
 ```text
-audio focus
-Bluetooth/headset events
-remote MediaSession commands back into Qt/C++ controls
+AVAudioSession
+AVPlayer
+RemoteCommandCenter
+Now Playing metadata
+interruption handling
 ```
