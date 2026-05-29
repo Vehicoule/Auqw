@@ -15,6 +15,12 @@ if(ANDROID)
     set(AUQW_ENABLE_ANDROID_PLATFORM ON)
 endif()
 
+set(AUQW_ENABLE_IOS_PLATFORM OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(AUQW_ENABLE_IOS_PLATFORM ON)
+    enable_language(OBJCXX)
+endif()
+
 qt_add_executable(Auqw
     src/main.cpp
     src/CoreController.cpp
@@ -36,6 +42,15 @@ if(AUQW_ENABLE_ANDROID_PLATFORM)
         PRIVATE
             src/AndroidPlaybackController.cpp
             src/AndroidPlaybackController.hpp
+    )
+endif()
+
+if(AUQW_ENABLE_IOS_PLATFORM)
+    target_sources(Auqw
+        PRIVATE
+            src/ApplePlaybackBackend.mm
+            src/IosPlaybackController.hpp
+            src/IosPlaybackController.mm
     )
 endif()
 
@@ -62,6 +77,7 @@ target_compile_definitions(Auqw
         AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
         AUQW_ENABLE_DESKTOP_PLATFORM=$<BOOL:${AUQW_ENABLE_DESKTOP_PLATFORM}>
         AUQW_ENABLE_ANDROID_PLATFORM=$<BOOL:${AUQW_ENABLE_ANDROID_PLATFORM}>
+        AUQW_ENABLE_IOS_PLATFORM=$<BOOL:${AUQW_ENABLE_IOS_PLATFORM}>
 )
 
 if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
@@ -70,6 +86,11 @@ endif()
 
 if(AUQW_ENABLE_DESKTOP_PLATFORM)
     target_link_libraries(Auqw PRIVATE Qt6::Widgets)
+endif()
+
+if(AUQW_ENABLE_IOS_PLATFORM)
+    target_link_libraries(Auqw PRIVATE "-framework AVFoundation" "-framework MediaPlayer")
+    target_compile_options(Auqw PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 endif()
 
 target_compile_definitions(Auqw
@@ -194,6 +215,23 @@ if(BUILD_TESTING AND NOT ANDROID)
     )
 
     add_test(NAME auqw_qt_android_platform_package_test COMMAND auqw_qt_android_platform_package_test)
+
+    qt_add_executable(auqw_qt_ios_platform_wiring_test
+        tests/ios_platform_wiring_test.cpp
+    )
+
+    target_link_libraries(auqw_qt_ios_platform_wiring_test
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+
+    target_compile_definitions(auqw_qt_ios_platform_wiring_test
+        PRIVATE
+            AUQW_QT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    add_test(NAME auqw_qt_ios_platform_wiring_test COMMAND auqw_qt_ios_platform_wiring_test)
 
     if(AUQW_ENABLE_DESKTOP_PLATFORM)
         qt_add_executable(auqw_qt_desktop_platform_controller_test

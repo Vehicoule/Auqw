@@ -357,7 +357,7 @@ Acceptance:
 
 ## 8. Milestone 4: Platform Playback
 
-Status: in progress. Desktop platform playback, Android MediaSession, Android foreground service, Android remote control routing, audio focus, and noisy-audio handling have landed on `main`. Android device/emulator smoke is still needed before marking Android complete. iOS platform playback is not started.
+Status: in progress. Desktop platform playback, Android MediaSession, Android foreground service, Android remote control routing, audio focus, and noisy-audio handling have landed on `main`. iOS AVAudioSession, AVPlayer backend, RemoteCommandCenter, Now Playing metadata, and interruption handling source wiring have landed. Android and iOS device/runtime smoke remain pending on attached platform targets.
 
 Goal:
 
@@ -385,11 +385,12 @@ Android:
 
 iOS:
 
-- AVAudioSession.
-- AVPlayer.
-- RemoteCommandCenter.
-- Now Playing metadata.
-- Interruption handling.
+- AVAudioSession. Landed in source wiring.
+- AVPlayer backend behind iOS guard. Landed in source wiring.
+- RemoteCommandCenter. Landed in source wiring.
+- Now Playing metadata. Landed in source wiring.
+- Interruption handling. Landed in source wiring.
+- Device/runtime smoke. Pending macOS/Xcode/Qt iOS kit.
 
 Acceptance:
 
@@ -548,26 +549,7 @@ Testing:
 
 ## 13. Immediate Next Actions
 
-1. Device-smoke Milestone 4 Android platform playback on an attached Android target:
-
-```text
-install build/android-linux/apk/auqw-android-arm64-debug.apk
-verify foreground media notification
-verify background playback
-verify media key play/pause/stop/next/previous
-verify seek routing
-inspect dumpsys media_session
-capture relevant logcat
-```
-
-Local status on 2026-05-29:
-
-```text
-/mnt/c/Users/Owner/AppData/Local/Android/Sdk/platform-tools/adb.exe devices -l
-returned no attached Android devices.
-```
-
-2. Keep local and container verification green:
+1. Keep local and container verification green:
 
 ```bash
 AUQW_BUILD_QT=OFF ./ci/build-local.sh
@@ -576,12 +558,16 @@ AUQW_BUILD_QT=ON ./ci/build-local.sh
 ./ci/container-build.sh linux-flatpak
 ```
 
-3. Start iOS platform playback after Android device smoke:
+2. Verify iOS platform playback on macOS when host is available:
 
-```text
-AVAudioSession
-AVPlayer
-RemoteCommandCenter
-Now Playing metadata
-interruption handling
+```bash
+brew bundle --file containers/ios/Brewfile
+./ci/ios-build.sh
 ```
+
+3. Start Milestone 5 online provider spike:
+
+- Keep provider code in C++/Qt first.
+- Use anonymous provider access only.
+- Keep normalized results out of QML/provider-specific shapes.
+- No yt-dlp dependency.

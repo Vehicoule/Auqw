@@ -2,6 +2,9 @@
 #if AUQW_ENABLE_ANDROID_PLATFORM
 #include "AndroidPlaybackController.hpp"
 #endif
+#if AUQW_ENABLE_IOS_PLATFORM
+#include "IosPlaybackController.hpp"
+#endif
 #if AUQW_ENABLE_DESKTOP_PLATFORM
 #include "DesktopPlatformController.hpp"
 #endif
@@ -37,6 +40,9 @@ int main(int argc, char* argv[]) {
     CoreController coreController;
 #if AUQW_ENABLE_ANDROID_PLATFORM
     AndroidPlaybackController androidPlaybackController(coreController);
+#endif
+#if AUQW_ENABLE_IOS_PLATFORM
+    IosPlaybackController iosPlaybackController(coreController);
 #endif
 #if AUQW_ENABLE_DESKTOP_PLATFORM
     DesktopPlatformController desktopPlatformController(coreController);

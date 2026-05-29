@@ -9,6 +9,10 @@
 #include <QMediaPlayer>
 #endif
 
+#if AUQW_ENABLE_IOS_PLATFORM
+std::unique_ptr<PlaybackBackend> createApplePlaybackBackend();
+#endif
+
 namespace {
 
 class CallbackPlaybackBackend : public PlaybackBackend {
@@ -151,7 +155,9 @@ public:
 } // namespace
 
 std::unique_ptr<PlaybackBackend> createDefaultPlaybackBackend() {
-#if AUQW_HAS_QT_MULTIMEDIA
+#if AUQW_ENABLE_IOS_PLATFORM
+    return createApplePlaybackBackend();
+#elif AUQW_HAS_QT_MULTIMEDIA
     return std::make_unique<QtMultimediaPlaybackBackend>();
 #else
     return std::make_unique<StubPlaybackBackend>();
