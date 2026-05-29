@@ -10,6 +10,11 @@ if(Qt6Widgets_FOUND AND NOT ANDROID)
     set(AUQW_ENABLE_DESKTOP_PLATFORM ON)
 endif()
 
+set(AUQW_ENABLE_ANDROID_PLATFORM OFF)
+if(ANDROID)
+    set(AUQW_ENABLE_ANDROID_PLATFORM ON)
+endif()
+
 qt_add_executable(Auqw
     src/main.cpp
     src/CoreController.cpp
@@ -23,6 +28,14 @@ if(AUQW_ENABLE_DESKTOP_PLATFORM)
         PRIVATE
             src/DesktopPlatformController.cpp
             src/DesktopPlatformController.hpp
+    )
+endif()
+
+if(AUQW_ENABLE_ANDROID_PLATFORM)
+    target_sources(Auqw
+        PRIVATE
+            src/AndroidPlaybackController.cpp
+            src/AndroidPlaybackController.hpp
     )
 endif()
 
@@ -48,6 +61,7 @@ target_compile_definitions(Auqw
     PRIVATE
         AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
         AUQW_ENABLE_DESKTOP_PLATFORM=$<BOOL:${AUQW_ENABLE_DESKTOP_PLATFORM}>
+        AUQW_ENABLE_ANDROID_PLATFORM=$<BOOL:${AUQW_ENABLE_ANDROID_PLATFORM}>
 )
 
 if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
@@ -163,6 +177,23 @@ if(BUILD_TESTING AND NOT ANDROID)
     set_tests_properties(auqw_qt_qml_shell_smoke_test PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+
+    qt_add_executable(auqw_qt_android_platform_package_test
+        tests/android_platform_package_test.cpp
+    )
+
+    target_link_libraries(auqw_qt_android_platform_package_test
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+
+    target_compile_definitions(auqw_qt_android_platform_package_test
+        PRIVATE
+            AUQW_ANDROID_PACKAGE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/android"
+    )
+
+    add_test(NAME auqw_qt_android_platform_package_test COMMAND auqw_qt_android_platform_package_test)
 
     if(AUQW_ENABLE_DESKTOP_PLATFORM)
         qt_add_executable(auqw_qt_desktop_platform_controller_test

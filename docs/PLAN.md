@@ -357,7 +357,7 @@ Acceptance:
 
 ## 8. Milestone 4: Platform Playback
 
-Status: in progress. Slice 1 starts with desktop platform playback around the existing Qt shell.
+Status: in progress. Slice 1 desktop platform playback landed. Slice 2 has the initial Android MediaSession and foreground-service spike on `milestone4-slice2-android-mediasession`; device smoke is still needed before marking it complete.
 
 Goal:
 
@@ -375,8 +375,8 @@ Desktop:
 
 Android:
 
-- MediaSession.
-- Foreground service.
+- MediaSession bridge from Qt/C++ playback state. Initial spike added.
+- Foreground media playback service. Initial spike added.
 - Background playback.
 - Audio focus.
 - Bluetooth/headset events.
@@ -546,32 +546,29 @@ Testing:
 
 ## 13. Immediate Next Actions
 
-1. Finish Milestone 4 slice 1 desktop platform playback:
+1. Device-smoke Milestone 4 slice 2 Android MediaSession/foreground-service spike:
 
 ```text
-DesktopPlatformController
-tray actions
-track notifications
-window state restore
-app-focused media keys
+AndroidPlaybackController
+AuqwActivity
+AuqwMediaSessionBridge
+AuqwPlaybackService
+foreground media service manifest wiring
 ```
 
-2. Verify the desktop slice locally:
+2. Keep local and container verification green:
 
 ```bash
+AUQW_BUILD_QT=OFF ./ci/build-local.sh
 AUQW_BUILD_QT=ON ./ci/build-local.sh
-```
-
-3. Smoke-run the GUI:
-
-```bash
-QT_QPA_PLATFORM=offscreen timeout 3s ./build/local/bin/auqw
-```
-
-4. Run platform container gates:
-
-```bash
+./ci/container-build.sh android-linux
 ./ci/container-build.sh linux-flatpak
 ```
 
-5. After desktop slice lands, start Android MediaSession/foreground-service spike.
+3. Continue Android platform playback:
+
+```text
+audio focus
+Bluetooth/headset events
+remote MediaSession commands back into Qt/C++ controls
+```
