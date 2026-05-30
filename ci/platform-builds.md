@@ -16,6 +16,17 @@ export AUQW_ZIG_CACHE_DIR=/tmp/auqw-zig-cache
 export AUQW_ZIG_GLOBAL_CACHE_DIR=/tmp/auqw-zig-global-cache
 ```
 
+The experimental Zig C++ bridge preset uses separate writable caches and a
+wrapper that resolves `/snap/bin/zig` to the real snap payload before Ninja
+invokes it:
+
+```bash
+export AUQW_ZIG_CXX_CACHE_DIR=/tmp/auqw-zig-cxx-cache
+export AUQW_ZIG_CXX_GLOBAL_CACHE_DIR=/tmp/auqw-zig-cxx-global-cache
+# Optional, when zig is not on PATH or /snap/bin/zig should be bypassed:
+export ZIG_REAL=/path/to/zig
+```
+
 ## Linux Desktop
 
 ```bash
@@ -38,6 +49,18 @@ The Linux container build copies its Qt Multimedia runtime dependency into
 ```bash
 ZIG=zig AUQW_BUILD_QT=OFF ./ci/build-local.sh
 ```
+
+Experimental Zig C++ support is bridge-only:
+
+```bash
+cmake --preset zig-cxx-bridge
+cmake --build --preset zig-cxx-bridge
+ctest --preset zig-cxx-bridge
+```
+
+Do not use Zig C++ for the distro Qt shell build. Current Linux Qt packages are
+built against libstdc++; Zig C++ emits libc++ ABI symbols such as `std::__1`,
+which leaves Qt C++ entry points unresolved at link time.
 
 ## Windows
 

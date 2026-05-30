@@ -13,6 +13,19 @@
       }
     },
     {
+      "name": "zig-cxx-bridge",
+      "displayName": "Bridge only with Zig C++",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/zig-cxx-bridge",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "${sourceDir}/ci/zig-cxx-wrapper.sh",
+        "CMAKE_CXX_LINKER_DEPFILE_SUPPORTED": "FALSE",
+        "AUQW_BUILD_QT": "OFF",
+        "AUQW_CORE_LIB": "${sourceDir}/auqw-core/zig-out/lib/libauqw_core.a"
+      }
+    },
+    {
       "name": "qt",
       "displayName": "Qt shell",
       "generator": "Ninja",
@@ -30,6 +43,10 @@
       "configurePreset": "bridge"
     },
     {
+      "name": "zig-cxx-bridge",
+      "configurePreset": "zig-cxx-bridge"
+    },
+    {
       "name": "qt",
       "configurePreset": "qt"
     }
@@ -41,7 +58,13 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "zig-cxx-bridge",
+      "configurePreset": "zig-cxx-bridge",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }
-
