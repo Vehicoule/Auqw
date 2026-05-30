@@ -19,18 +19,46 @@ fi
 
 mkdir -p "$runtime_dir"
 
-mapfile -t qt_multimedia_libs < <(
-  ldd "$exe" | awk '$1 ~ /^libQt6Multimedia/ && $3 ~ /^\// { print $3 }'
-)
+runtime_ldd_output="$(ldd "$exe")"
 
-for lib in "${qt_multimedia_libs[@]}"; do
-  dest="$runtime_dir/$(basename "$lib")"
-  if [[ "$(readlink -f "$lib")" != "$(readlink -m "$dest")" ]]; then
-    cp -L "$lib" "$dest"
-  fi
-done
+should_skip_runtime_library() {
+  case "$(basename "$1")" in
+    ld-linux*.so*|libc.so*|libdl.so*|libgcc_s.so*|libm.so*)
+      return 0
+      ;;
+    libpthread.so*|libresolv.so*|librt.so*|libstdc++.so*|libutil.so*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-if ((${#qt_multimedia_libs[@]} > 0)); then
+copy_runtime_libraries() {
+  local binary="$1"
+  local dest
+  local lib
+  local -a runtime_libs
+  mapfile -t runtime_libs < <(
+    ldd "$binary" | awk '$2 == "=>" && $3 ~ /^\// { print $3 } $1 ~ /^\// { print $1 }'
+  )
+
+  for lib in "${runtime_libs[@]}"; do
+    if should_skip_runtime_library "$lib"; then
+      continue
+    fi
+
+    dest="$runtime_dir/$(basename "$lib")"
+    if [[ "$(readlink -f "$lib")" != "$(readlink -m "$dest")" ]]; then
+      cp -L "$lib" "$dest"
+    fi
+  done
+}
+
+copy_runtime_libraries "$exe"
+
+if printf '%s\n' "$runtime_ldd_output" | awk '$1 == "libQt6Multimedia.so.6" { found = 1 } END { exit found ? 0 : 1 }'; then
   qt_plugin_root="$(qtpaths6 --plugin-dir)"
   multimedia_plugin="$qt_plugin_root/multimedia/libffmpegmediaplugin.so"
 
@@ -41,4 +69,5 @@ if ((${#qt_multimedia_libs[@]} > 0)); then
 
   mkdir -p "$plugin_dir/multimedia"
   cp -L "$multimedia_plugin" "$plugin_dir/multimedia/libffmpegmediaplugin.so"
+  copy_runtime_libraries "$plugin_dir/multimedia/libffmpegmediaplugin.so"
 fi

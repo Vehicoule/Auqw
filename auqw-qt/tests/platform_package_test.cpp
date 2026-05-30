@@ -95,6 +95,21 @@ private slots:
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "macOS Qt shell should keep native platform compiler");
     }
 
+    void linuxRuntimeDeploymentBundlesHostVisibleQtLibraries() {
+        const QString deploy = readTextFile(projectSourcePath(u"ci/deploy-linux-runtime.sh"));
+        const QString check = readTextFile(projectSourcePath(u"ci/check-linux-runtime.sh"));
+
+        QVERIFY2(!deploy.isEmpty(), "ci/deploy-linux-runtime.sh should be readable");
+        QVERIFY2(!check.isEmpty(), "ci/check-linux-runtime.sh should be readable");
+
+        QVERIFY2(deploy.contains(QStringLiteral("copy_runtime_libraries")),
+            "Linux deploy should copy the runtime library closure into build/lib");
+        QVERIFY2(!deploy.contains(QStringLiteral("$1 ~ /^libQt6Multimedia/")),
+            "Linux deploy should not copy only Qt Multimedia libraries");
+        QVERIFY2(check.contains(QStringLiteral("LD_LIBRARY_PATH")),
+            "Linux runtime check should resolve libraries bundled in build/lib");
+    }
+
     void iosBuildChecksQtKitAppleLinkageAndBundleMetadata() {
         const QString script = readTextFile(projectSourcePath(u"ci/ios-build.sh"));
         QVERIFY2(!script.isEmpty(), "ci/ios-build.sh should be readable");
