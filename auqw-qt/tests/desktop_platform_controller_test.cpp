@@ -1,6 +1,7 @@
 #include "../src/CoreController.hpp"
 #include "../src/DesktopPlatformController.hpp"
 #include "../src/PlaybackBackend.hpp"
+#include "test_storage.hpp"
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -8,6 +9,7 @@
 #include <QFile>
 #include <QKeyEvent>
 #include <QMetaObject>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -186,10 +188,10 @@ private slots:
         if (appData.exists()) {
             QVERIFY(appData.removeRecursively());
         }
-        QDir config(QStandardPaths::writableLocation(QStandardPaths::ConfigLocation));
-        if (config.exists()) {
-            QVERIFY(config.removeRecursively());
-        }
+        QSettings settings;
+        settings.clear();
+        settings.sync();
+        QCOMPARE(settings.status(), QSettings::NoError);
     }
 
     void actionsDrivePlaybackAndExposeState() {
@@ -272,21 +274,13 @@ private slots:
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
 
-    QTemporaryDir dataHome;
-    QTemporaryDir cacheHome;
-    QTemporaryDir configHome;
-    if (!dataHome.isValid() || !cacheHome.isValid() || !configHome.isValid()) {
+    auqw::tests::TestStorage storage(QStringLiteral("AuqwDesktopPlatformControllerTest"));
+    if (!storage.isValid()) {
         return 1;
     }
 
-    qputenv("XDG_DATA_HOME", dataHome.path().toUtf8());
-    qputenv("XDG_CACHE_HOME", cacheHome.path().toUtf8());
-    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
-
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName(QStringLiteral("Auqw"));
-    QCoreApplication::setOrganizationName(QStringLiteral("Vehicoule"));
-    QCoreApplication::setOrganizationDomain(QStringLiteral("com.Vehicoule.auqw"));
+    storage.applyApplicationMetadata();
 
     DesktopPlatformControllerTest test;
     return QTest::qExec(&test, argc, argv);

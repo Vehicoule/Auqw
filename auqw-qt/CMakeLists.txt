@@ -238,6 +238,9 @@ if(BUILD_TESTING AND NOT ANDROID)
     )
 
     add_test(NAME auqw_qt_online_provider_test COMMAND auqw_qt_online_provider_test)
+    set_tests_properties(auqw_qt_online_provider_test PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
 
     qt_add_executable(auqw_qt_youtube_sabr_live_smoke
         tests/youtube_sabr_live_smoke.cpp

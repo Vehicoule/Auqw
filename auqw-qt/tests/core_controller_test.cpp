@@ -1,6 +1,7 @@
 #include "../src/CoreController.hpp"
 #include "../src/OnlineProvider.hpp"
 #include "../src/PlaybackBackend.hpp"
+#include "test_storage.hpp"
 
 #include <QAbstractItemModel>
 #include <QCoreApplication>
@@ -1376,18 +1377,13 @@ private slots:
 };
 
 int main(int argc, char** argv) {
-    QTemporaryDir dataHome;
-    QTemporaryDir cacheHome;
-    if (!dataHome.isValid() || !cacheHome.isValid()) {
+    auqw::tests::TestStorage storage(QStringLiteral("AuqwCoreControllerTest"));
+    if (!storage.isValid()) {
         return 1;
     }
 
-    qputenv("XDG_DATA_HOME", dataHome.path().toUtf8());
-    qputenv("XDG_CACHE_HOME", cacheHome.path().toUtf8());
     QCoreApplication app(argc, argv);
-    QCoreApplication::setApplicationName(QStringLiteral("Auqw"));
-    QCoreApplication::setOrganizationName(QStringLiteral("Vehicoule"));
-    QCoreApplication::setOrganizationDomain(QStringLiteral("com.Vehicoule.auqw"));
+    storage.applyApplicationMetadata();
 
     CoreControllerTest test;
     return QTest::qExec(&test, argc, argv);

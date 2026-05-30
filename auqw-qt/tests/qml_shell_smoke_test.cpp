@@ -1,4 +1,5 @@
 #include "../src/CoreController.hpp"
+#include "test_storage.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -139,19 +140,13 @@ private slots:
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
 
-    QTemporaryDir dataHome;
-    QTemporaryDir cacheHome;
-    if (!dataHome.isValid() || !cacheHome.isValid()) {
+    auqw::tests::TestStorage storage(QStringLiteral("AuqwQmlShellSmokeTest"));
+    if (!storage.isValid()) {
         return 1;
     }
 
-    qputenv("XDG_DATA_HOME", dataHome.path().toUtf8());
-    qputenv("XDG_CACHE_HOME", cacheHome.path().toUtf8());
-
     QGuiApplication app(argc, argv);
-    QCoreApplication::setApplicationName(QStringLiteral("Auqw"));
-    QCoreApplication::setOrganizationName(QStringLiteral("Vehicoule"));
-    QCoreApplication::setOrganizationDomain(QStringLiteral("com.Vehicoule.auqw"));
+    storage.applyApplicationMetadata();
 
     QmlShellSmokeTest test;
     return QTest::qExec(&test, argc, argv);
