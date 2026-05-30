@@ -135,7 +135,11 @@ signals:
     void playbackOptionsChanged();
 
 private:
-    struct CommandResult;
+    struct CommandResult {
+        bool ok = false;
+        QJsonObject data;
+        QString error;
+    };
 
     [[nodiscard]] CommandResult invokeCommand(
         const QString& id,

@@ -21,12 +21,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     enable_language(OBJCXX)
 endif()
 
-qt_add_executable(Auqw
-    src/main.cpp
+qt_add_library(auqw_qt_runtime STATIC
     src/CoreController.cpp
     src/CoreController.hpp
+    src/CoreControllerDownloads.cpp
+    src/CoreControllerLibrary.cpp
+    src/CoreControllerPlayback.cpp
+    src/CoreControllerSearch.cpp
     src/InnertubeProvider.cpp
     src/InnertubeProvider.hpp
+    src/InnertubeProviderParsing.cpp
+    src/JsonListModel.cpp
+    src/JsonListModel.hpp
     src/OnlineProvider.cpp
     src/OnlineProvider.hpp
     src/PlaybackBackend.cpp
@@ -35,6 +41,7 @@ qt_add_executable(Auqw
     src/YoutubeHttpAudioDevice.hpp
     src/YoutubePlaybackResolver.cpp
     src/YoutubePlaybackResolver.hpp
+    src/YoutubePlaybackResolverParsing.cpp
     src/YoutubeSabrAudioDevice.cpp
     src/YoutubeSabrAudioDevice.hpp
     src/YoutubeSabrSession.cpp
@@ -42,6 +49,58 @@ qt_add_executable(Auqw
     src/YoutubeSabrTypes.hpp
     src/YoutubeUmpParser.cpp
     src/YoutubeUmpParser.hpp
+)
+
+target_link_libraries(auqw_qt_runtime
+    PUBLIC
+        Qt6::Core
+        Qt6::Network
+        auqw_bridge
+)
+
+target_compile_definitions(auqw_qt_runtime
+    PUBLIC
+        AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+        AUQW_ENABLE_DESKTOP_PLATFORM=$<BOOL:${AUQW_ENABLE_DESKTOP_PLATFORM}>
+        AUQW_ENABLE_ANDROID_PLATFORM=$<BOOL:${AUQW_ENABLE_ANDROID_PLATFORM}>
+        AUQW_ENABLE_IOS_PLATFORM=$<BOOL:${AUQW_ENABLE_IOS_PLATFORM}>
+        AUQW_APP_ID="com.Vehicoule.auqw"
+        AUQW_APP_NAME="Auqw"
+)
+
+if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+    target_link_libraries(auqw_qt_runtime PUBLIC Qt6::Multimedia)
+endif()
+
+if(AUQW_ENABLE_QT_PCH)
+    target_precompile_headers(auqw_qt_runtime
+        PRIVATE
+            <QObject>
+            <QString>
+            <QVector>
+            <QJsonObject>
+            <QNetworkAccessManager>
+            <memory>
+            <optional>
+    )
+endif()
+
+if(AUQW_ENABLE_DESKTOP_PLATFORM)
+    qt_add_library(auqw_qt_desktop_platform STATIC
+        src/DesktopPlatformController.cpp
+        src/DesktopPlatformController.hpp
+    )
+
+    target_link_libraries(auqw_qt_desktop_platform
+        PUBLIC
+            Qt6::Core
+            Qt6::Widgets
+            auqw_qt_runtime
+    )
+endif()
+
+qt_add_executable(Auqw
+    src/main.cpp
 )
 
 if(ANDROID)
@@ -54,14 +113,6 @@ if(ANDROID)
     FetchContent_MakeAvailable(android_openssl)
     include("${android_openssl_SOURCE_DIR}/android_openssl.cmake")
     add_android_openssl_libraries(Auqw)
-endif()
-
-if(AUQW_ENABLE_DESKTOP_PLATFORM)
-    target_sources(Auqw
-        PRIVATE
-            src/DesktopPlatformController.cpp
-            src/DesktopPlatformController.hpp
-    )
 endif()
 
 if(AUQW_ENABLE_ANDROID_PLATFORM)
@@ -90,42 +141,22 @@ qt_add_qml_module(Auqw
 
 target_link_libraries(Auqw
     PRIVATE
-        Qt6::Core
-        Qt6::Network
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
         Qt6::QuickDialogs2
         Qt6::QuickLayouts
-        auqw_bridge
+        auqw_qt_runtime
 )
-
-target_compile_definitions(Auqw
-    PRIVATE
-        AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
-        AUQW_ENABLE_DESKTOP_PLATFORM=$<BOOL:${AUQW_ENABLE_DESKTOP_PLATFORM}>
-        AUQW_ENABLE_ANDROID_PLATFORM=$<BOOL:${AUQW_ENABLE_ANDROID_PLATFORM}>
-        AUQW_ENABLE_IOS_PLATFORM=$<BOOL:${AUQW_ENABLE_IOS_PLATFORM}>
-)
-
-if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
-    target_link_libraries(Auqw PRIVATE Qt6::Multimedia)
-endif()
 
 if(AUQW_ENABLE_DESKTOP_PLATFORM)
-    target_link_libraries(Auqw PRIVATE Qt6::Widgets)
+    target_link_libraries(Auqw PRIVATE auqw_qt_desktop_platform)
 endif()
 
 if(AUQW_ENABLE_IOS_PLATFORM)
     target_link_libraries(Auqw PRIVATE "-framework AVFoundation" "-framework MediaPlayer")
     target_compile_options(Auqw PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 endif()
-
-target_compile_definitions(Auqw
-    PRIVATE
-        AUQW_APP_ID="com.Vehicoule.auqw"
-        AUQW_APP_NAME="Auqw"
-)
 
 set_target_properties(Auqw PROPERTIES
     OUTPUT_NAME auqw
@@ -156,101 +187,33 @@ endif()
 if(BUILD_TESTING AND NOT ANDROID)
     qt_add_executable(auqw_qt_core_controller_test
         tests/core_controller_test.cpp
-        src/CoreController.cpp
-        src/CoreController.hpp
-        src/InnertubeProvider.cpp
-        src/InnertubeProvider.hpp
-        src/OnlineProvider.cpp
-        src/OnlineProvider.hpp
-        src/PlaybackBackend.cpp
-        src/PlaybackBackend.hpp
-        src/YoutubeHttpAudioDevice.cpp
-        src/YoutubeHttpAudioDevice.hpp
-        src/YoutubePlaybackResolver.cpp
-        src/YoutubePlaybackResolver.hpp
-        src/YoutubeSabrAudioDevice.cpp
-        src/YoutubeSabrAudioDevice.hpp
-        src/YoutubeSabrSession.cpp
-        src/YoutubeSabrSession.hpp
-        src/YoutubeSabrTypes.hpp
-        src/YoutubeUmpParser.cpp
-        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_core_controller_test
         PRIVATE
-            Qt6::Core
-            Qt6::Network
             Qt6::Test
-            auqw_bridge
-    )
-
-    target_compile_definitions(auqw_qt_core_controller_test
-        PRIVATE
-            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
-    )
-
-    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
-        target_link_libraries(auqw_qt_core_controller_test PRIVATE Qt6::Multimedia)
-    endif()
-
-    target_compile_definitions(auqw_qt_core_controller_test
-        PRIVATE
-            AUQW_APP_ID="com.Vehicoule.auqw"
-            AUQW_APP_NAME="Auqw"
+            auqw_qt_runtime
     )
 
     add_test(NAME auqw_qt_core_controller_test COMMAND auqw_qt_core_controller_test)
 
     qt_add_executable(auqw_qt_qml_shell_smoke_test
         tests/qml_shell_smoke_test.cpp
-        src/CoreController.cpp
-        src/CoreController.hpp
-        src/InnertubeProvider.cpp
-        src/InnertubeProvider.hpp
-        src/OnlineProvider.cpp
-        src/OnlineProvider.hpp
-        src/PlaybackBackend.cpp
-        src/PlaybackBackend.hpp
-        src/YoutubeHttpAudioDevice.cpp
-        src/YoutubeHttpAudioDevice.hpp
-        src/YoutubePlaybackResolver.cpp
-        src/YoutubePlaybackResolver.hpp
-        src/YoutubeSabrAudioDevice.cpp
-        src/YoutubeSabrAudioDevice.hpp
-        src/YoutubeSabrSession.cpp
-        src/YoutubeSabrSession.hpp
-        src/YoutubeSabrTypes.hpp
-        src/YoutubeUmpParser.cpp
-        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_qml_shell_smoke_test
         PRIVATE
-            Qt6::Core
-            Qt6::Network
             Qt6::Qml
             Qt6::Quick
             Qt6::QuickControls2
             Qt6::QuickDialogs2
             Qt6::QuickLayouts
             Qt6::Test
-            auqw_bridge
+            auqw_qt_runtime
     )
 
     target_compile_definitions(auqw_qt_qml_shell_smoke_test
         PRIVATE
-            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
-    )
-
-    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
-        target_link_libraries(auqw_qt_qml_shell_smoke_test PRIVATE Qt6::Multimedia)
-    endif()
-
-    target_compile_definitions(auqw_qt_qml_shell_smoke_test
-        PRIVATE
-            AUQW_APP_ID="com.Vehicoule.auqw"
-            AUQW_APP_NAME="Auqw"
             AUQW_QML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml"
     )
 
@@ -261,24 +224,12 @@ if(BUILD_TESTING AND NOT ANDROID)
 
     qt_add_executable(auqw_qt_online_provider_test
         tests/online_provider_test.cpp
-        src/InnertubeProvider.cpp
-        src/InnertubeProvider.hpp
-        src/OnlineProvider.cpp
-        src/OnlineProvider.hpp
-        src/YoutubeHttpAudioDevice.cpp
-        src/YoutubeHttpAudioDevice.hpp
-        src/YoutubePlaybackResolver.cpp
-        src/YoutubePlaybackResolver.hpp
-        src/YoutubeSabrTypes.hpp
-        src/YoutubeUmpParser.cpp
-        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_online_provider_test
         PRIVATE
-            Qt6::Core
-            Qt6::Network
             Qt6::Test
+            auqw_qt_runtime
     )
 
     target_compile_definitions(auqw_qt_online_provider_test
@@ -290,37 +241,12 @@ if(BUILD_TESTING AND NOT ANDROID)
 
     qt_add_executable(auqw_qt_youtube_sabr_live_smoke
         tests/youtube_sabr_live_smoke.cpp
-        src/InnertubeProvider.cpp
-        src/InnertubeProvider.hpp
-        src/OnlineProvider.cpp
-        src/OnlineProvider.hpp
-        src/YoutubeHttpAudioDevice.cpp
-        src/YoutubeHttpAudioDevice.hpp
-        src/YoutubePlaybackResolver.cpp
-        src/YoutubePlaybackResolver.hpp
-        src/YoutubeSabrAudioDevice.cpp
-        src/YoutubeSabrAudioDevice.hpp
-        src/YoutubeSabrSession.cpp
-        src/YoutubeSabrSession.hpp
-        src/YoutubeSabrTypes.hpp
-        src/YoutubeUmpParser.cpp
-        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_youtube_sabr_live_smoke
         PRIVATE
-            Qt6::Core
-            Qt6::Network
+            auqw_qt_runtime
     )
-
-    target_compile_definitions(auqw_qt_youtube_sabr_live_smoke
-        PRIVATE
-            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
-    )
-
-    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
-        target_link_libraries(auqw_qt_youtube_sabr_live_smoke PRIVATE Qt6::Multimedia)
-    endif()
 
     qt_add_executable(auqw_qt_android_platform_package_test
         tests/android_platform_package_test.cpp
@@ -376,51 +302,12 @@ if(BUILD_TESTING AND NOT ANDROID)
     if(AUQW_ENABLE_DESKTOP_PLATFORM)
         qt_add_executable(auqw_qt_desktop_platform_controller_test
             tests/desktop_platform_controller_test.cpp
-            src/CoreController.cpp
-            src/CoreController.hpp
-            src/DesktopPlatformController.cpp
-            src/DesktopPlatformController.hpp
-            src/InnertubeProvider.cpp
-            src/InnertubeProvider.hpp
-            src/OnlineProvider.cpp
-            src/OnlineProvider.hpp
-            src/PlaybackBackend.cpp
-            src/PlaybackBackend.hpp
-            src/YoutubeHttpAudioDevice.cpp
-            src/YoutubeHttpAudioDevice.hpp
-            src/YoutubePlaybackResolver.cpp
-            src/YoutubePlaybackResolver.hpp
-            src/YoutubeSabrAudioDevice.cpp
-            src/YoutubeSabrAudioDevice.hpp
-            src/YoutubeSabrSession.cpp
-            src/YoutubeSabrSession.hpp
-            src/YoutubeSabrTypes.hpp
-            src/YoutubeUmpParser.cpp
-            src/YoutubeUmpParser.hpp
         )
 
         target_link_libraries(auqw_qt_desktop_platform_controller_test
             PRIVATE
-                Qt6::Core
-                Qt6::Network
                 Qt6::Test
-                Qt6::Widgets
-                auqw_bridge
-        )
-
-        target_compile_definitions(auqw_qt_desktop_platform_controller_test
-            PRIVATE
-                AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
-        )
-
-        if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
-            target_link_libraries(auqw_qt_desktop_platform_controller_test PRIVATE Qt6::Multimedia)
-        endif()
-
-        target_compile_definitions(auqw_qt_desktop_platform_controller_test
-            PRIVATE
-                AUQW_APP_ID="com.Vehicoule.auqw"
-                AUQW_APP_NAME="Auqw"
+                auqw_qt_desktop_platform
         )
 
         add_test(NAME auqw_qt_desktop_platform_controller_test COMMAND auqw_qt_desktop_platform_controller_test)
