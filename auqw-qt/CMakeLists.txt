@@ -356,6 +356,23 @@ if(BUILD_TESTING AND NOT ANDROID)
 
     add_test(NAME auqw_qt_ios_platform_wiring_test COMMAND auqw_qt_ios_platform_wiring_test)
 
+    qt_add_executable(auqw_qt_platform_package_test
+        tests/platform_package_test.cpp
+    )
+
+    target_link_libraries(auqw_qt_platform_package_test
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+
+    target_compile_definitions(auqw_qt_platform_package_test
+        PRIVATE
+            AUQW_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    )
+
+    add_test(NAME auqw_qt_platform_package_test COMMAND auqw_qt_platform_package_test)
+
     if(AUQW_ENABLE_DESKTOP_PLATFORM)
         qt_add_executable(auqw_qt_desktop_platform_controller_test
             tests/desktop_platform_controller_test.cpp

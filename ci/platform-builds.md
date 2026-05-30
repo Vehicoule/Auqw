@@ -67,14 +67,13 @@ which leaves Qt C++ entry points unresolved at link time.
 Windows native runner/host:
 
 ```powershell
-cd auqw-core
-zig build test
-zig build
-cd ..
-cmake -S . -B build/windows -G Ninja -DAUQW_BUILD_QT=ON -DAUQW_CORE_LIB="$PWD/auqw-core/zig-out/lib/auqw_core.lib"
-cmake --build build/windows
-ctest --test-dir build/windows --output-on-failure
+.\ci\windows-build.ps1
 ```
+
+The script honors `ZIG`, `AUQW_BUILD_DIR`, `AUQW_ZIG_CACHE_DIR`, and
+`AUQW_ZIG_GLOBAL_CACHE_DIR`; requires Qt Multimedia for platform playback;
+deploys `build\windows\bin\auqw.exe` with `windeployqt`; and validates the
+deployed Qt DLLs and Multimedia plugin before running CTest.
 
 Windows container on a Windows host with Windows containers enabled:
 
@@ -100,6 +99,12 @@ brew bundle --file containers/macos/Brewfile
 ./ci/macos-build.sh
 ```
 
+The script honors `ZIG`, `AUQW_BUILD_DIR`, `AUQW_ZIG_CACHE_DIR`, and
+`AUQW_ZIG_GLOBAL_CACHE_DIR`; requires Qt Multimedia for platform playback;
+deploys the `.app` bundle with `macdeployqt`; and validates `otool -L`,
+`QtMultimedia.framework`, bundle metadata, and `Contents/PlugIns/multimedia`
+before running CTest.
+
 ## Android
 
 Use a Qt Android kit for APK builds. Current container proves the Android SDK/NDK and Zig Android core path first.
@@ -124,17 +129,31 @@ AUQW_ENABLE_IOS=true
 ```
 
 Enable it after the runner has a Qt iOS kit available through `CMAKE_PREFIX_PATH`.
+Set `QT_HOST_PATH` to the matching host Qt tools kit. `ci/ios-build.sh` builds
+the Zig core for `aarch64-ios`, runs source/package CTest with the host kit,
+configures the artifact build with `CMAKE_SYSTEM_NAME=iOS`, and validates
+`Info.plist`, `AVFoundation`, and `MediaPlayer` linkage when an `.app` bundle
+is produced. Runtime smoke on a physical device or simulator remains a separate
+step until an attached iOS target exists.
 
 ## FreeBSD
 
 FreeBSD support starts as source-build proof with Qt 6 from ports/packages.
 
 ```sh
+sudo pkg install cmake ninja qt6-base qt6-declarative qt6-multimedia qt6-quickcontrols2 zig
 cd auqw-core
-zig build test
-zig build
+zig build test && zig build
 cd ..
-cmake -S . -B build/freebsd -GNinja -DAUQW_BUILD_QT=ON -DAUQW_CORE_LIB="$PWD/auqw-core/zig-out/lib/libauqw_core.a"
+cmake -S . -B build/freebsd -GNinja \
+  -DAUQW_BUILD_QT=ON \
+  -DAUQW_REQUIRE_QT_MULTIMEDIA=ON \
+  -DAUQW_CORE_LIB="$PWD/auqw-core/zig-out/lib/libauqw_core.a"
 cmake --build build/freebsd
 ctest --test-dir build/freebsd --output-on-failure
+./ci/check-freebsd-runtime.sh build/freebsd/bin/auqw
 ```
+
+FreeBSD uses the native compiler/toolchain for the Qt shell and native `ldd`
+for runtime validation. Zig remains responsible for the core library and bridge
+smoke path, not the Qt C++ shell compiler.
