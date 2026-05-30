@@ -126,6 +126,29 @@ private slots:
         QVERIFY2(cmake.contains(QStringLiteral("add_android_openssl_libraries(Auqw)")), "Android build should package OpenSSL libraries with Auqw");
     }
 
+    void androidBuildUsesPreloadedAndroidOpenSslSource() {
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+
+        QVERIFY2(!containerfile.isEmpty(), "Android Containerfile should be readable");
+        QVERIFY2(!androidBuild.isEmpty(), "Android build script should be readable");
+
+        QVERIFY2(containerfile.contains(QStringLiteral("ANDROID_OPENSSL_SOURCE_DIR=/opt/android_openssl")),
+            "Android image should define the preloaded android_openssl source directory");
+        QVERIFY2(containerfile.contains(QStringLiteral("https://github.com/KDAB/android_openssl.git")),
+            "Android image should prefetch android_openssl from KDAB");
+        QVERIFY2(containerfile.contains(QStringLiteral("b71f1470962019bd89534a2919f5925f93bc5779")),
+            "Android image should keep android_openssl pinned to the reviewed commit");
+        QVERIFY2(containerfile.contains(QStringLiteral("rm -rf \"${ANDROID_OPENSSL_SOURCE_DIR}/.git\"")),
+            "Android image should drop android_openssl Git metadata after checkout");
+        QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_OPENSSL_SOURCE_DIR")),
+            "Android build script should read the preloaded android_openssl source env");
+        QVERIFY2(androidBuild.contains(QStringLiteral("android_openssl.cmake")),
+            "Android build script should validate the preloaded android_openssl source");
+        QVERIFY2(androidBuild.contains(QStringLiteral("FETCHCONTENT_SOURCE_DIR_ANDROID_OPENSSL")),
+            "Android CMake configure should use the preloaded android_openssl source when present");
+    }
+
     void androidBuildRequiresQtMultimedia() {
         const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
         const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));

@@ -15,11 +15,13 @@ qt_android_abi="${QT_ANDROID_ABI:-arm64-v8a}"
 qt_root="${QT_ROOT:-/opt/Qt}"
 qt_prefix="${QT_ANDROID_PREFIX:-$qt_root/$qt_version/$qt_android_arch}"
 qt_host_path="${QT_HOST_PATH:-$qt_root/$qt_version/gcc_64}"
+android_openssl_source_dir="${ANDROID_OPENSSL_SOURCE_DIR:-}"
 qt_cmake="$qt_prefix/bin/qt-cmake"
 build_dir="${AUQW_BUILD_DIR:-$root/build/android-linux}"
 apk_dir="$build_dir/apk"
 target="aarch64-linux-android"
 artifact="$root/auqw-core/zig-out/lib/libauqw_core.a"
+cmake_fetchcontent_args=()
 
 patch_gradle_wrapper_timeout() {
   local wrapper
@@ -67,6 +69,15 @@ if [[ ! -f "$artifact" ]]; then
   exit 1
 fi
 
+if [[ -n "$android_openssl_source_dir" ]]; then
+  android_openssl_cmake="$android_openssl_source_dir/android_openssl.cmake"
+  if [[ ! -f "$android_openssl_cmake" ]]; then
+    echo "missing Android OpenSSL source: $android_openssl_cmake" >&2
+    exit 1
+  fi
+  cmake_fetchcontent_args+=("-DFETCHCONTENT_SOURCE_DIR_ANDROID_OPENSSL=$android_openssl_source_dir")
+fi
+
 patch_gradle_wrapper_timeout
 
 cmake -E rm -rf "$build_dir"
@@ -80,7 +91,8 @@ cmake -E rm -rf "$build_dir"
   -DANDROID_ABI="$qt_android_abi" \
   -DANDROID_PLATFORM="$android_platform" \
   -DQT_HOST_PATH="$qt_host_path" \
-  -DQt6_DIR="$qt_prefix/lib/cmake/Qt6"
+  -DQt6_DIR="$qt_prefix/lib/cmake/Qt6" \
+  "${cmake_fetchcontent_args[@]}"
 
 cmake --build "$build_dir" --target Auqw_make_apk
 
