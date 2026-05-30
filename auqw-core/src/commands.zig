@@ -1,9 +1,14 @@
 const std = @import("std");
 const errors = @import("errors.zig");
-const migrations = @import("migrations.zig");
-const models = @import("models.zig");
-const sqlite = @import("sqlite.zig");
 const AppState = @import("state.zig").AppState;
+
+const core = @import("commands/core.zig");
+const json = @import("commands/json_helpers.zig");
+const library = @import("commands/library.zig");
+const playback = @import("commands/playback.zig");
+const queue = @import("commands/queue.zig");
+const responses = @import("commands/responses.zig");
+const tracks = @import("commands/tracks.zig");
 
 const ObjectMap = std.json.ObjectMap;
 const Value = std.json.Value;
@@ -14,1013 +19,150 @@ pub fn invoke(state: *AppState, request_json: []const u8) errors.CoreError![]u8 
 
     if (parsed.value != .object) return error.InvalidJson;
     const root = parsed.value.object;
-    const id = optionalString(root, "id") orelse "";
-    const command = requiredString(root, "command") catch return error.InvalidJson;
-    const params = paramsObject(root) catch return error.InvalidJson;
+    const id = json.optionalString(root, "id") orelse "";
+    const command = json.requiredString(root, "command") catch return error.InvalidJson;
+    const params = json.paramsObject(root) catch return error.InvalidJson;
 
-    if (std.mem.eql(u8, command, "core.get_metadata")) return getMetadata(state, id);
-    if (std.mem.eql(u8, command, "tracks.upsert")) return tracksUpsert(state, id, params);
-    if (std.mem.eql(u8, command, "tracks.list")) return tracksList(state, id);
-    if (std.mem.eql(u8, command, "local_files.upsert")) return localFilesUpsert(state, id, params);
-    if (std.mem.eql(u8, command, "queue.add")) return queueAdd(state, id, params);
-    if (std.mem.eql(u8, command, "queue.list")) return queueList(state, id);
-    if (std.mem.eql(u8, command, "queue.remove")) return queueRemove(state, id, params);
-    if (std.mem.eql(u8, command, "queue.clear")) return queueClear(state, id);
-    if (std.mem.eql(u8, command, "queue.move")) return queueMove(state, id, params);
-    if (std.mem.eql(u8, command, "playback.get")) return playbackGet(state, id);
-    if (std.mem.eql(u8, command, "playback.load_queue_item")) return playbackLoadQueueItem(state, id, params);
-    if (std.mem.eql(u8, command, "playback.update")) return playbackUpdate(state, id, params);
-    if (std.mem.eql(u8, command, "playback.options.get")) return playbackOptionsGet(state, id);
-    if (std.mem.eql(u8, command, "playback.options.update")) return playbackOptionsUpdate(state, id, params);
-    if (std.mem.eql(u8, command, "playlists.create")) return playlistsCreate(state, id, params);
-    if (std.mem.eql(u8, command, "playlists.list")) return playlistsList(state, id);
-    if (std.mem.eql(u8, command, "recent.add")) return recentAdd(state, id, params);
-    if (std.mem.eql(u8, command, "recent.list")) return recentList(state, id);
-    if (std.mem.eql(u8, command, "search_history.add")) return searchHistoryAdd(state, id, params);
-    if (std.mem.eql(u8, command, "search_history.list")) return searchHistoryList(state, id);
-    if (std.mem.eql(u8, command, "settings.get")) return settingsGet(state, id, params);
-    if (std.mem.eql(u8, command, "settings.set")) return settingsSet(state, id, params);
+    if (std.mem.eql(u8, command, "core.get_metadata")) return core.getMetadata(state, id);
+    if (std.mem.eql(u8, command, "tracks.upsert")) return tracks.upsert(state, id, params);
+    if (std.mem.eql(u8, command, "tracks.list")) return tracks.list(state, id);
+    if (std.mem.eql(u8, command, "local_files.upsert")) return tracks.localFilesUpsert(state, id, params);
+    if (std.mem.eql(u8, command, "queue.add")) return queue.add(state, id, params);
+    if (std.mem.eql(u8, command, "queue.list")) return queue.list(state, id);
+    if (std.mem.eql(u8, command, "queue.remove")) return queue.remove(state, id, params);
+    if (std.mem.eql(u8, command, "queue.clear")) return queue.clear(state, id);
+    if (std.mem.eql(u8, command, "queue.move")) return queue.move(state, id, params);
+    if (std.mem.eql(u8, command, "playback.get")) return playback.get(state, id);
+    if (std.mem.eql(u8, command, "playback.load_queue_item")) return playback.loadQueueItem(state, id, params);
+    if (std.mem.eql(u8, command, "playback.update")) return playback.update(state, id, params);
+    if (std.mem.eql(u8, command, "playback.options.get")) return playback.optionsGet(state, id);
+    if (std.mem.eql(u8, command, "playback.options.update")) return playback.optionsUpdate(state, id, params);
+    if (std.mem.eql(u8, command, "playlists.create")) return library.playlistsCreate(state, id, params);
+    if (std.mem.eql(u8, command, "playlists.list")) return library.playlistsList(state, id);
+    if (std.mem.eql(u8, command, "recent.add")) return library.recentAdd(state, id, params);
+    if (std.mem.eql(u8, command, "recent.list")) return library.recentList(state, id);
+    if (std.mem.eql(u8, command, "search_history.add")) return library.searchHistoryAdd(state, id, params);
+    if (std.mem.eql(u8, command, "search_history.list")) return library.searchHistoryList(state, id);
+    if (std.mem.eql(u8, command, "settings.get")) return library.settingsGet(state, id, params);
+    if (std.mem.eql(u8, command, "settings.set")) return library.settingsSet(state, id, params);
 
     return error.UnknownCommand;
 }
 
 pub fn makeErrorResponse(allocator: std.mem.Allocator, id: []const u8, err: errors.CoreError) []u8 {
-    return std.json.Stringify.valueAlloc(allocator, .{
-        .id = id,
-        .ok = false,
-        .@"error" = .{
-            .code = errors.jsonCode(err),
-            .message = errors.message(err),
-        },
-    }, .{}) catch blk: {
-        break :blk allocator.dupe(u8, "{\"id\":\"\",\"ok\":false,\"error\":{\"code\":\"allocation_failed\",\"message\":\"Allocation failed\"}}") catch "";
-    };
+    return responses.makeErrorResponse(allocator, id, err);
 }
 
-fn makeSuccess(allocator: std.mem.Allocator, id: []const u8, data: anytype) errors.CoreError![]u8 {
-    return std.json.Stringify.valueAlloc(allocator, .{
-        .id = id,
-        .ok = true,
-        .data = data,
-    }, .{}) catch return error.AllocationFailed;
+fn parsedInvoke(allocator: std.mem.Allocator, state: *AppState, request_json: []const u8) !std.json.Parsed(Value) {
+    const response = try invoke(state, request_json);
+    defer allocator.free(response);
+    return std.json.parseFromSlice(Value, allocator, response, .{});
 }
 
-fn getMetadata(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const version = migrations.currentVersion(&state.db) catch return error.Database;
-    return makeSuccess(state.allocator, id, .{
-        .app_id = state.app_id[0..state.app_id.len],
-        .app_name = state.app_name[0..state.app_name.len],
-        .database_path = state.db.path[0..state.db.path.len],
-        .schema_version = version,
+fn expectData(parsed: *const std.json.Parsed(Value), expected_id: []const u8) !ObjectMap {
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings(expected_id, root.get("id").?.string);
+    try std.testing.expectEqual(true, root.get("ok").?.bool);
+    return root.get("data").?.object;
+}
+
+fn createTestState(allocator: std.mem.Allocator, data_dir: ?[]const u8) !*AppState {
+    return AppState.create(allocator, .{
+        .app_id = "com.Vehicoule.auqw",
+        .app_name = "Auqw",
+        .data_dir = data_dir,
+        .cache_dir = null,
     });
 }
 
-fn tracksUpsert(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const track_id = if (optionalString(params, "id")) |value|
-        state.allocator.dupe(u8, value) catch return error.AllocationFailed
-    else
-        models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(track_id);
+test "command dispatcher returns unknown command error" {
+    const allocator = std.testing.allocator;
+    var state = try createTestState(allocator, null);
+    defer state.deinit();
 
-    const title = requiredString(params, "title") catch return error.InvalidJson;
-    const artist = optionalString(params, "artist");
-    const album = optionalString(params, "album");
-    const duration_ms = optionalInt(params, "duration_ms") catch return error.InvalidJson;
-    const artwork_url = optionalString(params, "artwork_url");
-    const provider = optionalString(params, "provider");
-    const provider_track_id = optionalString(params, "provider_track_id");
-
-    var stmt = state.db.prepare(
-        \\INSERT INTO tracks (
-        \\    id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, updated_at
-        \\) VALUES (
-        \\    ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')
-        \\)
-        \\ON CONFLICT(id) DO UPDATE SET
-        \\    provider = excluded.provider,
-        \\    provider_track_id = excluded.provider_track_id,
-        \\    title = excluded.title,
-        \\    artist = excluded.artist,
-        \\    album = excluded.album,
-        \\    duration_ms = excluded.duration_ms,
-        \\    artwork_url = excluded.artwork_url,
-        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-    ) catch return error.Database;
-    defer stmt.finalize();
-
-    stmt.bindText(1, track_id) catch return error.Database;
-    stmt.bindOptionalText(2, provider) catch return error.Database;
-    stmt.bindOptionalText(3, provider_track_id) catch return error.Database;
-    stmt.bindText(4, title) catch return error.Database;
-    stmt.bindOptionalText(5, artist) catch return error.Database;
-    stmt.bindOptionalText(6, album) catch return error.Database;
-    stmt.bindOptionalInt64(7, duration_ms) catch return error.Database;
-    stmt.bindOptionalText(8, artwork_url) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const track = getTrackById(state, track_id) catch return error.Database;
-    defer track.deinit(state.allocator);
-
-    return makeSuccess(state.allocator, id, .{ .track = track });
+    try std.testing.expectError(error.UnknownCommand, invoke(state, "{\"id\":\"bad\",\"command\":\"nope\",\"params\":{}}"));
 }
 
-fn tracksList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const tracks = listTracks(state) catch return error.Database;
-    defer freeTracks(state.allocator, tracks);
-    return makeSuccess(state.allocator, id, .{ .tracks = tracks });
+test "metadata command contract includes schema version" {
+    const allocator = std.testing.allocator;
+    var state = try createTestState(allocator, null);
+    defer state.deinit();
+
+    var parsed = try parsedInvoke(allocator, state, "{\"id\":\"meta\",\"command\":\"core.get_metadata\",\"params\":{}}");
+    defer parsed.deinit();
+
+    const data = try expectData(&parsed, "meta");
+    try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
+    try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
+    try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
+    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
 }
 
-fn localFilesUpsert(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const path = requiredString(params, "path") catch return error.InvalidJson;
-    const title = requiredString(params, "title") catch return error.InvalidJson;
-    const artist = optionalString(params, "artist");
-    const album = optionalString(params, "album");
-    const duration_ms = optionalInt(params, "duration_ms") catch return error.InvalidJson;
+test "queue command contract preserves moved order" {
+    const allocator = std.testing.allocator;
+    var state = try createTestState(allocator, null);
+    defer state.deinit();
 
-    const candidate_track_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(candidate_track_id);
-    const candidate_local_file_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(candidate_local_file_id);
+    var alpha = try parsedInvoke(allocator, state, "{\"id\":\"alpha\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/alpha.mp3\",\"title\":\"Alpha\"}}");
+    defer alpha.deinit();
+    const alpha_track_id = try allocator.dupe(u8, (try expectData(&alpha, "alpha")).get("track").?.object.get("id").?.string);
+    defer allocator.free(alpha_track_id);
 
-    state.db.exec("BEGIN IMMEDIATE;") catch return error.Database;
-    var committed = false;
-    errdefer if (!committed) state.db.exec("ROLLBACK;") catch {};
+    var beta = try parsedInvoke(allocator, state, "{\"id\":\"beta\",\"command\":\"local_files.upsert\",\"params\":{\"path\":\"/music/beta.flac\",\"title\":\"Beta\"}}");
+    defer beta.deinit();
+    const beta_track_id = try allocator.dupe(u8, (try expectData(&beta, "beta")).get("track").?.object.get("id").?.string);
+    defer allocator.free(beta_track_id);
 
-    upsertLocalTrack(state, candidate_track_id, path, title, artist, album, duration_ms) catch return error.Database;
-    const track = getTrackByProviderIdentity(state, "local", path) catch return error.Database;
-    defer track.deinit(state.allocator);
+    const add_alpha_request = try std.fmt.allocPrint(allocator, "{{\"id\":\"add-alpha\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{alpha_track_id});
+    defer allocator.free(add_alpha_request);
+    var add_alpha = try parsedInvoke(allocator, state, add_alpha_request);
+    defer add_alpha.deinit();
+    const alpha_queue_id = try allocator.dupe(u8, (try expectData(&add_alpha, "add-alpha")).get("item").?.object.get("id").?.string);
+    defer allocator.free(alpha_queue_id);
 
-    upsertLocalFile(state, candidate_local_file_id, track.id, path) catch return error.Database;
-    const local_file = getLocalFileByPath(state, path) catch return error.Database;
-    defer local_file.deinit(state.allocator);
+    const add_beta_request = try std.fmt.allocPrint(allocator, "{{\"id\":\"add-beta\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{beta_track_id});
+    defer allocator.free(add_beta_request);
+    var add_beta = try parsedInvoke(allocator, state, add_beta_request);
+    defer add_beta.deinit();
+    const beta_queue_id = try allocator.dupe(u8, (try expectData(&add_beta, "add-beta")).get("item").?.object.get("id").?.string);
+    defer allocator.free(beta_queue_id);
 
-    state.db.exec("COMMIT;") catch return error.Database;
-    committed = true;
+    const move_request = try std.fmt.allocPrint(allocator, "{{\"id\":\"move\",\"command\":\"queue.move\",\"params\":{{\"id\":\"{s}\",\"to_index\":0}}}}", .{beta_queue_id});
+    defer allocator.free(move_request);
+    var moved = try parsedInvoke(allocator, state, move_request);
+    defer moved.deinit();
 
-    return makeSuccess(state.allocator, id, .{
-        .track = track,
-        .local_file = local_file,
-    });
+    const items = (try expectData(&moved, "move")).get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings(beta_queue_id, items[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 0), items[0].object.get("position").?.integer);
+    try std.testing.expectEqualStrings(alpha_queue_id, items[1].object.get("id").?.string);
+    try std.testing.expectEqual(@as(i64, 1), items[1].object.get("position").?.integer);
 }
 
-fn queueAdd(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const item_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(item_id);
-    const track_id = requiredString(params, "track_id") catch return error.InvalidJson;
-
-    var stmt = state.db.prepare(
-        \\INSERT INTO queue_items(id, track_id, position)
-        \\SELECT ?, tracks.id, COALESCE((SELECT MAX(position) + 1 FROM queue_items), 0)
-        \\FROM tracks
-        \\WHERE tracks.id = ?
-    ) catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, item_id) catch return error.Database;
-    stmt.bindText(2, track_id) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const item = getQueueItemById(state, item_id) catch return error.Database;
-    defer item.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .item = item });
-}
-
-fn queueList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const items = listQueue(state) catch return error.Database;
-    defer freeQueueItems(state.allocator, items);
-    return makeSuccess(state.allocator, id, .{ .items = items });
-}
-
-fn queueRemove(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const item_id = requiredString(params, "id") catch return error.InvalidJson;
-
-    var stmt = state.db.prepare("DELETE FROM queue_items WHERE id = ?") catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, item_id) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    return queueList(state, id);
-}
-
-fn queueClear(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    state.db.exec("DELETE FROM queue_items") catch return error.Database;
-    return queueList(state, id);
-}
-
-fn queueMove(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const item_id = requiredString(params, "id") catch return error.InvalidJson;
-    const to_index = requiredInt(params, "to_index") catch return error.InvalidJson;
-
-    const items = listQueue(state) catch return error.Database;
-    defer freeQueueItems(state.allocator, items);
-    if (items.len == 0) return error.Database;
-
-    var from_index: ?usize = null;
-    for (items, 0..) |item, index| {
-        if (std.mem.eql(u8, item.id, item_id)) {
-            from_index = index;
-            break;
-        }
-    }
-    const source_index = from_index orelse return error.Database;
-
-    const target_index: usize = if (to_index <= 0)
-        0
-    else
-        @min(@as(usize, @intCast(to_index)), items.len - 1);
-
-    const ordered_ids = state.allocator.alloc([]const u8, items.len) catch return error.AllocationFailed;
-    defer state.allocator.free(ordered_ids);
-
-    var write_index: usize = 0;
-    for (items, 0..) |item, index| {
-        if (index == source_index) {
-            continue;
-        }
-        if (write_index == target_index) {
-            ordered_ids[write_index] = items[source_index].id;
-            write_index += 1;
-        }
-        ordered_ids[write_index] = item.id;
-        write_index += 1;
-    }
-    if (write_index == target_index) {
-        ordered_ids[write_index] = items[source_index].id;
-        write_index += 1;
-    }
-
-    state.db.exec("BEGIN IMMEDIATE;") catch return error.Database;
-    var committed = false;
-    errdefer if (!committed) state.db.exec("ROLLBACK;") catch {};
-
-    for (ordered_ids, 0..) |queue_item_id, index| {
-        updateQueueItemPosition(state, queue_item_id, @intCast(index)) catch return error.Database;
-    }
-
-    state.db.exec("COMMIT;") catch return error.Database;
-    committed = true;
-
-    return queueList(state, id);
-}
-
-fn playbackGet(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const playback = getPlaybackState(state) catch return error.Database;
-    defer playback.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .playback = playback });
-}
-
-fn playbackLoadQueueItem(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const queue_item_id = requiredString(params, "id") catch return error.InvalidJson;
-    const item = getQueueItemById(state, queue_item_id) catch return error.Database;
-    defer item.deinit(state.allocator);
-
-    if (item.local_path == null and (item.provider == null or item.provider_track_id == null)) {
-        updatePlaybackFromQueueItem(state, "error", item, null, item.duration_ms, "Queue item has no local file") catch return error.Database;
-    } else {
-        updatePlaybackFromQueueItem(state, "loading", item, null, item.duration_ms, null) catch return error.Database;
-    }
-
-    const playback = getPlaybackState(state) catch return error.Database;
-    defer playback.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{
-        .playback = playback,
-        .item = item,
-    });
-}
-
-fn playbackUpdate(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const next_state = requiredString(params, "state") catch return error.InvalidJson;
-    if (!isValidPlaybackState(next_state)) return error.InvalidJson;
-
-    const current = getPlaybackState(state) catch return error.Database;
-    defer current.deinit(state.allocator);
-
-    const next_position_ms = if (params.get("position_ms") != null)
-        optionalInt(params, "position_ms") catch return error.InvalidJson
-    else
-        current.position_ms;
-    const next_duration_ms = if (params.get("duration_ms") != null)
-        optionalInt(params, "duration_ms") catch return error.InvalidJson
-    else
-        current.duration_ms;
-    const next_error_message = if (std.mem.eql(u8, next_state, "error"))
-        optionalString(params, "error_message") orelse current.error_message
-    else
-        null;
-
-    updatePlaybackFull(
-        state,
-        next_state,
-        current.queue_item_id,
-        current.track_id,
-        current.title,
-        current.artist,
-        current.album,
-        current.artwork_url,
-        current.local_path,
-        next_position_ms,
-        next_duration_ms,
-        next_error_message,
-    ) catch return error.Database;
-
-    const playback = getPlaybackState(state) catch return error.Database;
-    defer playback.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .playback = playback });
-}
-
-const PlaybackOptions = struct {
-    repeat_mode: []const u8,
-    shuffle_enabled: bool,
-};
-
-fn playbackOptionsGet(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const options = getPlaybackOptions(state) catch return error.Database;
-    return makeSuccess(state.allocator, id, .{ .options = options });
-}
-
-fn playbackOptionsUpdate(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    if (params.get("repeat_mode")) |value| {
-        if (value != .null) {
-            const repeat_mode = requiredString(params, "repeat_mode") catch return error.InvalidJson;
-            if (!isValidRepeatMode(repeat_mode)) return error.InvalidJson;
-            setSettingValue(state, "playback.repeat_mode", repeat_mode) catch return error.Database;
-        }
-    }
-
-    if (params.get("shuffle_enabled")) |value| {
-        if (value != .null) {
-            const shuffle_enabled = optionalBool(params, "shuffle_enabled") catch return error.InvalidJson;
-            const shuffle_text = if (shuffle_enabled orelse false) "true" else "false";
-            setSettingValue(state, "playback.shuffle_enabled", shuffle_text) catch return error.Database;
-        }
-    }
-
-    const options = getPlaybackOptions(state) catch return error.Database;
-    return makeSuccess(state.allocator, id, .{ .options = options });
-}
-
-fn playlistsCreate(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const playlist_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(playlist_id);
-    const name = requiredString(params, "name") catch return error.InvalidJson;
-
-    var stmt = state.db.prepare("INSERT INTO playlists(id, name) VALUES (?, ?)") catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, playlist_id) catch return error.Database;
-    stmt.bindText(2, name) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const playlist = getPlaylistById(state, playlist_id) catch return error.Database;
-    defer playlist.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .playlist = playlist });
-}
-
-fn playlistsList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const playlists = listPlaylists(state) catch return error.Database;
-    defer freePlaylists(state.allocator, playlists);
-    return makeSuccess(state.allocator, id, .{ .playlists = playlists });
-}
-
-fn recentAdd(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const item_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(item_id);
-    const track_id = requiredString(params, "track_id") catch return error.InvalidJson;
-    const played_at = optionalString(params, "played_at");
-
-    var stmt = state.db.prepare(
-        \\INSERT INTO recent_tracks(id, track_id, played_at)
-        \\VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')))
-    ) catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, item_id) catch return error.Database;
-    stmt.bindText(2, track_id) catch return error.Database;
-    stmt.bindOptionalText(3, played_at) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const item = getRecentById(state, item_id) catch return error.Database;
-    defer item.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .item = item });
-}
-
-fn recentList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const items = listRecent(state) catch return error.Database;
-    defer freeRecent(state.allocator, items);
-    return makeSuccess(state.allocator, id, .{ .items = items });
-}
-
-fn searchHistoryAdd(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const item_id = models.generateId(state.allocator) catch return error.AllocationFailed;
-    defer state.allocator.free(item_id);
-    const query = requiredString(params, "query") catch return error.InvalidJson;
-    const searched_at = optionalString(params, "searched_at");
-
-    var stmt = state.db.prepare(
-        \\INSERT INTO search_history(id, query, searched_at)
-        \\VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')))
-    ) catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, item_id) catch return error.Database;
-    stmt.bindText(2, query) catch return error.Database;
-    stmt.bindOptionalText(3, searched_at) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const item = getSearchById(state, item_id) catch return error.Database;
-    defer item.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .item = item });
-}
-
-fn searchHistoryList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
-    const items = listSearchHistory(state) catch return error.Database;
-    defer freeSearchHistory(state.allocator, items);
-    return makeSuccess(state.allocator, id, .{ .items = items });
-}
-
-fn settingsSet(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const key = requiredString(params, "key") catch return error.InvalidJson;
-    const value = requiredString(params, "value") catch return error.InvalidJson;
-
-    var stmt = state.db.prepare(
-        \\INSERT INTO settings(key, value, updated_at)
-        \\VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        \\ON CONFLICT(key) DO UPDATE SET
-        \\    value = excluded.value,
-        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-    ) catch return error.Database;
-    defer stmt.finalize();
-    stmt.bindText(1, key) catch return error.Database;
-    stmt.bindText(2, value) catch return error.Database;
-    if ((stmt.step() catch return error.Database) != .done) return error.Database;
-
-    const setting = getSettingByKey(state, key) catch return error.Database;
-    defer setting.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .setting = setting });
-}
-
-fn settingsGet(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
-    const key = requiredString(params, "key") catch return error.InvalidJson;
-    const setting = getSettingByKey(state, key) catch return error.Database;
-    defer setting.deinit(state.allocator);
-    return makeSuccess(state.allocator, id, .{ .setting = setting });
-}
-
-fn getTrackById(state: *AppState, id: []const u8) sqlite.DbError!models.Track {
-    var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
-        \\FROM tracks
-        \\WHERE id = ?
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return trackFromStmt(state.allocator, &stmt);
-}
-
-fn listTracks(state: *AppState) sqlite.DbError![]models.Track {
-    var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
-        \\FROM tracks
-        \\ORDER BY title COLLATE NOCASE ASC, id ASC
-    );
-    defer stmt.finalize();
-
-    var items: std.ArrayList(models.Track) = .empty;
-    errdefer freeTracks(state.allocator, items.items);
-    while ((try stmt.step()) == .row) {
-        const item = try trackFromStmt(state.allocator, &stmt);
-        items.append(state.allocator, item) catch {
-            item.deinit(state.allocator);
-            return error.AllocationFailed;
-        };
-    }
-    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
-}
-
-fn upsertLocalTrack(
-    state: *AppState,
-    track_id: []const u8,
-    path: []const u8,
-    title: []const u8,
-    artist: ?[]const u8,
-    album: ?[]const u8,
-    duration_ms: ?i64,
-) sqlite.DbError!void {
-    var stmt = try state.db.prepare(
-        \\INSERT INTO tracks (
-        \\    id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, updated_at
-        \\) VALUES (
-        \\    ?, 'local', ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now')
-        \\)
-        \\ON CONFLICT(provider, provider_track_id)
-        \\WHERE provider IS NOT NULL AND provider_track_id IS NOT NULL
-        \\DO UPDATE SET
-        \\    title = excluded.title,
-        \\    artist = excluded.artist,
-        \\    album = excluded.album,
-        \\    duration_ms = excluded.duration_ms,
-        \\    artwork_url = excluded.artwork_url,
-        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-    );
-    defer stmt.finalize();
-
-    try stmt.bindText(1, track_id);
-    try stmt.bindText(2, path);
-    try stmt.bindText(3, title);
-    try stmt.bindOptionalText(4, artist);
-    try stmt.bindOptionalText(5, album);
-    try stmt.bindOptionalInt64(6, duration_ms);
-    if ((try stmt.step()) != .done) return error.Database;
-}
-
-fn upsertLocalFile(
-    state: *AppState,
-    local_file_id: []const u8,
-    track_id: []const u8,
-    path: []const u8,
-) sqlite.DbError!void {
-    var stmt = try state.db.prepare(
-        \\INSERT INTO local_files (id, track_id, path)
-        \\VALUES (?, ?, ?)
-        \\ON CONFLICT(path) DO UPDATE SET
-        \\    track_id = excluded.track_id
-    );
-    defer stmt.finalize();
-
-    try stmt.bindText(1, local_file_id);
-    try stmt.bindText(2, track_id);
-    try stmt.bindText(3, path);
-    if ((try stmt.step()) != .done) return error.Database;
-}
-
-fn getTrackByProviderIdentity(state: *AppState, provider: []const u8, provider_track_id: []const u8) sqlite.DbError!models.Track {
-    var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
-        \\FROM tracks
-        \\WHERE provider = ? AND provider_track_id = ?
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, provider);
-    try stmt.bindText(2, provider_track_id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return trackFromStmt(state.allocator, &stmt);
-}
-
-fn getLocalFileByPath(state: *AppState, path: []const u8) sqlite.DbError!models.LocalFile {
-    var stmt = try state.db.prepare("SELECT id, track_id, path, discovered_at FROM local_files WHERE path = ?");
-    defer stmt.finalize();
-    try stmt.bindText(1, path);
-    if ((try stmt.step()) != .row) return error.Database;
-    return localFileFromStmt(state.allocator, &stmt);
-}
-
-fn trackFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.Track {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .provider = try stmt.columnOptionalText(allocator, 1),
-        .provider_track_id = try stmt.columnOptionalText(allocator, 2),
-        .title = try stmt.columnText(allocator, 3),
-        .artist = try stmt.columnOptionalText(allocator, 4),
-        .album = try stmt.columnOptionalText(allocator, 5),
-        .duration_ms = stmt.columnOptionalInt64(6),
-        .artwork_url = try stmt.columnOptionalText(allocator, 7),
-        .created_at = try stmt.columnText(allocator, 8),
-        .updated_at = try stmt.columnText(allocator, 9),
-    };
-}
-
-fn localFileFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.LocalFile {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .track_id = try stmt.columnText(allocator, 1),
-        .path = try stmt.columnText(allocator, 2),
-        .discovered_at = try stmt.columnText(allocator, 3),
-    };
-}
-
-fn getQueueItemById(state: *AppState, id: []const u8) sqlite.DbError!models.QueueItem {
-    var stmt = try state.db.prepare(
-        \\SELECT
-        \\    queue_items.id,
-        \\    queue_items.track_id,
-        \\    queue_items.position,
-        \\    queue_items.added_at,
-        \\    tracks.provider,
-        \\    tracks.provider_track_id,
-        \\    tracks.title,
-        \\    tracks.artist,
-        \\    tracks.album,
-        \\    tracks.duration_ms,
-        \\    tracks.artwork_url,
-        \\    local_files.path
-        \\FROM queue_items
-        \\JOIN tracks ON tracks.id = queue_items.track_id
-        \\LEFT JOIN local_files ON local_files.track_id = queue_items.track_id
-        \\WHERE queue_items.id = ?
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return queueItemFromStmt(state.allocator, &stmt);
-}
-
-fn listQueue(state: *AppState) sqlite.DbError![]models.QueueItem {
-    var stmt = try state.db.prepare(
-        \\SELECT
-        \\    queue_items.id,
-        \\    queue_items.track_id,
-        \\    queue_items.position,
-        \\    queue_items.added_at,
-        \\    tracks.provider,
-        \\    tracks.provider_track_id,
-        \\    tracks.title,
-        \\    tracks.artist,
-        \\    tracks.album,
-        \\    tracks.duration_ms,
-        \\    tracks.artwork_url,
-        \\    local_files.path
-        \\FROM queue_items
-        \\JOIN tracks ON tracks.id = queue_items.track_id
-        \\LEFT JOIN local_files ON local_files.track_id = queue_items.track_id
-        \\ORDER BY queue_items.position ASC, queue_items.added_at ASC, queue_items.id ASC
-    );
-    defer stmt.finalize();
-
-    var items: std.ArrayList(models.QueueItem) = .empty;
-    errdefer freeQueueItems(state.allocator, items.items);
-    while ((try stmt.step()) == .row) {
-        const item = try queueItemFromStmt(state.allocator, &stmt);
-        items.append(state.allocator, item) catch {
-            item.deinit(state.allocator);
-            return error.AllocationFailed;
-        };
-    }
-    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
-}
-
-fn queueItemFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.QueueItem {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .track_id = try stmt.columnText(allocator, 1),
-        .position = stmt.columnOptionalInt64(2) orelse 0,
-        .added_at = try stmt.columnText(allocator, 3),
-        .provider = try stmt.columnOptionalText(allocator, 4),
-        .provider_track_id = try stmt.columnOptionalText(allocator, 5),
-        .title = try stmt.columnText(allocator, 6),
-        .artist = try stmt.columnOptionalText(allocator, 7),
-        .album = try stmt.columnOptionalText(allocator, 8),
-        .duration_ms = stmt.columnOptionalInt64(9),
-        .artwork_url = try stmt.columnOptionalText(allocator, 10),
-        .local_path = try stmt.columnOptionalText(allocator, 11),
-    };
-}
-
-fn updateQueueItemPosition(state: *AppState, item_id: []const u8, position: i64) sqlite.DbError!void {
-    var stmt = try state.db.prepare("UPDATE queue_items SET position = ? WHERE id = ?");
-    defer stmt.finalize();
-    try stmt.bindInt64(1, position);
-    try stmt.bindText(2, item_id);
-    if ((try stmt.step()) != .done) return error.Database;
-}
-
-fn getPlaybackState(state: *AppState) sqlite.DbError!models.PlaybackState {
-    var stmt = try state.db.prepare(
-        \\SELECT
-        \\    state,
-        \\    queue_item_id,
-        \\    track_id,
-        \\    title,
-        \\    artist,
-        \\    album,
-        \\    artwork_url,
-        \\    local_path,
-        \\    position_ms,
-        \\    duration_ms,
-        \\    error_message
-        \\FROM playback_state
-        \\WHERE id = 1
-    );
-    defer stmt.finalize();
-    if ((try stmt.step()) != .row) return error.Database;
-    return playbackStateFromStmt(state.allocator, &stmt);
-}
-
-fn playbackStateFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.PlaybackState {
-    return .{
-        .state = try stmt.columnText(allocator, 0),
-        .queue_item_id = try stmt.columnOptionalText(allocator, 1),
-        .track_id = try stmt.columnOptionalText(allocator, 2),
-        .title = try stmt.columnOptionalText(allocator, 3),
-        .artist = try stmt.columnOptionalText(allocator, 4),
-        .album = try stmt.columnOptionalText(allocator, 5),
-        .artwork_url = try stmt.columnOptionalText(allocator, 6),
-        .local_path = try stmt.columnOptionalText(allocator, 7),
-        .position_ms = stmt.columnOptionalInt64(8),
-        .duration_ms = stmt.columnOptionalInt64(9),
-        .error_message = try stmt.columnOptionalText(allocator, 10),
-    };
-}
-
-fn updatePlaybackFromQueueItem(
-    state: *AppState,
-    playback_state: []const u8,
-    item: models.QueueItem,
-    position_ms: ?i64,
-    duration_ms: ?i64,
-    error_message: ?[]const u8,
-) sqlite.DbError!void {
-    try updatePlaybackFull(
-        state,
-        playback_state,
-        item.id,
-        item.track_id,
-        item.title,
-        item.artist,
-        item.album,
-        item.artwork_url,
-        item.local_path,
-        position_ms,
-        duration_ms,
-        error_message,
-    );
-}
-
-fn updatePlaybackFull(
-    state: *AppState,
-    playback_state: []const u8,
-    queue_item_id: ?[]const u8,
-    track_id: ?[]const u8,
-    title: ?[]const u8,
-    artist: ?[]const u8,
-    album: ?[]const u8,
-    artwork_url: ?[]const u8,
-    local_path: ?[]const u8,
-    position_ms: ?i64,
-    duration_ms: ?i64,
-    error_message: ?[]const u8,
-) sqlite.DbError!void {
-    var stmt = try state.db.prepare(
-        \\UPDATE playback_state
-        \\SET
-        \\    state = ?,
-        \\    queue_item_id = ?,
-        \\    track_id = ?,
-        \\    title = ?,
-        \\    artist = ?,
-        \\    album = ?,
-        \\    artwork_url = ?,
-        \\    local_path = ?,
-        \\    position_ms = ?,
-        \\    duration_ms = ?,
-        \\    error_message = ?,
-        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-        \\WHERE id = 1
-    );
-    defer stmt.finalize();
-
-    try stmt.bindText(1, playback_state);
-    try stmt.bindOptionalText(2, queue_item_id);
-    try stmt.bindOptionalText(3, track_id);
-    try stmt.bindOptionalText(4, title);
-    try stmt.bindOptionalText(5, artist);
-    try stmt.bindOptionalText(6, album);
-    try stmt.bindOptionalText(7, artwork_url);
-    try stmt.bindOptionalText(8, local_path);
-    try stmt.bindOptionalInt64(9, position_ms);
-    try stmt.bindOptionalInt64(10, duration_ms);
-    try stmt.bindOptionalText(11, error_message);
-    if ((try stmt.step()) != .done) return error.Database;
-}
-
-fn isValidPlaybackState(value: []const u8) bool {
-    return std.mem.eql(u8, value, "stopped")
-        or std.mem.eql(u8, value, "loading")
-        or std.mem.eql(u8, value, "playing")
-        or std.mem.eql(u8, value, "paused")
-        or std.mem.eql(u8, value, "error");
-}
-
-fn isValidRepeatMode(value: []const u8) bool {
-    return std.mem.eql(u8, value, "off")
-        or std.mem.eql(u8, value, "one")
-        or std.mem.eql(u8, value, "all");
-}
-
-fn getPlaylistById(state: *AppState, id: []const u8) sqlite.DbError!models.Playlist {
-    var stmt = try state.db.prepare("SELECT id, name, created_at, updated_at FROM playlists WHERE id = ?");
-    defer stmt.finalize();
-    try stmt.bindText(1, id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return playlistFromStmt(state.allocator, &stmt);
-}
-
-fn listPlaylists(state: *AppState) sqlite.DbError![]models.Playlist {
-    var stmt = try state.db.prepare("SELECT id, name, created_at, updated_at FROM playlists ORDER BY created_at DESC, id DESC");
-    defer stmt.finalize();
-
-    var items: std.ArrayList(models.Playlist) = .empty;
-    errdefer freePlaylists(state.allocator, items.items);
-    while ((try stmt.step()) == .row) {
-        const item = try playlistFromStmt(state.allocator, &stmt);
-        items.append(state.allocator, item) catch {
-            item.deinit(state.allocator);
-            return error.AllocationFailed;
-        };
-    }
-    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
-}
-
-fn playlistFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.Playlist {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .name = try stmt.columnText(allocator, 1),
-        .created_at = try stmt.columnText(allocator, 2),
-        .updated_at = try stmt.columnText(allocator, 3),
-    };
-}
-
-fn getRecentById(state: *AppState, id: []const u8) sqlite.DbError!models.RecentTrack {
-    var stmt = try state.db.prepare("SELECT id, track_id, played_at, created_at FROM recent_tracks WHERE id = ?");
-    defer stmt.finalize();
-    try stmt.bindText(1, id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return recentFromStmt(state.allocator, &stmt);
-}
-
-fn listRecent(state: *AppState) sqlite.DbError![]models.RecentTrack {
-    var stmt = try state.db.prepare("SELECT id, track_id, played_at, created_at FROM recent_tracks ORDER BY played_at DESC, created_at DESC, id DESC");
-    defer stmt.finalize();
-
-    var items: std.ArrayList(models.RecentTrack) = .empty;
-    errdefer freeRecent(state.allocator, items.items);
-    while ((try stmt.step()) == .row) {
-        const item = try recentFromStmt(state.allocator, &stmt);
-        items.append(state.allocator, item) catch {
-            item.deinit(state.allocator);
-            return error.AllocationFailed;
-        };
-    }
-    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
-}
-
-fn recentFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.RecentTrack {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .track_id = try stmt.columnText(allocator, 1),
-        .played_at = try stmt.columnText(allocator, 2),
-        .created_at = try stmt.columnText(allocator, 3),
-    };
-}
-
-fn getSearchById(state: *AppState, id: []const u8) sqlite.DbError!models.SearchHistoryItem {
-    var stmt = try state.db.prepare("SELECT id, query, searched_at FROM search_history WHERE id = ?");
-    defer stmt.finalize();
-    try stmt.bindText(1, id);
-    if ((try stmt.step()) != .row) return error.Database;
-    return searchFromStmt(state.allocator, &stmt);
-}
-
-fn listSearchHistory(state: *AppState) sqlite.DbError![]models.SearchHistoryItem {
-    var stmt = try state.db.prepare("SELECT id, query, searched_at FROM search_history ORDER BY searched_at DESC, created_at DESC, id DESC");
-    defer stmt.finalize();
-
-    var items: std.ArrayList(models.SearchHistoryItem) = .empty;
-    errdefer freeSearchHistory(state.allocator, items.items);
-    while ((try stmt.step()) == .row) {
-        const item = try searchFromStmt(state.allocator, &stmt);
-        items.append(state.allocator, item) catch {
-            item.deinit(state.allocator);
-            return error.AllocationFailed;
-        };
-    }
-    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
-}
-
-fn searchFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.SearchHistoryItem {
-    return .{
-        .id = try stmt.columnText(allocator, 0),
-        .query = try stmt.columnText(allocator, 1),
-        .searched_at = try stmt.columnText(allocator, 2),
-    };
-}
-
-fn getSettingByKey(state: *AppState, key: []const u8) sqlite.DbError!models.Setting {
-    var stmt = try state.db.prepare("SELECT key, value, updated_at FROM settings WHERE key = ?");
-    defer stmt.finalize();
-    try stmt.bindText(1, key);
-
-    if ((try stmt.step()) == .row) {
-        return .{
-            .key = try stmt.columnText(state.allocator, 0),
-            .value = try stmt.columnOptionalText(state.allocator, 1),
-            .updated_at = try stmt.columnOptionalText(state.allocator, 2),
-        };
-    }
-
-    return .{
-        .key = state.allocator.dupe(u8, key) catch return error.AllocationFailed,
-        .value = null,
-        .updated_at = null,
-    };
-}
-
-fn setSettingValue(state: *AppState, key: []const u8, value: []const u8) sqlite.DbError!void {
-    var stmt = try state.db.prepare(
-        \\INSERT INTO settings(key, value, updated_at)
-        \\VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        \\ON CONFLICT(key) DO UPDATE SET
-        \\    value = excluded.value,
-        \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, key);
-    try stmt.bindText(2, value);
-    if ((try stmt.step()) != .done) return error.Database;
-}
-
-fn getPlaybackOptions(state: *AppState) sqlite.DbError!PlaybackOptions {
-    const repeat_setting = try getSettingByKey(state, "playback.repeat_mode");
-    defer repeat_setting.deinit(state.allocator);
-    const shuffle_setting = try getSettingByKey(state, "playback.shuffle_enabled");
-    defer shuffle_setting.deinit(state.allocator);
-
-    return .{
-        .repeat_mode = normalizeRepeatMode(repeat_setting.value),
-        .shuffle_enabled = isTrueSetting(shuffle_setting.value),
-    };
-}
-
-fn normalizeRepeatMode(value: ?[]const u8) []const u8 {
-    const text = value orelse return "off";
-    if (std.mem.eql(u8, text, "one")) return "one";
-    if (std.mem.eql(u8, text, "all")) return "all";
-    return "off";
-}
-
-fn isTrueSetting(value: ?[]const u8) bool {
-    const text = value orelse return false;
-    return std.mem.eql(u8, text, "true");
-}
-
-fn freeTracks(allocator: std.mem.Allocator, items: []models.Track) void {
-    for (items) |item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn freeQueueItems(allocator: std.mem.Allocator, items: []models.QueueItem) void {
-    for (items) |item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn freePlaylists(allocator: std.mem.Allocator, items: []models.Playlist) void {
-    for (items) |item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn freeRecent(allocator: std.mem.Allocator, items: []models.RecentTrack) void {
-    for (items) |item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn freeSearchHistory(allocator: std.mem.Allocator, items: []models.SearchHistoryItem) void {
-    for (items) |item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn paramsObject(root: ObjectMap) !ObjectMap {
-    const value = root.get("params") orelse return error.InvalidJson;
-    if (value != .object) return error.InvalidJson;
-    return value.object;
-}
-
-fn requiredString(object: ObjectMap, key: []const u8) ![]const u8 {
-    return optionalString(object, key) orelse error.InvalidJson;
-}
-
-fn requiredInt(object: ObjectMap, key: []const u8) !i64 {
-    return (try optionalInt(object, key)) orelse error.InvalidJson;
-}
-
-fn optionalString(object: ObjectMap, key: []const u8) ?[]const u8 {
-    const value = object.get(key) orelse return null;
-    return switch (value) {
-        .string => |text| text,
-        .null => null,
-        else => null,
-    };
-}
-
-fn optionalInt(object: ObjectMap, key: []const u8) !?i64 {
-    const value = object.get(key) orelse return null;
-    return switch (value) {
-        .integer => |number| number,
-        .null => null,
-        else => error.InvalidJson,
-    };
-}
-
-fn optionalBool(object: ObjectMap, key: []const u8) !?bool {
-    const value = object.get(key) orelse return null;
-    return switch (value) {
-        .bool => |boolean| boolean,
-        .null => null,
-        else => error.InvalidJson,
-    };
+test "playback options command contract persists settings" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var data_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const data_dir_len = try tmp.dir.realPath(std.testing.io, &data_dir_buf);
+    const data_dir = data_dir_buf[0..data_dir_len];
+
+    var first = try createTestState(allocator, data_dir);
+    var updated = try parsedInvoke(allocator, first, "{\"id\":\"update\",\"command\":\"playback.options.update\",\"params\":{\"repeat_mode\":\"all\",\"shuffle_enabled\":true}}");
+    defer updated.deinit();
+    var options = (try expectData(&updated, "update")).get("options").?.object;
+    try std.testing.expectEqualStrings("all", options.get("repeat_mode").?.string);
+    try std.testing.expectEqual(true, options.get("shuffle_enabled").?.bool);
+    first.deinit();
+
+    var second = try createTestState(allocator, data_dir);
+    defer second.deinit();
+
+    var persisted = try parsedInvoke(allocator, second, "{\"id\":\"persisted\",\"command\":\"playback.options.get\",\"params\":{}}");
+    defer persisted.deinit();
+    options = (try expectData(&persisted, "persisted")).get("options").?.object;
+    try std.testing.expectEqualStrings("all", options.get("repeat_mode").?.string);
+    try std.testing.expectEqual(true, options.get("shuffle_enabled").?.bool);
 }
