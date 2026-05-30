@@ -47,6 +47,19 @@ public:
         emitState(QStringLiteral("playing"), 0, std::nullopt);
     }
 
+    void playRemoteUrl(const QUrl& url) override {
+        ++remotePlayCalls;
+        lastRemoteUrl = url;
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
+    void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
+        Q_UNUSED(device);
+        Q_UNUSED(mimeType);
+        ++streamDevicePlayCalls;
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
     void pause() override {
         ++pauseCalls;
         emitState(QStringLiteral("paused"), std::nullopt, std::nullopt);
@@ -77,12 +90,15 @@ public:
     }
 
     int playCalls = 0;
+    int remotePlayCalls = 0;
+    int streamDevicePlayCalls = 0;
     int pauseCalls = 0;
     int resumeCalls = 0;
     int stopCalls = 0;
     int seekCalls = 0;
     qint64 lastSeekMs = -1;
     QString lastPath;
+    QUrl lastRemoteUrl;
     StateChangedCallback stateChangedCallback;
     ErrorCallback errorCallback;
 

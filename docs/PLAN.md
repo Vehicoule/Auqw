@@ -416,12 +416,12 @@ Provider direction:
 
 Initial capabilities:
 
-- Search tracks.
+- Search tracks. **Landed:** first C++/Qt InnerTube-style provider slice with normalized search results, fixture parser tests, and QML search state.
 - Suggestions.
 - Metadata.
 - Artwork.
-- Stream resolution.
-- Clean error reporting.
+- Stream resolution. **Landed:** queued provider tracks resolve direct anonymous InnerTube audio URLs through normalized Qt provider results.
+- Clean error reporting. **Current:** search and online playback failures use friendly UI/core messages; cipher-only streams fail without crashing.
 - Fixture-based parser tests.
 
 References:
@@ -439,9 +439,9 @@ Rules:
 
 Acceptance:
 
-- Online search returns normalized tracks.
-- Online playback works on desktop.
-- Provider failure shows non-scary UI state.
+- Online search returns normalized tracks. **Current:** normalized provider results stay in `CoreController`/Qt models and selected results persist through existing `tracks.upsert`.
+- Online playback works on desktop. **Current:** direct audio URLs route through `PlaybackBackend::playRemoteUrl`; signature/cipher handling remains out of scope.
+- Provider failure shows non-scary UI state. **Current:** provider failures surface as `Search unavailable. Try again.`
 - Same provider code path works on desktop and mobile build targets.
 
 ## 10. Milestone 6: Cache And Downloads
@@ -565,9 +565,10 @@ brew bundle --file containers/ios/Brewfile
 ./ci/ios-build.sh
 ```
 
-3. Start Milestone 5 online provider spike:
+3. Continue Milestone 5 online provider spike:
 
+- Run a real desktop playback smoke against live provider data and record whether direct URLs are enough.
+- If live streams are cipher-only, plan a separate signature/cipher handling slice.
 - Keep provider code in C++/Qt first.
-- Use anonymous provider access only.
 - Keep normalized results out of QML/provider-specific shapes.
-- No yt-dlp dependency.
+- Keep anonymous provider access only and no yt-dlp dependency.

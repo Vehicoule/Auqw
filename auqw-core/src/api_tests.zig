@@ -192,32 +192,73 @@ test "playback update persists playing paused stopped and error" {
     try std.testing.expectEqualStrings("decoder failed", playback.get("error_message").?.string);
 }
 
-test "playback load rejects missing or non local queue item" {
+test "playback load handles missing, unresolved, and provider queue items" {
     var core: ?*api.AuqwCore = null;
     try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
     defer api.auqw_core_destroy(core);
 
     try expectErrorInvoke(core.?, "{\"id\":\"missing\",\"command\":\"playback.load_queue_item\",\"params\":{\"id\":\"missing\"}}", error_database, "database");
 
+    var unresolved = try expectInvoke(core.?, "{\"id\":\"unresolved\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"No Source\"}}");
+    defer unresolved.deinit();
+    const unresolved_track_id = (try expectOk(unresolved, "unresolved")).get("track").?.object.get("id").?.string;
+
+    const unresolved_add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-unresolved\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{unresolved_track_id}, 0);
+    defer allocator.free(unresolved_add_request);
+    var unresolved_add = try expectInvoke(core.?, unresolved_add_request);
+    defer unresolved_add.deinit();
+    const unresolved_queue_id = (try expectOk(unresolved_add, "add-unresolved")).get("item").?.object.get("id").?.string;
+
+    const unresolved_load_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"load-unresolved\",\"command\":\"playback.load_queue_item\",\"params\":{{\"id\":\"{s}\"}}}}", .{unresolved_queue_id}, 0);
+    defer allocator.free(unresolved_load_request);
+    var unresolved_load = try expectInvoke(core.?, unresolved_load_request);
+    defer unresolved_load.deinit();
+    var playback = (try expectOk(unresolved_load, "load-unresolved")).get("playback").?.object;
+    try std.testing.expectEqualStrings("error", playback.get("state").?.string);
+    try std.testing.expectEqualStrings("Queue item has no local file", playback.get("error_message").?.string);
+
     var remote = try expectInvoke(core.?, "{\"id\":\"remote\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"Stream Only\",\"provider\":\"remote\",\"provider_track_id\":\"42\"}}");
     defer remote.deinit();
-    const track_id = (try expectOk(remote, "remote")).get("track").?.object.get("id").?.string;
+    const remote_track = (try expectOk(remote, "remote")).get("track").?.object;
+    const track_id = remote_track.get("id").?.string;
+    try std.testing.expectEqualStrings("remote", remote_track.get("provider").?.string);
+    try std.testing.expectEqualStrings("42", remote_track.get("provider_track_id").?.string);
+
+    var tracks_list = try expectInvoke(core.?, "{\"id\":\"tracks-list\",\"command\":\"tracks.list\",\"params\":{}}");
+    defer tracks_list.deinit();
+    const listed_tracks = (try expectOk(tracks_list, "tracks-list")).get("tracks").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), listed_tracks.len);
+    try std.testing.expectEqualStrings("remote", listed_tracks[1].object.get("provider").?.string);
+    try std.testing.expectEqualStrings("42", listed_tracks[1].object.get("provider_track_id").?.string);
 
     const add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"add-remote\",\"command\":\"queue.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
     defer allocator.free(add_request);
     var add = try expectInvoke(core.?, add_request);
     defer add.deinit();
-    const queue_id = (try expectOk(add, "add-remote")).get("item").?.object.get("id").?.string;
+    const remote_item = (try expectOk(add, "add-remote")).get("item").?.object;
+    const queue_id = remote_item.get("id").?.string;
+    try std.testing.expectEqualStrings("remote", remote_item.get("provider").?.string);
+    try std.testing.expectEqualStrings("42", remote_item.get("provider_track_id").?.string);
+
+    var queue_list = try expectInvoke(core.?, "{\"id\":\"queue-list\",\"command\":\"queue.list\",\"params\":{}}");
+    defer queue_list.deinit();
+    const listed_items = (try expectOk(queue_list, "queue-list")).get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), listed_items.len);
+    try std.testing.expectEqualStrings("remote", listed_items[1].object.get("provider").?.string);
+    try std.testing.expectEqualStrings("42", listed_items[1].object.get("provider_track_id").?.string);
 
     const load_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"load-remote\",\"command\":\"playback.load_queue_item\",\"params\":{{\"id\":\"{s}\"}}}}", .{queue_id}, 0);
     defer allocator.free(load_request);
     var load = try expectInvoke(core.?, load_request);
     defer load.deinit();
-    const playback = (try expectOk(load, "load-remote")).get("playback").?.object;
-    try std.testing.expectEqualStrings("error", playback.get("state").?.string);
+    playback = (try expectOk(load, "load-remote")).get("playback").?.object;
+    const loaded_item = (try expectOk(load, "load-remote")).get("item").?.object;
+    try std.testing.expectEqualStrings("loading", playback.get("state").?.string);
     try std.testing.expectEqualStrings(queue_id, playback.get("queue_item_id").?.string);
     try std.testing.expect(playback.get("local_path").? == .null);
-    try std.testing.expectEqualStrings("Queue item has no local file", playback.get("error_message").?.string);
+    try std.testing.expect(playback.get("error_message").? == .null);
+    try std.testing.expectEqualStrings("remote", loaded_item.get("provider").?.string);
+    try std.testing.expectEqualStrings("42", loaded_item.get("provider_track_id").?.string);
 }
 
 test "tracks upsert and list round trip" {

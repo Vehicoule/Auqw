@@ -41,6 +41,16 @@ ApplicationWindow {
         return byline.length > 0 ? detail + " | " + byline : detail
     }
 
+    function formatDuration(durationMs) {
+        if (durationMs <= 0) {
+            return ""
+        }
+        var totalSeconds = Math.floor(durationMs / 1000)
+        var minutes = Math.floor(totalSeconds / 60)
+        var seconds = totalSeconds % 60
+        return minutes + ":" + (seconds < 10 ? "0" + seconds : seconds)
+    }
+
     color: palette.window
 
     component PageHeader: ColumnLayout {
@@ -141,6 +151,39 @@ ApplicationWindow {
 
             Label {
                 text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
+                color: root.palette.placeholderText
+                elide: Text.ElideRight
+                visible: text.length > 0
+                Layout.fillWidth: true
+            }
+        }
+    }
+
+    component SearchResultDelegate: ItemDelegate {
+        required property string result_id
+        required property string title
+        required property string artist
+        required property string album
+        required property int duration_ms
+
+        objectName: "searchResultDelegate"
+        width: ListView.view.width
+        implicitHeight: root.compact ? 66 : 60
+        enabled: result_id.length > 0
+        onClicked: coreController.addSearchResultToQueue(result_id)
+
+        contentItem: ColumnLayout {
+            spacing: 2
+
+            Label {
+                text: title.length > 0 ? title : "Untitled track"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: [artist, album, root.formatDuration(duration_ms)].filter(function(item) { return item.length > 0 }).join(" | ")
                 color: root.palette.placeholderText
                 elide: Text.ElideRight
                 visible: text.length > 0
@@ -312,20 +355,59 @@ ApplicationWindow {
 
             PageHeader {
                 title: "Search"
-                detail: "0 results"
+                detail: coreController.searchStatus === "Ready" ? searchResultsList.count + " results" : coreController.searchStatus
             }
 
-            TextField {
-                id: searchField
-                placeholderText: "Search"
+            RowLayout {
                 Layout.fillWidth: true
-                implicitHeight: root.density
-                inputMethodHints: Qt.ImhNoPredictiveText
+                spacing: root.pageGap
+
+                TextField {
+                    id: searchField
+                    objectName: "searchField"
+                    placeholderText: "Search"
+                    Layout.fillWidth: true
+                    implicitHeight: root.density
+                    inputMethodHints: Qt.ImhNoPredictiveText
+                    onAccepted: coreController.searchOnline(text)
+                }
+
+                Button {
+                    objectName: "searchButton"
+                    text: "Search"
+                    enabled: searchField.text.length > 0 && coreController.searchStatus !== "Searching"
+                    implicitHeight: root.density
+                    onClicked: coreController.searchOnline(searchField.text)
+                }
             }
 
-            EmptyState {
-                title: searchField.text.length > 0 ? "No results" : "No query"
-                detail: "Provider state is empty"
+            Label {
+                objectName: "searchStatusLabel"
+                text: coreController.searchErrorMessage.length > 0 ? coreController.searchErrorMessage : coreController.searchStatus
+                color: coreController.searchStatus === "Error" ? "#a63b2f" : root.palette.placeholderText
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                ListView {
+                    id: searchResultsList
+                    objectName: "searchResultsList"
+                    anchors.fill: parent
+                    clip: true
+                    model: coreController.searchResultsModel
+                    delegate: SearchResultDelegate {}
+                }
+
+                EmptyState {
+                    anchors.fill: parent
+                    title: coreController.searchStatus === "Searching" ? "Searching" : searchField.text.length > 0 ? "No results" : "No query"
+                    detail: coreController.searchStatus === "Error" ? coreController.searchErrorMessage : "Online provider state is empty"
+                    visible: searchResultsList.count === 0
+                }
             }
         }
     }

@@ -1,4 +1,5 @@
 #include "../src/CoreController.hpp"
+#include "../src/OnlineProvider.hpp"
 #include "../src/PlaybackBackend.hpp"
 
 #include <QAbstractItemModel>
@@ -6,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QIODevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -51,6 +53,24 @@ public:
         emitState(QStringLiteral("playing"), 0, std::nullopt);
     }
 
+    void playRemoteUrl(const QUrl& url) override {
+        ++remotePlayCalls;
+        lastRemoteUrl = url;
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
+    void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
+        ++streamDevicePlayCalls;
+        streamDeviceAlive = device != nullptr;
+        lastStreamMimeType = mimeType;
+        streamDevice = std::move(device);
+        if (failStreamDevicePlayback) {
+            emitError(QStringLiteral("Online stream playback unsupported on this platform."));
+            return;
+        }
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
     void pause() override {
         ++pauseCalls;
         emitState(QStringLiteral("paused"), std::nullopt, std::nullopt);
@@ -63,6 +83,8 @@ public:
 
     void stop() override {
         ++stopCalls;
+        streamDevice.reset();
+        streamDeviceAlive = false;
         emitState(QStringLiteral("stopped"), 0, std::nullopt);
     }
 
@@ -85,12 +107,19 @@ public:
     }
 
     int playCalls = 0;
+    int remotePlayCalls = 0;
+    int streamDevicePlayCalls = 0;
     int pauseCalls = 0;
     int resumeCalls = 0;
     int stopCalls = 0;
     int seekCalls = 0;
+    bool failStreamDevicePlayback = false;
+    bool streamDeviceAlive = false;
     qint64 lastSeekMs = -1;
     QString lastPath;
+    QUrl lastRemoteUrl;
+    QString lastStreamMimeType;
+    std::unique_ptr<QIODevice> streamDevice;
     StateChangedCallback stateChangedCallback;
     ErrorCallback errorCallback;
 
@@ -102,6 +131,12 @@ private:
                 .positionMs = positionMs,
                 .durationMs = durationMs,
             });
+        }
+    }
+
+    void emitError(const QString& message) {
+        if (errorCallback) {
+            errorCallback(message);
         }
     }
 };
@@ -121,6 +156,125 @@ int recentCountForTrack(const QString& databasePath, const QString& trackId) {
         }
     }
     return count;
+}
+
+int searchHistoryCountForQuery(const QString& databasePath, const QString& query) {
+    auqw::InitOptions options;
+    options.dataDir = QFileInfo(databasePath).absolutePath().toStdString();
+    auqw::CoreBridge core(options);
+    const std::string response = core.invokeJson(R"({"id":"search","command":"search_history.list","params":{}})");
+    const QJsonObject root = QJsonDocument::fromJson(QByteArray::fromStdString(response)).object();
+    const QJsonArray items = root.value(QStringLiteral("data")).toObject().value(QStringLiteral("items")).toArray();
+
+    int count = 0;
+    for (const QJsonValue& item : items) {
+        if (item.toObject().value(QStringLiteral("query")).toString() == query) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+class FakeOnlineProvider final : public OnlineProvider {
+public:
+    QString name() const override {
+        return QStringLiteral("fake");
+    }
+
+    void searchTracks(const QString& query) override {
+        ++searchCalls;
+        lastQuery = query;
+        if (failNext) {
+            emit searchFailed(query, QStringLiteral("upstream exploded"));
+            return;
+        }
+        emit searchSucceeded(query, nextResults);
+    }
+
+    void resolveStream(const QString& provider, const QString& providerTrackId) override {
+        ++resolveCalls;
+        lastResolveProvider = provider;
+        lastResolveTrackId = providerTrackId;
+    }
+
+    void emitResolvedStream(
+        const QString& provider,
+        const QString& providerTrackId,
+        const QUrl& streamUrl = QUrl(QStringLiteral("https://audio.example/direct.webm"))) {
+        emit streamResolved(provider, providerTrackId, OnlineStreamResult{
+            .provider = provider,
+            .providerTrackId = providerTrackId,
+            .streamUrl = streamUrl,
+            .mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+        });
+    }
+
+    void emitResolvedHeaderedStream(const QString& provider, const QString& providerTrackId) {
+        OnlineStreamResult stream;
+        stream.provider = provider;
+        stream.providerTrackId = providerTrackId;
+        stream.streamUrl = QUrl(QStringLiteral("https://audio.example/headered.webm"));
+        stream.mimeType = QStringLiteral("audio/webm; codecs=\"opus\"");
+        stream.streamKind = OnlineStreamKind::HeaderedDirectUrl;
+        stream.requestHeaders = {
+            {QByteArrayLiteral("User-Agent"), QByteArrayLiteral("android-vr-agent")},
+        };
+        stream.clientName = QStringLiteral("ANDROID_VR");
+        stream.itag = 251;
+        emit streamResolved(provider, providerTrackId, stream);
+    }
+
+    void emitResolvedSabrStream(const QString& provider, const QString& providerTrackId) {
+        YoutubeSabrStreamInfo sabr;
+        sabr.providerTrackId = providerTrackId;
+        sabr.serverAbrStreamingUrl = QUrl(QStringLiteral("https://rr1.example/videoplayback?sabr=1"));
+        sabr.videoPlaybackUstreamerConfig = QStringLiteral("dXN0cmVhbWVy");
+        sabr.clientName = QStringLiteral("WEB");
+        sabr.clientVersion = QStringLiteral("2.20260528.01.00");
+        sabr.visitorData = QStringLiteral("visitor-token");
+        sabr.audioFormats = QVector<YoutubeSabrFormat>{
+            YoutubeSabrFormat{
+                .itag = 251,
+                .mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+                .bitrate = 160000,
+                .lastModified = 1780000000000001LL,
+                .xtags = QStringLiteral("acont=original"),
+            },
+        };
+        emit streamResolved(provider, providerTrackId, OnlineStreamResult{
+            .provider = provider,
+            .providerTrackId = providerTrackId,
+            .mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+            .isSabr = true,
+            .sabr = sabr,
+        });
+    }
+
+    void emitStreamFailure(const QString& provider, const QString& providerTrackId) {
+        emit streamResolveFailed(provider, providerTrackId, QStringLiteral("direct stream unavailable"));
+    }
+
+    int searchCalls = 0;
+    int resolveCalls = 0;
+    bool failNext = false;
+    QString lastQuery;
+    QString lastResolveProvider;
+    QString lastResolveTrackId;
+    QVector<OnlineTrackResult> nextResults;
+};
+
+std::unique_ptr<CoreController> makeController(
+    FakeOnlineProvider** providerOut = nullptr,
+    FakePlaybackBackend** backendOut = nullptr) {
+    auto playback = std::make_unique<FakePlaybackBackend>();
+    if (backendOut != nullptr) {
+        *backendOut = playback.get();
+    }
+    auto provider = std::make_unique<FakeOnlineProvider>();
+    if (providerOut != nullptr) {
+        *providerOut = provider.get();
+    }
+    return std::make_unique<CoreController>(std::move(playback), std::move(provider));
 }
 
 } // namespace
@@ -149,12 +303,409 @@ private slots:
         auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
         auto* playlists = qobject_cast<QAbstractItemModel*>(controller.property("playlistsModel").value<QObject*>());
         auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
+        auto* searchResults = qobject_cast<QAbstractItemModel*>(controller.property("searchResultsModel").value<QObject*>());
         QVERIFY(tracks != nullptr);
         QVERIFY(playlists != nullptr);
         QVERIFY(queue != nullptr);
+        QVERIFY(searchResults != nullptr);
         QCOMPARE(tracks->rowCount(), 0);
         QCOMPARE(playlists->rowCount(), 0);
         QCOMPARE(queue->rowCount(), 0);
+        QCOMPARE(searchResults->rowCount(), 0);
+        QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Idle"));
+        QCOMPARE(controller.property("searchErrorMessage").toString(), QString{});
+    }
+
+    void onlineSearchPopulatesResultsAndRecordsHistory() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artist = QStringLiteral("Aster Band"),
+                .album = QStringLiteral("Blue Album"),
+                .durationMs = 213000,
+                .artworkUrl = QStringLiteral("https://img.example/large.jpg"),
+            },
+        };
+
+        auto* searchResults = qobject_cast<QAbstractItemModel*>(controller->property("searchResultsModel").value<QObject*>());
+        QVERIFY(searchResults != nullptr);
+        const int resultIdRole = roleForName(searchResults, "result_id");
+        const int titleRole = roleForName(searchResults, "title");
+        const int artistRole = roleForName(searchResults, "artist");
+        const int artworkRole = roleForName(searchResults, "artwork_url");
+        QVERIFY(resultIdRole > 0);
+        QVERIFY(titleRole > 0);
+        QVERIFY(artistRole > 0);
+        QVERIFY(artworkRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "searchOnline",
+            Q_ARG(QString, QStringLiteral("stone"))));
+
+        QCOMPARE(provider->searchCalls, 1);
+        QCOMPARE(provider->lastQuery, QStringLiteral("stone"));
+        QCOMPARE(searchResults->rowCount(), 1);
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), resultIdRole).toString(), QStringLiteral("ytmusic:video-alpha"));
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), titleRole).toString(), QStringLiteral("Stone Window"));
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), artistRole).toString(), QStringLiteral("Aster Band"));
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), artworkRole).toString(), QStringLiteral("https://img.example/large.jpg"));
+        QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Ready"));
+        QCOMPARE(controller->property("searchErrorMessage").toString(), QString{});
+        QCOMPARE(searchHistoryCountForQuery(controller->property("databasePath").toString(), QStringLiteral("stone")), 1);
+    }
+
+    void addSearchResultUpsertsTrackAndQueuesIt() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artist = QStringLiteral("Aster Band"),
+                .album = QStringLiteral("Blue Album"),
+                .durationMs = 213000,
+                .artworkUrl = QStringLiteral("https://img.example/large.jpg"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueTitleRole = roleForName(queue, "title");
+        const int queueLocalPathRole = roleForName(queue, "local_path");
+        const int queueProviderRole = roleForName(queue, "provider");
+        const int queueProviderTrackIdRole = roleForName(queue, "provider_track_id");
+        QVERIFY(queueTitleRole > 0);
+        QVERIFY(queueLocalPathRole > 0);
+        QVERIFY(queueProviderRole > 0);
+        QVERIFY(queueProviderTrackIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "searchOnline",
+            Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "addSearchResultToQueue",
+            Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        QCOMPARE(queue->rowCount(), 1);
+        QCOMPARE(queue->data(queue->index(0, 0), queueTitleRole).toString(), QStringLiteral("Stone Window"));
+        QCOMPARE(queue->data(queue->index(0, 0), queueLocalPathRole).toString(), QString{});
+        QCOMPARE(queue->data(queue->index(0, 0), queueProviderRole).toString(), QStringLiteral("ytmusic"));
+        QCOMPARE(queue->data(queue->index(0, 0), queueProviderTrackIdRole).toString(), QStringLiteral("video-alpha"));
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Ready"));
+    }
+
+    void onlineSearchFailureShowsFriendlyErrorAndDoesNotQueue() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->failNext = true;
+
+        auto* searchResults = qobject_cast<QAbstractItemModel*>(controller->property("searchResultsModel").value<QObject*>());
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(searchResults != nullptr);
+        QVERIFY(queue != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "searchOnline",
+            Q_ARG(QString, QStringLiteral("stone"))));
+
+        QCOMPARE(searchResults->rowCount(), 0);
+        QCOMPARE(queue->rowCount(), 0);
+        QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Error"));
+        QCOMPARE(controller->property("searchErrorMessage").toString(), QStringLiteral("Search unavailable. Try again."));
+    }
+
+    void playsQueuedOnlineTrackThroughResolvedStream() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artist = QStringLiteral("Aster Band"),
+                .durationMs = 213000,
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        QVERIFY(!queueItemId.isEmpty());
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+
+        QCOMPARE(provider->resolveCalls, 1);
+        QCOMPARE(provider->lastResolveProvider, QStringLiteral("ytmusic"));
+        QCOMPARE(provider->lastResolveTrackId, QStringLiteral("video-alpha"));
+        QCOMPARE(backend->playCalls, 0);
+        QCOMPARE(backend->remotePlayCalls, 0);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("loading"));
+
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"), QUrl(QStringLiteral("https://audio.example/direct.webm")));
+
+        QCOMPARE(backend->remotePlayCalls, 1);
+        QCOMPARE(backend->lastRemoteUrl, QUrl(QStringLiteral("https://audio.example/direct.webm")));
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Playing"));
+    }
+
+    void playsQueuedSabrTrackThroughStreamDevice() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+        provider->emitResolvedSabrStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(backend->remotePlayCalls, 0);
+        QCOMPARE(backend->streamDevicePlayCalls, 1);
+        QCOMPARE(backend->lastStreamMimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
+        QVERIFY(backend->streamDeviceAlive);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
+    }
+
+    void playsQueuedHeaderedTrackThroughStreamDevice() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+        provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(backend->remotePlayCalls, 0);
+        QCOMPARE(backend->streamDevicePlayCalls, 1);
+        QCOMPARE(backend->lastStreamMimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
+        QVERIFY(backend->streamDeviceAlive);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "seekPlayback", Q_ARG(qint64, 42000)));
+        QCOMPARE(backend->seekCalls, 0);
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Seek unavailable for this online stream."));
+    }
+
+    void sabrBackendFailureShowsFriendlyError() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        backend->failStreamDevicePlayback = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+
+        provider->emitResolvedSabrStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(backend->streamDevicePlayCalls, 1);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("error"));
+        QCOMPARE(controller->property("playbackErrorMessage").toString(), QStringLiteral("Online stream playback unsupported on this platform."));
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Online stream playback unsupported on this platform."));
+    }
+
+    void seekOnSabrStreamShowsUnavailableStatus() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+        provider->emitResolvedSabrStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "seekPlayback", Q_ARG(qint64, 42000)));
+
+        QCOMPARE(backend->seekCalls, 0);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Seek unavailable for this online stream."));
+    }
+
+    void stopCancelsActiveSabrStream() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+        provider->emitResolvedSabrStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+        QVERIFY(backend->streamDeviceAlive);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "stopPlayback"));
+
+        QCOMPARE(backend->stopCalls, 1);
+        QVERIFY(!backend->streamDeviceAlive);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("stopped"));
+    }
+
+    void onlinePlaybackFailureShowsFriendlyError() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        const QString queueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, queueItemId)));
+        provider->emitStreamFailure(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(backend->remotePlayCalls, 0);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("error"));
+        QCOMPARE(controller->property("playbackErrorMessage").toString(), QStringLiteral("Online playback unavailable. Try another result."));
+        QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Online playback unavailable. Try another result."));
+    }
+
+    void ignoresStaleStreamResolution() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-beta"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-beta"),
+                .title = QStringLiteral("Moon Door"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-beta"))));
+        const QString firstQueueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        const QString secondQueueItemId = queue->data(queue->index(1, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, firstQueueItemId)));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, secondQueueItemId)));
+        QCOMPARE(provider->resolveCalls, 2);
+
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"), QUrl(QStringLiteral("https://audio.example/old.webm")));
+        QCOMPARE(backend->remotePlayCalls, 0);
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), secondQueueItemId);
+
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-beta"), QUrl(QStringLiteral("https://audio.example/new.webm")));
+        QCOMPARE(backend->remotePlayCalls, 1);
+        QCOMPARE(backend->lastRemoteUrl, QUrl(QStringLiteral("https://audio.example/new.webm")));
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
     }
 
     void themeSettingRoundTripsThroughCore() {

@@ -1,7 +1,7 @@
 qt_standard_project_setup(REQUIRES 6.5)
 
 set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND OFF)
-if(Qt6Multimedia_FOUND AND NOT ANDROID)
+if(Qt6Multimedia_FOUND)
     set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND ON)
 endif()
 
@@ -25,9 +25,36 @@ qt_add_executable(Auqw
     src/main.cpp
     src/CoreController.cpp
     src/CoreController.hpp
+    src/InnertubeProvider.cpp
+    src/InnertubeProvider.hpp
+    src/OnlineProvider.cpp
+    src/OnlineProvider.hpp
     src/PlaybackBackend.cpp
     src/PlaybackBackend.hpp
+    src/YoutubeHttpAudioDevice.cpp
+    src/YoutubeHttpAudioDevice.hpp
+    src/YoutubePlaybackResolver.cpp
+    src/YoutubePlaybackResolver.hpp
+    src/YoutubeSabrAudioDevice.cpp
+    src/YoutubeSabrAudioDevice.hpp
+    src/YoutubeSabrSession.cpp
+    src/YoutubeSabrSession.hpp
+    src/YoutubeSabrTypes.hpp
+    src/YoutubeUmpParser.cpp
+    src/YoutubeUmpParser.hpp
 )
+
+if(ANDROID)
+    include(FetchContent)
+    FetchContent_Declare(
+        android_openssl
+        GIT_REPOSITORY https://github.com/KDAB/android_openssl.git
+        GIT_TAG b71f1470962019bd89534a2919f5925f93bc5779
+    )
+    FetchContent_MakeAvailable(android_openssl)
+    include("${android_openssl_SOURCE_DIR}/android_openssl.cmake")
+    add_android_openssl_libraries(Auqw)
+endif()
 
 if(AUQW_ENABLE_DESKTOP_PLATFORM)
     target_sources(Auqw
@@ -64,6 +91,7 @@ qt_add_qml_module(Auqw
 target_link_libraries(Auqw
     PRIVATE
         Qt6::Core
+        Qt6::Network
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
@@ -130,13 +158,29 @@ if(BUILD_TESTING AND NOT ANDROID)
         tests/core_controller_test.cpp
         src/CoreController.cpp
         src/CoreController.hpp
+        src/InnertubeProvider.cpp
+        src/InnertubeProvider.hpp
+        src/OnlineProvider.cpp
+        src/OnlineProvider.hpp
         src/PlaybackBackend.cpp
         src/PlaybackBackend.hpp
+        src/YoutubeHttpAudioDevice.cpp
+        src/YoutubeHttpAudioDevice.hpp
+        src/YoutubePlaybackResolver.cpp
+        src/YoutubePlaybackResolver.hpp
+        src/YoutubeSabrAudioDevice.cpp
+        src/YoutubeSabrAudioDevice.hpp
+        src/YoutubeSabrSession.cpp
+        src/YoutubeSabrSession.hpp
+        src/YoutubeSabrTypes.hpp
+        src/YoutubeUmpParser.cpp
+        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_core_controller_test
         PRIVATE
             Qt6::Core
+            Qt6::Network
             Qt6::Test
             auqw_bridge
     )
@@ -162,13 +206,29 @@ if(BUILD_TESTING AND NOT ANDROID)
         tests/qml_shell_smoke_test.cpp
         src/CoreController.cpp
         src/CoreController.hpp
+        src/InnertubeProvider.cpp
+        src/InnertubeProvider.hpp
+        src/OnlineProvider.cpp
+        src/OnlineProvider.hpp
         src/PlaybackBackend.cpp
         src/PlaybackBackend.hpp
+        src/YoutubeHttpAudioDevice.cpp
+        src/YoutubeHttpAudioDevice.hpp
+        src/YoutubePlaybackResolver.cpp
+        src/YoutubePlaybackResolver.hpp
+        src/YoutubeSabrAudioDevice.cpp
+        src/YoutubeSabrAudioDevice.hpp
+        src/YoutubeSabrSession.cpp
+        src/YoutubeSabrSession.hpp
+        src/YoutubeSabrTypes.hpp
+        src/YoutubeUmpParser.cpp
+        src/YoutubeUmpParser.hpp
     )
 
     target_link_libraries(auqw_qt_qml_shell_smoke_test
         PRIVATE
             Qt6::Core
+            Qt6::Network
             Qt6::Qml
             Qt6::Quick
             Qt6::QuickControls2
@@ -198,6 +258,64 @@ if(BUILD_TESTING AND NOT ANDROID)
     set_tests_properties(auqw_qt_qml_shell_smoke_test PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+
+    qt_add_executable(auqw_qt_online_provider_test
+        tests/online_provider_test.cpp
+        src/InnertubeProvider.cpp
+        src/InnertubeProvider.hpp
+        src/OnlineProvider.cpp
+        src/OnlineProvider.hpp
+        src/YoutubeHttpAudioDevice.cpp
+        src/YoutubeHttpAudioDevice.hpp
+        src/YoutubePlaybackResolver.cpp
+        src/YoutubePlaybackResolver.hpp
+        src/YoutubeSabrTypes.hpp
+        src/YoutubeUmpParser.cpp
+        src/YoutubeUmpParser.hpp
+    )
+
+    target_link_libraries(auqw_qt_online_provider_test
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    add_test(NAME auqw_qt_online_provider_test COMMAND auqw_qt_online_provider_test)
+
+    qt_add_executable(auqw_qt_youtube_sabr_live_smoke
+        tests/youtube_sabr_live_smoke.cpp
+        src/InnertubeProvider.cpp
+        src/InnertubeProvider.hpp
+        src/OnlineProvider.cpp
+        src/OnlineProvider.hpp
+        src/YoutubeHttpAudioDevice.cpp
+        src/YoutubeHttpAudioDevice.hpp
+        src/YoutubePlaybackResolver.cpp
+        src/YoutubePlaybackResolver.hpp
+        src/YoutubeSabrAudioDevice.cpp
+        src/YoutubeSabrAudioDevice.hpp
+        src/YoutubeSabrSession.cpp
+        src/YoutubeSabrSession.hpp
+        src/YoutubeSabrTypes.hpp
+        src/YoutubeUmpParser.cpp
+        src/YoutubeUmpParser.hpp
+    )
+
+    target_link_libraries(auqw_qt_youtube_sabr_live_smoke
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+    )
+
+    target_compile_definitions(auqw_qt_youtube_sabr_live_smoke
+        PRIVATE
+            AUQW_HAS_QT_MULTIMEDIA=$<BOOL:${AUQW_ENABLE_QT_MULTIMEDIA_BACKEND}>
+    )
+
+    if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
+        target_link_libraries(auqw_qt_youtube_sabr_live_smoke PRIVATE Qt6::Multimedia)
+    endif()
 
     qt_add_executable(auqw_qt_android_platform_package_test
         tests/android_platform_package_test.cpp
@@ -240,13 +358,29 @@ if(BUILD_TESTING AND NOT ANDROID)
             src/CoreController.hpp
             src/DesktopPlatformController.cpp
             src/DesktopPlatformController.hpp
+            src/InnertubeProvider.cpp
+            src/InnertubeProvider.hpp
+            src/OnlineProvider.cpp
+            src/OnlineProvider.hpp
             src/PlaybackBackend.cpp
             src/PlaybackBackend.hpp
+            src/YoutubeHttpAudioDevice.cpp
+            src/YoutubeHttpAudioDevice.hpp
+            src/YoutubePlaybackResolver.cpp
+            src/YoutubePlaybackResolver.hpp
+            src/YoutubeSabrAudioDevice.cpp
+            src/YoutubeSabrAudioDevice.hpp
+            src/YoutubeSabrSession.cpp
+            src/YoutubeSabrSession.hpp
+            src/YoutubeSabrTypes.hpp
+            src/YoutubeUmpParser.cpp
+            src/YoutubeUmpParser.hpp
         )
 
         target_link_libraries(auqw_qt_desktop_platform_controller_test
             PRIVATE
                 Qt6::Core
+                Qt6::Network
                 Qt6::Test
                 Qt6::Widgets
                 auqw_bridge

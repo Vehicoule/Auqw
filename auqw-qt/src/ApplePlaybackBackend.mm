@@ -6,6 +6,7 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QUrl>
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +55,32 @@ public:
         emitState(QStringLiteral("loading"), 0, std::nullopt);
         [player_ play];
         emitState(QStringLiteral("playing"), positionMs(), durationMs());
+    }
+
+    void playRemoteUrl(const QUrl& url) override {
+        if (!url.isValid() || url.isEmpty()) {
+            emitError(QStringLiteral("Playback URL is empty"));
+            return;
+        }
+
+        clearObservers();
+        NSURL* nsUrl = [NSURL URLWithString:nsStringFromQString(url.toString())];
+        if (nsUrl == nil) {
+            emitError(QStringLiteral("Playback URL is empty"));
+            return;
+        }
+        player_ = [AVPlayer playerWithURL:nsUrl];
+        installObservers();
+
+        emitState(QStringLiteral("loading"), 0, std::nullopt);
+        [player_ play];
+        emitState(QStringLiteral("playing"), positionMs(), durationMs());
+    }
+
+    void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
+        Q_UNUSED(device);
+        Q_UNUSED(mimeType);
+        emitError(QStringLiteral("Online stream playback unsupported on this platform."));
     }
 
     void pause() override {

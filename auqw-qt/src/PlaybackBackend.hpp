@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QIODevice>
 #include <QString>
+#include <QUrl>
 
 #include <functional>
 #include <memory>
@@ -20,6 +22,8 @@ public:
     virtual ~PlaybackBackend() = default;
 
     virtual void playLocalFile(const QString& path) = 0;
+    virtual void playRemoteUrl(const QUrl& url) = 0;
+    virtual void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) = 0;
     virtual void pause() = 0;
     virtual void resume() = 0;
     virtual void stop() = 0;

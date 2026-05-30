@@ -1,4 +1,5 @@
 #include <QFile>
+#include <QFileInfo>
 #include <QString>
 #include <QTest>
 
@@ -16,6 +17,26 @@ QString readTextFile(const QString& path) {
     return QString::fromUtf8(file.readAll());
 }
 
+QByteArray readBinaryFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return file.readAll();
+}
+
+QString sourcePath(QStringView relativePath) {
+    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../") + relativePath;
+}
+
+QString projectSourcePath(QStringView relativePath) {
+    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../../") + relativePath;
+}
+
+QString androidApkPath() {
+    return qEnvironmentVariable("AUQW_ANDROID_APK_PATH");
+}
+
 bool hasUsesPermission(const QString& manifest, const QString& permission) {
     return manifest.contains(QStringLiteral("android:name=\"%1\"").arg(permission));
 }
@@ -30,6 +51,7 @@ private slots:
         const QString manifest = readTextFile(packageSourcePath(u"AndroidManifest.xml"));
         QVERIFY2(!manifest.isEmpty(), "AndroidManifest.xml should be readable");
 
+        QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.INTERNET")));
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.FOREGROUND_SERVICE")));
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK")));
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.POST_NOTIFICATIONS")));
@@ -89,6 +111,94 @@ private slots:
         QVERIFY2(main.contains(QStringLiteral("AUQW_ENABLE_ANDROID_PLATFORM")), "main should guard Android playback integration");
         QVERIFY2(!main.contains(QStringLiteral("DesktopPlatformController desktopPlatformController(coreController);\n#endif\n#if AUQW_ENABLE_ANDROID_PLATFORM")),
             "Android integration should not sit inside desktop platform guard");
+    }
+
+    void cmakePackagesAndroidOpenSslLibraries() {
+        const QString cmake = readTextFile(sourcePath(u"CMakeLists.txt"));
+        QVERIFY2(!cmake.isEmpty(), "Qt CMakeLists.txt should be readable");
+
+        QVERIFY2(cmake.contains(QStringLiteral("include(FetchContent)")), "Android build should use FetchContent for android_openssl");
+        QVERIFY2(cmake.contains(QStringLiteral("FetchContent_Declare")), "Android build should declare android_openssl");
+        QVERIFY2(cmake.contains(QStringLiteral("android_openssl")), "Android build should name the android_openssl dependency");
+        QVERIFY2(cmake.contains(QStringLiteral("https://github.com/KDAB/android_openssl.git")), "Android OpenSSL source should use KDAB repository");
+        QVERIFY2(cmake.contains(QStringLiteral("b71f1470962019bd89534a2919f5925f93bc5779")), "Android OpenSSL source should be pinned");
+        QVERIFY2(cmake.contains(QStringLiteral("android_openssl.cmake")), "Android build should include android_openssl.cmake");
+        QVERIFY2(cmake.contains(QStringLiteral("add_android_openssl_libraries(Auqw)")), "Android build should package OpenSSL libraries with Auqw");
+    }
+
+    void androidBuildRequiresQtMultimedia() {
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        const QString rootCmake = readTextFile(projectSourcePath(u"CMakeLists.txt"));
+        const QString qtCmake = readTextFile(sourcePath(u"CMakeLists.txt"));
+
+        QVERIFY2(!containerfile.isEmpty(), "Android Containerfile should be readable");
+        QVERIFY2(!androidBuild.isEmpty(), "Android build script should be readable");
+        QVERIFY2(!rootCmake.isEmpty(), "root CMakeLists.txt should be readable");
+        QVERIFY2(!qtCmake.isEmpty(), "Qt CMakeLists.txt should be readable");
+
+        QVERIFY2(containerfile.contains(QStringLiteral("-m qtmultimedia")),
+            "Android Qt install should include qtmultimedia");
+        QVERIFY2(androidBuild.contains(QStringLiteral("Qt6Multimedia/Qt6MultimediaConfig.cmake")),
+            "Android build should fail fast when Qt Multimedia is absent");
+        QVERIFY2(rootCmake.contains(QStringLiteral("find_package(Qt6 6.5 REQUIRED COMPONENTS Multimedia)")),
+            "Android CMake configure should require Qt Multimedia");
+        QVERIFY2(!qtCmake.contains(QStringLiteral("Qt6Multimedia_FOUND AND NOT ANDROID")),
+            "Qt Multimedia backend should not exclude Android");
+        QVERIFY2(qtCmake.contains(QStringLiteral("if(Qt6Multimedia_FOUND)")),
+            "Qt Multimedia backend should enable whenever Qt6Multimedia is found");
+    }
+
+    void playbackBackendLogsAndroidMultimediaDiagnostics() {
+        const QString playbackBackend = readTextFile(sourcePath(u"src/PlaybackBackend.cpp"));
+        QVERIFY2(!playbackBackend.isEmpty(), "PlaybackBackend.cpp should be readable");
+
+        QVERIFY2(playbackBackend.contains(QStringLiteral("AUQW_HAS_QT_MULTIMEDIA=1")),
+            "Qt Multimedia backend startup should log AUQW_HAS_QT_MULTIMEDIA=1");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("AUQW_HAS_QT_MULTIMEDIA=0")),
+            "stub backend startup should log AUQW_HAS_QT_MULTIMEDIA=0");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("playStreamDevice")),
+            "stream-device playback should log diagnostics");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("deviceType")),
+            "stream-device diagnostics should include device type");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("QMediaPlayer error")),
+            "QMediaPlayer errors should log debug diagnostics");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("mediaStatus")),
+            "QMediaPlayer error diagnostics should include media status");
+    }
+
+    void packagedApkContainsQtTlsBackendAndOpenSsl() {
+        const QString apkPath = androidApkPath();
+        if (apkPath.isEmpty()) {
+            QSKIP("Set AUQW_ANDROID_APK_PATH to verify packaged APK contents");
+        }
+        if (!QFileInfo::exists(apkPath)) {
+            QSKIP(qPrintable(QStringLiteral("Android APK not found at %1").arg(apkPath)));
+        }
+
+        const QByteArray apk = readBinaryFile(apkPath);
+        QVERIFY2(!apk.isEmpty(), "Android APK should be readable");
+        QVERIFY2(apk.contains("lib/arm64-v8a/libplugins_tls_qopensslbackend_arm64-v8a.so"),
+            "APK should contain Qt OpenSSL TLS backend plugin");
+        QVERIFY2(apk.contains("lib/arm64-v8a/libssl_3.so"), "APK should contain libssl_3.so");
+        QVERIFY2(apk.contains("lib/arm64-v8a/libcrypto_3.so"), "APK should contain libcrypto_3.so");
+    }
+
+    void packagedApkContainsQtMultimediaRuntime() {
+        const QString apkPath = androidApkPath();
+        if (apkPath.isEmpty()) {
+            QSKIP("Set AUQW_ANDROID_APK_PATH to verify packaged APK contents");
+        }
+        if (!QFileInfo::exists(apkPath)) {
+            QSKIP(qPrintable(QStringLiteral("Android APK not found at %1").arg(apkPath)));
+        }
+
+        const QByteArray apk = readBinaryFile(apkPath);
+        QVERIFY2(!apk.isEmpty(), "Android APK should be readable");
+        QVERIFY2(apk.contains("lib/arm64-v8a/libQt6Multimedia_arm64-v8a.so"),
+            "APK should contain Qt Multimedia runtime library");
+        QVERIFY2(apk.contains("lib/arm64-v8a/libplugins_multimedia_"),
+            "APK should contain at least one Qt Multimedia backend plugin");
     }
 
     void nativeControllerRoutesAndroidCommandsToCorePlayback() {

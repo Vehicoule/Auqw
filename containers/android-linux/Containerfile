@@ -51,7 +51,7 @@ RUN apt-get update \
         "ndk;${ANDROID_NDK}" \
     && python3 -m venv /opt/aqt \
     && /opt/aqt/bin/pip install --no-cache-dir "aqtinstall==${AQT_VERSION}" \
-    && /opt/aqt/bin/aqt install-qt linux android "${QT_VERSION}" "${QT_ANDROID_ARCH}" --autodesktop -O "${QT_ROOT}" \
+    && /opt/aqt/bin/aqt install-qt linux android "${QT_VERSION}" "${QT_ANDROID_ARCH}" --autodesktop -m qtmultimedia -O "${QT_ROOT}" \
     && rm -rf /tmp/zig.tar.xz /tmp/android-tools.zip /tmp/android-tools /var/lib/apt/lists/*
 
 WORKDIR /workspace

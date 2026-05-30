@@ -1,6 +1,7 @@
 build/
 build-*/
 cmake-build-*/
+CMakeFiles/
 .cache/
 .zig-cache/
 zig-cache/
@@ -15,3 +16,4 @@ auqw-core/zig-out/
 *.dylib
 *.dll
 *.exe
+live-youtube*.html

@@ -32,6 +32,7 @@ for required in \
   "$sdk_root/ndk/$android_ndk/ndk-build" \
   "$qt_cmake" \
   "$qt_prefix/lib/cmake/Qt6/Qt6Config.cmake" \
+  "$qt_prefix/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" \
   "$qt_host_path/lib/cmake/Qt6/Qt6Config.cmake"; do
   if [[ ! -e "$required" ]]; then
     echo "missing Android dependency: $required" >&2

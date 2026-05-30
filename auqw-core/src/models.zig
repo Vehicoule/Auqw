@@ -3,6 +3,8 @@ const sqlite = @import("sqlite.zig");
 
 pub const Track = struct {
     id: []const u8,
+    provider: ?[]const u8 = null,
+    provider_track_id: ?[]const u8 = null,
     title: []const u8,
     artist: ?[]const u8 = null,
     album: ?[]const u8 = null,
@@ -13,6 +15,8 @@ pub const Track = struct {
 
     pub fn deinit(self: Track, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
+        if (self.provider) |value| allocator.free(value);
+        if (self.provider_track_id) |value| allocator.free(value);
         allocator.free(self.title);
         if (self.artist) |value| allocator.free(value);
         if (self.album) |value| allocator.free(value);
@@ -81,6 +85,8 @@ pub const QueueItem = struct {
     track_id: []const u8,
     position: i64,
     added_at: []const u8,
+    provider: ?[]const u8 = null,
+    provider_track_id: ?[]const u8 = null,
     title: []const u8,
     artist: ?[]const u8 = null,
     album: ?[]const u8 = null,
@@ -92,6 +98,8 @@ pub const QueueItem = struct {
         allocator.free(self.id);
         allocator.free(self.track_id);
         allocator.free(self.added_at);
+        if (self.provider) |value| allocator.free(value);
+        if (self.provider_track_id) |value| allocator.free(value);
         allocator.free(self.title);
         if (self.artist) |value| allocator.free(value);
         if (self.album) |value| allocator.free(value);

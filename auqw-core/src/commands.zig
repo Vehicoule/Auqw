@@ -273,7 +273,7 @@ fn playbackLoadQueueItem(state: *AppState, id: []const u8, params: ObjectMap) er
     const item = getQueueItemById(state, queue_item_id) catch return error.Database;
     defer item.deinit(state.allocator);
 
-    if (item.local_path == null) {
+    if (item.local_path == null and (item.provider == null or item.provider_track_id == null)) {
         updatePlaybackFromQueueItem(state, "error", item, null, item.duration_ms, "Queue item has no local file") catch return error.Database;
     } else {
         updatePlaybackFromQueueItem(state, "loading", item, null, item.duration_ms, null) catch return error.Database;
@@ -464,7 +464,7 @@ fn settingsGet(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreE
 
 fn getTrackById(state: *AppState, id: []const u8) sqlite.DbError!models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
         \\FROM tracks
         \\WHERE id = ?
     );
@@ -476,7 +476,7 @@ fn getTrackById(state: *AppState, id: []const u8) sqlite.DbError!models.Track {
 
 fn listTracks(state: *AppState) sqlite.DbError![]models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
         \\FROM tracks
         \\ORDER BY title COLLATE NOCASE ASC, id ASC
     );
@@ -552,7 +552,7 @@ fn upsertLocalFile(
 
 fn getTrackByProviderIdentity(state: *AppState, provider: []const u8, provider_track_id: []const u8) sqlite.DbError!models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
         \\FROM tracks
         \\WHERE provider = ? AND provider_track_id = ?
     );
@@ -574,13 +574,15 @@ fn getLocalFileByPath(state: *AppState, path: []const u8) sqlite.DbError!models.
 fn trackFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.Track {
     return .{
         .id = try stmt.columnText(allocator, 0),
-        .title = try stmt.columnText(allocator, 1),
-        .artist = try stmt.columnOptionalText(allocator, 2),
-        .album = try stmt.columnOptionalText(allocator, 3),
-        .duration_ms = stmt.columnOptionalInt64(4),
-        .artwork_url = try stmt.columnOptionalText(allocator, 5),
-        .created_at = try stmt.columnText(allocator, 6),
-        .updated_at = try stmt.columnText(allocator, 7),
+        .provider = try stmt.columnOptionalText(allocator, 1),
+        .provider_track_id = try stmt.columnOptionalText(allocator, 2),
+        .title = try stmt.columnText(allocator, 3),
+        .artist = try stmt.columnOptionalText(allocator, 4),
+        .album = try stmt.columnOptionalText(allocator, 5),
+        .duration_ms = stmt.columnOptionalInt64(6),
+        .artwork_url = try stmt.columnOptionalText(allocator, 7),
+        .created_at = try stmt.columnText(allocator, 8),
+        .updated_at = try stmt.columnText(allocator, 9),
     };
 }
 
@@ -600,6 +602,8 @@ fn getQueueItemById(state: *AppState, id: []const u8) sqlite.DbError!models.Queu
         \\    queue_items.track_id,
         \\    queue_items.position,
         \\    queue_items.added_at,
+        \\    tracks.provider,
+        \\    tracks.provider_track_id,
         \\    tracks.title,
         \\    tracks.artist,
         \\    tracks.album,
@@ -624,6 +628,8 @@ fn listQueue(state: *AppState) sqlite.DbError![]models.QueueItem {
         \\    queue_items.track_id,
         \\    queue_items.position,
         \\    queue_items.added_at,
+        \\    tracks.provider,
+        \\    tracks.provider_track_id,
         \\    tracks.title,
         \\    tracks.artist,
         \\    tracks.album,
@@ -655,12 +661,14 @@ fn queueItemFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqli
         .track_id = try stmt.columnText(allocator, 1),
         .position = stmt.columnOptionalInt64(2) orelse 0,
         .added_at = try stmt.columnText(allocator, 3),
-        .title = try stmt.columnText(allocator, 4),
-        .artist = try stmt.columnOptionalText(allocator, 5),
-        .album = try stmt.columnOptionalText(allocator, 6),
-        .duration_ms = stmt.columnOptionalInt64(7),
-        .artwork_url = try stmt.columnOptionalText(allocator, 8),
-        .local_path = try stmt.columnOptionalText(allocator, 9),
+        .provider = try stmt.columnOptionalText(allocator, 4),
+        .provider_track_id = try stmt.columnOptionalText(allocator, 5),
+        .title = try stmt.columnText(allocator, 6),
+        .artist = try stmt.columnOptionalText(allocator, 7),
+        .album = try stmt.columnOptionalText(allocator, 8),
+        .duration_ms = stmt.columnOptionalInt64(9),
+        .artwork_url = try stmt.columnOptionalText(allocator, 10),
+        .local_path = try stmt.columnOptionalText(allocator, 11),
     };
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "OnlineProvider.hpp"
+
 #include <auqw/CoreBridge.hpp>
 
 #include <QAbstractItemModel>
@@ -8,6 +10,7 @@
 #include <QObject>
 #include <QString>
 #include <QUrl>
+#include <QVector>
 
 #include <memory>
 #include <optional>
@@ -26,9 +29,12 @@ class CoreController final : public QObject {
     Q_PROPERTY(QAbstractItemModel* tracksModel READ tracksModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* playlistsModel READ playlistsModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* queueModel READ queueModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* searchResultsModel READ searchResultsModel CONSTANT)
     Q_PROPERTY(QString themeSetting READ themeSetting NOTIFY themeSettingChanged)
     Q_PROPERTY(QString importStatus READ importStatus NOTIFY importStatusChanged)
     Q_PROPERTY(int importedTrackCount READ importedTrackCount NOTIFY importStatusChanged)
+    Q_PROPERTY(QString searchStatus READ searchStatus NOTIFY searchStateChanged)
+    Q_PROPERTY(QString searchErrorMessage READ searchErrorMessage NOTIFY searchStateChanged)
     Q_PROPERTY(QString playbackState READ playbackState NOTIFY playbackStateChanged)
     Q_PROPERTY(QString playbackQueueItemId READ playbackQueueItemId NOTIFY playbackStateChanged)
     Q_PROPERTY(QString playbackTrackId READ playbackTrackId NOTIFY playbackStateChanged)
@@ -46,6 +52,10 @@ class CoreController final : public QObject {
 public:
     explicit CoreController(QObject* parent = nullptr);
     explicit CoreController(std::unique_ptr<PlaybackBackend> playbackBackend, QObject* parent = nullptr);
+    explicit CoreController(
+        std::unique_ptr<PlaybackBackend> playbackBackend,
+        std::unique_ptr<OnlineProvider> onlineProvider,
+        QObject* parent = nullptr);
     ~CoreController() override;
 
     [[nodiscard]] QString helloText() const;
@@ -57,9 +67,12 @@ public:
     [[nodiscard]] QAbstractItemModel* tracksModel() const;
     [[nodiscard]] QAbstractItemModel* playlistsModel() const;
     [[nodiscard]] QAbstractItemModel* queueModel() const;
+    [[nodiscard]] QAbstractItemModel* searchResultsModel() const;
     [[nodiscard]] QString themeSetting() const;
     [[nodiscard]] QString importStatus() const;
     [[nodiscard]] int importedTrackCount() const;
+    [[nodiscard]] QString searchStatus() const;
+    [[nodiscard]] QString searchErrorMessage() const;
     [[nodiscard]] QString playbackState() const;
     [[nodiscard]] QString playbackQueueItemId() const;
     [[nodiscard]] QString playbackTrackId() const;
@@ -76,6 +89,8 @@ public:
 
     Q_INVOKABLE void setThemeSetting(const QString& value);
     Q_INVOKABLE void importLocalFolder(const QUrl& folderUrl);
+    Q_INVOKABLE void searchOnline(const QString& query);
+    Q_INVOKABLE void addSearchResultToQueue(const QString& resultId);
     Q_INVOKABLE void addTrackToQueue(const QString& trackId);
     Q_INVOKABLE void removeQueueItem(const QString& queueItemId);
     Q_INVOKABLE void moveQueueItem(const QString& queueItemId, int toIndex);
@@ -97,6 +112,7 @@ signals:
     void coreStatusChanged();
     void themeSettingChanged();
     void importStatusChanged();
+    void searchStateChanged();
     void playbackStateChanged();
     void playbackOptionsChanged();
 
@@ -108,6 +124,7 @@ private:
         const QString& command,
         const QJsonObject& params = {}) const;
     void loadInitialState();
+    bool refreshTracksFromCore();
     bool refreshQueueFromCore();
     bool refreshPlaybackFromCore();
     bool refreshPlaybackOptionsFromCore();
@@ -115,6 +132,11 @@ private:
     void setThemeSettingFromCore(const QString& value);
     void setImportResult(const QString& status, int importedTrackCount);
     void configurePlaybackBackend();
+    void configureOnlineProvider();
+    void setSearchState(const QString& status, const QString& errorMessage);
+    void applySearchResults(const QVector<OnlineTrackResult>& results);
+    void recordSearchHistory(const QString& query);
+    [[nodiscard]] std::optional<OnlineTrackResult> searchResultById(const QString& resultId) const;
     bool applyPlaybackObject(const QJsonObject& playback);
     bool applyPlaybackOptionsObject(const QJsonObject& options);
     void updatePlaybackFromBackend(const QString& playbackState, std::optional<qint64> positionMs, std::optional<qint64> durationMs, const QString& errorMessage = {});
@@ -122,12 +144,17 @@ private:
     [[nodiscard]] int queueIndexForItem(const QString& queueItemId) const;
     [[nodiscard]] QString queueItemIdAt(int row) const;
     void applyQueueItems(const QJsonArray& items);
+    [[nodiscard]] bool isPendingStreamResolve(const QString& provider, const QString& providerTrackId) const;
+    void clearPendingStreamResolve();
 
     std::optional<auqw::CoreBridge> core_;
     std::unique_ptr<PlaybackBackend> playbackBackend_;
+    std::unique_ptr<OnlineProvider> onlineProvider_;
     std::unique_ptr<JsonListModel> tracksModel_;
     std::unique_ptr<JsonListModel> playlistsModel_;
     std::unique_ptr<JsonListModel> queueModel_;
+    std::unique_ptr<JsonListModel> searchResultsModel_;
+    QVector<OnlineTrackResult> searchResults_;
     QString helloText_;
     QString appName_;
     QString appId_;
@@ -137,6 +164,9 @@ private:
     QString themeSetting_;
     QString importStatus_;
     int importedTrackCount_ = 0;
+    QString searchStatus_ = QStringLiteral("Idle");
+    QString searchErrorMessage_;
+    QString activeSearchQuery_;
     QString playbackState_ = QStringLiteral("stopped");
     QString playbackQueueItemId_;
     QString playbackTrackId_;
@@ -149,7 +179,11 @@ private:
     qint64 playbackDurationMs_ = 0;
     QString playbackErrorMessage_;
     QString recentRecordedQueueItemId_;
+    QString pendingStreamQueueItemId_;
+    QString pendingStreamProvider_;
+    QString pendingStreamProviderTrackId_;
     QString repeatMode_ = QStringLiteral("off");
     bool shuffleEnabled_ = false;
     bool stopRequested_ = false;
+    bool sabrPlaybackActive_ = false;
 };
