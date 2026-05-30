@@ -708,6 +708,57 @@ private slots:
         QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
     }
 
+    void playNextStopsActiveStreamBeforeResolvingNextTrack() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-beta"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-beta"),
+                .title = QStringLiteral("Moon Door"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+        const int queueIdRole = roleForName(queue, "id");
+        QVERIFY(queueIdRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-beta"))));
+        const QString firstQueueItemId = queue->data(queue->index(0, 0), queueIdRole).toString();
+        const QString secondQueueItemId = queue->data(queue->index(1, 0), queueIdRole).toString();
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, firstQueueItemId)));
+        provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+        QVERIFY(backend->streamDeviceAlive);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playNextQueuedTrack"));
+
+        QCOMPARE(provider->resolveCalls, 2);
+        QCOMPARE(provider->lastResolveTrackId, QStringLiteral("video-beta"));
+        QCOMPARE(backend->stopCalls, 1);
+        QVERIFY(!backend->streamDeviceAlive);
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), secondQueueItemId);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("loading"));
+
+        provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-beta"));
+
+        QCOMPARE(backend->streamDevicePlayCalls, 2);
+        QVERIFY(backend->streamDeviceAlive);
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), secondQueueItemId);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+    }
+
     void themeSettingRoundTripsThroughCore() {
         CoreController controller;
         QSignalSpy spy(&controller, SIGNAL(themeSettingChanged()));

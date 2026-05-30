@@ -144,6 +144,7 @@ private:
     [[nodiscard]] int queueIndexForItem(const QString& queueItemId) const;
     [[nodiscard]] QString queueItemIdAt(int row) const;
     void applyQueueItems(const QJsonArray& items);
+    void stopActivePlaybackBeforeLoad(bool shouldStop);
     [[nodiscard]] bool isPendingStreamResolve(const QString& provider, const QString& providerTrackId) const;
     void clearPendingStreamResolve();
 

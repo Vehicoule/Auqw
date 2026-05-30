@@ -547,6 +547,18 @@ void CoreController::playQueueItem(const QString& queueItemId) {
         return;
     }
 
+    const bool hadActivePlayback = playbackState_ == QStringLiteral("playing")
+        || playbackState_ == QStringLiteral("paused")
+        || playbackState_ == QStringLiteral("loading");
+    const bool hadActiveStreamPlayback = sabrPlaybackActive_;
+    const int targetQueueIndex = queueIndexForItem(queueItemId);
+    const QVariantMap targetQueueItem = targetQueueIndex >= 0 ? queueModel_->itemAt(targetQueueIndex) : QVariantMap{};
+    const bool targetNeedsStreamResolve = targetQueueItem.value(QStringLiteral("local_path")).toString().isEmpty()
+        && !targetQueueItem.value(QStringLiteral("provider")).toString().isEmpty()
+        && !targetQueueItem.value(QStringLiteral("provider_track_id")).toString().isEmpty();
+    clearPendingStreamResolve();
+    stopActivePlaybackBeforeLoad(hadActiveStreamPlayback || (targetNeedsStreamResolve && hadActivePlayback));
+
     const CommandResult result = invokeCommand(
         QStringLiteral("playback.load_queue_item"),
         QStringLiteral("playback.load_queue_item"),
@@ -559,8 +571,6 @@ void CoreController::playQueueItem(const QString& queueItemId) {
 
     applyPlaybackObject(result.data.value(QStringLiteral("playback")).toObject());
     if (!playbackLocalPath_.isEmpty()) {
-        clearPendingStreamResolve();
-        sabrPlaybackActive_ = false;
         setCoreStatus(QStringLiteral("Loading playback"));
         playbackBackend_->playLocalFile(playbackLocalPath_);
         return;
@@ -570,7 +580,6 @@ void CoreController::playQueueItem(const QString& queueItemId) {
     const QString provider = item.value(QStringLiteral("provider")).toString();
     const QString providerTrackId = item.value(QStringLiteral("provider_track_id")).toString();
     if (!provider.isEmpty() && !providerTrackId.isEmpty() && onlineProvider_) {
-        sabrPlaybackActive_ = false;
         pendingStreamQueueItemId_ = queueItemId;
         pendingStreamProvider_ = provider;
         pendingStreamProviderTrackId_ = providerTrackId;
@@ -1205,6 +1214,16 @@ void CoreController::applyQueueItems(const QJsonArray& items) {
         items,
         QStringLiteral("queue_item_id"),
         QStringLiteral("id")));
+}
+
+void CoreController::stopActivePlaybackBeforeLoad(bool shouldStop) {
+    sabrPlaybackActive_ = false;
+    if (!shouldStop) {
+        return;
+    }
+
+    stopRequested_ = true;
+    playbackBackend_->stop();
 }
 
 bool CoreController::isPendingStreamResolve(const QString& provider, const QString& providerTrackId) const {
