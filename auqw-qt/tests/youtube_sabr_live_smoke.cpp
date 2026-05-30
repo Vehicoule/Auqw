@@ -7,10 +7,23 @@
 #include <QTimer>
 #include <QTextStream>
 
+#include <algorithm>
+#include <functional>
+
 #if AUQW_HAS_QT_MULTIMEDIA
 #include <QAudioOutput>
 #include <QMediaPlayer>
 #endif
+
+namespace {
+
+int positiveEnvInt(const char* name, int fallback) {
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue(name, &ok);
+    return ok && value > 0 ? value : fallback;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
@@ -19,12 +32,27 @@ int main(int argc, char** argv) {
 
     const QString query = app.arguments().size() > 1 ? app.arguments().at(1) : QStringLiteral("rolling in the");
     const bool playbackSmoke = qEnvironmentVariableIntValue("AUQW_SABR_SMOKE_PLAYBACK") > 0;
+    const qsizetype maxResults = std::max<qsizetype>(
+        1,
+        positiveEnvInt("AUQW_SABR_SMOKE_MAX_RESULTS", 1));
+    const int minPlaybackPositionMs = positiveEnvInt("AUQW_SABR_SMOKE_MIN_POSITION_MS", 1000);
+    const int playbackWindowMs = positiveEnvInt("AUQW_SABR_SMOKE_PLAYBACK_WINDOW_MS", 5000);
     out << "query=" << query << '\n';
+    out << "max_results=" << maxResults << '\n';
     out.flush();
 
     auto provider = createDefaultOnlineProvider();
     std::unique_ptr<QIODevice> device;
+    QVector<OnlineTrackResult> searchResults;
+    qsizetype attemptIndex = 0;
+    qsizetype activeAttempt = 0;
+    QString lastFailureStatus;
+    QString lastFailureMessage;
+    int lastFailureExitCode = 5;
     int exitCode = 1;
+
+    std::function<void()> attemptNextResult;
+    std::function<void(const QString&, const QString&, int)> failAttempt;
 
 #if AUQW_HAS_QT_MULTIMEDIA
     QAudioOutput audioOutput;
@@ -36,7 +64,7 @@ int main(int argc, char** argv) {
     audioOutput.setVolume(0.1);
     player.setAudioOutput(&audioOutput);
     playbackTimer.setSingleShot(true);
-    playbackTimer.setInterval(5000);
+    playbackTimer.setInterval(playbackWindowMs);
 
     QObject::connect(&player, &QMediaPlayer::positionChanged, &app, [&](qint64 position) {
         lastPlaybackPosition = position;
@@ -45,25 +73,24 @@ int main(int argc, char** argv) {
         if (error == QMediaPlayer::NoError) {
             return;
         }
-        err << "status=playback_error\n";
-        err << "message=" << message << '\n';
-        err.flush();
-        exitCode = 8;
-        app.quit();
+        if (failAttempt) {
+            failAttempt(QStringLiteral("playback_error"), message, 8);
+        }
     });
     QObject::connect(&playbackTimer, &QTimer::timeout, &app, [&] {
-        if (lastPlaybackPosition >= 1000) {
+        if (lastPlaybackPosition >= minPlaybackPositionMs) {
             out << "status=playback_progress\n";
+            out << "attempt=" << activeAttempt << '\n';
             out << "position_ms=" << lastPlaybackPosition << '\n';
             out.flush();
             exitCode = 0;
-        } else {
-            err << "status=playback_stalled\n";
-            err << "position_ms=" << lastPlaybackPosition << '\n';
-            err.flush();
-            exitCode = 9;
+            app.quit();
+        } else if (failAttempt) {
+            failAttempt(
+                QStringLiteral("playback_stalled"),
+                QStringLiteral("position_ms=%1").arg(lastPlaybackPosition),
+                9);
         }
-        app.quit();
     });
 
     auto attachPlaybackDevice = [&](QIODevice* streamDevice) {
@@ -71,6 +98,7 @@ int main(int argc, char** argv) {
             return;
         }
         playbackAttached = true;
+        lastPlaybackPosition = 0;
         player.setSourceDevice(streamDevice);
         player.play();
         playbackTimer.start();
@@ -85,9 +113,7 @@ int main(int argc, char** argv) {
 
     QTimer timeout;
     timeout.setSingleShot(true);
-    timeout.setInterval(qEnvironmentVariableIntValue("AUQW_SABR_SMOKE_TIMEOUT_MS") > 0
-                            ? qEnvironmentVariableIntValue("AUQW_SABR_SMOKE_TIMEOUT_MS")
-                            : 45000);
+    timeout.setInterval(positiveEnvInt("AUQW_SABR_SMOKE_TIMEOUT_MS", 45000));
 
     QObject::connect(&timeout, &QTimer::timeout, &app, [&] {
         err << "status=timeout\n";
@@ -95,6 +121,65 @@ int main(int argc, char** argv) {
         exitCode = 2;
         app.quit();
     });
+
+    failAttempt = [&](const QString& status, const QString& message, int code) {
+        lastFailureStatus = status;
+        lastFailureMessage = message;
+        lastFailureExitCode = code;
+        err << "status=" << status << '\n';
+        err << "attempt=" << activeAttempt << '\n';
+        if (!message.isEmpty()) {
+            err << "message=" << message << '\n';
+        }
+        err.flush();
+#if AUQW_HAS_QT_MULTIMEDIA
+        playbackTimer.stop();
+        player.stop();
+        playbackAttached = false;
+        lastPlaybackPosition = 0;
+#endif
+        QTimer::singleShot(0, &app, [&] {
+            attemptNextResult();
+        });
+    };
+
+    attemptNextResult = [&] {
+#if AUQW_HAS_QT_MULTIMEDIA
+        playbackTimer.stop();
+        player.stop();
+        playbackAttached = false;
+        lastPlaybackPosition = 0;
+#endif
+        if (device) {
+            device->close();
+            device.reset();
+        }
+
+        const qsizetype attemptLimit = std::min<qsizetype>(maxResults, searchResults.size());
+        if (attemptIndex >= attemptLimit) {
+            err << "status=all_results_failed\n";
+            if (!lastFailureStatus.isEmpty()) {
+                err << "last_status=" << lastFailureStatus << '\n';
+            }
+            if (!lastFailureMessage.isEmpty()) {
+                err << "message=" << lastFailureMessage << '\n';
+            }
+            err.flush();
+            exitCode = lastFailureExitCode;
+            app.quit();
+            return;
+        }
+
+        const OnlineTrackResult track = searchResults.at(attemptIndex);
+        activeAttempt = attemptIndex + 1;
+        ++attemptIndex;
+        out << "result_attempt=" << activeAttempt << '\n';
+        out << "result_title=" << track.title << '\n';
+        out << "result_provider=" << track.provider << '\n';
+        out << "result_id=" << track.providerTrackId << '\n';
+        out.flush();
+        provider->resolveStream(track.provider, track.providerTrackId);
+    };
 
     QObject::connect(provider.get(), &OnlineProvider::searchSucceeded, &app, [&](const QString&, const QVector<OnlineTrackResult>& results) {
         if (results.isEmpty()) {
@@ -105,12 +190,9 @@ int main(int argc, char** argv) {
             return;
         }
 
-        const OnlineTrackResult track = results.first();
-        out << "first_result_title=" << track.title << '\n';
-        out << "first_result_provider=" << track.provider << '\n';
-        out << "first_result_id=" << track.providerTrackId << '\n';
-        out.flush();
-        provider->resolveStream(track.provider, track.providerTrackId);
+        searchResults = results;
+        attemptIndex = 0;
+        attemptNextResult();
     });
 
     QObject::connect(provider.get(), &OnlineProvider::searchFailed, &app, [&](const QString&, const QString& message) {
@@ -122,16 +204,13 @@ int main(int argc, char** argv) {
     });
 
     QObject::connect(provider.get(), &OnlineProvider::streamResolveFailed, &app, [&](const QString&, const QString&, const QString& message) {
-        err << "status=resolve_failed\n";
-        err << "message=" << message << '\n';
-        err.flush();
-        exitCode = 5;
-        app.quit();
+        failAttempt(QStringLiteral("resolve_failed"), message, 5);
     });
 
     QObject::connect(provider.get(), &OnlineProvider::streamResolved, &app, [&](const QString&, const QString&, const OnlineStreamResult& stream) {
         if (stream.streamKind == OnlineStreamKind::HeaderedDirectUrl) {
             out << "stream=headered_direct_url\n";
+            out << "attempt=" << activeAttempt << '\n';
             out << "client=" << stream.clientName << '\n';
             out << "itag=" << stream.itag << '\n';
             out << "mime_type=" << stream.mimeType << '\n';
@@ -140,6 +219,7 @@ int main(int argc, char** argv) {
             auto httpDevice = std::make_unique<YoutubeHttpAudioDevice>(stream.streamUrl, stream.requestHeaders);
             QObject::connect(httpDevice.get(), &YoutubeHttpAudioDevice::firstAudioBytes, &app, [&](qint64 bytes) {
                 out << "status=first_audio_bytes\n";
+                out << "attempt=" << activeAttempt << '\n';
                 out << "bytes=" << bytes << '\n';
                 out.flush();
                 if (playbackSmoke) {
@@ -159,35 +239,40 @@ int main(int argc, char** argv) {
 #endif
             });
             QObject::connect(httpDevice.get(), &YoutubeHttpAudioDevice::streamError, &app, [&](const QString& message) {
-                err << "status=direct_stream_error\n";
-                err << "message=" << message << '\n';
-                err.flush();
-                exitCode = 6;
-                app.quit();
+                failAttempt(QStringLiteral("direct_stream_error"), message, 6);
             });
             device = std::move(httpDevice);
             if (!device->open(QIODevice::ReadOnly)) {
-                err << "status=device_open_failed\n";
-                err.flush();
-                exitCode = 7;
-                app.quit();
+                failAttempt(QStringLiteral("device_open_failed"), device->errorString(), 7);
             }
             return;
         }
 
         if (stream.streamKind == OnlineStreamKind::DirectUrl || !stream.isSabr) {
             out << "stream=direct_url\n";
+            out << "attempt=" << activeAttempt << '\n';
             out << "client=" << stream.clientName << '\n';
             out << "itag=" << stream.itag << '\n';
             out << "mime_type=" << stream.mimeType << '\n';
             out << "url=" << stream.streamUrl.toString() << '\n';
             out.flush();
+            if (playbackSmoke) {
+#if AUQW_HAS_QT_MULTIMEDIA
+                playbackAttached = true;
+                lastPlaybackPosition = 0;
+                player.setSource(stream.streamUrl);
+                player.play();
+                playbackTimer.start();
+#endif
+                return;
+            }
             exitCode = 0;
             app.quit();
             return;
         }
 
         out << "stream=sabr\n";
+        out << "attempt=" << activeAttempt << '\n';
         out << "audio_formats=" << stream.sabr.audioFormats.size() << '\n';
         out << "mime_type=" << stream.mimeType << '\n';
         out.flush();
@@ -195,6 +280,7 @@ int main(int argc, char** argv) {
         auto sabrDevice = std::make_unique<YoutubeSabrAudioDevice>(stream.sabr);
         QObject::connect(sabrDevice.get(), &YoutubeSabrAudioDevice::firstAudioBytes, &app, [&](qint64 bytes) {
             out << "status=first_audio_bytes\n";
+            out << "attempt=" << activeAttempt << '\n';
             out << "bytes=" << bytes << '\n';
             out.flush();
             if (playbackSmoke) {
@@ -214,19 +300,12 @@ int main(int argc, char** argv) {
 #endif
         });
         QObject::connect(sabrDevice.get(), &YoutubeSabrAudioDevice::streamError, &app, [&](const QString& message) {
-            err << "status=sabr_error\n";
-            err << "message=" << message << '\n';
-            err.flush();
-            exitCode = 6;
-            app.quit();
+            failAttempt(QStringLiteral("sabr_error"), message, 6);
         });
 
         device = std::move(sabrDevice);
         if (!device->open(QIODevice::ReadOnly)) {
-            err << "status=device_open_failed\n";
-            err.flush();
-            exitCode = 7;
-            app.quit();
+            failAttempt(QStringLiteral("device_open_failed"), device->errorString(), 7);
         }
     });
 

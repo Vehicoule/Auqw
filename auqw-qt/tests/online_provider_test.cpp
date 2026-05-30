@@ -3,6 +3,8 @@
 #include "../src/YoutubeStreamBuffer.hpp"
 #include "../src/YoutubeUmpParser.hpp"
 
+#include <QFile>
+#include <QStringView>
 #include <QTest>
 #include <QUrl>
 
@@ -11,6 +13,22 @@
 #include <cstring>
 #include <thread>
 
+namespace {
+
+QString projectSourcePath(QStringView relativePath) {
+    return QStringLiteral(AUQW_PROJECT_SOURCE_DIR) + QLatin1Char('/') + relativePath;
+}
+
+QString readTextFile(QStringView relativePath) {
+    QFile file(projectSourcePath(relativePath));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return {};
+    }
+    return QString::fromUtf8(file.readAll());
+}
+
+} // namespace
+
 class OnlineProviderTest final : public QObject {
     Q_OBJECT
 
@@ -18,6 +36,8 @@ private slots:
     void parsesTrackShelfFixture();
     void ignoresMalformedItems();
     void reportsInvalidJsonAsFriendlyError();
+    void liveSmokeExposesSoakControls();
+    void livePlaybackSoakScriptDrivesManualMatrix();
     void playbackClientProfilesPreferAndroidVr();
     void parsesAndroidVrDirectAudioStreamFixture();
     void parsesDirectAudioStreamFixture();
@@ -174,6 +194,37 @@ void OnlineProviderTest::reportsInvalidJsonAsFriendlyError() {
         QVERIFY(!parsed.ok);
         QCOMPARE(parsed.errorMessage, QStringLiteral("Provider returned invalid search data."));
         QVERIFY(parsed.tracks.isEmpty());
+}
+
+void OnlineProviderTest::liveSmokeExposesSoakControls() {
+        const QString smoke = readTextFile(u"auqw-qt/tests/youtube_sabr_live_smoke.cpp");
+
+        QVERIFY2(!smoke.isEmpty(), "live smoke source should be readable");
+        QVERIFY2(smoke.contains(QStringLiteral("AUQW_SABR_SMOKE_MAX_RESULTS")),
+            "live smoke should allow trying more than the first search result");
+        QVERIFY2(smoke.contains(QStringLiteral("AUQW_SABR_SMOKE_MIN_POSITION_MS")),
+            "playback smoke should make progress threshold configurable");
+        QVERIFY2(smoke.contains(QStringLiteral("AUQW_SABR_SMOKE_PLAYBACK_WINDOW_MS")),
+            "playback smoke should make playback observation window configurable");
+        QVERIFY2(smoke.contains(QStringLiteral("result_attempt=")),
+            "live smoke should log which search result attempt is running");
+        QVERIFY2(smoke.contains(QStringLiteral("status=all_results_failed")),
+            "live smoke should report matrix exhaustion distinctly");
+}
+
+void OnlineProviderTest::livePlaybackSoakScriptDrivesManualMatrix() {
+        const QString script = readTextFile(u"ci/live-playback-soak.sh");
+
+        QVERIFY2(!script.isEmpty(), "manual live playback soak script should be readable");
+        QVERIFY2(script.contains(QStringLiteral("--runs")), "soak script should expose run count");
+        QVERIFY2(script.contains(QStringLiteral("--max-results")), "soak script should expose per-query result breadth");
+        QVERIFY2(script.contains(QStringLiteral("--playback")), "soak script should expose Qt Multimedia playback mode");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_SABR_SMOKE_MAX_RESULTS")),
+            "soak script should pass result breadth into live smoke binary");
+        QVERIFY2(script.contains(QStringLiteral("around the world")),
+            "soak script should include release-relevant default queries");
+        QVERIFY2(script.contains(QStringLiteral("blinding lights")),
+            "soak script should include multiple default query shapes");
 }
 
 void OnlineProviderTest::playbackClientProfilesPreferAndroidVr() {

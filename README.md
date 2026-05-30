@@ -56,6 +56,14 @@ Use container builds when dependency reproducibility matters:
 ./ci/container-build.sh android-linux
 ```
 
+Run live YouTube playback soak manually before releases. This uses network data
+and is intentionally not part of push/PR CI:
+
+```bash
+./ci/live-playback-soak.sh --runs 2 --max-results 3
+./ci/live-playback-soak.sh --playback --runs 1 --max-results 3 "around the world"
+```
+
 Windows containers require a Windows host with Windows containers enabled:
 
 ```powershell

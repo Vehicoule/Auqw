@@ -21,6 +21,19 @@ apk_dir="$build_dir/apk"
 target="aarch64-linux-android"
 artifact="$root/auqw-core/zig-out/lib/libauqw_core.a"
 
+patch_gradle_wrapper_timeout() {
+  local wrapper
+  while IFS= read -r wrapper; do
+    if [[ ! -w "$wrapper" ]]; then
+      echo "warning: cannot patch Gradle wrapper timeout: $wrapper" >&2
+      continue
+    fi
+    if grep -q '^networkTimeout=' "$wrapper"; then
+      sed -i 's/^networkTimeout=.*/networkTimeout=60000/' "$wrapper"
+    fi
+  done < <(find "$qt_root/$qt_version" -path '*/gradle/wrapper/gradle-wrapper.properties' -type f 2>/dev/null)
+}
+
 if [[ -z "$sdk_root" ]]; then
   echo "ANDROID_SDK_ROOT or ANDROID_HOME is required" >&2
   exit 1
@@ -53,6 +66,8 @@ if [[ ! -f "$artifact" ]]; then
   echo "missing Android core artifact: $artifact" >&2
   exit 1
 fi
+
+patch_gradle_wrapper_timeout
 
 cmake -E rm -rf "$build_dir"
 

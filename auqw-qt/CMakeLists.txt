@@ -281,6 +281,11 @@ if(BUILD_TESTING AND NOT ANDROID)
             Qt6::Test
     )
 
+    target_compile_definitions(auqw_qt_online_provider_test
+        PRIVATE
+            AUQW_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    )
+
     add_test(NAME auqw_qt_online_provider_test COMMAND auqw_qt_online_provider_test)
 
     qt_add_executable(auqw_qt_youtube_sabr_live_smoke

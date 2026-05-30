@@ -149,6 +149,14 @@ private slots:
             "Qt Multimedia backend should enable whenever Qt6Multimedia is found");
     }
 
+    void androidBuildExtendsGradleWrapperTimeout() {
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        QVERIFY2(!androidBuild.isEmpty(), "Android build script should be readable");
+
+        QVERIFY2(androidBuild.contains(QStringLiteral("networkTimeout=60000")),
+            "Android build should raise Qt-generated Gradle wrapper download timeout");
+    }
+
     void playbackBackendLogsAndroidMultimediaDiagnostics() {
         const QString playbackBackend = readTextFile(sourcePath(u"src/PlaybackBackend.cpp"));
         QVERIFY2(!playbackBackend.isEmpty(), "PlaybackBackend.cpp should be readable");
