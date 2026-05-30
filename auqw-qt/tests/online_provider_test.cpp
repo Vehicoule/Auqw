@@ -34,6 +34,8 @@ class OnlineProviderTest final : public QObject {
 
 private slots:
     void parsesTrackShelfFixture();
+    void parsesSearchSuggestionsFixture();
+    void parsesTrackMetadataFixture();
     void ignoresMalformedItems();
     void reportsInvalidJsonAsFriendlyError();
     void liveSmokeExposesSoakControls();
@@ -132,6 +134,68 @@ void OnlineProviderTest::parsesTrackShelfFixture() {
         QCOMPARE(parsed.tracks.first().album, QStringLiteral("Blue Album"));
         QCOMPARE(parsed.tracks.first().durationMs, 213000);
         QCOMPARE(parsed.tracks.first().artworkUrl, QStringLiteral("https://img.example/large.jpg"));
+}
+
+void OnlineProviderTest::parsesSearchSuggestionsFixture() {
+        const QByteArray payload = R"json(
+{
+  "contents": [
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "runs": [ { "text": "stone window" } ] }
+            }
+          },
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "simpleText": "stone window live" }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+)json";
+
+        const OnlineSuggestionsParseResult parsed = InnertubeProvider::parseSearchSuggestions(payload);
+
+        QVERIFY2(parsed.ok, qPrintable(parsed.errorMessage));
+        QCOMPARE(parsed.suggestions.size(), 2);
+        QCOMPARE(parsed.suggestions.at(0).provider, QStringLiteral("ytmusic"));
+        QCOMPARE(parsed.suggestions.at(0).text, QStringLiteral("stone window"));
+        QCOMPARE(parsed.suggestions.at(1).text, QStringLiteral("stone window live"));
+}
+
+void OnlineProviderTest::parsesTrackMetadataFixture() {
+        const QByteArray payload = R"json(
+{
+  "videoDetails": {
+    "videoId": "video-alpha",
+    "title": "Stone Window",
+    "author": "Aster Band",
+    "lengthSeconds": "213",
+    "thumbnail": {
+      "thumbnails": [
+        { "url": "https://img.example/small.jpg" },
+        { "url": "https://img.example/large.jpg" }
+      ]
+    }
+  }
+}
+)json";
+
+        const OnlineTrackMetadataParseResult parsed = InnertubeProvider::parseTrackMetadata(payload, QStringLiteral("video-alpha"));
+
+        QVERIFY2(parsed.ok, qPrintable(parsed.errorMessage));
+        QCOMPARE(parsed.metadata.provider, QStringLiteral("ytmusic"));
+        QCOMPARE(parsed.metadata.providerTrackId, QStringLiteral("video-alpha"));
+        QCOMPARE(parsed.metadata.title, QStringLiteral("Stone Window"));
+        QCOMPARE(parsed.metadata.artist, QStringLiteral("Aster Band"));
+        QCOMPARE(parsed.metadata.durationMs, 213000);
+        QCOMPARE(parsed.metadata.artworkUrl, QStringLiteral("https://img.example/large.jpg"));
 }
 
 void OnlineProviderTest::ignoresMalformedItems() {

@@ -111,6 +111,14 @@ QString lastThumbnailUrl(const QJsonObject& renderer) {
     return thumbnails.last().toObject().value(QStringLiteral("url")).toString();
 }
 
+QString lastThumbnailUrlFromObject(const QJsonObject& object) {
+    const QJsonArray thumbnails = object.value(QStringLiteral("thumbnails")).toArray();
+    if (thumbnails.isEmpty()) {
+        return {};
+    }
+    return thumbnails.last().toObject().value(QStringLiteral("url")).toString();
+}
+
 qint64 durationFromText(const QString& text) {
     if (text.isEmpty()) {
         return 0;
@@ -131,6 +139,18 @@ qint64 durationFromText(const QString& text) {
         seconds = seconds * 60 + value;
     }
     return seconds * 1000;
+}
+
+qint64 durationFromSecondsValue(const QJsonValue& value) {
+    bool ok = false;
+    qint64 seconds = 0;
+    if (value.isString()) {
+        seconds = value.toString().toLongLong(&ok);
+    } else if (value.isDouble()) {
+        seconds = static_cast<qint64>(value.toDouble());
+        ok = true;
+    }
+    return ok && seconds > 0 ? seconds * 1000 : 0;
 }
 
 QStringList splitDetailText(const QString& text) {
@@ -199,6 +219,47 @@ void collectTrackRenderers(const QJsonValue& value, QVector<OnlineTrackResult>& 
 
     for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
         collectTrackRenderers(it.value(), tracks);
+    }
+}
+
+std::optional<OnlineSuggestionResult> suggestionFromRenderer(const QJsonObject& renderer) {
+    const QString text = joinedRuns(renderer.value(QStringLiteral("suggestion")).toObject());
+    if (text.isEmpty()) {
+        return std::nullopt;
+    }
+    return OnlineSuggestionResult{
+        .provider = QString::fromLatin1(providerId),
+        .text = text,
+    };
+}
+
+void collectSuggestionRenderers(const QJsonValue& value, QVector<OnlineSuggestionResult>& suggestions) {
+    if (value.isArray()) {
+        const QJsonArray array = value.toArray();
+        for (const QJsonValue& child : array) {
+            collectSuggestionRenderers(child, suggestions);
+        }
+        return;
+    }
+
+    if (!value.isObject()) {
+        return;
+    }
+
+    const QJsonObject object = value.toObject();
+    if (object.contains(QStringLiteral("searchSuggestionRenderer"))) {
+        if (const auto suggestion = suggestionFromRenderer(object.value(QStringLiteral("searchSuggestionRenderer")).toObject())) {
+            const auto duplicate = std::find_if(suggestions.cbegin(), suggestions.cend(), [&suggestion](const OnlineSuggestionResult& existing) {
+                return existing.text.compare(suggestion->text, Qt::CaseInsensitive) == 0;
+            });
+            if (duplicate == suggestions.cend()) {
+                suggestions.push_back(*suggestion);
+            }
+        }
+    }
+
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        collectSuggestionRenderers(it.value(), suggestions);
     }
 }
 
@@ -381,6 +442,82 @@ void InnertubeProvider::searchTracks(const QString& query) {
     });
 }
 
+void InnertubeProvider::suggestTracks(const QString& query) {
+    const QString trimmedQuery = query.trimmed();
+    if (trimmedQuery.isEmpty()) {
+        emit suggestionsSucceeded(trimmedQuery, {});
+        return;
+    }
+
+    QNetworkRequest request = innertubeJsonRequest(QUrl(QStringLiteral("https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false&key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")));
+    const QJsonObject body{
+        {QStringLiteral("context"), searchContext()},
+        {QStringLiteral("input"), trimmedQuery},
+    };
+
+    QNetworkReply* reply = network_.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, trimmedQuery] {
+        const QByteArray payload = reply->readAll();
+        const bool networkFailed = reply->error() != QNetworkReply::NoError;
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (networkFailed || statusCode >= 400) {
+            emit suggestionsFailed(trimmedQuery, QStringLiteral("Suggestions unavailable. Try again."));
+            return;
+        }
+
+        const OnlineSuggestionsParseResult parsed = parseSearchSuggestions(payload);
+        if (!parsed.ok) {
+            emit suggestionsFailed(trimmedQuery, parsed.errorMessage);
+            return;
+        }
+
+        emit suggestionsSucceeded(trimmedQuery, parsed.suggestions);
+    });
+}
+
+void InnertubeProvider::fetchTrackMetadata(const QString& provider, const QString& providerTrackId) {
+    if (provider != name() || providerTrackId.trimmed().isEmpty()) {
+        emit metadataFailed(provider, providerTrackId, QStringLiteral("Metadata unavailable for this track."));
+        return;
+    }
+
+    QUrl watchUrl(QStringLiteral("https://www.youtube.com/watch"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("v"), providerTrackId.trimmed());
+    query.addQueryItem(QStringLiteral("bpctr"), QStringLiteral("9999999999"));
+    query.addQueryItem(QStringLiteral("has_verified"), QStringLiteral("1"));
+    watchUrl.setQuery(query);
+
+    QNetworkReply* reply = network_.get(youtubeWatchRequest(watchUrl));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, provider, providerTrackId] {
+        const QByteArray payload = reply->readAll();
+        const bool networkFailed = reply->error() != QNetworkReply::NoError;
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (networkFailed || statusCode >= 400) {
+            emit metadataFailed(provider, providerTrackId, QStringLiteral("Metadata unavailable for this track."));
+            return;
+        }
+
+        const YoutubeWebBootstrap bootstrap = parseWebBootstrap(payload);
+        if (!bootstrap.ok) {
+            emit metadataFailed(provider, providerTrackId, bootstrap.errorMessage);
+            return;
+        }
+
+        const OnlineTrackMetadataParseResult parsed = parseTrackMetadata(bootstrap.playerResponse, providerTrackId);
+        if (!parsed.ok) {
+            emit metadataFailed(provider, providerTrackId, parsed.errorMessage);
+            return;
+        }
+
+        emit metadataSucceeded(provider, providerTrackId, parsed.metadata);
+    });
+}
+
 void InnertubeProvider::resolveStream(const QString& provider, const QString& providerTrackId) {
     if (provider != name() || providerTrackId.trimmed().isEmpty()) {
         emit streamResolveFailed(provider, providerTrackId, QStringLiteral("Online playback unavailable for this track."));
@@ -462,6 +599,68 @@ OnlineSearchParseResult InnertubeProvider::parseTrackSearchResults(const QByteAr
     return {
         .ok = true,
         .tracks = tracks,
+    };
+}
+
+OnlineSuggestionsParseResult InnertubeProvider::parseSearchSuggestions(const QByteArray& payload) {
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {
+            .ok = false,
+            .errorMessage = QStringLiteral("Provider returned invalid suggestions data."),
+        };
+    }
+
+    QVector<OnlineSuggestionResult> suggestions;
+    collectSuggestionRenderers(document.object(), suggestions);
+    return {
+        .ok = true,
+        .suggestions = suggestions,
+    };
+}
+
+OnlineTrackMetadataParseResult InnertubeProvider::parseTrackMetadata(const QByteArray& payload, const QString& providerTrackId) {
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {
+            .ok = false,
+            .errorMessage = QStringLiteral("Provider returned invalid metadata data."),
+        };
+    }
+
+    const QJsonObject root = document.object();
+    const QJsonObject details = root.value(QStringLiteral("videoDetails")).toObject();
+    const QString trackId = details.value(QStringLiteral("videoId")).toString(providerTrackId);
+    const QString title = details.value(QStringLiteral("title")).toString();
+    if (trackId.isEmpty() || title.isEmpty()) {
+        return {
+            .ok = false,
+            .errorMessage = QStringLiteral("Metadata unavailable for this track."),
+        };
+    }
+
+    QString artworkUrl = lastThumbnailUrlFromObject(details.value(QStringLiteral("thumbnail")).toObject());
+    if (artworkUrl.isEmpty()) {
+        artworkUrl = lastThumbnailUrlFromObject(root.value(QStringLiteral("microformat"))
+                                                    .toObject()
+                                                    .value(QStringLiteral("playerMicroformatRenderer"))
+                                                    .toObject()
+                                                    .value(QStringLiteral("thumbnail"))
+                                                    .toObject());
+    }
+
+    return {
+        .ok = true,
+        .metadata = OnlineTrackMetadata{
+            .provider = QString::fromLatin1(providerId),
+            .providerTrackId = trackId,
+            .title = title,
+            .artist = details.value(QStringLiteral("author")).toString(),
+            .durationMs = durationFromSecondsValue(details.value(QStringLiteral("lengthSeconds"))),
+            .artworkUrl = artworkUrl,
+        },
     };
 }
 

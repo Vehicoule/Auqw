@@ -115,6 +115,64 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("ctest")), "iOS build should run source/package CTest where available");
     }
 
+    void androidRuntimeSmokeRequiresAttachedTargetEvidence() {
+        const QString script = readTextFile(projectSourcePath(u"ci/android-runtime-smoke.sh"));
+        const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
+
+        QVERIFY2(!script.isEmpty(), "ci/android-runtime-smoke.sh should be readable");
+        QVERIFY2(!docs.isEmpty(), "ci/platform-builds.md should be readable");
+
+        QVERIFY2(script.contains(QStringLiteral("AUQW_ANDROID_APK_PATH")),
+            "Android smoke should accept an already-built APK path");
+        QVERIFY2(script.contains(QStringLiteral("ci/android-build.sh")),
+            "Android smoke should build the APK when no APK path is provided");
+        QVERIFY2(script.contains(QStringLiteral("adb devices")),
+            "Android smoke should discover attached emulator/device targets");
+        QVERIFY2(script.contains(QStringLiteral("install -r")),
+            "Android smoke should install the APK before launch");
+        QVERIFY2(script.contains(QStringLiteral("am start")),
+            "Android smoke should launch the Qt activity");
+        QVERIFY2(script.contains(QStringLiteral("dumpsys media_session")),
+            "Android smoke should collect MediaSession runtime evidence");
+        QVERIFY2(script.contains(QStringLiteral("AuqwPlaybackService")),
+            "Android smoke should check the playback service evidence path");
+        QVERIFY2(script.contains(QStringLiteral("attach Android target")),
+            "Android smoke should fail clearly when no target is attached");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_ANDROID_SMOKE_SOURCE_ONLY")),
+            "Android smoke should support explicit source-only CI mode without claiming runtime pass");
+        QVERIFY2(docs.contains(QStringLiteral("ci/android-runtime-smoke.sh")),
+            "Platform docs should document the Android runtime smoke gate");
+    }
+
+    void iosRuntimeSmokeRequiresNativeHostTargetEvidence() {
+        const QString script = readTextFile(projectSourcePath(u"ci/ios-runtime-smoke.sh"));
+        const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
+
+        QVERIFY2(!script.isEmpty(), "ci/ios-runtime-smoke.sh should be readable");
+        QVERIFY2(!docs.isEmpty(), "ci/platform-builds.md should be readable");
+
+        QVERIFY2(script.contains(QStringLiteral("ci/ios-build.sh")),
+            "iOS smoke should build/validate the app when no app path is provided");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_IOS_APP_PATH")),
+            "iOS smoke should accept an already-built app bundle");
+        QVERIFY2(script.contains(QStringLiteral("xcrun simctl")),
+            "iOS smoke should use simctl for simulator/device launch evidence");
+        QVERIFY2(script.contains(QStringLiteral("booted")),
+            "iOS smoke should target a booted simulator/device");
+        QVERIFY2(script.contains(QStringLiteral("com.Vehicoule.auqw")),
+            "iOS smoke should launch the Auqw bundle id");
+        QVERIFY2(script.contains(QStringLiteral("AVFoundation")),
+            "iOS smoke should keep Apple framework linkage validation in the runtime gate");
+        QVERIFY2(script.contains(QStringLiteral("MediaPlayer")),
+            "iOS smoke should keep MediaPlayer linkage validation in the runtime gate");
+        QVERIFY2(script.contains(QStringLiteral("attach iOS target")),
+            "iOS smoke should fail clearly when no target is available");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_IOS_SMOKE_SOURCE_ONLY")),
+            "iOS smoke should support explicit source-only CI mode without claiming runtime pass");
+        QVERIFY2(docs.contains(QStringLiteral("ci/ios-runtime-smoke.sh")),
+            "Platform docs should document the iOS runtime smoke gate");
+    }
+
     void freebsdDocsAndRuntimeCheckMirrorSourceBuildFlow() {
         const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
         const QString runtimeCheck = readTextFile(projectSourcePath(u"ci/check-freebsd-runtime.sh"));

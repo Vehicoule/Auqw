@@ -191,6 +191,10 @@ CoreController::CoreController(
           QStringLiteral("duration_ms"),
           QStringLiteral("artwork_url"),
       })),
+      searchSuggestionsModel_(std::make_unique<JsonListModel>(QStringList{
+          QStringLiteral("provider"),
+          QStringLiteral("text"),
+      })),
       coreStatus_(QStringLiteral("Starting")),
       importStatus_(QStringLiteral("Import a folder")) {
     if (!playbackBackend_) {
@@ -265,6 +269,10 @@ QAbstractItemModel* CoreController::queueModel() const {
 
 QAbstractItemModel* CoreController::searchResultsModel() const {
     return searchResultsModel_.get();
+}
+
+QAbstractItemModel* CoreController::searchSuggestionsModel() const {
+    return searchSuggestionsModel_.get();
 }
 
 QString CoreController::themeSetting() const {
@@ -409,8 +417,10 @@ void CoreController::importLocalFolder(const QUrl& folderUrl) {
 void CoreController::searchOnline(const QString& query) {
     const QString trimmedQuery = query.trimmed();
     activeSearchQuery_ = trimmedQuery;
+    activeSuggestionQuery_.clear();
     if (trimmedQuery.isEmpty()) {
         applySearchResults({});
+        applySearchSuggestions({});
         setSearchState(QStringLiteral("Idle"), {});
         return;
     }
@@ -422,8 +432,36 @@ void CoreController::searchOnline(const QString& query) {
     }
 
     applySearchResults({});
+    applySearchSuggestions({});
     setSearchState(QStringLiteral("Searching"), {});
     onlineProvider_->searchTracks(trimmedQuery);
+}
+
+void CoreController::suggestOnline(const QString& query) {
+    const QString trimmedQuery = query.trimmed();
+    activeSuggestionQuery_ = trimmedQuery;
+    if (trimmedQuery.isEmpty()) {
+        applySearchSuggestions({});
+        return;
+    }
+
+    if (!onlineProvider_) {
+        applySearchSuggestions({});
+        return;
+    }
+
+    onlineProvider_->suggestTracks(trimmedQuery);
+}
+
+void CoreController::acceptSearchSuggestion(const QString& suggestion) {
+    const QString trimmedSuggestion = suggestion.trimmed();
+    activeSuggestionQuery_.clear();
+    applySearchSuggestions({});
+    if (trimmedSuggestion.isEmpty()) {
+        return;
+    }
+
+    searchOnline(trimmedSuggestion);
 }
 
 void CoreController::addSearchResultToQueue(const QString& resultId) {
@@ -941,6 +979,22 @@ void CoreController::configureOnlineProvider() {
         setSearchState(QStringLiteral("Error"), QStringLiteral("Search unavailable. Try again."));
     });
 
+    connect(onlineProvider_.get(), &OnlineProvider::suggestionsSucceeded, this, [this](const QString& query, const QVector<OnlineSuggestionResult>& suggestions) {
+        if (query != activeSuggestionQuery_) {
+            return;
+        }
+
+        applySearchSuggestions(suggestions);
+    });
+
+    connect(onlineProvider_.get(), &OnlineProvider::suggestionsFailed, this, [this](const QString& query, const QString&) {
+        if (query != activeSuggestionQuery_) {
+            return;
+        }
+
+        applySearchSuggestions({});
+    });
+
     connect(onlineProvider_.get(), &OnlineProvider::streamResolved, this, [this](
         const QString& provider,
         const QString& providerTrackId,
@@ -1042,6 +1096,22 @@ void CoreController::applySearchResults(const QVector<OnlineTrackResult>& result
     }
 
     searchResultsModel_->setItems(std::move(items));
+}
+
+void CoreController::applySearchSuggestions(const QVector<OnlineSuggestionResult>& suggestions) {
+    searchSuggestions_ = suggestions;
+
+    QVector<QVariantMap> items;
+    items.reserve(suggestions.size());
+    for (const OnlineSuggestionResult& suggestion : suggestions) {
+        QVariantMap item{
+            {QStringLiteral("provider"), suggestion.provider},
+            {QStringLiteral("text"), suggestion.text},
+        };
+        items.push_back(std::move(item));
+    }
+
+    searchSuggestionsModel_->setItems(std::move(items));
 }
 
 void CoreController::recordSearchHistory(const QString& query) {

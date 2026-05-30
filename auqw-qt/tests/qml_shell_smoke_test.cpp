@@ -105,7 +105,10 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("searchField")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("searchButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("searchStatusLabel")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("searchSuggestionsList")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("searchResultsList")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerArtworkImage")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerArtworkFallback")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPreviousButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayPauseButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniNextButton")) != nullptr);

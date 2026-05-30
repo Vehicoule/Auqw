@@ -191,6 +191,22 @@ public:
         emit searchSucceeded(query, nextResults);
     }
 
+    void suggestTracks(const QString& query) override {
+        ++suggestCalls;
+        lastSuggestQuery = query;
+        if (holdSuggestions) {
+            return;
+        }
+        emit suggestionsSucceeded(query, nextSuggestions);
+    }
+
+    void fetchTrackMetadata(const QString& provider, const QString& providerTrackId) override {
+        ++metadataCalls;
+        lastMetadataProvider = provider;
+        lastMetadataTrackId = providerTrackId;
+        emit metadataSucceeded(provider, providerTrackId, nextMetadata);
+    }
+
     void resolveStream(const QString& provider, const QString& providerTrackId) override {
         ++resolveCalls;
         lastResolveProvider = provider;
@@ -254,13 +270,25 @@ public:
         emit streamResolveFailed(provider, providerTrackId, QStringLiteral("direct stream unavailable"));
     }
 
+    void emitSuggestions(const QString& query) {
+        emit suggestionsSucceeded(query, nextSuggestions);
+    }
+
     int searchCalls = 0;
+    int suggestCalls = 0;
+    int metadataCalls = 0;
     int resolveCalls = 0;
     bool failNext = false;
+    bool holdSuggestions = false;
     QString lastQuery;
+    QString lastSuggestQuery;
+    QString lastMetadataProvider;
+    QString lastMetadataTrackId;
     QString lastResolveProvider;
     QString lastResolveTrackId;
     QVector<OnlineTrackResult> nextResults;
+    QVector<OnlineSuggestionResult> nextSuggestions;
+    OnlineTrackMetadata nextMetadata;
 };
 
 std::unique_ptr<CoreController> makeController(
@@ -358,6 +386,90 @@ private slots:
         QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Ready"));
         QCOMPARE(controller->property("searchErrorMessage").toString(), QString{});
         QCOMPARE(searchHistoryCountForQuery(controller->property("databasePath").toString(), QStringLiteral("stone")), 1);
+    }
+
+    void onlineSuggestionsPopulateModelAndAcceptedSuggestionRunsSearch() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextSuggestions = QVector<OnlineSuggestionResult>{
+            OnlineSuggestionResult{
+                .provider = QStringLiteral("ytmusic"),
+                .text = QStringLiteral("stone window"),
+            },
+        };
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* suggestions = qobject_cast<QAbstractItemModel*>(controller->property("searchSuggestionsModel").value<QObject*>());
+        QVERIFY(suggestions != nullptr);
+        const int providerRole = roleForName(suggestions, "provider");
+        const int textRole = roleForName(suggestions, "text");
+        QVERIFY(providerRole > 0);
+        QVERIFY(textRole > 0);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "suggestOnline",
+            Q_ARG(QString, QStringLiteral("sto"))));
+
+        QCOMPARE(provider->suggestCalls, 1);
+        QCOMPARE(provider->lastSuggestQuery, QStringLiteral("sto"));
+        QCOMPARE(suggestions->rowCount(), 1);
+        QCOMPARE(suggestions->data(suggestions->index(0, 0), providerRole).toString(), QStringLiteral("ytmusic"));
+        QCOMPARE(suggestions->data(suggestions->index(0, 0), textRole).toString(), QStringLiteral("stone window"));
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "acceptSearchSuggestion",
+            Q_ARG(QString, QStringLiteral("stone window"))));
+
+        QCOMPARE(suggestions->rowCount(), 0);
+        QCOMPARE(provider->searchCalls, 1);
+        QCOMPARE(provider->lastQuery, QStringLiteral("stone window"));
+        QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Ready"));
+    }
+
+    void acceptedSuggestionIgnoresStaleSuggestionReplies() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->holdSuggestions = true;
+        provider->nextSuggestions = QVector<OnlineSuggestionResult>{
+            OnlineSuggestionResult{
+                .provider = QStringLiteral("ytmusic"),
+                .text = QStringLiteral("stone window"),
+            },
+        };
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* suggestions = qobject_cast<QAbstractItemModel*>(controller->property("searchSuggestionsModel").value<QObject*>());
+        QVERIFY(suggestions != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "suggestOnline",
+            Q_ARG(QString, QStringLiteral("sto"))));
+        QVERIFY(QMetaObject::invokeMethod(
+            controller.get(),
+            "acceptSearchSuggestion",
+            Q_ARG(QString, QStringLiteral("stone window"))));
+
+        provider->emitSuggestions(QStringLiteral("sto"));
+
+        QCOMPARE(suggestions->rowCount(), 0);
+        QCOMPARE(provider->searchCalls, 1);
     }
 
     void addSearchResultUpsertsTrackAndQueuesIt() {

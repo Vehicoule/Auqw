@@ -357,7 +357,7 @@ Acceptance:
 
 ## 8. Milestone 4: Platform Playback
 
-Status: in progress. Desktop platform playback, Android MediaSession, Android foreground service, Android remote control routing, audio focus, and noisy-audio handling have landed on `main`. iOS AVAudioSession, AVPlayer backend, RemoteCommandCenter, Now Playing metadata, and interruption handling source wiring have landed. Android and iOS device/runtime smoke remain pending on attached platform targets.
+Status: in progress. Desktop platform playback, Android MediaSession, Android foreground service, Android remote control routing, audio focus, and noisy-audio handling have landed on `main`. iOS AVAudioSession, AVPlayer backend, RemoteCommandCenter, Now Playing metadata, and interruption handling source wiring have landed. Android and iOS smoke harnesses are planned/landing; device/runtime pass remains pending until attached platform target logs exist.
 
 Goal:
 
@@ -381,7 +381,7 @@ Android:
 - Remote MediaSession commands routed back into Qt/C++ controls. Landed on `main`.
 - Audio focus handling. Landed on `main`.
 - Bluetooth/headset disconnect handling through noisy-audio receiver. Landed on `main`.
-- Device/emulator smoke. Pending attached Android target.
+- Device/emulator smoke harness. Landing through `ci/android-runtime-smoke.sh`; runtime pass pending attached Android target.
 
 iOS:
 
@@ -390,7 +390,7 @@ iOS:
 - RemoteCommandCenter. Landed in source wiring.
 - Now Playing metadata. Landed in source wiring.
 - Interruption handling. Landed in source wiring.
-- Device/runtime smoke. Pending macOS/Xcode/Qt iOS kit.
+- Device/runtime smoke harness. Landing through `ci/ios-runtime-smoke.sh`; runtime pass pending macOS/Xcode/Qt iOS target.
 
 Acceptance:
 
@@ -417,9 +417,9 @@ Provider direction:
 Initial capabilities:
 
 - Search tracks. **Landed:** first C++/Qt InnerTube-style provider slice with normalized search results, fixture parser tests, and QML search state.
-- Suggestions.
-- Metadata.
-- Artwork.
+- Suggestions. **Landed:** normalized provider suggestions flow through `OnlineProvider`, `CoreController`, and QML suggestion UI.
+- Metadata. **Landed:** provider metadata contract and InnerTube player-response parser cover title, artist, duration, and artwork.
+- Artwork. **Landed:** search result artwork persists through normalized results and queue upsert; QML renders search artwork and mini-player artwork with fallback.
 - Stream resolution. **Landed:** queued provider tracks resolve direct anonymous InnerTube audio URLs through normalized Qt provider results.
 - Clean error reporting. **Current:** search and online playback failures use friendly UI/core messages; cipher-only streams fail without crashing.
 - Fixture-based parser tests.

@@ -113,6 +113,25 @@ Use a Qt Android kit for APK builds. Current container proves the Android SDK/ND
 ./ci/container-build.sh android-linux
 ```
 
+Runtime smoke requires an attached emulator/device in `adb device` state. The
+smoke builds the APK when `AUQW_ANDROID_APK_PATH` is not set, installs it,
+launches `com.Vehicoule.auqw.AuqwActivity`, validates the installed playback
+service declaration, and captures `dumpsys media_session` evidence.
+
+```bash
+./ci/android-runtime-smoke.sh
+```
+
+For source-only CI where no emulator/device is attached, use:
+
+```bash
+AUQW_ANDROID_SMOKE_SOURCE_ONLY=ON ./ci/android-runtime-smoke.sh
+```
+
+That mode validates the build artifact path only and does not claim runtime
+pass. Set `AUQW_ANDROID_REQUIRE_ACTIVE_MEDIA_SESSION=ON` after manually
+starting playback when active MediaSession evidence must be required.
+
 ## iOS
 
 Use a native macOS host with Xcode and a Qt iOS kit. Install shared command-line dependencies with:
@@ -135,6 +154,24 @@ configures the artifact build with `CMAKE_SYSTEM_NAME=iOS`, and validates
 `Info.plist`, `AVFoundation`, and `MediaPlayer` linkage when an `.app` bundle
 is produced. Runtime smoke on a physical device or simulator remains a separate
 step until an attached iOS target exists.
+
+Runtime smoke requires a booted iOS simulator on macOS/Xcode. The smoke builds
+the `.app` when `AUQW_IOS_APP_PATH` is not set, validates `Info.plist` plus
+`AVFoundation`/`MediaPlayer` linkage, installs the app through `xcrun simctl`,
+and launches bundle id `com.Vehicoule.auqw`.
+
+```bash
+./ci/ios-runtime-smoke.sh
+```
+
+For source-only CI where no simulator/device is attached, use:
+
+```bash
+AUQW_IOS_SMOKE_SOURCE_ONLY=ON ./ci/ios-runtime-smoke.sh
+```
+
+That mode validates the build artifact path only and does not claim runtime
+pass.
 
 ## FreeBSD
 

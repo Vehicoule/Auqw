@@ -164,30 +164,57 @@ ApplicationWindow {
         required property string title
         required property string artist
         required property string album
+        required property string artwork_url
         required property int duration_ms
 
         objectName: "searchResultDelegate"
         width: ListView.view.width
-        implicitHeight: root.compact ? 66 : 60
+        implicitHeight: root.compact ? 72 : 66
         enabled: result_id.length > 0
         onClicked: coreController.addSearchResultToQueue(result_id)
 
-        contentItem: ColumnLayout {
-            spacing: 2
+        contentItem: RowLayout {
+            spacing: 10
 
-            Label {
-                text: title.length > 0 ? title : "Untitled track"
-                font.weight: Font.Medium
-                elide: Text.ElideRight
-                Layout.fillWidth: true
+            Item {
+                Layout.preferredWidth: root.compact ? 46 : 50
+                Layout.preferredHeight: root.compact ? 46 : 50
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 6
+                    color: root.palette.mid
+                    visible: artwork_url.length === 0
+                }
+
+                Image {
+                    anchors.fill: parent
+                    source: artwork_url
+                    fillMode: Image.PreserveAspectCrop
+                    visible: artwork_url.length > 0
+                    asynchronous: true
+                    cache: true
+                }
             }
 
-            Label {
-                text: [artist, album, root.formatDuration(duration_ms)].filter(function(item) { return item.length > 0 }).join(" | ")
-                color: root.palette.placeholderText
-                elide: Text.ElideRight
-                visible: text.length > 0
+            ColumnLayout {
                 Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: title.length > 0 ? title : "Untitled track"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: [artist, album, root.formatDuration(duration_ms)].filter(function(item) { return item.length > 0 }).join(" | ")
+                    color: root.palette.placeholderText
+                    elide: Text.ElideRight
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                }
             }
         }
     }
@@ -369,6 +396,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     implicitHeight: root.density
                     inputMethodHints: Qt.ImhNoPredictiveText
+                    onTextEdited: coreController.suggestOnline(text)
                     onAccepted: coreController.searchOnline(text)
                 }
 
@@ -387,6 +415,26 @@ ApplicationWindow {
                 color: coreController.searchStatus === "Error" ? "#a63b2f" : root.palette.placeholderText
                 Layout.fillWidth: true
                 elide: Text.ElideRight
+            }
+
+            ListView {
+                id: searchSuggestionsList
+                objectName: "searchSuggestionsList"
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? Math.min(count * 38, 128) : 0
+                visible: count > 0
+                clip: true
+                model: coreController.searchSuggestionsModel
+                delegate: ItemDelegate {
+                    objectName: "searchSuggestionDelegate"
+                    width: ListView.view.width
+                    implicitHeight: 38
+                    text: model.text
+                    onClicked: {
+                        searchField.text = model.text
+                        coreController.acceptSearchSuggestion(model.text)
+                    }
+                }
             }
 
             Item {
@@ -673,16 +721,32 @@ ApplicationWindow {
                 anchors.fill: parent
                 spacing: root.pageGap
 
-                Rectangle {
+                Item {
                     Layout.preferredWidth: root.compact ? 44 : 48
                     Layout.preferredHeight: root.compact ? 44 : 48
-                    radius: 6
-                    color: root.palette.mid
 
-                    Label {
-                        anchors.centerIn: parent
-                        text: "A"
-                        font.weight: Font.Bold
+                    Image {
+                        objectName: "miniPlayerArtworkImage"
+                        anchors.fill: parent
+                        source: coreController.playbackArtworkUrl
+                        fillMode: Image.PreserveAspectCrop
+                        visible: coreController.playbackArtworkUrl.length > 0
+                        asynchronous: true
+                        cache: true
+                    }
+
+                    Rectangle {
+                        objectName: "miniPlayerArtworkFallback"
+                        anchors.fill: parent
+                        radius: 6
+                        color: root.palette.mid
+                        visible: coreController.playbackArtworkUrl.length === 0
+
+                        Label {
+                            anchors.centerIn: parent
+                            text: "A"
+                            font.weight: Font.Bold
+                        }
                     }
                 }
 

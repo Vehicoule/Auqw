@@ -30,6 +30,7 @@ class CoreController final : public QObject {
     Q_PROPERTY(QAbstractItemModel* playlistsModel READ playlistsModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* queueModel READ queueModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* searchResultsModel READ searchResultsModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* searchSuggestionsModel READ searchSuggestionsModel CONSTANT)
     Q_PROPERTY(QString themeSetting READ themeSetting NOTIFY themeSettingChanged)
     Q_PROPERTY(QString importStatus READ importStatus NOTIFY importStatusChanged)
     Q_PROPERTY(int importedTrackCount READ importedTrackCount NOTIFY importStatusChanged)
@@ -68,6 +69,7 @@ public:
     [[nodiscard]] QAbstractItemModel* playlistsModel() const;
     [[nodiscard]] QAbstractItemModel* queueModel() const;
     [[nodiscard]] QAbstractItemModel* searchResultsModel() const;
+    [[nodiscard]] QAbstractItemModel* searchSuggestionsModel() const;
     [[nodiscard]] QString themeSetting() const;
     [[nodiscard]] QString importStatus() const;
     [[nodiscard]] int importedTrackCount() const;
@@ -90,6 +92,8 @@ public:
     Q_INVOKABLE void setThemeSetting(const QString& value);
     Q_INVOKABLE void importLocalFolder(const QUrl& folderUrl);
     Q_INVOKABLE void searchOnline(const QString& query);
+    Q_INVOKABLE void suggestOnline(const QString& query);
+    Q_INVOKABLE void acceptSearchSuggestion(const QString& suggestion);
     Q_INVOKABLE void addSearchResultToQueue(const QString& resultId);
     Q_INVOKABLE void addTrackToQueue(const QString& trackId);
     Q_INVOKABLE void removeQueueItem(const QString& queueItemId);
@@ -135,6 +139,7 @@ private:
     void configureOnlineProvider();
     void setSearchState(const QString& status, const QString& errorMessage);
     void applySearchResults(const QVector<OnlineTrackResult>& results);
+    void applySearchSuggestions(const QVector<OnlineSuggestionResult>& suggestions);
     void recordSearchHistory(const QString& query);
     [[nodiscard]] std::optional<OnlineTrackResult> searchResultById(const QString& resultId) const;
     bool applyPlaybackObject(const QJsonObject& playback);
@@ -155,7 +160,9 @@ private:
     std::unique_ptr<JsonListModel> playlistsModel_;
     std::unique_ptr<JsonListModel> queueModel_;
     std::unique_ptr<JsonListModel> searchResultsModel_;
+    std::unique_ptr<JsonListModel> searchSuggestionsModel_;
     QVector<OnlineTrackResult> searchResults_;
+    QVector<OnlineSuggestionResult> searchSuggestions_;
     QString helloText_;
     QString appName_;
     QString appId_;
@@ -168,6 +175,7 @@ private:
     QString searchStatus_ = QStringLiteral("Idle");
     QString searchErrorMessage_;
     QString activeSearchQuery_;
+    QString activeSuggestionQuery_;
     QString playbackState_ = QStringLiteral("stopped");
     QString playbackQueueItemId_;
     QString playbackTrackId_;
