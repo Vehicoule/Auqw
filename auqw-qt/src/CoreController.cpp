@@ -5,15 +5,20 @@
 #include "YoutubeSabrAudioDevice.hpp"
 
 #include <QAbstractListModel>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QRandomGenerator>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QVariantMap>
 
@@ -132,6 +137,92 @@ bool isSupportedAudioFile(const QFileInfo& fileInfo) {
         || suffix == QStringLiteral("aif");
 }
 
+QString normalizedArtworkSuffix(QString suffix) {
+    suffix = suffix.toLower();
+    if (suffix == QStringLiteral("jpeg")) {
+        return QStringLiteral("jpg");
+    }
+    if (suffix == QStringLiteral("jpg")
+        || suffix == QStringLiteral("png")
+        || suffix == QStringLiteral("webp")
+        || suffix == QStringLiteral("gif")
+        || suffix == QStringLiteral("bmp")
+        || suffix == QStringLiteral("avif")
+        || suffix == QStringLiteral("heic")
+        || suffix == QStringLiteral("svg")) {
+        return suffix;
+    }
+    return QStringLiteral("img");
+}
+
+QString artworkSuffixFromUrl(const QUrl& url) {
+    return normalizedArtworkSuffix(QFileInfo(url.path()).suffix());
+}
+
+QString artworkSuffixFromContentType(const QString& contentType, const QString& fallback) {
+    const QString normalized = contentType.toLower();
+    if (normalized.contains(QStringLiteral("jpeg")) || normalized.contains(QStringLiteral("jpg"))) {
+        return QStringLiteral("jpg");
+    }
+    if (normalized.contains(QStringLiteral("png"))) {
+        return QStringLiteral("png");
+    }
+    if (normalized.contains(QStringLiteral("webp"))) {
+        return QStringLiteral("webp");
+    }
+    if (normalized.contains(QStringLiteral("gif"))) {
+        return QStringLiteral("gif");
+    }
+    if (normalized.contains(QStringLiteral("bmp"))) {
+        return QStringLiteral("bmp");
+    }
+    if (normalized.contains(QStringLiteral("avif"))) {
+        return QStringLiteral("avif");
+    }
+    if (normalized.contains(QStringLiteral("svg"))) {
+        return QStringLiteral("svg");
+    }
+    return normalizedArtworkSuffix(fallback);
+}
+
+QString artworkCacheRoot() {
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).filePath(QStringLiteral("artwork"));
+}
+
+QString artworkCachePathForSource(const QString& sourceUrl, const QString& suffix) {
+    const QByteArray digest = QCryptographicHash::hash(sourceUrl.toUtf8(), QCryptographicHash::Sha256).toHex();
+    return QDir(artworkCacheRoot()).filePath(QString::fromLatin1(digest.left(32)) + QLatin1Char('.') + normalizedArtworkSuffix(suffix));
+}
+
+bool ensureParentDirectory(const QString& path) {
+    return QDir().mkpath(QFileInfo(path).absolutePath());
+}
+
+bool replaceFileWithBytes(const QString& path, const QByteArray& bytes) {
+    if (bytes.isEmpty() || !ensureParentDirectory(path)) {
+        return false;
+    }
+
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+    if (file.write(bytes) != bytes.size()) {
+        return false;
+    }
+    return file.commit();
+}
+
+bool copyFileReplacing(const QString& sourcePath, const QString& cachePath) {
+    if (!ensureParentDirectory(cachePath)) {
+        return false;
+    }
+    if (QFileInfo::exists(cachePath)) {
+        QFile::remove(cachePath);
+    }
+    return QFile::copy(sourcePath, cachePath);
+}
+
 } // namespace
 
 CoreController::CoreController(QObject* parent)
@@ -157,6 +248,7 @@ CoreController::CoreController(
           QStringLiteral("album"),
           QStringLiteral("duration_ms"),
           QStringLiteral("artwork_url"),
+          QStringLiteral("metadata_cached_at"),
           QStringLiteral("created_at"),
           QStringLiteral("updated_at"),
       })),
@@ -180,6 +272,24 @@ CoreController::CoreController(
           QStringLiteral("duration_ms"),
           QStringLiteral("artwork_url"),
           QStringLiteral("local_path"),
+      })),
+      downloadsModel_(std::make_unique<JsonListModel>(QStringList{
+          QStringLiteral("id"),
+          QStringLiteral("download_id"),
+          QStringLiteral("track_id"),
+          QStringLiteral("state"),
+          QStringLiteral("progress"),
+          QStringLiteral("error_text"),
+          QStringLiteral("target_path"),
+          QStringLiteral("created_at"),
+          QStringLiteral("updated_at"),
+          QStringLiteral("provider"),
+          QStringLiteral("provider_track_id"),
+          QStringLiteral("title"),
+          QStringLiteral("artist"),
+          QStringLiteral("album"),
+          QStringLiteral("duration_ms"),
+          QStringLiteral("artwork_url"),
       })),
       searchResultsModel_(std::make_unique<JsonListModel>(QStringList{
           QStringLiteral("result_id"),
@@ -267,6 +377,10 @@ QAbstractItemModel* CoreController::queueModel() const {
     return queueModel_.get();
 }
 
+QAbstractItemModel* CoreController::downloadsModel() const {
+    return downloadsModel_.get();
+}
+
 QAbstractItemModel* CoreController::searchResultsModel() const {
     return searchResultsModel_.get();
 }
@@ -293,6 +407,14 @@ QString CoreController::searchStatus() const {
 
 QString CoreController::searchErrorMessage() const {
     return searchErrorMessage_;
+}
+
+QString CoreController::downloadStatus() const {
+    return downloadStatus_;
+}
+
+QString CoreController::downloadDirectory() const {
+    return downloadDirectory_;
 }
 
 QString CoreController::playbackState() const {
@@ -499,8 +621,55 @@ void CoreController::addSearchResultToQueue(const QString& resultId) {
     }
 
     const QString trackId = upsert.data.value(QStringLiteral("track")).toObject().value(QStringLiteral("id")).toString();
+    cacheArtworkForTrack(trackId, result->artworkUrl);
     addTrackToQueue(trackId);
     refreshTracksFromCore();
+}
+
+void CoreController::downloadSearchResult(const QString& resultId) {
+    const std::optional<OnlineTrackResult> result = searchResultById(resultId);
+    if (!result.has_value()) {
+        setDownloadStatus(QStringLiteral("Search result unavailable"));
+        return;
+    }
+
+    if (!downloadsSupportedForProvider(result->provider)) {
+        setDownloadStatus(QStringLiteral("Downloads unavailable for this provider."));
+        return;
+    }
+
+    QJsonObject params{
+        {QStringLiteral("provider"), result->provider},
+        {QStringLiteral("provider_track_id"), result->providerTrackId},
+        {QStringLiteral("title"), result->title},
+    };
+    if (!result->artist.isEmpty()) {
+        params.insert(QStringLiteral("artist"), result->artist);
+    }
+    if (!result->album.isEmpty()) {
+        params.insert(QStringLiteral("album"), result->album);
+    }
+    if (result->durationMs > 0) {
+        params.insert(QStringLiteral("duration_ms"), result->durationMs);
+    }
+    if (!result->artworkUrl.isEmpty()) {
+        params.insert(QStringLiteral("artwork_url"), result->artworkUrl);
+    }
+
+    const CommandResult upsert = invokeCommand(
+        QStringLiteral("tracks.upsert.download"),
+        QStringLiteral("tracks.upsert"),
+        params);
+    if (!upsert.ok) {
+        setDownloadStatus(upsert.error);
+        return;
+    }
+
+    const QString trackId = upsert.data.value(QStringLiteral("track")).toObject().value(QStringLiteral("id")).toString();
+    cacheArtworkForTrack(trackId, result->artworkUrl);
+    if (queueDownloadForTrack(trackId, result->provider, result->providerTrackId, result->title)) {
+        refreshTracksFromCore();
+    }
 }
 
 void CoreController::addTrackToQueue(const QString& trackId) {
@@ -522,6 +691,77 @@ void CoreController::addTrackToQueue(const QString& trackId) {
     if (refreshQueueFromCore()) {
         setCoreStatus(QStringLiteral("Ready"));
     }
+}
+
+void CoreController::downloadTrack(const QString& trackId) {
+    const QVariantMap track = trackById(trackId);
+    if (track.isEmpty()) {
+        setDownloadStatus(QStringLiteral("Track unavailable"));
+        return;
+    }
+
+    const QString provider = track.value(QStringLiteral("provider")).toString();
+    const QString providerTrackId = track.value(QStringLiteral("provider_track_id")).toString();
+    const QString title = track.value(QStringLiteral("title")).toString();
+    if (!downloadsSupportedForProvider(provider)) {
+        setDownloadStatus(QStringLiteral("Downloads unavailable for this provider."));
+        return;
+    }
+
+    queueDownloadForTrack(trackId, provider, providerTrackId, title);
+}
+
+void CoreController::removeDownload(const QString& downloadId) {
+    if (downloadId.isEmpty()) {
+        return;
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("downloads.remove"),
+        QStringLiteral("downloads.remove"),
+        QJsonObject{{QStringLiteral("id"), downloadId}});
+    if (!result.ok) {
+        setDownloadStatus(result.error);
+        return;
+    }
+
+    const QString targetPath = result.data.value(QStringLiteral("download")).toObject().value(QStringLiteral("target_path")).toString();
+    if (!targetPath.isEmpty() && QFileInfo::exists(targetPath)) {
+        QFile::remove(targetPath);
+    }
+
+    refreshDownloadsFromCore();
+    setDownloadStatus(QStringLiteral("Download removed"));
+}
+
+void CoreController::setDownloadDirectory(const QString& path) {
+    const QString trimmedPath = path.trimmed();
+    if (trimmedPath.isEmpty()) {
+        setDownloadStatus(QStringLiteral("Download folder unavailable"));
+        return;
+    }
+
+    QDir dir(trimmedPath);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        setDownloadStatus(QStringLiteral("Download folder unavailable"));
+        return;
+    }
+
+    const QString absolutePath = QFileInfo(dir.absolutePath()).absoluteFilePath();
+    const CommandResult result = invokeCommand(
+        QStringLiteral("settings.set.storage.download_dir"),
+        QStringLiteral("settings.set"),
+        QJsonObject{
+            {QStringLiteral("key"), QStringLiteral("storage.download_dir")},
+            {QStringLiteral("value"), absolutePath},
+        });
+    if (!result.ok) {
+        setDownloadStatus(result.error);
+        return;
+    }
+
+    setDownloadDirectoryFromCore(absolutePath);
+    setDownloadStatus(QStringLiteral("Download folder saved"));
 }
 
 void CoreController::removeQueueItem(const QString& queueItemId) {
@@ -843,6 +1083,10 @@ void CoreController::loadInitialState() {
         return;
     }
 
+    if (!refreshDownloadsFromCore()) {
+        return;
+    }
+
     if (!refreshPlaybackFromCore()) {
         return;
     }
@@ -862,6 +1106,17 @@ void CoreController::loadInitialState() {
 
     const QJsonObject setting = theme.data.value(QStringLiteral("setting")).toObject();
     setThemeSettingFromCore(setting.value(QStringLiteral("value")).toString());
+
+    const CommandResult storage = invokeCommand(
+        QStringLiteral("settings.get.storage.download_dir"),
+        QStringLiteral("settings.get"),
+        QJsonObject{{QStringLiteral("key"), QStringLiteral("storage.download_dir")}});
+    if (!storage.ok) {
+        setCoreStatus(storage.error);
+        return;
+    }
+    const QString storedDownloadDirectory = storage.data.value(QStringLiteral("setting")).toObject().value(QStringLiteral("value")).toString();
+    setDownloadDirectoryFromCore(storedDownloadDirectory.isEmpty() ? defaultDownloadDirectory() : storedDownloadDirectory);
     setCoreStatus(QStringLiteral("Ready"));
 }
 
@@ -875,6 +1130,19 @@ bool CoreController::refreshQueueFromCore() {
     }
 
     applyQueueItems(queue.data.value(QStringLiteral("items")).toArray());
+    return true;
+}
+
+bool CoreController::refreshDownloadsFromCore() {
+    const CommandResult downloads = invokeCommand(
+        QStringLiteral("downloads.list"),
+        QStringLiteral("downloads.list"));
+    if (!downloads.ok) {
+        setCoreStatus(downloads.error);
+        return false;
+    }
+
+    applyDownloads(downloads.data.value(QStringLiteral("downloads")).toArray());
     return true;
 }
 
@@ -946,6 +1214,24 @@ void CoreController::setImportResult(const QString& status, int importedTrackCou
     importStatus_ = status;
     importedTrackCount_ = importedTrackCount;
     emit importStatusChanged();
+}
+
+void CoreController::setDownloadStatus(const QString& status) {
+    if (downloadStatus_ == status) {
+        return;
+    }
+
+    downloadStatus_ = status;
+    emit downloadStateChanged();
+}
+
+void CoreController::setDownloadDirectoryFromCore(const QString& path) {
+    if (downloadDirectory_ == path) {
+        return;
+    }
+
+    downloadDirectory_ = path;
+    emit downloadDirectoryChanged();
 }
 
 void CoreController::configurePlaybackBackend() {
@@ -1138,6 +1424,162 @@ std::optional<OnlineTrackResult> CoreController::searchResultById(const QString&
     return std::nullopt;
 }
 
+QVariantMap CoreController::trackById(const QString& trackId) const {
+    if (trackId.isEmpty()) {
+        return {};
+    }
+
+    const int count = tracksModel_->rowCount();
+    for (int row = 0; row < count; ++row) {
+        const QVariantMap item = tracksModel_->itemAt(row);
+        if (item.value(QStringLiteral("id")).toString() == trackId) {
+            return item;
+        }
+    }
+    return {};
+}
+
+bool CoreController::downloadsSupportedForProvider(const QString& provider) const {
+    if (provider.isEmpty() || !onlineProvider_) {
+        return false;
+    }
+
+    return onlineProvider_->capabilities().downloads;
+}
+
+QString CoreController::defaultDownloadDirectory() const {
+    const QString music = QStandardPaths::writableLocation(QStandardPaths::MusicLocation);
+    if (!music.isEmpty()) {
+        return music;
+    }
+    const QString documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (!documents.isEmpty()) {
+        return documents;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+}
+
+QString CoreController::targetPathForDownload(const QString& title, const QString& providerTrackId) const {
+    QString baseName = title.trimmed();
+    if (baseName.isEmpty()) {
+        baseName = providerTrackId.trimmed();
+    }
+    if (baseName.isEmpty()) {
+        baseName = QStringLiteral("download");
+    }
+
+    for (QChar& ch : baseName) {
+        if (ch == QLatin1Char('/') || ch == QLatin1Char('\\') || ch == QLatin1Char(':')
+            || ch == QLatin1Char('*') || ch == QLatin1Char('?') || ch == QLatin1Char('"')
+            || ch == QLatin1Char('<') || ch == QLatin1Char('>') || ch == QLatin1Char('|')) {
+            ch = QLatin1Char('_');
+        }
+    }
+
+    const QString root = downloadDirectory_.isEmpty() ? defaultDownloadDirectory() : downloadDirectory_;
+    return QDir(root).filePath(baseName + QStringLiteral(".m4a"));
+}
+
+bool CoreController::queueDownloadForTrack(
+    const QString& trackId,
+    const QString& provider,
+    const QString& providerTrackId,
+    const QString& title) {
+    if (trackId.isEmpty()) {
+        setDownloadStatus(QStringLiteral("Track unavailable"));
+        return false;
+    }
+    if (!downloadsSupportedForProvider(provider)) {
+        setDownloadStatus(QStringLiteral("Downloads unavailable for this provider."));
+        return false;
+    }
+
+    const QString targetPath = targetPathForDownload(title, providerTrackId);
+    QDir().mkpath(QFileInfo(targetPath).absolutePath());
+    const CommandResult result = invokeCommand(
+        QStringLiteral("downloads.queue"),
+        QStringLiteral("downloads.queue"),
+        QJsonObject{
+            {QStringLiteral("track_id"), trackId},
+            {QStringLiteral("target_path"), targetPath},
+        });
+    if (!result.ok) {
+        setDownloadStatus(result.error);
+        return false;
+    }
+
+    refreshDownloadsFromCore();
+    setDownloadStatus(QStringLiteral("Download queued"));
+    return true;
+}
+
+void CoreController::cacheArtworkForTrack(const QString& trackId, const QString& sourceUrl) {
+    if (trackId.isEmpty() || sourceUrl.isEmpty()) {
+        return;
+    }
+
+    const QUrl url(sourceUrl);
+    if (!url.isValid()) {
+        return;
+    }
+
+    const QString suffix = artworkSuffixFromUrl(url);
+    if (url.isLocalFile()) {
+        const QString sourcePath = url.toLocalFile();
+        const QFileInfo sourceInfo(sourcePath);
+        if (!sourceInfo.exists() || !sourceInfo.isFile()) {
+            return;
+        }
+
+        const QString cachePath = artworkCachePathForSource(sourceUrl, sourceInfo.suffix());
+        if (!copyFileReplacing(sourcePath, cachePath)) {
+            return;
+        }
+        upsertArtworkCacheRecord(trackId, sourceUrl, cachePath);
+        return;
+    }
+
+    const QString scheme = url.scheme().toLower();
+    if (scheme != QStringLiteral("http") && scheme != QStringLiteral("https")) {
+        return;
+    }
+
+    QNetworkRequest request(url);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = artworkNetwork_.get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, trackId, sourceUrl, suffix] {
+        reply->deleteLater();
+
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool httpFailed = statusCode != 0 && (statusCode < 200 || statusCode >= 300);
+        if (reply->error() != QNetworkReply::NoError || httpFailed) {
+            return;
+        }
+
+        const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+        const QString cachePath = artworkCachePathForSource(sourceUrl, artworkSuffixFromContentType(contentType, suffix));
+        if (!replaceFileWithBytes(cachePath, reply->readAll())) {
+            return;
+        }
+
+        upsertArtworkCacheRecord(trackId, sourceUrl, cachePath);
+    });
+}
+
+void CoreController::upsertArtworkCacheRecord(const QString& trackId, const QString& sourceUrl, const QString& cachePath) {
+    const CommandResult result = invokeCommand(
+        QStringLiteral("cache.artwork.upsert"),
+        QStringLiteral("cache.artwork.upsert"),
+        QJsonObject{
+            {QStringLiteral("track_id"), trackId},
+            {QStringLiteral("source_url"), sourceUrl},
+            {QStringLiteral("cache_path"), cachePath},
+        });
+    if (!result.ok) {
+        QFile::remove(cachePath);
+    }
+}
+
 bool CoreController::applyPlaybackObject(const QJsonObject& playback) {
     const QString nextState = playback.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
     const QString nextQueueItemId = playback.value(QStringLiteral("queue_item_id")).toString();
@@ -1283,6 +1725,13 @@ void CoreController::applyQueueItems(const QJsonArray& items) {
     queueModel_->setItems(mapsWithAliasFromArray(
         items,
         QStringLiteral("queue_item_id"),
+        QStringLiteral("id")));
+}
+
+void CoreController::applyDownloads(const QJsonArray& downloads) {
+    downloadsModel_->setItems(mapsWithAliasFromArray(
+        downloads,
+        QStringLiteral("download_id"),
         QStringLiteral("id")));
 }
 

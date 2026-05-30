@@ -98,6 +98,13 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queuePanel")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueList")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueClearButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadsPage")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadsList")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadStatusLabel")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadRemoveSelectedButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("storageSettingsGroup")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadDirectoryField")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadDirectorySaveButton")) != nullptr);
         QVERIFY(findObjectByName(root, QStringLiteral("queueMoveUpButton")) != nullptr);
         QVERIFY(findObjectByName(root, QStringLiteral("queueMoveDownButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("importFolderButton")) != nullptr);
@@ -121,6 +128,7 @@ private slots:
         QObject* libraryTrackDelegate = nullptr;
         QTRY_VERIFY((libraryTrackDelegate = findObjectByName(root, QStringLiteral("libraryTrackDelegate"))) != nullptr);
         QVERIFY(libraryTrackDelegate->property("enabled").toBool());
+        QVERIFY(findObjectByName(root, QStringLiteral("libraryTrackDownloadButton")) != nullptr);
 
         QObject* queueTrackDelegate = nullptr;
         QTRY_VERIFY((queueTrackDelegate = findObjectByName(root, QStringLiteral("queueTrackDelegate"))) != nullptr);

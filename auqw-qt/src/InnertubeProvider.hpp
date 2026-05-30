@@ -11,6 +11,7 @@ public:
     explicit InnertubeProvider(QObject* parent = nullptr);
 
     [[nodiscard]] QString name() const override;
+    [[nodiscard]] OnlineProviderCapabilities capabilities() const override;
     void searchTracks(const QString& query) override;
     void suggestTracks(const QString& query) override;
     void fetchTrackMetadata(const QString& provider, const QString& providerTrackId) override;

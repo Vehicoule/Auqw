@@ -20,14 +20,15 @@ pub fn upsert(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
     const album = json.optionalString(params, "album");
     const duration_ms = json.optionalInt(params, "duration_ms") catch return error.InvalidJson;
     const artwork_url = json.optionalString(params, "artwork_url");
+    const metadata_cached_at = json.optionalString(params, "metadata_cached_at");
     const provider = json.optionalString(params, "provider");
     const provider_track_id = json.optionalString(params, "provider_track_id");
 
     var stmt = state.db.prepare(
         \\INSERT INTO tracks (
-        \\    id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, updated_at
+        \\    id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, metadata_cached_at, updated_at
         \\) VALUES (
-        \\    ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        \\    ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')), strftime('%Y-%m-%dT%H:%M:%SZ','now')
         \\)
         \\ON CONFLICT(id) DO UPDATE SET
         \\    provider = excluded.provider,
@@ -37,6 +38,7 @@ pub fn upsert(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
         \\    album = excluded.album,
         \\    duration_ms = excluded.duration_ms,
         \\    artwork_url = excluded.artwork_url,
+        \\    metadata_cached_at = excluded.metadata_cached_at,
         \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
     ) catch return error.Database;
     defer stmt.finalize();
@@ -49,6 +51,7 @@ pub fn upsert(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
     stmt.bindOptionalText(6, album) catch return error.Database;
     stmt.bindOptionalInt64(7, duration_ms) catch return error.Database;
     stmt.bindOptionalText(8, artwork_url) catch return error.Database;
+    stmt.bindOptionalText(9, metadata_cached_at) catch return error.Database;
     if ((stmt.step() catch return error.Database) != .done) return error.Database;
 
     const track = getTrackById(state, track_id) catch return error.Database;
@@ -98,7 +101,7 @@ pub fn localFilesUpsert(state: *AppState, id: []const u8, params: ObjectMap) err
 
 fn getTrackById(state: *AppState, id: []const u8) sqlite.DbError!models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, metadata_cached_at, created_at, updated_at
         \\FROM tracks
         \\WHERE id = ?
     );
@@ -110,7 +113,7 @@ fn getTrackById(state: *AppState, id: []const u8) sqlite.DbError!models.Track {
 
 fn listTracks(state: *AppState) sqlite.DbError![]models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, metadata_cached_at, created_at, updated_at
         \\FROM tracks
         \\ORDER BY title COLLATE NOCASE ASC, id ASC
     );
@@ -186,7 +189,7 @@ fn upsertLocalFile(
 
 fn getTrackByProviderIdentity(state: *AppState, provider: []const u8, provider_track_id: []const u8) sqlite.DbError!models.Track {
     var stmt = try state.db.prepare(
-        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, created_at, updated_at
+        \\SELECT id, provider, provider_track_id, title, artist, album, duration_ms, artwork_url, metadata_cached_at, created_at, updated_at
         \\FROM tracks
         \\WHERE provider = ? AND provider_track_id = ?
     );
@@ -215,8 +218,9 @@ fn trackFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.D
         .album = try stmt.columnOptionalText(allocator, 5),
         .duration_ms = stmt.columnOptionalInt64(6),
         .artwork_url = try stmt.columnOptionalText(allocator, 7),
-        .created_at = try stmt.columnText(allocator, 8),
-        .updated_at = try stmt.columnText(allocator, 9),
+        .metadata_cached_at = try stmt.columnOptionalText(allocator, 8),
+        .created_at = try stmt.columnText(allocator, 9),
+        .updated_at = try stmt.columnText(allocator, 10),
     };
 }
 

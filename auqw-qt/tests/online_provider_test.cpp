@@ -33,6 +33,7 @@ class OnlineProviderTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void innertubeCapabilitiesDisableDownloads();
     void parsesTrackShelfFixture();
     void parsesSearchSuggestionsFixture();
     void parsesTrackMetadataFixture();
@@ -53,6 +54,18 @@ private slots:
     void reportsMalformedUmpFrame();
     void streamBufferWaitsForBytesAndCancelWakesReader();
 };
+
+void OnlineProviderTest::innertubeCapabilitiesDisableDownloads() {
+        InnertubeProvider provider;
+
+        const OnlineProviderCapabilities capabilities = provider.capabilities();
+
+        QVERIFY(capabilities.search);
+        QVERIFY(capabilities.suggestions);
+        QVERIFY(capabilities.metadata);
+        QVERIFY(capabilities.playback);
+        QVERIFY(!capabilities.downloads);
+}
 
 void OnlineProviderTest::parsesTrackShelfFixture() {
         const QByteArray payload = R"json(

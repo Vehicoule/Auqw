@@ -402,6 +402,16 @@ QString InnertubeProvider::name() const {
     return QString::fromLatin1(providerId);
 }
 
+OnlineProviderCapabilities InnertubeProvider::capabilities() const {
+    return OnlineProviderCapabilities{
+        .search = true,
+        .suggestions = true,
+        .metadata = true,
+        .playback = true,
+        .downloads = false,
+    };
+}
+
 void InnertubeProvider::searchTracks(const QString& query) {
     const QString trimmedQuery = query.trimmed();
     if (trimmedQuery.isEmpty()) {

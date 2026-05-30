@@ -11,3 +11,7 @@ OnlineProvider::OnlineProvider(QObject* parent)
 }
 
 OnlineProvider::~OnlineProvider() = default;
+
+OnlineProviderCapabilities OnlineProvider::capabilities() const {
+    return {};
+}
