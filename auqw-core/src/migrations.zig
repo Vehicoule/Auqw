@@ -1,6 +1,7 @@
+const std = @import("std");
 const sqlite = @import("sqlite.zig");
 
-pub const latest_version: i64 = 3;
+pub const latest_version: i64 = 4;
 
 pub fn run(db: *sqlite.Database) sqlite.DbError!void {
     try db.exec(
@@ -35,6 +36,7 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\    album TEXT,
         \\    duration_ms INTEGER,
         \\    artwork_url TEXT,
+        \\    metadata_cached_at TEXT,
         \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
         \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         \\);
@@ -92,14 +94,28 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         \\);
         \\
+        \\CREATE INDEX IF NOT EXISTS idx_cached_artwork_track
+        \\ON cached_artwork(track_id);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_cached_artwork_source
+        \\ON cached_artwork(source_url);
+        \\
         \\CREATE TABLE IF NOT EXISTS downloads (
         \\    id TEXT PRIMARY KEY,
         \\    track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
         \\    state TEXT NOT NULL,
+        \\    progress INTEGER NOT NULL DEFAULT 0,
+        \\    error_text TEXT,
         \\    target_path TEXT,
         \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
         \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         \\);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_downloads_state
+        \\ON downloads(state, updated_at DESC);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_downloads_track
+        \\ON downloads(track_id);
         \\
         \\CREATE TABLE IF NOT EXISTS local_files (
         \\    id TEXT PRIMARY KEY,
@@ -142,6 +158,11 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\
         \\COMMIT;
     );
+
+    try ensureColumn(db, "tracks", "metadata_cached_at", "ALTER TABLE tracks ADD COLUMN metadata_cached_at TEXT");
+    try ensureColumn(db, "downloads", "progress", "ALTER TABLE downloads ADD COLUMN progress INTEGER NOT NULL DEFAULT 0");
+    try ensureColumn(db, "downloads", "error_text", "ALTER TABLE downloads ADD COLUMN error_text TEXT");
+    try db.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);");
 }
 
 pub fn currentVersion(db: *sqlite.Database) sqlite.DbError!i64 {
@@ -152,4 +173,21 @@ pub fn currentVersion(db: *sqlite.Database) sqlite.DbError!i64 {
         .row => stmt.columnOptionalInt64(0) orelse 0,
         .done => 0,
     };
+}
+
+fn ensureColumn(db: *sqlite.Database, table: []const u8, column: []const u8, alter_sql: []const u8) sqlite.DbError!void {
+    var sql_buf: [128]u8 = undefined;
+    const pragma_sql = std.fmt.bufPrint(&sql_buf, "PRAGMA table_info({s})", .{table}) catch return error.AllocationFailed;
+    var stmt = try db.prepare(pragma_sql);
+    defer stmt.finalize();
+
+    while ((try stmt.step()) == .row) {
+        const name = try stmt.columnText(std.heap.page_allocator, 1);
+        defer std.heap.page_allocator.free(name);
+        if (std.mem.eql(u8, name, column)) {
+            return;
+        }
+    }
+
+    try db.exec(alter_sql);
 }

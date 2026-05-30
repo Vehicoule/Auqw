@@ -175,10 +175,29 @@ int searchHistoryCountForQuery(const QString& databasePath, const QString& query
     return count;
 }
 
+QJsonArray artworkCacheRows(const QString& databasePath) {
+    auqw::InitOptions options;
+    options.dataDir = QFileInfo(databasePath).absolutePath().toStdString();
+    auqw::CoreBridge core(options);
+    const std::string response = core.invokeJson(R"({"id":"artwork","command":"cache.artwork.list","params":{}})");
+    const QJsonObject root = QJsonDocument::fromJson(QByteArray::fromStdString(response)).object();
+    return root.value(QStringLiteral("data")).toObject().value(QStringLiteral("artwork")).toArray();
+}
+
 class FakeOnlineProvider final : public OnlineProvider {
 public:
     QString name() const override {
         return QStringLiteral("fake");
+    }
+
+    OnlineProviderCapabilities capabilities() const override {
+        return OnlineProviderCapabilities{
+            .search = true,
+            .suggestions = true,
+            .metadata = true,
+            .playback = true,
+            .downloads = downloadsSupported,
+        };
     }
 
     void searchTracks(const QString& query) override {
@@ -278,6 +297,7 @@ public:
     int suggestCalls = 0;
     int metadataCalls = 0;
     int resolveCalls = 0;
+    bool downloadsSupported = false;
     bool failNext = false;
     bool holdSuggestions = false;
     QString lastQuery;
@@ -324,24 +344,29 @@ private slots:
         QCOMPARE(controller.property("appName").toString(), QStringLiteral("Auqw"));
         QCOMPARE(controller.property("appId").toString(), QStringLiteral("com.Vehicoule.auqw"));
         QVERIFY(controller.property("databasePath").toString().endsWith(QStringLiteral("auqw.sqlite3")));
-        QCOMPARE(controller.property("schemaVersion").toInt(), 3);
+        QCOMPARE(controller.property("schemaVersion").toInt(), 4);
         QCOMPARE(controller.property("coreStatus").toString(), QStringLiteral("Ready"));
         QCOMPARE(controller.property("helloText").toString(), QStringLiteral("Hello from Auqw Core"));
 
         auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
         auto* playlists = qobject_cast<QAbstractItemModel*>(controller.property("playlistsModel").value<QObject*>());
         auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller.property("downloadsModel").value<QObject*>());
         auto* searchResults = qobject_cast<QAbstractItemModel*>(controller.property("searchResultsModel").value<QObject*>());
         QVERIFY(tracks != nullptr);
         QVERIFY(playlists != nullptr);
         QVERIFY(queue != nullptr);
+        QVERIFY(downloads != nullptr);
         QVERIFY(searchResults != nullptr);
         QCOMPARE(tracks->rowCount(), 0);
         QCOMPARE(playlists->rowCount(), 0);
         QCOMPARE(queue->rowCount(), 0);
+        QCOMPARE(downloads->rowCount(), 0);
         QCOMPARE(searchResults->rowCount(), 0);
         QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Idle"));
         QCOMPARE(controller.property("searchErrorMessage").toString(), QString{});
+        QCOMPARE(controller.property("downloadStatus").toString(), QStringLiteral("Idle"));
+        QVERIFY(controller.property("downloadDirectory").toString().length() > 0);
     }
 
     void onlineSearchPopulatesResultsAndRecordsHistory() {
@@ -514,6 +539,144 @@ private slots:
         QCOMPARE(queue->data(queue->index(0, 0), queueProviderRole).toString(), QStringLiteral("ytmusic"));
         QCOMPARE(queue->data(queue->index(0, 0), queueProviderTrackIdRole).toString(), QStringLiteral("video-alpha"));
         QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Ready"));
+    }
+
+    void unsupportedProviderDownloadShowsFriendlyStatusAndDoesNotQueue() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = false;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        QCOMPARE(downloads->rowCount(), 0);
+        QCOMPARE(provider->metadataCalls, 0);
+        QCOMPARE(provider->resolveCalls, 0);
+        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Downloads unavailable for this provider."));
+    }
+
+    void downloadCapableProviderQueuesDownload() {
+        QTemporaryDir downloadDir;
+        QVERIFY(downloadDir.isValid());
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artist = QStringLiteral("Aster Band"),
+                .durationMs = 213000,
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setDownloadDirectory", Q_ARG(QString, downloadDir.path())));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+        QCOMPARE(downloads->rowCount(), 1);
+
+        const int stateRole = roleForName(downloads, "state");
+        const int progressRole = roleForName(downloads, "progress");
+        const int targetPathRole = roleForName(downloads, "target_path");
+        const int titleRole = roleForName(downloads, "title");
+        QVERIFY(stateRole > 0);
+        QVERIFY(progressRole > 0);
+        QVERIFY(targetPathRole > 0);
+        QVERIFY(titleRole > 0);
+        QCOMPARE(downloads->data(downloads->index(0, 0), stateRole).toString(), QStringLiteral("queued"));
+        QCOMPARE(downloads->data(downloads->index(0, 0), progressRole).toLongLong(), 0);
+        QVERIFY(downloads->data(downloads->index(0, 0), targetPathRole).toString().startsWith(downloadDir.path()));
+        QCOMPARE(downloads->data(downloads->index(0, 0), titleRole).toString(), QStringLiteral("Stone Window"));
+        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Download queued"));
+        QCOMPARE(provider->metadataCalls, 0);
+        QCOMPARE(provider->resolveCalls, 0);
+    }
+
+    void removeDownloadDeletesModelRowAndTargetFile() {
+        QTemporaryDir downloadDir;
+        QVERIFY(downloadDir.isValid());
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setDownloadDirectory", Q_ARG(QString, downloadDir.path())));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+        QCOMPARE(downloads->rowCount(), 1);
+        const int idRole = roleForName(downloads, "id");
+        const int targetPathRole = roleForName(downloads, "target_path");
+        QVERIFY(idRole > 0);
+        QVERIFY(targetPathRole > 0);
+        const QString downloadId = downloads->data(downloads->index(0, 0), idRole).toString();
+        const QString targetPath = downloads->data(downloads->index(0, 0), targetPathRole).toString();
+        QVERIFY(!downloadId.isEmpty());
+        QVERIFY(writeTestFile(targetPath));
+        QVERIFY(QFileInfo::exists(targetPath));
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "removeDownload", Q_ARG(QString, downloadId)));
+
+        QCOMPARE(downloads->rowCount(), 0);
+        QVERIFY(!QFileInfo::exists(targetPath));
+        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Download removed"));
+    }
+
+    void artworkCacheRecordsLocalCachePath() {
+        QTemporaryDir artworkDir;
+        QVERIFY(artworkDir.isValid());
+        const QString artworkSource = QDir(artworkDir.path()).filePath(QStringLiteral("cover.jpg"));
+        QVERIFY(writeTestFile(artworkSource));
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artworkUrl = QUrl::fromLocalFile(artworkSource).toString(),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "addSearchResultToQueue", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        const QJsonArray rows = artworkCacheRows(controller->property("databasePath").toString());
+        QCOMPARE(rows.size(), 1);
+        const QJsonObject artwork = rows.first().toObject();
+        QCOMPARE(artwork.value(QStringLiteral("source_url")).toString(), QUrl::fromLocalFile(artworkSource).toString());
+        const QString cachePath = artwork.value(QStringLiteral("cache_path")).toString();
+        QVERIFY(cachePath.contains(QStringLiteral("/artwork/")));
+        QVERIFY(QFileInfo::exists(cachePath));
     }
 
     void onlineSearchFailureShowsFriendlyErrorAndDoesNotQueue() {

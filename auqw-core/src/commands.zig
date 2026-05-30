@@ -2,7 +2,9 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const AppState = @import("state.zig").AppState;
 
+const cache = @import("commands/cache.zig");
 const core = @import("commands/core.zig");
+const downloads = @import("commands/downloads.zig");
 const json = @import("commands/json_helpers.zig");
 const library = @import("commands/library.zig");
 const playback = @import("commands/playback.zig");
@@ -24,6 +26,13 @@ pub fn invoke(state: *AppState, request_json: []const u8) errors.CoreError![]u8 
     const params = json.paramsObject(root) catch return error.InvalidJson;
 
     if (std.mem.eql(u8, command, "core.get_metadata")) return core.getMetadata(state, id);
+    if (std.mem.eql(u8, command, "cache.artwork.upsert")) return cache.artworkUpsert(state, id, params);
+    if (std.mem.eql(u8, command, "cache.artwork.list")) return cache.artworkList(state, id);
+    if (std.mem.eql(u8, command, "cache.artwork.remove")) return cache.artworkRemove(state, id, params);
+    if (std.mem.eql(u8, command, "downloads.queue")) return downloads.queueDownload(state, id, params);
+    if (std.mem.eql(u8, command, "downloads.list")) return downloads.list(state, id);
+    if (std.mem.eql(u8, command, "downloads.update")) return downloads.update(state, id, params);
+    if (std.mem.eql(u8, command, "downloads.remove")) return downloads.remove(state, id, params);
     if (std.mem.eql(u8, command, "tracks.upsert")) return tracks.upsert(state, id, params);
     if (std.mem.eql(u8, command, "tracks.list")) return tracks.list(state, id);
     if (std.mem.eql(u8, command, "local_files.upsert")) return tracks.localFilesUpsert(state, id, params);
@@ -95,7 +104,7 @@ test "metadata command contract includes schema version" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
 }
 
 test "queue command contract preserves moved order" {

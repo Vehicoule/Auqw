@@ -1,5 +1,6 @@
 const std = @import("std");
 const api = @import("api.zig");
+const sqlite = @import("sqlite.zig");
 
 const allocator = std.testing.allocator;
 const error_ok: c_int = 0;
@@ -59,10 +60,10 @@ test "core metadata reports app details and migrated schema" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
 }
 
-test "migrations are idempotent for file databases" {
+test "schema v4 migration is idempotent for existing v3 databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -78,6 +79,43 @@ test "migrations are idempotent for file databases" {
         .cache_dir = null,
     };
 
+    {
+        var db = try sqlite.Database.open(allocator, data_dir_buf[0..data_dir_len]);
+        defer db.close();
+        try db.exec(
+            \\CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+            \\INSERT INTO schema_migrations(version) VALUES (1), (2), (3);
+            \\CREATE TABLE tracks (
+            \\    id TEXT PRIMARY KEY,
+            \\    provider TEXT,
+            \\    provider_track_id TEXT,
+            \\    title TEXT NOT NULL,
+            \\    artist TEXT,
+            \\    album TEXT,
+            \\    duration_ms INTEGER,
+            \\    artwork_url TEXT,
+            \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            \\);
+            \\CREATE UNIQUE INDEX idx_tracks_provider_identity ON tracks(provider, provider_track_id) WHERE provider IS NOT NULL AND provider_track_id IS NOT NULL;
+            \\CREATE TABLE cached_artwork (
+            \\    id TEXT PRIMARY KEY,
+            \\    track_id TEXT REFERENCES tracks(id) ON DELETE CASCADE,
+            \\    source_url TEXT,
+            \\    cache_path TEXT NOT NULL,
+            \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            \\);
+            \\CREATE TABLE downloads (
+            \\    id TEXT PRIMARY KEY,
+            \\    track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
+            \\    state TEXT NOT NULL,
+            \\    target_path TEXT,
+            \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            \\    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            \\);
+        );
+    }
+
     var first: ?*api.AuqwCore = null;
     try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &first));
     api.auqw_core_destroy(first);
@@ -89,7 +127,16 @@ test "migrations are idempotent for file databases" {
     var response = try expectInvoke(second.?, "{\"id\":\"meta\",\"command\":\"core.get_metadata\",\"params\":{}}");
     defer response.deinit();
     const data = try expectOk(response, "meta");
-    try std.testing.expectEqual(@as(i64, 3), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
+
+    var track = try expectInvoke(second.?, "{\"id\":\"track\",\"command\":\"tracks.upsert\",\"params\":{\"id\":\"alpha\",\"provider\":\"fake\",\"provider_track_id\":\"alpha\",\"title\":\"Alpha\",\"metadata_cached_at\":\"2026-05-30T10:00:00Z\"}}");
+    defer track.deinit();
+    const track_object = (try expectOk(track, "track")).get("track").?.object;
+    try std.testing.expectEqualStrings("2026-05-30T10:00:00Z", track_object.get("metadata_cached_at").?.string);
+
+    var download = try expectInvoke(second.?, "{\"id\":\"download\",\"command\":\"downloads.queue\",\"params\":{\"track_id\":\"alpha\",\"target_path\":\"/tmp/alpha.m4a\"}}");
+    defer download.deinit();
+    _ = try expectOk(download, "download");
 }
 
 test "playback get starts stopped" {
@@ -315,6 +362,130 @@ test "local files upsert creates idempotent local track" {
     try std.testing.expectEqual(@as(usize, 1), tracks.len);
     try std.testing.expectEqualStrings(first_track_id, tracks[0].object.get("id").?.string);
     try std.testing.expectEqualStrings("Alpha Renamed", tracks[0].object.get("title").?.string);
+}
+
+test "artwork cache commands round trip" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var track_response = try expectInvoke(core.?, "{\"id\":\"track\",\"command\":\"tracks.upsert\",\"params\":{\"id\":\"track-alpha\",\"title\":\"Alpha\",\"artwork_url\":\"https://img.example/alpha.jpg\",\"metadata_cached_at\":\"2026-05-30T10:00:00Z\"}}");
+    defer track_response.deinit();
+    const track = (try expectOk(track_response, "track")).get("track").?.object;
+    try std.testing.expectEqualStrings("2026-05-30T10:00:00Z", track.get("metadata_cached_at").?.string);
+
+    var upsert = try expectInvoke(core.?, "{\"id\":\"art-upsert\",\"command\":\"cache.artwork.upsert\",\"params\":{\"track_id\":\"track-alpha\",\"source_url\":\"https://img.example/alpha.jpg\",\"cache_path\":\"/cache/artwork/alpha.jpg\"}}");
+    defer upsert.deinit();
+    const artwork = (try expectOk(upsert, "art-upsert")).get("artwork").?.object;
+    const artwork_id = artwork.get("id").?.string;
+    try std.testing.expect(artwork_id.len >= 32);
+    try std.testing.expectEqualStrings("track-alpha", artwork.get("track_id").?.string);
+    try std.testing.expectEqualStrings("https://img.example/alpha.jpg", artwork.get("source_url").?.string);
+    try std.testing.expectEqualStrings("/cache/artwork/alpha.jpg", artwork.get("cache_path").?.string);
+
+    var list = try expectInvoke(core.?, "{\"id\":\"art-list\",\"command\":\"cache.artwork.list\",\"params\":{}}");
+    defer list.deinit();
+    const listed = (try expectOk(list, "art-list")).get("artwork").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqualStrings(artwork_id, listed[0].object.get("id").?.string);
+
+    const remove_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"art-remove\",\"command\":\"cache.artwork.remove\",\"params\":{{\"id\":\"{s}\"}}}}", .{artwork_id}, 0);
+    defer allocator.free(remove_request);
+    var removed = try expectInvoke(core.?, remove_request);
+    defer removed.deinit();
+    const removed_artwork = (try expectOk(removed, "art-remove")).get("artwork").?.object;
+    try std.testing.expectEqualStrings("/cache/artwork/alpha.jpg", removed_artwork.get("cache_path").?.string);
+
+    var empty = try expectInvoke(core.?, "{\"id\":\"art-empty\",\"command\":\"cache.artwork.list\",\"params\":{}}");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try expectOk(empty, "art-empty")).get("artwork").?.array.items.len);
+}
+
+test "download commands cover M6 states" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var track_response = try expectInvoke(core.?, "{\"id\":\"track\",\"command\":\"tracks.upsert\",\"params\":{\"id\":\"track-alpha\",\"provider\":\"fake\",\"provider_track_id\":\"alpha\",\"title\":\"Alpha\"}}");
+    defer track_response.deinit();
+    _ = try expectOk(track_response, "track");
+
+    var queued = try expectInvoke(core.?, "{\"id\":\"download-queue\",\"command\":\"downloads.queue\",\"params\":{\"track_id\":\"track-alpha\",\"target_path\":\"/downloads/alpha.m4a\"}}");
+    defer queued.deinit();
+    var download = (try expectOk(queued, "download-queue")).get("download").?.object;
+    const download_id = download.get("id").?.string;
+    try std.testing.expect(download_id.len >= 32);
+    try std.testing.expectEqualStrings("queued", download.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 0), download.get("progress").?.integer);
+
+    const states = [_][]const u8{ "downloading", "paused", "completed", "failed", "canceled" };
+    for (states, 0..) |state_name, index| {
+        const progress: i64 = if (std.mem.eql(u8, state_name, "completed")) 100 else @intCast((index + 1) * 10);
+        const update_request = try std.fmt.allocPrintSentinel(
+            allocator,
+            "{{\"id\":\"download-update\",\"command\":\"downloads.update\",\"params\":{{\"id\":\"{s}\",\"state\":\"{s}\",\"progress\":{},\"error_text\":\"err-{s}\"}}}}",
+            .{ download_id, state_name, progress, state_name },
+            0,
+        );
+        defer allocator.free(update_request);
+        var updated = try expectInvoke(core.?, update_request);
+        defer updated.deinit();
+        download = (try expectOk(updated, "download-update")).get("download").?.object;
+        try std.testing.expectEqualStrings(state_name, download.get("state").?.string);
+        try std.testing.expectEqual(progress, download.get("progress").?.integer);
+        const expected_error = try std.fmt.allocPrint(allocator, "err-{s}", .{state_name});
+        defer allocator.free(expected_error);
+        try std.testing.expectEqualStrings(expected_error, download.get("error_text").?.string);
+    }
+
+    var list = try expectInvoke(core.?, "{\"id\":\"download-list\",\"command\":\"downloads.list\",\"params\":{}}");
+    defer list.deinit();
+    const listed = (try expectOk(list, "download-list")).get("downloads").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqualStrings(download_id, listed[0].object.get("id").?.string);
+
+    const remove_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"download-remove\",\"command\":\"downloads.remove\",\"params\":{{\"id\":\"{s}\"}}}}", .{download_id}, 0);
+    defer allocator.free(remove_request);
+    var removed = try expectInvoke(core.?, remove_request);
+    defer removed.deinit();
+    const removed_download = (try expectOk(removed, "download-remove")).get("download").?.object;
+    try std.testing.expectEqualStrings("/downloads/alpha.m4a", removed_download.get("target_path").?.string);
+
+    var empty = try expectInvoke(core.?, "{\"id\":\"download-empty\",\"command\":\"downloads.list\",\"params\":{}}");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try expectOk(empty, "download-empty")).get("downloads").?.array.items.len);
+}
+
+test "storage download directory setting persists across reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var data_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const data_dir_len = try tmp.dir.realPath(std.testing.io, &data_dir_buf);
+    const data_dir_z = try allocator.dupeZ(u8, data_dir_buf[0..data_dir_len]);
+    defer allocator.free(data_dir_z);
+
+    const options = api.AuqwInitOptions{
+        .app_id = "com.Vehicoule.auqw",
+        .app_name = "Auqw",
+        .data_dir = data_dir_z.ptr,
+        .cache_dir = null,
+    };
+
+    var first: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &first));
+    var set = try expectInvoke(first.?, "{\"id\":\"storage-set\",\"command\":\"settings.set\",\"params\":{\"key\":\"storage.download_dir\",\"value\":\"/downloads/music\"}}");
+    defer set.deinit();
+    try std.testing.expectEqualStrings("/downloads/music", (try expectOk(set, "storage-set")).get("setting").?.object.get("value").?.string);
+    api.auqw_core_destroy(first);
+
+    var second: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(&options, &second));
+    defer api.auqw_core_destroy(second);
+
+    var get = try expectInvoke(second.?, "{\"id\":\"storage-get\",\"command\":\"settings.get\",\"params\":{\"key\":\"storage.download_dir\"}}");
+    defer get.deinit();
+    try std.testing.expectEqualStrings("/downloads/music", (try expectOk(get, "storage-get")).get("setting").?.object.get("value").?.string);
 }
 
 test "queue commands append duplicate local tracks and return joined items" {

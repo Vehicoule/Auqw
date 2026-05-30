@@ -83,6 +83,14 @@ struct OnlineStreamResolveResult {
     QString errorMessage;
 };
 
+struct OnlineProviderCapabilities {
+    bool search = false;
+    bool suggestions = false;
+    bool metadata = false;
+    bool playback = false;
+    bool downloads = false;
+};
+
 class OnlineProvider : public QObject {
     Q_OBJECT
 
@@ -91,6 +99,7 @@ public:
     ~OnlineProvider() override;
 
     [[nodiscard]] virtual QString name() const = 0;
+    [[nodiscard]] virtual OnlineProviderCapabilities capabilities() const;
     virtual void searchTracks(const QString& query) = 0;
     virtual void suggestTracks(const QString& query) = 0;
     virtual void fetchTrackMetadata(const QString& provider, const QString& providerTrackId) = 0;

@@ -10,6 +10,7 @@ pub const Track = struct {
     album: ?[]const u8 = null,
     duration_ms: ?i64 = null,
     artwork_url: ?[]const u8 = null,
+    metadata_cached_at: ?[]const u8 = null,
     created_at: []const u8,
     updated_at: []const u8,
 
@@ -21,8 +22,59 @@ pub const Track = struct {
         if (self.artist) |value| allocator.free(value);
         if (self.album) |value| allocator.free(value);
         if (self.artwork_url) |value| allocator.free(value);
+        if (self.metadata_cached_at) |value| allocator.free(value);
         allocator.free(self.created_at);
         allocator.free(self.updated_at);
+    }
+};
+
+pub const CachedArtwork = struct {
+    id: []const u8,
+    track_id: ?[]const u8 = null,
+    source_url: ?[]const u8 = null,
+    cache_path: []const u8,
+    updated_at: []const u8,
+
+    pub fn deinit(self: CachedArtwork, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        if (self.track_id) |value| allocator.free(value);
+        if (self.source_url) |value| allocator.free(value);
+        allocator.free(self.cache_path);
+        allocator.free(self.updated_at);
+    }
+};
+
+pub const Download = struct {
+    id: []const u8,
+    track_id: ?[]const u8 = null,
+    state: []const u8,
+    progress: i64,
+    error_text: ?[]const u8 = null,
+    target_path: ?[]const u8 = null,
+    created_at: []const u8,
+    updated_at: []const u8,
+    provider: ?[]const u8 = null,
+    provider_track_id: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+    album: ?[]const u8 = null,
+    duration_ms: ?i64 = null,
+    artwork_url: ?[]const u8 = null,
+
+    pub fn deinit(self: Download, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        if (self.track_id) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.error_text) |value| allocator.free(value);
+        if (self.target_path) |value| allocator.free(value);
+        allocator.free(self.created_at);
+        allocator.free(self.updated_at);
+        if (self.provider) |value| allocator.free(value);
+        if (self.provider_track_id) |value| allocator.free(value);
+        if (self.title) |value| allocator.free(value);
+        if (self.artist) |value| allocator.free(value);
+        if (self.album) |value| allocator.free(value);
+        if (self.artwork_url) |value| allocator.free(value);
     }
 };
 

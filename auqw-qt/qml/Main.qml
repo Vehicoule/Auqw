@@ -27,6 +27,7 @@ ApplicationWindow {
     readonly property var themeOptions: ["system", "light", "dark"]
 
     property int currentPageIndex: 0
+    property string selectedDownloadId: ""
 
     function goTo(index) {
         currentPageIndex = index
@@ -139,22 +140,35 @@ ApplicationWindow {
         enabled: track_id.length > 0
         onClicked: coreController.addTrackToQueue(track_id)
 
-        contentItem: ColumnLayout {
-            spacing: 2
+        contentItem: RowLayout {
+            spacing: 10
 
-            Label {
-                text: title.length > 0 ? title : "Untitled track"
-                font.weight: Font.Medium
-                elide: Text.ElideRight
+            ColumnLayout {
                 Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: title.length > 0 ? title : "Untitled track"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
+                    color: root.palette.placeholderText
+                    elide: Text.ElideRight
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                }
             }
 
-            Label {
-                text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                color: root.palette.placeholderText
-                elide: Text.ElideRight
-                visible: text.length > 0
-                Layout.fillWidth: true
+            Button {
+                objectName: "libraryTrackDownloadButton"
+                text: "Download"
+                enabled: track_id.length > 0
+                implicitHeight: Math.max(36, root.density - 8)
+                onClicked: coreController.downloadTrack(track_id)
             }
         }
     }
@@ -215,6 +229,69 @@ ApplicationWindow {
                     visible: text.length > 0
                     Layout.fillWidth: true
                 }
+            }
+
+            Button {
+                objectName: "searchResultDownloadButton"
+                text: "Download"
+                enabled: result_id.length > 0
+                implicitHeight: Math.max(36, root.density - 8)
+                onClicked: coreController.downloadSearchResult(result_id)
+            }
+        }
+    }
+
+    component DownloadDelegate: ItemDelegate {
+        required property string download_id
+        required property string title
+        required property string state
+        required property int progress
+        required property string error_text
+        required property string target_path
+
+        objectName: "downloadDelegate"
+        width: ListView.view.width
+        implicitHeight: root.compact ? 78 : 70
+        enabled: download_id.length > 0
+        onClicked: root.selectedDownloadId = download_id
+
+        contentItem: RowLayout {
+            spacing: 10
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: title.length > 0 ? title : "Untitled track"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: state + " | " + progress + "%"
+                    color: error_text.length > 0 ? "#a63b2f" : root.palette.placeholderText
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: error_text.length > 0 ? error_text : target_path
+                    color: root.palette.placeholderText
+                    font.pixelSize: 11
+                    elide: Text.ElideMiddle
+                    visible: text.length > 0 && !root.compact
+                    Layout.fillWidth: true
+                }
+            }
+
+            Button {
+                objectName: "downloadRemoveButton"
+                text: "Remove"
+                enabled: download_id.length > 0
+                implicitHeight: Math.max(36, root.density - 8)
+                onClicked: coreController.removeDownload(download_id)
             }
         }
     }
@@ -545,6 +622,62 @@ ApplicationWindow {
         }
     }
 
+    component DownloadsPage: SectionFrame {
+        objectName: "downloadsPage"
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: root.pageGap
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: root.pageGap
+
+                PageHeader {
+                    title: "Downloads"
+                    detail: downloadsList.count + " items"
+                }
+
+                Button {
+                    objectName: "downloadRemoveSelectedButton"
+                    text: "Remove"
+                    enabled: root.selectedDownloadId.length > 0
+                    implicitHeight: root.density
+                    onClicked: coreController.removeDownload(root.selectedDownloadId)
+                }
+            }
+
+            Label {
+                objectName: "downloadStatusLabel"
+                text: coreController.downloadStatus
+                color: coreController.downloadStatus.indexOf("unavailable") >= 0 ? "#a63b2f" : root.palette.placeholderText
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                ListView {
+                    id: downloadsList
+                    objectName: "downloadsList"
+                    anchors.fill: parent
+                    clip: true
+                    model: coreController.downloadsModel
+                    delegate: DownloadDelegate {}
+                }
+
+                EmptyState {
+                    anchors.fill: parent
+                    title: "No downloads"
+                    detail: "Download state is empty"
+                    visible: downloadsList.count === 0
+                }
+            }
+        }
+    }
+
     component SettingsPage: SectionFrame {
         objectName: "settingsPage"
 
@@ -581,6 +714,45 @@ ApplicationWindow {
                         color: root.palette.placeholderText
                         Layout.fillWidth: true
                         elide: Text.ElideRight
+                    }
+                }
+            }
+
+            GroupBox {
+                objectName: "storageSettingsGroup"
+                title: "Storage"
+                Layout.fillWidth: true
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 10
+
+                    TextField {
+                        id: downloadDirectoryField
+                        objectName: "downloadDirectoryField"
+                        text: coreController.downloadDirectory
+                        placeholderText: "Download folder"
+                        Layout.fillWidth: true
+                        implicitHeight: root.density
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: root.pageGap
+
+                        Button {
+                            objectName: "downloadDirectorySaveButton"
+                            text: "Save"
+                            implicitHeight: root.density
+                            onClicked: coreController.setDownloadDirectory(downloadDirectoryField.text)
+                        }
+
+                        Label {
+                            text: coreController.downloadStatus
+                            color: root.palette.placeholderText
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
                     }
                 }
             }
@@ -668,13 +840,18 @@ ApplicationWindow {
                         pageIndex: 2
                     }
 
+                    NavButton {
+                        text: "Downloads"
+                        pageIndex: 3
+                    }
+
                     Item {
                         Layout.fillHeight: true
                     }
 
                     NavButton {
                         text: "Settings"
-                        pageIndex: 4
+                        pageIndex: 5
                     }
                 }
             }
@@ -689,6 +866,7 @@ ApplicationWindow {
                 LibraryPage {}
                 SearchPage {}
                 PlaylistsPage {}
+                DownloadsPage {}
                 QueuePage {}
                 SettingsPage {}
             }
@@ -861,6 +1039,11 @@ ApplicationWindow {
 
             TabButton {
                 text: "Lists"
+                implicitHeight: root.density
+            }
+
+            TabButton {
+                text: "Down"
                 implicitHeight: root.density
             }
 
