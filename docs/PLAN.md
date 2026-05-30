@@ -134,7 +134,7 @@ Qt6QmlConfig.cmake
 Fix on current Ubuntu/WSL environment:
 
 ```bash
-sudo apt install qt6-declarative-dev qml6-module-qtquick-window qml6-module-qtquick-controls
+sudo apt install qt6-declarative-dev qt6-multimedia-dev qml6-module-qtquick-window qml6-module-qtquick-controls qml6-module-qtmultimedia
 ```
 
 Then run:
@@ -444,6 +444,12 @@ Acceptance:
 - Provider failure shows non-scary UI state. **Current:** provider failures surface as `Search unavailable. Try again.`
 - Same provider code path works on desktop and mobile build targets.
 
+Immediate live smoke status (2026-05-30):
+
+- Resolver soak passed against all default anonymous queries with `stream=headered_direct_url` and `status=first_audio_bytes`.
+- Playback soak passed against all default anonymous queries with `stream=headered_direct_url`, `status=first_audio_bytes`, and `status=playback_progress`.
+- Current direct/headered path is enough for the tested desktop live playback slice; no `sabr` stream or failure marker was observed.
+
 ## 10. Milestone 6: Cache And Downloads
 
 Goal:
@@ -549,25 +555,33 @@ Testing:
 
 ## 13. Immediate Next Actions
 
-1. Keep local and container verification green:
+1. Keep local verification green:
 
 ```bash
 AUQW_BUILD_QT=OFF ./ci/build-local.sh
-AUQW_BUILD_QT=ON ./ci/build-local.sh
+AUQW_REQUIRE_QT_MULTIMEDIA=ON AUQW_BUILD_QT=ON ./ci/build-local.sh
+./ci/live-playback-soak.sh --runs 1 --max-results 3
+./ci/live-playback-soak.sh --playback --runs 1 --max-results 3 --min-position-ms 1000 --playback-window-ms 7000
+```
+
+2. Verify reproducible container builds:
+
+```bash
 ./ci/container-build.sh android-linux
 ./ci/container-build.sh linux-flatpak
 ```
 
-2. Verify iOS platform playback on macOS when host is available:
+3. Plan Milestone 6 cache/download work.
+
+4. Verify iOS platform playback on macOS when host is available:
 
 ```bash
 brew bundle --file containers/ios/Brewfile
 ./ci/ios-build.sh
 ```
 
-3. Continue Milestone 5 online provider spike:
+5. Keep online provider constraints in force:
 
-- Run a real desktop playback smoke against live provider data and record whether direct URLs are enough.
 - If live streams are cipher-only, plan a separate signature/cipher handling slice.
 - Keep provider code in C++/Qt first.
 - Keep normalized results out of QML/provider-specific shapes.

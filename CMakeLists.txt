@@ -9,13 +9,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 option(AUQW_BUILD_QT "Build the Qt/QML shell" ON)
+option(AUQW_REQUIRE_QT_MULTIMEDIA "Require Qt Multimedia when building the Qt/QML shell" OFF)
 set(AUQW_CORE_LIB "" CACHE FILEPATH "Path to the Zig-built Auqw core static library")
 
 add_subdirectory(auqw-bridge)
 
 if(AUQW_BUILD_QT)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network Qml Quick QuickControls2 QuickDialogs2 QuickLayouts)
-    if(ANDROID)
+    if(ANDROID OR AUQW_REQUIRE_QT_MULTIMEDIA)
         find_package(Qt6 6.5 REQUIRED COMPONENTS Multimedia)
     else()
         find_package(Qt6 6.5 QUIET COMPONENTS Multimedia)

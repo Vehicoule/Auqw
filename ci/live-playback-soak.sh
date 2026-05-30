@@ -89,8 +89,27 @@ for value_name in runs max_results timeout_ms min_position_ms playback_window_ms
   fi
 done
 
+build_smoke() {
+  if [[ "$playback" -eq 1 ]]; then
+    AUQW_BUILD_QT=ON AUQW_REQUIRE_QT_MULTIMEDIA=ON AUQW_BUILD_DIR="$build_dir" "$root/ci/build-local.sh"
+  else
+    AUQW_BUILD_QT=ON AUQW_BUILD_DIR="$build_dir" "$root/ci/build-local.sh"
+  fi
+}
+
+smoke_has_linux_multimedia() {
+  if ! command -v ldd >/dev/null 2>&1; then
+    echo "ldd is required to verify Qt Multimedia linkage for playback smoke" >&2
+    exit 127
+  fi
+
+  ldd "$smoke_bin" | awk '$1 == "libQt6Multimedia.so.6" { found = 1 } END { exit found ? 0 : 1 }'
+}
+
 if [[ ! -x "$smoke_bin" ]]; then
-  AUQW_BUILD_QT=ON AUQW_BUILD_DIR="$build_dir" "$root/ci/build-local.sh"
+  build_smoke
+elif [[ "$playback" -eq 1 && "$(uname -s)" == "Linux" ]] && ! smoke_has_linux_multimedia; then
+  build_smoke
 fi
 
 failures=0

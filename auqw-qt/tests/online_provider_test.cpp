@@ -38,6 +38,7 @@ private slots:
     void reportsInvalidJsonAsFriendlyError();
     void liveSmokeExposesSoakControls();
     void livePlaybackSoakScriptDrivesManualMatrix();
+    void livePlaybackSoakRequiresMultimediaForPlayback();
     void playbackClientProfilesPreferAndroidVr();
     void parsesAndroidVrDirectAudioStreamFixture();
     void parsesDirectAudioStreamFixture();
@@ -225,6 +226,18 @@ void OnlineProviderTest::livePlaybackSoakScriptDrivesManualMatrix() {
             "soak script should include release-relevant default queries");
         QVERIFY2(script.contains(QStringLiteral("blinding lights")),
             "soak script should include multiple default query shapes");
+}
+
+void OnlineProviderTest::livePlaybackSoakRequiresMultimediaForPlayback() {
+        const QString script = readTextFile(u"ci/live-playback-soak.sh");
+
+        QVERIFY2(!script.isEmpty(), "manual live playback soak script should be readable");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")),
+            "playback soak should force a multimedia-required build");
+        QVERIFY2(script.contains(QStringLiteral("ldd \"$smoke_bin\"")),
+            "playback soak should inspect the existing smoke binary linkage on Linux");
+        QVERIFY2(script.contains(QStringLiteral("libQt6Multimedia.so.6")),
+            "playback soak should reject non-multimedia Linux smoke binaries");
 }
 
 void OnlineProviderTest::playbackClientProfilesPreferAndroidVr() {

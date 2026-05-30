@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 zig_bin="${ZIG:-zig}"
 build_qt="${AUQW_BUILD_QT:-OFF}"
+require_qt_multimedia="${AUQW_REQUIRE_QT_MULTIMEDIA:-OFF}"
 build_dir="${AUQW_BUILD_DIR:-$root/build/local}"
 
 zig_cache="${AUQW_ZIG_CACHE_DIR:-/tmp/auqw-zig-cache}"
@@ -19,6 +20,7 @@ core_lib="$root/auqw-core/zig-out/lib/libauqw_core.a"
 
 cmake -S "$root" -B "$build_dir" -GNinja \
   -DAUQW_BUILD_QT="$build_qt" \
+  -DAUQW_REQUIRE_QT_MULTIMEDIA="$require_qt_multimedia" \
   -DAUQW_CORE_LIB="$core_lib"
 
 cmake --build "$build_dir"
