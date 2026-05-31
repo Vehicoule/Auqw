@@ -1,10 +1,14 @@
 #include "../src/InnertubeProvider.hpp"
+#include "../src/YoutubeHttpAudioDevice.hpp"
 #include "../src/YoutubePlaybackResolver.hpp"
 #include "../src/YoutubeStreamBuffer.hpp"
 #include "../src/YoutubeUmpParser.hpp"
 
 #include <QFile>
+#include <QSignalSpy>
 #include <QStringView>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTest>
 #include <QUrl>
 
@@ -53,6 +57,7 @@ private slots:
     void parsesUmpDirectiveParts();
     void reportsMalformedUmpFrame();
     void streamBufferWaitsForBytesAndCancelWakesReader();
+    void httpAudioDeviceResumesAfterShortNetworkReply();
 };
 
 void OnlineProviderTest::innertubeCapabilitiesEnableDownloads() {
@@ -288,6 +293,8 @@ void OnlineProviderTest::liveSmokeExposesSoakControls() {
             "live smoke should log which search result attempt is running");
         QVERIFY2(smoke.contains(QStringLiteral("status=all_results_failed")),
             "live smoke should report matrix exhaustion distinctly");
+        QVERIFY2(smoke.contains(QStringLiteral("playback_stopped_early")),
+            "playback smoke should fail fast when a stream stops before the configured progress threshold");
 }
 
 void OnlineProviderTest::livePlaybackSoakScriptDrivesManualMatrix() {
@@ -691,6 +698,74 @@ void OnlineProviderTest::streamBufferWaitsForBytesAndCancelWakesReader() {
         QCOMPARE(buffer.read(bytes, sizeof(bytes)), qint64(2));
         QCOMPARE(std::memcmp(bytes, "xy", 2), 0);
         QCOMPARE(buffer.read(bytes, sizeof(bytes)), qint64(-1));
+}
+
+void OnlineProviderTest::httpAudioDeviceResumesAfterShortNetworkReply() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QVector<QByteArray> ranges;
+        int requestCount = 0;
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&] {
+            QTcpSocket* socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                const QByteArray request = socket->readAll();
+                const QList<QByteArray> lines = request.split('\n');
+                for (QByteArray line : lines) {
+                    line = line.trimmed();
+                    if (line.toLower().startsWith("range:")) {
+                        ranges.push_back(line);
+                    }
+                }
+
+                if (requestCount++ == 0) {
+                    const QByteArray response =
+                        "HTTP/1.1 206 Partial Content\r\n"
+                        "Content-Length: 8\r\n"
+                        "Content-Range: bytes 0-7/8\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                        "abcd";
+                    socket->write(response);
+                } else {
+                    const QByteArray response =
+                        "HTTP/1.1 206 Partial Content\r\n"
+                        "Content-Length: 4\r\n"
+                        "Content-Range: bytes 4-7/8\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                        "efgh";
+                    socket->write(response);
+                }
+                socket->disconnectFromHost();
+            });
+        });
+
+        YoutubeHttpAudioDevice device(
+            QUrl(QStringLiteral("http://127.0.0.1:%1/audio").arg(server.serverPort())),
+            {});
+        QSignalSpy finished(&device, &QIODevice::readChannelFinished);
+        QSignalSpy errors(&device, &YoutubeHttpAudioDevice::streamError);
+
+        QVERIFY(device.open(QIODevice::ReadOnly));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(errors.count(), 0);
+
+        QByteArray actual;
+        char chunk[16] = {};
+        while (true) {
+            const qint64 count = device.read(chunk, sizeof(chunk));
+            if (count < 0) {
+                break;
+            }
+            actual.append(chunk, static_cast<qsizetype>(count));
+        }
+
+        QCOMPARE(actual, QByteArrayLiteral("abcdefgh"));
+        QCOMPARE(ranges.size(), 2);
+        QCOMPARE(ranges.at(0), QByteArrayLiteral("Range: bytes=0-"));
+        QCOMPARE(ranges.at(1), QByteArrayLiteral("Range: bytes=4-"));
 }
 
 QTEST_MAIN(OnlineProviderTest)

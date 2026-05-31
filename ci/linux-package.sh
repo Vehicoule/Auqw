@@ -142,6 +142,7 @@ flatpak-builder "${flatpak_scope_args[@]}" --force-clean \
 
 mkdir -p "$(dirname "$flatpak_bundle")"
 flatpak build-bundle \
+  --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
   "$flatpak_repo" \
   "$flatpak_bundle" \
   com.vehicoule.auqw \

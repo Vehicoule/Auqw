@@ -120,6 +120,8 @@ private slots:
             "Release job should fail clearly when an old alpha-suffixed tag is pushed");
         QVERIFY2(workflow.contains(QStringLiteral("startsWith(github.ref_name, 'v0.')")),
             "v0.* releases should be marked prerelease");
+        QVERIFY2(workflow.contains(QStringLiteral("overwrite_files: true")),
+            "Release job should overwrite same-name assets when v0.0.1 is recreated");
         QVERIFY2(!workflow.contains(QStringLiteral("contains(github.ref_name, 'alpha')")),
             "Prerelease logic should not depend on alpha tag suffixes");
 
@@ -271,6 +273,10 @@ private slots:
             "Linux deploy should copy the runtime library closure into build/lib");
         QVERIFY2(!deploy.contains(QStringLiteral("$1 ~ /^libQt6Multimedia/")),
             "Linux deploy should not copy only Qt Multimedia libraries");
+        QVERIFY2(!deploy.contains(QStringLiteral("awk '$2 == \"=>\"")),
+            "Linux deploy should not split ldd library paths on spaces");
+        QVERIFY2(deploy.contains(QStringLiteral("sed -n")),
+            "Linux deploy should parse ldd output line-wise so repo paths with spaces stay intact");
         QVERIFY2(check.contains(QStringLiteral("LD_LIBRARY_PATH")),
             "Linux runtime check should resolve libraries bundled in build/lib");
         QVERIFY2(containerfile.contains(QStringLiteral("ubuntu:24.04")),
@@ -301,6 +307,7 @@ private slots:
         const QString iconPath = projectSourcePath(u"packaging/linux/com.vehicoule.auqw.png");
         const QString manifest = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.yml"));
         const QString script = readTextFile(projectSourcePath(u"ci/linux-package.sh"));
+        const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
 
         QVERIFY2(!qtCMake.isEmpty(), "auqw-qt/CMakeLists.txt should be readable");
         QVERIFY2(!main.isEmpty(), "auqw-qt/src/main.cpp should be readable");
@@ -309,6 +316,7 @@ private slots:
         QVERIFY2(QFileInfo::exists(iconPath), "Linux PNG app icon should exist");
         QVERIFY2(!manifest.isEmpty(), "Linux Flatpak manifest should be readable");
         QVERIFY2(!script.isEmpty(), "ci/linux-package.sh should be readable");
+        QVERIFY2(!docs.isEmpty(), "ci/platform-builds.md should be readable");
 
         QVERIFY2(qtCMake.contains(QStringLiteral("include(GNUInstallDirs)")),
             "Qt CMake should use GNU install directories for Linux packaging");
@@ -377,6 +385,8 @@ private slots:
             "Linux package script should invoke flatpak-builder when available");
         QVERIFY2(script.contains(QStringLiteral("flatpak build-bundle")),
             "Linux package script should export a Flatpak bundle artifact for releases");
+        QVERIFY2(script.contains(QStringLiteral("--runtime-repo=https://flathub.org/repo/flathub.flatpakrepo")),
+            "Linux Flatpak bundle should carry the Flathub runtime repository hint so org.kde.Platform can be resolved during install");
         QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_FLATPAK_BUNDLE")),
             "Linux package script should let CI choose the Flatpak bundle output path");
         QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_TARBALL")),
@@ -391,6 +401,8 @@ private slots:
             "Linux package script should support user Flatpak installation mode for hosted CI");
         QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_BUILD")),
             "Linux package script should let CI disable Flatpak builds explicitly");
+        QVERIFY2(docs.contains(QStringLiteral("flatpak install --user ./auqw-linux-x64.flatpak")),
+            "Linux package docs should show installing the release bundle directly");
     }
 
     void androidBuildSignsReleaseApkForTagReleases() {

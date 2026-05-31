@@ -41,7 +41,9 @@ copy_runtime_libraries() {
   local lib
   local -a runtime_libs
   mapfile -t runtime_libs < <(
-    ldd "$binary" | awk '$2 == "=>" && $3 ~ /^\// { print $3 } $1 ~ /^\// { print $1 }'
+    ldd "$binary" | sed -n -E \
+      -e 's/^[[:space:]]*[^=]+=>[[:space:]]*(\/.*)[[:space:]]+\(0x[[:xdigit:]]+\).*$/\1/p' \
+      -e 's/^[[:space:]]*(\/.*)[[:space:]]+\(0x[[:xdigit:]]+\).*$/\1/p'
   )
 
   for lib in "${runtime_libs[@]}"; do

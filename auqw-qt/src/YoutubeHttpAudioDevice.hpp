@@ -36,14 +36,21 @@ protected:
 
 private:
     void startRequest();
+    void handleReplyFinished();
     void appendReplyBytes();
     void finishReplyIfDrained();
+    void updateExpectedTotalBytes(QNetworkReply* reply, int statusCode);
+    [[nodiscard]] bool canResumeAfterFailure(bool failed, int statusCode) const;
+    void resumeAfterFailure(QNetworkReply* reply);
 
     QNetworkAccessManager network_;
     QPointer<QNetworkReply> reply_;
     QUrl streamUrl_;
     QList<QPair<QByteArray, QByteArray>> requestHeaders_;
     YoutubeStreamBuffer buffer_;
+    qint64 nextRequestOffset_ = 0;
+    qint64 expectedTotalBytes_ = -1;
+    int resumeAttempts_ = 0;
     bool networkFinished_ = false;
     bool firstAudioEmitted_ = false;
     bool prebufferEmitted_ = false;

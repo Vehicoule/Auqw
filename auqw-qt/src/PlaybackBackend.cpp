@@ -2,11 +2,8 @@
 #include "YoutubeHttpAudioDevice.hpp"
 #include "YoutubeSabrAudioDevice.hpp"
 
-#include <QUrl>
-
-#ifndef QT_NO_DEBUG
 #include <QDebug>
-#endif
+#include <QUrl>
 
 #include <utility>
 
@@ -89,12 +86,64 @@ void logMediaPlayerErrorDiagnostics(const QMediaPlayer& player, QMediaPlayer::Er
 #endif
 }
 
+QString mediaStatusName(QMediaPlayer::MediaStatus status) {
+    switch (status) {
+    case QMediaPlayer::NoMedia:
+        return QStringLiteral("no_media");
+    case QMediaPlayer::LoadingMedia:
+        return QStringLiteral("loading");
+    case QMediaPlayer::LoadedMedia:
+        return QStringLiteral("loaded");
+    case QMediaPlayer::StalledMedia:
+        return QStringLiteral("stalled");
+    case QMediaPlayer::BufferingMedia:
+        return QStringLiteral("buffering");
+    case QMediaPlayer::BufferedMedia:
+        return QStringLiteral("buffered");
+    case QMediaPlayer::EndOfMedia:
+        return QStringLiteral("end_of_media");
+    case QMediaPlayer::InvalidMedia:
+        return QStringLiteral("invalid");
+    }
+    return QStringLiteral("unknown");
+}
+
+QString playbackStateName(QMediaPlayer::PlaybackState state) {
+    switch (state) {
+    case QMediaPlayer::StoppedState:
+        return QStringLiteral("stopped");
+    case QMediaPlayer::PlayingState:
+        return QStringLiteral("playing");
+    case QMediaPlayer::PausedState:
+        return QStringLiteral("paused");
+    }
+    return QStringLiteral("unknown");
+}
+
+bool playbackTraceEnabled() {
+    return qEnvironmentVariableIntValue("AUQW_PLAYBACK_TRACE") > 0;
+}
+
+void logPlaybackTrace(const QMediaPlayer& player, const QString& event) {
+    if (!playbackTraceEnabled()) {
+        return;
+    }
+    qInfo().noquote()
+        << "Auqw playback trace"
+        << "event=" << event
+        << "state=" << playbackStateName(player.playbackState())
+        << "mediaStatus=" << mediaStatusName(player.mediaStatus())
+        << "positionMs=" << player.position()
+        << "durationMs=" << player.duration();
+}
+
 class QtMultimediaPlaybackBackend final : public CallbackPlaybackBackend {
 public:
     QtMultimediaPlaybackBackend() {
         player_.setAudioOutput(&audioOutput_);
 
         QObject::connect(&player_, &QMediaPlayer::playbackStateChanged, &player_, [this](QMediaPlayer::PlaybackState state) {
+            logPlaybackTrace(player_, QStringLiteral("state_changed:%1").arg(playbackStateName(state)));
             switch (state) {
             case QMediaPlayer::StoppedState:
                 emitState(QStringLiteral("stopped"), player_.position(), player_.duration());
@@ -114,6 +163,10 @@ public:
 
         QObject::connect(&player_, &QMediaPlayer::durationChanged, &player_, [this](qint64 duration) {
             emitState(stateName(player_.playbackState()), player_.position(), duration);
+        });
+
+        QObject::connect(&player_, &QMediaPlayer::mediaStatusChanged, &player_, [this] {
+            logPlaybackTrace(player_, QStringLiteral("media_status_changed"));
         });
 
         QObject::connect(&player_, &QMediaPlayer::errorOccurred, &player_, [this](QMediaPlayer::Error error, const QString& errorString) {
@@ -186,6 +239,9 @@ public:
                 attachStreamDevice();
             });
         }
+        QObject::connect(device.get(), &QIODevice::readChannelFinished, &player_, [this] {
+            logPlaybackTrace(player_, QStringLiteral("stream_device_read_finished"));
+        });
 
         sourceDevice_ = std::move(device);
         sourceDeviceAttached_ = false;
@@ -239,6 +295,7 @@ private:
             return;
         }
         sourceDeviceAttached_ = true;
+        logPlaybackTrace(player_, QStringLiteral("stream_device_attach"));
         player_.setSourceDevice(sourceDevice_.get());
         player_.play();
     }

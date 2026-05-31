@@ -2,6 +2,7 @@
 
 #include <QMetaObject>
 #include <QNetworkRequest>
+#include <QTimer>
 
 #include <algorithm>
 #include <utility>
@@ -10,6 +11,21 @@ namespace {
 
 constexpr qint64 kPrebufferBytes = 256 * 1024;
 constexpr qint64 kReplyReadChunkBytes = 64 * 1024;
+constexpr int kMaxResumeAttempts = 12;
+
+qint64 parseTotalBytesFromContentRange(const QByteArray& contentRange) {
+    const qsizetype slash = contentRange.lastIndexOf('/');
+    if (slash < 0 || slash + 1 >= contentRange.size()) {
+        return -1;
+    }
+    const QByteArray total = contentRange.mid(slash + 1).trimmed();
+    if (total == "*") {
+        return -1;
+    }
+    bool ok = false;
+    const qint64 value = total.toLongLong(&ok);
+    return ok && value >= 0 ? value : -1;
+}
 
 } // namespace
 
@@ -36,6 +52,9 @@ bool YoutubeHttpAudioDevice::open(OpenMode mode) {
     }
 
     buffer_.reset();
+    nextRequestOffset_ = 0;
+    expectedTotalBytes_ = -1;
+    resumeAttempts_ = 0;
     networkFinished_ = false;
     firstAudioEmitted_ = false;
     prebufferEmitted_ = false;
@@ -78,8 +97,9 @@ qint64 YoutubeHttpAudioDevice::writeData(const char*, qint64) {
 }
 
 void YoutubeHttpAudioDevice::startRequest() {
+    networkFinished_ = false;
     QNetworkRequest request(streamUrl_);
-    request.setRawHeader("Range", "bytes=0-");
+    request.setRawHeader("Range", QByteArrayLiteral("bytes=") + QByteArray::number(nextRequestOffset_) + QByteArrayLiteral("-"));
     for (const auto& header : requestHeaders_) {
         request.setRawHeader(header.first, header.second);
     }
@@ -87,24 +107,38 @@ void YoutubeHttpAudioDevice::startRequest() {
     reply_ = network_.get(request);
     reply_->setReadBufferSize(4 * 1024 * 1024);
     connect(reply_, &QNetworkReply::readyRead, this, &YoutubeHttpAudioDevice::appendReplyBytes);
-    connect(reply_, &QNetworkReply::finished, this, [this] {
-        QNetworkReply* reply = reply_.data();
-        const bool failed = reply != nullptr && reply->error() != QNetworkReply::NoError && reply->error() != QNetworkReply::OperationCanceledError;
-        const int statusCode = reply != nullptr ? reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+    connect(reply_, &QNetworkReply::finished, this, &YoutubeHttpAudioDevice::handleReplyFinished);
+}
 
-        if (failed || statusCode >= 400) {
-            reply_.clear();
-            if (reply != nullptr) {
-                reply->deleteLater();
-            }
-            buffer_.cancel();
-            emit streamError(QStringLiteral("Online stream network request failed."));
-            return;
-        }
-        networkFinished_ = true;
+void YoutubeHttpAudioDevice::handleReplyFinished() {
+    QNetworkReply* reply = reply_.data();
+    const bool failed = reply != nullptr
+        && reply->error() != QNetworkReply::NoError
+        && reply->error() != QNetworkReply::OperationCanceledError;
+    const int statusCode = reply != nullptr ? reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+
+    updateExpectedTotalBytes(reply, statusCode);
+    while (reply_ && reply_->bytesAvailable() > 0 && buffer_.writableBytes() > 0) {
         appendReplyBytes();
-        finishReplyIfDrained();
-    });
+    }
+
+    if (canResumeAfterFailure(failed, statusCode)) {
+        resumeAfterFailure(reply);
+        return;
+    }
+
+    if (failed || statusCode >= 400) {
+        reply_.clear();
+        if (reply != nullptr) {
+            reply->deleteLater();
+        }
+        buffer_.cancel();
+        emit streamError(QStringLiteral("Online stream network request failed."));
+        return;
+    }
+
+    networkFinished_ = true;
+    finishReplyIfDrained();
 }
 
 void YoutubeHttpAudioDevice::appendReplyBytes() {
@@ -125,6 +159,8 @@ void YoutubeHttpAudioDevice::appendReplyBytes() {
     }
 
     buffer_.append(bytes);
+    nextRequestOffset_ += bytes.size();
+    resumeAttempts_ = 0;
     if (!firstAudioEmitted_) {
         firstAudioEmitted_ = true;
         emit firstAudioBytes(bytes.size());
@@ -156,4 +192,50 @@ void YoutubeHttpAudioDevice::finishReplyIfDrained() {
     }
     buffer_.finish();
     emit readChannelFinished();
+}
+
+void YoutubeHttpAudioDevice::updateExpectedTotalBytes(QNetworkReply* reply, int statusCode) {
+    if (reply == nullptr) {
+        return;
+    }
+
+    if (statusCode == 206) {
+        const qint64 total = parseTotalBytesFromContentRange(reply->rawHeader("Content-Range"));
+        if (total >= 0) {
+            expectedTotalBytes_ = total;
+        }
+        return;
+    }
+
+    if (statusCode == 200 && nextRequestOffset_ == 0) {
+        const QVariant contentLength = reply->header(QNetworkRequest::ContentLengthHeader);
+        if (contentLength.isValid()) {
+            bool ok = false;
+            const qint64 total = contentLength.toLongLong(&ok);
+            if (ok && total >= 0) {
+                expectedTotalBytes_ = total;
+            }
+        }
+    }
+}
+
+bool YoutubeHttpAudioDevice::canResumeAfterFailure(bool failed, int statusCode) const {
+    if (!failed || statusCode >= 400 || resumeAttempts_ >= kMaxResumeAttempts) {
+        return false;
+    }
+    return expectedTotalBytes_ < 0 || nextRequestOffset_ < expectedTotalBytes_;
+}
+
+void YoutubeHttpAudioDevice::resumeAfterFailure(QNetworkReply* reply) {
+    reply_.clear();
+    if (reply != nullptr) {
+        reply->deleteLater();
+    }
+    ++resumeAttempts_;
+    const int backoffMs = std::min(1000, 100 * resumeAttempts_);
+    QTimer::singleShot(backoffMs, this, [this] {
+        if (isOpen()) {
+            startRequest();
+        }
+    });
 }

@@ -245,6 +245,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          overwrite_files: true
           files: |
             dist/auqw-linux-x64/auqw-linux-x64.flatpak
             dist/auqw-linux-x64/auqw-linux-x64.tar.gz

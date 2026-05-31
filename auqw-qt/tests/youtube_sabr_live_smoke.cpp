@@ -23,6 +23,42 @@ int positiveEnvInt(const char* name, int fallback) {
     return ok && value > 0 ? value : fallback;
 }
 
+#if AUQW_HAS_QT_MULTIMEDIA
+QString playbackStateName(QMediaPlayer::PlaybackState state) {
+    switch (state) {
+    case QMediaPlayer::StoppedState:
+        return QStringLiteral("stopped");
+    case QMediaPlayer::PlayingState:
+        return QStringLiteral("playing");
+    case QMediaPlayer::PausedState:
+        return QStringLiteral("paused");
+    }
+    return QStringLiteral("unknown");
+}
+
+QString mediaStatusName(QMediaPlayer::MediaStatus status) {
+    switch (status) {
+    case QMediaPlayer::NoMedia:
+        return QStringLiteral("no_media");
+    case QMediaPlayer::LoadingMedia:
+        return QStringLiteral("loading");
+    case QMediaPlayer::LoadedMedia:
+        return QStringLiteral("loaded");
+    case QMediaPlayer::StalledMedia:
+        return QStringLiteral("stalled");
+    case QMediaPlayer::BufferingMedia:
+        return QStringLiteral("buffering");
+    case QMediaPlayer::BufferedMedia:
+        return QStringLiteral("buffered");
+    case QMediaPlayer::EndOfMedia:
+        return QStringLiteral("end_of_media");
+    case QMediaPlayer::InvalidMedia:
+        return QStringLiteral("invalid");
+    }
+    return QStringLiteral("unknown");
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -59,7 +95,9 @@ int main(int argc, char** argv) {
     QMediaPlayer player;
     QTimer playbackTimer;
     qint64 lastPlaybackPosition = 0;
+    qint64 playbackDuration = 0;
     bool playbackAttached = false;
+    bool playbackStarted = false;
 
     audioOutput.setVolume(0.1);
     player.setAudioOutput(&audioOutput);
@@ -68,6 +106,34 @@ int main(int argc, char** argv) {
 
     QObject::connect(&player, &QMediaPlayer::positionChanged, &app, [&](qint64 position) {
         lastPlaybackPosition = position;
+    });
+    QObject::connect(&player, &QMediaPlayer::durationChanged, &app, [&](qint64 duration) {
+        playbackDuration = duration;
+        out << "playback_duration_ms=" << duration << '\n';
+        out.flush();
+    });
+    QObject::connect(&player, &QMediaPlayer::mediaStatusChanged, &app, [&](QMediaPlayer::MediaStatus status) {
+        out << "media_status=" << mediaStatusName(status) << '\n';
+        out.flush();
+    });
+    QObject::connect(&player, &QMediaPlayer::playbackStateChanged, &app, [&](QMediaPlayer::PlaybackState state) {
+        out << "playback_state=" << playbackStateName(state) << '\n';
+        out << "position_ms=" << lastPlaybackPosition << '\n';
+        out.flush();
+        if (state == QMediaPlayer::PlayingState) {
+            playbackStarted = true;
+            return;
+        }
+        if (state != QMediaPlayer::StoppedState || !playbackSmoke || !playbackAttached || !playbackStarted || !playbackTimer.isActive()) {
+            return;
+        }
+        const bool nearEnd = playbackDuration > 0 && lastPlaybackPosition + 1500 >= playbackDuration;
+        if (!nearEnd && lastPlaybackPosition < minPlaybackPositionMs && failAttempt) {
+            failAttempt(
+                QStringLiteral("playback_stopped_early"),
+                QStringLiteral("position_ms=%1 duration_ms=%2").arg(lastPlaybackPosition).arg(playbackDuration),
+                11);
+        }
     });
     QObject::connect(&player, &QMediaPlayer::errorOccurred, &app, [&](QMediaPlayer::Error error, const QString& message) {
         if (error == QMediaPlayer::NoError) {
@@ -98,7 +164,9 @@ int main(int argc, char** argv) {
             return;
         }
         playbackAttached = true;
+        playbackStarted = false;
         lastPlaybackPosition = 0;
+        playbackDuration = 0;
         player.setSourceDevice(streamDevice);
         player.play();
         playbackTimer.start();
@@ -134,9 +202,11 @@ int main(int argc, char** argv) {
         err.flush();
 #if AUQW_HAS_QT_MULTIMEDIA
         playbackTimer.stop();
-        player.stop();
         playbackAttached = false;
+        playbackStarted = false;
+        player.stop();
         lastPlaybackPosition = 0;
+        playbackDuration = 0;
 #endif
         QTimer::singleShot(0, &app, [&] {
             attemptNextResult();
@@ -146,9 +216,11 @@ int main(int argc, char** argv) {
     attemptNextResult = [&] {
 #if AUQW_HAS_QT_MULTIMEDIA
         playbackTimer.stop();
-        player.stop();
         playbackAttached = false;
+        playbackStarted = false;
+        player.stop();
         lastPlaybackPosition = 0;
+        playbackDuration = 0;
 #endif
         if (device) {
             device->close();
@@ -259,7 +331,9 @@ int main(int argc, char** argv) {
             if (playbackSmoke) {
 #if AUQW_HAS_QT_MULTIMEDIA
                 playbackAttached = true;
+                playbackStarted = false;
                 lastPlaybackPosition = 0;
+                playbackDuration = 0;
                 player.setSource(stream.streamUrl);
                 player.play();
                 playbackTimer.start();
