@@ -104,7 +104,7 @@ test "metadata command contract includes schema version" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
 }
 
 test "queue command contract preserves moved order" {

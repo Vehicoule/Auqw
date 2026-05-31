@@ -10,15 +10,17 @@ const ObjectMap = std.json.ObjectMap;
 
 const valid_states = [_][]const u8{
     "queued",
+    "resolving",
     "downloading",
-    "paused",
+    "verifying",
     "completed",
     "failed",
-    "canceled",
+    "cancelled",
 };
 
 const download_select_sql =
-    \\SELECT d.id, d.track_id, d.state, d.progress, d.error_text, d.target_path, d.created_at, d.updated_at,
+    \\SELECT d.id, d.track_id, d.state, d.progress, d.bytes_received, d.bytes_total, d.mime_type, d.stream_kind,
+    \\       d.error_text, d.target_path, d.created_at, d.updated_at,
     \\       t.provider, t.provider_track_id, t.title, t.artist, t.album, t.duration_ms, t.artwork_url
     \\FROM downloads d
     \\LEFT JOIN tracks t ON t.id = d.track_id
@@ -36,15 +38,23 @@ pub fn queueDownload(state: *AppState, id: []const u8, params: ObjectMap) errors
     const state_name = json.optionalString(params, "state") orelse "queued";
     if (!isValidState(state_name)) return error.InvalidJson;
     const progress = normalizeProgress(json.optionalInt(params, "progress") catch return error.InvalidJson);
+    const bytes_received = normalizeOptionalBytes(json.optionalInt(params, "bytes_received") catch return error.InvalidJson) orelse 0;
+    const bytes_total = normalizeOptionalBytes(json.optionalInt(params, "bytes_total") catch return error.InvalidJson);
+    const mime_type = json.optionalString(params, "mime_type");
+    const stream_kind = json.optionalString(params, "stream_kind");
     const error_text = json.optionalString(params, "error_text");
 
     var stmt = state.db.prepare(
-        \\INSERT INTO downloads (id, track_id, state, progress, error_text, target_path, updated_at)
-        \\VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        \\INSERT INTO downloads (id, track_id, state, progress, bytes_received, bytes_total, mime_type, stream_kind, error_text, target_path, updated_at)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         \\ON CONFLICT(id) DO UPDATE SET
         \\    track_id = excluded.track_id,
         \\    state = excluded.state,
         \\    progress = excluded.progress,
+        \\    bytes_received = excluded.bytes_received,
+        \\    bytes_total = excluded.bytes_total,
+        \\    mime_type = excluded.mime_type,
+        \\    stream_kind = excluded.stream_kind,
         \\    error_text = excluded.error_text,
         \\    target_path = excluded.target_path,
         \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
@@ -55,8 +65,12 @@ pub fn queueDownload(state: *AppState, id: []const u8, params: ObjectMap) errors
     stmt.bindText(2, track_id) catch return error.Database;
     stmt.bindText(3, state_name) catch return error.Database;
     stmt.bindInt64(4, progress) catch return error.Database;
-    stmt.bindOptionalText(5, error_text) catch return error.Database;
-    stmt.bindOptionalText(6, target_path) catch return error.Database;
+    stmt.bindInt64(5, bytes_received) catch return error.Database;
+    stmt.bindOptionalInt64(6, bytes_total) catch return error.Database;
+    stmt.bindOptionalText(7, mime_type) catch return error.Database;
+    stmt.bindOptionalText(8, stream_kind) catch return error.Database;
+    stmt.bindOptionalText(9, error_text) catch return error.Database;
+    stmt.bindOptionalText(10, target_path) catch return error.Database;
     if ((stmt.step() catch return error.Database) != .done) return error.Database;
 
     const download = getDownloadById(state, download_id) catch return error.Database;
@@ -77,6 +91,10 @@ pub fn update(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
         if (!isValidState(value)) return error.InvalidJson;
     }
     const progress = json.optionalInt(params, "progress") catch return error.InvalidJson;
+    const bytes_received = json.optionalInt(params, "bytes_received") catch return error.InvalidJson;
+    const bytes_total = json.optionalInt(params, "bytes_total") catch return error.InvalidJson;
+    const mime_type = json.optionalString(params, "mime_type");
+    const stream_kind = json.optionalString(params, "stream_kind");
     const error_text = json.optionalString(params, "error_text");
     const target_path = json.optionalString(params, "target_path");
 
@@ -84,6 +102,10 @@ pub fn update(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
         \\UPDATE downloads
         \\SET state = COALESCE(?, state),
         \\    progress = COALESCE(?, progress),
+        \\    bytes_received = COALESCE(?, bytes_received),
+        \\    bytes_total = COALESCE(?, bytes_total),
+        \\    mime_type = COALESCE(?, mime_type),
+        \\    stream_kind = COALESCE(?, stream_kind),
         \\    error_text = COALESCE(?, error_text),
         \\    target_path = COALESCE(?, target_path),
         \\    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
@@ -93,9 +115,13 @@ pub fn update(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreEr
 
     stmt.bindOptionalText(1, state_name) catch return error.Database;
     stmt.bindOptionalInt64(2, if (progress) |value| normalizeProgress(value) else null) catch return error.Database;
-    stmt.bindOptionalText(3, error_text) catch return error.Database;
-    stmt.bindOptionalText(4, target_path) catch return error.Database;
-    stmt.bindText(5, download_id) catch return error.Database;
+    stmt.bindOptionalInt64(3, if (bytes_received) |value| normalizeBytes(value) else null) catch return error.Database;
+    stmt.bindOptionalInt64(4, if (bytes_total) |value| normalizeBytes(value) else null) catch return error.Database;
+    stmt.bindOptionalText(5, mime_type) catch return error.Database;
+    stmt.bindOptionalText(6, stream_kind) catch return error.Database;
+    stmt.bindOptionalText(7, error_text) catch return error.Database;
+    stmt.bindOptionalText(8, target_path) catch return error.Database;
+    stmt.bindText(9, download_id) catch return error.Database;
     if ((stmt.step() catch return error.Database) != .done) return error.Database;
 
     const download = getDownloadById(state, download_id) catch return error.Database;
@@ -131,6 +157,15 @@ fn normalizeProgress(value: ?i64) i64 {
     return progress;
 }
 
+fn normalizeBytes(value: i64) i64 {
+    if (value < 0) return 0;
+    return value;
+}
+
+fn normalizeOptionalBytes(value: ?i64) ?i64 {
+    return if (value) |number| normalizeBytes(number) else null;
+}
+
 fn getDownloadById(state: *AppState, id: []const u8) sqlite.DbError!models.Download {
     var stmt = try state.db.prepare(download_select_sql ++ " WHERE d.id = ?");
     defer stmt.finalize();
@@ -161,17 +196,21 @@ fn downloadFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlit
         .track_id = try stmt.columnOptionalText(allocator, 1),
         .state = try stmt.columnText(allocator, 2),
         .progress = stmt.columnOptionalInt64(3) orelse 0,
-        .error_text = try stmt.columnOptionalText(allocator, 4),
-        .target_path = try stmt.columnOptionalText(allocator, 5),
-        .created_at = try stmt.columnText(allocator, 6),
-        .updated_at = try stmt.columnText(allocator, 7),
-        .provider = try stmt.columnOptionalText(allocator, 8),
-        .provider_track_id = try stmt.columnOptionalText(allocator, 9),
-        .title = try stmt.columnOptionalText(allocator, 10),
-        .artist = try stmt.columnOptionalText(allocator, 11),
-        .album = try stmt.columnOptionalText(allocator, 12),
-        .duration_ms = stmt.columnOptionalInt64(13),
-        .artwork_url = try stmt.columnOptionalText(allocator, 14),
+        .bytes_received = stmt.columnOptionalInt64(4) orelse 0,
+        .bytes_total = stmt.columnOptionalInt64(5),
+        .mime_type = try stmt.columnOptionalText(allocator, 6),
+        .stream_kind = try stmt.columnOptionalText(allocator, 7),
+        .error_text = try stmt.columnOptionalText(allocator, 8),
+        .target_path = try stmt.columnOptionalText(allocator, 9),
+        .created_at = try stmt.columnText(allocator, 10),
+        .updated_at = try stmt.columnText(allocator, 11),
+        .provider = try stmt.columnOptionalText(allocator, 12),
+        .provider_track_id = try stmt.columnOptionalText(allocator, 13),
+        .title = try stmt.columnOptionalText(allocator, 14),
+        .artist = try stmt.columnOptionalText(allocator, 15),
+        .album = try stmt.columnOptionalText(allocator, 16),
+        .duration_ms = stmt.columnOptionalInt64(17),
+        .artwork_url = try stmt.columnOptionalText(allocator, 18),
     };
 }
 

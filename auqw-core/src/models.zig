@@ -49,6 +49,10 @@ pub const Download = struct {
     track_id: ?[]const u8 = null,
     state: []const u8,
     progress: i64,
+    bytes_received: i64 = 0,
+    bytes_total: ?i64 = null,
+    mime_type: ?[]const u8 = null,
+    stream_kind: ?[]const u8 = null,
     error_text: ?[]const u8 = null,
     target_path: ?[]const u8 = null,
     created_at: []const u8,
@@ -65,6 +69,8 @@ pub const Download = struct {
         allocator.free(self.id);
         if (self.track_id) |value| allocator.free(value);
         allocator.free(self.state);
+        if (self.mime_type) |value| allocator.free(value);
+        if (self.stream_kind) |value| allocator.free(value);
         if (self.error_text) |value| allocator.free(value);
         if (self.target_path) |value| allocator.free(value);
         allocator.free(self.created_at);

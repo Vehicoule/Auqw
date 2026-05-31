@@ -28,6 +28,8 @@ qt_add_library(auqw_qt_runtime STATIC
     src/CoreControllerLibrary.cpp
     src/CoreControllerPlayback.cpp
     src/CoreControllerSearch.cpp
+    src/DownloadWorker.cpp
+    src/DownloadWorker.hpp
     src/InnertubeProvider.cpp
     src/InnertubeProvider.hpp
     src/InnertubeProviderParsing.cpp

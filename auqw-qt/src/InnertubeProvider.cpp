@@ -168,7 +168,7 @@ OnlineProviderCapabilities InnertubeProvider::capabilities() const {
         .suggestions = true,
         .metadata = true,
         .playback = true,
-        .downloads = false,
+        .downloads = true,
     };
 }
 

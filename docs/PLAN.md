@@ -452,6 +452,8 @@ Immediate live smoke status (2026-05-30):
 
 ## 10. Milestone 6: Cache And Downloads
 
+Status: in progress. Cache tables, provider capability checks, storage settings, Downloads UI, and real one-at-a-time download execution have landed. Downloaded files preserve provider stream bytes as-is; no transcoding or container rewriting is performed. Direct URL, headered direct URL, and SABR media payload downloads are supported, with SABR limited to parsed audio media payload bytes rather than saving UMP framing.
+
 Goal:
 
 ```text
@@ -474,7 +476,6 @@ verifying
 completed
 failed
 cancelled
-removed
 ```
 
 Capabilities:
@@ -486,6 +487,9 @@ Capabilities:
 - Delete downloads.
 - Storage settings.
 - Provider capability checks.
+- Direct/headered direct stream download worker.
+- SABR audio payload download worker.
+- Original stream byte persistence only; no transcode.
 
 Acceptance:
 

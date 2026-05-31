@@ -18,6 +18,7 @@
 #include <optional>
 
 class JsonListModel;
+class DownloadWorker;
 class PlaybackBackend;
 
 class CoreController final : public QObject {
@@ -173,6 +174,11 @@ private:
         const QString& provider,
         const QString& providerTrackId,
         const QString& title);
+    void maybeStartNextDownload();
+    void startDownloadWorker(const QVariantMap& download);
+    void applyDownloadWorkerUpdate(const QString& downloadId, const QVariantMap& fields);
+    void finishActiveDownload(const QString& downloadId, const QString& status);
+    void clearActiveDownloadWorker();
     void cacheArtworkForTrack(const QString& trackId, const QString& sourceUrl);
     void upsertArtworkCacheRecord(const QString& trackId, const QString& sourceUrl, const QString& cachePath);
     bool applyPlaybackObject(const QJsonObject& playback);
@@ -190,6 +196,8 @@ private:
     std::unique_ptr<PlaybackBackend> playbackBackend_;
     std::unique_ptr<OnlineProvider> onlineProvider_;
     QNetworkAccessManager artworkNetwork_;
+    DownloadWorker* activeDownloadWorker_ = nullptr;
+    QString activeDownloadId_;
     std::unique_ptr<JsonListModel> tracksModel_;
     std::unique_ptr<JsonListModel> playlistsModel_;
     std::unique_ptr<JsonListModel> queueModel_;

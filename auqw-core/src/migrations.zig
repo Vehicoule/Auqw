@@ -1,7 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 
-pub const latest_version: i64 = 4;
+pub const latest_version: i64 = 5;
 
 pub fn run(db: *sqlite.Database) sqlite.DbError!void {
     try db.exec(
@@ -105,6 +105,10 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\    track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
         \\    state TEXT NOT NULL,
         \\    progress INTEGER NOT NULL DEFAULT 0,
+        \\    bytes_received INTEGER NOT NULL DEFAULT 0,
+        \\    bytes_total INTEGER,
+        \\    mime_type TEXT,
+        \\    stream_kind TEXT,
         \\    error_text TEXT,
         \\    target_path TEXT,
         \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
@@ -161,8 +165,13 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
 
     try ensureColumn(db, "tracks", "metadata_cached_at", "ALTER TABLE tracks ADD COLUMN metadata_cached_at TEXT");
     try ensureColumn(db, "downloads", "progress", "ALTER TABLE downloads ADD COLUMN progress INTEGER NOT NULL DEFAULT 0");
+    try ensureColumn(db, "downloads", "bytes_received", "ALTER TABLE downloads ADD COLUMN bytes_received INTEGER NOT NULL DEFAULT 0");
+    try ensureColumn(db, "downloads", "bytes_total", "ALTER TABLE downloads ADD COLUMN bytes_total INTEGER");
+    try ensureColumn(db, "downloads", "mime_type", "ALTER TABLE downloads ADD COLUMN mime_type TEXT");
+    try ensureColumn(db, "downloads", "stream_kind", "ALTER TABLE downloads ADD COLUMN stream_kind TEXT");
     try ensureColumn(db, "downloads", "error_text", "ALTER TABLE downloads ADD COLUMN error_text TEXT");
     try db.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);");
+    try db.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);");
 }
 
 pub fn currentVersion(db: *sqlite.Database) sqlite.DbError!i64 {

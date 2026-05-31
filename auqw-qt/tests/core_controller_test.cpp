@@ -14,14 +14,20 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QObject>
+#include <QHostAddress>
+#include <QPointer>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUrl>
 
 #include <auqw/CoreBridge.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -36,6 +42,14 @@ bool writeTestFile(const QString& path) {
     return file.write("test") == 4;
 }
 
+QByteArray readFileBytes(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return file.readAll();
+}
+
 int roleForName(const QAbstractItemModel* model, const QByteArray& name) {
     const QHash<int, QByteArray> roles = model->roleNames();
     for (auto it = roles.cbegin(); it != roles.cend(); ++it) {
@@ -45,6 +59,130 @@ int roleForName(const QAbstractItemModel* model, const QByteArray& name) {
     }
     return -1;
 }
+
+QVariant roleValue(const QAbstractItemModel* model, int row, const QByteArray& name) {
+    const int role = roleForName(model, name);
+    if (role <= 0 || row < 0 || row >= model->rowCount()) {
+        return {};
+    }
+    return model->data(model->index(row, 0), role);
+}
+
+void appendUmpVarint(QByteArray& bytes, quint32 value) {
+    if (value < 128) {
+        bytes.append(static_cast<char>(value));
+        return;
+    }
+    if (value < 8192) {
+        bytes.append(static_cast<char>(0x80 | (value & 0x3f)));
+        bytes.append(static_cast<char>(value / 64));
+        return;
+    }
+    Q_UNREACHABLE();
+}
+
+QByteArray umpFrame(quint32 type, const QByteArray& payload) {
+    QByteArray frame;
+    appendUmpVarint(frame, type);
+    appendUmpVarint(frame, static_cast<quint32>(payload.size()));
+    frame.append(payload);
+    return frame;
+}
+
+QByteArray sabrAudioResponse(const QByteArray& audioBytes) {
+    QByteArray mediaPayload;
+    mediaPayload.append('\0');
+    mediaPayload.append(audioBytes);
+    return umpFrame(21, mediaPayload);
+}
+
+class LocalHttpServer final {
+public:
+    struct Response {
+        QByteArray body;
+        QByteArray contentType = QByteArrayLiteral("application/octet-stream");
+        QByteArray requiredHeaderName;
+        QByteArray requiredHeaderValue;
+        int delayMs = 0;
+    };
+
+    explicit LocalHttpServer(QList<Response> responses)
+        : responses_(std::move(responses)) {
+        QObject::connect(&server_, &QTcpServer::newConnection, &server_, [this] {
+            while (QTcpSocket* socket = server_.nextPendingConnection()) {
+                handleSocket(socket);
+            }
+        });
+        const bool listening = server_.listen(QHostAddress::LocalHost);
+        Q_ASSERT(listening);
+    }
+
+    QUrl url(const QString& path = QStringLiteral("/stream")) const {
+        QUrl value;
+        value.setScheme(QStringLiteral("http"));
+        value.setHost(QStringLiteral("127.0.0.1"));
+        value.setPort(server_.serverPort());
+        value.setPath(path);
+        return value;
+    }
+
+    int requestCount() const {
+        return requestCount_;
+    }
+
+    bool sawRequiredHeader() const {
+        return sawRequiredHeader_;
+    }
+
+private:
+    void handleSocket(QTcpSocket* socket) {
+        socket->setParent(&server_);
+        auto buffer = std::make_shared<QByteArray>();
+        QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+        QObject::connect(socket, &QTcpSocket::readyRead, &server_, [this, socket, buffer] {
+            buffer->append(socket->readAll());
+            if (!buffer->contains("\r\n\r\n")) {
+                return;
+            }
+
+            const int index = requestCount_++;
+            const Response response = responses_.value(std::min(index, static_cast<int>(responses_.size()) - 1));
+            if (!response.requiredHeaderName.isEmpty()) {
+                const QByteArray wanted = response.requiredHeaderName + QByteArrayLiteral(": ") + response.requiredHeaderValue;
+                sawRequiredHeader_ = buffer->contains(wanted);
+            }
+
+            QPointer<QTcpSocket> guardedSocket(socket);
+            const auto sendResponse = [guardedSocket, response] {
+                if (!guardedSocket) {
+                    return;
+                }
+                QByteArray header;
+                header.append("HTTP/1.1 200 OK\r\n");
+                header.append("Connection: close\r\n");
+                header.append("Content-Type: ");
+                header.append(response.contentType);
+                header.append("\r\nContent-Length: ");
+                header.append(QByteArray::number(response.body.size()));
+                header.append("\r\n\r\n");
+                guardedSocket->write(header);
+                guardedSocket->write(response.body);
+                guardedSocket->disconnectFromHost();
+            };
+
+            if (response.delayMs > 0) {
+                QTimer::singleShot(response.delayMs, &server_, sendResponse);
+            } else {
+                sendResponse();
+            }
+        });
+    }
+
+    QTcpServer server_;
+    QList<Response> responses_;
+    int requestCount_ = 0;
+    bool sawRequiredHeader_ = false;
+};
 
 class FakePlaybackBackend final : public PlaybackBackend {
 public:
@@ -236,34 +374,43 @@ public:
     void emitResolvedStream(
         const QString& provider,
         const QString& providerTrackId,
-        const QUrl& streamUrl = QUrl(QStringLiteral("https://audio.example/direct.webm"))) {
+        const QUrl& streamUrl = QUrl(QStringLiteral("https://audio.example/direct.webm")),
+        const QString& mimeType = QStringLiteral("audio/webm; codecs=\"opus\"")) {
         emit streamResolved(provider, providerTrackId, OnlineStreamResult{
             .provider = provider,
             .providerTrackId = providerTrackId,
             .streamUrl = streamUrl,
-            .mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+            .mimeType = mimeType,
         });
     }
 
-    void emitResolvedHeaderedStream(const QString& provider, const QString& providerTrackId) {
+    void emitResolvedHeaderedStream(
+        const QString& provider,
+        const QString& providerTrackId,
+        const QUrl& streamUrl = QUrl(QStringLiteral("https://audio.example/headered.webm")),
+        const QString& mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+        int itag = 251) {
         OnlineStreamResult stream;
         stream.provider = provider;
         stream.providerTrackId = providerTrackId;
-        stream.streamUrl = QUrl(QStringLiteral("https://audio.example/headered.webm"));
-        stream.mimeType = QStringLiteral("audio/webm; codecs=\"opus\"");
+        stream.streamUrl = streamUrl;
+        stream.mimeType = mimeType;
         stream.streamKind = OnlineStreamKind::HeaderedDirectUrl;
         stream.requestHeaders = {
-            {QByteArrayLiteral("User-Agent"), QByteArrayLiteral("android-vr-agent")},
+            {QByteArrayLiteral("X-Test-Download"), QByteArrayLiteral("direct-secret")},
         };
         stream.clientName = QStringLiteral("ANDROID_VR");
-        stream.itag = 251;
+        stream.itag = itag;
         emit streamResolved(provider, providerTrackId, stream);
     }
 
-    void emitResolvedSabrStream(const QString& provider, const QString& providerTrackId) {
+    void emitResolvedSabrStream(
+        const QString& provider,
+        const QString& providerTrackId,
+        const QUrl& streamUrl = QUrl(QStringLiteral("https://rr1.example/videoplayback?sabr=1"))) {
         YoutubeSabrStreamInfo sabr;
         sabr.providerTrackId = providerTrackId;
-        sabr.serverAbrStreamingUrl = QUrl(QStringLiteral("https://rr1.example/videoplayback?sabr=1"));
+        sabr.serverAbrStreamingUrl = streamUrl;
         sabr.videoPlaybackUstreamerConfig = QStringLiteral("dXN0cmVhbWVy");
         sabr.clientName = QStringLiteral("WEB");
         sabr.clientVersion = QStringLiteral("2.20260528.01.00");
@@ -345,7 +492,7 @@ private slots:
         QCOMPARE(controller.property("appName").toString(), QStringLiteral("Auqw"));
         QCOMPARE(controller.property("appId").toString(), QStringLiteral("com.Vehicoule.auqw"));
         QVERIFY(controller.property("databasePath").toString().endsWith(QStringLiteral("auqw.sqlite3")));
-        QCOMPARE(controller.property("schemaVersion").toInt(), 4);
+        QCOMPARE(controller.property("schemaVersion").toInt(), 5);
         QCOMPARE(controller.property("coreStatus").toString(), QStringLiteral("Ready"));
         QCOMPARE(controller.property("helloText").toString(), QStringLiteral("Hello from Auqw Core"));
 
@@ -567,7 +714,7 @@ private slots:
         QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Downloads unavailable for this provider."));
     }
 
-    void downloadCapableProviderQueuesDownload() {
+    void downloadCapableProviderQueuesAndStartsResolve() {
         QTemporaryDir downloadDir;
         QVERIFY(downloadDir.isValid());
 
@@ -601,18 +748,170 @@ private slots:
         QVERIFY(progressRole > 0);
         QVERIFY(targetPathRole > 0);
         QVERIFY(titleRole > 0);
-        QCOMPARE(downloads->data(downloads->index(0, 0), stateRole).toString(), QStringLiteral("queued"));
+        QCOMPARE(downloads->data(downloads->index(0, 0), stateRole).toString(), QStringLiteral("resolving"));
         QCOMPARE(downloads->data(downloads->index(0, 0), progressRole).toLongLong(), 0);
         QVERIFY(downloads->data(downloads->index(0, 0), targetPathRole).toString().startsWith(downloadDir.path()));
         QCOMPARE(downloads->data(downloads->index(0, 0), titleRole).toString(), QStringLiteral("Stone Window"));
-        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Download queued"));
+        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Resolving download"));
         QCOMPARE(provider->metadataCalls, 0);
-        QCOMPARE(provider->resolveCalls, 0);
+        QCOMPARE(provider->resolveCalls, 1);
+        QCOMPARE(provider->lastResolveProvider, QStringLiteral("ytmusic"));
+        QCOMPARE(provider->lastResolveTrackId, QStringLiteral("video-alpha"));
     }
 
-    void removeDownloadDeletesModelRowAndTargetFile() {
+    void directStreamDownloadWritesOriginalBytesAndCompletes() {
         QTemporaryDir downloadDir;
         QVERIFY(downloadDir.isValid());
+        const QByteArray audioBytes = QByteArrayLiteral("direct-webm-bytes");
+        LocalHttpServer server({
+            LocalHttpServer::Response{
+                .body = audioBytes,
+                .contentType = QByteArrayLiteral("audio/webm"),
+            },
+        });
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setDownloadDirectory", Q_ARG(QString, downloadDir.path())));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        QCOMPARE(provider->resolveCalls, 1);
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"), server.url(QStringLiteral("/direct.webm")), QStringLiteral("audio/webm"));
+
+        QTRY_COMPARE(roleValue(downloads, 0, "state").toString(), QStringLiteral("completed"));
+        QCOMPARE(roleValue(downloads, 0, "progress").toLongLong(), 100);
+        QCOMPARE(roleValue(downloads, 0, "bytes_received").toLongLong(), audioBytes.size());
+        QCOMPARE(roleValue(downloads, 0, "bytes_total").toLongLong(), audioBytes.size());
+        QCOMPARE(roleValue(downloads, 0, "mime_type").toString(), QStringLiteral("audio/webm"));
+        QCOMPARE(roleValue(downloads, 0, "stream_kind").toString(), QStringLiteral("direct"));
+        const QString targetPath = roleValue(downloads, 0, "target_path").toString();
+        QVERIFY(targetPath.startsWith(downloadDir.path()));
+        QVERIFY(targetPath.endsWith(QStringLiteral(".webm")));
+        QCOMPARE(readFileBytes(targetPath), audioBytes);
+        QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Download completed"));
+    }
+
+    void headeredStreamDownloadSendsHeadersAndCompletes() {
+        QTemporaryDir downloadDir;
+        QVERIFY(downloadDir.isValid());
+        const QByteArray audioBytes = QByteArrayLiteral("headered-m4a-bytes");
+        LocalHttpServer server({
+            LocalHttpServer::Response{
+                .body = audioBytes,
+                .contentType = QByteArrayLiteral("audio/mp4"),
+                .requiredHeaderName = QByteArrayLiteral("X-Test-Download"),
+                .requiredHeaderValue = QByteArrayLiteral("direct-secret"),
+            },
+        });
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setDownloadDirectory", Q_ARG(QString, downloadDir.path())));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+        provider->emitResolvedHeaderedStream(
+            QStringLiteral("ytmusic"),
+            QStringLiteral("video-alpha"),
+            server.url(QStringLiteral("/headered.m4a")),
+            QStringLiteral("audio/mp4"),
+            140);
+
+        QTRY_COMPARE(roleValue(downloads, 0, "state").toString(), QStringLiteral("completed"));
+        QVERIFY(server.sawRequiredHeader());
+        QCOMPARE(roleValue(downloads, 0, "progress").toLongLong(), 100);
+        QCOMPARE(roleValue(downloads, 0, "bytes_received").toLongLong(), audioBytes.size());
+        QCOMPARE(roleValue(downloads, 0, "bytes_total").toLongLong(), audioBytes.size());
+        QCOMPARE(roleValue(downloads, 0, "mime_type").toString(), QStringLiteral("audio/mp4"));
+        QCOMPARE(roleValue(downloads, 0, "stream_kind").toString(), QStringLiteral("headered_direct"));
+        const QString targetPath = roleValue(downloads, 0, "target_path").toString();
+        QVERIFY(targetPath.endsWith(QStringLiteral(".m4a")));
+        QCOMPARE(readFileBytes(targetPath), audioBytes);
+    }
+
+    void sabrStreamDownloadWritesParsedAudioPayloadBytes() {
+        QTemporaryDir downloadDir;
+        QVERIFY(downloadDir.isValid());
+        const QByteArray audioBytes = QByteArrayLiteral("sabr-audio-payload");
+        LocalHttpServer server({
+            LocalHttpServer::Response{
+                .body = sabrAudioResponse(audioBytes),
+                .contentType = QByteArrayLiteral("application/vnd.yt-ump"),
+            },
+            LocalHttpServer::Response{
+                .body = {},
+                .contentType = QByteArrayLiteral("application/vnd.yt-ump"),
+            },
+        });
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->downloadsSupported = true;
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setDownloadDirectory", Q_ARG(QString, downloadDir.path())));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "downloadSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        auto* downloads = qobject_cast<QAbstractItemModel*>(controller->property("downloadsModel").value<QObject*>());
+        QVERIFY(downloads != nullptr);
+        provider->emitResolvedSabrStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"), server.url(QStringLiteral("/sabr")));
+
+        QTRY_COMPARE(roleValue(downloads, 0, "state").toString(), QStringLiteral("completed"));
+        QTRY_VERIFY(server.requestCount() >= 2);
+        QCOMPARE(roleValue(downloads, 0, "progress").toLongLong(), 100);
+        QCOMPARE(roleValue(downloads, 0, "bytes_received").toLongLong(), audioBytes.size());
+        QVERIFY(roleValue(downloads, 0, "bytes_total").toString().isEmpty());
+        QCOMPARE(roleValue(downloads, 0, "mime_type").toString(), QStringLiteral("audio/webm; codecs=\"opus\""));
+        QCOMPARE(roleValue(downloads, 0, "stream_kind").toString(), QStringLiteral("sabr"));
+        const QString targetPath = roleValue(downloads, 0, "target_path").toString();
+        QVERIFY(targetPath.endsWith(QStringLiteral(".webm")));
+        QCOMPARE(readFileBytes(targetPath), audioBytes);
+    }
+
+    void removeActiveDownloadCancelsWorkerAndDeletesFiles() {
+        QTemporaryDir downloadDir;
+        QVERIFY(downloadDir.isValid());
+        const QByteArray audioBytes = QByteArrayLiteral("slow-direct-bytes");
+        LocalHttpServer server({
+            LocalHttpServer::Response{
+                .body = audioBytes,
+                .contentType = QByteArrayLiteral("audio/webm"),
+                .delayMs = 400,
+            },
+        });
 
         FakeOnlineProvider* provider = nullptr;
         const std::unique_ptr<CoreController> controller = makeController(&provider);
@@ -638,15 +937,19 @@ private slots:
         QVERIFY(idRole > 0);
         QVERIFY(targetPathRole > 0);
         const QString downloadId = downloads->data(downloads->index(0, 0), idRole).toString();
-        const QString targetPath = downloads->data(downloads->index(0, 0), targetPathRole).toString();
         QVERIFY(!downloadId.isEmpty());
-        QVERIFY(writeTestFile(targetPath));
-        QVERIFY(QFileInfo::exists(targetPath));
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"), server.url(QStringLiteral("/slow.webm")), QStringLiteral("audio/webm"));
+        QTRY_COMPARE(roleValue(downloads, 0, "state").toString(), QStringLiteral("downloading"));
+        const QString targetPath = downloads->data(downloads->index(0, 0), targetPathRole).toString();
+        QVERIFY(!targetPath.isEmpty());
 
         QVERIFY(QMetaObject::invokeMethod(controller.get(), "removeDownload", Q_ARG(QString, downloadId)));
 
         QCOMPARE(downloads->rowCount(), 0);
+        QTest::qWait(500);
         QVERIFY(!QFileInfo::exists(targetPath));
+        const QStringList files = QDir(downloadDir.path()).entryList(QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot);
+        QVERIFY(files.isEmpty());
         QCOMPARE(controller->property("downloadStatus").toString(), QStringLiteral("Download removed"));
     }
 

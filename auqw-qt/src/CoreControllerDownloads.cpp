@@ -1,4 +1,5 @@
 #include "CoreController.hpp"
+#include "DownloadWorker.hpp"
 #include "JsonListModel.hpp"
 #include "OnlineProvider.hpp"
 
@@ -201,6 +202,16 @@ void CoreController::removeDownload(const QString& downloadId) {
         return;
     }
 
+    QString activeTargetPath;
+    if (activeDownloadWorker_ != nullptr && activeDownloadId_ == downloadId) {
+        activeTargetPath = activeDownloadWorker_->targetPath();
+        QObject::disconnect(activeDownloadWorker_, nullptr, this, nullptr);
+        activeDownloadWorker_->cancel();
+        activeDownloadWorker_->deleteLater();
+        activeDownloadWorker_ = nullptr;
+        activeDownloadId_.clear();
+    }
+
     const CommandResult result = invokeCommand(
         QStringLiteral("downloads.remove"),
         QStringLiteral("downloads.remove"),
@@ -214,9 +225,13 @@ void CoreController::removeDownload(const QString& downloadId) {
     if (!targetPath.isEmpty() && QFileInfo::exists(targetPath)) {
         QFile::remove(targetPath);
     }
+    if (!activeTargetPath.isEmpty() && activeTargetPath != targetPath && QFileInfo::exists(activeTargetPath)) {
+        QFile::remove(activeTargetPath);
+    }
 
     refreshDownloadsFromCore();
     setDownloadStatus(QStringLiteral("Download removed"));
+    maybeStartNextDownload();
 }
 
 void CoreController::setDownloadDirectory(const QString& path) {
@@ -366,7 +381,125 @@ bool CoreController::queueDownloadForTrack(
 
     refreshDownloadsFromCore();
     setDownloadStatus(QStringLiteral("Download queued"));
+    maybeStartNextDownload();
     return true;
+}
+
+void CoreController::maybeStartNextDownload() {
+    if (activeDownloadWorker_ != nullptr || !onlineProvider_) {
+        return;
+    }
+
+    QVariantMap selected;
+    QString selectedCreatedAt;
+    const int count = downloadsModel_->rowCount();
+    for (int row = 0; row < count; ++row) {
+        const QVariantMap item = downloadsModel_->itemAt(row);
+        if (item.value(QStringLiteral("state")).toString() != QStringLiteral("queued")) {
+            continue;
+        }
+
+        const QString createdAt = item.value(QStringLiteral("created_at")).toString();
+        if (selected.isEmpty() || createdAt < selectedCreatedAt) {
+            selected = item;
+            selectedCreatedAt = createdAt;
+        }
+    }
+
+    if (!selected.isEmpty()) {
+        startDownloadWorker(selected);
+    }
+}
+
+void CoreController::startDownloadWorker(const QVariantMap& download) {
+    const QString downloadId = download.value(QStringLiteral("id")).toString();
+    const QString provider = download.value(QStringLiteral("provider")).toString();
+    const QString providerTrackId = download.value(QStringLiteral("provider_track_id")).toString();
+    const QString title = download.value(QStringLiteral("title")).toString();
+    const QString directory = downloadDirectory_.isEmpty() ? defaultDownloadDirectory() : downloadDirectory_;
+
+    if (downloadId.isEmpty() || provider.isEmpty() || providerTrackId.isEmpty()) {
+        applyDownloadWorkerUpdate(downloadId, QVariantMap{
+            {QStringLiteral("state"), QStringLiteral("failed")},
+            {QStringLiteral("progress"), 0},
+            {QStringLiteral("error_text"), QStringLiteral("Download source unavailable.")},
+        });
+        return;
+    }
+
+    auto* worker = new DownloadWorker(DownloadWorker::Job{
+        .downloadId = downloadId,
+        .provider = provider,
+        .providerTrackId = providerTrackId,
+        .title = title,
+        .downloadDirectory = directory,
+    }, onlineProvider_.get(), this);
+
+    activeDownloadWorker_ = worker;
+    activeDownloadId_ = downloadId;
+
+    connect(worker, &DownloadWorker::updateRequested, this, &CoreController::applyDownloadWorkerUpdate);
+    connect(worker, &DownloadWorker::completed, this, [this](const QString& id, const QString&) {
+        finishActiveDownload(id, QStringLiteral("Download completed"));
+    });
+    connect(worker, &DownloadWorker::failed, this, [this](const QString& id, const QString& message, const QString&) {
+        finishActiveDownload(id, message.isEmpty() ? QStringLiteral("Download failed") : message);
+    });
+    connect(worker, &DownloadWorker::cancelled, this, [this](const QString& id, const QString&) {
+        finishActiveDownload(id, QStringLiteral("Download cancelled"));
+    });
+
+    setDownloadStatus(QStringLiteral("Resolving download"));
+    worker->start();
+}
+
+void CoreController::applyDownloadWorkerUpdate(const QString& downloadId, const QVariantMap& fields) {
+    if (downloadId.isEmpty()) {
+        return;
+    }
+
+    QJsonObject params{{QStringLiteral("id"), downloadId}};
+    for (auto it = fields.cbegin(); it != fields.cend(); ++it) {
+        params.insert(it.key(), QJsonValue::fromVariant(it.value()));
+    }
+
+    const CommandResult result = invokeCommand(
+        QStringLiteral("downloads.update.worker"),
+        QStringLiteral("downloads.update"),
+        params);
+    if (!result.ok) {
+        setDownloadStatus(result.error);
+        return;
+    }
+
+    refreshDownloadsFromCore();
+    const QString state = fields.value(QStringLiteral("state")).toString();
+    if (state == QStringLiteral("resolving")) {
+        setDownloadStatus(QStringLiteral("Resolving download"));
+    } else if (state == QStringLiteral("downloading")) {
+        setDownloadStatus(QStringLiteral("Downloading"));
+    } else if (state == QStringLiteral("verifying")) {
+        setDownloadStatus(QStringLiteral("Verifying download"));
+    }
+}
+
+void CoreController::finishActiveDownload(const QString& downloadId, const QString& status) {
+    if (downloadId != activeDownloadId_) {
+        return;
+    }
+
+    clearActiveDownloadWorker();
+    refreshDownloadsFromCore();
+    setDownloadStatus(status);
+    maybeStartNextDownload();
+}
+
+void CoreController::clearActiveDownloadWorker() {
+    if (activeDownloadWorker_ != nullptr) {
+        activeDownloadWorker_->deleteLater();
+        activeDownloadWorker_ = nullptr;
+    }
+    activeDownloadId_.clear();
 }
 
 void CoreController::cacheArtworkForTrack(const QString& trackId, const QString& sourceUrl) {

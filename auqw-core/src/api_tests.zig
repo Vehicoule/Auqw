@@ -60,10 +60,10 @@ test "core metadata reports app details and migrated schema" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
 }
 
-test "schema v4 migration is idempotent for existing v3 databases" {
+test "schema v5 migration is idempotent for existing v3 databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -127,7 +127,7 @@ test "schema v4 migration is idempotent for existing v3 databases" {
     var response = try expectInvoke(second.?, "{\"id\":\"meta\",\"command\":\"core.get_metadata\",\"params\":{}}");
     defer response.deinit();
     const data = try expectOk(response, "meta");
-    try std.testing.expectEqual(@as(i64, 4), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
 
     var track = try expectInvoke(second.?, "{\"id\":\"track\",\"command\":\"tracks.upsert\",\"params\":{\"id\":\"alpha\",\"provider\":\"fake\",\"provider_track_id\":\"alpha\",\"title\":\"Alpha\",\"metadata_cached_at\":\"2026-05-30T10:00:00Z\"}}");
     defer track.deinit();
@@ -136,7 +136,11 @@ test "schema v4 migration is idempotent for existing v3 databases" {
 
     var download = try expectInvoke(second.?, "{\"id\":\"download\",\"command\":\"downloads.queue\",\"params\":{\"track_id\":\"alpha\",\"target_path\":\"/tmp/alpha.m4a\"}}");
     defer download.deinit();
-    _ = try expectOk(download, "download");
+    const download_object = (try expectOk(download, "download")).get("download").?.object;
+    try std.testing.expectEqual(@as(i64, 0), download_object.get("bytes_received").?.integer);
+    try std.testing.expect(download_object.get("bytes_total").? == .null);
+    try std.testing.expect(download_object.get("mime_type").? == .null);
+    try std.testing.expect(download_object.get("stream_kind").? == .null);
 }
 
 test "playback get starts stopped" {
@@ -401,7 +405,7 @@ test "artwork cache commands round trip" {
     try std.testing.expectEqual(@as(usize, 0), (try expectOk(empty, "art-empty")).get("artwork").?.array.items.len);
 }
 
-test "download commands cover M6 states" {
+test "download commands cover M6 states and stream metadata" {
     var core: ?*api.AuqwCore = null;
     try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
     defer api.auqw_core_destroy(core);
@@ -417,14 +421,18 @@ test "download commands cover M6 states" {
     try std.testing.expect(download_id.len >= 32);
     try std.testing.expectEqualStrings("queued", download.get("state").?.string);
     try std.testing.expectEqual(@as(i64, 0), download.get("progress").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), download.get("bytes_received").?.integer);
+    try std.testing.expect(download.get("bytes_total").? == .null);
+    try std.testing.expect(download.get("mime_type").? == .null);
+    try std.testing.expect(download.get("stream_kind").? == .null);
 
-    const states = [_][]const u8{ "downloading", "paused", "completed", "failed", "canceled" };
+    const states = [_][]const u8{ "resolving", "downloading", "verifying", "completed", "failed", "cancelled" };
     for (states, 0..) |state_name, index| {
         const progress: i64 = if (std.mem.eql(u8, state_name, "completed")) 100 else @intCast((index + 1) * 10);
         const update_request = try std.fmt.allocPrintSentinel(
             allocator,
-            "{{\"id\":\"download-update\",\"command\":\"downloads.update\",\"params\":{{\"id\":\"{s}\",\"state\":\"{s}\",\"progress\":{},\"error_text\":\"err-{s}\"}}}}",
-            .{ download_id, state_name, progress, state_name },
+            "{{\"id\":\"download-update\",\"command\":\"downloads.update\",\"params\":{{\"id\":\"{s}\",\"state\":\"{s}\",\"progress\":{},\"bytes_received\":{},\"bytes_total\":4096,\"mime_type\":\"audio/webm\",\"stream_kind\":\"headered_direct\",\"error_text\":\"err-{s}\"}}}}",
+            .{ download_id, state_name, progress, @as(i64, @intCast(index + 1)) * 512, state_name },
             0,
         );
         defer allocator.free(update_request);
@@ -433,10 +441,18 @@ test "download commands cover M6 states" {
         download = (try expectOk(updated, "download-update")).get("download").?.object;
         try std.testing.expectEqualStrings(state_name, download.get("state").?.string);
         try std.testing.expectEqual(progress, download.get("progress").?.integer);
+        try std.testing.expectEqual(@as(i64, @intCast(index + 1)) * 512, download.get("bytes_received").?.integer);
+        try std.testing.expectEqual(@as(i64, 4096), download.get("bytes_total").?.integer);
+        try std.testing.expectEqualStrings("audio/webm", download.get("mime_type").?.string);
+        try std.testing.expectEqualStrings("headered_direct", download.get("stream_kind").?.string);
         const expected_error = try std.fmt.allocPrint(allocator, "err-{s}", .{state_name});
         defer allocator.free(expected_error);
         try std.testing.expectEqualStrings(expected_error, download.get("error_text").?.string);
     }
+
+    const invalid_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"download-invalid\",\"command\":\"downloads.update\",\"params\":{{\"id\":\"{s}\",\"state\":\"paused\"}}}}", .{download_id}, 0);
+    defer allocator.free(invalid_request);
+    try expectErrorInvoke(core.?, invalid_request, error_invalid_json, "invalid_json");
 
     var list = try expectInvoke(core.?, "{\"id\":\"download-list\",\"command\":\"downloads.list\",\"params\":{}}");
     defer list.deinit();
