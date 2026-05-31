@@ -97,6 +97,8 @@ private slots:
             "Release job should download package artifacts before publishing assets");
         QVERIFY2(workflow.contains(QStringLiteral("github.ref_type == 'tag'")),
             "Release publishing should be gated to tag refs");
+        QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-window")),
+            "Linux release workflow should install the QtQuick.Window QML module required by Main.qml");
     }
 
     void windowsBuildRequiresCachesQtMultimediaAndDeployment() {
