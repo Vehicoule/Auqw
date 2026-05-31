@@ -197,13 +197,48 @@ function Require-WindowsPackage {
     }
 }
 
+function Write-WindowsSmokeLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (Test-Path $Path) {
+        Write-Host "=== auqw.exe package smoke ${Label} ==="
+        Get-Content $Path -ErrorAction SilentlyContinue | Select-Object -Last 120
+    }
+}
+
 function Invoke-WindowsPackageSmoke {
     param([Parameter(Mandatory = $true)][string]$Exe)
 
-    $process = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe -Parent) -PassThru
+    $packageDir = Split-Path $Exe -Parent
+    $stdoutPath = Join-Path $packageDir "auqw-package-smoke.stdout.log"
+    $stderrPath = Join-Path $packageDir "auqw-package-smoke.stderr.log"
+    Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+    $envNames = @("QT_QUICK_BACKEND", "QSG_RHI_BACKEND", "QT_OPENGL", "QT_LOGGING_RULES")
+    $previousEnv = @{}
+    foreach ($name in $envNames) {
+        $previousEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+
+    $env:QT_QUICK_BACKEND = "software"
+    $env:QSG_RHI_BACKEND = "software"
+    $env:QT_OPENGL = "software"
+    $env:QT_LOGGING_RULES = "qt.qml.warning=true;qt.quick.warning=true"
+
+    $process = Start-Process `
+        -FilePath $Exe `
+        -WorkingDirectory $packageDir `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
     try {
         if ($process.WaitForExit(5000)) {
             if ($process.ExitCode -ne 0) {
+                Write-WindowsSmokeLog $stdoutPath "stdout"
+                Write-WindowsSmokeLog $stderrPath "stderr"
                 throw "Windows package smoke failed: auqw.exe exited early with code $($process.ExitCode)"
             }
         }
@@ -211,6 +246,13 @@ function Invoke-WindowsPackageSmoke {
         if (-not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
+        }
+        foreach ($name in $envNames) {
+            if ($null -eq $previousEnv[$name]) {
+                [Environment]::SetEnvironmentVariable($name, $null, "Process")
+            } else {
+                [Environment]::SetEnvironmentVariable($name, $previousEnv[$name], "Process")
+            }
         }
     }
 }

@@ -204,6 +204,12 @@ private slots:
                 script.contains(QStringLiteral("WaitForExit")) &&
                 script.contains(QStringLiteral("Kill()")),
             "Windows package smoke should launch auqw.exe, detect early nonzero exit, then stop it if still running");
+        QVERIFY2(script.contains(QStringLiteral("RedirectStandardOutput")) &&
+                script.contains(QStringLiteral("RedirectStandardError")),
+            "Windows package smoke should capture packaged app diagnostics on launch failure");
+        QVERIFY2(script.contains(QStringLiteral("QT_QUICK_BACKEND")) &&
+                script.contains(QStringLiteral("software")),
+            "Windows package smoke should avoid hosted-runner graphics backend dependencies");
         QVERIFY2(script.contains(QStringLiteral("plugins\\multimedia")) || script.contains(QStringLiteral("plugins/multimedia")),
             "Windows package validation should require Qt Multimedia plugin directory");
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "Windows Qt shell should keep native platform compiler");
