@@ -8,6 +8,8 @@ install_root="${AUQW_INSTALL_ROOT:-$build_dir/stage}"
 flatpak_mode="${AUQW_FLATPAK_BUILD:-auto}"
 flatpak_build_dir="${AUQW_FLATPAK_BUILD_DIR:-$build_dir/flatpak-build}"
 flatpak_repo="${AUQW_FLATPAK_REPO:-$build_dir/flatpak-repo}"
+flatpak_bundle="${AUQW_LINUX_FLATPAK_BUNDLE:-$build_dir/auqw-linux-x64.flatpak}"
+flatpak_branch="${AUQW_FLATPAK_BRANCH:-master}"
 manifest="$root/packaging/linux/com.vehicoule.auqw.yml"
 
 zig_cache="${AUQW_ZIG_CACHE_DIR:-/tmp/auqw-zig-cache}"
@@ -103,3 +105,12 @@ flatpak-builder --force-clean \
   --install-deps-from=flathub \
   "$flatpak_build_dir" \
   "$manifest"
+
+mkdir -p "$(dirname "$flatpak_bundle")"
+flatpak build-bundle \
+  "$flatpak_repo" \
+  "$flatpak_bundle" \
+  com.vehicoule.auqw \
+  "$flatpak_branch"
+
+echo "Linux Flatpak bundle: $flatpak_bundle"

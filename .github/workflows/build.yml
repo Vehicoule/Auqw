@@ -2,6 +2,13 @@ name: Build
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  actions: read
+  contents: write
 
 jobs:
   linux-flatpak:
@@ -9,15 +16,62 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install container engine
-        run: sudo apt-get update && sudo apt-get install -y podman
-      - name: Build in Linux container
-        run: ./ci/container-build.sh linux-flatpak
+      - name: Install Linux package dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            appstream \
+            build-essential \
+            ca-certificates \
+            cmake \
+            curl \
+            desktop-file-utils \
+            flatpak \
+            flatpak-builder \
+            git \
+            gstreamer1.0-alsa \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-pulseaudio \
+            libxkbcommon-dev \
+            ninja-build \
+            qml6-module-qtqml \
+            qml6-module-qtqml-workerscript \
+            qml6-module-qtquick \
+            qml6-module-qtquick-controls \
+            qml6-module-qtquick-dialogs \
+            qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates \
+            qml6-module-qtmultimedia \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-base-private-dev \
+            qt6-declarative-dev \
+            qt6-declarative-dev-tools \
+            qt6-declarative-private-dev \
+            qt6-multimedia-dev \
+            xz-utils
+      - name: Install Zig
+        run: |
+          zig_version="0.16.0"
+          zig_archive="zig-x86_64-linux-${zig_version}.tar.xz"
+          zig_url="https://ziglang.org/download/${zig_version}/${zig_archive}"
+          curl -fsSL "$zig_url" -o "$RUNNER_TEMP/$zig_archive"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$zig_archive" --strip-components=1 -C "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: Add Flathub remote
+        run: sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - name: Build Linux Flatpak bundle
+        env:
+          AUQW_BUILD_DIR: build/linux-package
+          AUQW_FLATPAK_BUILD: ON
+          AUQW_LINUX_FLATPAK_BUNDLE: build/linux-package/auqw-linux-x64.flatpak
+        run: ./ci/linux-package.sh
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: auqw-linux-x64
-          path: build/linux-flatpak/bin/auqw
+          path: build/linux-package/auqw-linux-x64.flatpak
 
   android-linux:
     name: Android Linux Environment
@@ -63,11 +117,14 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
           call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
           powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\ci\windows-build.ps1"
+      - name: Package Windows zip
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/bin/* -DestinationPath build/windows/auqw-windows-x64.zip -Force
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: auqw-windows-x64
-          path: build/windows/bin/**
+          path: build/windows/auqw-windows-x64.zip
 
   macos:
     name: macOS Environment
@@ -89,3 +146,29 @@ jobs:
         run: brew bundle --file containers/ios/Brewfile
       - name: Build iOS
         run: ./ci/ios-build.sh
+
+  release:
+    name: GitHub Release
+    if: ${{ github.ref_type == 'tag' }}
+    needs:
+      - linux-flatpak
+      - windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: auqw-linux-x64
+          path: dist/auqw-linux-x64
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: auqw-windows-x64
+          path: dist/auqw-windows-x64
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: |
+            dist/auqw-linux-x64/auqw-linux-x64.flatpak
+            dist/auqw-windows-x64/auqw-windows-x64.zip

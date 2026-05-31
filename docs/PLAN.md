@@ -502,8 +502,9 @@ Acceptance:
 
 Status: in progress. Linux desktop package foundation has the first slice:
 CMake install rules, desktop metadata, AppStream metadata, SVG icon,
-Flatpak manifest, and local package staging script. Windows, macOS, Android,
-iOS, and FreeBSD release artifacts remain separate M7 slices.
+Flatpak manifest, local package staging script, and tagged GitHub Release
+publishing for Linux Flatpak plus Windows zip assets. macOS, Android, iOS,
+and FreeBSD release artifacts remain separate M7 slices.
 Linux package IDs use lowercase `com.vehicoule.auqw` because AppStream and
 Flatpak validators require lowercase reverse-DNS IDs.
 

@@ -63,8 +63,10 @@ AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=ON ./ci/linux-package.
 ```
 
 The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` and pins Zig
-0.16.0. If `flatpak-builder` or the Flathub remote is missing, the script
-prints the missing dependency instead of claiming package success.
+0.16.0. A full build exports `auqw-linux-x64.flatpak`, or the path set by
+`AUQW_LINUX_FLATPAK_BUNDLE`. If `flatpak-builder` or the Flathub remote is
+missing, the script prints the missing dependency instead of claiming package
+success.
 
 ## Bridge-Only Baseline
 
@@ -87,10 +89,10 @@ which leaves Qt C++ entry points unresolved at link time.
 ## Windows
 
 Hosted GitHub Actions Windows build is enabled through the manual `Build`
-workflow dispatch. CI does not run automatically on push or pull request
-updates. The hosted job installs Zig 0.16.0, Qt 6.8.3 for
+workflow dispatch and release tag pushes. CI does not run automatically on
+branch pushes or pull request updates. The hosted job installs Zig 0.16.0, Qt 6.8.3 for
 `win64_msvc2022_64` with Qt Multimedia, enters the MSVC developer environment,
-and uploads `auqw-windows-x64` from `build/windows/bin/**`.
+zips `build/windows/bin`, and uploads `auqw-windows-x64.zip`.
 
 Windows native runner/host:
 

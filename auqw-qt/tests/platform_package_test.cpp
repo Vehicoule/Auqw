@@ -64,10 +64,14 @@ private slots:
 
         QVERIFY2(workflow.contains(QStringLiteral("workflow_dispatch:")),
             "Build workflow should support manual dispatch");
-        QVERIFY2(!workflow.contains(QStringLiteral("push:")),
-            "Build workflow should not run automatically on push");
+        QVERIFY2(workflow.contains(QStringLiteral("push:")) &&
+                workflow.contains(QStringLiteral("tags:")) &&
+                workflow.contains(QStringLiteral("v*")),
+            "Build workflow should publish releases from v* tag pushes");
         QVERIFY2(!workflow.contains(QStringLiteral("pull_request:")),
             "Build workflow should not run automatically on pull request");
+        QVERIFY2(workflow.contains(QStringLiteral("contents: write")),
+            "Build workflow should allow tagged release asset publishing");
         QVERIFY2(workflow.contains(QStringLiteral("windows-latest")),
             "Windows workflow should use a hosted GitHub runner");
         QVERIFY2(!workflow.contains(QStringLiteral("AUQW_ENABLE_WINDOWS_CONTAINER")),
@@ -85,8 +89,14 @@ private slots:
             "Windows workflow should call ci/windows-build.ps1");
         QVERIFY2(workflow.contains(QStringLiteral("auqw-windows-x64")),
             "Windows workflow should upload a Windows artifact");
-        QVERIFY2(workflow.contains(QStringLiteral("build/windows/bin/**")),
-            "Windows workflow should upload deployed Windows binaries");
+        QVERIFY2(workflow.contains(QStringLiteral("auqw-windows-x64.zip")),
+            "Windows workflow should package deployed binaries as a release zip");
+        QVERIFY2(workflow.contains(QStringLiteral("softprops/action-gh-release")),
+            "Build workflow should create a GitHub Release for tag pushes");
+        QVERIFY2(workflow.contains(QStringLiteral("download-artifact")),
+            "Release job should download package artifacts before publishing assets");
+        QVERIFY2(workflow.contains(QStringLiteral("github.ref_type == 'tag'")),
+            "Release publishing should be gated to tag refs");
     }
 
     void windowsBuildRequiresCachesQtMultimediaAndDeployment() {
@@ -248,6 +258,10 @@ private slots:
             "Linux package script should validate AppStream metadata when available");
         QVERIFY2(script.contains(QStringLiteral("flatpak-builder")),
             "Linux package script should invoke flatpak-builder when available");
+        QVERIFY2(script.contains(QStringLiteral("flatpak build-bundle")),
+            "Linux package script should export a Flatpak bundle artifact for releases");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_FLATPAK_BUNDLE")),
+            "Linux package script should let CI choose the Flatpak bundle output path");
         QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_BUILD")),
             "Linux package script should let CI disable Flatpak builds explicitly");
     }
