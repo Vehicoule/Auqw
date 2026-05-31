@@ -452,7 +452,7 @@ Immediate live smoke status (2026-05-30):
 
 ## 10. Milestone 6: Cache And Downloads
 
-Status: in progress. Cache tables, provider capability checks, storage settings, Downloads UI, and real one-at-a-time download execution have landed. Downloaded files preserve provider stream bytes as-is; no transcoding or container rewriting is performed. Direct URL, headered direct URL, and SABR media payload downloads are supported, with SABR limited to parsed audio media payload bytes rather than saving UMP framing.
+Status: complete on `main` as of `feat(downloads): execute queued downloads`. Cache tables, provider capability checks, storage settings, Downloads UI, and real one-at-a-time download execution have landed. Downloaded files preserve provider stream bytes as-is; no transcoding or container rewriting is performed. Direct URL, headered direct URL, and SABR media payload downloads are supported, with SABR limited to parsed audio media payload bytes rather than saving UMP framing.
 
 Goal:
 
@@ -575,7 +575,7 @@ AUQW_REQUIRE_QT_MULTIMEDIA=ON AUQW_BUILD_QT=ON ./ci/build-local.sh
 ./ci/container-build.sh linux-flatpak
 ```
 
-3. Plan Milestone 6 cache/download work.
+3. Plan Milestone 7 packaging and release work.
 
 4. Verify iOS platform playback on macOS when host is available:
 
