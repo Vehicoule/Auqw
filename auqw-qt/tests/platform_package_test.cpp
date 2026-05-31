@@ -58,6 +58,37 @@ class PlatformPackageTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void githubBuildWorkflowIsManualAndUsesHostedWindows() {
+        const QString workflow = readTextFile(projectSourcePath(u".github/workflows/build.yml"));
+        QVERIFY2(!workflow.isEmpty(), ".github/workflows/build.yml should be readable");
+
+        QVERIFY2(workflow.contains(QStringLiteral("workflow_dispatch:")),
+            "Build workflow should support manual dispatch");
+        QVERIFY2(!workflow.contains(QStringLiteral("push:")),
+            "Build workflow should not run automatically on push");
+        QVERIFY2(!workflow.contains(QStringLiteral("pull_request:")),
+            "Build workflow should not run automatically on pull request");
+        QVERIFY2(workflow.contains(QStringLiteral("windows-latest")),
+            "Windows workflow should use a hosted GitHub runner");
+        QVERIFY2(!workflow.contains(QStringLiteral("AUQW_ENABLE_WINDOWS_CONTAINER")),
+            "Windows workflow should not be gated by the old self-hosted container repo variable");
+        QVERIFY2(workflow.contains(QStringLiteral("aqtinstall==3.3.0")),
+            "Windows workflow should install the pinned aqtinstall package");
+        QVERIFY2(workflow.contains(QStringLiteral("0.16.0")),
+            "Windows workflow should install Zig 0.16.0");
+        QVERIFY2(workflow.contains(QStringLiteral("6.7.3")) &&
+                workflow.contains(QStringLiteral("win64_msvc2022_64")) &&
+                workflow.contains(QStringLiteral("qtmultimedia")),
+            "Windows workflow should install Qt 6.7.3 win64_msvc2022_64 with qtmultimedia");
+        QVERIFY2(workflow.contains(QStringLiteral("ci\\windows-build.ps1")) ||
+                workflow.contains(QStringLiteral("ci/windows-build.ps1")),
+            "Windows workflow should call ci/windows-build.ps1");
+        QVERIFY2(workflow.contains(QStringLiteral("auqw-windows-x64")),
+            "Windows workflow should upload a Windows artifact");
+        QVERIFY2(workflow.contains(QStringLiteral("build/windows/bin/**")),
+            "Windows workflow should upload deployed Windows binaries");
+    }
+
     void windowsBuildRequiresCachesQtMultimediaAndDeployment() {
         const QString script = readTextFile(projectSourcePath(u"ci/windows-build.ps1"));
         QVERIFY2(!script.isEmpty(), "ci/windows-build.ps1 should be readable");

@@ -64,6 +64,12 @@ which leaves Qt C++ entry points unresolved at link time.
 
 ## Windows
 
+Hosted GitHub Actions Windows build is enabled through the manual `Build`
+workflow dispatch. CI does not run automatically on push or pull request
+updates. The hosted job installs Zig 0.16.0, Qt 6.7.3 for
+`win64_msvc2022_64` with Qt Multimedia, enters the MSVC developer environment,
+and uploads `auqw-windows-x64` from `build/windows/bin/**`.
+
 Windows native runner/host:
 
 ```powershell
@@ -81,11 +87,8 @@ Windows container on a Windows host with Windows containers enabled:
 .\ci\container-build.ps1 windows
 ```
 
-GitHub Actions job `windows-container` is gated behind repository variable:
-
-```text
-AUQW_ENABLE_WINDOWS_CONTAINER=true
-```
+The Windows container flow is a local/manual host option only; GitHub Actions
+uses hosted `windows-latest`.
 
 ## macOS
 

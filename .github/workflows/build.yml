@@ -1,10 +1,6 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -33,18 +29,45 @@ jobs:
       - name: Build in Android container
         run: ./ci/container-build.sh android-linux
 
-  windows-container:
-    name: Windows Container Environment
-    if: ${{ vars.AUQW_ENABLE_WINDOWS_CONTAINER == 'true' }}
-    runs-on:
-      - self-hosted
-      - Windows
-      - containers
+  windows:
+    name: Windows Environment
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build in Windows container
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install aQt
+        run: python -m pip install aqtinstall==3.3.0
+      - name: Install Zig
         shell: pwsh
-        run: .\ci\container-build.ps1 windows
+        run: |
+          $zigVersion = "0.16.0"
+          $zigArchive = "zig-x86_64-windows-$zigVersion.zip"
+          $zigUrl = "https://ziglang.org/download/$zigVersion/$zigArchive"
+          Invoke-WebRequest -Uri $zigUrl -OutFile $zigArchive
+          Expand-Archive $zigArchive -DestinationPath "$env:RUNNER_TEMP\zig"
+          $zigDir = Join-Path "$env:RUNNER_TEMP\zig" "zig-x86_64-windows-$zigVersion"
+          Add-Content $env:GITHUB_PATH $zigDir
+      - name: Install Qt
+        shell: pwsh
+        run: |
+          python -m aqt install-qt windows desktop 6.7.3 win64_msvc2022_64 --outputdir "$env:RUNNER_TEMP\Qt" -m qtmultimedia
+          $qtPrefix = Join-Path "$env:RUNNER_TEMP\Qt" "6.7.3\msvc2022_64"
+          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$qtPrefix"
+          Add-Content $env:GITHUB_PATH (Join-Path $qtPrefix "bin")
+      - name: Build Windows
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\ci\windows-build.ps1"
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auqw-windows-x64
+          path: build/windows/bin/**
 
   macos:
     name: macOS Environment
