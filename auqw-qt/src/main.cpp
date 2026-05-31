@@ -18,8 +18,11 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlError>
 #include <QUrl>
 #include <QWindow>
+
+#include <cstdio>
 
 int main(int argc, char* argv[]) {
 #if AUQW_ENABLE_DESKTOP_PLATFORM
@@ -57,9 +60,19 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(
         &engine,
+        &QQmlApplicationEngine::warnings,
+        [](const QList<QQmlError>& warnings) {
+            for (const QQmlError& warning : warnings) {
+                const QByteArray message = warning.toString().toLocal8Bit();
+                std::fprintf(stderr, "QML warning: %s\n", message.constData());
+            }
+        });
+    QObject::connect(
+        &engine,
         &QQmlApplicationEngine::objectCreationFailed,
         &app,
         [] {
+            std::fprintf(stderr, "QML object creation failed\n");
             QCoreApplication::exit(-1);
         },
         Qt::QueuedConnection);

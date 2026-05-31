@@ -224,8 +224,10 @@ function Invoke-WindowsPackageSmoke {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables["QT_QUICK_BACKEND"] = "software"
+    $startInfo.EnvironmentVariables["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     $startInfo.EnvironmentVariables["QSG_RHI_BACKEND"] = "software"
     $startInfo.EnvironmentVariables["QT_OPENGL"] = "software"
+    $startInfo.EnvironmentVariables["QT_FORCE_STDERR_LOGGING"] = "1"
     $startInfo.EnvironmentVariables["QT_LOGGING_RULES"] = "qt.qml.warning=true;qt.quick.warning=true"
 
     $process = New-Object System.Diagnostics.Process
