@@ -118,12 +118,19 @@ private slots:
             "Release job should accept only plain semver tags like v0.0.1");
         QVERIFY2(workflow.contains(QStringLiteral("Release tags must use plain semver like v0.0.1")),
             "Release job should fail clearly when an old alpha-suffixed tag is pushed");
-        QVERIFY2(workflow.contains(QStringLiteral("startsWith(github.ref_name, 'v0.')")),
-            "v0.* releases should be marked prerelease");
+        QVERIFY2(workflow.contains(QStringLiteral("prerelease: false")),
+            "Plain semver installer releases should be stable GitHub Releases");
+        QVERIFY2(workflow.contains(QStringLiteral("make_latest: true")),
+            "Plain semver installer releases should be promoted to GitHub Latest");
         QVERIFY2(workflow.contains(QStringLiteral("overwrite_files: true")),
             "Release job should overwrite same-name assets when v0.0.1 is recreated");
+        QVERIFY2(!workflow.contains(QStringLiteral("startsWith(github.ref_name, 'v0.')")),
+            "v0.* releases should not be forced to prerelease when v0.0.1 is the public latest installer release");
         QVERIFY2(!workflow.contains(QStringLiteral("contains(github.ref_name, 'alpha')")),
             "Prerelease logic should not depend on alpha tag suffixes");
+        QVERIFY2(docs.contains(QStringLiteral("plain semver tags publish stable GitHub Releases")) &&
+                docs.contains(QStringLiteral("GitHub Latest")),
+            "platform docs should describe plain semver release tags as stable/latest installer releases");
 
         QVERIFY2(workflow.contains(QStringLiteral("android-linux")) &&
                 workflow.contains(QStringLiteral("macos")),

@@ -244,7 +244,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          prerelease: false
+          make_latest: true
           overwrite_files: true
           files: |
             dist/auqw-linux-x64/auqw-linux-x64.flatpak

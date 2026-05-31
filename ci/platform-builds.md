@@ -37,9 +37,9 @@ Release tags use plain semver only:
 - `v0.1.1`: Beta 2
 - `v1.0.0`: first stable
 
-GitHub Releases are the canonical installer download location. `v0.*`
-Releases are marked prerelease; `v1.*` Releases are stable. Installer files
-are published only as GitHub Release assets.
+GitHub Releases are the canonical installer download location. In this repo,
+plain semver tags publish stable GitHub Releases and are promoted to GitHub Latest.
+Installer files are published only as GitHub Release assets.
 
 ## Linux Desktop
 
