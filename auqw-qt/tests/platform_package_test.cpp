@@ -255,6 +255,12 @@ private slots:
             "Flatpak manifest should pin Zig 0.16.0 for source builds");
         QVERIFY2(manifest.contains(QStringLiteral("cmake --install")),
             "Flatpak manifest should install through CMake install rules");
+        QVERIFY2(manifest.contains(QStringLiteral("ctest --test-dir flatpak-build --output-on-failure -R")) &&
+                manifest.contains(QStringLiteral("auqw_bridge_smoke")) &&
+                manifest.contains(QStringLiteral("auqw_qt_platform_package_test")),
+            "Flatpak manifest should run only package-safe smoke tests inside the Flatpak build sandbox");
+        QVERIFY2(!manifest.contains(QStringLiteral("ctest --test-dir flatpak-build --output-on-failure\n")),
+            "Flatpak manifest should not run network-sensitive controller tests inside the Flatpak build sandbox");
 
         QVERIFY2(script.contains(QStringLiteral("CMAKE_BUILD_TYPE=Release")),
             "Linux package script should produce Release artifacts");
