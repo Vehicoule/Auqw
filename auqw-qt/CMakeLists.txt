@@ -138,6 +138,7 @@ endif()
 qt_add_qml_module(Auqw
     URI Auqw
     VERSION 1.0
+    RESOURCE_PREFIX /qt/qml
     QML_FILES
         qml/Main.qml
 )

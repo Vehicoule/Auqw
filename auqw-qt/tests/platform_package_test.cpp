@@ -192,6 +192,9 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "Windows CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("windeployqt")), "Windows build should deploy Qt runtime with windeployqt");
         QVERIFY2(script.contains(QStringLiteral("Qt6Multimedia.dll")), "Windows package validation should require Qt Multimedia DLL");
+        const QString qtCmake = readTextFile(projectSourcePath(u"auqw-qt/CMakeLists.txt"));
+        QVERIFY2(qtCmake.contains(QStringLiteral("RESOURCE_PREFIX /qt/qml")),
+            "Packaged Qt app should embed its Auqw QML module under the standard qrc:/qt/qml import path");
         QVERIFY2(script.contains(QStringLiteral("vcruntime140.dll")) &&
                 script.contains(QStringLiteral("vcruntime140_1.dll")) &&
                 script.contains(QStringLiteral("msvcp140.dll")),
