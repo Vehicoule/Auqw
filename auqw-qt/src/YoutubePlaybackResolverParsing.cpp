@@ -20,10 +20,11 @@ bool isAudioMimeType(const QString& mimeType) {
 }
 
 int codecRank(const QString& mimeType) {
-    if (mimeType.contains(QStringLiteral("opus"), Qt::CaseInsensitive)) {
+    // Qt Multimedia handles YouTube AAC/MP4 direct streams more reliably than WebM/Opus.
+    if (mimeType.contains(QStringLiteral("mp4a"), Qt::CaseInsensitive)) {
         return 3;
     }
-    if (mimeType.contains(QStringLiteral("mp4a"), Qt::CaseInsensitive)) {
+    if (mimeType.contains(QStringLiteral("opus"), Qt::CaseInsensitive)) {
         return 2;
     }
     return 1;
@@ -279,7 +280,7 @@ OnlineStreamResolveResult YoutubePlaybackResolver::parsePlayerResponse(
         url = patchClientVersion(url, profile.clientVersion);
         const int bitrate = format.value(QStringLiteral("bitrate")).toInt(0);
         const int rank = codecRank(mimeType);
-        if (bestUrl.isEmpty() || bitrate > bestBitrate || (bitrate == bestBitrate && rank > bestCodecRank)) {
+        if (bestUrl.isEmpty() || rank > bestCodecRank || (rank == bestCodecRank && bitrate > bestBitrate)) {
             bestFormat = format;
             bestUrl = url;
             bestBitrate = bitrate;

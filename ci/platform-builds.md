@@ -79,11 +79,12 @@ AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=ON AUQW_FLATPAK_INSTAL
 flatpak install --user ./auqw-linux-x64.flatpak
 ```
 
-The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` and pins Zig
+The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` runtime branch
+`6.9` and pins Zig
 0.16.0. A full build exports `auqw-linux-x64.flatpak`, or the path set by
 `AUQW_LINUX_FLATPAK_BUNDLE`. Release bundles include the Flathub runtime
 repository hint so `flatpak install --user ./auqw-linux-x64.flatpak` can resolve
-`org.kde.Platform//6.8`; if the local Flatpak setup still refuses, add the
+`org.kde.Platform//6.9`; if the local Flatpak setup still refuses, add the
 Flathub remote manually with the command above and retry the install. If
 `flatpak-builder` or the Flathub remote is missing, the script prints the
 missing dependency instead of claiming package success. The manifest defaults
@@ -94,7 +95,8 @@ extraction and repository AppStream compose for hosted CI bundle exports; the
 package script still validates the installed AppStream metadata before invoking
 Flatpak packaging. The package script runs the full host CTest suite before
 invoking Flatpak packaging; the manifest reruns only package-safe smoke tests
-inside the Flatpak builder sandbox.
+inside the Flatpak builder sandbox. The sandboxed CMake build is capped at two
+parallel jobs so low-memory WSL hosts can validate the same package path.
 
 ## Bridge-Only Baseline
 

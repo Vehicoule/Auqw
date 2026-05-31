@@ -227,6 +227,17 @@ bool isVideoMimeType(const QString& mimeType) {
     return mimeType.startsWith(QStringLiteral("video/"), Qt::CaseInsensitive);
 }
 
+int codecRank(const QString& mimeType) {
+    // Qt Multimedia handles YouTube AAC/MP4 direct streams more reliably than WebM/Opus.
+    if (mimeType.contains(QStringLiteral("mp4a"), Qt::CaseInsensitive)) {
+        return 3;
+    }
+    if (mimeType.contains(QStringLiteral("opus"), Qt::CaseInsensitive)) {
+        return 2;
+    }
+    return 1;
+}
+
 qint64 jsonInt64(const QJsonObject& object, const QString& key) {
     const QJsonValue value = object.value(key);
     if (value.isString()) {
@@ -347,6 +358,7 @@ OnlineStreamResolveResult InnertubeProvider::parseStreamResolution(const QByteAr
     QUrl bestUrl;
     QString bestMimeType;
     int bestBitrate = -1;
+    int bestCodecRank = -1;
     const QJsonArray formats = document.object()
                                    .value(QStringLiteral("streamingData"))
                                    .toObject()
@@ -370,10 +382,12 @@ OnlineStreamResolveResult InnertubeProvider::parseStreamResolution(const QByteAr
         }
 
         const int bitrate = format.value(QStringLiteral("bitrate")).toInt(0);
-        if (bestUrl.isEmpty() || bitrate > bestBitrate) {
+        const int rank = codecRank(mimeType);
+        if (bestUrl.isEmpty() || rank > bestCodecRank || (rank == bestCodecRank && bitrate > bestBitrate)) {
             bestUrl = url;
             bestMimeType = mimeType;
             bestBitrate = bitrate;
+            bestCodecRank = rank;
         }
     }
 

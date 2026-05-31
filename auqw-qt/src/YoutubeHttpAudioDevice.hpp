@@ -40,8 +40,10 @@ private:
     void appendReplyBytes();
     void finishReplyIfDrained();
     void updateExpectedTotalBytes(QNetworkReply* reply, int statusCode);
+    [[nodiscard]] bool hasIncompleteKnownLengthReply() const;
     [[nodiscard]] bool canResumeAfterFailure(bool failed, int statusCode) const;
     void resumeAfterFailure(QNetworkReply* reply);
+    void continueAfterIncompleteReply(QNetworkReply* reply);
 
     QNetworkAccessManager network_;
     QPointer<QNetworkReply> reply_;

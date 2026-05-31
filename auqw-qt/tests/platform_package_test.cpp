@@ -365,6 +365,10 @@ private slots:
         QVERIFY2(manifest.contains(QStringLiteral("runtime: org.kde.Platform")) &&
                 manifest.contains(QStringLiteral("sdk: org.kde.Sdk")),
             "Flatpak manifest should use the KDE Qt runtime and SDK");
+        QVERIFY2(manifest.contains(QStringLiteral("runtime-version: '6.9'")),
+            "Flatpak manifest should target a supported KDE Platform runtime branch");
+        QVERIFY2(!manifest.contains(QStringLiteral("runtime-version: '6.8'")),
+            "Flatpak manifest should not target the EOL KDE Platform 6.8 runtime");
         QVERIFY2(manifest.contains(QStringLiteral("no-debuginfo: true")),
             "Flatpak manifest should not require eu-strip during hosted CI bundle exports");
         QVERIFY2(manifest.contains(QStringLiteral("appstream-compose: false")),
@@ -379,6 +383,8 @@ private slots:
             "Flatpak manifest should pin Zig 0.16.0 for source builds");
         QVERIFY2(manifest.contains(QStringLiteral("cmake --install")),
             "Flatpak manifest should install through CMake install rules");
+        QVERIFY2(manifest.contains(QStringLiteral("cmake --build flatpak-build --parallel 2")),
+            "Flatpak manifest should cap sandbox build parallelism for low-memory Linux hosts");
         QVERIFY2(manifest.contains(QStringLiteral("ctest --test-dir flatpak-build --output-on-failure -R")) &&
                 manifest.contains(QStringLiteral("auqw_bridge_smoke")) &&
                 manifest.contains(QStringLiteral("auqw_qt_platform_package_test")),
@@ -414,6 +420,9 @@ private slots:
             "Linux package script should let CI disable Flatpak builds explicitly");
         QVERIFY2(docs.contains(QStringLiteral("flatpak install --user ./auqw-linux-x64.flatpak")),
             "Linux package docs should show installing the release bundle directly");
+        QVERIFY2(docs.contains(QStringLiteral("org.kde.Platform//6.9")) &&
+                !docs.contains(QStringLiteral("org.kde.Platform//6.8")),
+            "Linux package docs should document the supported KDE Platform runtime branch");
         QVERIFY2(docs.contains(QStringLiteral("QT_QUICK_BACKEND=software")) &&
                 docs.contains(QStringLiteral("QSG_RHI_BACKEND=software")) &&
                 docs.contains(QStringLiteral("QT_OPENGL=software")),

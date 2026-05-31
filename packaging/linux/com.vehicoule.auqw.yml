@@ -1,6 +1,6 @@
 app-id: com.vehicoule.auqw
 runtime: org.kde.Platform
-runtime-version: '6.8'
+runtime-version: '6.9'
 sdk: org.kde.Sdk
 command: auqw
 appstream-compose: false
@@ -47,6 +47,6 @@ modules:
       - export ZIG=/app/zig/zig && cd auqw-core && "$ZIG" build --cache-dir /run/build/auqw/.zig-cache --global-cache-dir /run/build/auqw/.zig-global-cache test
       - export ZIG=/app/zig/zig && cd auqw-core && "$ZIG" build --cache-dir /run/build/auqw/.zig-cache --global-cache-dir /run/build/auqw/.zig-global-cache
       - cmake -S . -B flatpak-build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app -DAUQW_BUILD_QT=ON -DAUQW_REQUIRE_QT_MULTIMEDIA=ON -DAUQW_CORE_LIB="$PWD/auqw-core/zig-out/lib/libauqw_core.a"
-      - cmake --build flatpak-build
+      - cmake --build flatpak-build --parallel 2
       - ctest --test-dir flatpak-build --output-on-failure -R '^(auqw_bridge_smoke|auqw_qt_platform_package_test)$'
       - cmake --install flatpak-build

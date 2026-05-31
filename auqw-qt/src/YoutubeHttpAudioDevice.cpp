@@ -180,6 +180,11 @@ void YoutubeHttpAudioDevice::finishReplyIfDrained() {
     }
 
     QNetworkReply* reply = reply_.data();
+    if (hasIncompleteKnownLengthReply()) {
+        continueAfterIncompleteReply(reply);
+        return;
+    }
+
     reply_.clear();
     if (reply != nullptr) {
         reply->deleteLater();
@@ -219,6 +224,10 @@ void YoutubeHttpAudioDevice::updateExpectedTotalBytes(QNetworkReply* reply, int 
     }
 }
 
+bool YoutubeHttpAudioDevice::hasIncompleteKnownLengthReply() const {
+    return expectedTotalBytes_ >= 0 && nextRequestOffset_ < expectedTotalBytes_;
+}
+
 bool YoutubeHttpAudioDevice::canResumeAfterFailure(bool failed, int statusCode) const {
     if (!failed || statusCode >= 400 || resumeAttempts_ >= kMaxResumeAttempts) {
         return false;
@@ -234,6 +243,18 @@ void YoutubeHttpAudioDevice::resumeAfterFailure(QNetworkReply* reply) {
     ++resumeAttempts_;
     const int backoffMs = std::min(1000, 100 * resumeAttempts_);
     QTimer::singleShot(backoffMs, this, [this] {
+        if (isOpen()) {
+            startRequest();
+        }
+    });
+}
+
+void YoutubeHttpAudioDevice::continueAfterIncompleteReply(QNetworkReply* reply) {
+    reply_.clear();
+    if (reply != nullptr) {
+        reply->deleteLater();
+    }
+    QTimer::singleShot(0, this, [this] {
         if (isOpen()) {
             startRequest();
         }

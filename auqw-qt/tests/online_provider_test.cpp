@@ -58,6 +58,7 @@ private slots:
     void reportsMalformedUmpFrame();
     void streamBufferWaitsForBytesAndCancelWakesReader();
     void httpAudioDeviceResumesAfterShortNetworkReply();
+    void httpAudioDeviceContinuesAfterCompletePartialSegment();
 };
 
 void OnlineProviderTest::innertubeCapabilitiesEnableDownloads() {
@@ -368,11 +369,11 @@ void OnlineProviderTest::parsesAndroidVrDirectAudioStreamFixture() {
         QVERIFY(!parsed.stream.isSabr);
         QCOMPARE(parsed.stream.provider, QStringLiteral("ytmusic"));
         QCOMPARE(parsed.stream.providerTrackId, QStringLiteral("video-alpha"));
-        QCOMPARE(parsed.stream.streamUrl, QUrl(QStringLiteral("https://rr1.example/videoplayback?itag=251&c=ANDROID_VR&cver=1.37")));
-        QCOMPARE(parsed.stream.mimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
+        QCOMPARE(parsed.stream.streamUrl, QUrl(QStringLiteral("https://rr1.example/videoplayback?itag=140&c=ANDROID_VR&cver=1.37")));
+        QCOMPARE(parsed.stream.mimeType, QStringLiteral("audio/mp4; codecs=\"mp4a.40.2\""));
         QCOMPARE(parsed.stream.clientName, QStringLiteral("ANDROID_VR"));
         QCOMPARE(parsed.stream.clientVersion, QStringLiteral("1.37"));
-        QCOMPARE(parsed.stream.itag, 251);
+        QCOMPARE(parsed.stream.itag, 140);
         QVERIFY(parsed.stream.expiresAtMs > 0);
         QVERIFY(!parsed.stream.requestHeaders.isEmpty());
 }
@@ -409,8 +410,8 @@ void OnlineProviderTest::parsesDirectAudioStreamFixture() {
         QVERIFY2(parsed.ok, qPrintable(parsed.errorMessage));
         QCOMPARE(parsed.stream.provider, QStringLiteral("ytmusic"));
         QCOMPARE(parsed.stream.providerTrackId, QStringLiteral("video-alpha"));
-        QCOMPARE(parsed.stream.streamUrl, QUrl(QStringLiteral("https://audio.example/high.webm")));
-        QCOMPARE(parsed.stream.mimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
+        QCOMPARE(parsed.stream.streamUrl, QUrl(QStringLiteral("https://audio.example/low.m4a")));
+        QCOMPARE(parsed.stream.mimeType, QStringLiteral("audio/mp4; codecs=\"mp4a.40.2\""));
 }
 
 void OnlineProviderTest::parsesSabrOnlyAudioStreamFixture() {
@@ -724,6 +725,74 @@ void OnlineProviderTest::httpAudioDeviceResumesAfterShortNetworkReply() {
                         "HTTP/1.1 206 Partial Content\r\n"
                         "Content-Length: 8\r\n"
                         "Content-Range: bytes 0-7/8\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                        "abcd";
+                    socket->write(response);
+                } else {
+                    const QByteArray response =
+                        "HTTP/1.1 206 Partial Content\r\n"
+                        "Content-Length: 4\r\n"
+                        "Content-Range: bytes 4-7/8\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                        "efgh";
+                    socket->write(response);
+                }
+                socket->disconnectFromHost();
+            });
+        });
+
+        YoutubeHttpAudioDevice device(
+            QUrl(QStringLiteral("http://127.0.0.1:%1/audio").arg(server.serverPort())),
+            {});
+        QSignalSpy finished(&device, &QIODevice::readChannelFinished);
+        QSignalSpy errors(&device, &YoutubeHttpAudioDevice::streamError);
+
+        QVERIFY(device.open(QIODevice::ReadOnly));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(errors.count(), 0);
+
+        QByteArray actual;
+        char chunk[16] = {};
+        while (true) {
+            const qint64 count = device.read(chunk, sizeof(chunk));
+            if (count < 0) {
+                break;
+            }
+            actual.append(chunk, static_cast<qsizetype>(count));
+        }
+
+        QCOMPARE(actual, QByteArrayLiteral("abcdefgh"));
+        QCOMPARE(ranges.size(), 2);
+        QCOMPARE(ranges.at(0), QByteArrayLiteral("Range: bytes=0-"));
+        QCOMPARE(ranges.at(1), QByteArrayLiteral("Range: bytes=4-"));
+}
+
+void OnlineProviderTest::httpAudioDeviceContinuesAfterCompletePartialSegment() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QVector<QByteArray> ranges;
+        int requestCount = 0;
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&] {
+            QTcpSocket* socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                const QByteArray request = socket->readAll();
+                const QList<QByteArray> lines = request.split('\n');
+                for (QByteArray line : lines) {
+                    line = line.trimmed();
+                    if (line.toLower().startsWith("range:")) {
+                        ranges.push_back(line);
+                    }
+                }
+
+                if (requestCount++ == 0) {
+                    const QByteArray response =
+                        "HTTP/1.1 206 Partial Content\r\n"
+                        "Content-Length: 4\r\n"
+                        "Content-Range: bytes 0-3/8\r\n"
                         "Connection: close\r\n"
                         "\r\n"
                         "abcd";
