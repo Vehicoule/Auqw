@@ -5,7 +5,7 @@
 namespace {
 
 QString sourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_QT_SOURCE_DIR) + QLatin1Char('/') + relativePath;
+    return QStringLiteral(AUQW_QT_SOURCE_DIR) + QLatin1Char('/') + relativePath.toString();
 }
 
 QString readTextFile(const QString& path) {

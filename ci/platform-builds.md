@@ -7,7 +7,7 @@ First milestone uses build proof plus local display where available.
 - Zig 0.16.0 or newer
 - CMake 3.27 or newer
 - Ninja
-- Qt 6.5 or newer for the QML shell
+- Qt 6.4 or newer for the QML shell
 
 Use temporary Zig caches on Windows-mounted WSL paths:
 

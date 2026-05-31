@@ -9,7 +9,7 @@
 namespace {
 
 QString projectSourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_PROJECT_SOURCE_DIR) + QLatin1Char('/') + relativePath;
+    return QStringLiteral(AUQW_PROJECT_SOURCE_DIR) + QLatin1Char('/') + relativePath.toString();
 }
 
 QString readTextFile(const QString& path) {
@@ -98,9 +98,11 @@ private slots:
     void linuxRuntimeDeploymentBundlesHostVisibleQtLibraries() {
         const QString deploy = readTextFile(projectSourcePath(u"ci/deploy-linux-runtime.sh"));
         const QString check = readTextFile(projectSourcePath(u"ci/check-linux-runtime.sh"));
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/linux-flatpak/Containerfile"));
 
         QVERIFY2(!deploy.isEmpty(), "ci/deploy-linux-runtime.sh should be readable");
         QVERIFY2(!check.isEmpty(), "ci/check-linux-runtime.sh should be readable");
+        QVERIFY2(!containerfile.isEmpty(), "containers/linux-flatpak/Containerfile should be readable");
 
         QVERIFY2(deploy.contains(QStringLiteral("copy_runtime_libraries")),
             "Linux deploy should copy the runtime library closure into build/lib");
@@ -108,6 +110,24 @@ private slots:
             "Linux deploy should not copy only Qt Multimedia libraries");
         QVERIFY2(check.contains(QStringLiteral("LD_LIBRARY_PATH")),
             "Linux runtime check should resolve libraries bundled in build/lib");
+        QVERIFY2(containerfile.contains(QStringLiteral("ubuntu:24.04")),
+            "Linux Flatpak container should match the GitHub ubuntu-latest host glibc for runtime validation");
+        QVERIFY2(!containerfile.contains(QStringLiteral("ubuntu:26.04")),
+            "Linux Flatpak container should not build runtime libraries against a newer glibc than the GitHub host check");
+        QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-alsa")),
+            "Linux Flatpak container should provide a GStreamer audio sink for Qt Multimedia tests");
+        QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-plugins-good")),
+            "Linux Flatpak container should provide common GStreamer playback elements for Qt Multimedia tests");
+        QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-pulseaudio")),
+            "Linux Flatpak container should provide the PulseAudio GStreamer sink used by Qt Multimedia");
+        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtqml-workerscript")),
+            "Linux Flatpak container should provide the WorkerScript QML import used by Main.qml");
+        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-dialogs")),
+            "Linux Flatpak container should provide the QtQuick Dialogs QML import used by Main.qml");
+        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-layouts")),
+            "Linux Flatpak container should provide the QtQuick Layouts QML import used by Main.qml");
+        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-templates")),
+            "Linux Flatpak container should provide the QtQuick Templates QML import used by Qt Quick Controls styles");
     }
 
     void iosBuildChecksQtKitAppleLinkageAndBundleMetadata() {

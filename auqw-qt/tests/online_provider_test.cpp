@@ -16,7 +16,7 @@
 namespace {
 
 QString projectSourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_PROJECT_SOURCE_DIR) + QLatin1Char('/') + relativePath;
+    return QStringLiteral(AUQW_PROJECT_SOURCE_DIR) + QLatin1Char('/') + relativePath.toString();
 }
 
 QString readTextFile(QStringView relativePath) {

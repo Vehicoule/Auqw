@@ -6,7 +6,7 @@
 namespace {
 
 QString packageSourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QLatin1Char('/') + relativePath;
+    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QLatin1Char('/') + relativePath.toString();
 }
 
 QString readTextFile(const QString& path) {
@@ -26,11 +26,11 @@ QByteArray readBinaryFile(const QString& path) {
 }
 
 QString sourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../") + relativePath;
+    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../") + relativePath.toString();
 }
 
 QString projectSourcePath(QStringView relativePath) {
-    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../../") + relativePath;
+    return QStringLiteral(AUQW_ANDROID_PACKAGE_SOURCE_DIR) + QStringLiteral("/../../") + relativePath.toString();
 }
 
 QString androidApkPath() {
@@ -164,7 +164,7 @@ private slots:
             "Android Qt install should include qtmultimedia");
         QVERIFY2(androidBuild.contains(QStringLiteral("Qt6Multimedia/Qt6MultimediaConfig.cmake")),
             "Android build should fail fast when Qt Multimedia is absent");
-        QVERIFY2(rootCmake.contains(QStringLiteral("find_package(Qt6 6.5 REQUIRED COMPONENTS Multimedia)")),
+        QVERIFY2(rootCmake.contains(QStringLiteral("find_package(Qt6 6.4 REQUIRED COMPONENTS Multimedia)")),
             "Android CMake configure should require Qt Multimedia");
         QVERIFY2(!qtCmake.contains(QStringLiteral("Qt6Multimedia_FOUND AND NOT ANDROID")),
             "Qt Multimedia backend should not exclude Android");

@@ -1,4 +1,4 @@
-qt_standard_project_setup(REQUIRES 6.5)
+qt_standard_project_setup(REQUIRES 6.4)
 
 set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND OFF)
 if(Qt6Multimedia_FOUND)

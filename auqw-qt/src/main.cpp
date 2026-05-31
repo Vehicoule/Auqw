@@ -18,6 +18,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QUrl>
 #include <QWindow>
 
 int main(int argc, char* argv[]) {
@@ -60,7 +61,11 @@ int main(int argc, char* argv[]) {
         },
         Qt::QueuedConnection);
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     engine.loadFromModule(QStringLiteral("Auqw"), QStringLiteral("Main"));
+#else
+    engine.load(QUrl(QStringLiteral("qrc:/Auqw/qml/Main.qml")));
+#endif
 #if AUQW_ENABLE_DESKTOP_PLATFORM
     if (!engine.rootObjects().isEmpty()) {
         desktopPlatformController.bindWindow(qobject_cast<QWindow*>(engine.rootObjects().first()));
