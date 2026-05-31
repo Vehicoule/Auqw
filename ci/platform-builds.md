@@ -58,8 +58,8 @@ available.
 Full Flatpak build:
 
 ```bash
-flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=ON ./ci/linux-package.sh
+flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=ON AUQW_FLATPAK_INSTALLATION=user ./ci/linux-package.sh
 ```
 
 The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` and pins Zig

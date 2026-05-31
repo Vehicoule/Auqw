@@ -99,6 +99,10 @@ private slots:
             "Release publishing should be gated to tag refs");
         QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-window")),
             "Linux release workflow should install the QtQuick.Window QML module required by Main.qml");
+        QVERIFY2(workflow.contains(QStringLiteral("flatpak --user remote-add")),
+            "Linux release workflow should add Flathub to the user Flatpak installation");
+        QVERIFY2(workflow.contains(QStringLiteral("AUQW_FLATPAK_INSTALLATION: user")),
+            "Linux release workflow should install Flatpak dependencies without system deploy permissions");
     }
 
     void windowsBuildRequiresCachesQtMultimediaAndDeployment() {
@@ -223,7 +227,7 @@ private slots:
 
         QVERIFY2(desktop.contains(QStringLiteral("Exec=auqw")), "Desktop file should launch auqw");
         QVERIFY2(desktop.contains(QStringLiteral("Icon=com.vehicoule.auqw")), "Desktop file should use the app-id icon");
-        QVERIFY2(desktop.contains(QStringLiteral("Categories=Audio;Music;Player;")),
+        QVERIFY2(desktop.contains(QStringLiteral("Categories=AudioVideo;Audio;Music;Player;")),
             "Desktop file should place Auqw in music player launchers");
 
         QVERIFY2(appstream.contains(QStringLiteral("<id>com.vehicoule.auqw</id>")),
@@ -264,6 +268,8 @@ private slots:
             "Linux package script should export a Flatpak bundle artifact for releases");
         QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_FLATPAK_BUNDLE")),
             "Linux package script should let CI choose the Flatpak bundle output path");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_INSTALLATION")),
+            "Linux package script should support user Flatpak installation mode for hosted CI");
         QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_BUILD")),
             "Linux package script should let CI disable Flatpak builds explicitly");
     }

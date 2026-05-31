@@ -61,11 +61,12 @@ jobs:
           tar -xJf "$RUNNER_TEMP/$zig_archive" --strip-components=1 -C "$RUNNER_TEMP/zig"
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - name: Add Flathub remote
-        run: sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+        run: flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
       - name: Build Linux Flatpak bundle
         env:
           AUQW_BUILD_DIR: build/linux-package
           AUQW_FLATPAK_BUILD: ON
+          AUQW_FLATPAK_INSTALLATION: user
           AUQW_LINUX_FLATPAK_BUNDLE: build/linux-package/auqw-linux-x64.flatpak
         run: ./ci/linux-package.sh
       - name: Upload Linux artifact

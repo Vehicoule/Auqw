@@ -10,6 +10,7 @@ flatpak_build_dir="${AUQW_FLATPAK_BUILD_DIR:-$build_dir/flatpak-build}"
 flatpak_repo="${AUQW_FLATPAK_REPO:-$build_dir/flatpak-repo}"
 flatpak_bundle="${AUQW_LINUX_FLATPAK_BUNDLE:-$build_dir/auqw-linux-x64.flatpak}"
 flatpak_branch="${AUQW_FLATPAK_BRANCH:-master}"
+flatpak_installation="${AUQW_FLATPAK_INSTALLATION:-system}"
 manifest="$root/packaging/linux/com.vehicoule.auqw.yml"
 
 zig_cache="${AUQW_ZIG_CACHE_DIR:-/tmp/auqw-zig-cache}"
@@ -37,6 +38,19 @@ is_on() {
       ;;
   esac
 }
+
+flatpak_scope_args=()
+case "${flatpak_installation,,}" in
+  system|"")
+    ;;
+  user)
+    flatpak_scope_args=(--user)
+    ;;
+  *)
+    echo "invalid AUQW_FLATPAK_INSTALLATION: $flatpak_installation" >&2
+    exit 2
+    ;;
+esac
 
 (
   cd "$root/auqw-core"
@@ -94,13 +108,13 @@ if ! command -v flatpak-builder >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! flatpak remotes --columns=name 2>/dev/null | grep -qx flathub; then
+if ! flatpak "${flatpak_scope_args[@]}" remotes --columns=name 2>/dev/null | grep -qx flathub; then
   echo "missing Flatpak remote: flathub" >&2
-  echo "Add it with: flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo" >&2
+  echo "Add it with: flatpak ${flatpak_scope_args[*]} remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo" >&2
   exit 1
 fi
 
-flatpak-builder --force-clean \
+flatpak-builder "${flatpak_scope_args[@]}" --force-clean \
   --repo="$flatpak_repo" \
   --install-deps-from=flathub \
   "$flatpak_build_dir" \
