@@ -117,6 +117,10 @@ private slots:
         const QString bridgeCMake = readTextFile(projectSourcePath(u"auqw-bridge/CMakeLists.txt"));
         QVERIFY2(bridgeCMake.contains(QStringLiteral("ntdll")),
             "Windows CMake linkage should include ntdll for Zig core Windows runtime symbols");
+
+        const QString coreBuild = readTextFile(projectSourcePath(u"auqw-core/build.zig"));
+        QVERIFY2(coreBuild.contains(QStringLiteral("bundle_compiler_rt = true")),
+            "Windows Zig core static library should bundle compiler-rt helpers for MSVC links");
     }
 
     void macosBuildRequiresCachesQtMultimediaAndDeployment() {
