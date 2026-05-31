@@ -9,6 +9,7 @@ on:
 permissions:
   actions: read
   contents: write
+  packages: write
 
 jobs:
   linux-flatpak:
@@ -68,12 +69,15 @@ jobs:
           AUQW_FLATPAK_BUILD: ON
           AUQW_FLATPAK_INSTALLATION: user
           AUQW_LINUX_FLATPAK_BUNDLE: build/linux-package/auqw-linux-x64.flatpak
+          AUQW_LINUX_TARBALL: build/linux-package/auqw-linux-x64.tar.gz
         run: ./ci/linux-package.sh
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: auqw-linux-x64
-          path: build/linux-package/auqw-linux-x64.flatpak
+          path: |
+            build/linux-package/auqw-linux-x64.flatpak
+            build/linux-package/auqw-linux-x64.tar.gz
 
   android-linux:
     name: Android Linux Environment
@@ -83,7 +87,18 @@ jobs:
       - name: Install container engine
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build in Android container
+        env:
+          AUQW_ANDROID_KEYSTORE_BASE64: ${{ secrets.AUQW_ANDROID_KEYSTORE_BASE64 }}
+          AUQW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AUQW_ANDROID_KEYSTORE_PASSWORD }}
+          AUQW_ANDROID_KEY_ALIAS: ${{ secrets.AUQW_ANDROID_KEY_ALIAS }}
+          AUQW_ANDROID_KEY_PASSWORD: ${{ secrets.AUQW_ANDROID_KEY_PASSWORD }}
         run: ./ci/container-build.sh android-linux
+      - name: Upload Android release APK
+        if: ${{ github.ref_type == 'tag' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: auqw-android-arm64
+          path: build/android-linux/apk/auqw-android-arm64.apk
 
   windows:
     name: Windows Environment
@@ -136,7 +151,14 @@ jobs:
       - name: Install Homebrew dependencies
         run: brew bundle --file containers/macos/Brewfile
       - name: Build macOS
+        env:
+          AUQW_MACOS_DMG_PATH: build/macos/auqw-macos.dmg
         run: ./ci/macos-build.sh
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: auqw-macos
+          path: build/macos/auqw-macos.dmg
 
   ios:
     name: iOS Environment
@@ -154,23 +176,83 @@ jobs:
     if: ${{ github.ref_type == 'tag' }}
     needs:
       - linux-flatpak
+      - android-linux
       - windows
+      - macos
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use plain semver like v0.0.1" >&2
+            exit 1
+          fi
+      - name: Prepare release package metadata
+        id: release-meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+          tags="ghcr.io/vehicoule/auqw:${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF_NAME" == v0.0.* ]]; then
+            tags="${tags}"$'\n'"ghcr.io/vehicoule/auqw:alpha"
+          elif [[ "$GITHUB_REF_NAME" == v0.1.* ]]; then
+            tags="${tags}"$'\n'"ghcr.io/vehicoule/auqw:beta"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release-url=$release_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Download Linux artifact
         uses: actions/download-artifact@v4
         with:
           name: auqw-linux-x64
           path: dist/auqw-linux-x64
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: auqw-android-arm64
+          path: dist/auqw-android-arm64
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
           name: auqw-windows-x64
           path: dist/auqw-windows-x64
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: auqw-macos
+          path: dist/auqw-macos
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
           files: |
             dist/auqw-linux-x64/auqw-linux-x64.flatpak
+            dist/auqw-linux-x64/auqw-linux-x64.tar.gz
+            dist/auqw-android-arm64/auqw-android-arm64.apk
             dist/auqw-windows-x64/auqw-windows-x64.zip
+            dist/auqw-macos/auqw-macos.dmg
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish GHCR release index
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/ghcr/release-index.Containerfile
+          push: true
+          tags: ${{ steps.release-meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Auqw Release Index
+            org.opencontainers.image.description=Metadata-only index for Auqw release downloads. Installers remain on GitHub Releases.
+            org.opencontainers.image.source=https://github.com/Vehicoule/Auqw
+            org.opencontainers.image.version=${{ steps.release-meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.url=${{ steps.release-meta.outputs.release-url }}

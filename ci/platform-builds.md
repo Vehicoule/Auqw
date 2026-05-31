@@ -27,6 +27,22 @@ export AUQW_ZIG_CXX_GLOBAL_CACHE_DIR=/tmp/auqw-zig-cxx-global-cache
 export ZIG_REAL=/path/to/zig
 ```
 
+## Release Publishing
+
+Release tags use plain semver only:
+
+- `v0.0.1`: Alpha 1
+- `v0.0.2`: Alpha 2
+- `v0.1.0`: Beta 1
+- `v0.1.1`: Beta 2
+- `v1.0.0`: first stable
+
+GitHub Releases are the canonical installer download location. `v0.*`
+Releases are marked prerelease; `v1.*` Releases are stable. The release job
+also publishes a metadata-only GHCR release index at `ghcr.io/vehicoule/auqw`
+with version labels and `alpha` / `beta` channel tags. Installer files are not
+stored in GHCR layers.
+
 ## Linux Desktop
 
 ```bash
@@ -53,7 +69,9 @@ AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=OFF ./ci/linux-package
 The package script builds Release artifacts, installs to a staged `/usr`
 layout under `build/linux-package/stage`, and validates the installed desktop
 file and AppStream metadata when `desktop-file-validate` and `appstreamcli` are
-available.
+available. It also deploys a portable runtime tree, validates it with
+`ci/check-linux-runtime.sh`, and writes `auqw-linux-x64.tar.gz` or the path set
+by `AUQW_LINUX_TARBALL`.
 
 Full Flatpak build:
 
@@ -138,7 +156,8 @@ The script honors `ZIG`, `AUQW_BUILD_DIR`, `AUQW_ZIG_CACHE_DIR`, and
 `AUQW_ZIG_GLOBAL_CACHE_DIR`; requires Qt Multimedia for platform playback;
 deploys the `.app` bundle with `macdeployqt`; and validates `otool -L`,
 `QtMultimedia.framework`, bundle metadata, and `Contents/PlugIns/multimedia`
-before running CTest.
+before running CTest. It creates a compressed `auqw-macos.dmg`, or the path set
+by `AUQW_MACOS_DMG_PATH`, from the deployed app bundle.
 
 ## Android
 
@@ -147,6 +166,18 @@ Use a Qt Android kit for APK builds. Current container proves the Android SDK/ND
 ```bash
 ./ci/container-build.sh android-linux
 ```
+
+Tag releases require a signed release APK. Configure repository secrets before
+pushing release tags:
+
+- `AUQW_ANDROID_KEYSTORE_BASE64`
+- `AUQW_ANDROID_KEYSTORE_PASSWORD`
+- `AUQW_ANDROID_KEY_ALIAS`
+- `AUQW_ANDROID_KEY_PASSWORD`
+
+On tag runs, `ci/android-build.sh` fails clearly if any signing secret is
+missing. The signed output is `build/android-linux/apk/auqw-android-arm64.apk`;
+non-release local builds still emit `auqw-android-arm64-debug.apk`.
 
 Runtime smoke requires an attached emulator/device in `adb device` state. The
 smoke builds the APK when `AUQW_ANDROID_APK_PATH` is not set, installs it,

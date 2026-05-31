@@ -53,6 +53,14 @@ case "$target" in
       -e AUQW_BUILD_DIR="$build_dir" \
       -e AUQW_ZIG_CACHE_DIR=/tmp/auqw-zig-cache \
       -e AUQW_ZIG_GLOBAL_CACHE_DIR=/tmp/auqw-zig-global-cache \
+      -e AUQW_ANDROID_RELEASE_BUILD \
+      -e AUQW_ANDROID_KEYSTORE_BASE64 \
+      -e AUQW_ANDROID_KEYSTORE_PASSWORD \
+      -e AUQW_ANDROID_KEY_ALIAS \
+      -e AUQW_ANDROID_KEY_PASSWORD \
+      -e GITHUB_REF \
+      -e GITHUB_REF_NAME \
+      -e GITHUB_REF_TYPE \
       "$image" \
       ./ci/android-build.sh
     ;;

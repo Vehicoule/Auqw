@@ -9,6 +9,7 @@ flatpak_mode="${AUQW_FLATPAK_BUILD:-auto}"
 flatpak_build_dir="${AUQW_FLATPAK_BUILD_DIR:-$build_dir/flatpak-build}"
 flatpak_repo="${AUQW_FLATPAK_REPO:-$build_dir/flatpak-repo}"
 flatpak_bundle="${AUQW_LINUX_FLATPAK_BUNDLE:-$build_dir/auqw-linux-x64.flatpak}"
+linux_tarball="${AUQW_LINUX_TARBALL:-$build_dir/auqw-linux-x64.tar.gz}"
 flatpak_branch="${AUQW_FLATPAK_BRANCH:-master}"
 flatpak_installation="${AUQW_FLATPAK_INSTALLATION:-system}"
 manifest="$root/packaging/linux/com.vehicoule.auqw.yml"
@@ -67,6 +68,25 @@ cmake -S "$root" -B "$build_dir" -GNinja \
 
 cmake --build "$build_dir"
 ctest --test-dir "$build_dir" --output-on-failure
+
+"$root/ci/deploy-linux-runtime.sh" "$build_dir"
+"$root/ci/check-linux-runtime.sh" "$build_dir/bin/auqw"
+
+mkdir -p "$(dirname "$linux_tarball")"
+tar_entries=(bin)
+if [[ -d "$build_dir/lib" ]]; then
+  tar_entries+=(lib)
+fi
+if [[ -d "$build_dir/plugins" ]]; then
+  tar_entries+=(plugins)
+fi
+tar -czf "$linux_tarball" -C "$build_dir" "${tar_entries[@]}"
+tar -tzf "$linux_tarball" >/dev/null
+if ! tar -tzf "$linux_tarball" | grep -Fx "bin/auqw" >/dev/null; then
+  echo "missing Linux portable executable in tarball: bin/auqw" >&2
+  exit 1
+fi
+echo "Linux portable tarball: $linux_tarball"
 
 rm -rf "$install_root"
 DESTDIR="$install_root" cmake --install "$build_dir"

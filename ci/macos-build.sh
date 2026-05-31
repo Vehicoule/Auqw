@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 zig_bin="${ZIG:-zig}"
 build_dir="${AUQW_BUILD_DIR:-$root/build/macos}"
+dmg_path="${AUQW_MACOS_DMG_PATH:-$build_dir/auqw-macos.dmg}"
 zig_cache="${AUQW_ZIG_CACHE_DIR:-/tmp/auqw-zig-cache}"
 zig_global_cache="${AUQW_ZIG_GLOBAL_CACHE_DIR:-/tmp/auqw-zig-global-cache}"
 core_lib="$root/auqw-core/zig-out/lib/libauqw_core.a"
@@ -90,6 +91,25 @@ validate_macos_bundle() {
   fi
 }
 
+create_macos_dmg() {
+  local app_path="$1"
+  local output_path="$2"
+
+  if ! command -v hdiutil >/dev/null 2>&1; then
+    echo "missing macOS dependency: hdiutil" >&2
+    exit 127
+  fi
+
+  mkdir -p "$(dirname "$output_path")"
+  rm -f "$output_path"
+  hdiutil create \
+    -volname Auqw \
+    -srcfolder "$app_path" \
+    -format UDZO \
+    "$output_path"
+  hdiutil verify "$output_path"
+}
+
 qt_prefix="$(discover_qt_prefix)"
 if [[ -z "$qt_prefix" ]]; then
   echo "missing macOS dependency: Qt prefix (set QT_PREFIX, QT_HOST_PATH, or CMAKE_PREFIX_PATH)" >&2
@@ -131,3 +151,5 @@ fi
 validate_macos_bundle "$app_path"
 
 AUQW_MACOS_APP_PATH="$app_path" ctest --test-dir "$build_dir" --output-on-failure
+create_macos_dmg "$app_path" "$dmg_path"
+echo "macOS DMG: $dmg_path"

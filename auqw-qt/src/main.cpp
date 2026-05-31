@@ -34,7 +34,7 @@ int main(int argc, char* argv[]) {
     }
 
     QCoreApplication::setApplicationName(QStringLiteral("Auqw"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.0.1"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("com.Vehicoule.auqw"));
     QCoreApplication::setOrganizationName(QStringLiteral("Vehicoule"));
 #if defined(Q_OS_LINUX)

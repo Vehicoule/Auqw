@@ -19,9 +19,55 @@ android_openssl_source_dir="${ANDROID_OPENSSL_SOURCE_DIR:-}"
 qt_cmake="$qt_prefix/bin/qt-cmake"
 build_dir="${AUQW_BUILD_DIR:-$root/build/android-linux}"
 apk_dir="$build_dir/apk"
+release_mode="${AUQW_ANDROID_RELEASE_BUILD:-auto}"
 target="aarch64-linux-android"
 artifact="$root/auqw-core/zig-out/lib/libauqw_core.a"
 cmake_fetchcontent_args=()
+release_build=0
+
+is_off() {
+  case "${1,,}" in
+    0|false|no|off)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_on() {
+  case "${1,,}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_tag_release() {
+  [[ "${GITHUB_REF_TYPE:-}" == "tag" || "${GITHUB_REF:-}" == refs/tags/* ]]
+}
+
+case "${release_mode,,}" in
+  auto)
+    if is_tag_release; then
+      release_build=1
+    fi
+    ;;
+  *)
+    if is_on "$release_mode"; then
+      release_build=1
+    elif is_off "$release_mode"; then
+      release_build=0
+    else
+      echo "invalid AUQW_ANDROID_RELEASE_BUILD: $release_mode" >&2
+      exit 2
+    fi
+    ;;
+esac
 
 patch_gradle_wrapper_timeout() {
   local wrapper
@@ -35,6 +81,64 @@ patch_gradle_wrapper_timeout() {
     fi
   done < <(find "$qt_root/$qt_version" -path '*/gradle/wrapper/gradle-wrapper.properties' -type f 2>/dev/null)
 }
+
+require_android_release_signing() {
+  local -a missing=()
+  local name
+
+  for name in \
+    AUQW_ANDROID_KEYSTORE_BASE64 \
+    AUQW_ANDROID_KEYSTORE_PASSWORD \
+    AUQW_ANDROID_KEY_ALIAS \
+    AUQW_ANDROID_KEY_PASSWORD; do
+    if [[ -z "${!name:-}" ]]; then
+      missing+=("$name")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    echo "missing Android release signing secrets: ${missing[*]}" >&2
+    exit 1
+  fi
+}
+
+sign_release_apk() {
+  local unsigned_apk="$1"
+  local signed_apk="$apk_dir/auqw-android-arm64.apk"
+  local aligned_apk="$apk_dir/auqw-android-arm64-aligned.apk"
+  local keystore="$build_dir/auqw-android-release.keystore"
+  local apksigner="$sdk_root/build-tools/$android_build_tools/apksigner"
+  local zipalign="$sdk_root/build-tools/$android_build_tools/zipalign"
+
+  cleanup_signing_artifacts() {
+    rm -f "$aligned_apk" "$keystore"
+  }
+  trap cleanup_signing_artifacts RETURN
+
+  for required in "$apksigner" "$zipalign"; do
+    if [[ ! -x "$required" ]]; then
+      echo "missing Android release signing dependency: $required" >&2
+      exit 1
+    fi
+  done
+
+  printf '%s' "$AUQW_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+  "$zipalign" -f -p 4 "$unsigned_apk" "$aligned_apk"
+  "$apksigner" sign \
+    --ks "$keystore" \
+    --ks-pass "pass:$AUQW_ANDROID_KEYSTORE_PASSWORD" \
+    --ks-key-alias "$AUQW_ANDROID_KEY_ALIAS" \
+    --key-pass "pass:$AUQW_ANDROID_KEY_PASSWORD" \
+    --out "$signed_apk" \
+    "$aligned_apk"
+  "$apksigner" verify --verbose "$signed_apk"
+  cleanup_signing_artifacts
+  trap - RETURN
+}
+
+if [[ "$release_build" -eq 1 ]]; then
+  require_android_release_signing
+fi
 
 if [[ -z "$sdk_root" ]]; then
   echo "ANDROID_SDK_ROOT or ANDROID_HOME is required" >&2
@@ -81,9 +185,13 @@ fi
 patch_gradle_wrapper_timeout
 
 cmake -E rm -rf "$build_dir"
+build_type="Debug"
+if [[ "$release_build" -eq 1 ]]; then
+  build_type="Release"
+fi
 
 "$qt_cmake" -S "$root" -B "$build_dir" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_BUILD_TYPE="$build_type" \
   -DAUQW_BUILD_QT=ON \
   -DAUQW_CORE_LIB="$artifact" \
   -DANDROID_SDK_ROOT="$sdk_root" \
@@ -96,14 +204,30 @@ cmake -E rm -rf "$build_dir"
 
 cmake --build "$build_dir" --target Auqw_make_apk
 
-mapfile -t apks < <(find "$build_dir" -type f -name "*.apk" | sort)
+if [[ "$release_build" -eq 1 ]]; then
+  mapfile -t apks < <(find "$build_dir" -type f \( -name "*release*.apk" -o -name "*unsigned*.apk" \) | sort)
+  if [[ "${#apks[@]}" -eq 0 ]]; then
+    mapfile -t apks < <(find "$build_dir" -type f -name "*.apk" | sort)
+  fi
+else
+  mapfile -t apks < <(find "$build_dir" -type f -name "*debug*.apk" | sort)
+  if [[ "${#apks[@]}" -eq 0 ]]; then
+    mapfile -t apks < <(find "$build_dir" -type f -name "*.apk" | sort)
+  fi
+fi
 if [[ "${#apks[@]}" -eq 0 ]]; then
   echo "missing Android APK under $build_dir" >&2
   exit 1
 fi
 
 mkdir -p "$apk_dir"
-cp "${apks[0]}" "$apk_dir/auqw-android-arm64-debug.apk"
+if [[ "$release_build" -eq 1 ]]; then
+  sign_release_apk "${apks[0]}"
+  output_apk="$apk_dir/auqw-android-arm64.apk"
+else
+  output_apk="$apk_dir/auqw-android-arm64-debug.apk"
+  cp "${apks[0]}" "$output_apk"
+fi
 
 echo "Android SDK root: $sdk_root"
 echo "Android NDK: $sdk_root/ndk/$android_ndk"
@@ -111,4 +235,4 @@ echo "Qt Android kit: $qt_prefix"
 echo "Qt host kit: $qt_host_path"
 echo "Android Zig target: $target"
 echo "Android core artifact: $artifact"
-echo "Android APK: $apk_dir/auqw-android-arm64-debug.apk"
+echo "Android APK: $output_apk"

@@ -105,6 +105,76 @@ private slots:
             "Linux release workflow should install Flatpak dependencies without system deploy permissions");
     }
 
+    void releaseWorkflowUsesPlainSemverAssetsAndGhcrIndex() {
+        const QString workflow = readTextFile(projectSourcePath(u".github/workflows/build.yml"));
+        const QString ghcrContainerfile = readTextFile(projectSourcePath(u"packaging/ghcr/release-index.Containerfile"));
+        QVERIFY2(!workflow.isEmpty(), ".github/workflows/build.yml should be readable");
+        QVERIFY2(!ghcrContainerfile.isEmpty(), "GHCR release index Containerfile should be readable");
+
+        QVERIFY2(workflow.contains(QStringLiteral("packages: write")),
+            "Build workflow should allow publishing the linked GHCR package");
+        QVERIFY2(workflow.contains(QStringLiteral("^v[0-9]+\\.[0-9]+\\.[0-9]+$")),
+            "Release job should accept only plain semver tags like v0.0.1");
+        QVERIFY2(workflow.contains(QStringLiteral("Release tags must use plain semver like v0.0.1")),
+            "Release job should fail clearly when an old alpha-suffixed tag is pushed");
+        QVERIFY2(workflow.contains(QStringLiteral("startsWith(github.ref_name, 'v0.')")),
+            "v0.* releases should be marked prerelease");
+        QVERIFY2(!workflow.contains(QStringLiteral("contains(github.ref_name, 'alpha')")),
+            "Prerelease logic should not depend on alpha tag suffixes");
+
+        QVERIFY2(workflow.contains(QStringLiteral("android-linux")) &&
+                workflow.contains(QStringLiteral("macos")),
+            "Release job should wait for Android and macOS package artifacts");
+        QVERIFY2(workflow.contains(QStringLiteral("auqw-linux-x64.flatpak")) &&
+                workflow.contains(QStringLiteral("auqw-linux-x64.tar.gz")) &&
+                workflow.contains(QStringLiteral("auqw-windows-x64.zip")) &&
+                workflow.contains(QStringLiteral("auqw-macos.dmg")) &&
+                workflow.contains(QStringLiteral("auqw-android-arm64.apk")),
+            "GitHub Release should publish the five installer assets for v0.0.1");
+
+        QVERIFY2(workflow.contains(QStringLiteral("docker/login-action")),
+            "Release job should authenticate to GHCR");
+        QVERIFY2(workflow.contains(QStringLiteral("docker/build-push-action")),
+            "Release job should publish the GHCR release index image");
+        QVERIFY2((workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:${{ github.ref_name }}")) ||
+                 workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:${GITHUB_REF_NAME}"))) &&
+                workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:alpha")),
+            "GHCR release index should publish the version and alpha tags");
+        QVERIFY2(workflow.contains(QStringLiteral("org.opencontainers.image.source=https://github.com/Vehicoule/Auqw")) &&
+                workflow.contains(QStringLiteral("org.opencontainers.image.version=${{ steps.release-meta.outputs.version }}")) &&
+                workflow.contains(QStringLiteral("org.opencontainers.image.revision=${{ github.sha }}")) &&
+                workflow.contains(QStringLiteral("org.opencontainers.image.url=${{ steps.release-meta.outputs.release-url }}")),
+            "GHCR release index should carry source, version, revision, and release URL labels");
+        QVERIFY2(ghcrContainerfile.contains(QStringLiteral("FROM scratch")),
+            "GHCR release index image should be metadata-only");
+    }
+
+    void projectVersionsResetToFirstAlphaSemver() {
+        const QString rootCmake = readTextFile(projectSourcePath(u"CMakeLists.txt"));
+        const QString main = readTextFile(projectSourcePath(u"auqw-qt/src/main.cpp"));
+        const QString androidManifest = readTextFile(projectSourcePath(u"auqw-qt/android/AndroidManifest.xml"));
+        const QString appstream = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.metainfo.xml"));
+
+        QVERIFY2(!rootCmake.isEmpty(), "CMakeLists.txt should be readable");
+        QVERIFY2(!main.isEmpty(), "main.cpp should be readable");
+        QVERIFY2(!androidManifest.isEmpty(), "AndroidManifest.xml should be readable");
+        QVERIFY2(!appstream.isEmpty(), "AppStream metadata should be readable");
+
+        QVERIFY2(rootCmake.contains(QStringLiteral("project(Auqw VERSION 0.0.1")),
+            "Project version should reset to 0.0.1 for Alpha 1");
+        QVERIFY2(main.contains(QStringLiteral("setApplicationVersion(QStringLiteral(\"0.0.1\"))")),
+            "Runtime application version should reset to 0.0.1");
+        QVERIFY2(androidManifest.contains(QStringLiteral("android:versionName=\"0.0.1\"")),
+            "Android manifest versionName should reset to 0.0.1");
+        QVERIFY2(appstream.contains(QStringLiteral("<release version=\"0.0.1\"")),
+            "AppStream release metadata should reset to 0.0.1");
+        QVERIFY2(!rootCmake.contains(QStringLiteral("0.1.0-alpha")) &&
+                !main.contains(QStringLiteral("0.1.0-alpha")) &&
+                !androidManifest.contains(QStringLiteral("0.1.0-alpha")) &&
+                !appstream.contains(QStringLiteral("0.1.0-alpha")),
+            "Source versions should not use alpha-suffixed semver tags");
+    }
+
     void windowsBuildRequiresCachesQtMultimediaAndDeployment() {
         const QString script = readTextFile(projectSourcePath(u"ci/windows-build.ps1"));
         QVERIFY2(!script.isEmpty(), "ci/windows-build.ps1 should be readable");
@@ -156,6 +226,12 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("QtMultimedia.framework")), "macOS package validation should require Qt Multimedia framework");
         QVERIFY2(script.contains(QStringLiteral("PlugIns/multimedia")) || script.contains(QStringLiteral("plugins/multimedia")),
             "macOS package validation should require Qt Multimedia plugin directory");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_MACOS_DMG_PATH")),
+            "macOS build should let CI choose the DMG output path");
+        QVERIFY2(script.contains(QStringLiteral("hdiutil create")) &&
+                script.contains(QStringLiteral("-format UDZO")) &&
+                script.contains(QStringLiteral("hdiutil verify")),
+            "macOS build should create and validate a compressed DMG from the deployed app bundle");
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "macOS Qt shell should keep native platform compiler");
     }
 
@@ -280,10 +356,56 @@ private slots:
             "Linux package script should export a Flatpak bundle artifact for releases");
         QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_FLATPAK_BUNDLE")),
             "Linux package script should let CI choose the Flatpak bundle output path");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_LINUX_TARBALL")),
+            "Linux package script should let CI choose the portable tarball output path");
+        QVERIFY2(script.contains(QStringLiteral("deploy-linux-runtime.sh")) &&
+                script.contains(QStringLiteral("check-linux-runtime.sh")),
+            "Linux package script should deploy and validate the portable runtime tree before archiving it");
+        QVERIFY2(script.contains(QStringLiteral("tar -czf")) &&
+                script.contains(QStringLiteral("tar -tzf")),
+            "Linux package script should create and validate the portable tarball");
         QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_INSTALLATION")),
             "Linux package script should support user Flatpak installation mode for hosted CI");
         QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_BUILD")),
             "Linux package script should let CI disable Flatpak builds explicitly");
+    }
+
+    void androidBuildSignsReleaseApkForTagReleases() {
+        const QString workflow = readTextFile(projectSourcePath(u".github/workflows/build.yml"));
+        const QString script = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        const QString containerBuild = readTextFile(projectSourcePath(u"ci/container-build.sh"));
+        QVERIFY2(!workflow.isEmpty(), ".github/workflows/build.yml should be readable");
+        QVERIFY2(!script.isEmpty(), "ci/android-build.sh should be readable");
+        QVERIFY2(!containerBuild.isEmpty(), "ci/container-build.sh should be readable");
+
+        QVERIFY2(script.contains(QStringLiteral("AUQW_ANDROID_RELEASE_BUILD")),
+            "Android build should support explicit release APK mode");
+        QVERIFY2(script.contains(QStringLiteral("GITHUB_REF_TYPE")) &&
+                script.contains(QStringLiteral("refs/tags/")),
+            "Android build should detect tag release runs");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_ANDROID_KEYSTORE_BASE64")) &&
+                script.contains(QStringLiteral("AUQW_ANDROID_KEYSTORE_PASSWORD")) &&
+                script.contains(QStringLiteral("AUQW_ANDROID_KEY_ALIAS")) &&
+                script.contains(QStringLiteral("AUQW_ANDROID_KEY_PASSWORD")),
+            "Android release signing should use the documented signing secrets");
+        QVERIFY2(script.contains(QStringLiteral("missing Android release signing secrets")),
+            "Android release build should fail clearly when signing secrets are missing");
+        QVERIFY2(script.contains(QStringLiteral("apksigner")) &&
+                script.contains(QStringLiteral("zipalign")),
+            "Android release build should align, sign, and verify the APK");
+        QVERIFY2(script.contains(QStringLiteral("auqw-android-arm64.apk")),
+            "Android release build should emit the signed release APK path");
+        QVERIFY2(containerBuild.contains(QStringLiteral("AUQW_ANDROID_KEYSTORE_BASE64")) &&
+                containerBuild.contains(QStringLiteral("GITHUB_REF_TYPE")),
+            "Android container build should pass signing and tag context into the build container");
+        QVERIFY2(workflow.contains(QStringLiteral("AUQW_ANDROID_KEYSTORE_BASE64: ${{ secrets.AUQW_ANDROID_KEYSTORE_BASE64 }}")) &&
+                workflow.contains(QStringLiteral("AUQW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AUQW_ANDROID_KEYSTORE_PASSWORD }}")) &&
+                workflow.contains(QStringLiteral("AUQW_ANDROID_KEY_ALIAS: ${{ secrets.AUQW_ANDROID_KEY_ALIAS }}")) &&
+                workflow.contains(QStringLiteral("AUQW_ANDROID_KEY_PASSWORD: ${{ secrets.AUQW_ANDROID_KEY_PASSWORD }}")),
+            "Android workflow should provide release signing secrets to tag builds");
+        QVERIFY2(workflow.contains(QStringLiteral("Upload Android release APK")) &&
+                workflow.contains(QStringLiteral("build/android-linux/apk/auqw-android-arm64.apk")),
+            "Android workflow should upload the signed release APK artifact");
     }
 
     void iosBuildChecksQtKitAppleLinkageAndBundleMetadata() {
