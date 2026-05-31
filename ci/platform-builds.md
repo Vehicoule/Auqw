@@ -86,12 +86,15 @@ repository hint so `flatpak install --user ./auqw-linux-x64.flatpak` can resolve
 `org.kde.Platform//6.8`; if the local Flatpak setup still refuses, add the
 Flathub remote manually with the command above and retry the install. If
 `flatpak-builder` or the Flathub remote is missing, the script prints the
-missing dependency instead of claiming package success. The manifest disables
-Flatpak debuginfo extraction and repository AppStream compose for hosted CI
-bundle exports; the package script still validates the installed AppStream
-metadata before invoking Flatpak packaging. The package script runs the full
-host CTest suite before invoking Flatpak packaging; the manifest reruns only
-package-safe smoke tests inside the Flatpak builder sandbox.
+missing dependency instead of claiming package success. The manifest defaults
+Qt Quick to software rendering with `QT_QUICK_BACKEND=software`,
+`QSG_RHI_BACKEND=software`, and `QT_OPENGL=software` so WSL/Flatpak launches do
+not depend on `/dev/dri` or Zink. The manifest disables Flatpak debuginfo
+extraction and repository AppStream compose for hosted CI bundle exports; the
+package script still validates the installed AppStream metadata before invoking
+Flatpak packaging. The package script runs the full host CTest suite before
+invoking Flatpak packaging; the manifest reruns only package-safe smoke tests
+inside the Flatpak builder sandbox.
 
 ## Bridge-Only Baseline
 

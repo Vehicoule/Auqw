@@ -16,6 +16,9 @@ finish-args:
   - --share=network
   - --filesystem=xdg-music
   - --filesystem=xdg-download
+  - --env=QT_QUICK_BACKEND=software
+  - --env=QSG_RHI_BACKEND=software
+  - --env=QT_OPENGL=software
 
 modules:
   - name: zig

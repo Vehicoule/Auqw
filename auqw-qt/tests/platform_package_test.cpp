@@ -363,6 +363,10 @@ private slots:
         QVERIFY2(manifest.contains(QStringLiteral("appstream-compose: false")),
             "Flatpak manifest should not require repository AppStream compose for GitHub release bundles");
         QVERIFY2(manifest.contains(QStringLiteral("command: auqw")), "Flatpak manifest should launch auqw");
+        QVERIFY2(manifest.contains(QStringLiteral("--env=QT_QUICK_BACKEND=software")) &&
+                manifest.contains(QStringLiteral("--env=QSG_RHI_BACKEND=software")) &&
+                manifest.contains(QStringLiteral("--env=QT_OPENGL=software")),
+            "Flatpak manifest should force Qt Quick software rendering for WSL/Flatpak launch compatibility");
         QVERIFY2(manifest.contains(QStringLiteral("zig-x86_64-linux-0.16.0.tar.xz")) &&
                 manifest.contains(QStringLiteral("70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00")),
             "Flatpak manifest should pin Zig 0.16.0 for source builds");
@@ -403,6 +407,10 @@ private slots:
             "Linux package script should let CI disable Flatpak builds explicitly");
         QVERIFY2(docs.contains(QStringLiteral("flatpak install --user ./auqw-linux-x64.flatpak")),
             "Linux package docs should show installing the release bundle directly");
+        QVERIFY2(docs.contains(QStringLiteral("QT_QUICK_BACKEND=software")) &&
+                docs.contains(QStringLiteral("QSG_RHI_BACKEND=software")) &&
+                docs.contains(QStringLiteral("QT_OPENGL=software")),
+            "Linux package docs should document the Flatpak software renderer defaults");
     }
 
     void androidBuildSignsReleaseApkForTagReleases() {
