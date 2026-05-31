@@ -7,7 +7,7 @@ function Require-Path {
     )
 
     if (-not (Test-Path $Path)) {
-        throw "missing $Description: $Path"
+        throw "missing ${Description}: $Path"
     }
 }
 

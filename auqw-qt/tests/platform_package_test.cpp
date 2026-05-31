@@ -106,6 +106,8 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("plugins\\multimedia")) || script.contains(QStringLiteral("plugins/multimedia")),
             "Windows package validation should require Qt Multimedia plugin directory");
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "Windows Qt shell should keep native platform compiler");
+        QVERIFY2(script.contains(QStringLiteral("missing ${Description}: $Path")),
+            "Windows build should delimit PowerShell variables before literal colons");
     }
 
     void macosBuildRequiresCachesQtMultimediaAndDeployment() {
