@@ -66,7 +66,7 @@ which leaves Qt C++ entry points unresolved at link time.
 
 Hosted GitHub Actions Windows build is enabled through the manual `Build`
 workflow dispatch. CI does not run automatically on push or pull request
-updates. The hosted job installs Zig 0.16.0, Qt 6.7.3 for
+updates. The hosted job installs Zig 0.16.0, Qt 6.8.3 for
 `win64_msvc2022_64` with Qt Multimedia, enters the MSVC developer environment,
 and uploads `auqw-windows-x64` from `build/windows/bin/**`.
 

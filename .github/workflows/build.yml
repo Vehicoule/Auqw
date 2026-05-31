@@ -53,8 +53,8 @@ jobs:
       - name: Install Qt
         shell: pwsh
         run: |
-          python -m aqt install-qt windows desktop 6.7.3 win64_msvc2022_64 --outputdir "$env:RUNNER_TEMP\Qt" -m qtmultimedia
-          $qtPrefix = Join-Path "$env:RUNNER_TEMP\Qt" "6.7.3\msvc2022_64"
+          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 --outputdir "$env:RUNNER_TEMP\Qt" -m qtmultimedia
+          $qtPrefix = Join-Path "$env:RUNNER_TEMP\Qt" "6.8.3\msvc2022_64"
           Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$qtPrefix"
           Add-Content $env:GITHUB_PATH (Join-Path $qtPrefix "bin")
       - name: Build Windows

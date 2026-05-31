@@ -76,10 +76,10 @@ private slots:
             "Windows workflow should install the pinned aqtinstall package");
         QVERIFY2(workflow.contains(QStringLiteral("0.16.0")),
             "Windows workflow should install Zig 0.16.0");
-        QVERIFY2(workflow.contains(QStringLiteral("6.7.3")) &&
+        QVERIFY2(workflow.contains(QStringLiteral("6.8.3")) &&
                 workflow.contains(QStringLiteral("win64_msvc2022_64")) &&
                 workflow.contains(QStringLiteral("qtmultimedia")),
-            "Windows workflow should install Qt 6.7.3 win64_msvc2022_64 with qtmultimedia");
+            "Windows workflow should install Qt 6.8.3 win64_msvc2022_64 with qtmultimedia");
         QVERIFY2(workflow.contains(QStringLiteral("ci\\windows-build.ps1")) ||
                 workflow.contains(QStringLiteral("ci/windows-build.ps1")),
             "Windows workflow should call ci/windows-build.ps1");
