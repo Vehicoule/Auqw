@@ -1,4 +1,5 @@
 #include "InnertubeProvider.hpp"
+#include "OnlinePlaybackStreamSelection.hpp"
 #include "YoutubePlaybackResolver.hpp"
 
 #include <QDebug>
@@ -32,6 +33,18 @@ struct YoutubeWebBootstrap {
 };
 
 #ifndef QT_NO_DEBUG
+QString streamKindName(OnlineStreamKind kind) {
+    switch (kind) {
+    case OnlineStreamKind::DirectUrl:
+        return QStringLiteral("direct_url");
+    case OnlineStreamKind::HeaderedDirectUrl:
+        return QStringLiteral("headered_direct_url");
+    case OnlineStreamKind::Sabr:
+        return QStringLiteral("sabr");
+    }
+    return QStringLiteral("unknown");
+}
+
 void logSearchSslDiagnosticsOnce() {
     static bool logged = false;
     if (logged) {
@@ -51,9 +64,27 @@ void logSearchNetworkFailure(const QNetworkReply* reply, int statusCode) {
                          << (reply == nullptr ? QStringLiteral("missing QNetworkReply") : reply->errorString())
                          << "httpStatus=" << statusCode;
 }
+
+void logStreamResolveChoice(const char* event, const OnlineStreamResult& stream) {
+    const QUrl playbackUrl = stream.streamKind == OnlineStreamKind::Sabr || stream.isSabr
+        ? stream.sabr.serverAbrStreamingUrl
+        : stream.streamUrl;
+    qDebug().noquote()
+        << "Auqw stream resolve"
+        << "event=" << QString::fromLatin1(event)
+        << "kind=" << streamKindName(stream.streamKind)
+        << "isSabr=" << stream.isSabr
+        << "mimeType=" << (stream.mimeType.isEmpty() ? QStringLiteral("<empty>") : stream.mimeType)
+        << "itag=" << stream.itag
+        << "client=" << (stream.clientName.isEmpty() ? QStringLiteral("<none>") : stream.clientName)
+        << "host=" << (playbackUrl.host().isEmpty() ? QStringLiteral("<none>") : playbackUrl.host())
+        << "sabrFormats=" << stream.sabr.audioFormats.size()
+        << "hasUstreamerConfig=" << !stream.sabr.videoPlaybackUstreamerConfig.isEmpty();
+}
 #else
 void logSearchSslDiagnosticsOnce() {}
 void logSearchNetworkFailure(const QNetworkReply*, int) {}
+void logStreamResolveChoice(const char*, const OnlineStreamResult&) {}
 #endif
 
 QJsonObject searchContext() {
@@ -335,15 +366,28 @@ void InnertubeProvider::resolveStream(const QString& provider, const QString& pr
                 if (!parsed.stream.sabr.videoPlaybackUstreamerConfig.isEmpty()) {
                     parsed.stream.sabr.signatureTimestamp = bootstrap.signatureTimestamp;
                     fallbackStream = parsed.stream;
+                    logStreamResolveChoice("bootstrap_sabr_fallback", *fallbackStream);
                 }
             } else {
                 fallbackStream = parsed.stream;
+                logStreamResolveChoice("bootstrap_direct_fallback", *fallbackStream);
             }
+        }
+
+        const OnlineStreamResult platformPreferredStream = selectPreferredOnlinePlaybackStream(
+            OnlineStreamResult{},
+            fallbackStream,
+            preferSabrPlaybackOnCurrentPlatform());
+        if (isUsableSabrPlaybackStream(platformPreferredStream)) {
+            logStreamResolveChoice("platform_preferred_bootstrap_sabr", platformPreferredStream);
+            emit streamResolved(provider, providerTrackId, platformPreferredStream);
+            return;
         }
 
         auto* resolver = new YoutubePlaybackResolver(providerTrackId, bootstrap.visitorData, std::move(fallbackStream), this);
         connect(resolver, &YoutubePlaybackResolver::resolved, this, [this, resolver, provider, providerTrackId](const OnlineStreamResult& stream) {
             resolver->deleteLater();
+            logStreamResolveChoice("resolved", stream);
             emit streamResolved(provider, providerTrackId, stream);
         });
         connect(resolver, &YoutubePlaybackResolver::failed, this, [this, resolver, provider, providerTrackId](const QString& message) {

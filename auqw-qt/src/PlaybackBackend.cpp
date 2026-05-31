@@ -120,21 +120,19 @@ QString playbackStateName(QMediaPlayer::PlaybackState state) {
     return QStringLiteral("unknown");
 }
 
-bool playbackTraceEnabled() {
-    return qEnvironmentVariableIntValue("AUQW_PLAYBACK_TRACE") > 0;
-}
-
 void logPlaybackTrace(const QMediaPlayer& player, const QString& event) {
-    if (!playbackTraceEnabled()) {
-        return;
-    }
-    qInfo().noquote()
+#ifndef QT_NO_DEBUG
+    qDebug().noquote()
         << "Auqw playback trace"
         << "event=" << event
         << "state=" << playbackStateName(player.playbackState())
         << "mediaStatus=" << mediaStatusName(player.mediaStatus())
         << "positionMs=" << player.position()
         << "durationMs=" << player.duration();
+#else
+    Q_UNUSED(player);
+    Q_UNUSED(event);
+#endif
 }
 
 class QtMultimediaPlaybackBackend final : public CallbackPlaybackBackend {

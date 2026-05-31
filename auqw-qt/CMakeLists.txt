@@ -38,6 +38,8 @@ qt_add_library(auqw_qt_runtime STATIC
     src/JsonListModel.hpp
     src/OnlineProvider.cpp
     src/OnlineProvider.hpp
+    src/OnlinePlaybackStreamSelection.cpp
+    src/OnlinePlaybackStreamSelection.hpp
     src/PlaybackBackend.cpp
     src/PlaybackBackend.hpp
     src/YoutubeHttpAudioDevice.cpp
@@ -134,6 +136,11 @@ if(AUQW_ENABLE_IOS_PLATFORM)
             src/IosPlaybackController.mm
     )
 endif()
+
+set_source_files_properties(qml/Main.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS Main.qml
+)
 
 qt_add_qml_module(Auqw
     URI Auqw

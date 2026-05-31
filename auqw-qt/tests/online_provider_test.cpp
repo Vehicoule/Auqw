@@ -1,4 +1,5 @@
 #include "../src/InnertubeProvider.hpp"
+#include "../src/OnlinePlaybackStreamSelection.hpp"
 #include "../src/YoutubeHttpAudioDevice.hpp"
 #include "../src/YoutubePlaybackResolver.hpp"
 #include "../src/YoutubeStreamBuffer.hpp"
@@ -51,6 +52,7 @@ private slots:
     void parsesDirectAudioStreamFixture();
     void parsesSabrOnlyAudioStreamFixture();
     void parsesSabrStreamWithExternalUstreamerConfig();
+    void prefersUsableSabrFallbackWhenRequested();
     void ignoresVideoOnlyStreamFormats();
     void reportsCipherOnlyStreamsAsUnavailable();
     void parsesUmpMediaPartsInOrder();
@@ -488,6 +490,41 @@ void OnlineProviderTest::parsesSabrStreamWithExternalUstreamerConfig() {
         QCOMPARE(parsed.stream.sabr.videoPlaybackUstreamerConfig, QString{});
         QCOMPARE(parsed.stream.sabr.audioFormats.size(), 1);
         QCOMPARE(parsed.stream.sabr.audioFormats.first().itag, 251);
+}
+
+void OnlineProviderTest::prefersUsableSabrFallbackWhenRequested() {
+        OnlineStreamResult direct;
+        direct.streamKind = OnlineStreamKind::HeaderedDirectUrl;
+        direct.streamUrl = QUrl(QStringLiteral("https://audio.example/direct.m4a"));
+        direct.mimeType = QStringLiteral("audio/mp4; codecs=\"mp4a.40.2\"");
+
+        OnlineStreamResult sabr;
+        sabr.streamKind = OnlineStreamKind::Sabr;
+        sabr.isSabr = true;
+        sabr.mimeType = QStringLiteral("audio/webm; codecs=\"opus\"");
+        sabr.sabr.serverAbrStreamingUrl = QUrl(QStringLiteral("https://rr1.example/videoplayback?sabr=1"));
+        sabr.sabr.videoPlaybackUstreamerConfig = QStringLiteral("dXN0cmVhbWVy");
+        sabr.sabr.audioFormats = QVector<YoutubeSabrFormat>{
+            YoutubeSabrFormat{
+                .itag = 251,
+                .mimeType = QStringLiteral("audio/webm; codecs=\"opus\""),
+                .bitrate = 160000,
+            },
+        };
+
+        const OnlineStreamResult selected =
+            selectPreferredOnlinePlaybackStream(direct, sabr, true);
+        QCOMPARE(selected.streamKind, OnlineStreamKind::Sabr);
+        QCOMPARE(selected.sabr.serverAbrStreamingUrl, sabr.sabr.serverAbrStreamingUrl);
+
+        const OnlineStreamResult desktopSelected =
+            selectPreferredOnlinePlaybackStream(direct, sabr, false);
+        QCOMPARE(desktopSelected.streamKind, OnlineStreamKind::HeaderedDirectUrl);
+
+        sabr.sabr.videoPlaybackUstreamerConfig.clear();
+        const OnlineStreamResult invalidSabrSelected =
+            selectPreferredOnlinePlaybackStream(direct, sabr, true);
+        QCOMPARE(invalidSabrSelected.streamKind, OnlineStreamKind::HeaderedDirectUrl);
 }
 
 void OnlineProviderTest::ignoresVideoOnlyStreamFormats() {

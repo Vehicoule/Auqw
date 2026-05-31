@@ -517,6 +517,8 @@ private slots:
             "Android smoke should collect logcat and fail on launch crashes");
         QVERIFY2(script.contains(QStringLiteral("dumpsys media_session")),
             "Android smoke should collect MediaSession runtime evidence");
+        QVERIFY2(script.contains(QStringLiteral("dumpsys activity services")),
+            "Android smoke should fall back to active service evidence when package dumps omit non-exported services");
         QVERIFY2(script.contains(QStringLiteral("AuqwPlaybackService")),
             "Android smoke should check the playback service evidence path");
         QVERIFY2(script.contains(QStringLiteral("attach Android target")),

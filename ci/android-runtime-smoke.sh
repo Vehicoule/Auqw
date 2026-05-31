@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 apk_path="${AUQW_ANDROID_APK_PATH:-}"
 package_name="${AUQW_ANDROID_PACKAGE:-com.Vehicoule.auqw}"
 activity_name="${AUQW_ANDROID_ACTIVITY:-com.Vehicoule.auqw.AuqwActivity}"
+service_component="${AUQW_ANDROID_PLAYBACK_SERVICE:-$package_name/.AuqwPlaybackService}"
 serial="${AUQW_ANDROID_SERIAL:-}"
 logcat_path="${AUQW_ANDROID_LOGCAT_PATH:-$root/build/android-runtime-smoke.log}"
 launch_settle_seconds="${AUQW_ANDROID_LAUNCH_SETTLE_SECONDS:-3}"
@@ -64,8 +65,16 @@ if grep -E "FATAL EXCEPTION|Process: ${package_name}|am_crash.*${package_name}|$
 fi
 
 package_dump="$(adb "${adb_args[@]}" shell dumpsys package "$package_name" 2>/dev/null || true)"
-if [[ "$package_dump" != *"AuqwPlaybackService"* ]]; then
-  echo "Android runtime smoke failed: AuqwPlaybackService missing from installed package dump" >&2
+service_dump="$(adb "${adb_args[@]}" shell cmd package query-services --components --user 0 -n "$service_component" 2>/dev/null || true)"
+active_service_dump="$(adb "${adb_args[@]}" shell dumpsys activity services "$package_name" 2>/dev/null || true)"
+if [[ "$package_dump" == *"AuqwPlaybackService"* ]]; then
+  service_evidence="package dump"
+elif [[ "$service_dump" == *"AuqwPlaybackService"* ]]; then
+  service_evidence="declared service"
+elif [[ "$active_service_dump" == *"AuqwPlaybackService"* ]]; then
+  service_evidence="active service"
+else
+  echo "Android runtime smoke failed: AuqwPlaybackService missing from package/service evidence" >&2
   exit 1
 fi
 
@@ -81,7 +90,7 @@ echo "Android APK: $apk_path"
 echo "Android package: $package_name"
 echo "Android activity launch: ok"
 echo "Android logcat: $logcat_path"
-echo "Android service evidence: AuqwPlaybackService"
+echo "Android service evidence: AuqwPlaybackService ($service_evidence)"
 if [[ "$session_dump" == *"$package_name"* ]]; then
   echo "Android MediaSession evidence: present"
 else

@@ -80,7 +80,7 @@ int main(int argc, char* argv[]) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     engine.loadFromModule(QStringLiteral("Auqw"), QStringLiteral("Main"));
 #else
-    engine.load(QUrl(QStringLiteral("qrc:/Auqw/qml/Main.qml")));
+    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/Auqw/Main.qml")));
 #endif
 #if AUQW_ENABLE_DESKTOP_PLATFORM
     if (!engine.rootObjects().isEmpty()) {

@@ -119,6 +119,80 @@ patch_android_gradle_api35_compatibility() {
   set_gradle_property "$gradle_properties" "android.suppressUnsupportedCompileSdk" "35"
 }
 
+patch_android_deployment_qml_settings() {
+  local settings="$build_dir/auqw-qt/android-Auqw-deployment-settings.json"
+  local module_build_dir="$build_dir/auqw-qt"
+
+  if [[ ! -f "$settings" ]]; then
+    echo "missing Android deployment settings: $settings" >&2
+    exit 1
+  fi
+
+  python3 - "$settings" "$module_build_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+settings_path = Path(sys.argv[1])
+module_build_dir = Path(sys.argv[2]).resolve()
+data = json.loads(settings_path.read_text(encoding="utf-8"))
+
+qml_import_paths = data.get("qml-import-paths", "")
+if qml_import_paths:
+    kept_paths = []
+    for path_text in qml_import_paths.split(","):
+        if not path_text:
+            continue
+        candidate = Path(path_text).resolve()
+        try:
+            candidate.relative_to(module_build_dir)
+        except ValueError:
+            continue
+        kept_paths.append(candidate.as_posix())
+    data["qml-import-paths"] = ",".join(kept_paths)
+
+data.pop("qml-root-path", None)
+settings_path.write_text(json.dumps(data, indent=3) + "\n", encoding="utf-8")
+PY
+}
+
+configure_gradle_java() {
+  local selected_java_home="${AUQW_JAVA_HOME:-${JAVA_HOME:-}}"
+  local java_version
+  local java_major
+
+  if [[ -z "$selected_java_home" && -d /usr/lib/jvm/java-17-openjdk-amd64 ]]; then
+    selected_java_home=/usr/lib/jvm/java-17-openjdk-amd64
+  fi
+
+  if [[ -n "$selected_java_home" ]]; then
+    if [[ ! -x "$selected_java_home/bin/java" ]]; then
+      echo "invalid Java home for Android build: $selected_java_home" >&2
+      exit 1
+    fi
+    export JAVA_HOME="$selected_java_home"
+    export PATH="$JAVA_HOME/bin:$PATH"
+  fi
+
+  if ! command -v java >/dev/null 2>&1; then
+    echo "missing Java runtime for Android Gradle build" >&2
+    exit 1
+  fi
+
+  java_version="$(java -version 2>&1 | awk -F '"' '/version/ { print $2; exit }')"
+  java_major="${java_version%%.*}"
+  if [[ "$java_major" == "1" ]]; then
+    java_major="${java_version#1.}"
+    java_major="${java_major%%.*}"
+  fi
+
+  if [[ ! "$java_major" =~ ^[0-9]+$ || "$java_major" -lt 17 || "$java_major" -gt 20 ]]; then
+    echo "Qt Android Gradle wrapper requires Java 17-20; found ${java_version:-unknown}." >&2
+    echo "Set AUQW_JAVA_HOME or JAVA_HOME to a compatible JDK to avoid Gradle 'Unsupported class file major version' failures." >&2
+    exit 1
+  fi
+}
+
 require_android_release_signing() {
   local -a missing=()
   local name
@@ -176,6 +250,8 @@ sign_release_apk() {
 if [[ "$release_build" -eq 1 ]]; then
   require_android_release_signing
 fi
+
+configure_gradle_java
 
 if [[ -z "$sdk_root" ]]; then
   echo "ANDROID_SDK_ROOT or ANDROID_HOME is required" >&2
@@ -239,6 +315,8 @@ fi
   -DQT_HOST_PATH="$qt_host_path" \
   -DQt6_DIR="$qt_prefix/lib/cmake/Qt6" \
   "${cmake_fetchcontent_args[@]}"
+
+patch_android_deployment_qml_settings
 
 cmake --build "$build_dir" --target Auqw_make_apk
 

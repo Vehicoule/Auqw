@@ -212,6 +212,53 @@ private slots:
             "Android build should suppress the expected Qt 6.7 Android Gradle plugin compileSdk 35 warning");
     }
 
+    void androidQmlModuleUsesStandardFlatResourcePath() {
+        const QString qtCmake = readTextFile(sourcePath(u"CMakeLists.txt"));
+        const QString main = readTextFile(sourcePath(u"src/main.cpp"));
+
+        QVERIFY2(!qtCmake.isEmpty(), "Qt CMakeLists.txt should be readable");
+        QVERIFY2(!main.isEmpty(), "main.cpp should be readable");
+
+        QVERIFY2(qtCmake.contains(QStringLiteral("RESOURCE_PREFIX /qt/qml")),
+            "Android QML module should use the standard qrc:/qt/qml import prefix");
+        QVERIFY2(qtCmake.contains(QStringLiteral("set_source_files_properties(qml/Main.qml")),
+            "Main.qml should have an explicit Qt resource alias");
+        QVERIFY2(qtCmake.contains(QStringLiteral("QT_RESOURCE_ALIAS Main.qml")),
+            "Main.qml should be flattened to the Auqw module root for androiddeployqt scanning");
+        QVERIFY2(main.contains(QStringLiteral("qrc:/qt/qml/Auqw/Main.qml")),
+            "Qt 6.4 fallback loading should match the packaged QML module resource path");
+        QVERIFY2(!main.contains(QStringLiteral("qrc:/Auqw/qml/Main.qml")),
+            "Fallback loading should not use the stale non-standard resource path");
+    }
+
+    void androidBuildPatchesQmlScannerSourceRoots() {
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        QVERIFY2(!androidBuild.isEmpty(), "ci/android-build.sh should be readable");
+
+        QVERIFY2(androidBuild.contains(QStringLiteral("patch_android_deployment_qml_settings")),
+            "Android build should patch generated Qt deployment settings before apk creation");
+        QVERIFY2(androidBuild.contains(QStringLiteral("data.pop(\"qml-root-path\", None)")),
+            "Android deploy settings should not feed source QML roots to Qt 6.7 qmlimportscanner");
+        QVERIFY2(androidBuild.contains(QStringLiteral("\"qml-import-paths\"")),
+            "Android deploy settings patch should preserve build-tree QML import paths");
+        QVERIFY2(androidBuild.contains(QStringLiteral("relative_to(module_build_dir)")),
+            "Android deploy settings patch should drop source-tree QML import paths");
+    }
+
+    void androidBuildChecksGradleJavaCompatibility() {
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        QVERIFY2(!androidBuild.isEmpty(), "ci/android-build.sh should be readable");
+
+        QVERIFY2(androidBuild.contains(QStringLiteral("AUQW_JAVA_HOME")),
+            "Android build should allow a repo-local Java override for Qt's Gradle wrapper");
+        QVERIFY2(androidBuild.contains(QStringLiteral("java_major")),
+            "Android build should inspect the active Java major version");
+        QVERIFY2(androidBuild.contains(QStringLiteral("Qt Android Gradle wrapper requires Java")),
+            "Android build should fail fast on unsupported Java runtimes");
+        QVERIFY2(androidBuild.contains(QStringLiteral("Unsupported class file major version")),
+            "Android build should explain the Gradle failure it is preventing");
+    }
+
     void playbackBackendLogsAndroidMultimediaDiagnostics() {
         const QString playbackBackend = readTextFile(sourcePath(u"src/PlaybackBackend.cpp"));
         QVERIFY2(!playbackBackend.isEmpty(), "PlaybackBackend.cpp should be readable");
