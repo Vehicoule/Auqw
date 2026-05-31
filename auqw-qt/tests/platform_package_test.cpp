@@ -104,6 +104,8 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("--global-cache-dir")), "Windows Zig build should use explicit global cache dir");
         QVERIFY2(script.contains(QStringLiteral("-Dtarget=$ZigTarget")),
             "Windows Zig build should pass the selected target to the core build");
+        QVERIFY2(script.contains(QStringLiteral("CMAKE_BUILD_TYPE=Release")),
+            "Windows CMake configure should build Release artifacts for release Qt runtime deployment");
         QVERIFY2(script.contains(QStringLiteral("Qt6MultimediaConfig.cmake")), "Windows build should fail fast when Qt Multimedia is absent");
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "Windows CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("windeployqt")), "Windows build should deploy Qt runtime with windeployqt");

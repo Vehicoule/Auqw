@@ -79,9 +79,10 @@ Windows native runner/host:
 The script honors `ZIG`, `AUQW_BUILD_DIR`, `AUQW_ZIG_TARGET`,
 `AUQW_ZIG_CACHE_DIR`, and `AUQW_ZIG_GLOBAL_CACHE_DIR`; defaults the Zig core to
 `x86_64-windows-msvc` for the hosted Qt kit; bundles Zig compiler-rt helpers
-for MSVC static library links; requires Qt Multimedia for platform playback;
-deploys `build\windows\bin\auqw.exe` with `windeployqt`; and validates the
-deployed Qt DLLs and Multimedia plugin before running CTest.
+for MSVC static library links; configures a Release CMake build for release Qt
+runtime deployment; requires Qt Multimedia for platform playback; deploys
+`build\windows\bin\auqw.exe` with `windeployqt`; and validates the deployed Qt
+DLLs and Multimedia plugin before running CTest.
 
 Windows container on a Windows host with Windows containers enabled:
 

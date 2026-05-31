@@ -149,6 +149,7 @@ $CMakeArgs = @(
     "-S", $Root,
     "-B", $Build,
     "-G", "Ninja",
+    "-DCMAKE_BUILD_TYPE=Release",
     "-DAUQW_BUILD_QT=ON",
     "-DAUQW_REQUIRE_QT_MULTIMEDIA=ON",
     "-DAUQW_CORE_LIB=$CoreLib"
