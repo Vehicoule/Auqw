@@ -9,7 +9,6 @@ on:
 permissions:
   actions: read
   contents: write
-  packages: write
 
 jobs:
   linux-flatpak:
@@ -222,24 +221,6 @@ jobs:
             echo "Release tags must use plain semver like v0.0.1" >&2
             exit 1
           fi
-      - name: Prepare release package metadata
-        id: release-meta
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
-          tags="ghcr.io/vehicoule/auqw:${GITHUB_REF_NAME}"
-          if [[ "$GITHUB_REF_NAME" == v0.0.* ]]; then
-            tags="${tags}"$'\n'"ghcr.io/vehicoule/auqw:alpha"
-          elif [[ "$GITHUB_REF_NAME" == v0.1.* ]]; then
-            tags="${tags}"$'\n'"ghcr.io/vehicoule/auqw:beta"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "release-url=$release_url" >> "$GITHUB_OUTPUT"
-          {
-            echo "tags<<EOF"
-            printf '%s\n' "$tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
       - name: Download Linux artifact
         uses: actions/download-artifact@v4
         with:
@@ -270,23 +251,3 @@ jobs:
             dist/auqw-android-arm64/auqw-android-arm64.apk
             dist/auqw-windows-x64/auqw-windows-x64.zip
             dist/auqw-macos/auqw-macos.dmg
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish GHCR release index
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packaging/ghcr/release-index.Containerfile
-          push: true
-          tags: ${{ steps.release-meta.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=Auqw Release Index
-            org.opencontainers.image.description=Metadata-only index for Auqw release downloads. Installers remain on GitHub Releases.
-            org.opencontainers.image.source=https://github.com/Vehicoule/Auqw
-            org.opencontainers.image.version=${{ steps.release-meta.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.url=${{ steps.release-meta.outputs.release-url }}

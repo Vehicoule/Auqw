@@ -6,6 +6,8 @@ apk_path="${AUQW_ANDROID_APK_PATH:-}"
 package_name="${AUQW_ANDROID_PACKAGE:-com.Vehicoule.auqw}"
 activity_name="${AUQW_ANDROID_ACTIVITY:-com.Vehicoule.auqw.AuqwActivity}"
 serial="${AUQW_ANDROID_SERIAL:-}"
+logcat_path="${AUQW_ANDROID_LOGCAT_PATH:-$root/build/android-runtime-smoke.log}"
+launch_settle_seconds="${AUQW_ANDROID_LAUNCH_SETTLE_SECONDS:-3}"
 source_only="${AUQW_ANDROID_SMOKE_SOURCE_ONLY:-OFF}"
 require_active_session="${AUQW_ANDROID_REQUIRE_ACTIVE_MEDIA_SESSION:-OFF}"
 
@@ -50,7 +52,16 @@ fi
 adb_args=(-s "$serial")
 adb "${adb_args[@]}" install -r "$apk_path"
 adb "${adb_args[@]}" shell am force-stop "$package_name" >/dev/null 2>&1 || true
+adb "${adb_args[@]}" logcat -c || true
 adb "${adb_args[@]}" shell am start -W -n "$package_name/$activity_name"
+sleep "$launch_settle_seconds"
+mkdir -p "$(dirname "$logcat_path")"
+adb "${adb_args[@]}" logcat -d -v time > "$logcat_path" || true
+
+if grep -E "FATAL EXCEPTION|Process: ${package_name}|am_crash.*${package_name}|${package_name}.*has died" "$logcat_path" >/dev/null; then
+  echo "Android runtime smoke failed: Process crashed; logcat saved to $logcat_path" >&2
+  exit 1
+fi
 
 package_dump="$(adb "${adb_args[@]}" shell dumpsys package "$package_name" 2>/dev/null || true)"
 if [[ "$package_dump" != *"AuqwPlaybackService"* ]]; then
@@ -69,6 +80,7 @@ echo "Android target: $serial"
 echo "Android APK: $apk_path"
 echo "Android package: $package_name"
 echo "Android activity launch: ok"
+echo "Android logcat: $logcat_path"
 echo "Android service evidence: AuqwPlaybackService"
 if [[ "$session_dump" == *"$package_name"* ]]; then
   echo "Android MediaSession evidence: present"

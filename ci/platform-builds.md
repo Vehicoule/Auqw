@@ -38,10 +38,8 @@ Release tags use plain semver only:
 - `v1.0.0`: first stable
 
 GitHub Releases are the canonical installer download location. `v0.*`
-Releases are marked prerelease; `v1.*` Releases are stable. The release job
-also publishes a metadata-only GHCR release index at `ghcr.io/vehicoule/auqw`
-with version labels and `alpha` / `beta` channel tags. Installer files are not
-stored in GHCR layers.
+Releases are marked prerelease; `v1.*` Releases are stable. Installer files
+are published only as GitHub Release assets.
 
 ## Linux Desktop
 
@@ -129,7 +127,10 @@ The script honors `ZIG`, `AUQW_BUILD_DIR`, `AUQW_ZIG_TARGET`,
 for MSVC static library links; configures a Release CMake build for release Qt
 runtime deployment; requires Qt Multimedia for platform playback; deploys
 `build\windows\bin\auqw.exe` with `windeployqt`; and validates the deployed Qt
-DLLs and Multimedia plugin before running CTest.
+DLLs, bundled MSVC runtime DLLs, and Multimedia plugin before smoke-launching
+the packaged executable and running CTest. The Visual C++ redistributable
+installer is copied beside the app when the hosted Visual Studio image exposes
+it, but the zip does not depend on users installing it first.
 
 Windows container on a Windows host with Windows containers enabled:
 
@@ -175,9 +176,12 @@ pushing release tags:
 - `AUQW_ANDROID_KEY_ALIAS`
 - `AUQW_ANDROID_KEY_PASSWORD`
 
-On tag runs, `ci/android-build.sh` fails clearly if any signing secret is
-missing. The signed output is `build/android-linux/apk/auqw-android-arm64.apk`;
-non-release local builds still emit `auqw-android-arm64-debug.apk`.
+The Android build targets API 35 with build tools 35.0.0. For Qt 6.7's older
+Android Gradle plugin, the script forces Gradle to use the SDK build-tools
+`aapt2` binary so API 35 resources link correctly. On tag runs,
+`ci/android-build.sh` fails clearly if any signing secret is missing. The
+signed output is `build/android-linux/apk/auqw-android-arm64.apk`; non-release
+local builds still emit `auqw-android-arm64-debug.apk`.
 
 Runtime smoke requires an attached emulator/device in `adb device` state. The
 smoke builds the APK when `AUQW_ANDROID_APK_PATH` is not set, installs it,

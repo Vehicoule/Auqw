@@ -105,14 +105,15 @@ private slots:
             "Linux release workflow should install Flatpak dependencies without system deploy permissions");
     }
 
-    void releaseWorkflowUsesPlainSemverAssetsAndGhcrIndex() {
+    void releaseWorkflowUsesPlainSemverAssetsWithoutPackageRegistryIndex() {
         const QString workflow = readTextFile(projectSourcePath(u".github/workflows/build.yml"));
-        const QString ghcrContainerfile = readTextFile(projectSourcePath(u"packaging/ghcr/release-index.Containerfile"));
+        const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
+        const QString packageIndexPath = projectSourcePath(u"packaging/ghcr/release-index.Containerfile");
         QVERIFY2(!workflow.isEmpty(), ".github/workflows/build.yml should be readable");
-        QVERIFY2(!ghcrContainerfile.isEmpty(), "GHCR release index Containerfile should be readable");
+        QVERIFY2(!docs.isEmpty(), "ci/platform-builds.md should be readable");
 
-        QVERIFY2(workflow.contains(QStringLiteral("packages: write")),
-            "Build workflow should allow publishing the linked GHCR package");
+        QVERIFY2(!workflow.contains(QStringLiteral("packages: write")),
+            "Build workflow should not request package registry write permission for installer releases");
         QVERIFY2(workflow.contains(QStringLiteral("^v[0-9]+\\.[0-9]+\\.[0-9]+$")),
             "Release job should accept only plain semver tags like v0.0.1");
         QVERIFY2(workflow.contains(QStringLiteral("Release tags must use plain semver like v0.0.1")),
@@ -132,21 +133,16 @@ private slots:
                 workflow.contains(QStringLiteral("auqw-android-arm64.apk")),
             "GitHub Release should publish the five installer assets for v0.0.1");
 
-        QVERIFY2(workflow.contains(QStringLiteral("docker/login-action")),
-            "Release job should authenticate to GHCR");
-        QVERIFY2(workflow.contains(QStringLiteral("docker/build-push-action")),
-            "Release job should publish the GHCR release index image");
-        QVERIFY2((workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:${{ github.ref_name }}")) ||
-                 workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:${GITHUB_REF_NAME}"))) &&
-                workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw:alpha")),
-            "GHCR release index should publish the version and alpha tags");
-        QVERIFY2(workflow.contains(QStringLiteral("org.opencontainers.image.source=https://github.com/Vehicoule/Auqw")) &&
-                workflow.contains(QStringLiteral("org.opencontainers.image.version=${{ steps.release-meta.outputs.version }}")) &&
-                workflow.contains(QStringLiteral("org.opencontainers.image.revision=${{ github.sha }}")) &&
-                workflow.contains(QStringLiteral("org.opencontainers.image.url=${{ steps.release-meta.outputs.release-url }}")),
-            "GHCR release index should carry source, version, revision, and release URL labels");
-        QVERIFY2(ghcrContainerfile.contains(QStringLiteral("FROM scratch")),
-            "GHCR release index image should be metadata-only");
+        QVERIFY2(!workflow.contains(QStringLiteral("docker/login-action")),
+            "Release job should not authenticate to a container registry");
+        QVERIFY2(!workflow.contains(QStringLiteral("docker/build-push-action")),
+            "Release job should not publish a metadata-only container image");
+        QVERIFY2(!workflow.contains(QStringLiteral("ghcr.io/vehicoule/auqw")),
+            "Release workflow should not advertise a package registry entry for installer assets");
+        QVERIFY2(!QFileInfo::exists(packageIndexPath),
+            "metadata-only package registry Containerfile should be removed");
+        QVERIFY2(!docs.contains(QStringLiteral("GHCR")) && !docs.contains(QStringLiteral("ghcr.io/vehicoule/auqw")),
+            "platform docs should point installer downloads at GitHub Releases only");
     }
 
     void projectVersionsResetToFirstAlphaSemver() {
@@ -196,6 +192,18 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "Windows CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("windeployqt")), "Windows build should deploy Qt runtime with windeployqt");
         QVERIFY2(script.contains(QStringLiteral("Qt6Multimedia.dll")), "Windows package validation should require Qt Multimedia DLL");
+        QVERIFY2(script.contains(QStringLiteral("vcruntime140.dll")) &&
+                script.contains(QStringLiteral("vcruntime140_1.dll")) &&
+                script.contains(QStringLiteral("msvcp140.dll")),
+            "Windows package validation should require core MSVC runtime DLLs beside auqw.exe");
+        QVERIFY2(script.contains(QStringLiteral("msvcp140_*.dll")),
+            "Windows package should copy available MSVC companion DLLs beside auqw.exe");
+        QVERIFY2(script.contains(QStringLiteral("vc_redist.x64.exe")),
+            "Windows package should keep the VC redistributable installer as a fallback");
+        QVERIFY2(script.contains(QStringLiteral("Start-Process")) &&
+                script.contains(QStringLiteral("WaitForExit")) &&
+                script.contains(QStringLiteral("Kill()")),
+            "Windows package smoke should launch auqw.exe, detect early nonzero exit, then stop it if still running");
         QVERIFY2(script.contains(QStringLiteral("plugins\\multimedia")) || script.contains(QStringLiteral("plugins/multimedia")),
             "Windows package validation should require Qt Multimedia plugin directory");
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "Windows Qt shell should keep native platform compiler");
@@ -452,6 +460,10 @@ private slots:
             "Android smoke should install the APK before launch");
         QVERIFY2(script.contains(QStringLiteral("am start")),
             "Android smoke should launch the Qt activity");
+        QVERIFY2(script.contains(QStringLiteral("logcat")) &&
+                script.contains(QStringLiteral("FATAL EXCEPTION")) &&
+                script.contains(QStringLiteral("Process crashed")),
+            "Android smoke should collect logcat and fail on launch crashes");
         QVERIFY2(script.contains(QStringLiteral("dumpsys media_session")),
             "Android smoke should collect MediaSession runtime evidence");
         QVERIFY2(script.contains(QStringLiteral("AuqwPlaybackService")),
@@ -521,6 +533,11 @@ private slots:
         QVERIFY2(hasFileEndingWith(files, QStringLiteral("auqw.exe")), "Windows package should contain auqw.exe");
         QVERIFY2(hasFileEndingWith(files, QStringLiteral("Qt6Core.dll")), "Windows package should contain Qt6Core.dll");
         QVERIFY2(hasFileEndingWith(files, QStringLiteral("Qt6Multimedia.dll")), "Windows package should contain Qt6Multimedia.dll");
+        QVERIFY2(hasFileEndingWith(files, QStringLiteral("vcruntime140.dll")), "Windows package should contain vcruntime140.dll");
+        QVERIFY2(hasFileEndingWith(files, QStringLiteral("vcruntime140_1.dll")), "Windows package should contain vcruntime140_1.dll");
+        QVERIFY2(hasFileEndingWith(files, QStringLiteral("msvcp140.dll")), "Windows package should contain msvcp140.dll");
+        QVERIFY2(hasFileContaining(files, QStringLiteral("msvcp140_")),
+            "Windows package should contain available msvcp140 companion DLLs");
         QVERIFY2(hasFileContaining(files, QStringLiteral("plugins/multimedia/")) || hasFileContaining(files, QStringLiteral("multimedia/")),
             "Windows package should contain a Qt Multimedia backend plugin");
     }

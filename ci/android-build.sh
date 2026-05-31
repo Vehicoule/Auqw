@@ -6,8 +6,8 @@ zig_bin="${ZIG:-zig}"
 zig_cache="${AUQW_ZIG_CACHE_DIR:-/tmp/auqw-zig-cache}"
 zig_global_cache="${AUQW_ZIG_GLOBAL_CACHE_DIR:-/tmp/auqw-zig-global-cache}"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-android_platform="${ANDROID_PLATFORM:-android-34}"
-android_build_tools="${ANDROID_BUILD_TOOLS:-34.0.0}"
+android_platform="${ANDROID_PLATFORM:-android-35}"
+android_build_tools="${ANDROID_BUILD_TOOLS:-35.0.0}"
 android_ndk="${ANDROID_NDK:-28.2.13676358}"
 qt_version="${QT_VERSION:-6.7.3}"
 qt_android_arch="${QT_ANDROID_ARCH:-android_arm64_v8a}"
@@ -80,6 +80,43 @@ patch_gradle_wrapper_timeout() {
       sed -i 's/^networkTimeout=.*/networkTimeout=60000/' "$wrapper"
     fi
   done < <(find "$qt_root/$qt_version" -path '*/gradle/wrapper/gradle-wrapper.properties' -type f 2>/dev/null)
+}
+
+set_gradle_property() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local temp_file
+
+  if grep -q "^${key}=" "$file"; then
+    temp_file="$(mktemp)"
+    awk -v key="$key" -v value="$value" '
+      BEGIN { prefix = key "=" }
+      index($0, prefix) == 1 { $0 = prefix value }
+      { print }
+    ' "$file" > "$temp_file"
+    cat "$temp_file" > "$file"
+    rm -f "$temp_file"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+patch_android_gradle_api35_compatibility() {
+  if [[ "$android_platform" != "android-35" ]]; then
+    return
+  fi
+
+  local gradle_properties="$qt_prefix/src/3rdparty/gradle/gradle.properties"
+  local aapt2="$sdk_root/build-tools/$android_build_tools/aapt2"
+
+  if [[ ! -w "$gradle_properties" ]]; then
+    echo "missing writable Android Gradle template: $gradle_properties" >&2
+    exit 1
+  fi
+
+  set_gradle_property "$gradle_properties" "android.aapt2FromMavenOverride" "$aapt2"
+  set_gradle_property "$gradle_properties" "android.suppressUnsupportedCompileSdk" "35"
 }
 
 require_android_release_signing() {
@@ -183,6 +220,7 @@ if [[ -n "$android_openssl_source_dir" ]]; then
 fi
 
 patch_gradle_wrapper_timeout
+patch_android_gradle_api35_compatibility
 
 cmake -E rm -rf "$build_dir"
 build_type="Debug"

@@ -55,6 +55,10 @@ private slots:
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.FOREGROUND_SERVICE")));
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK")));
         QVERIFY(hasUsesPermission(manifest, QStringLiteral("android.permission.POST_NOTIFICATIONS")));
+        QVERIFY2(!hasUsesPermission(manifest, QStringLiteral("android.permission.WRITE_EXTERNAL_STORAGE")),
+            "Android 15-targeted package should not request legacy external storage write permission");
+        QVERIFY2(!manifest.contains(QStringLiteral("requestLegacyExternalStorage")),
+            "Android 15-targeted package should not opt into legacy external storage");
         QVERIFY(manifest.contains(QStringLiteral("android:name=\"com.Vehicoule.auqw.AuqwActivity\"")));
         QVERIFY(manifest.contains(QStringLiteral("android:name=\"com.Vehicoule.auqw.AuqwPlaybackService\"")));
         QVERIFY(manifest.contains(QStringLiteral("android:foregroundServiceType=\"mediaPlayback\"")));
@@ -178,6 +182,34 @@ private slots:
 
         QVERIFY2(androidBuild.contains(QStringLiteral("networkTimeout=60000")),
             "Android build should raise Qt-generated Gradle wrapper download timeout");
+    }
+
+    void androidBuildTargetsApi35() {
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
+        const QString qtCmake = readTextFile(sourcePath(u"CMakeLists.txt"));
+
+        QVERIFY2(!androidBuild.isEmpty(), "ci/android-build.sh should be readable");
+        QVERIFY2(!containerfile.isEmpty(), "Android Containerfile should be readable");
+        QVERIFY2(!qtCmake.isEmpty(), "Qt CMakeLists.txt should be readable");
+
+        QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_PLATFORM:-android-35")),
+            "Android build should default to API 35 platform");
+        QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_BUILD_TOOLS:-35.0.0")),
+            "Android build should default to Android build tools 35.0.0");
+        QVERIFY2(containerfile.contains(QStringLiteral("ARG ANDROID_PLATFORM=android-35")),
+            "Android container should install API 35 platform");
+        QVERIFY2(containerfile.contains(QStringLiteral("ARG ANDROID_BUILD_TOOLS=35.0.0")),
+            "Android container should install build tools 35.0.0");
+        QVERIFY2(qtCmake.contains(QStringLiteral("QT_ANDROID_SDK_BUILD_TOOLS_REVISION 35.0.0")),
+            "Qt Android package should declare build tools 35.0.0");
+        QVERIFY2(qtCmake.contains(QStringLiteral("QT_ANDROID_TARGET_SDK_VERSION 35")),
+            "Qt Android package should target API 35");
+        QVERIFY2(androidBuild.contains(QStringLiteral("android.aapt2FromMavenOverride")),
+            "Android build should force Gradle to use SDK build-tools aapt2 for API 35 resources");
+        QVERIFY2(androidBuild.contains(QStringLiteral("android.suppressUnsupportedCompileSdk")) &&
+                androidBuild.contains(QStringLiteral("\"35\"")),
+            "Android build should suppress the expected Qt 6.7 Android Gradle plugin compileSdk 35 warning");
     }
 
     void playbackBackendLogsAndroidMultimediaDiagnostics() {

@@ -77,6 +77,90 @@ function Find-WinDeployQt {
     return $null
 }
 
+function Get-MsvcRuntimeSearchDirs {
+    $dirs = @()
+    $redistRoots = @()
+
+    if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
+        $redistRoots += $env:VCToolsRedistDir
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:VCINSTALLDIR)) {
+        $redistRoots += Join-Path $env:VCINSTALLDIR "Redist\MSVC"
+    }
+
+    foreach ($root in $redistRoots | Where-Object { $_ } | Select-Object -Unique) {
+        if (Test-Path $root) {
+            $dirs += Get-ChildItem -Path $root -Directory -Recurse -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "\\x64\\" } |
+                ForEach-Object { $_.FullName }
+        }
+    }
+
+    $systemDir = Join-Path $env:WINDIR "System32"
+    if (Test-Path $systemDir) {
+        $dirs += $systemDir
+    }
+
+    $dirs | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+}
+
+function Copy-MsvcRuntimeDlls {
+    param([Parameter(Mandatory = $true)][string]$PackageDir)
+
+    $runtimeDirs = @(Get-MsvcRuntimeSearchDirs)
+    $requiredRuntimeDlls = @(
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll"
+    )
+
+    foreach ($dll in $requiredRuntimeDlls) {
+        $source = $runtimeDirs |
+            ForEach-Object { Join-Path $_ $dll } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+        if (-not $source) {
+            throw "missing Windows MSVC runtime DLL source: $dll"
+        }
+        Copy-Item $source (Join-Path $PackageDir $dll) -Force
+    }
+
+    foreach ($dir in $runtimeDirs) {
+        Get-ChildItem -Path $dir -Filter "msvcp140_*.dll" -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path $PackageDir $_.Name) -Force }
+    }
+}
+
+function Copy-VcRedistInstaller {
+    param([Parameter(Mandatory = $true)][string]$PackageDir)
+
+    $redistRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
+        $redistRoots += $env:VCToolsRedistDir
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:VCINSTALLDIR)) {
+        $redistRoots += Join-Path $env:VCINSTALLDIR "Redist\MSVC"
+    }
+
+    $installer = $null
+    foreach ($root in $redistRoots | Where-Object { $_ } | Select-Object -Unique) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        $installer = Get-ChildItem -Path $root -File -Recurse -Include "vc_redist.x64.exe", "vcredist_x64.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($installer) {
+            break
+        }
+    }
+
+    if ($installer) {
+        Copy-Item $installer.FullName (Join-Path $PackageDir "vc_redist.x64.exe") -Force
+    } else {
+        Write-Warning "vc_redist.x64.exe not found in Visual Studio redist directories; MSVC runtime DLLs were bundled directly"
+    }
+}
+
 function Require-WindowsPackage {
     param([Parameter(Mandatory = $true)][string]$PackageDir)
 
@@ -89,9 +173,12 @@ function Require-WindowsPackage {
         "Qt6Qml.dll",
         "Qt6Quick.dll",
         "Qt6QuickControls2.dll",
-        "Qt6Multimedia.dll"
+        "Qt6Multimedia.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll"
     )) {
-        Require-Path (Join-Path $PackageDir $dll) "Windows Qt runtime DLL"
+        Require-Path (Join-Path $PackageDir $dll) "Windows package runtime DLL"
     }
 
     $multimediaPluginDirs = @(
@@ -107,6 +194,24 @@ function Require-WindowsPackage {
     }
     if (-not $hasMultimediaBackend) {
         throw "missing Windows Qt Multimedia backend plugin under multimedia or plugins\multimedia"
+    }
+}
+
+function Invoke-WindowsPackageSmoke {
+    param([Parameter(Mandatory = $true)][string]$Exe)
+
+    $process = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe -Parent) -PassThru
+    try {
+        if ($process.WaitForExit(5000)) {
+            if ($process.ExitCode -ne 0) {
+                throw "Windows package smoke failed: auqw.exe exited early with code $($process.ExitCode)"
+            }
+        }
+    } finally {
+        if (-not $process.HasExited) {
+            $process.Kill()
+            $process.WaitForExit()
+        }
     }
 }
 
@@ -168,6 +273,9 @@ Require-Path $Exe "Windows built executable"
 & $WinDeployQt --qmldir (Join-Path $Root "auqw-qt\qml") $Exe
 
 $PackageDir = Split-Path $Exe -Parent
+Copy-MsvcRuntimeDlls $PackageDir
+Copy-VcRedistInstaller $PackageDir
 Require-WindowsPackage $PackageDir
+Invoke-WindowsPackageSmoke $Exe
 $env:AUQW_WINDOWS_PACKAGE_DIR = $PackageDir
 ctest --test-dir $Build --output-on-failure
