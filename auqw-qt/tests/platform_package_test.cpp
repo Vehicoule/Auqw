@@ -97,8 +97,13 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("AUQW_BUILD_DIR")), "Windows build should honor AUQW_BUILD_DIR");
         QVERIFY2(script.contains(QStringLiteral("AUQW_ZIG_CACHE_DIR")), "Windows build should honor AUQW_ZIG_CACHE_DIR");
         QVERIFY2(script.contains(QStringLiteral("AUQW_ZIG_GLOBAL_CACHE_DIR")), "Windows build should honor AUQW_ZIG_GLOBAL_CACHE_DIR");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_ZIG_TARGET")), "Windows build should honor AUQW_ZIG_TARGET");
+        QVERIFY2(script.contains(QStringLiteral("x86_64-windows-msvc")),
+            "Windows Zig core should default to the MSVC ABI for the hosted Qt kit");
         QVERIFY2(script.contains(QStringLiteral("--cache-dir")), "Windows Zig build should use explicit cache dir");
         QVERIFY2(script.contains(QStringLiteral("--global-cache-dir")), "Windows Zig build should use explicit global cache dir");
+        QVERIFY2(script.contains(QStringLiteral("-Dtarget=$ZigTarget")),
+            "Windows Zig build should pass the selected target to the core build");
         QVERIFY2(script.contains(QStringLiteral("Qt6MultimediaConfig.cmake")), "Windows build should fail fast when Qt Multimedia is absent");
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "Windows CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("windeployqt")), "Windows build should deploy Qt runtime with windeployqt");
@@ -108,6 +113,10 @@ private slots:
         QVERIFY2(!script.contains(QStringLiteral("CMAKE_CXX_COMPILER")), "Windows Qt shell should keep native platform compiler");
         QVERIFY2(script.contains(QStringLiteral("missing ${Description}: $Path")),
             "Windows build should delimit PowerShell variables before literal colons");
+
+        const QString bridgeCMake = readTextFile(projectSourcePath(u"auqw-bridge/CMakeLists.txt"));
+        QVERIFY2(bridgeCMake.contains(QStringLiteral("ntdll")),
+            "Windows CMake linkage should include ntdll for Zig core Windows runtime symbols");
     }
 
     void macosBuildRequiresCachesQtMultimediaAndDeployment() {

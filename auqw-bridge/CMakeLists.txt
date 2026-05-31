@@ -14,6 +14,9 @@ add_library(auqw_core STATIC IMPORTED GLOBAL)
 set_target_properties(auqw_core PROPERTIES
     IMPORTED_LOCATION "${AUQW_CORE_LIB}"
 )
+if(WIN32)
+    set_property(TARGET auqw_core APPEND PROPERTY INTERFACE_LINK_LIBRARIES ntdll)
+endif()
 
 add_library(auqw_bridge STATIC
     src/CoreBridge.cpp

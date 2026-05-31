@@ -114,13 +114,19 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Core = Join-Path $Root "auqw-core"
 $Build = if ($env:AUQW_BUILD_DIR) { $env:AUQW_BUILD_DIR } else { Join-Path $Root "build\windows" }
 $Zig = if ($env:ZIG) { $env:ZIG } else { "zig" }
+$ZigTarget = if ($env:AUQW_ZIG_TARGET) { $env:AUQW_ZIG_TARGET } else { "x86_64-windows-msvc" }
 $ZigCache = if ($env:AUQW_ZIG_CACHE_DIR) { $env:AUQW_ZIG_CACHE_DIR } else { Join-Path $env:TEMP "auqw-zig-cache" }
 $ZigGlobalCache = if ($env:AUQW_ZIG_GLOBAL_CACHE_DIR) { $env:AUQW_ZIG_GLOBAL_CACHE_DIR } else { Join-Path $env:TEMP "auqw-zig-global-cache" }
 $CoreLib = Join-Path $Core "zig-out\lib\auqw_core.lib"
+$ZigArgs = @(
+    "--cache-dir", "$ZigCache",
+    "--global-cache-dir", "$ZigGlobalCache",
+    "-Dtarget=$ZigTarget"
+)
 
 Push-Location $Core
-& $Zig build --cache-dir "$ZigCache" --global-cache-dir "$ZigGlobalCache" test
-& $Zig build --cache-dir "$ZigCache" --global-cache-dir "$ZigGlobalCache"
+& $Zig build @ZigArgs test
+& $Zig build @ZigArgs
 Pop-Location
 
 Require-Path $CoreLib "Windows core artifact"
