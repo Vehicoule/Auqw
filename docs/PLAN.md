@@ -501,7 +501,7 @@ Acceptance:
 ## 11. Milestone 7: Packaging And Release
 
 Status: in progress. Linux desktop package foundation has the first slice:
-CMake install rules, desktop metadata, AppStream metadata, SVG icon,
+CMake install rules, desktop metadata, AppStream metadata, PNG icon,
 Flatpak manifest, local package staging script, and tagged GitHub Release
 publishing for Linux Flatpak plus Windows zip assets. macOS, Android, iOS,
 and FreeBSD release artifacts remain separate M7 slices.

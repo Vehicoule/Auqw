@@ -199,7 +199,7 @@ private slots:
         const QString main = readTextFile(projectSourcePath(u"auqw-qt/src/main.cpp"));
         const QString desktop = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.desktop"));
         const QString appstream = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.metainfo.xml"));
-        const QString icon = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.svg"));
+        const QString iconPath = projectSourcePath(u"packaging/linux/com.vehicoule.auqw.png");
         const QString manifest = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.yml"));
         const QString script = readTextFile(projectSourcePath(u"ci/linux-package.sh"));
 
@@ -207,7 +207,7 @@ private slots:
         QVERIFY2(!main.isEmpty(), "auqw-qt/src/main.cpp should be readable");
         QVERIFY2(!desktop.isEmpty(), "Linux desktop file should be readable");
         QVERIFY2(!appstream.isEmpty(), "Linux AppStream metadata should be readable");
-        QVERIFY2(!icon.isEmpty(), "Linux app icon should be readable");
+        QVERIFY2(QFileInfo::exists(iconPath), "Linux PNG app icon should exist");
         QVERIFY2(!manifest.isEmpty(), "Linux Flatpak manifest should be readable");
         QVERIFY2(!script.isEmpty(), "ci/linux-package.sh should be readable");
 
@@ -220,8 +220,9 @@ private slots:
         QVERIFY2(qtCMake.contains(QStringLiteral("CMAKE_INSTALL_DATADIR")) &&
                 qtCMake.contains(QStringLiteral("applications")) &&
                 qtCMake.contains(QStringLiteral("metainfo")) &&
-                qtCMake.contains(QStringLiteral("icons/hicolor/scalable/apps")),
-            "Qt CMake should install desktop, AppStream, and icon metadata");
+                qtCMake.contains(QStringLiteral("icons/hicolor/128x128/apps")) &&
+                qtCMake.contains(QStringLiteral("com.vehicoule.auqw.png")),
+            "Qt CMake should install desktop, AppStream, and PNG icon metadata");
         QVERIFY2(main.contains(QStringLiteral("setDesktopFileName(QStringLiteral(\"com.vehicoule.auqw\"))")),
             "Linux app should expose the desktop file id to the windowing system");
 
@@ -241,8 +242,9 @@ private slots:
         QVERIFY2(appstream.contains(QStringLiteral("<content_rating type=\"oars-1.1\" />")),
             "AppStream metadata should include a content rating tag");
 
-        QVERIFY2(icon.contains(QStringLiteral("<svg")), "Linux app icon should be an SVG asset");
-        QVERIFY2(icon.contains(QStringLiteral("com.vehicoule.auqw")), "Linux app icon should identify the app id");
+        QFile iconFile(iconPath);
+        QVERIFY2(iconFile.open(QIODevice::ReadOnly), "Linux PNG app icon should be readable");
+        QCOMPARE(iconFile.read(8), QByteArray::fromHex("89504E470D0A1A0A"));
 
         QVERIFY2(manifest.contains(QStringLiteral("app-id: com.vehicoule.auqw")),
             "Flatpak manifest should use the app id");

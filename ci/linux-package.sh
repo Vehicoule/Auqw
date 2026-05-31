@@ -73,7 +73,7 @@ DESTDIR="$install_root" cmake --install "$build_dir"
 
 desktop_file="$install_root/usr/share/applications/com.vehicoule.auqw.desktop"
 appstream_file="$install_root/usr/share/metainfo/com.vehicoule.auqw.metainfo.xml"
-icon_file="$install_root/usr/share/icons/hicolor/scalable/apps/com.vehicoule.auqw.svg"
+icon_file="$install_root/usr/share/icons/hicolor/128x128/apps/com.vehicoule.auqw.png"
 
 for required in "$install_root/usr/bin/auqw" "$desktop_file" "$appstream_file" "$icon_file"; do
   if [[ ! -e "$required" ]]; then

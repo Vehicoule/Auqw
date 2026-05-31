@@ -201,8 +201,8 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
         DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo"
     )
 
-    install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/com.vehicoule.auqw.svg"
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+    install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/com.vehicoule.auqw.png"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
     )
 endif()
 
