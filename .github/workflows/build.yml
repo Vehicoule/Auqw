@@ -79,8 +79,41 @@ jobs:
             build/linux-package/auqw-linux-x64.flatpak
             build/linux-package/auqw-linux-x64.tar.gz
 
+  android-signing-preflight:
+    name: Android Signing Preflight
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    outputs:
+      signing-ready: ${{ steps.signing.outputs.signing-ready }}
+    steps:
+      - name: Check Android signing secrets
+        id: signing
+        env:
+          AUQW_ANDROID_KEYSTORE_BASE64: ${{ secrets.AUQW_ANDROID_KEYSTORE_BASE64 }}
+          AUQW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AUQW_ANDROID_KEYSTORE_PASSWORD }}
+          AUQW_ANDROID_KEY_ALIAS: ${{ secrets.AUQW_ANDROID_KEY_ALIAS }}
+          AUQW_ANDROID_KEY_PASSWORD: ${{ secrets.AUQW_ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in AUQW_ANDROID_KEYSTORE_BASE64 AUQW_ANDROID_KEYSTORE_PASSWORD AUQW_ANDROID_KEY_ALIAS AUQW_ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [[ "${#missing[@]}" -ne 0 ]]; then
+            echo "::warning::Android release signing secrets are missing; skipping signed APK and GitHub Release: ${missing[*]}"
+            echo "signing-ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "signing-ready=true" >> "$GITHUB_OUTPUT"
+
   android-linux:
     name: Android Linux Environment
+    needs:
+      - android-signing-preflight
+    if: ${{ always() && (github.ref_type != 'tag' || needs.android-signing-preflight.outputs.signing-ready == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,8 +206,9 @@ jobs:
 
   release:
     name: GitHub Release
-    if: ${{ github.ref_type == 'tag' }}
+    if: ${{ github.ref_type == 'tag' && needs.android-signing-preflight.outputs.signing-ready == 'true' }}
     needs:
+      - android-signing-preflight
       - linux-flatpak
       - android-linux
       - windows

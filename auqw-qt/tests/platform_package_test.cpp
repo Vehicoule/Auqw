@@ -390,6 +390,13 @@ private slots:
             "Android release signing should use the documented signing secrets");
         QVERIFY2(script.contains(QStringLiteral("missing Android release signing secrets")),
             "Android release build should fail clearly when signing secrets are missing");
+        QVERIFY2(workflow.contains(QStringLiteral("android-signing-preflight")),
+            "Android workflow should check signing secrets before starting the container build");
+        QVERIFY2(workflow.contains(QStringLiteral("signing-ready")) &&
+                workflow.contains(QStringLiteral("Android release signing secrets are missing; skipping signed APK and GitHub Release")),
+            "Android workflow should warn and skip release jobs when signing secrets are missing");
+        QVERIFY2(workflow.contains(QStringLiteral("needs.android-signing-preflight.outputs.signing-ready == 'true'")),
+            "Android and release jobs should run only after signing preflight succeeds");
         QVERIFY2(script.contains(QStringLiteral("apksigner")) &&
                 script.contains(QStringLiteral("zipalign")),
             "Android release build should align, sign, and verify the APK");
