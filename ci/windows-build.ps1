@@ -217,25 +217,28 @@ function Invoke-WindowsPackageSmoke {
     $stderrPath = Join-Path $packageDir "auqw-package-smoke.stderr.log"
     Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
-    $envNames = @("QT_QUICK_BACKEND", "QSG_RHI_BACKEND", "QT_OPENGL", "QT_LOGGING_RULES")
-    $previousEnv = @{}
-    foreach ($name in $envNames) {
-        $previousEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Exe
+    $startInfo.WorkingDirectory = $packageDir
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["QT_QUICK_BACKEND"] = "software"
+    $startInfo.EnvironmentVariables["QSG_RHI_BACKEND"] = "software"
+    $startInfo.EnvironmentVariables["QT_OPENGL"] = "software"
+    $startInfo.EnvironmentVariables["QT_LOGGING_RULES"] = "qt.qml.warning=true;qt.quick.warning=true"
 
-    $env:QT_QUICK_BACKEND = "software"
-    $env:QSG_RHI_BACKEND = "software"
-    $env:QT_OPENGL = "software"
-    $env:QT_LOGGING_RULES = "qt.qml.warning=true;qt.quick.warning=true"
-
-    $process = Start-Process `
-        -FilePath $Exe `
-        -WorkingDirectory $packageDir `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath `
-        -PassThru
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $exited = $false
     try {
-        if ($process.WaitForExit(5000)) {
+        [void]$process.Start()
+        $exited = $process.WaitForExit(5000)
+        if ($exited) {
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
+            Set-Content -Path $stdoutPath -Value $stdout -NoNewline
+            Set-Content -Path $stderrPath -Value $stderr -NoNewline
             if ($process.ExitCode -ne 0) {
                 Write-WindowsSmokeLog $stdoutPath "stdout"
                 Write-WindowsSmokeLog $stderrPath "stderr"
@@ -243,17 +246,11 @@ function Invoke-WindowsPackageSmoke {
             }
         }
     } finally {
-        if (-not $process.HasExited) {
+        if (-not $exited -and -not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
         }
-        foreach ($name in $envNames) {
-            if ($null -eq $previousEnv[$name]) {
-                [Environment]::SetEnvironmentVariable($name, $null, "Process")
-            } else {
-                [Environment]::SetEnvironmentVariable($name, $previousEnv[$name], "Process")
-            }
-        }
+        $process.Dispose()
     }
 }
 

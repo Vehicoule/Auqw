@@ -200,10 +200,11 @@ private slots:
             "Windows package should copy available MSVC companion DLLs beside auqw.exe");
         QVERIFY2(script.contains(QStringLiteral("vc_redist.x64.exe")),
             "Windows package should keep the VC redistributable installer as a fallback");
-        QVERIFY2(script.contains(QStringLiteral("Start-Process")) &&
+        QVERIFY2(script.contains(QStringLiteral("System.Diagnostics.ProcessStartInfo")) &&
+                script.contains(QStringLiteral("UseShellExecute = $false")) &&
                 script.contains(QStringLiteral("WaitForExit")) &&
                 script.contains(QStringLiteral("Kill()")),
-            "Windows package smoke should launch auqw.exe, detect early nonzero exit, then stop it if still running");
+            "Windows package smoke should launch auqw.exe with a process API that returns a reliable exit code");
         QVERIFY2(script.contains(QStringLiteral("RedirectStandardOutput")) &&
                 script.contains(QStringLiteral("RedirectStandardError")),
             "Windows package smoke should capture packaged app diagnostics on launch failure");
