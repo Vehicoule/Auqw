@@ -251,6 +251,8 @@ private slots:
             "Flatpak manifest should use the KDE Qt runtime and SDK");
         QVERIFY2(manifest.contains(QStringLiteral("no-debuginfo: true")),
             "Flatpak manifest should not require eu-strip during hosted CI bundle exports");
+        QVERIFY2(manifest.contains(QStringLiteral("appstream-compose: false")),
+            "Flatpak manifest should not require repository AppStream compose for GitHub release bundles");
         QVERIFY2(manifest.contains(QStringLiteral("command: auqw")), "Flatpak manifest should launch auqw");
         QVERIFY2(manifest.contains(QStringLiteral("zig-x86_64-linux-0.16.0.tar.xz")) &&
                 manifest.contains(QStringLiteral("70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00")),

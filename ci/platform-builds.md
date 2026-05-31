@@ -66,10 +66,12 @@ The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` and pins Zig
 0.16.0. A full build exports `auqw-linux-x64.flatpak`, or the path set by
 `AUQW_LINUX_FLATPAK_BUNDLE`. If `flatpak-builder` or the Flathub remote is
 missing, the script prints the missing dependency instead of claiming package
-success. The manifest disables Flatpak debuginfo extraction for hosted CI
-bundle exports. The package script runs the full host CTest suite before
-invoking Flatpak packaging; the manifest reruns only package-safe smoke tests
-inside the Flatpak builder sandbox.
+success. The manifest disables Flatpak debuginfo extraction and repository
+AppStream compose for hosted CI bundle exports; the package script still
+validates the installed AppStream metadata before invoking Flatpak packaging.
+The package script runs the full host CTest suite before invoking Flatpak
+packaging; the manifest reruns only package-safe smoke tests inside the Flatpak
+builder sandbox.
 
 ## Bridge-Only Baseline
 
