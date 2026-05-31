@@ -44,6 +44,28 @@ Reproducible container build:
 The Linux container build copies its Qt Multimedia runtime dependency into
 `build/linux-flatpak/lib` and checks the resulting executable with `ldd`.
 
+Linux release staging:
+
+```bash
+AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=OFF ./ci/linux-package.sh
+```
+
+The package script builds Release artifacts, installs to a staged `/usr`
+layout under `build/linux-package/stage`, and validates the installed desktop
+file and AppStream metadata when `desktop-file-validate` and `appstreamcli` are
+available.
+
+Full Flatpak build:
+
+```bash
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+AUQW_BUILD_DIR=/tmp/auqw-linux-package AUQW_FLATPAK_BUILD=ON ./ci/linux-package.sh
+```
+
+The Flatpak manifest uses `org.kde.Platform` / `org.kde.Sdk` and pins Zig
+0.16.0. If `flatpak-builder` or the Flathub remote is missing, the script
+prints the missing dependency instead of claiming package success.
+
 ## Bridge-Only Baseline
 
 ```bash

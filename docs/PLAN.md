@@ -113,7 +113,7 @@ Implemented:
 - `containers/`: reproducible build environment recipes.
 - `ci/platform-builds.md`: platform gate notes.
 - `docs/architecture.md`: architecture and maintainability rules.
-- `packaging/linux/com.Vehicoule.auqw.desktop`: desktop metadata.
+- `packaging/linux/com.vehicoule.auqw.desktop`: Linux desktop metadata.
 
 Verified:
 
@@ -149,8 +149,8 @@ AUQW_BUILD_QT=ON ./ci/build-local.sh
 Important note:
 
 ```text
-packaging/linux/com.Vehicoule.auqw.desktop is not a shell script.
-Do not run it with ./com.Vehicoule.auqw.desktop.
+packaging/linux/com.vehicoule.auqw.desktop is not a shell script.
+Do not run it with ./com.vehicoule.auqw.desktop.
 It is launcher metadata for desktop environments.
 ```
 
@@ -500,6 +500,13 @@ Acceptance:
 
 ## 11. Milestone 7: Packaging And Release
 
+Status: in progress. Linux desktop package foundation has the first slice:
+CMake install rules, desktop metadata, AppStream metadata, SVG icon,
+Flatpak manifest, and local package staging script. Windows, macOS, Android,
+iOS, and FreeBSD release artifacts remain separate M7 slices.
+Linux package IDs use lowercase `com.vehicoule.auqw` because AppStream and
+Flatpak validators require lowercase reverse-DNS IDs.
+
 Goal:
 
 ```text
@@ -564,6 +571,7 @@ Testing:
 ```bash
 AUQW_BUILD_QT=OFF ./ci/build-local.sh
 AUQW_REQUIRE_QT_MULTIMEDIA=ON AUQW_BUILD_QT=ON ./ci/build-local.sh
+AUQW_FLATPAK_BUILD=OFF ./ci/linux-package.sh
 ./ci/live-playback-soak.sh --runs 1 --max-results 3
 ./ci/live-playback-soak.sh --playback --runs 1 --max-results 3 --min-position-ms 1000 --playback-window-ms 7000
 ```

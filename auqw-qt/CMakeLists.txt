@@ -1,4 +1,5 @@
 qt_standard_project_setup(REQUIRES 6.4)
+include(GNUInstallDirs)
 
 set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND OFF)
 if(Qt6Multimedia_FOUND)
@@ -183,6 +184,25 @@ if(ANDROID)
         QT_ANDROID_TARGET_SDK_VERSION 33
         QT_ANDROID_VERSION_CODE 1
         QT_ANDROID_VERSION_NAME ${PROJECT_VERSION}
+    )
+endif()
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    install(TARGETS Auqw
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        BUNDLE DESTINATION "."
+    )
+
+    install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/com.vehicoule.auqw.desktop"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+    )
+
+    install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/com.vehicoule.auqw.metainfo.xml"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo"
+    )
+
+    install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/com.vehicoule.auqw.svg"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
     )
 endif()
 

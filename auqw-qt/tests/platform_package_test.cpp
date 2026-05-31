@@ -178,6 +178,80 @@ private slots:
             "Linux Flatpak container should provide the QtQuick Templates QML import used by Qt Quick Controls styles");
     }
 
+    void linuxDesktopInstallMetadataAndFlatpakManifestAreWired() {
+        const QString qtCMake = readTextFile(projectSourcePath(u"auqw-qt/CMakeLists.txt"));
+        const QString main = readTextFile(projectSourcePath(u"auqw-qt/src/main.cpp"));
+        const QString desktop = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.desktop"));
+        const QString appstream = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.metainfo.xml"));
+        const QString icon = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.svg"));
+        const QString manifest = readTextFile(projectSourcePath(u"packaging/linux/com.vehicoule.auqw.yml"));
+        const QString script = readTextFile(projectSourcePath(u"ci/linux-package.sh"));
+
+        QVERIFY2(!qtCMake.isEmpty(), "auqw-qt/CMakeLists.txt should be readable");
+        QVERIFY2(!main.isEmpty(), "auqw-qt/src/main.cpp should be readable");
+        QVERIFY2(!desktop.isEmpty(), "Linux desktop file should be readable");
+        QVERIFY2(!appstream.isEmpty(), "Linux AppStream metadata should be readable");
+        QVERIFY2(!icon.isEmpty(), "Linux app icon should be readable");
+        QVERIFY2(!manifest.isEmpty(), "Linux Flatpak manifest should be readable");
+        QVERIFY2(!script.isEmpty(), "ci/linux-package.sh should be readable");
+
+        QVERIFY2(qtCMake.contains(QStringLiteral("include(GNUInstallDirs)")),
+            "Qt CMake should use GNU install directories for Linux packaging");
+        QVERIFY2(qtCMake.contains(QStringLiteral("install(TARGETS Auqw")),
+            "Qt CMake should install the Auqw executable");
+        QVERIFY2(qtCMake.contains(QStringLiteral("CMAKE_INSTALL_BINDIR")),
+            "Qt CMake should install the executable to the configured bindir");
+        QVERIFY2(qtCMake.contains(QStringLiteral("CMAKE_INSTALL_DATADIR")) &&
+                qtCMake.contains(QStringLiteral("applications")) &&
+                qtCMake.contains(QStringLiteral("metainfo")) &&
+                qtCMake.contains(QStringLiteral("icons/hicolor/scalable/apps")),
+            "Qt CMake should install desktop, AppStream, and icon metadata");
+        QVERIFY2(main.contains(QStringLiteral("setDesktopFileName(QStringLiteral(\"com.vehicoule.auqw\"))")),
+            "Linux app should expose the desktop file id to the windowing system");
+
+        QVERIFY2(desktop.contains(QStringLiteral("Exec=auqw")), "Desktop file should launch auqw");
+        QVERIFY2(desktop.contains(QStringLiteral("Icon=com.vehicoule.auqw")), "Desktop file should use the app-id icon");
+        QVERIFY2(desktop.contains(QStringLiteral("Categories=Audio;Music;Player;")),
+            "Desktop file should place Auqw in music player launchers");
+
+        QVERIFY2(appstream.contains(QStringLiteral("<id>com.vehicoule.auqw</id>")),
+            "AppStream metadata should use the app id");
+        QVERIFY2(appstream.contains(QStringLiteral("<launchable type=\"desktop-id\">com.vehicoule.auqw.desktop</launchable>")),
+            "AppStream metadata should point at the desktop file");
+        QVERIFY2(appstream.contains(QStringLiteral("<metadata_license>CC0-1.0</metadata_license>")),
+            "AppStream metadata should declare a metadata license");
+        QVERIFY2(appstream.contains(QStringLiteral("<project_license>LicenseRef-proprietary</project_license>")),
+            "AppStream metadata should avoid inventing a project source license");
+        QVERIFY2(appstream.contains(QStringLiteral("<content_rating type=\"oars-1.1\" />")),
+            "AppStream metadata should include a content rating tag");
+
+        QVERIFY2(icon.contains(QStringLiteral("<svg")), "Linux app icon should be an SVG asset");
+        QVERIFY2(icon.contains(QStringLiteral("com.vehicoule.auqw")), "Linux app icon should identify the app id");
+
+        QVERIFY2(manifest.contains(QStringLiteral("app-id: com.vehicoule.auqw")),
+            "Flatpak manifest should use the app id");
+        QVERIFY2(manifest.contains(QStringLiteral("runtime: org.kde.Platform")) &&
+                manifest.contains(QStringLiteral("sdk: org.kde.Sdk")),
+            "Flatpak manifest should use the KDE Qt runtime and SDK");
+        QVERIFY2(manifest.contains(QStringLiteral("command: auqw")), "Flatpak manifest should launch auqw");
+        QVERIFY2(manifest.contains(QStringLiteral("zig-x86_64-linux-0.16.0.tar.xz")) &&
+                manifest.contains(QStringLiteral("70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00")),
+            "Flatpak manifest should pin Zig 0.16.0 for source builds");
+        QVERIFY2(manifest.contains(QStringLiteral("cmake --install")),
+            "Flatpak manifest should install through CMake install rules");
+
+        QVERIFY2(script.contains(QStringLiteral("CMAKE_BUILD_TYPE=Release")),
+            "Linux package script should produce Release artifacts");
+        QVERIFY2(script.contains(QStringLiteral("desktop-file-validate")),
+            "Linux package script should validate desktop metadata when available");
+        QVERIFY2(script.contains(QStringLiteral("appstreamcli validate")),
+            "Linux package script should validate AppStream metadata when available");
+        QVERIFY2(script.contains(QStringLiteral("flatpak-builder")),
+            "Linux package script should invoke flatpak-builder when available");
+        QVERIFY2(script.contains(QStringLiteral("AUQW_FLATPAK_BUILD")),
+            "Linux package script should let CI disable Flatpak builds explicitly");
+    }
+
     void iosBuildChecksQtKitAppleLinkageAndBundleMetadata() {
         const QString script = readTextFile(projectSourcePath(u"ci/ios-build.sh"));
         QVERIFY2(!script.isEmpty(), "ci/ios-build.sh should be readable");

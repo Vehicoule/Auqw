@@ -37,6 +37,9 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("com.Vehicoule.auqw"));
     QCoreApplication::setOrganizationName(QStringLiteral("Vehicoule"));
+#if defined(Q_OS_LINUX)
+    QGuiApplication::setDesktopFileName(QStringLiteral("com.vehicoule.auqw"));
+#endif
 
     CoreController coreController;
 #if AUQW_ENABLE_ANDROID_PLATFORM
