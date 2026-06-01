@@ -93,7 +93,7 @@ public final class AuqwMediaSessionBridge {
         }
     }
 
-    private static synchronized Context context() {
+    static synchronized Context context() {
         return applicationContext;
     }
 

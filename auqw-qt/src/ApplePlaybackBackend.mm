@@ -77,6 +77,16 @@ public:
         emitState(QStringLiteral("playing"), positionMs(), durationMs());
     }
 
+    void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) override {
+        Q_UNUSED(url);
+        Q_UNUSED(headers);
+        Q_UNUSED(mimeType);
+        emitError(QStringLiteral("Online stream playback unsupported on this platform."));
+    }
+
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
         Q_UNUSED(device);
         Q_UNUSED(mimeType);

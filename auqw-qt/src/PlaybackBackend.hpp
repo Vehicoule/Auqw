@@ -1,6 +1,9 @@
 #pragma once
 
+#include <QByteArray>
 #include <QIODevice>
+#include <QList>
+#include <QPair>
 #include <QString>
 #include <QUrl>
 
@@ -23,6 +26,10 @@ public:
 
     virtual void playLocalFile(const QString& path) = 0;
     virtual void playRemoteUrl(const QUrl& url) = 0;
+    virtual void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) = 0;
     virtual void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) = 0;
     virtual void pause() = 0;
     virtual void resume() = 0;

@@ -2,7 +2,6 @@
 #include "JsonListModel.hpp"
 #include "OnlineProvider.hpp"
 #include "PlaybackBackend.hpp"
-#include "YoutubeHttpAudioDevice.hpp"
 #include "YoutubeSabrAudioDevice.hpp"
 
 #include <QJsonObject>
@@ -184,9 +183,7 @@ void CoreController::configureOnlineProvider() {
         setCoreStatus(QStringLiteral("Loading playback"));
         if (stream.streamKind == OnlineStreamKind::HeaderedDirectUrl) {
             sabrPlaybackActive_ = true;
-            playbackBackend_->playStreamDevice(
-                std::make_unique<YoutubeHttpAudioDevice>(stream.streamUrl, stream.requestHeaders),
-                stream.mimeType);
+            playbackBackend_->playHeaderedRemoteUrl(stream.streamUrl, stream.requestHeaders, stream.mimeType);
             return;
         }
 

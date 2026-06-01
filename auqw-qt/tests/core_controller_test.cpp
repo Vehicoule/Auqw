@@ -198,6 +198,18 @@ public:
         emitState(QStringLiteral("playing"), 0, std::nullopt);
     }
 
+    void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) override {
+        ++headeredRemotePlayCalls;
+        headeredRemotePlaybackActive = true;
+        lastHeaderedRemoteUrl = url;
+        lastHeaderedRemoteHeaders = headers;
+        lastHeaderedRemoteMimeType = mimeType;
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
         ++streamDevicePlayCalls;
         streamDeviceAlive = device != nullptr;
@@ -224,6 +236,7 @@ public:
         ++stopCalls;
         streamDevice.reset();
         streamDeviceAlive = false;
+        headeredRemotePlaybackActive = false;
         emitState(QStringLiteral("stopped"), 0, std::nullopt);
     }
 
@@ -247,6 +260,7 @@ public:
 
     int playCalls = 0;
     int remotePlayCalls = 0;
+    int headeredRemotePlayCalls = 0;
     int streamDevicePlayCalls = 0;
     int pauseCalls = 0;
     int resumeCalls = 0;
@@ -254,9 +268,13 @@ public:
     int seekCalls = 0;
     bool failStreamDevicePlayback = false;
     bool streamDeviceAlive = false;
+    bool headeredRemotePlaybackActive = false;
     qint64 lastSeekMs = -1;
     QString lastPath;
     QUrl lastRemoteUrl;
+    QUrl lastHeaderedRemoteUrl;
+    QList<QPair<QByteArray, QByteArray>> lastHeaderedRemoteHeaders;
+    QString lastHeaderedRemoteMimeType;
     QString lastStreamMimeType;
     std::unique_ptr<QIODevice> streamDevice;
     StateChangedCallback stateChangedCallback;
@@ -1080,7 +1098,7 @@ private slots:
         QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
     }
 
-    void playsQueuedHeaderedTrackThroughStreamDevice() {
+    void playsQueuedHeaderedTrackThroughBackendHeaderedUrl() {
         FakeOnlineProvider* provider = nullptr;
         FakePlaybackBackend* backend = nullptr;
         const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
@@ -1106,9 +1124,14 @@ private slots:
         provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
 
         QCOMPARE(backend->remotePlayCalls, 0);
-        QCOMPARE(backend->streamDevicePlayCalls, 1);
-        QCOMPARE(backend->lastStreamMimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
-        QVERIFY(backend->streamDeviceAlive);
+        QCOMPARE(backend->streamDevicePlayCalls, 0);
+        QCOMPARE(backend->headeredRemotePlayCalls, 1);
+        QCOMPARE(backend->lastHeaderedRemoteUrl, QUrl(QStringLiteral("https://audio.example/headered.webm")));
+        QCOMPARE(backend->lastHeaderedRemoteMimeType, QStringLiteral("audio/webm; codecs=\"opus\""));
+        QCOMPARE(backend->lastHeaderedRemoteHeaders.size(), 1);
+        QCOMPARE(backend->lastHeaderedRemoteHeaders.at(0).first, QByteArrayLiteral("X-Test-Download"));
+        QCOMPARE(backend->lastHeaderedRemoteHeaders.at(0).second, QByteArrayLiteral("direct-secret"));
+        QVERIFY(backend->headeredRemotePlaybackActive);
         QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
         QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
 
@@ -1319,21 +1342,22 @@ private slots:
 
         QVERIFY(QMetaObject::invokeMethod(controller.get(), "playQueueItem", Q_ARG(QString, firstQueueItemId)));
         provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
-        QVERIFY(backend->streamDeviceAlive);
+        QVERIFY(backend->headeredRemotePlaybackActive);
 
         QVERIFY(QMetaObject::invokeMethod(controller.get(), "playNextQueuedTrack"));
 
         QCOMPARE(provider->resolveCalls, 2);
         QCOMPARE(provider->lastResolveTrackId, QStringLiteral("video-beta"));
         QCOMPARE(backend->stopCalls, 1);
-        QVERIFY(!backend->streamDeviceAlive);
+        QVERIFY(!backend->headeredRemotePlaybackActive);
         QCOMPARE(controller->property("playbackQueueItemId").toString(), secondQueueItemId);
         QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("loading"));
 
         provider->emitResolvedHeaderedStream(QStringLiteral("ytmusic"), QStringLiteral("video-beta"));
 
-        QCOMPARE(backend->streamDevicePlayCalls, 2);
-        QVERIFY(backend->streamDeviceAlive);
+        QCOMPARE(backend->streamDevicePlayCalls, 0);
+        QCOMPARE(backend->headeredRemotePlayCalls, 2);
+        QVERIFY(backend->headeredRemotePlaybackActive);
         QCOMPARE(controller->property("playbackQueueItemId").toString(), secondQueueItemId);
         QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
     }

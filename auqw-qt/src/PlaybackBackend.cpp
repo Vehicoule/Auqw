@@ -4,6 +4,7 @@
 
 #include <QDebug>
 #include <QUrl>
+#include <QtGlobal>
 
 #include <utility>
 
@@ -17,10 +18,30 @@
 std::unique_ptr<PlaybackBackend> createApplePlaybackBackend();
 #endif
 
+#if AUQW_ENABLE_ANDROID_PLATFORM
+std::unique_ptr<PlaybackBackend> createAndroidNativePlaybackBackend(std::unique_ptr<PlaybackBackend> fallback);
+#endif
+
 namespace {
+
+bool playbackTraceEnabled() {
+#ifndef QT_NO_DEBUG
+    static const bool enabled = [] {
+        bool ok = false;
+        const int value = qEnvironmentVariableIntValue("AUQW_PLAYBACK_TRACE", &ok);
+        return ok ? value != 0 : qEnvironmentVariableIsSet("AUQW_PLAYBACK_TRACE");
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
 
 void logDebugMessage(const char* message) {
 #ifndef QT_NO_DEBUG
+    if (!playbackTraceEnabled()) {
+        return;
+    }
     qDebug().noquote() << message;
 #else
     Q_UNUSED(message);
@@ -29,6 +50,9 @@ void logDebugMessage(const char* message) {
 
 void logStreamDeviceDiagnostics(QIODevice* device, const QString& mimeType) {
 #ifndef QT_NO_DEBUG
+    if (!playbackTraceEnabled()) {
+        return;
+    }
     qDebug().noquote()
         << "Auqw playStreamDevice"
         << "mimeType=" << (mimeType.isEmpty() ? QStringLiteral("<empty>") : mimeType)
@@ -74,6 +98,9 @@ private:
 #if AUQW_HAS_QT_MULTIMEDIA
 void logMediaPlayerErrorDiagnostics(const QMediaPlayer& player, QMediaPlayer::Error error, const QString& errorString) {
 #ifndef QT_NO_DEBUG
+    if (!playbackTraceEnabled()) {
+        return;
+    }
     qDebug().noquote()
         << "Auqw QMediaPlayer error"
         << "error=" << static_cast<int>(error)
@@ -122,6 +149,9 @@ QString playbackStateName(QMediaPlayer::PlaybackState state) {
 
 void logPlaybackTrace(const QMediaPlayer& player, const QString& event) {
 #ifndef QT_NO_DEBUG
+    if (!playbackTraceEnabled()) {
+        return;
+    }
     qDebug().noquote()
         << "Auqw playback trace"
         << "event=" << event
@@ -200,6 +230,18 @@ public:
         emitState(QStringLiteral("loading"), 0, std::nullopt);
         player_.setSource(url);
         player_.play();
+    }
+
+    void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) override {
+        if (!url.isValid() || url.isEmpty()) {
+            emitError(QStringLiteral("Playback URL is empty"));
+            return;
+        }
+
+        playStreamDevice(std::make_unique<YoutubeHttpAudioDevice>(url, headers), mimeType);
     }
 
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
@@ -316,6 +358,16 @@ public:
         emitError(QStringLiteral("Qt Multimedia unavailable"));
     }
 
+    void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) override {
+        Q_UNUSED(url);
+        Q_UNUSED(headers);
+        Q_UNUSED(mimeType);
+        emitError(QStringLiteral("Online stream playback unsupported on this platform."));
+    }
+
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
         logStreamDeviceDiagnostics(device.get(), mimeType);
         Q_UNUSED(device);
@@ -343,6 +395,14 @@ public:
 
 } // namespace
 
+std::unique_ptr<PlaybackBackend> createQtMultimediaPlaybackBackend() {
+#if AUQW_HAS_QT_MULTIMEDIA
+    return std::make_unique<QtMultimediaPlaybackBackend>();
+#else
+    return std::make_unique<StubPlaybackBackend>();
+#endif
+}
+
 std::unique_ptr<PlaybackBackend> createDefaultPlaybackBackend() {
 #if AUQW_ENABLE_IOS_PLATFORM
 #if AUQW_HAS_QT_MULTIMEDIA
@@ -351,11 +411,18 @@ std::unique_ptr<PlaybackBackend> createDefaultPlaybackBackend() {
     logDebugMessage("Auqw playback backend selected: Apple AUQW_HAS_QT_MULTIMEDIA=0");
 #endif
     return createApplePlaybackBackend();
+#elif AUQW_ENABLE_ANDROID_PLATFORM
+#if AUQW_HAS_QT_MULTIMEDIA
+    logDebugMessage("Auqw playback backend selected: Android native AUQW_HAS_QT_MULTIMEDIA=1");
+#else
+    logDebugMessage("Auqw playback backend selected: Android native AUQW_HAS_QT_MULTIMEDIA=0");
+#endif
+    return createAndroidNativePlaybackBackend(createQtMultimediaPlaybackBackend());
 #elif AUQW_HAS_QT_MULTIMEDIA
     logDebugMessage("Auqw playback backend selected: QtMultimedia AUQW_HAS_QT_MULTIMEDIA=1");
-    return std::make_unique<QtMultimediaPlaybackBackend>();
+    return createQtMultimediaPlaybackBackend();
 #else
     logDebugMessage("Auqw playback backend selected: Stub AUQW_HAS_QT_MULTIMEDIA=0");
-    return std::make_unique<StubPlaybackBackend>();
+    return createQtMultimediaPlaybackBackend();
 #endif
 }

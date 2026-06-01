@@ -117,6 +117,47 @@ private slots:
             "Android integration should not sit inside desktop platform guard");
     }
 
+    void androidNativeBackendPlaysHeaderedRemoteStreams() {
+        const QString cmake = readTextFile(sourcePath(u"CMakeLists.txt"));
+        const QString playbackHeader = readTextFile(sourcePath(u"src/PlaybackBackend.hpp"));
+        const QString playbackBackend = readTextFile(sourcePath(u"src/PlaybackBackend.cpp"));
+        const QString androidBackend = readTextFile(sourcePath(u"src/AndroidNativePlaybackBackend.cpp"));
+        const QString nativePlayer = readTextFile(packageSourcePath(u"src/com/Vehicoule/auqw/AuqwNativeAudioPlayer.java"));
+
+        QVERIFY2(!cmake.isEmpty(), "Qt CMakeLists.txt should be readable");
+        QVERIFY2(!playbackHeader.isEmpty(), "PlaybackBackend.hpp should be readable");
+        QVERIFY2(!playbackBackend.isEmpty(), "PlaybackBackend.cpp should be readable");
+        QVERIFY2(!androidBackend.isEmpty(), "Android native playback backend should exist");
+        QVERIFY2(!nativePlayer.isEmpty(), "Android native audio player should exist");
+
+        QVERIFY2(playbackHeader.contains(QStringLiteral("playHeaderedRemoteUrl")),
+            "playback backend interface should expose headered remote URL playback");
+        QVERIFY2(playbackBackend.contains(QStringLiteral("createAndroidNativePlaybackBackend")),
+            "default Android backend should wrap Qt Multimedia with the native Android backend");
+        QVERIFY2(cmake.contains(QStringLiteral("src/AndroidNativePlaybackBackend.cpp")),
+            "Android build should compile the native Android playback backend");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("MediaPlayer")),
+            "Android native player should use platform MediaPlayer");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("setDataSource")) &&
+                nativePlayer.contains(QStringLiteral("HashMap")),
+            "Android native player should pass request headers into MediaPlayer.setDataSource");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("nativeOnPlaybackState")) &&
+                nativePlayer.contains(QStringLiteral("nativeOnPlaybackError")),
+            "Android native player should report state and errors to the Qt backend");
+    }
+
+    void headeredOnlinePlaybackRoutesThroughBackendApi() {
+        const QString coreSearch = readTextFile(sourcePath(u"src/CoreControllerSearch.cpp"));
+        QVERIFY2(!coreSearch.isEmpty(), "CoreControllerSearch.cpp should be readable");
+
+        QVERIFY2(coreSearch.contains(QStringLiteral("OnlineStreamKind::HeaderedDirectUrl")),
+            "headered direct streams should keep an explicit routing branch");
+        QVERIFY2(coreSearch.contains(QStringLiteral("playHeaderedRemoteUrl")),
+            "headered direct streams should use backend-level headered URL playback");
+        QVERIFY2(!coreSearch.contains(QStringLiteral("std::make_unique<YoutubeHttpAudioDevice>(stream.streamUrl, stream.requestHeaders)")),
+            "CoreController should not force headered streams through Qt setSourceDevice on Android");
+    }
+
     void cmakePackagesAndroidOpenSslLibraries() {
         const QString cmake = readTextFile(sourcePath(u"CMakeLists.txt"));
         QVERIFY2(!cmake.isEmpty(), "Qt CMakeLists.txt should be readable");

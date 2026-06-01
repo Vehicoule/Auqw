@@ -4,6 +4,7 @@
 #include <QMetaObject>
 #include <QNetworkRequest>
 #include <QTimer>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <utility>
@@ -15,6 +16,15 @@ constexpr qint64 kReplyReadChunkBytes = 64 * 1024;
 constexpr int kMaxResumeAttempts = 12;
 
 #ifndef QT_NO_DEBUG
+bool playbackTraceEnabled() {
+    static const bool enabled = [] {
+        bool ok = false;
+        const int value = qEnvironmentVariableIntValue("AUQW_PLAYBACK_TRACE", &ok);
+        return ok ? value != 0 : qEnvironmentVariableIsSet("AUQW_PLAYBACK_TRACE");
+    }();
+    return enabled;
+}
+
 void logHttpAudioDeviceEvent(
     const char* event,
     const QUrl& url,
@@ -23,6 +33,10 @@ void logHttpAudioDeviceEvent(
     qint64 bufferedBytes = -1,
     int statusCode = -1,
     const QByteArray& contentRange = {}) {
+    if (!playbackTraceEnabled()) {
+        return;
+    }
+
     qDebug().noquote()
         << "Auqw HTTP audio"
         << "event=" << QString::fromLatin1(event)

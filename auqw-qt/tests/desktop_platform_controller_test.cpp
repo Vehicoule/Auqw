@@ -55,6 +55,16 @@ public:
         emitState(QStringLiteral("playing"), 0, std::nullopt);
     }
 
+    void playHeaderedRemoteUrl(
+        const QUrl& url,
+        const QList<QPair<QByteArray, QByteArray>>& headers,
+        const QString& mimeType) override {
+        Q_UNUSED(url);
+        Q_UNUSED(headers);
+        Q_UNUSED(mimeType);
+        emitState(QStringLiteral("playing"), 0, std::nullopt);
+    }
+
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
         Q_UNUSED(device);
         Q_UNUSED(mimeType);

@@ -1,5 +1,4 @@
 #include "InnertubeProvider.hpp"
-#include "OnlinePlaybackStreamSelection.hpp"
 #include "YoutubePlaybackResolver.hpp"
 
 #include <QDebug>
@@ -8,9 +7,9 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
-#include <QSslSocket>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QtGlobal>
 
 #include <memory>
 #include <optional>
@@ -33,6 +32,15 @@ struct YoutubeWebBootstrap {
 };
 
 #ifndef QT_NO_DEBUG
+bool playbackTraceEnabled() {
+    static const bool enabled = [] {
+        bool ok = false;
+        const int value = qEnvironmentVariableIntValue("AUQW_PLAYBACK_TRACE", &ok);
+        return ok ? value != 0 : qEnvironmentVariableIsSet("AUQW_PLAYBACK_TRACE");
+    }();
+    return enabled;
+}
+
 QString streamKindName(OnlineStreamKind kind) {
     switch (kind) {
     case OnlineStreamKind::DirectUrl:
@@ -45,18 +53,6 @@ QString streamKindName(OnlineStreamKind kind) {
     return QStringLiteral("unknown");
 }
 
-void logSearchSslDiagnosticsOnce() {
-    static bool logged = false;
-    if (logged) {
-        return;
-    }
-    logged = true;
-
-    qWarning().noquote() << "Auqw search supportsSsl=" << QSslSocket::supportsSsl()
-                         << "sslBuildVersion=" << QSslSocket::sslLibraryBuildVersionString()
-                         << "sslRuntimeVersion=" << QSslSocket::sslLibraryVersionString();
-}
-
 void logSearchNetworkFailure(const QNetworkReply* reply, int statusCode) {
     qWarning().noquote() << "Auqw search network error="
                          << (reply == nullptr ? QNetworkReply::UnknownNetworkError : reply->error())
@@ -66,6 +62,10 @@ void logSearchNetworkFailure(const QNetworkReply* reply, int statusCode) {
 }
 
 void logStreamResolveChoice(const char* event, const OnlineStreamResult& stream) {
+    if (!playbackTraceEnabled()) {
+        return;
+    }
+
     const QUrl playbackUrl = stream.streamKind == OnlineStreamKind::Sabr || stream.isSabr
         ? stream.sabr.serverAbrStreamingUrl
         : stream.streamUrl;
@@ -82,7 +82,6 @@ void logStreamResolveChoice(const char* event, const OnlineStreamResult& stream)
         << "hasUstreamerConfig=" << !stream.sabr.videoPlaybackUstreamerConfig.isEmpty();
 }
 #else
-void logSearchSslDiagnosticsOnce() {}
 void logSearchNetworkFailure(const QNetworkReply*, int) {}
 void logStreamResolveChoice(const char*, const OnlineStreamResult&) {}
 #endif
@@ -209,8 +208,6 @@ void InnertubeProvider::searchTracks(const QString& query) {
         emit searchSucceeded(trimmedQuery, {});
         return;
     }
-
-    logSearchSslDiagnosticsOnce();
 
     QNetworkRequest request = innertubeJsonRequest(QUrl(QStringLiteral("https://music.youtube.com/youtubei/v1/search?prettyPrint=false&key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")));
 
@@ -372,16 +369,6 @@ void InnertubeProvider::resolveStream(const QString& provider, const QString& pr
                 fallbackStream = parsed.stream;
                 logStreamResolveChoice("bootstrap_direct_fallback", *fallbackStream);
             }
-        }
-
-        const OnlineStreamResult platformPreferredStream = selectPreferredOnlinePlaybackStream(
-            OnlineStreamResult{},
-            fallbackStream,
-            preferSabrPlaybackOnCurrentPlatform());
-        if (isUsableSabrPlaybackStream(platformPreferredStream)) {
-            logStreamResolveChoice("platform_preferred_bootstrap_sabr", platformPreferredStream);
-            emit streamResolved(provider, providerTrackId, platformPreferredStream);
-            return;
         }
 
         auto* resolver = new YoutubePlaybackResolver(providerTrackId, bootstrap.visitorData, std::move(fallbackStream), this);

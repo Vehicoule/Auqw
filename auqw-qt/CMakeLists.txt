@@ -38,8 +38,6 @@ qt_add_library(auqw_qt_runtime STATIC
     src/JsonListModel.hpp
     src/OnlineProvider.cpp
     src/OnlineProvider.hpp
-    src/OnlinePlaybackStreamSelection.cpp
-    src/OnlinePlaybackStreamSelection.hpp
     src/PlaybackBackend.cpp
     src/PlaybackBackend.hpp
     src/YoutubeHttpAudioDevice.cpp
@@ -75,6 +73,13 @@ target_compile_definitions(auqw_qt_runtime
 
 if(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND)
     target_link_libraries(auqw_qt_runtime PUBLIC Qt6::Multimedia)
+endif()
+
+if(AUQW_ENABLE_ANDROID_PLATFORM)
+    target_sources(auqw_qt_runtime
+        PRIVATE
+            src/AndroidNativePlaybackBackend.cpp
+    )
 endif()
 
 if(AUQW_ENABLE_QT_PCH)
