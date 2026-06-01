@@ -219,7 +219,7 @@ private slots:
         QObject* nowPlayingSheet = root->findChild<QObject*>(QStringLiteral("nowPlayingSheet"));
         QVERIFY(nowPlayingSheet != nullptr);
         QVERIFY(!nowPlayingSheet->property("visible").toBool());
-        QVERIFY(QMetaObject::invokeMethod(currentSongBox, "click"));
+        QVERIFY(QMetaObject::invokeMethod(currentSongBox, "clicked"));
         QTRY_VERIFY(nowPlayingSheet->property("visible").toBool());
 
         QObject* libraryTrackDelegate = nullptr;

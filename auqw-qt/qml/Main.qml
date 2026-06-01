@@ -542,7 +542,7 @@ ApplicationWindow {
             spacing: 10
 
             Label {
-                text: parent.title
+                text: homeLane.title
                 font.pixelSize: 18
                 font.weight: Font.DemiBold
                 color: "#202622"
@@ -1030,6 +1030,7 @@ ApplicationWindow {
             }
 
             GroupBox {
+                id: aboutSettingsGroup
                 objectName: "aboutSettingsGroup"
                 title: "About"
                 property bool expanded: false
@@ -1040,15 +1041,15 @@ ApplicationWindow {
                     spacing: 6
 
                     Button {
-                        text: parent.parent.expanded ? "Hide Details" : "Show Details"
+                        text: aboutSettingsGroup.expanded ? "Hide Details" : "Show Details"
                         implicitHeight: root.density
-                        onClicked: parent.parent.expanded = !parent.parent.expanded
+                        onClicked: aboutSettingsGroup.expanded = !aboutSettingsGroup.expanded
                     }
 
                     Label {
                         text: coreController.appId + " | schema " + coreController.schemaVersion
                         color: "#66736d"
-                        visible: parent.parent.expanded
+                        visible: aboutSettingsGroup.expanded
                         Layout.fillWidth: true
                         elide: Text.ElideMiddle
                     }
@@ -1057,7 +1058,7 @@ ApplicationWindow {
                         text: coreController.databasePath
                         color: "#66736d"
                         font.pixelSize: 11
-                        visible: parent.parent.expanded
+                        visible: aboutSettingsGroup.expanded
                         Layout.fillWidth: true
                         elide: Text.ElideMiddle
                     }
