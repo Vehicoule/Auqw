@@ -16,6 +16,18 @@ QString readTextFile(const QString& path) {
     return QString::fromUtf8(file.readAll());
 }
 
+QString sourceSlice(const QString& source, const QString& begin, const QString& end) {
+    const qsizetype beginIndex = source.indexOf(begin);
+    if (beginIndex < 0) {
+        return {};
+    }
+    const qsizetype endIndex = source.indexOf(end, beginIndex + begin.size());
+    if (endIndex < 0) {
+        return source.mid(beginIndex);
+    }
+    return source.mid(beginIndex, endIndex - beginIndex);
+}
+
 } // namespace
 
 class IosPlatformWiringTest final : public QObject {
@@ -70,6 +82,37 @@ private slots:
         QVERIFY2(controller.contains(QStringLiteral("playPreviousQueuedTrack")), "iOS previous command should use core queue navigation");
         QVERIFY2(controller.contains(QStringLiteral("seekPlayback")), "iOS seek command should use core seeking");
         QVERIFY2(controller.contains(QStringLiteral("AVAudioSessionInterruptionNotification")), "iOS interruptions should be observed");
+    }
+
+    void appleBackendPlaysHeaderedRemoteStreams() {
+        const QString backend = readTextFile(sourcePath(u"src/ApplePlaybackBackend.mm"));
+        QVERIFY2(!backend.isEmpty(), "ApplePlaybackBackend.mm should be readable");
+
+        const QString headeredPlayback = sourceSlice(
+            backend,
+            QStringLiteral("void playHeaderedRemoteUrl("),
+            QStringLiteral("void playStreamDevice("));
+
+        QVERIFY2(!headeredPlayback.isEmpty(), "Apple backend should expose playHeaderedRemoteUrl");
+        QVERIFY2(headeredPlayback.contains(QStringLiteral("AVURLAssetHTTPHeaderFieldsKey")),
+            "Apple backend should pass request headers through AVURLAsset options");
+        QVERIFY2(headeredPlayback.contains(QStringLiteral("AVURLAsset")) &&
+                headeredPlayback.contains(QStringLiteral("playerItemWithAsset")),
+            "Apple backend should create AVPlayerItem from a header-aware AVURLAsset");
+        QVERIFY2(!headeredPlayback.contains(QStringLiteral("Online stream playback unsupported on this platform.")),
+            "Apple backend should support headered direct playback instead of reporting it unsupported");
+    }
+
+    void appleBackendIgnoresStalePlaybackObservers() {
+        const QString backend = readTextFile(sourcePath(u"src/ApplePlaybackBackend.mm"));
+        QVERIFY2(!backend.isEmpty(), "ApplePlaybackBackend.mm should be readable");
+
+        QVERIFY2(backend.contains(QStringLiteral("playbackGeneration_")),
+            "Apple backend should track playback generations for async observers");
+        QVERIFY2(backend.contains(QStringLiteral("observerGeneration")),
+            "Apple backend observer blocks should capture their playback generation");
+        QVERIFY2(backend.contains(QStringLiteral("observerGeneration != playbackGeneration_")),
+            "Apple backend should ignore stale observer callbacks from old player items");
     }
 };
 

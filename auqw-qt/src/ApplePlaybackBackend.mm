@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -19,6 +20,12 @@ namespace {
 NSString* nsStringFromQString(const QString& text) {
     const QByteArray bytes = text.toUtf8();
     return [NSString stringWithUTF8String:bytes.constData()];
+}
+
+NSString* nsStringFromQByteArray(const QByteArray& text) {
+    return [[NSString alloc] initWithBytes:text.constData()
+                                    length:static_cast<NSUInteger>(text.size())
+                                  encoding:NSUTF8StringEncoding];
 }
 
 qint64 millisecondsFromTime(CMTime time) {
@@ -48,9 +55,10 @@ public:
         }
 
         clearObservers();
+        ++playbackGeneration_;
         NSURL* url = [NSURL fileURLWithPath:nsStringFromQString(path)];
         player_ = [AVPlayer playerWithURL:url];
-        installObservers();
+        installObservers(playbackGeneration_);
 
         emitState(QStringLiteral("loading"), 0, std::nullopt);
         [player_ play];
@@ -64,13 +72,14 @@ public:
         }
 
         clearObservers();
+        ++playbackGeneration_;
         NSURL* nsUrl = [NSURL URLWithString:nsStringFromQString(url.toString())];
         if (nsUrl == nil) {
             emitError(QStringLiteral("Playback URL is empty"));
             return;
         }
         player_ = [AVPlayer playerWithURL:nsUrl];
-        installObservers();
+        installObservers(playbackGeneration_);
 
         emitState(QStringLiteral("loading"), 0, std::nullopt);
         [player_ play];
@@ -81,10 +90,42 @@ public:
         const QUrl& url,
         const QList<QPair<QByteArray, QByteArray>>& headers,
         const QString& mimeType) override {
-        Q_UNUSED(url);
-        Q_UNUSED(headers);
         Q_UNUSED(mimeType);
-        emitError(QStringLiteral("Online stream playback unsupported on this platform."));
+        if (!url.isValid() || url.isEmpty()) {
+            emitError(QStringLiteral("Playback URL is empty"));
+            return;
+        }
+
+        NSURL* nsUrl = [NSURL URLWithString:nsStringFromQString(url.toString())];
+        if (nsUrl == nil) {
+            emitError(QStringLiteral("Playback URL is empty"));
+            return;
+        }
+
+        NSMutableDictionary* httpHeaders = [NSMutableDictionary dictionaryWithCapacity:static_cast<NSUInteger>(headers.size())];
+        for (const auto& header : headers) {
+            NSString* name = nsStringFromQByteArray(header.first);
+            if (name == nil || name.length == 0) {
+                continue;
+            }
+            NSString* value = nsStringFromQByteArray(header.second);
+            httpHeaders[name] = value == nil ? @"" : value;
+        }
+
+        NSDictionary* options = httpHeaders.count == 0
+            ? @{}
+            : @{ AVURLAssetHTTPHeaderFieldsKey : httpHeaders };
+        AVURLAsset* asset = [AVURLAsset URLAssetWithURL:nsUrl options:options];
+        AVPlayerItem* item = [AVPlayerItem playerItemWithAsset:asset];
+
+        clearObservers();
+        ++playbackGeneration_;
+        player_ = [AVPlayer playerWithPlayerItem:item];
+        installObservers(playbackGeneration_);
+
+        emitState(QStringLiteral("loading"), 0, std::nullopt);
+        [player_ play];
+        emitState(QStringLiteral("playing"), positionMs(), durationMs());
     }
 
     void playStreamDevice(std::unique_ptr<QIODevice> device, const QString& mimeType) override {
@@ -138,7 +179,7 @@ public:
     }
 
 private:
-    void installObservers() {
+    void installObservers(std::uint64_t observerGeneration) {
         if (player_ == nil) {
             return;
         }
@@ -146,6 +187,9 @@ private:
         timeObserver_ = [player_ addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(1.0, NSEC_PER_SEC)
                                                               queue:dispatch_get_main_queue()
                                                          usingBlock:^(CMTime) {
+                                                             if (observerGeneration != playbackGeneration_) {
+                                                                 return;
+                                                             }
                                                              emitState(QStringLiteral("playing"), positionMs(), durationMs());
                                                          }];
 
@@ -155,6 +199,9 @@ private:
                         object:item
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification*) {
+                        if (observerGeneration != playbackGeneration_) {
+                            return;
+                        }
                         emitState(QStringLiteral("stopped"), durationMs(), durationMs());
                     }];
     }
@@ -203,6 +250,7 @@ private:
     AVPlayer* player_ = nil;
     id timeObserver_ = nil;
     id endObserver_ = nil;
+    std::uint64_t playbackGeneration_ = 0;
     StateChangedCallback stateChangedCallback_;
     ErrorCallback errorCallback_;
 };

@@ -421,6 +421,7 @@ Initial capabilities:
 - Metadata. **Landed:** provider metadata contract and InnerTube player-response parser cover title, artist, duration, and artwork.
 - Artwork. **Landed:** search result artwork persists through normalized results and queue upsert; QML renders search artwork and mini-player artwork with fallback.
 - Stream resolution. **Landed:** queued provider tracks resolve direct anonymous InnerTube audio URLs through normalized Qt provider results.
+- Headered direct playback parity. **Landed:** Android and iOS platform backends consume provider request headers through `PlaybackBackend::playHeaderedRemoteUrl`; iOS runtime proof remains under the Milestone 4 attached-target gate.
 - Clean error reporting. **Current:** search and online playback failures use friendly UI/core messages; cipher-only streams fail without crashing.
 - Fixture-based parser tests.
 
