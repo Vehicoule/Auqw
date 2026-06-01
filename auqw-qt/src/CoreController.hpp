@@ -10,6 +10,7 @@
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 #include <QVector>
 #include <QVariantMap>
@@ -35,6 +36,9 @@ class CoreController final : public QObject {
     Q_PROPERTY(QAbstractItemModel* downloadsModel READ downloadsModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* searchResultsModel READ searchResultsModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel* searchSuggestionsModel READ searchSuggestionsModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* recentTracksModel READ recentTracksModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* favoriteTracksModel READ favoriteTracksModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* recommendationsModel READ recommendationsModel CONSTANT)
     Q_PROPERTY(QString themeSetting READ themeSetting NOTIFY themeSettingChanged)
     Q_PROPERTY(QString importStatus READ importStatus NOTIFY importStatusChanged)
     Q_PROPERTY(int importedTrackCount READ importedTrackCount NOTIFY importStatusChanged)
@@ -55,6 +59,9 @@ class CoreController final : public QObject {
     Q_PROPERTY(QString playbackErrorMessage READ playbackErrorMessage NOTIFY playbackStateChanged)
     Q_PROPERTY(QString repeatMode READ repeatMode NOTIFY playbackOptionsChanged)
     Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY playbackOptionsChanged)
+    Q_PROPERTY(bool onlineEnabled READ onlineEnabled NOTIFY onlineSourceChanged)
+    Q_PROPERTY(QString onlineSourceStatus READ onlineSourceStatus NOTIFY onlineSourceChanged)
+    Q_PROPERTY(QStringList onlineSourceCapabilities READ onlineSourceCapabilities NOTIFY onlineSourceChanged)
 
 public:
     explicit CoreController(QObject* parent = nullptr);
@@ -77,6 +84,9 @@ public:
     [[nodiscard]] QAbstractItemModel* downloadsModel() const;
     [[nodiscard]] QAbstractItemModel* searchResultsModel() const;
     [[nodiscard]] QAbstractItemModel* searchSuggestionsModel() const;
+    [[nodiscard]] QAbstractItemModel* recentTracksModel() const;
+    [[nodiscard]] QAbstractItemModel* favoriteTracksModel() const;
+    [[nodiscard]] QAbstractItemModel* recommendationsModel() const;
     [[nodiscard]] QString themeSetting() const;
     [[nodiscard]] QString importStatus() const;
     [[nodiscard]] int importedTrackCount() const;
@@ -97,13 +107,22 @@ public:
     [[nodiscard]] QString playbackErrorMessage() const;
     [[nodiscard]] QString repeatMode() const;
     [[nodiscard]] bool shuffleEnabled() const;
+    [[nodiscard]] bool onlineEnabled() const;
+    [[nodiscard]] QString onlineSourceStatus() const;
+    [[nodiscard]] QStringList onlineSourceCapabilities() const;
 
     Q_INVOKABLE void setThemeSetting(const QString& value);
+    Q_INVOKABLE void setOnlineEnabled(bool enabled);
     Q_INVOKABLE void importLocalFolder(const QUrl& folderUrl);
     Q_INVOKABLE void searchOnline(const QString& query);
     Q_INVOKABLE void suggestOnline(const QString& query);
     Q_INVOKABLE void acceptSearchSuggestion(const QString& suggestion);
     Q_INVOKABLE void addSearchResultToQueue(const QString& resultId);
+    Q_INVOKABLE void favoriteSearchResult(const QString& resultId);
+    Q_INVOKABLE void favoriteTrack(const QString& trackId);
+    Q_INVOKABLE void unfavoriteTrack(const QString& trackId);
+    Q_INVOKABLE void clearListeningHistory();
+    Q_INVOKABLE void clearSearchHistory();
     Q_INVOKABLE void downloadSearchResult(const QString& resultId);
     Q_INVOKABLE void addTrackToQueue(const QString& trackId);
     Q_INVOKABLE void downloadTrack(const QString& trackId);
@@ -134,6 +153,7 @@ signals:
     void downloadDirectoryChanged();
     void playbackStateChanged();
     void playbackOptionsChanged();
+    void onlineSourceChanged();
 
 private:
     struct CommandResult {
@@ -150,6 +170,9 @@ private:
     bool refreshTracksFromCore();
     bool refreshQueueFromCore();
     bool refreshDownloadsFromCore();
+    bool refreshRecentTracksFromCore();
+    bool refreshFavoriteTracksFromCore();
+    void refreshRecommendationsFromModels();
     bool refreshPlaybackFromCore();
     bool refreshPlaybackOptionsFromCore();
     void setCoreStatus(const QString& status);
@@ -157,6 +180,8 @@ private:
     void setImportResult(const QString& status, int importedTrackCount);
     void setDownloadStatus(const QString& status);
     void setDownloadDirectoryFromCore(const QString& path);
+    void setOnlineEnabledFromCore(bool enabled);
+    void syncOnlineSourceState();
     void configurePlaybackBackend();
     void configureOnlineProvider();
     void setSearchState(const QString& status, const QString& errorMessage);
@@ -165,6 +190,7 @@ private:
     void applyDownloads(const QJsonArray& downloads);
     void recordSearchHistory(const QString& query);
     [[nodiscard]] std::optional<OnlineTrackResult> searchResultById(const QString& resultId) const;
+    [[nodiscard]] std::optional<QString> upsertTrackForSearchResult(const OnlineTrackResult& result);
     [[nodiscard]] QVariantMap trackById(const QString& trackId) const;
     [[nodiscard]] bool downloadsSupportedForProvider(const QString& provider) const;
     [[nodiscard]] QString defaultDownloadDirectory() const;
@@ -204,6 +230,9 @@ private:
     std::unique_ptr<JsonListModel> downloadsModel_;
     std::unique_ptr<JsonListModel> searchResultsModel_;
     std::unique_ptr<JsonListModel> searchSuggestionsModel_;
+    std::unique_ptr<JsonListModel> recentTracksModel_;
+    std::unique_ptr<JsonListModel> favoriteTracksModel_;
+    std::unique_ptr<JsonListModel> recommendationsModel_;
     QVector<OnlineTrackResult> searchResults_;
     QVector<OnlineSuggestionResult> searchSuggestions_;
     QString helloText_;
@@ -221,6 +250,9 @@ private:
     QString downloadDirectory_;
     QString activeSearchQuery_;
     QString activeSuggestionQuery_;
+    bool onlineEnabled_ = true;
+    QString onlineSourceStatus_ = QStringLiteral("Ready");
+    QStringList onlineSourceCapabilities_;
     QString playbackState_ = QStringLiteral("stopped");
     QString playbackQueueItemId_;
     QString playbackTrackId_;

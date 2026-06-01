@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QSet>
 #include <QStandardPaths>
 #include <QVariantMap>
 
@@ -46,6 +47,31 @@ QString errorMessageFromResponse(const QJsonObject& root) {
         return code;
     }
     return QStringLiteral("unknown core error");
+}
+
+QStringList capabilitiesForProvider(const OnlineProvider* provider) {
+    if (provider == nullptr) {
+        return {};
+    }
+
+    const OnlineProviderCapabilities capabilities = provider->capabilities();
+    QStringList names;
+    if (capabilities.search) {
+        names.push_back(QStringLiteral("Search"));
+    }
+    if (capabilities.suggestions) {
+        names.push_back(QStringLiteral("Suggestions"));
+    }
+    if (capabilities.metadata) {
+        names.push_back(QStringLiteral("Metadata"));
+    }
+    if (capabilities.playback) {
+        names.push_back(QStringLiteral("Playback"));
+    }
+    if (capabilities.downloads) {
+        names.push_back(QStringLiteral("Downloads"));
+    }
+    return names;
 }
 
 } // namespace
@@ -134,6 +160,44 @@ CoreController::CoreController(
           QStringLiteral("provider"),
           QStringLiteral("text"),
       })),
+      recentTracksModel_(std::make_unique<JsonListModel>(QStringList{
+          QStringLiteral("id"),
+          QStringLiteral("track_id"),
+          QStringLiteral("played_at"),
+          QStringLiteral("created_at"),
+          QStringLiteral("provider"),
+          QStringLiteral("provider_track_id"),
+          QStringLiteral("title"),
+          QStringLiteral("artist"),
+          QStringLiteral("album"),
+          QStringLiteral("duration_ms"),
+          QStringLiteral("artwork_url"),
+      })),
+      favoriteTracksModel_(std::make_unique<JsonListModel>(QStringList{
+          QStringLiteral("id"),
+          QStringLiteral("track_id"),
+          QStringLiteral("added_at"),
+          QStringLiteral("created_at"),
+          QStringLiteral("provider"),
+          QStringLiteral("provider_track_id"),
+          QStringLiteral("title"),
+          QStringLiteral("artist"),
+          QStringLiteral("album"),
+          QStringLiteral("duration_ms"),
+          QStringLiteral("artwork_url"),
+      })),
+      recommendationsModel_(std::make_unique<JsonListModel>(QStringList{
+          QStringLiteral("id"),
+          QStringLiteral("track_id"),
+          QStringLiteral("provider"),
+          QStringLiteral("provider_track_id"),
+          QStringLiteral("title"),
+          QStringLiteral("artist"),
+          QStringLiteral("album"),
+          QStringLiteral("duration_ms"),
+          QStringLiteral("artwork_url"),
+          QStringLiteral("reason"),
+      })),
       coreStatus_(QStringLiteral("Starting")),
       importStatus_(QStringLiteral("Import a folder")) {
     if (!playbackBackend_) {
@@ -218,6 +282,18 @@ QAbstractItemModel* CoreController::searchSuggestionsModel() const {
     return searchSuggestionsModel_.get();
 }
 
+QAbstractItemModel* CoreController::recentTracksModel() const {
+    return recentTracksModel_.get();
+}
+
+QAbstractItemModel* CoreController::favoriteTracksModel() const {
+    return favoriteTracksModel_.get();
+}
+
+QAbstractItemModel* CoreController::recommendationsModel() const {
+    return recommendationsModel_.get();
+}
+
 QString CoreController::themeSetting() const {
     return themeSetting_;
 }
@@ -296,6 +372,18 @@ QString CoreController::repeatMode() const {
 
 bool CoreController::shuffleEnabled() const {
     return shuffleEnabled_;
+}
+
+bool CoreController::onlineEnabled() const {
+    return onlineEnabled_;
+}
+
+QString CoreController::onlineSourceStatus() const {
+    return onlineSourceStatus_;
+}
+
+QStringList CoreController::onlineSourceCapabilities() const {
+    return onlineSourceCapabilities_;
 }
 
 void CoreController::refreshState() {
@@ -381,6 +469,14 @@ void CoreController::loadInitialState() {
         return;
     }
 
+    if (!refreshRecentTracksFromCore()) {
+        return;
+    }
+
+    if (!refreshFavoriteTracksFromCore()) {
+        return;
+    }
+
     if (!refreshPlaybackFromCore()) {
         return;
     }
@@ -411,6 +507,18 @@ void CoreController::loadInitialState() {
     }
     const QString storedDownloadDirectory = storage.data.value(QStringLiteral("setting")).toObject().value(QStringLiteral("value")).toString();
     setDownloadDirectoryFromCore(storedDownloadDirectory.isEmpty() ? defaultDownloadDirectory() : storedDownloadDirectory);
+
+    const CommandResult online = invokeCommand(
+        QStringLiteral("settings.get.online.enabled"),
+        QStringLiteral("settings.get"),
+        QJsonObject{{QStringLiteral("key"), QStringLiteral("online.enabled")}});
+    if (!online.ok) {
+        setCoreStatus(online.error);
+        return;
+    }
+    const QString storedOnlineEnabled = online.data.value(QStringLiteral("setting")).toObject().value(QStringLiteral("value")).toString();
+    setOnlineEnabledFromCore(storedOnlineEnabled.isEmpty() || storedOnlineEnabled == QStringLiteral("true"));
+
     setCoreStatus(QStringLiteral("Ready"));
 }
 
@@ -430,6 +538,33 @@ void CoreController::setThemeSettingFromCore(const QString& value) {
 
     themeSetting_ = value;
     emit themeSettingChanged();
+}
+
+void CoreController::setOnlineEnabledFromCore(bool enabled) {
+    if (onlineEnabled_ == enabled) {
+        syncOnlineSourceState();
+        return;
+    }
+
+    onlineEnabled_ = enabled;
+    syncOnlineSourceState();
+}
+
+void CoreController::syncOnlineSourceState() {
+    const QString nextStatus = !onlineEnabled_
+        ? QStringLiteral("Disabled")
+        : onlineProvider_ != nullptr
+            ? QStringLiteral("Ready")
+            : QStringLiteral("Unavailable");
+    const QStringList nextCapabilities = onlineEnabled_ ? capabilitiesForProvider(onlineProvider_.get()) : QStringList{};
+
+    if (onlineSourceStatus_ == nextStatus && onlineSourceCapabilities_ == nextCapabilities) {
+        return;
+    }
+
+    onlineSourceStatus_ = nextStatus;
+    onlineSourceCapabilities_ = nextCapabilities;
+    emit onlineSourceChanged();
 }
 
 void CoreController::setImportResult(const QString& status, int importedTrackCount) {

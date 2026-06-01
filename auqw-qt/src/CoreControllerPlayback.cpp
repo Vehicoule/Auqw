@@ -536,4 +536,5 @@ void CoreController::recordRecentIfNeeded() {
     }
 
     recentRecordedQueueItemId_ = playbackQueueItemId_;
+    refreshRecentTracksFromCore();
 }

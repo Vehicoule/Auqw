@@ -22,6 +22,13 @@ void CoreController::searchOnline(const QString& query) {
         return;
     }
 
+    if (!onlineEnabled_) {
+        applySearchResults({});
+        applySearchSuggestions({});
+        setSearchState(QStringLiteral("Disabled"), QStringLiteral("Online search disabled."));
+        return;
+    }
+
     if (!onlineProvider_) {
         applySearchResults({});
         setSearchState(QStringLiteral("Error"), QStringLiteral("Search unavailable. Try again."));
@@ -38,6 +45,11 @@ void CoreController::suggestOnline(const QString& query) {
     const QString trimmedQuery = query.trimmed();
     activeSuggestionQuery_ = trimmedQuery;
     if (trimmedQuery.isEmpty()) {
+        applySearchSuggestions({});
+        return;
+    }
+
+    if (!onlineEnabled_) {
         applySearchSuggestions({});
         return;
     }
@@ -68,22 +80,48 @@ void CoreController::addSearchResultToQueue(const QString& resultId) {
         return;
     }
 
+    const std::optional<QString> trackId = upsertTrackForSearchResult(*result);
+    if (!trackId.has_value()) {
+        return;
+    }
+
+    addTrackToQueue(*trackId);
+    refreshTracksFromCore();
+}
+
+void CoreController::favoriteSearchResult(const QString& resultId) {
+    const std::optional<OnlineTrackResult> result = searchResultById(resultId);
+    if (!result.has_value()) {
+        setCoreStatus(QStringLiteral("Search result unavailable"));
+        return;
+    }
+
+    const std::optional<QString> trackId = upsertTrackForSearchResult(*result);
+    if (!trackId.has_value()) {
+        return;
+    }
+
+    favoriteTrack(*trackId);
+    refreshTracksFromCore();
+}
+
+std::optional<QString> CoreController::upsertTrackForSearchResult(const OnlineTrackResult& result) {
     QJsonObject params{
-        {QStringLiteral("provider"), result->provider},
-        {QStringLiteral("provider_track_id"), result->providerTrackId},
-        {QStringLiteral("title"), result->title},
+        {QStringLiteral("provider"), result.provider},
+        {QStringLiteral("provider_track_id"), result.providerTrackId},
+        {QStringLiteral("title"), result.title},
     };
-    if (!result->artist.isEmpty()) {
-        params.insert(QStringLiteral("artist"), result->artist);
+    if (!result.artist.isEmpty()) {
+        params.insert(QStringLiteral("artist"), result.artist);
     }
-    if (!result->album.isEmpty()) {
-        params.insert(QStringLiteral("album"), result->album);
+    if (!result.album.isEmpty()) {
+        params.insert(QStringLiteral("album"), result.album);
     }
-    if (result->durationMs > 0) {
-        params.insert(QStringLiteral("duration_ms"), result->durationMs);
+    if (result.durationMs > 0) {
+        params.insert(QStringLiteral("duration_ms"), result.durationMs);
     }
-    if (!result->artworkUrl.isEmpty()) {
-        params.insert(QStringLiteral("artwork_url"), result->artworkUrl);
+    if (!result.artworkUrl.isEmpty()) {
+        params.insert(QStringLiteral("artwork_url"), result.artworkUrl);
     }
 
     const CommandResult upsert = invokeCommand(
@@ -92,13 +130,12 @@ void CoreController::addSearchResultToQueue(const QString& resultId) {
         params);
     if (!upsert.ok) {
         setCoreStatus(upsert.error);
-        return;
+        return std::nullopt;
     }
 
     const QString trackId = upsert.data.value(QStringLiteral("track")).toObject().value(QStringLiteral("id")).toString();
-    cacheArtworkForTrack(trackId, result->artworkUrl);
-    addTrackToQueue(trackId);
-    refreshTracksFromCore();
+    cacheArtworkForTrack(trackId, result.artworkUrl);
+    return trackId;
 }
 
 void CoreController::configureOnlineProvider() {

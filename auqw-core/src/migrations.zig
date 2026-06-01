@@ -1,7 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 
-pub const latest_version: i64 = 5;
+pub const latest_version: i64 = 6;
 
 pub fn run(db: *sqlite.Database) sqlite.DbError!void {
     try db.exec(
@@ -69,6 +69,19 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
         \\
         \\CREATE INDEX IF NOT EXISTS idx_recent_tracks_played_at
         \\ON recent_tracks(played_at DESC, created_at DESC);
+        \\
+        \\CREATE TABLE IF NOT EXISTS favorite_tracks (
+        \\    id TEXT PRIMARY KEY,
+        \\    track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+        \\    added_at TEXT NOT NULL,
+        \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        \\);
+        \\
+        \\CREATE UNIQUE INDEX IF NOT EXISTS idx_favorite_tracks_track
+        \\ON favorite_tracks(track_id);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_favorite_tracks_added_at
+        \\ON favorite_tracks(added_at DESC, created_at DESC);
         \\
         \\CREATE TABLE IF NOT EXISTS search_history (
         \\    id TEXT PRIMARY KEY,
@@ -172,6 +185,19 @@ pub fn run(db: *sqlite.Database) sqlite.DbError!void {
     try ensureColumn(db, "downloads", "error_text", "ALTER TABLE downloads ADD COLUMN error_text TEXT");
     try db.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);");
     try db.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);");
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS favorite_tracks (
+        \\    id TEXT PRIMARY KEY,
+        \\    track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+        \\    added_at TEXT NOT NULL,
+        \\    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        \\);
+        \\CREATE UNIQUE INDEX IF NOT EXISTS idx_favorite_tracks_track
+        \\ON favorite_tracks(track_id);
+        \\CREATE INDEX IF NOT EXISTS idx_favorite_tracks_added_at
+        \\ON favorite_tracks(added_at DESC, created_at DESC);
+        \\INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);
+    );
 }
 
 pub fn currentVersion(db: *sqlite.Database) sqlite.DbError!i64 {

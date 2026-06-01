@@ -50,8 +50,13 @@ pub fn invoke(state: *AppState, request_json: []const u8) errors.CoreError![]u8 
     if (std.mem.eql(u8, command, "playlists.list")) return library.playlistsList(state, id);
     if (std.mem.eql(u8, command, "recent.add")) return library.recentAdd(state, id, params);
     if (std.mem.eql(u8, command, "recent.list")) return library.recentList(state, id);
+    if (std.mem.eql(u8, command, "recent.clear")) return library.recentClear(state, id);
+    if (std.mem.eql(u8, command, "favorites.add")) return library.favoritesAdd(state, id, params);
+    if (std.mem.eql(u8, command, "favorites.remove")) return library.favoritesRemove(state, id, params);
+    if (std.mem.eql(u8, command, "favorites.list")) return library.favoritesList(state, id);
     if (std.mem.eql(u8, command, "search_history.add")) return library.searchHistoryAdd(state, id, params);
     if (std.mem.eql(u8, command, "search_history.list")) return library.searchHistoryList(state, id);
+    if (std.mem.eql(u8, command, "search_history.clear")) return library.searchHistoryClear(state, id);
     if (std.mem.eql(u8, command, "settings.get")) return library.settingsGet(state, id, params);
     if (std.mem.eql(u8, command, "settings.set")) return library.settingsSet(state, id, params);
 
@@ -104,7 +109,7 @@ test "metadata command contract includes schema version" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 6), data.get("schema_version").?.integer);
 }
 
 test "queue command contract preserves moved order" {

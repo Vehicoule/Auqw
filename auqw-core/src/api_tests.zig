@@ -60,10 +60,10 @@ test "core metadata reports app details and migrated schema" {
     try std.testing.expectEqualStrings("com.Vehicoule.auqw", data.get("app_id").?.string);
     try std.testing.expectEqualStrings("Auqw", data.get("app_name").?.string);
     try std.testing.expectEqualStrings(":memory:", data.get("database_path").?.string);
-    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 6), data.get("schema_version").?.integer);
 }
 
-test "schema v5 migration is idempotent for existing v3 databases" {
+test "schema v6 migration is idempotent for existing v3 databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -127,7 +127,7 @@ test "schema v5 migration is idempotent for existing v3 databases" {
     var response = try expectInvoke(second.?, "{\"id\":\"meta\",\"command\":\"core.get_metadata\",\"params\":{}}");
     defer response.deinit();
     const data = try expectOk(response, "meta");
-    try std.testing.expectEqual(@as(i64, 5), data.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 6), data.get("schema_version").?.integer);
 
     var track = try expectInvoke(second.?, "{\"id\":\"track\",\"command\":\"tracks.upsert\",\"params\":{\"id\":\"alpha\",\"provider\":\"fake\",\"provider_track_id\":\"alpha\",\"title\":\"Alpha\",\"metadata_cached_at\":\"2026-05-30T10:00:00Z\"}}");
     defer track.deinit();
@@ -763,7 +763,7 @@ test "recent tracks and search history list newest first" {
     try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
     defer api.auqw_core_destroy(core);
 
-    var track = try expectInvoke(core.?, "{\"id\":\"upsert\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"One\"}}");
+    var track = try expectInvoke(core.?, "{\"id\":\"upsert\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"One\",\"artist\":\"Vela\",\"album\":\"North\",\"duration_ms\":1234,\"artwork_url\":\"https://img.example/one.jpg\"}}");
     defer track.deinit();
     const track_id = (try expectOk(track, "upsert")).get("track").?.object.get("id").?.string;
 
@@ -782,6 +782,11 @@ test "recent tracks and search history list newest first" {
     const recent_items = (try expectOk(recents, "recent-list")).get("items").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), recent_items.len);
     try std.testing.expectEqualStrings("2026-05-28T11:00:00Z", recent_items[0].object.get("played_at").?.string);
+    try std.testing.expectEqualStrings("One", recent_items[0].object.get("title").?.string);
+    try std.testing.expectEqualStrings("Vela", recent_items[0].object.get("artist").?.string);
+    try std.testing.expectEqualStrings("North", recent_items[0].object.get("album").?.string);
+    try std.testing.expectEqual(@as(i64, 1234), recent_items[0].object.get("duration_ms").?.integer);
+    try std.testing.expectEqualStrings("https://img.example/one.jpg", recent_items[0].object.get("artwork_url").?.string);
 
     var s1 = try expectInvoke(core.?, "{\"id\":\"s1\",\"command\":\"search_history.add\",\"params\":{\"query\":\"alpha\",\"searched_at\":\"2026-05-28T10:00:00Z\"}}");
     s1.deinit();
@@ -793,6 +798,81 @@ test "recent tracks and search history list newest first" {
     const search_items = (try expectOk(searches, "search-list")).get("items").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), search_items.len);
     try std.testing.expectEqualStrings("beta", search_items[0].object.get("query").?.string);
+}
+
+test "favorites add remove and list joined track fields" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var track = try expectInvoke(core.?, "{\"id\":\"upsert\",\"command\":\"tracks.upsert\",\"params\":{\"provider\":\"ytmusic\",\"provider_track_id\":\"video-alpha\",\"title\":\"Alpha\",\"artist\":\"Mira\",\"album\":\"Wide\",\"duration_ms\":4200,\"artwork_url\":\"https://img.example/alpha.jpg\"}}");
+    defer track.deinit();
+    const track_id = (try expectOk(track, "upsert")).get("track").?.object.get("id").?.string;
+
+    const add_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"fav-add\",\"command\":\"favorites.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(add_request);
+    var add = try expectInvoke(core.?, add_request);
+    defer add.deinit();
+    const added = (try expectOk(add, "fav-add")).get("item").?.object;
+    try std.testing.expectEqualStrings(track_id, added.get("track_id").?.string);
+    try std.testing.expectEqualStrings("ytmusic", added.get("provider").?.string);
+    try std.testing.expectEqualStrings("video-alpha", added.get("provider_track_id").?.string);
+    try std.testing.expectEqualStrings("Alpha", added.get("title").?.string);
+    try std.testing.expectEqualStrings("Mira", added.get("artist").?.string);
+
+    var list = try expectInvoke(core.?, "{\"id\":\"fav-list\",\"command\":\"favorites.list\",\"params\":{}}");
+    defer list.deinit();
+    const favorites = (try expectOk(list, "fav-list")).get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), favorites.len);
+    try std.testing.expectEqualStrings(track_id, favorites[0].object.get("track_id").?.string);
+    try std.testing.expectEqualStrings("Alpha", favorites[0].object.get("title").?.string);
+    try std.testing.expectEqual(@as(i64, 4200), favorites[0].object.get("duration_ms").?.integer);
+    try std.testing.expectEqualStrings("https://img.example/alpha.jpg", favorites[0].object.get("artwork_url").?.string);
+
+    const remove_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"fav-remove\",\"command\":\"favorites.remove\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(remove_request);
+    var remove = try expectInvoke(core.?, remove_request);
+    defer remove.deinit();
+    const remove_data = try expectOk(remove, "fav-remove");
+    try std.testing.expectEqual(@as(i64, 1), remove_data.get("removed").?.integer);
+
+    var empty = try expectInvoke(core.?, "{\"id\":\"fav-empty\",\"command\":\"favorites.list\",\"params\":{}}");
+    defer empty.deinit();
+    const empty_items = (try expectOk(empty, "fav-empty")).get("items").?.array.items;
+    try std.testing.expectEqual(@as(usize, 0), empty_items.len);
+}
+
+test "clear recent tracks and search history" {
+    var core: ?*api.AuqwCore = null;
+    try std.testing.expectEqual(error_ok, api.auqw_core_create(null, &core));
+    defer api.auqw_core_destroy(core);
+
+    var track = try expectInvoke(core.?, "{\"id\":\"upsert\",\"command\":\"tracks.upsert\",\"params\":{\"title\":\"Clear Me\"}}");
+    defer track.deinit();
+    const track_id = (try expectOk(track, "upsert")).get("track").?.object.get("id").?.string;
+
+    const recent_request = try std.fmt.allocPrintSentinel(allocator, "{{\"id\":\"recent-add\",\"command\":\"recent.add\",\"params\":{{\"track_id\":\"{s}\"}}}}", .{track_id}, 0);
+    defer allocator.free(recent_request);
+    var recent_add = try expectInvoke(core.?, recent_request);
+    recent_add.deinit();
+    var search_add = try expectInvoke(core.?, "{\"id\":\"search-add\",\"command\":\"search_history.add\",\"params\":{\"query\":\"clear me\"}}");
+    search_add.deinit();
+
+    var clear_recent = try expectInvoke(core.?, "{\"id\":\"recent-clear\",\"command\":\"recent.clear\",\"params\":{}}");
+    defer clear_recent.deinit();
+    try std.testing.expectEqual(@as(i64, 1), (try expectOk(clear_recent, "recent-clear")).get("removed").?.integer);
+
+    var clear_search = try expectInvoke(core.?, "{\"id\":\"search-clear\",\"command\":\"search_history.clear\",\"params\":{}}");
+    defer clear_search.deinit();
+    try std.testing.expectEqual(@as(i64, 1), (try expectOk(clear_search, "search-clear")).get("removed").?.integer);
+
+    var recents = try expectInvoke(core.?, "{\"id\":\"recent-list\",\"command\":\"recent.list\",\"params\":{}}");
+    defer recents.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try expectOk(recents, "recent-list")).get("items").?.array.items.len);
+
+    var searches = try expectInvoke(core.?, "{\"id\":\"search-list\",\"command\":\"search_history.list\",\"params\":{}}");
+    defer searches.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try expectOk(searches, "search-list")).get("items").?.array.items.len);
 }
 
 test "settings set and get round trip" {

@@ -14,17 +14,24 @@ ApplicationWindow {
     minimumHeight: 560
     visible: true
     title: coreController.appName.length > 0 ? coreController.appName : "Auqw"
+    color: "#f6f3ee"
 
     readonly property bool mobilePlatform: Qt.platform.os === "android" || Qt.platform.os === "ios"
     readonly property bool compact: root.width < 760 || root.mobilePlatform
-    readonly property int density: root.compact ? 56 : 44
-    readonly property int pagePadding: root.compact ? 14 : 22
+    readonly property int density: root.compact ? 54 : 44
+    readonly property int pagePadding: root.compact ? 14 : 24
     readonly property int pageGap: root.compact ? 12 : 16
-    readonly property int navWidth: 184
-    readonly property int queuePanelWidth: Math.min(340, Math.max(280, Math.round(root.width * 0.28)))
+    readonly property int navWidth: root.compact
+        ? (root.hasPlayback ? Math.max(154, Math.round((root.width - root.pagePadding * 3) * 0.52)) : Math.min(root.width - 28, 230))
+        : 270
+    readonly property int queuePanelWidth: Math.min(330, Math.max(280, Math.round(root.width * 0.27)))
     readonly property int safeTop: root.mobilePlatform ? 10 : 0
     readonly property int safeBottom: root.mobilePlatform ? 10 : 0
     readonly property var themeOptions: ["system", "light", "dark"]
+    readonly property bool hasPlayback: coreController.playbackState !== "stopped" || coreController.playbackTitle.length > 0
+    readonly property real playbackProgress: coreController.playbackDurationMs > 0
+        ? Math.max(0, Math.min(1, coreController.playbackPositionMs / coreController.playbackDurationMs))
+        : 0
 
     property int currentPageIndex: 0
     property string selectedDownloadId: ""
@@ -33,13 +40,19 @@ ApplicationWindow {
         currentPageIndex = index
     }
 
+    function goSearch(query) {
+        currentPageIndex = 2
+        if (query.length > 0) {
+            coreController.searchOnline(query)
+        }
+    }
+
     function playbackDetailText() {
         if (coreController.playbackErrorMessage.length > 0) {
             return coreController.playbackErrorMessage
         }
-        var detail = coreController.playbackState.length > 0 ? coreController.playbackState : "stopped"
         var byline = [coreController.playbackArtist, coreController.playbackAlbum].filter(function(item) { return item.length > 0 }).join(" | ")
-        return byline.length > 0 ? detail + " | " + byline : detail
+        return byline.length > 0 ? byline : (coreController.playbackState.length > 0 ? coreController.playbackState : "stopped")
     }
 
     function formatDuration(durationMs) {
@@ -52,7 +65,24 @@ ApplicationWindow {
         return minutes + ":" + (seconds < 10 ? "0" + seconds : seconds)
     }
 
-    color: palette.window
+    function formatProgress() {
+        var position = root.formatDuration(coreController.playbackPositionMs)
+        var duration = root.formatDuration(coreController.playbackDurationMs)
+        if (position.length === 0 && duration.length === 0) {
+            return coreController.playbackState
+        }
+        return position + " / " + duration
+    }
+
+    component GlassFrame: Frame {
+        padding: root.pagePadding
+        background: Rectangle {
+            radius: 8
+            color: "#dffafafa"
+            border.color: "#80ffffff"
+            border.width: 1
+        }
+    }
 
     component PageHeader: ColumnLayout {
         property string title
@@ -63,15 +93,16 @@ ApplicationWindow {
 
         Label {
             text: parent.title
-            font.pixelSize: root.compact ? 24 : 28
+            font.pixelSize: root.compact ? 25 : 31
             font.weight: Font.DemiBold
+            color: "#1f2522"
             Layout.fillWidth: true
             elide: Text.ElideRight
         }
 
         Label {
             text: parent.detail
-            color: root.palette.placeholderText
+            color: "#66736d"
             visible: text.length > 0
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
@@ -95,13 +126,14 @@ ApplicationWindow {
                 horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: 17
                 font.weight: Font.DemiBold
+                color: "#1f2522"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
             }
 
             Label {
                 text: detail
-                color: root.palette.placeholderText
+                color: "#66736d"
                 horizontalAlignment: Text.AlignHCenter
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
@@ -109,23 +141,49 @@ ApplicationWindow {
         }
     }
 
-    component NavButton: Button {
+    component NavPill: Button {
         property int pageIndex: 0
+        property string glyph: ""
+        property string label: ""
 
+        objectName: ""
         checkable: true
         checked: root.currentPageIndex === pageIndex
         flat: true
-        leftPadding: 14
-        rightPadding: 14
-        implicitHeight: root.density
+        implicitHeight: root.compact ? 48 : 52
         Layout.fillWidth: true
+        ToolTip.visible: hovered
+        ToolTip.text: label
         onClicked: root.goTo(pageIndex)
-    }
 
-    component SectionFrame: Frame {
-        padding: root.pagePadding
-        Layout.fillWidth: true
-        Layout.fillHeight: true
+        contentItem: ColumnLayout {
+            spacing: 2
+
+            Label {
+                text: glyph
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 19
+                font.weight: Font.DemiBold
+                color: parent.parent.checked ? "#0e5a43" : "#4d5a54"
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: label
+                visible: !root.compact
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 11
+                color: parent.parent.checked ? "#0e5a43" : "#6a756f"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: parent.checked ? "#d8efe6" : parent.hovered ? "#eff6f3" : "transparent"
+            border.color: parent.checked ? "#9bd1ba" : "transparent"
+        }
     }
 
     component TrackDelegate: ItemDelegate {
@@ -143,6 +201,20 @@ ApplicationWindow {
         contentItem: RowLayout {
             spacing: 10
 
+            Rectangle {
+                Layout.preferredWidth: 42
+                Layout.preferredHeight: 42
+                radius: 6
+                color: "#e5ece8"
+
+                Label {
+                    anchors.centerIn: parent
+                    text: "♪"
+                    color: "#4f6258"
+                    font.pixelSize: 18
+                }
+            }
+
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 2
@@ -150,13 +222,14 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
+                    color: "#202622"
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: root.palette.placeholderText
+                    color: "#66736d"
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -165,10 +238,83 @@ ApplicationWindow {
 
             Button {
                 objectName: "libraryTrackDownloadButton"
-                text: "Download"
+                text: "⇩"
                 enabled: track_id.length > 0
-                implicitHeight: Math.max(36, root.density - 8)
+                implicitWidth: 42
+                implicitHeight: 36
+                ToolTip.visible: hovered
+                ToolTip.text: "Download"
                 onClicked: coreController.downloadTrack(track_id)
+            }
+        }
+    }
+
+    component HomeTrackDelegate: ItemDelegate {
+        required property string track_id
+        required property string title
+        required property string artist
+        required property string album
+        required property string artwork_url
+
+        width: ListView.view.width
+        implicitHeight: 58
+        enabled: track_id.length > 0
+        onClicked: coreController.addTrackToQueue(track_id)
+
+        contentItem: RowLayout {
+            spacing: 10
+
+            Rectangle {
+                Layout.preferredWidth: 42
+                Layout.preferredHeight: 42
+                radius: 6
+                color: "#e9eee9"
+                clip: true
+
+                Image {
+                    anchors.fill: parent
+                    source: artwork_url
+                    visible: artwork_url.length > 0
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                }
+
+                Label {
+                    anchors.centerIn: parent
+                    text: "♪"
+                    visible: artwork_url.length === 0
+                    color: "#4f6258"
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: title.length > 0 ? title : "Untitled track"
+                    color: "#202622"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
+                    color: "#66736d"
+                    elide: Text.ElideRight
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                }
+            }
+
+            Button {
+                text: "♡"
+                implicitWidth: 38
+                implicitHeight: 34
+                ToolTip.visible: hovered
+                ToolTip.text: "Favorite"
+                onClicked: coreController.favoriteTrack(track_id)
             }
         }
     }
@@ -190,16 +336,12 @@ ApplicationWindow {
         contentItem: RowLayout {
             spacing: 10
 
-            Item {
+            Rectangle {
                 Layout.preferredWidth: root.compact ? 46 : 50
                 Layout.preferredHeight: root.compact ? 46 : 50
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 6
-                    color: root.palette.mid
-                    visible: artwork_url.length === 0
-                }
+                radius: 6
+                color: "#e2eae6"
+                clip: true
 
                 Image {
                     anchors.fill: parent
@@ -218,13 +360,14 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
+                    color: "#202622"
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album, root.formatDuration(duration_ms)].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: root.palette.placeholderText
+                    color: "#66736d"
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -232,10 +375,22 @@ ApplicationWindow {
             }
 
             Button {
+                text: "♡"
+                implicitWidth: 40
+                implicitHeight: 36
+                ToolTip.visible: hovered
+                ToolTip.text: "Favorite"
+                onClicked: coreController.favoriteSearchResult(result_id)
+            }
+
+            Button {
                 objectName: "searchResultDownloadButton"
-                text: "Download"
+                text: "⇩"
                 enabled: result_id.length > 0
-                implicitHeight: Math.max(36, root.density - 8)
+                implicitWidth: 40
+                implicitHeight: 36
+                ToolTip.visible: hovered
+                ToolTip.text: "Download"
                 onClicked: coreController.downloadSearchResult(result_id)
             }
         }
@@ -265,20 +420,19 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
+                    color: "#202622"
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
-                Label {
-                    text: state + " | " + progress + "%"
-                    color: error_text.length > 0 ? "#a63b2f" : root.palette.placeholderText
-                    elide: Text.ElideRight
+                ProgressBar {
+                    value: progress / 100
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: error_text.length > 0 ? error_text : target_path
-                    color: root.palette.placeholderText
+                    color: error_text.length > 0 ? "#a63b2f" : "#66736d"
                     font.pixelSize: 11
                     elide: Text.ElideMiddle
                     visible: text.length > 0 && !root.compact
@@ -288,9 +442,12 @@ ApplicationWindow {
 
             Button {
                 objectName: "downloadRemoveButton"
-                text: "Remove"
+                text: "×"
                 enabled: download_id.length > 0
-                implicitHeight: Math.max(36, root.density - 8)
+                implicitWidth: 40
+                implicitHeight: 36
+                ToolTip.visible: hovered
+                ToolTip.text: "Remove"
                 onClicked: coreController.removeDownload(download_id)
             }
         }
@@ -322,24 +479,16 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
+                    color: "#202622"
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: root.palette.placeholderText
+                    color: "#66736d"
                     elide: Text.ElideRight
                     visible: text.length > 0
-                    Layout.fillWidth: true
-                }
-
-                Label {
-                    text: local_path
-                    color: root.palette.placeholderText
-                    font.pixelSize: 11
-                    elide: Text.ElideMiddle
-                    visible: text.length > 0 && !root.compact
                     Layout.fillWidth: true
                 }
             }
@@ -350,46 +499,130 @@ ApplicationWindow {
 
                 Button {
                     objectName: "queueMoveUpButton"
-                    text: "Up"
+                    text: "↑"
                     enabled: queue_item_id.length > 0 && queueDelegate.index > 0
+                    implicitWidth: 36
                     implicitHeight: 28
                     onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index - 1)
                 }
 
                 Button {
                     objectName: "queueMoveDownButton"
-                    text: "Down"
+                    text: "↓"
                     enabled: queue_item_id.length > 0 && queueDelegate.ListView.view !== null && queueDelegate.index < queueDelegate.ListView.view.count - 1
+                    implicitWidth: 36
                     implicitHeight: 28
                     onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index + 1)
                 }
             }
 
             Button {
-                text: "Remove"
+                text: "×"
                 enabled: queue_item_id.length > 0
-                implicitHeight: Math.max(36, root.density - 8)
+                implicitWidth: 40
+                implicitHeight: 36
                 onClicked: coreController.removeQueueItem(queue_item_id)
             }
         }
     }
 
-    component PlaylistDelegate: ItemDelegate {
-        required property string name
+    component HomeLane: GlassFrame {
+        id: homeLane
 
-        width: ListView.view.width
-        implicitHeight: root.compact ? 58 : 52
-        enabled: false
+        property string title
+        property alias model: laneList.model
+        property string emptyText
+        property string listObjectName
 
-        contentItem: Label {
-            text: name.length > 0 ? name : "Untitled playlist"
-            font.weight: Font.Medium
-            elide: Text.ElideRight
-            verticalAlignment: Text.AlignVCenter
+        Layout.fillWidth: true
+        Layout.preferredHeight: root.compact ? 220 : 250
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            Label {
+                text: parent.title
+                font.pixelSize: 18
+                font.weight: Font.DemiBold
+                color: "#202622"
+                Layout.fillWidth: true
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                ListView {
+                    id: laneList
+                    objectName: homeLane.listObjectName
+                    anchors.fill: parent
+                    clip: true
+                    model: []
+                    delegate: HomeTrackDelegate {}
+                }
+
+                EmptyState {
+                    anchors.fill: parent
+                    title: homeLane.emptyText
+                    detail: ""
+                    visible: laneList.count === 0
+                }
+            }
         }
     }
 
-    component LibraryPage: SectionFrame {
+    component HomePage: Item {
+        objectName: "homePage"
+
+        Flickable {
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: homeContent.implicitHeight
+            clip: true
+
+            ColumnLayout {
+                id: homeContent
+                width: parent.width
+                spacing: root.pageGap
+
+                PageHeader {
+                    title: "Home"
+                    detail: root.hasPlayback ? "Listening now" : "Pick up from recent music or search something new"
+                }
+
+                GridLayout {
+                    columns: root.compact ? 1 : 3
+                    Layout.fillWidth: true
+                    rowSpacing: root.pageGap
+                    columnSpacing: root.pageGap
+
+                    HomeLane {
+                        title: "Recommendations"
+                        listObjectName: "recommendationsList"
+                        model: coreController.recommendationsModel
+                        emptyText: "No recommendations yet"
+                    }
+
+                    HomeLane {
+                        title: "Keep Listening"
+                        listObjectName: "keepListeningList"
+                        model: coreController.recentTracksModel
+                        emptyText: "No recent plays"
+                    }
+
+                    HomeLane {
+                        title: "Favorites"
+                        listObjectName: "favoritesList"
+                        model: coreController.favoriteTracksModel
+                        emptyText: "No favorites"
+                    }
+                }
+            }
+        }
+    }
+
+    component LibraryPage: Item {
         objectName: "libraryPage"
 
         ColumnLayout {
@@ -415,31 +648,51 @@ ApplicationWindow {
                 Label {
                     objectName: "importStatusLabel"
                     text: coreController.importStatus
-                    color: root.palette.placeholderText
+                    color: "#66736d"
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
                 }
             }
 
-            Item {
+            TabBar {
+                id: libraryTabs
+                objectName: "libraryTabs"
+                Layout.fillWidth: true
+
+                TabButton {
+                    text: "Tracks"
+                }
+
+                TabButton {
+                    objectName: "libraryDownloadsTab"
+                    text: "Downloads"
+                }
+            }
+
+            StackLayout {
+                currentIndex: libraryTabs.currentIndex
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
-                ListView {
-                    id: tracksList
-                    anchors.fill: parent
-                    clip: true
-                    model: coreController.tracksModel
-                    delegate: TrackDelegate {}
+                Item {
+                    ListView {
+                        id: tracksList
+                        anchors.fill: parent
+                        clip: true
+                        model: coreController.tracksModel
+                        delegate: TrackDelegate {}
+                    }
+
+                    EmptyState {
+                        anchors.fill: parent
+                        title: "No tracks"
+                        detail: "Import a folder or add online results"
+                        visible: tracksList.count === 0
+                    }
                 }
 
-                EmptyState {
-                    anchors.fill: parent
-                    title: "No tracks"
-                    detail: "Library state is empty"
-                    visible: tracksList.count === 0
-                }
+                DownloadsPage {}
             }
         }
 
@@ -450,7 +703,7 @@ ApplicationWindow {
         }
     }
 
-    component SearchPage: SectionFrame {
+    component SearchPage: Item {
         objectName: "searchPage"
 
         ColumnLayout {
@@ -479,9 +732,12 @@ ApplicationWindow {
 
                 Button {
                     objectName: "searchButton"
-                    text: "Search"
+                    text: "⌕"
                     enabled: searchField.text.length > 0 && coreController.searchStatus !== "Searching"
+                    implicitWidth: root.density
                     implicitHeight: root.density
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Search"
                     onClicked: coreController.searchOnline(searchField.text)
                 }
             }
@@ -489,7 +745,7 @@ ApplicationWindow {
             Label {
                 objectName: "searchStatusLabel"
                 text: coreController.searchErrorMessage.length > 0 ? coreController.searchErrorMessage : coreController.searchStatus
-                color: coreController.searchStatus === "Error" ? "#a63b2f" : root.palette.placeholderText
+                color: coreController.searchStatus === "Error" || coreController.searchStatus === "Disabled" ? "#a63b2f" : "#66736d"
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -530,42 +786,8 @@ ApplicationWindow {
                 EmptyState {
                     anchors.fill: parent
                     title: coreController.searchStatus === "Searching" ? "Searching" : searchField.text.length > 0 ? "No results" : "No query"
-                    detail: coreController.searchStatus === "Error" ? coreController.searchErrorMessage : "Online provider state is empty"
+                    detail: coreController.searchStatus === "Disabled" ? "Online source is disabled" : "Search is ready"
                     visible: searchResultsList.count === 0
-                }
-            }
-        }
-    }
-
-    component PlaylistsPage: SectionFrame {
-        objectName: "playlistsPage"
-
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: root.pageGap
-
-            PageHeader {
-                title: "Playlists"
-                detail: playlistsList.count + " playlists"
-            }
-
-            Item {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-
-                ListView {
-                    id: playlistsList
-                    anchors.fill: parent
-                    clip: true
-                    model: coreController.playlistsModel
-                    delegate: PlaylistDelegate {}
-                }
-
-                EmptyState {
-                    anchors.fill: parent
-                    title: "No playlists"
-                    detail: "Playlist state is empty"
-                    visible: playlistsList.count === 0
                 }
             }
         }
@@ -608,21 +830,13 @@ ApplicationWindow {
             EmptyState {
                 anchors.fill: parent
                 title: "Queue empty"
-                detail: "Add tracks from Library"
+                detail: "Add tracks from Home or Library"
                 visible: queueList.count === 0
             }
         }
     }
 
-    component QueuePage: SectionFrame {
-        objectName: "queuePage"
-
-        QueueContent {
-            anchors.fill: parent
-        }
-    }
-
-    component DownloadsPage: SectionFrame {
+    component DownloadsPage: Item {
         objectName: "downloadsPage"
 
         ColumnLayout {
@@ -640,9 +854,12 @@ ApplicationWindow {
 
                 Button {
                     objectName: "downloadRemoveSelectedButton"
-                    text: "Remove"
+                    text: "×"
                     enabled: root.selectedDownloadId.length > 0
+                    implicitWidth: root.density
                     implicitHeight: root.density
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Remove selected"
                     onClicked: coreController.removeDownload(root.selectedDownloadId)
                 }
             }
@@ -650,7 +867,7 @@ ApplicationWindow {
             Label {
                 objectName: "downloadStatusLabel"
                 text: coreController.downloadStatus
-                color: coreController.downloadStatus.indexOf("unavailable") >= 0 ? "#a63b2f" : root.palette.placeholderText
+                color: coreController.downloadStatus.indexOf("unavailable") >= 0 ? "#a63b2f" : "#66736d"
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -671,18 +888,22 @@ ApplicationWindow {
                 EmptyState {
                     anchors.fill: parent
                     title: "No downloads"
-                    detail: "Download state is empty"
+                    detail: "Downloaded tracks appear here"
                     visible: downloadsList.count === 0
                 }
             }
         }
     }
 
-    component SettingsPage: SectionFrame {
+    component SettingsPage: Flickable {
         objectName: "settingsPage"
+        contentWidth: width
+        contentHeight: settingsContent.implicitHeight
+        clip: true
 
         ColumnLayout {
-            anchors.fill: parent
+            id: settingsContent
+            width: parent.width
             spacing: root.pageGap
 
             PageHeader {
@@ -691,12 +912,15 @@ ApplicationWindow {
             }
 
             GroupBox {
-                title: "Theme"
+                objectName: "settingsAppearancePlaybackGroup"
+                title: "Appearance + Playback"
                 Layout.fillWidth: true
 
-                ColumnLayout {
+                GridLayout {
                     anchors.fill: parent
-                    spacing: 10
+                    columns: root.compact ? 1 : 3
+                    rowSpacing: 10
+                    columnSpacing: 10
 
                     ComboBox {
                         id: themeSelector
@@ -709,9 +933,44 @@ ApplicationWindow {
                         }
                     }
 
+                    Button {
+                        text: coreController.repeatMode === "off" ? "Repeat Off" : "Repeat " + coreController.repeatMode
+                        checkable: true
+                        checked: coreController.repeatMode !== "off"
+                        implicitHeight: root.density
+                        Layout.fillWidth: true
+                        onClicked: coreController.toggleRepeatMode()
+                    }
+
+                    Button {
+                        text: "Shuffle"
+                        checkable: true
+                        checked: coreController.shuffleEnabled
+                        implicitHeight: root.density
+                        Layout.fillWidth: true
+                        onClicked: coreController.toggleShuffle()
+                    }
+                }
+            }
+
+            GroupBox {
+                objectName: "onlineSourceSettingsGroup"
+                title: "Online Source"
+                Layout.fillWidth: true
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: root.pageGap
+
+                    Switch {
+                        checked: coreController.onlineEnabled
+                        text: coreController.onlineSourceStatus
+                        onToggled: coreController.setOnlineEnabled(checked)
+                    }
+
                     Label {
-                        text: coreController.themeSetting.length > 0 ? "Stored: " + coreController.themeSetting : "Stored: empty"
-                        color: root.palette.placeholderText
+                        text: coreController.onlineSourceCapabilities.join(" / ")
+                        color: "#66736d"
                         Layout.fillWidth: true
                         elide: Text.ElideRight
                     }
@@ -723,9 +982,9 @@ ApplicationWindow {
                 title: "Storage"
                 Layout.fillWidth: true
 
-                ColumnLayout {
+                RowLayout {
                     anchors.fill: parent
-                    spacing: 10
+                    spacing: root.pageGap
 
                     TextField {
                         id: downloadDirectoryField
@@ -736,172 +995,236 @@ ApplicationWindow {
                         implicitHeight: root.density
                     }
 
-                    RowLayout {
+                    Button {
+                        objectName: "downloadDirectorySaveButton"
+                        text: "Save"
+                        implicitHeight: root.density
+                        onClicked: coreController.setDownloadDirectory(downloadDirectoryField.text)
+                    }
+                }
+            }
+
+            GroupBox {
+                objectName: "listeningDataSettingsGroup"
+                title: "Listening Data"
+                Layout.fillWidth: true
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: root.pageGap
+
+                    Button {
+                        text: "Clear Listening"
+                        implicitHeight: root.density
                         Layout.fillWidth: true
-                        spacing: root.pageGap
+                        onClicked: coreController.clearListeningHistory()
+                    }
 
-                        Button {
-                            objectName: "downloadDirectorySaveButton"
-                            text: "Save"
-                            implicitHeight: root.density
-                            onClicked: coreController.setDownloadDirectory(downloadDirectoryField.text)
-                        }
-
-                        Label {
-                            text: coreController.downloadStatus
-                            color: root.palette.placeholderText
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                        }
+                    Button {
+                        text: "Clear Search"
+                        implicitHeight: root.density
+                        Layout.fillWidth: true
+                        onClicked: coreController.clearSearchHistory()
                     }
                 }
             }
 
-            Item {
-                Layout.fillHeight: true
-            }
-        }
-    }
-
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.topMargin: root.safeTop
-        anchors.bottomMargin: root.safeBottom
-        spacing: 0
-
-        ToolBar {
-            Layout.fillWidth: true
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: root.pagePadding
-                anchors.rightMargin: root.pagePadding
-                spacing: root.pageGap
-
-                Label {
-                    text: coreController.appName.length > 0 ? coreController.appName : "Auqw"
-                    font.pixelSize: root.compact ? 20 : 22
-                    font.weight: Font.DemiBold
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
-
-                Label {
-                    text: coreController.appId + " | schema " + coreController.schemaVersion
-                    color: root.palette.placeholderText
-                    visible: !root.compact
-                    elide: Text.ElideMiddle
-                    Layout.maximumWidth: 380
-                }
-
-                Frame {
-                    padding: 8
-
-                    Label {
-                        text: coreController.coreStatus.length > 0 ? coreController.coreStatus : coreController.helloText
-                        color: coreController.coreStatus === "Ready" ? "#137a4a" : root.palette.text
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
-                    }
-                }
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.margins: root.pagePadding
-            spacing: root.pageGap
-
-            Frame {
-                id: desktopNavigationRail
-                objectName: "desktopNavigationRail"
-                visible: !root.compact
-                Layout.preferredWidth: root.navWidth
-                Layout.fillHeight: true
-                padding: 10
+            GroupBox {
+                objectName: "aboutSettingsGroup"
+                title: "About"
+                property bool expanded: false
+                Layout.fillWidth: true
 
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 6
 
-                    NavButton {
-                        text: "Library"
-                        pageIndex: 0
+                    Button {
+                        text: parent.parent.expanded ? "Hide Details" : "Show Details"
+                        implicitHeight: root.density
+                        onClicked: parent.parent.expanded = !parent.parent.expanded
                     }
 
-                    NavButton {
-                        text: "Search"
-                        pageIndex: 1
+                    Label {
+                        text: coreController.appId + " | schema " + coreController.schemaVersion
+                        color: "#66736d"
+                        visible: parent.parent.expanded
+                        Layout.fillWidth: true
+                        elide: Text.ElideMiddle
                     }
 
-                    NavButton {
-                        text: "Playlists"
-                        pageIndex: 2
+                    Label {
+                        text: coreController.databasePath
+                        color: "#66736d"
+                        font.pixelSize: 11
+                        visible: parent.parent.expanded
+                        Layout.fillWidth: true
+                        elide: Text.ElideMiddle
                     }
-
-                    NavButton {
-                        text: "Downloads"
-                        pageIndex: 3
-                    }
-
-                    Item {
-                        Layout.fillHeight: true
-                    }
-
-                    NavButton {
-                        text: "Settings"
-                        pageIndex: 5
-                    }
-                }
-            }
-
-            StackLayout {
-                id: mainStack
-                objectName: "mainStack"
-                currentIndex: root.currentPageIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-
-                LibraryPage {}
-                SearchPage {}
-                PlaylistsPage {}
-                DownloadsPage {}
-                QueuePage {}
-                SettingsPage {}
-            }
-
-            Frame {
-                id: queuePanel
-                objectName: "queuePanel"
-                visible: !root.compact
-                Layout.preferredWidth: root.queuePanelWidth
-                Layout.fillHeight: true
-                padding: root.pagePadding
-
-                QueueContent {
-                    anchors.fill: parent
                 }
             }
         }
+    }
 
-        Frame {
-            id: miniPlayer
-            objectName: "miniPlayer"
-            Layout.fillWidth: true
-            Layout.leftMargin: root.pagePadding
-            Layout.rightMargin: root.pagePadding
-            Layout.bottomMargin: root.compact ? 8 : root.pagePadding
-            implicitHeight: root.compact ? 68 : 76
-            padding: root.compact ? 10 : 14
+    Item {
+        anchors.fill: parent
+        anchors.margins: root.pagePadding
+        anchors.topMargin: root.safeTop + root.pagePadding
+        anchors.bottomMargin: root.safeBottom + 94
 
-            RowLayout {
+        StackLayout {
+            id: mainStack
+            objectName: "mainStack"
+            anchors.fill: parent
+            anchors.rightMargin: !root.compact ? root.queuePanelWidth + root.pageGap : 0
+            currentIndex: root.currentPageIndex
+
+            HomePage {}
+            LibraryPage {}
+            SearchPage {}
+            SettingsPage {}
+        }
+
+        GlassFrame {
+            id: queuePanel
+            objectName: "queuePanel"
+            visible: !root.compact
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+            width: root.queuePanelWidth
+
+            QueueContent {
                 anchors.fill: parent
-                spacing: root.pageGap
+            }
+        }
 
-                Item {
-                    Layout.preferredWidth: root.compact ? 44 : 48
-                    Layout.preferredHeight: root.compact ? 44 : 48
+        Item {
+            id: desktopNavigationRail
+            objectName: "desktopNavigationRail"
+            visible: false
+        }
+    }
+
+    TextField {
+        id: globalSearchField
+        objectName: "globalSearchField"
+        width: root.compact ? Math.min(root.width - 28, 260) : 300
+        height: root.density
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: root.safeTop + 14
+        anchors.rightMargin: root.pagePadding
+        placeholderText: "Search"
+        inputMethodHints: Qt.ImhNoPredictiveText
+        onTextEdited: coreController.suggestOnline(text)
+        onAccepted: root.goSearch(text)
+        background: Rectangle {
+            radius: 8
+            color: "#e8ffffff"
+            border.color: "#88ffffff"
+        }
+        leftPadding: 16
+        rightPadding: 16
+    }
+
+    GlassFrame {
+        id: floatingNavigation
+        objectName: "floatingNavigation"
+        width: root.navWidth
+        height: root.compact ? 64 : 72
+        padding: 8
+        x: root.hasPlayback ? root.pagePadding : Math.round((root.width - width) / 2)
+        y: root.height - height - root.safeBottom - 14
+        z: 20
+
+        Behavior on x {
+            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            spacing: 6
+
+            NavPill {
+                objectName: "floatingNavHomeButton"
+                pageIndex: 0
+                glyph: "⌂"
+                label: "Home"
+            }
+
+            NavPill {
+                objectName: "floatingNavLibraryButton"
+                pageIndex: 1
+                glyph: "▤"
+                label: "Library"
+            }
+
+            NavPill {
+                objectName: "floatingNavSettingsButton"
+                pageIndex: 3
+                glyph: "☷"
+                label: "Settings"
+            }
+        }
+    }
+
+    Button {
+        id: currentSongBox
+        objectName: "currentSongBox"
+        visible: root.hasPlayback
+        width: root.compact ? Math.max(132, root.width - floatingNavigation.width - root.pagePadding * 3) : 330
+        height: floatingNavigation.height
+        x: root.width - width - root.pagePadding
+        y: floatingNavigation.y
+        z: 20
+        flat: true
+        onClicked: nowPlayingSheet.open()
+
+        background: Rectangle {
+            radius: 8
+            color: "#e8ffffff"
+            border.color: "#88ffffff"
+        }
+
+        contentItem: RowLayout {
+            spacing: 10
+
+            Item {
+                Layout.preferredWidth: root.compact ? 48 : 52
+                Layout.preferredHeight: root.compact ? 48 : 52
+
+                Canvas {
+                    id: currentSongProgressRing
+                    anchors.fill: parent
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.lineWidth = 3
+                        ctx.strokeStyle = "#b7c6bd"
+                        ctx.beginPath()
+                        ctx.arc(width / 2, height / 2, width / 2 - 2, -Math.PI / 2, Math.PI * 1.5)
+                        ctx.stroke()
+                        ctx.strokeStyle = "#117a58"
+                        ctx.beginPath()
+                        ctx.arc(width / 2, height / 2, width / 2 - 2, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * root.playbackProgress)
+                        ctx.stroke()
+                    }
+                    Connections {
+                        target: coreController
+                        function onPlaybackStateChanged() {
+                            currentSongProgressRing.requestPaint()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width - 8
+                    height: width
+                    radius: 6
+                    color: "#e2eae6"
+                    clip: true
 
                     Image {
                         objectName: "miniPlayerArtworkImage"
@@ -913,57 +1236,132 @@ ApplicationWindow {
                         cache: true
                     }
 
-                    Rectangle {
+                    Label {
                         objectName: "miniPlayerArtworkFallback"
-                        anchors.fill: parent
-                        radius: 6
-                        color: root.palette.mid
+                        anchors.centerIn: parent
+                        text: "A"
                         visible: coreController.playbackArtworkUrl.length === 0
-
-                        Label {
-                            anchors.centerIn: parent
-                            text: "A"
-                            font.weight: Font.Bold
-                        }
+                        font.weight: Font.Bold
+                        color: "#4f6258"
                     }
                 }
+            }
 
-                ColumnLayout {
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    objectName: "miniPlayerTitle"
+                    text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
+                    font.weight: Font.DemiBold
+                    color: "#202622"
+                    elide: Text.ElideRight
                     Layout.fillWidth: true
-                    spacing: 2
-
-                    Label {
-                        objectName: "miniPlayerTitle"
-                        text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
-                        font.weight: Font.DemiBold
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-
-                    Label {
-                        objectName: "miniPlayerState"
-                        text: root.playbackDetailText()
-                        color: root.palette.placeholderText
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
                 }
+
+                Label {
+                    objectName: "miniPlayerState"
+                    text: root.formatProgress()
+                    color: "#66736d"
+                    font.pixelSize: 12
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+            }
+        }
+    }
+
+    Popup {
+        id: nowPlayingSheet
+        objectName: "nowPlayingSheet"
+        modal: true
+        focus: true
+        width: Math.min(root.width - 28, 560)
+        height: Math.min(root.height - 48, 520)
+        x: Math.round((root.width - width) / 2)
+        y: Math.round((root.height - height) / 2)
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: 8
+            color: "#f8ffffff"
+            border.color: "#88ffffff"
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: root.pagePadding
+            spacing: root.pageGap
+
+            Label {
+                text: "Now Playing"
+                font.pixelSize: 24
+                font.weight: Font.DemiBold
+                color: "#202622"
+                Layout.fillWidth: true
+            }
+
+            Rectangle {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: Math.min(parent.width, 260)
+                Layout.preferredHeight: Layout.preferredWidth
+                radius: 8
+                color: "#e2eae6"
+                clip: true
+
+                Image {
+                    anchors.fill: parent
+                    source: coreController.playbackArtworkUrl
+                    fillMode: Image.PreserveAspectCrop
+                    visible: coreController.playbackArtworkUrl.length > 0
+                    asynchronous: true
+                }
+            }
+
+            Label {
+                text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
+                font.pixelSize: 20
+                font.weight: Font.DemiBold
+                color: "#202622"
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            Label {
+                text: root.playbackDetailText()
+                color: "#66736d"
+                horizontalAlignment: Text.AlignHCenter
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            Slider {
+                from: 0
+                to: Math.max(1, coreController.playbackDurationMs)
+                value: coreController.playbackPositionMs
+                Layout.fillWidth: true
+                onMoved: coreController.seekPlayback(value)
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 8
 
                 Button {
                     objectName: "miniPreviousButton"
-                    text: "Prev"
-                    enabled: coreController.playbackState !== "loading"
+                    text: "⏮"
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 560
                     onClicked: coreController.playPreviousQueuedTrack()
                 }
 
                 Button {
                     objectName: "miniPlayPauseButton"
-                    text: coreController.playbackState === "playing" ? "Pause" : "Play"
-                    enabled: coreController.playbackState !== "loading"
+                    text: coreController.playbackState === "playing" ? "⏸" : "▶"
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 420
                     onClicked: {
                         if (coreController.playbackState === "playing") {
                             coreController.pausePlayback()
@@ -977,85 +1375,46 @@ ApplicationWindow {
 
                 Button {
                     objectName: "miniNextButton"
-                    text: "Next"
-                    enabled: coreController.playbackState !== "loading"
+                    text: "⏭"
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 560
                     onClicked: coreController.playNextQueuedTrack()
                 }
 
                 Button {
                     objectName: "miniStopButton"
-                    text: "Stop"
-                    enabled: coreController.playbackState !== "stopped"
+                    text: "■"
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 500
                     onClicked: coreController.stopPlayback()
                 }
 
                 Button {
                     objectName: "miniRepeatButton"
-                    text: coreController.repeatMode === "off" ? "Repeat" : "Repeat " + coreController.repeatMode
+                    text: "↻"
                     checkable: true
                     checked: coreController.repeatMode !== "off"
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 640
                     onClicked: coreController.toggleRepeatMode()
                 }
 
                 Button {
                     objectName: "miniShuffleButton"
-                    text: "Shuffle"
+                    text: "⇄"
                     checkable: true
                     checked: coreController.shuffleEnabled
+                    implicitWidth: root.density
                     implicitHeight: root.density
-                    visible: !root.compact || root.width > 700
                     onClicked: coreController.toggleShuffle()
                 }
             }
         }
+    }
 
-        TabBar {
-            id: mobileTabs
-            visible: root.compact
-            currentIndex: root.currentPageIndex
-            Layout.fillWidth: true
-            implicitHeight: Math.max(60, root.density)
-            onCurrentIndexChanged: {
-                if (visible && currentIndex !== root.currentPageIndex) {
-                    root.goTo(currentIndex)
-                }
-            }
-
-            TabButton {
-                text: "Library"
-                implicitHeight: root.density
-            }
-
-            TabButton {
-                text: "Search"
-                implicitHeight: root.density
-            }
-
-            TabButton {
-                text: "Lists"
-                implicitHeight: root.density
-            }
-
-            TabButton {
-                text: "Down"
-                implicitHeight: root.density
-            }
-
-            TabButton {
-                text: "Queue"
-                implicitHeight: root.density
-            }
-
-            TabButton {
-                text: "Settings"
-                implicitHeight: root.density
-            }
-        }
+    Item {
+        id: miniPlayer
+        objectName: "miniPlayer"
+        visible: false
     }
 }

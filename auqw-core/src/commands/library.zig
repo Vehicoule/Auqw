@@ -57,6 +57,52 @@ pub fn recentList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
     return responses.makeSuccess(state.allocator, id, .{ .items = items });
 }
 
+pub fn recentClear(state: *AppState, id: []const u8) errors.CoreError![]u8 {
+    var stmt = state.db.prepare("DELETE FROM recent_tracks") catch return error.Database;
+    defer stmt.finalize();
+    if ((stmt.step() catch return error.Database) != .done) return error.Database;
+    return responses.makeSuccess(state.allocator, id, .{ .removed = state.db.changes() });
+}
+
+pub fn favoritesAdd(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
+    const item_id = models.generateId(state.allocator) catch return error.AllocationFailed;
+    defer state.allocator.free(item_id);
+    const track_id = json.requiredString(params, "track_id") catch return error.InvalidJson;
+    const added_at = json.optionalString(params, "added_at");
+
+    var stmt = state.db.prepare(
+        \\INSERT INTO favorite_tracks(id, track_id, added_at)
+        \\VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')))
+        \\ON CONFLICT(track_id) DO UPDATE SET
+        \\    added_at = excluded.added_at
+    ) catch return error.Database;
+    defer stmt.finalize();
+    stmt.bindText(1, item_id) catch return error.Database;
+    stmt.bindText(2, track_id) catch return error.Database;
+    stmt.bindOptionalText(3, added_at) catch return error.Database;
+    if ((stmt.step() catch return error.Database) != .done) return error.Database;
+
+    const item = getFavoriteByTrackId(state, track_id) catch return error.Database;
+    defer item.deinit(state.allocator);
+    return responses.makeSuccess(state.allocator, id, .{ .item = item });
+}
+
+pub fn favoritesRemove(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
+    const track_id = json.requiredString(params, "track_id") catch return error.InvalidJson;
+
+    var stmt = state.db.prepare("DELETE FROM favorite_tracks WHERE track_id = ?") catch return error.Database;
+    defer stmt.finalize();
+    stmt.bindText(1, track_id) catch return error.Database;
+    if ((stmt.step() catch return error.Database) != .done) return error.Database;
+    return responses.makeSuccess(state.allocator, id, .{ .removed = state.db.changes() });
+}
+
+pub fn favoritesList(state: *AppState, id: []const u8) errors.CoreError![]u8 {
+    const items = listFavorites(state) catch return error.Database;
+    defer freeFavorites(state.allocator, items);
+    return responses.makeSuccess(state.allocator, id, .{ .items = items });
+}
+
 pub fn searchHistoryAdd(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
     const item_id = models.generateId(state.allocator) catch return error.AllocationFailed;
     defer state.allocator.free(item_id);
@@ -82,6 +128,13 @@ pub fn searchHistoryList(state: *AppState, id: []const u8) errors.CoreError![]u8
     const items = listSearchHistory(state) catch return error.Database;
     defer freeSearchHistory(state.allocator, items);
     return responses.makeSuccess(state.allocator, id, .{ .items = items });
+}
+
+pub fn searchHistoryClear(state: *AppState, id: []const u8) errors.CoreError![]u8 {
+    var stmt = state.db.prepare("DELETE FROM search_history") catch return error.Database;
+    defer stmt.finalize();
+    if ((stmt.step() catch return error.Database) != .done) return error.Database;
+    return responses.makeSuccess(state.allocator, id, .{ .removed = state.db.changes() });
 }
 
 pub fn settingsSet(state: *AppState, id: []const u8, params: ObjectMap) errors.CoreError![]u8 {
@@ -180,7 +233,13 @@ fn playlistFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlit
 }
 
 fn getRecentById(state: *AppState, id: []const u8) sqlite.DbError!models.RecentTrack {
-    var stmt = try state.db.prepare("SELECT id, track_id, played_at, created_at FROM recent_tracks WHERE id = ?");
+    var stmt = try state.db.prepare(
+        \\SELECT r.id, r.track_id, r.played_at, r.created_at,
+        \\       t.provider, t.provider_track_id, t.title, t.artist, t.album, t.duration_ms, t.artwork_url
+        \\FROM recent_tracks r
+        \\JOIN tracks t ON t.id = r.track_id
+        \\WHERE r.id = ?
+    );
     defer stmt.finalize();
     try stmt.bindText(1, id);
     if ((try stmt.step()) != .row) return error.Database;
@@ -188,7 +247,13 @@ fn getRecentById(state: *AppState, id: []const u8) sqlite.DbError!models.RecentT
 }
 
 fn listRecent(state: *AppState) sqlite.DbError![]models.RecentTrack {
-    var stmt = try state.db.prepare("SELECT id, track_id, played_at, created_at FROM recent_tracks ORDER BY played_at DESC, created_at DESC, id DESC");
+    var stmt = try state.db.prepare(
+        \\SELECT r.id, r.track_id, r.played_at, r.created_at,
+        \\       t.provider, t.provider_track_id, t.title, t.artist, t.album, t.duration_ms, t.artwork_url
+        \\FROM recent_tracks r
+        \\JOIN tracks t ON t.id = r.track_id
+        \\ORDER BY r.played_at DESC, r.created_at DESC, r.id DESC
+    );
     defer stmt.finalize();
 
     var items: std.ArrayList(models.RecentTrack) = .empty;
@@ -209,6 +274,65 @@ fn recentFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.
         .track_id = try stmt.columnText(allocator, 1),
         .played_at = try stmt.columnText(allocator, 2),
         .created_at = try stmt.columnText(allocator, 3),
+        .provider = try stmt.columnOptionalText(allocator, 4),
+        .provider_track_id = try stmt.columnOptionalText(allocator, 5),
+        .title = try stmt.columnText(allocator, 6),
+        .artist = try stmt.columnOptionalText(allocator, 7),
+        .album = try stmt.columnOptionalText(allocator, 8),
+        .duration_ms = stmt.columnOptionalInt64(9),
+        .artwork_url = try stmt.columnOptionalText(allocator, 10),
+    };
+}
+
+fn getFavoriteByTrackId(state: *AppState, track_id: []const u8) sqlite.DbError!models.FavoriteTrack {
+    var stmt = try state.db.prepare(
+        \\SELECT f.id, f.track_id, f.added_at, f.created_at,
+        \\       t.provider, t.provider_track_id, t.title, t.artist, t.album, t.duration_ms, t.artwork_url
+        \\FROM favorite_tracks f
+        \\JOIN tracks t ON t.id = f.track_id
+        \\WHERE f.track_id = ?
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, track_id);
+    if ((try stmt.step()) != .row) return error.Database;
+    return favoriteFromStmt(state.allocator, &stmt);
+}
+
+fn listFavorites(state: *AppState) sqlite.DbError![]models.FavoriteTrack {
+    var stmt = try state.db.prepare(
+        \\SELECT f.id, f.track_id, f.added_at, f.created_at,
+        \\       t.provider, t.provider_track_id, t.title, t.artist, t.album, t.duration_ms, t.artwork_url
+        \\FROM favorite_tracks f
+        \\JOIN tracks t ON t.id = f.track_id
+        \\ORDER BY f.added_at DESC, f.created_at DESC, f.id DESC
+    );
+    defer stmt.finalize();
+
+    var items: std.ArrayList(models.FavoriteTrack) = .empty;
+    errdefer freeFavorites(state.allocator, items.items);
+    while ((try stmt.step()) == .row) {
+        const item = try favoriteFromStmt(state.allocator, &stmt);
+        items.append(state.allocator, item) catch {
+            item.deinit(state.allocator);
+            return error.AllocationFailed;
+        };
+    }
+    return items.toOwnedSlice(state.allocator) catch return error.AllocationFailed;
+}
+
+fn favoriteFromStmt(allocator: std.mem.Allocator, stmt: *sqlite.Statement) sqlite.DbError!models.FavoriteTrack {
+    return .{
+        .id = try stmt.columnText(allocator, 0),
+        .track_id = try stmt.columnText(allocator, 1),
+        .added_at = try stmt.columnText(allocator, 2),
+        .created_at = try stmt.columnText(allocator, 3),
+        .provider = try stmt.columnOptionalText(allocator, 4),
+        .provider_track_id = try stmt.columnOptionalText(allocator, 5),
+        .title = try stmt.columnText(allocator, 6),
+        .artist = try stmt.columnOptionalText(allocator, 7),
+        .album = try stmt.columnOptionalText(allocator, 8),
+        .duration_ms = stmt.columnOptionalInt64(9),
+        .artwork_url = try stmt.columnOptionalText(allocator, 10),
     };
 }
 
@@ -250,6 +374,11 @@ fn freePlaylists(allocator: std.mem.Allocator, items: []models.Playlist) void {
 }
 
 fn freeRecent(allocator: std.mem.Allocator, items: []models.RecentTrack) void {
+    for (items) |item| item.deinit(allocator);
+    allocator.free(items);
+}
+
+fn freeFavorites(allocator: std.mem.Allocator, items: []models.FavoriteTrack) void {
     for (items) |item| item.deinit(allocator);
     allocator.free(items);
 }

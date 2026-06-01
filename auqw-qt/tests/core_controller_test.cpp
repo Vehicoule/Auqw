@@ -510,7 +510,7 @@ private slots:
         QCOMPARE(controller.property("appName").toString(), QStringLiteral("Auqw"));
         QCOMPARE(controller.property("appId").toString(), QStringLiteral("com.Vehicoule.auqw"));
         QVERIFY(controller.property("databasePath").toString().endsWith(QStringLiteral("auqw.sqlite3")));
-        QCOMPARE(controller.property("schemaVersion").toInt(), 5);
+        QCOMPARE(controller.property("schemaVersion").toInt(), 6);
         QCOMPARE(controller.property("coreStatus").toString(), QStringLiteral("Ready"));
         QCOMPARE(controller.property("helloText").toString(), QStringLiteral("Hello from Auqw Core"));
 
@@ -519,20 +519,79 @@ private slots:
         auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
         auto* downloads = qobject_cast<QAbstractItemModel*>(controller.property("downloadsModel").value<QObject*>());
         auto* searchResults = qobject_cast<QAbstractItemModel*>(controller.property("searchResultsModel").value<QObject*>());
+        auto* recentTracks = qobject_cast<QAbstractItemModel*>(controller.property("recentTracksModel").value<QObject*>());
+        auto* favoriteTracks = qobject_cast<QAbstractItemModel*>(controller.property("favoriteTracksModel").value<QObject*>());
+        auto* recommendations = qobject_cast<QAbstractItemModel*>(controller.property("recommendationsModel").value<QObject*>());
         QVERIFY(tracks != nullptr);
         QVERIFY(playlists != nullptr);
         QVERIFY(queue != nullptr);
         QVERIFY(downloads != nullptr);
         QVERIFY(searchResults != nullptr);
+        QVERIFY(recentTracks != nullptr);
+        QVERIFY(favoriteTracks != nullptr);
+        QVERIFY(recommendations != nullptr);
         QCOMPARE(tracks->rowCount(), 0);
         QCOMPARE(playlists->rowCount(), 0);
         QCOMPARE(queue->rowCount(), 0);
         QCOMPARE(downloads->rowCount(), 0);
         QCOMPARE(searchResults->rowCount(), 0);
+        QCOMPARE(recentTracks->rowCount(), 0);
+        QCOMPARE(favoriteTracks->rowCount(), 0);
+        QCOMPARE(recommendations->rowCount(), 0);
         QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Idle"));
         QCOMPARE(controller.property("searchErrorMessage").toString(), QString{});
         QCOMPARE(controller.property("downloadStatus").toString(), QStringLiteral("Idle"));
         QVERIFY(controller.property("downloadDirectory").toString().length() > 0);
+        QCOMPARE(controller.property("onlineEnabled").toBool(), true);
+        QCOMPARE(controller.property("onlineSourceStatus").toString(), QStringLiteral("Ready"));
+        QCOMPARE(controller.property("onlineSourceCapabilities").toStringList(), QStringList({
+            QStringLiteral("Search"),
+            QStringLiteral("Suggestions"),
+            QStringLiteral("Metadata"),
+            QStringLiteral("Playback"),
+            QStringLiteral("Downloads"),
+        }));
+    }
+
+    void onlineEnabledSettingPersistsAndBlocksProviderCalls() {
+        {
+            FakeOnlineProvider* provider = nullptr;
+            const std::unique_ptr<CoreController> controller = makeController(&provider);
+            QSignalSpy onlineSpy(controller.get(), SIGNAL(onlineSourceChanged()));
+
+            QVERIFY(QMetaObject::invokeMethod(controller.get(), "setOnlineEnabled", Q_ARG(bool, false)));
+
+            QCOMPARE(controller->property("onlineEnabled").toBool(), false);
+            QCOMPARE(controller->property("onlineSourceStatus").toString(), QStringLiteral("Disabled"));
+            QVERIFY(onlineSpy.count() >= 1);
+
+            QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+            QCOMPARE(provider->searchCalls, 0);
+            QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Disabled"));
+            QCOMPARE(controller->property("searchErrorMessage").toString(), QStringLiteral("Online search disabled."));
+
+            QVERIFY(QMetaObject::invokeMethod(controller.get(), "suggestOnline", Q_ARG(QString, QStringLiteral("sto"))));
+            QCOMPARE(provider->suggestCalls, 0);
+        }
+
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        QCOMPARE(controller->property("onlineEnabled").toBool(), false);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "setOnlineEnabled", Q_ARG(bool, true)));
+        QCOMPARE(controller->property("onlineSourceStatus").toString(), QStringLiteral("Ready"));
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QCOMPARE(provider->searchCalls, 1);
+        QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Ready"));
     }
 
     void onlineSearchPopulatesResultsAndRecordsHistory() {
@@ -705,6 +764,43 @@ private slots:
         QCOMPARE(queue->data(queue->index(0, 0), queueProviderRole).toString(), QStringLiteral("ytmusic"));
         QCOMPARE(queue->data(queue->index(0, 0), queueProviderTrackIdRole).toString(), QStringLiteral("video-alpha"));
         QCOMPARE(controller->property("coreStatus").toString(), QStringLiteral("Ready"));
+    }
+
+    void favoriteSearchResultUpsertsTrackAndRefreshesHomeModels() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+                .artist = QStringLiteral("Aster Band"),
+                .album = QStringLiteral("Blue Album"),
+                .durationMs = 213000,
+                .artworkUrl = QStringLiteral("https://img.example/large.jpg"),
+            },
+        };
+
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller->property("tracksModel").value<QObject*>());
+        auto* favorites = qobject_cast<QAbstractItemModel*>(controller->property("favoriteTracksModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        QVERIFY(favorites != nullptr);
+        QCOMPARE(favorites->rowCount(), 0);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "favoriteSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        QCOMPARE(tracks->rowCount(), 1);
+        QCOMPARE(favorites->rowCount(), 1);
+        QCOMPARE(roleValue(favorites, 0, "title").toString(), QStringLiteral("Stone Window"));
+        QCOMPARE(roleValue(favorites, 0, "artist").toString(), QStringLiteral("Aster Band"));
+        QCOMPARE(roleValue(favorites, 0, "artwork_url").toString(), QStringLiteral("https://img.example/large.jpg"));
+
+        const QString trackId = roleValue(favorites, 0, "track_id").toString();
+        QVERIFY(!trackId.isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "unfavoriteTrack", Q_ARG(QString, trackId)));
+        QCOMPARE(favorites->rowCount(), 0);
     }
 
     void unsupportedProviderDownloadShowsFriendlyStatusAndDoesNotQueue() {
@@ -1554,6 +1650,74 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(&controller, "stopPlayback"));
         QCOMPARE(fakeBackend->stopCalls, 1);
         QCOMPARE(controller.property("playbackState").toString(), QStringLiteral("stopped"));
+    }
+
+    void playbackRecentsSeedRecommendationsAndClearListeningHistory() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+
+        QDir dir(library.path());
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("alpha.mp3"))));
+        QVERIFY(writeTestFile(dir.filePath(QStringLiteral("beta.flac"))));
+
+        auto backend = std::make_unique<FakePlaybackBackend>();
+        auto* fakeBackend = backend.get();
+        CoreController controller(std::move(backend));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller.property("queueModel").value<QObject*>());
+        auto* recents = qobject_cast<QAbstractItemModel*>(controller.property("recentTracksModel").value<QObject*>());
+        auto* recommendations = qobject_cast<QAbstractItemModel*>(controller.property("recommendationsModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        QVERIFY(queue != nullptr);
+        QVERIFY(recents != nullptr);
+        QVERIFY(recommendations != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        QCOMPARE(tracks->rowCount(), 2);
+        QCOMPARE(recommendations->rowCount(), 0);
+
+        const QString firstTrackId = roleValue(tracks, 0, "id").toString();
+        QVERIFY(!firstTrackId.isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(&controller, "addTrackToQueue", Q_ARG(QString, firstTrackId)));
+        QCOMPARE(queue->rowCount(), 1);
+
+        const QString firstQueueItemId = roleValue(queue, 0, "id").toString();
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playQueueItem", Q_ARG(QString, firstQueueItemId)));
+        QCOMPARE(fakeBackend->playCalls, 1);
+
+        QCOMPARE(recents->rowCount(), 1);
+        QCOMPARE(roleValue(recents, 0, "track_id").toString(), firstTrackId);
+        QCOMPARE(roleValue(recents, 0, "title").toString(), QStringLiteral("alpha"));
+        QCOMPARE(recommendations->rowCount(), 1);
+        QVERIFY(roleValue(recommendations, 0, "track_id").toString() != firstTrackId);
+        QCOMPARE(roleValue(recommendations, 0, "title").toString(), QStringLiteral("beta"));
+
+        QVERIFY(QMetaObject::invokeMethod(&controller, "clearListeningHistory"));
+        QCOMPARE(recents->rowCount(), 0);
+        QCOMPARE(recommendations->rowCount(), 0);
+    }
+
+    void clearSearchHistoryRemovesStoredSuggestionsSeed() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QCOMPARE(searchHistoryCountForQuery(controller->property("databasePath").toString(), QStringLiteral("stone")), 1);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "clearSearchHistory"));
+        QCOMPARE(searchHistoryCountForQuery(controller->property("databasePath").toString(), QStringLiteral("stone")), 0);
+        QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Ready"));
     }
 
     void advancesToNextQueuedTrackWhenBackendStopsAtEnd() {

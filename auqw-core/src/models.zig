@@ -117,12 +117,52 @@ pub const RecentTrack = struct {
     track_id: []const u8,
     played_at: []const u8,
     created_at: []const u8,
+    provider: ?[]const u8 = null,
+    provider_track_id: ?[]const u8 = null,
+    title: []const u8,
+    artist: ?[]const u8 = null,
+    album: ?[]const u8 = null,
+    duration_ms: ?i64 = null,
+    artwork_url: ?[]const u8 = null,
 
     pub fn deinit(self: RecentTrack, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.track_id);
         allocator.free(self.played_at);
         allocator.free(self.created_at);
+        if (self.provider) |value| allocator.free(value);
+        if (self.provider_track_id) |value| allocator.free(value);
+        allocator.free(self.title);
+        if (self.artist) |value| allocator.free(value);
+        if (self.album) |value| allocator.free(value);
+        if (self.artwork_url) |value| allocator.free(value);
+    }
+};
+
+pub const FavoriteTrack = struct {
+    id: []const u8,
+    track_id: []const u8,
+    added_at: []const u8,
+    created_at: []const u8,
+    provider: ?[]const u8 = null,
+    provider_track_id: ?[]const u8 = null,
+    title: []const u8,
+    artist: ?[]const u8 = null,
+    album: ?[]const u8 = null,
+    duration_ms: ?i64 = null,
+    artwork_url: ?[]const u8 = null,
+
+    pub fn deinit(self: FavoriteTrack, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.track_id);
+        allocator.free(self.added_at);
+        allocator.free(self.created_at);
+        if (self.provider) |value| allocator.free(value);
+        if (self.provider_track_id) |value| allocator.free(value);
+        allocator.free(self.title);
+        if (self.artist) |value| allocator.free(value);
+        if (self.album) |value| allocator.free(value);
+        if (self.artwork_url) |value| allocator.free(value);
     }
 };
 

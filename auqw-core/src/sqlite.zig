@@ -70,6 +70,10 @@ pub const Database = struct {
     pub fn lastInsertRowId(self: *Database) i64 {
         return @intCast(c.sqlite3_last_insert_rowid(self.handle));
     }
+
+    pub fn changes(self: *Database) i64 {
+        return @intCast(c.sqlite3_changes64(self.handle));
+    }
 };
 
 pub const Statement = struct {
