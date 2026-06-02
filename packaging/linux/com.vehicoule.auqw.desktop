@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Auqw
+Comment=Native music player
+Exec=auqw
+Icon=com.vehicoule.auqw
+Terminal=false
+Categories=AudioVideo;Audio;Music;Player;
+StartupNotify=true
+StartupWMClass=auqw

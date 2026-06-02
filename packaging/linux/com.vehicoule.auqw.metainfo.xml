@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.vehicoule.auqw</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>Auqw</name>
+  <summary>Native cross-platform music player</summary>
+  <description>
+    <p>
+      Auqw is a native music player built with a Qt/QML shell and a durable Zig core, focused on local playback, queue control, online provider search, and provider-backed downloads.
+    </p>
+    <p>
+      The first release keeps provider code isolated, avoids account login, and saves provider download streams without yt-dlp or transcoding.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.vehicoule.auqw.desktop</launchable>
+  <categories>
+    <category>Audio</category>
+    <category>Music</category>
+    <category>Player</category>
+  </categories>
+  <developer id="com.vehicoule">
+    <name>Vehicoule</name>
+  </developer>
+  <url type="homepage">https://github.com/Vehicoule/Auqw</url>
+  <provides>
+    <binary>auqw</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.0.1" date="2026-05-31" />
+  </releases>
+</component>

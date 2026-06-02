@@ -472,6 +472,11 @@ private slots:
         QVERIFY2(workflow.contains(QStringLiteral("Upload Android release APK")) &&
                 workflow.contains(QStringLiteral("build/android-linux/apk/auqw-android-arm64.apk")),
             "Android workflow should upload the signed release APK artifact");
+        QVERIFY2(workflow.contains(QStringLiteral("Free Android runner disk")) &&
+                workflow.contains(QStringLiteral("/opt/hostedtoolcache")) &&
+                workflow.contains(QStringLiteral("/usr/local/lib/android")) &&
+                workflow.contains(QStringLiteral("podman system prune")),
+            "Android workflow should free hosted runner disk before building the large Qt Android image");
     }
 
     void iosBuildChecksQtKitAppleLinkageAndBundleMetadata() {

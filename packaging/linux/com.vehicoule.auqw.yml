@@ -1,0 +1,52 @@
+app-id: com.vehicoule.auqw
+runtime: org.kde.Platform
+runtime-version: '6.9'
+sdk: org.kde.Sdk
+command: auqw
+appstream-compose: false
+
+build-options:
+  no-debuginfo: true
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --share=network
+  - --filesystem=xdg-music
+  - --filesystem=xdg-download
+  - --env=QT_QUICK_BACKEND=software
+  - --env=QSG_RHI_BACKEND=software
+  - --env=QT_OPENGL=software
+
+modules:
+  - name: zig
+    buildsystem: simple
+    sources:
+      - type: archive
+        url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+    build-commands:
+      - mkdir -p /app/zig
+      - cp -a . /app/zig
+
+  - name: auqw
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - build
+          - .zig-cache
+          - auqw-core/.zig-cache
+          - auqw-core/zig-cache
+          - auqw-core/zig-out
+    build-commands:
+      - export ZIG=/app/zig/zig && cd auqw-core && "$ZIG" build --cache-dir /run/build/auqw/.zig-cache --global-cache-dir /run/build/auqw/.zig-global-cache test
+      - export ZIG=/app/zig/zig && cd auqw-core && "$ZIG" build --cache-dir /run/build/auqw/.zig-cache --global-cache-dir /run/build/auqw/.zig-global-cache
+      - cmake -S . -B flatpak-build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app -DAUQW_BUILD_QT=ON -DAUQW_REQUIRE_QT_MULTIMEDIA=ON -DAUQW_CORE_LIB="$PWD/auqw-core/zig-out/lib/libauqw_core.a"
+      - cmake --build flatpak-build --parallel 2
+      - ctest --test-dir flatpak-build --output-on-failure -R '^(auqw_bridge_smoke|auqw_qt_platform_package_test)$'
+      - cmake --install flatpak-build
