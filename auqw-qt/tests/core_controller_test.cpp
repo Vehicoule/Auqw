@@ -1178,7 +1178,7 @@ private slots:
         QCOMPARE(searchResults->rowCount(), 0);
         QCOMPARE(queue->rowCount(), 0);
         QCOMPARE(controller->property("searchStatus").toString(), QStringLiteral("Error"));
-        QCOMPARE(controller->property("searchErrorMessage").toString(), QStringLiteral("Search unavailable. Try again."));
+        QCOMPARE(controller->property("searchErrorMessage").toString(), QStringLiteral("upstream exploded"));
     }
 
     void playsQueuedOnlineTrackThroughResolvedStream() {

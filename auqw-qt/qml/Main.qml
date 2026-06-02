@@ -1304,26 +1304,47 @@ ApplicationWindow {
         }
     }
 
-    TextField {
-        id: globalSearchField
-        objectName: "globalSearchField"
-        width: root.compact ? Math.min(root.width - 28, 260) : 300
+    Row {
+        id: globalSearchBar
+        objectName: "globalSearchBar"
+        width: root.compact ? Math.min(root.width - 28, 318) : 352
         height: root.density
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: root.safeTop + 14
         anchors.rightMargin: root.pagePadding
-        placeholderText: "Search"
-        inputMethodHints: Qt.ImhNoPredictiveText
-        onTextEdited: coreController.suggestOnline(text)
-        onAccepted: root.submitSearch(text, globalSearchField)
-        background: Rectangle {
-            radius: 8
-            color: "#e8ffffff"
-            border.color: "#88ffffff"
+        spacing: 8
+        z: 30
+
+        TextField {
+            id: globalSearchField
+            objectName: "globalSearchField"
+            width: globalSearchBar.width - globalSearchButton.width - globalSearchBar.spacing
+            height: root.density
+            placeholderText: "Search"
+            inputMethodHints: Qt.ImhNoPredictiveText
+            onTextEdited: coreController.suggestOnline(text)
+            onAccepted: root.submitSearch(text, globalSearchField)
+            background: Rectangle {
+                radius: 8
+                color: "#e8ffffff"
+                border.color: "#88ffffff"
+            }
+            leftPadding: 16
+            rightPadding: 16
         }
-        leftPadding: 16
-        rightPadding: 16
+
+        IconButton {
+            id: globalSearchButton
+            objectName: "globalSearchButton"
+            iconName: "search"
+            iconObjectName: "globalSearchSubmitIcon"
+            width: root.density
+            height: root.density
+            enabled: globalSearchField.text.trim().length > 0 && coreController.searchStatus !== "Searching"
+            tooltip: "Search"
+            onClicked: root.submitSearch(globalSearchField.text, globalSearchField)
+        }
     }
 
     GlassFrame {

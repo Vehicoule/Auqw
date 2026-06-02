@@ -185,13 +185,15 @@ void CoreController::configureOnlineProvider() {
         setSearchState(results.isEmpty() ? QStringLiteral("No results") : QStringLiteral("Ready"), {});
     });
 
-    connect(onlineProvider_.get(), &OnlineProvider::searchFailed, this, [this](const QString& query, const QString&) {
+    connect(onlineProvider_.get(), &OnlineProvider::searchFailed, this, [this](const QString& query, const QString& message) {
         if (query != activeSearchQuery_) {
             return;
         }
 
         applySearchResults({});
-        setSearchState(QStringLiteral("Error"), QStringLiteral("Search unavailable. Try again."));
+        setSearchState(
+            QStringLiteral("Error"),
+            message.trimmed().isEmpty() ? QStringLiteral("Search unavailable. Try again.") : message.trimmed());
     });
 
     connect(onlineProvider_.get(), &OnlineProvider::suggestionsSucceeded, this, [this](const QString& query, const QVector<OnlineSuggestionResult>& suggestions) {

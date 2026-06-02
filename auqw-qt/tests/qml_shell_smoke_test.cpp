@@ -136,6 +136,45 @@ private:
     }
 };
 
+class FakeOnlineProvider final : public OnlineProvider {
+public:
+    QString name() const override {
+        return QStringLiteral("fake");
+    }
+
+    OnlineProviderCapabilities capabilities() const override {
+        return OnlineProviderCapabilities{
+            .search = true,
+            .suggestions = true,
+            .metadata = true,
+            .playback = true,
+            .downloads = true,
+        };
+    }
+
+    void searchTracks(const QString& query) override {
+        ++searchCalls;
+        lastSearchQuery = query;
+        emit searchSucceeded(query, nextResults);
+    }
+
+    void suggestTracks(const QString& query) override {
+        ++suggestCalls;
+        lastSuggestQuery = query;
+        emit suggestionsSucceeded(query, nextSuggestions);
+    }
+
+    void fetchTrackMetadata(const QString&, const QString&) override {}
+    void resolveStream(const QString&, const QString&) override {}
+
+    int searchCalls = 0;
+    int suggestCalls = 0;
+    QString lastSearchQuery;
+    QString lastSuggestQuery;
+    QVector<OnlineTrackResult> nextResults;
+    QVector<OnlineSuggestionResult> nextSuggestions;
+};
+
 } // namespace
 
 class QmlShellSmokeTest final : public QObject {
@@ -281,6 +320,59 @@ private slots:
         QVERIFY(nowPlayingSheet != nullptr);
         QVERIFY(!currentSongBox->property("visible").toBool());
         QVERIFY(!nowPlayingSheet->property("visible").toBool());
+    }
+
+    void globalSearchButtonSubmitsAndShowsResults() {
+        auto provider = std::make_unique<FakeOnlineProvider>();
+        auto* providerPtr = provider.get();
+        provider->nextResults = {
+            OnlineTrackResult{
+                .resultId = QStringLiteral("fake:around"),
+                .provider = QStringLiteral("fake"),
+                .providerTrackId = QStringLiteral("around"),
+                .title = QStringLiteral("Around the World"),
+                .artist = QStringLiteral("Daft Punk"),
+                .album = QStringLiteral("Homework"),
+                .durationMs = 430000,
+                .artworkUrl = QStringLiteral("https://img.example/around.jpg"),
+            },
+        };
+
+        CoreController controller(
+            std::make_unique<FakePlaybackBackend>(),
+            std::move(provider));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        QObject* globalSearchField = root->findChild<QObject*>(QStringLiteral("globalSearchField"));
+        QObject* globalSearchButton = root->findChild<QObject*>(QStringLiteral("globalSearchButton"));
+        QVERIFY(globalSearchField != nullptr);
+        QVERIFY(globalSearchButton != nullptr);
+
+        globalSearchField->setProperty("text", QStringLiteral("  around the world  "));
+        QVERIFY(QMetaObject::invokeMethod(globalSearchButton, "clicked"));
+
+        QCOMPARE(providerPtr->searchCalls, 1);
+        QCOMPARE(providerPtr->lastSearchQuery, QStringLiteral("around the world"));
+        QCOMPARE(root->property("currentPageIndex").toInt(), 2);
+        QCOMPARE(root->property("searchPageQuery").toString(), QStringLiteral("around the world"));
+        QCOMPARE(globalSearchField->property("text").toString(), QString());
+        QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Ready"));
+
+        auto* searchResults = qobject_cast<QAbstractItemModel*>(controller.property("searchResultsModel").value<QObject*>());
+        QVERIFY(searchResults != nullptr);
+        QCOMPARE(searchResults->rowCount(), 1);
+        const int titleRole = roleForName(searchResults, "title");
+        QVERIFY(titleRole > 0);
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), titleRole).toString(), QStringLiteral("Around the World"));
     }
 
     void compactNowPlayingSheetHasRoomForControls() {
