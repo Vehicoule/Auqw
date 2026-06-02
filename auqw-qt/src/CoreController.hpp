@@ -5,6 +5,8 @@
 #include <auqw/CoreBridge.hpp>
 
 #include <QAbstractItemModel>
+#include <QElapsedTimer>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -162,6 +164,17 @@ private:
         QJsonObject data;
         QString error;
     };
+    struct StreamCacheEntry {
+        OnlineStreamResult stream;
+        qint64 validUntilMs = 0;
+    };
+    struct PlaybackTiming {
+        QElapsedTimer timer;
+        QString provider;
+        QString providerTrackId;
+        QString queueItemId;
+        bool active = false;
+    };
 
     [[nodiscard]] CommandResult invokeCommand(
         const QString& id,
@@ -192,6 +205,7 @@ private:
     void recordSearchHistory(const QString& query);
     [[nodiscard]] std::optional<OnlineTrackResult> searchResultById(const QString& resultId) const;
     [[nodiscard]] std::optional<QString> upsertTrackForSearchResult(const OnlineTrackResult& result);
+    [[nodiscard]] std::optional<QString> queueItemIdForProviderTrack(const QString& provider, const QString& providerTrackId) const;
     [[nodiscard]] QVariantMap trackById(const QString& trackId) const;
     [[nodiscard]] bool downloadsSupportedForProvider(const QString& provider) const;
     [[nodiscard]] QString defaultDownloadDirectory() const;
@@ -218,6 +232,19 @@ private:
     void stopActivePlaybackBeforeLoad(bool shouldStop);
     [[nodiscard]] bool isPendingStreamResolve(const QString& provider, const QString& providerTrackId) const;
     void clearPendingStreamResolve();
+    [[nodiscard]] QString streamCacheKey(const QString& provider, const QString& providerTrackId) const;
+    [[nodiscard]] std::optional<OnlineStreamResult> cachedStreamFor(const QString& provider, const QString& providerTrackId);
+    void storeStreamInCache(const OnlineStreamResult& stream);
+    void requestStreamForPlayback(const QString& queueItemId, const QString& provider, const QString& providerTrackId);
+    void playResolvedStream(const OnlineStreamResult& stream);
+    void cancelSearchPrewarm();
+    void scheduleSearchPrewarm(const QVector<OnlineTrackResult>& results);
+    void startNextSearchPrewarm();
+    void finishActiveSearchPrewarm(const QString& provider, const QString& providerTrackId);
+    [[nodiscard]] bool isActiveSearchPrewarm(const QString& provider, const QString& providerTrackId) const;
+    void beginSearchPlaybackTiming(const OnlineTrackResult& result);
+    void logPlaybackTiming(const QString& stage);
+    void finishPlaybackTimingIfPlaying();
 
     std::optional<auqw::CoreBridge> core_;
     std::unique_ptr<PlaybackBackend> playbackBackend_;
@@ -269,6 +296,12 @@ private:
     QString pendingStreamQueueItemId_;
     QString pendingStreamProvider_;
     QString pendingStreamProviderTrackId_;
+    QHash<QString, StreamCacheEntry> streamCache_;
+    QVector<OnlineTrackResult> pendingPrewarmResults_;
+    QString activePrewarmProvider_;
+    QString activePrewarmProviderTrackId_;
+    int prewarmGeneration_ = 0;
+    PlaybackTiming playbackTiming_;
     QString repeatMode_ = QStringLiteral("off");
     bool shuffleEnabled_ = false;
     bool stopRequested_ = false;

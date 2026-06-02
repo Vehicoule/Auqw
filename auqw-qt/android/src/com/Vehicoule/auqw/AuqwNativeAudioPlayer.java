@@ -107,8 +107,9 @@ public final class AuqwNativeAudioPlayer {
     }
 
     private static void playOnMain(long playbackId, String url, HashMap<String, String> headers) {
-        activePlaybackId = playbackId;
+        activePlaybackId = 0;
         releasePlayer();
+        activePlaybackId = playbackId;
 
         Context context = AuqwMediaSessionBridge.context();
         if (context == null || url == null || url.isEmpty()) {
@@ -186,12 +187,22 @@ public final class AuqwNativeAudioPlayer {
         if (player == null) {
             return;
         }
+        detachPlayerCallbacks(player);
         try {
             player.reset();
         } catch (IllegalStateException ignored) {
         }
         player.release();
         player = null;
+    }
+
+    private static void detachPlayerCallbacks(MediaPlayer mediaPlayer) {
+        try {
+            mediaPlayer.setOnPreparedListener(null);
+            mediaPlayer.setOnCompletionListener(null);
+            mediaPlayer.setOnErrorListener(null);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     private static void notifyState(long playbackId, String state, long positionMs, long durationMs) {

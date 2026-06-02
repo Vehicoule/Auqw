@@ -155,6 +155,8 @@ CoreController::CoreController(
           QStringLiteral("album"),
           QStringLiteral("duration_ms"),
           QStringLiteral("artwork_url"),
+          QStringLiteral("is_playing"),
+          QStringLiteral("is_loading"),
       })),
       searchSuggestionsModel_(std::make_unique<JsonListModel>(QStringList{
           QStringLiteral("provider"),

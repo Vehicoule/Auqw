@@ -146,6 +146,35 @@ private slots:
             "Android native player should report state and errors to the Qt backend");
     }
 
+    void androidNativePlayerReleasesOldPlayerAndIgnoresStaleCallbacks() {
+        const QString androidBackend = readTextFile(sourcePath(u"src/AndroidNativePlaybackBackend.cpp"));
+        const QString nativePlayer = readTextFile(packageSourcePath(u"src/com/Vehicoule/auqw/AuqwNativeAudioPlayer.java"));
+        QVERIFY2(!androidBackend.isEmpty(), "AndroidNativePlaybackBackend.cpp should be readable");
+        QVERIFY2(!nativePlayer.isEmpty(), "AuqwNativeAudioPlayer.java should be readable");
+
+        const qsizetype playOnMainStart = nativePlayer.indexOf(QStringLiteral("private static void playOnMain"));
+        QVERIFY2(playOnMainStart >= 0, "native player should keep playOnMain entrypoint");
+        const qsizetype contextStart = nativePlayer.indexOf(QStringLiteral("Context context ="), playOnMainStart);
+        const qsizetype releaseStart = nativePlayer.indexOf(QStringLiteral("releasePlayer();"), playOnMainStart);
+        const qsizetype activateStart = nativePlayer.indexOf(QStringLiteral("activePlaybackId = playbackId;"), playOnMainStart);
+        QVERIFY2(releaseStart >= 0 && activateStart >= 0 && contextStart >= 0, "playOnMain should release before activating new playback id");
+        QVERIFY2(releaseStart < activateStart && activateStart < contextStart,
+            "new play should release old MediaPlayer before publishing the new active playback id");
+
+        QVERIFY2(nativePlayer.contains(QStringLiteral("detachPlayerCallbacks")),
+            "releasePlayer should clear MediaPlayer callbacks before release");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("setOnPreparedListener(null)")),
+            "releasePlayer should clear stale prepared callbacks");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("setOnCompletionListener(null)")),
+            "releasePlayer should clear stale completion callbacks");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("setOnErrorListener(null)")),
+            "releasePlayer should clear stale error callbacks");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("isCurrentPlayer(playbackId, mediaPlayer)")),
+            "Java callbacks should ignore stale playback ids and stale MediaPlayer instances");
+        QVERIFY2(androidBackend.contains(QStringLiteral("if (playbackId != nativePlaybackId_)")),
+            "Qt Android backend should ignore stale native state/error callbacks");
+    }
+
     void headeredOnlinePlaybackRoutesThroughBackendApi() {
         const QString coreSearch = readTextFile(sourcePath(u"src/CoreControllerSearch.cpp"));
         QVERIFY2(!coreSearch.isEmpty(), "CoreControllerSearch.cpp should be readable");

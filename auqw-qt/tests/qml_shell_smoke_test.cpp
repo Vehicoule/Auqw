@@ -49,6 +49,14 @@ int roleForName(const QAbstractItemModel* model, const QByteArray& name) {
     return -1;
 }
 
+QVariant roleValue(const QAbstractItemModel* model, int row, const QByteArray& name) {
+    const int role = roleForName(model, name);
+    if (role <= 0 || row < 0 || row >= model->rowCount()) {
+        return {};
+    }
+    return model->data(model->index(row, 0), role);
+}
+
 QObject* findObjectByName(QObject* root, const QString& name) {
     if (root == nullptr) {
         return nullptr;
@@ -83,6 +91,25 @@ bool effectivelyVisible(QObject* object) {
         }
     }
     return item->width() > 0.0 && item->height() > 0.0;
+}
+
+QQuickItem* quickItemByName(QObject* root, const QString& name) {
+    return qobject_cast<QQuickItem*>(findObjectByName(root, name));
+}
+
+QRectF sceneBounds(QQuickItem* item) {
+    if (item == nullptr) {
+        return {};
+    }
+    return QRectF(item->mapToScene(QPointF(0, 0)), QSizeF(item->width(), item->height()));
+}
+
+bool hasMeaningfulOverlap(QQuickItem* first, QQuickItem* second) {
+    if (first == nullptr || second == nullptr || !effectivelyVisible(first) || !effectivelyVisible(second)) {
+        return false;
+    }
+    const QRectF overlap = sceneBounds(first).intersected(sceneBounds(second));
+    return overlap.width() > 1.0 && overlap.height() > 1.0;
 }
 
 int visibleSearchFieldCount(QObject* root) {
@@ -194,12 +221,19 @@ public:
     }
 
     void fetchTrackMetadata(const QString&, const QString&) override {}
-    void resolveStream(const QString&, const QString&) override {}
+    void resolveStream(const QString& provider, const QString& providerTrackId) override {
+        ++resolveCalls;
+        lastResolveProvider = provider;
+        lastResolveTrackId = providerTrackId;
+    }
 
     int searchCalls = 0;
     int suggestCalls = 0;
+    int resolveCalls = 0;
     QString lastSearchQuery;
     QString lastSuggestQuery;
+    QString lastResolveProvider;
+    QString lastResolveTrackId;
     QVector<OnlineTrackResult> nextResults;
     QVector<OnlineSuggestionResult> nextSuggestions;
 };
@@ -508,6 +542,149 @@ private slots:
         QTRY_VERIFY(effectivelyVisible(searchResultsList));
     }
 
+    void searchResultFullRowClickStartsPlaybackRequest() {
+        auto provider = std::make_unique<FakeOnlineProvider>();
+        auto* providerPtr = provider.get();
+        provider->nextResults = {
+            OnlineTrackResult{
+                .resultId = QStringLiteral("fake:around"),
+                .provider = QStringLiteral("fake"),
+                .providerTrackId = QStringLiteral("around"),
+                .title = QStringLiteral("Around the World"),
+                .artist = QStringLiteral("Daft Punk"),
+            },
+        };
+
+        CoreController controller(
+            std::make_unique<FakePlaybackBackend>(),
+            std::move(provider));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("currentPageIndex", 2);
+        root->setProperty("searchPageQuery", QStringLiteral("around"));
+        root->setProperty("submittedSearchQuery", QStringLiteral("around"));
+        QVERIFY(QMetaObject::invokeMethod(&controller, "searchOnline", Q_ARG(QString, QStringLiteral("around"))));
+
+        QObject* resultDelegate = nullptr;
+        QTRY_VERIFY((resultDelegate = findObjectByName(root, QStringLiteral("searchResultDelegate"))) != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(resultDelegate, "clicked"));
+
+        QCOMPARE(providerPtr->resolveCalls, 1);
+        QCOMPARE(providerPtr->lastResolveProvider, QStringLiteral("fake"));
+        QCOMPARE(providerPtr->lastResolveTrackId, QStringLiteral("around"));
+        QCOMPARE(controller.property("playbackState").toString(), QStringLiteral("loading"));
+    }
+
+    void desktopShellReservesSearchNavQueueAndPlaybackSpace() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QVERIFY(writeTestFile(QDir(library.path()).filePath(QStringLiteral("alpha.mp3"))));
+
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        const QString trackId = roleValue(tracks, 0, "id").toString();
+        QVERIFY(QMetaObject::invokeMethod(&controller, "addTrackToQueue", Q_ARG(QString, trackId)));
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playFirstQueuedTrack"));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("width", 1180);
+        root->setProperty("height", 760);
+        root->setProperty("currentPageIndex", 0);
+        QCoreApplication::processEvents();
+
+        auto* desktopNavigationRail = quickItemByName(root, QStringLiteral("desktopNavigationRail"));
+        auto* globalSearchBar = quickItemByName(root, QStringLiteral("globalSearchBar"));
+        auto* mainStack = quickItemByName(root, QStringLiteral("mainStack"));
+        auto* queuePanel = quickItemByName(root, QStringLiteral("queuePanel"));
+        auto* bottomPlaybackBar = quickItemByName(root, QStringLiteral("bottomPlaybackBar"));
+        QVERIFY(desktopNavigationRail != nullptr);
+        QVERIFY(globalSearchBar != nullptr);
+        QVERIFY(mainStack != nullptr);
+        QVERIFY(queuePanel != nullptr);
+        QVERIFY(bottomPlaybackBar != nullptr);
+        QTRY_VERIFY(effectivelyVisible(desktopNavigationRail));
+        QTRY_VERIFY(effectivelyVisible(globalSearchBar));
+        QTRY_VERIFY(effectivelyVisible(queuePanel));
+        QTRY_VERIFY(effectivelyVisible(bottomPlaybackBar));
+
+        QVERIFY2(!hasMeaningfulOverlap(desktopNavigationRail, mainStack), "desktop nav overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(globalSearchBar, mainStack), "desktop search overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(queuePanel, mainStack), "queue panel overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(bottomPlaybackBar, mainStack), "bottom playback bar overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(bottomPlaybackBar, queuePanel), "bottom playback bar overlaps queue panel");
+    }
+
+    void compactShellUsesPageOwnedSearchAndBottomBarsWithoutOverlap() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QVERIFY(writeTestFile(QDir(library.path()).filePath(QStringLiteral("alpha.mp3"))));
+
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        const QString trackId = roleValue(tracks, 0, "id").toString();
+        QVERIFY(QMetaObject::invokeMethod(&controller, "addTrackToQueue", Q_ARG(QString, trackId)));
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playFirstQueuedTrack"));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("width", 390);
+        root->setProperty("height", 844);
+        root->setProperty("currentPageIndex", 0);
+        QCoreApplication::processEvents();
+
+        auto* globalSearchBar = quickItemByName(root, QStringLiteral("globalSearchBar"));
+        auto* mainStack = quickItemByName(root, QStringLiteral("mainStack"));
+        auto* floatingNavigation = quickItemByName(root, QStringLiteral("floatingNavigation"));
+        auto* currentSongBox = quickItemByName(root, QStringLiteral("currentSongBox"));
+        QVERIFY(globalSearchBar != nullptr);
+        QVERIFY(mainStack != nullptr);
+        QVERIFY(floatingNavigation != nullptr);
+        QVERIFY(currentSongBox != nullptr);
+        QVERIFY2(!effectivelyVisible(globalSearchBar), "compact home should not use floating/global search");
+        QTRY_VERIFY(effectivelyVisible(floatingNavigation));
+        QTRY_VERIFY(effectivelyVisible(currentSongBox));
+
+        QVERIFY2(!hasMeaningfulOverlap(floatingNavigation, mainStack), "compact nav overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(currentSongBox, mainStack), "compact mini-player overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(currentSongBox, floatingNavigation), "compact mini-player overlaps bottom nav");
+    }
+
     void queuePanelHiddenOnDesktopSearchPage() {
         CoreController controller(std::make_unique<FakePlaybackBackend>());
 
@@ -614,6 +791,10 @@ private slots:
         QVERIFY(!qml.isEmpty());
 
         QVERIFY2(qml.contains(QStringLiteral("playSearchResult(")), "search results should start playback directly");
+        QVERIFY2(
+            qml.contains(QStringLiteral("searchStatusLabel.visible")) ||
+                qml.contains(QStringLiteral("visible: coreController.searchStatus !== \"Idle\" && coreController.searchStatus !== \"Ready\"")),
+            "Idle/Ready search status should not duplicate search page header state");
         QVERIFY2(!qml.contains(QStringLiteral("favoriteSearchResult(")), "search row favorite action belongs in Now Playing");
         QVERIFY2(!qml.contains(QStringLiteral("downloadSearchResult(")), "search row download action belongs in Now Playing");
         QVERIFY2(!qml.contains(QStringLiteral("searchResultDownloadButton")), "search rows should not expose a download mini-button");

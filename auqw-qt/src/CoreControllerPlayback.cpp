@@ -154,11 +154,7 @@ void CoreController::playQueueItem(const QString& queueItemId) {
     const QString provider = item.value(QStringLiteral("provider")).toString();
     const QString providerTrackId = item.value(QStringLiteral("provider_track_id")).toString();
     if (!provider.isEmpty() && !providerTrackId.isEmpty() && onlineProvider_) {
-        pendingStreamQueueItemId_ = queueItemId;
-        pendingStreamProvider_ = provider;
-        pendingStreamProviderTrackId_ = providerTrackId;
-        setCoreStatus(QStringLiteral("Loading playback"));
-        onlineProvider_->resolveStream(provider, providerTrackId);
+        requestStreamForPlayback(queueItemId, provider, providerTrackId);
         return;
     }
 
@@ -391,6 +387,9 @@ bool CoreController::applyPlaybackObject(const QJsonObject& playback) {
 
     if (changed) {
         emit playbackStateChanged();
+        if (!searchResults_.isEmpty()) {
+            applySearchResults(searchResults_);
+        }
     }
     return changed;
 }
@@ -458,6 +457,7 @@ void CoreController::updatePlaybackFromBackend(
     if (playbackState_ == QStringLiteral("playing")) {
         recordRecentIfNeeded();
         setCoreStatus(QStringLiteral("Playing"));
+        finishPlaybackTimingIfPlaying();
     } else if (playbackState_ == QStringLiteral("paused")) {
         setCoreStatus(QStringLiteral("Paused"));
     } else if (playbackState_ == QStringLiteral("stopped")) {
@@ -516,6 +516,14 @@ void CoreController::clearPendingStreamResolve() {
     pendingStreamQueueItemId_.clear();
     pendingStreamProvider_.clear();
     pendingStreamProviderTrackId_.clear();
+}
+
+void CoreController::finishPlaybackTimingIfPlaying() {
+    if (!playbackTiming_.active || playbackState_ != QStringLiteral("playing")) {
+        return;
+    }
+    logPlaybackTiming(QStringLiteral("backend-playing"));
+    playbackTiming_.active = false;
 }
 
 void CoreController::recordRecentIfNeeded() {

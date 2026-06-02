@@ -551,6 +551,8 @@ ApplicationWindow {
         required property string album
         required property string artwork_url
         required property int duration_ms
+        required property bool is_playing
+        required property bool is_loading
 
         objectName: "searchResultDelegate"
         width: ListView.view.width
@@ -576,6 +578,14 @@ ApplicationWindow {
                     asynchronous: true
                     cache: true
                 }
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: "transparent"
+                    border.color: is_playing || is_loading ? "#c61f3a" : "transparent"
+                    border.width: 2
+                    radius: parent.radius
+                }
             }
 
             ColumnLayout {
@@ -598,6 +608,21 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
             }
+
+            Label {
+                text: is_playing ? "Playing" : is_loading ? "Loading" : "Play"
+                color: is_playing || is_loading ? "#c61f3a" : "#7b817d"
+                font.pixelSize: 12
+                font.weight: is_playing || is_loading ? Font.DemiBold : Font.Normal
+                Layout.preferredWidth: root.compact ? 58 : 64
+                horizontalAlignment: Text.AlignRight
+                elide: Text.ElideRight
+            }
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: is_playing ? "#fff0f2" : is_loading ? "#fff6e8" : parent.hovered ? "#f3f2ef" : "transparent"
         }
     }
 
@@ -798,6 +823,27 @@ ApplicationWindow {
                     detail: root.hasPlayback ? "Listening now" : "Pick up from recent music or search something new"
                 }
 
+                TextField {
+                    id: homeSearchField
+                    objectName: "homeSearchField"
+                    visible: root.compact
+                    placeholderText: "Search"
+                    text: root.currentPageIndex === 0 ? root.searchPageQuery : ""
+                    Layout.fillWidth: true
+                    implicitHeight: root.density
+                    inputMethodHints: Qt.ImhNoPredictiveText
+                    onActiveFocusChanged: {
+                        if (activeFocus) {
+                            root.openSearchPage(text, true)
+                        }
+                    }
+                    onTextEdited: {
+                        root.updateSearchQuery(text)
+                        root.openSearchPage(text, true)
+                    }
+                    onAccepted: root.submitSearch(text, homeSearchField)
+                }
+
                 GridLayout {
                     columns: root.compact ? 1 : 3
                     Layout.fillWidth: true
@@ -977,6 +1023,7 @@ ApplicationWindow {
             Label {
                 objectName: "searchStatusLabel"
                 text: coreController.searchErrorMessage.length > 0 ? coreController.searchErrorMessage : coreController.searchStatus
+                visible: coreController.searchStatus !== "Idle" && coreController.searchStatus !== "Ready"
                 color: coreController.searchStatus === "Error" || coreController.searchStatus === "Disabled" ? "#a63b2f" : "#66736d"
                 Layout.fillWidth: true
                 elide: Text.ElideRight
@@ -1300,58 +1347,98 @@ ApplicationWindow {
         }
     }
 
-    Item {
-        anchors.fill: parent
-        anchors.margins: root.pagePadding
-        anchors.topMargin: root.safeTop + root.pagePadding
-        anchors.bottomMargin: root.safeBottom + 94
+    Rectangle {
+        id: desktopNavigationRail
+        objectName: "desktopNavigationRail"
+        visible: !root.compact
+        x: 0
+        y: 0
+        width: root.navWidth
+        height: root.height
+        color: "#ffffff"
+        border.color: "#ebe7df"
+        z: 10
 
-        StackLayout {
-            id: mainStack
-            objectName: "mainStack"
+        ColumnLayout {
             anchors.fill: parent
-            anchors.rightMargin: !root.compact && root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0
-            currentIndex: root.currentPageIndex
+            anchors.margins: 18
+            spacing: 10
 
-            HomePage {}
-            LibraryPage {}
-            SearchPage {}
-            SettingsPage {}
-        }
-
-        GlassFrame {
-            id: queuePanel
-            objectName: "queuePanel"
-            visible: !root.compact && root.currentPageIndex !== 2
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            anchors.right: parent.right
-            width: root.queuePanelWidth
-
-            QueueContent {
-                anchors.fill: parent
+            Label {
+                text: "Auqw"
+                font.pixelSize: 25
+                font.weight: Font.DemiBold
+                color: "#1f2522"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
             }
-        }
 
-        Item {
-            id: desktopNavigationRail
-            objectName: "desktopNavigationRail"
-            visible: false
+            Label {
+                text: "Library + online playback"
+                color: "#7a817c"
+                font.pixelSize: 12
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            Item {
+                Layout.preferredHeight: 8
+            }
+
+            NavPill {
+                objectName: "floatingNavHomeButton"
+                pageIndex: 0
+                iconName: "home"
+                iconObjectName: "floatingNavHomeIcon"
+                label: "Home"
+            }
+
+            NavPill {
+                objectName: "floatingNavLibraryButton"
+                pageIndex: 1
+                iconName: "library"
+                iconObjectName: "floatingNavLibraryIcon"
+                label: "Library"
+            }
+
+            NavPill {
+                pageIndex: 2
+                iconName: "search"
+                label: "Search"
+            }
+
+            NavPill {
+                objectName: "floatingNavSettingsButton"
+                pageIndex: 3
+                iconName: "settings"
+                iconObjectName: "floatingNavSettingsIcon"
+                label: "Settings"
+            }
+
+            Item {
+                Layout.fillHeight: true
+            }
+
+            Label {
+                text: coreController.onlineSourceStatus
+                color: coreController.onlineEnabled ? "#0e5a43" : "#a63b2f"
+                font.pixelSize: 12
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
         }
     }
 
     Row {
         id: globalSearchBar
         objectName: "globalSearchBar"
-        visible: root.currentPageIndex === 0 || root.currentPageIndex === 1
-        width: root.compact ? Math.min(root.width - 28, 318) : 352
+        visible: !root.compact && (root.currentPageIndex === 0 || root.currentPageIndex === 1)
+        width: Math.max(260, Math.min(430, root.width - x - root.pagePadding - (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0)))
         height: root.density
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.topMargin: root.safeTop + 14
-        anchors.rightMargin: root.pagePadding
+        x: root.navWidth + root.pagePadding
+        y: root.safeTop + root.pagePadding
         spacing: 8
-        z: 30
+        z: 15
 
         TextField {
             id: globalSearchField
@@ -1373,8 +1460,8 @@ ApplicationWindow {
             onAccepted: root.submitSearch(text, globalSearchField)
             background: Rectangle {
                 radius: 8
-                color: "#e8ffffff"
-                border.color: "#88ffffff"
+                color: "#ffffff"
+                border.color: "#e5e0d7"
             }
             leftPadding: 16
             rightPadding: 16
@@ -1393,45 +1480,102 @@ ApplicationWindow {
         }
     }
 
+    Item {
+        id: contentHost
+        objectName: "contentHost"
+        z: 0
+        anchors.fill: parent
+        anchors.leftMargin: root.compact ? root.pagePadding : root.navWidth + root.pagePadding
+        anchors.rightMargin: root.compact
+            ? root.pagePadding
+            : root.pagePadding + (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0)
+        anchors.topMargin: root.safeTop + root.pagePadding + (!root.compact && globalSearchBar.visible ? root.density + root.pageGap : 0)
+        anchors.bottomMargin: root.safeBottom + root.pagePadding
+            + (root.compact
+                ? floatingNavigation.height + 8 + (root.hasPlayback ? currentSongBox.height + 8 : 0)
+                : (root.hasPlayback ? bottomPlaybackBar.height + root.pageGap : 0))
+
+        StackLayout {
+            id: mainStack
+            objectName: "mainStack"
+            anchors.fill: parent
+            currentIndex: root.currentPageIndex
+
+            HomePage {}
+            LibraryPage {}
+            SearchPage {}
+            SettingsPage {}
+        }
+    }
+
+    GlassFrame {
+        id: queuePanel
+        objectName: "queuePanel"
+        visible: !root.compact && root.currentPageIndex !== 2
+        x: root.width - root.pagePadding - width
+        y: contentHost.y
+        width: root.queuePanelWidth
+        height: Math.max(0, (root.hasPlayback ? bottomPlaybackBar.y - root.pageGap : root.height - root.safeBottom - root.pagePadding) - y)
+        z: 8
+
+        QueueContent {
+            anchors.fill: parent
+        }
+    }
+
+    Frame {
+        id: bottomPlaybackBar
+        objectName: "bottomPlaybackBar"
+        visible: root.hasPlayback && !root.compact
+        padding: 0
+        x: root.navWidth + root.pagePadding
+        y: root.height - root.safeBottom - root.pagePadding - height
+        width: Math.max(0, root.width - x - root.pagePadding - (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0))
+        height: 88
+        z: 12
+        background: Rectangle {
+            radius: 8
+            color: "#ffffff"
+            border.color: "#e5e0d7"
+        }
+    }
+
     GlassFrame {
         id: floatingNavigation
         objectName: "floatingNavigation"
-        width: root.navWidth
-        height: root.compact ? 64 : 72
+        visible: root.compact
+        width: root.width - root.pagePadding * 2
+        height: 64
         padding: 8
-        x: root.hasPlayback ? root.pagePadding : Math.round((root.width - width) / 2)
-        y: root.height - height - root.safeBottom - 14
+        x: root.pagePadding
+        y: root.height - height - root.safeBottom - 8
         z: 20
-
-        Behavior on x {
-            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
-        }
 
         RowLayout {
             anchors.fill: parent
             spacing: 6
 
             NavPill {
-                objectName: "floatingNavHomeButton"
                 pageIndex: 0
                 iconName: "home"
-                iconObjectName: "floatingNavHomeIcon"
                 label: "Home"
             }
 
             NavPill {
-                objectName: "floatingNavLibraryButton"
                 pageIndex: 1
                 iconName: "library"
-                iconObjectName: "floatingNavLibraryIcon"
                 label: "Library"
             }
 
             NavPill {
-                objectName: "floatingNavSettingsButton"
+                pageIndex: 2
+                iconName: "search"
+                label: "Search"
+            }
+
+            NavPill {
                 pageIndex: 3
                 iconName: "settings"
-                iconObjectName: "floatingNavSettingsIcon"
                 label: "Settings"
             }
         }
@@ -1441,18 +1585,18 @@ ApplicationWindow {
         id: currentSongBox
         objectName: "currentSongBox"
         visible: root.hasPlayback
-        width: root.compact ? Math.max(132, root.width - floatingNavigation.width - root.pagePadding * 3) : 330
-        height: floatingNavigation.height
-        x: root.width - width - root.pagePadding
-        y: floatingNavigation.y
-        z: 20
+        width: root.compact ? root.width - root.pagePadding * 2 : bottomPlaybackBar.width
+        height: root.compact ? 64 : 72
+        x: root.compact ? root.pagePadding : bottomPlaybackBar.x
+        y: root.compact ? floatingNavigation.y - height - 8 : bottomPlaybackBar.y + Math.round((bottomPlaybackBar.height - height) / 2)
+        z: 21
         flat: true
         onClicked: nowPlayingSheet.open()
 
         background: Rectangle {
             radius: 8
-            color: "#e8ffffff"
-            border.color: "#88ffffff"
+            color: "#ffffff"
+            border.color: "#e5e0d7"
         }
 
         contentItem: RowLayout {
@@ -1538,6 +1682,17 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    Item {
+        id: miniPlayer
+        objectName: "miniPlayer"
+        visible: currentSongBox.visible
+        x: currentSongBox.x
+        y: currentSongBox.y
+        width: currentSongBox.width
+        height: currentSongBox.height
+        z: currentSongBox.z - 1
     }
 
     Popup {
@@ -1723,11 +1878,5 @@ ApplicationWindow {
                 }
             }
         }
-    }
-
-    Item {
-        id: miniPlayer
-        objectName: "miniPlayer"
-        visible: false
     }
 }

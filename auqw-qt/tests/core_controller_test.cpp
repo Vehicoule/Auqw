@@ -360,6 +360,9 @@ public:
     void searchTracks(const QString& query) override {
         ++searchCalls;
         lastQuery = query;
+        if (holdSearch) {
+            return;
+        }
         if (failNext) {
             emit searchFailed(query, QStringLiteral("upstream exploded"));
             return;
@@ -455,6 +458,10 @@ public:
         emit streamResolveFailed(provider, providerTrackId, QStringLiteral("direct stream unavailable"));
     }
 
+    void emitSearchResults(const QString& query, const QVector<OnlineTrackResult>& results) {
+        emit searchSucceeded(query, results);
+    }
+
     void emitSuggestions(const QString& query) {
         emit suggestionsSucceeded(query, nextSuggestions);
     }
@@ -465,6 +472,7 @@ public:
     int resolveCalls = 0;
     bool downloadsSupported = false;
     bool failNext = false;
+    bool holdSearch = false;
     bool holdSuggestions = false;
     QString lastQuery;
     QString lastSuggestQuery;
@@ -810,6 +818,159 @@ private slots:
         QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
         QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
         QCOMPARE(controller->property("playbackTitle").toString(), QStringLiteral("Stone Window"));
+    }
+
+    void playSearchResultReusesQueuedItemAndRestartsFromCachedStream() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(queue->rowCount(), 1);
+        const QString queueItemId = roleValue(queue, 0, "id").toString();
+        QCOMPARE(provider->resolveCalls, 1);
+        QCOMPARE(backend->remotePlayCalls, 1);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        QCOMPARE(queue->rowCount(), 1);
+        QCOMPARE(roleValue(queue, 0, "id").toString(), queueItemId);
+        QCOMPARE(provider->resolveCalls, 1);
+        QCOMPARE(backend->remotePlayCalls, 2);
+        QCOMPARE(controller->property("playbackQueueItemId").toString(), queueItemId);
+        QCOMPARE(controller->property("playbackState").toString(), QStringLiteral("playing"));
+    }
+
+    void playSearchResultFirstSecondFirstSequenceKeepsTwoQueueItemsAndPlaysEachTap() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-beta"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-beta"),
+                .title = QStringLiteral("Moon Door"),
+            },
+        };
+
+        auto* queue = qobject_cast<QAbstractItemModel*>(controller->property("queueModel").value<QObject*>());
+        QVERIFY(queue != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        provider->emitResolvedStream(
+            QStringLiteral("ytmusic"),
+            QStringLiteral("video-alpha"),
+            QUrl(QStringLiteral("https://audio.example/alpha.webm")));
+        QCOMPARE(backend->remotePlayCalls, 1);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-beta"))));
+        provider->emitResolvedStream(
+            QStringLiteral("ytmusic"),
+            QStringLiteral("video-beta"),
+            QUrl(QStringLiteral("https://audio.example/beta.webm")));
+        QCOMPARE(backend->remotePlayCalls, 2);
+        QCOMPARE(backend->lastRemoteUrl, QUrl(QStringLiteral("https://audio.example/beta.webm")));
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+
+        QCOMPARE(queue->rowCount(), 2);
+        QCOMPARE(backend->remotePlayCalls, 3);
+        QCOMPARE(backend->lastRemoteUrl, QUrl(QStringLiteral("https://audio.example/alpha.webm")));
+        QCOMPARE(controller->property("playbackTitle").toString(), QStringLiteral("Stone Window"));
+    }
+
+    void searchResultModelMarksCurrentPlayingRow() {
+        FakeOnlineProvider* provider = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider);
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+
+        auto* searchResults = qobject_cast<QAbstractItemModel*>(controller->property("searchResultsModel").value<QObject*>());
+        QVERIFY(searchResults != nullptr);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        const int playingRole = roleForName(searchResults, "is_playing");
+        const int loadingRole = roleForName(searchResults, "is_loading");
+        QVERIFY(playingRole > 0);
+        QVERIFY(loadingRole > 0);
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), playingRole).toBool(), false);
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-alpha"))));
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), loadingRole).toBool(), true);
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("video-alpha"));
+
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), playingRole).toBool(), true);
+        QCOMPARE(searchResults->data(searchResults->index(0, 0), loadingRole).toBool(), false);
+    }
+
+    void prewarmStoresStreamAndIgnoresStaleQueryResults() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        const std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        provider->holdSearch = true;
+        const QVector<OnlineTrackResult> staleResults{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-alpha"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-alpha"),
+                .title = QStringLiteral("Stone Window"),
+            },
+        };
+        const QVector<OnlineTrackResult> freshResults{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:video-beta"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("video-beta"),
+                .title = QStringLiteral("Moon Door"),
+            },
+        };
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("stone"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("moon"))));
+        provider->emitSearchResults(QStringLiteral("stone"), staleResults);
+        provider->emitSearchResults(QStringLiteral("moon"), freshResults);
+
+        QTRY_COMPARE(provider->resolveCalls, 1);
+        QCOMPARE(provider->lastResolveTrackId, QStringLiteral("video-beta"));
+        provider->emitResolvedStream(
+            QStringLiteral("ytmusic"),
+            QStringLiteral("video-beta"),
+            QUrl(QStringLiteral("https://audio.example/prewarmed.webm")));
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:video-beta"))));
+
+        QCOMPARE(provider->resolveCalls, 1);
+        QCOMPARE(backend->remotePlayCalls, 1);
+        QCOMPARE(backend->lastRemoteUrl, QUrl(QStringLiteral("https://audio.example/prewarmed.webm")));
+        QCOMPARE(controller->property("playbackTitle").toString(), QStringLiteral("Moon Door"));
     }
 
     void playSearchResultWithMissingIdDoesNotQueue() {
