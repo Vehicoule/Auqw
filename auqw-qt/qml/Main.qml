@@ -25,26 +25,41 @@ ApplicationWindow {
         ? (root.hasPlayback ? Math.max(154, Math.round((root.width - root.pagePadding * 3) * 0.52)) : Math.min(root.width - 28, 230))
         : 270
     readonly property int queuePanelWidth: Math.min(330, Math.max(280, Math.round(root.width * 0.27)))
-    readonly property int safeTop: root.mobilePlatform ? 10 : 0
+    readonly property int safeTop: root.mobilePlatform ? 44 : 0
     readonly property int safeBottom: root.mobilePlatform ? 10 : 0
     readonly property var themeOptions: ["system", "light", "dark"]
-    readonly property bool hasPlayback: coreController.playbackState !== "stopped" || coreController.playbackTitle.length > 0
+    readonly property bool hasPlayback: coreController.playbackState !== "stopped" && coreController.playbackTitle.length > 0
     readonly property real playbackProgress: coreController.playbackDurationMs > 0
         ? Math.max(0, Math.min(1, coreController.playbackPositionMs / coreController.playbackDurationMs))
         : 0
 
     property int currentPageIndex: 0
     property string selectedDownloadId: ""
+    property string searchPageQuery: ""
 
     function goTo(index) {
         currentPageIndex = index
     }
 
-    function goSearch(query) {
-        currentPageIndex = 2
-        if (query.length > 0) {
-            coreController.searchOnline(query)
+    function submitSearch(query, sourceField) {
+        var trimmedQuery = query.trim()
+        if (sourceField) {
+            sourceField.focus = false
         }
+        Qt.inputMethod.hide()
+        if (trimmedQuery.length === 0) {
+            return
+        }
+        currentPageIndex = 2
+        searchPageQuery = trimmedQuery
+        if (globalSearchField.text.length > 0) {
+            globalSearchField.text = ""
+        }
+        coreController.searchOnline(trimmedQuery)
+    }
+
+    function goSearch(query) {
+        submitSearch(query, null)
     }
 
     function playbackDetailText() {
@@ -72,6 +87,182 @@ ApplicationWindow {
             return coreController.playbackState
         }
         return position + " / " + duration
+    }
+
+    component DrawnIcon: Canvas {
+        id: icon
+
+        property string kind: ""
+        property color strokeColor: "#4d5a54"
+
+        implicitWidth: 22
+        implicitHeight: 22
+        antialiasing: true
+        onKindChanged: requestPaint()
+        onStrokeColorChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var ctx = getContext("2d")
+            var w = width
+            var h = height
+            ctx.clearRect(0, 0, w, h)
+            ctx.lineWidth = Math.max(1.8, Math.min(w, h) * 0.09)
+            ctx.lineCap = "round"
+            ctx.lineJoin = "round"
+            ctx.strokeStyle = strokeColor
+            ctx.fillStyle = strokeColor
+
+            function x(v) { return w * v / 24 }
+            function y(v) { return h * v / 24 }
+            function line(x1, y1, x2, y2) {
+                ctx.beginPath()
+                ctx.moveTo(x(x1), y(y1))
+                ctx.lineTo(x(x2), y(y2))
+                ctx.stroke()
+            }
+            function poly(points, closed, filled) {
+                ctx.beginPath()
+                ctx.moveTo(x(points[0]), y(points[1]))
+                for (var i = 2; i < points.length; i += 2) {
+                    ctx.lineTo(x(points[i]), y(points[i + 1]))
+                }
+                if (closed) {
+                    ctx.closePath()
+                }
+                if (filled) {
+                    ctx.fill()
+                } else {
+                    ctx.stroke()
+                }
+            }
+            function circle(cx, cy, r) {
+                ctx.beginPath()
+                ctx.arc(x(cx), y(cy), Math.min(w, h) * r / 24, 0, Math.PI * 2)
+                ctx.stroke()
+            }
+            function rect(rx, ry, rw, rh, filled) {
+                ctx.beginPath()
+                ctx.rect(x(rx), y(ry), x(rw), y(rh))
+                if (filled) {
+                    ctx.fill()
+                } else {
+                    ctx.stroke()
+                }
+            }
+
+            if (kind === "home") {
+                poly([4, 11, 12, 4, 20, 11], false, false)
+                poly([6, 10, 6, 20, 18, 20, 18, 10], false, false)
+                line(11, 20, 11, 15)
+                line(13, 20, 13, 15)
+            } else if (kind === "library") {
+                rect(5, 5, 14, 14, false)
+                line(9, 5, 9, 19)
+                line(5, 10, 19, 10)
+                line(5, 15, 19, 15)
+            } else if (kind === "settings") {
+                line(5, 7, 19, 7)
+                line(5, 12, 19, 12)
+                line(5, 17, 19, 17)
+                circle(9, 7, 1.6)
+                circle(15, 12, 1.6)
+                circle(11, 17, 1.6)
+            } else if (kind === "search") {
+                circle(10, 10, 5)
+                line(14, 14, 20, 20)
+            } else if (kind === "heart") {
+                ctx.beginPath()
+                ctx.moveTo(x(12), y(20))
+                ctx.bezierCurveTo(x(5), y(15), x(4), y(10), x(8), y(7))
+                ctx.bezierCurveTo(x(10), y(5.6), x(12), y(7.2), x(12), y(9))
+                ctx.bezierCurveTo(x(12), y(7.2), x(14), y(5.6), x(16), y(7))
+                ctx.bezierCurveTo(x(20), y(10), x(19), y(15), x(12), y(20))
+                ctx.stroke()
+            } else if (kind === "download") {
+                line(12, 5, 12, 15)
+                poly([8, 11, 12, 15, 16, 11], false, false)
+                line(6, 19, 18, 19)
+            } else if (kind === "queue") {
+                line(5, 7, 14, 7)
+                line(5, 12, 14, 12)
+                line(5, 17, 14, 17)
+                line(18, 10, 18, 20)
+                line(13, 15, 23, 15)
+            } else if (kind === "previous") {
+                poly([5, 5, 5, 19], false, false)
+                poly([18, 5, 8, 12, 18, 19], true, false)
+            } else if (kind === "play") {
+                poly([8, 5, 19, 12, 8, 19], true, true)
+            } else if (kind === "pause") {
+                rect(7, 5, 3, 14, true)
+                rect(14, 5, 3, 14, true)
+            } else if (kind === "next") {
+                poly([19, 5, 19, 19], false, false)
+                poly([6, 5, 16, 12, 6, 19], true, false)
+            } else if (kind === "stop") {
+                rect(7, 7, 10, 10, true)
+            } else if (kind === "repeat") {
+                line(7, 8, 17, 8)
+                poly([15, 5, 18, 8, 15, 11], false, false)
+                line(17, 16, 7, 16)
+                poly([9, 13, 6, 16, 9, 19], false, false)
+            } else if (kind === "shuffle") {
+                line(5, 7, 9, 7)
+                line(9, 7, 16, 17)
+                line(16, 17, 20, 17)
+                poly([18, 14, 21, 17, 18, 20], false, false)
+                line(5, 17, 9, 17)
+                line(9, 17, 16, 7)
+                line(16, 7, 20, 7)
+                poly([18, 4, 21, 7, 18, 10], false, false)
+            } else if (kind === "remove") {
+                line(7, 7, 17, 17)
+                line(17, 7, 7, 17)
+            } else if (kind === "up") {
+                poly([7, 14, 12, 9, 17, 14], false, false)
+                line(12, 9, 12, 20)
+            } else if (kind === "down") {
+                poly([7, 10, 12, 15, 17, 10], false, false)
+                line(12, 4, 12, 15)
+            } else if (kind === "track") {
+                line(10, 5, 10, 17)
+                line(10, 5, 17, 7)
+                circle(7.5, 17, 2.5)
+            }
+        }
+    }
+
+    component IconButton: Button {
+        id: iconButton
+
+        property string iconName: ""
+        property string iconObjectName: ""
+        property string tooltip: ""
+
+        text: ""
+        padding: 0
+        implicitWidth: root.density
+        implicitHeight: root.density
+        ToolTip.visible: hovered && tooltip.length > 0
+        ToolTip.text: tooltip
+
+        contentItem: Item {
+            implicitWidth: iconButton.implicitWidth
+            implicitHeight: iconButton.implicitHeight
+
+            DrawnIcon {
+                objectName: iconButton.iconObjectName
+                kind: iconButton.iconName
+                strokeColor: iconButton.enabled
+                    ? (iconButton.checked ? "#0e5a43" : "#4d5a54")
+                    : "#9aa39e"
+                anchors.centerIn: parent
+                width: Math.min(iconButton.width, iconButton.height, 24)
+                height: width
+            }
+        }
     }
 
     component GlassFrame: Frame {
@@ -142,8 +333,11 @@ ApplicationWindow {
     }
 
     component NavPill: Button {
+        id: navPill
+
         property int pageIndex: 0
-        property string glyph: ""
+        property string iconName: ""
+        property string iconObjectName: ""
         property string label: ""
 
         objectName: ""
@@ -159,13 +353,18 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 2
 
-            Label {
-                text: glyph
-                horizontalAlignment: Text.AlignHCenter
-                font.pixelSize: 19
-                font.weight: Font.DemiBold
-                color: parent.parent.checked ? "#0e5a43" : "#4d5a54"
+            Item {
                 Layout.fillWidth: true
+                Layout.preferredHeight: 24
+
+                DrawnIcon {
+                    objectName: navPill.iconObjectName
+                    kind: navPill.iconName
+                    strokeColor: navPill.checked ? "#0e5a43" : "#4d5a54"
+                    anchors.centerIn: parent
+                    width: 22
+                    height: 22
+                }
             }
 
             Label {
@@ -173,7 +372,7 @@ ApplicationWindow {
                 visible: !root.compact
                 horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: 11
-                color: parent.parent.checked ? "#0e5a43" : "#6a756f"
+                color: navPill.checked ? "#0e5a43" : "#6a756f"
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -207,11 +406,18 @@ ApplicationWindow {
                 radius: 6
                 color: "#e5ece8"
 
-                Label {
+                Item {
                     anchors.centerIn: parent
-                    text: "♪"
-                    color: "#4f6258"
-                    font.pixelSize: 18
+                    width: 24
+                    height: 24
+
+                    DrawnIcon {
+                        kind: "track"
+                        strokeColor: "#4f6258"
+                        anchors.centerIn: parent
+                        width: 22
+                        height: 22
+                    }
                 }
             }
 
@@ -236,14 +442,13 @@ ApplicationWindow {
                 }
             }
 
-            Button {
+            IconButton {
                 objectName: "libraryTrackDownloadButton"
-                text: "⇩"
+                iconName: "download"
                 enabled: track_id.length > 0
                 implicitWidth: 42
                 implicitHeight: 36
-                ToolTip.visible: hovered
-                ToolTip.text: "Download"
+                tooltip: "Download"
                 onClicked: coreController.downloadTrack(track_id)
             }
         }
@@ -279,11 +484,19 @@ ApplicationWindow {
                     asynchronous: true
                 }
 
-                Label {
+                Item {
                     anchors.centerIn: parent
-                    text: "♪"
                     visible: artwork_url.length === 0
-                    color: "#4f6258"
+                    width: 24
+                    height: 24
+
+                    DrawnIcon {
+                        kind: "track"
+                        strokeColor: "#4f6258"
+                        anchors.centerIn: parent
+                        width: 22
+                        height: 22
+                    }
                 }
             }
 
@@ -308,12 +521,11 @@ ApplicationWindow {
                 }
             }
 
-            Button {
-                text: "♡"
+            IconButton {
+                iconName: "heart"
                 implicitWidth: 38
                 implicitHeight: 34
-                ToolTip.visible: hovered
-                ToolTip.text: "Favorite"
+                tooltip: "Favorite"
                 onClicked: coreController.favoriteTrack(track_id)
             }
         }
@@ -331,7 +543,7 @@ ApplicationWindow {
         width: ListView.view.width
         implicitHeight: root.compact ? 72 : 66
         enabled: result_id.length > 0
-        onClicked: coreController.addSearchResultToQueue(result_id)
+        onClicked: coreController.playSearchResult(result_id)
 
         contentItem: RowLayout {
             spacing: 10
@@ -372,26 +584,6 @@ ApplicationWindow {
                     visible: text.length > 0
                     Layout.fillWidth: true
                 }
-            }
-
-            Button {
-                text: "♡"
-                implicitWidth: 40
-                implicitHeight: 36
-                ToolTip.visible: hovered
-                ToolTip.text: "Favorite"
-                onClicked: coreController.favoriteSearchResult(result_id)
-            }
-
-            Button {
-                objectName: "searchResultDownloadButton"
-                text: "⇩"
-                enabled: result_id.length > 0
-                implicitWidth: 40
-                implicitHeight: 36
-                ToolTip.visible: hovered
-                ToolTip.text: "Download"
-                onClicked: coreController.downloadSearchResult(result_id)
             }
         }
     }
@@ -440,14 +632,13 @@ ApplicationWindow {
                 }
             }
 
-            Button {
+            IconButton {
                 objectName: "downloadRemoveButton"
-                text: "×"
+                iconName: "remove"
                 enabled: download_id.length > 0
                 implicitWidth: 40
                 implicitHeight: 36
-                ToolTip.visible: hovered
-                ToolTip.text: "Remove"
+                tooltip: "Remove"
                 onClicked: coreController.removeDownload(download_id)
             }
         }
@@ -497,30 +688,33 @@ ApplicationWindow {
                 spacing: 4
                 visible: !root.compact
 
-                Button {
+                IconButton {
                     objectName: "queueMoveUpButton"
-                    text: "↑"
+                    iconName: "up"
                     enabled: queue_item_id.length > 0 && queueDelegate.index > 0
                     implicitWidth: 36
                     implicitHeight: 28
+                    tooltip: "Move up"
                     onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index - 1)
                 }
 
-                Button {
+                IconButton {
                     objectName: "queueMoveDownButton"
-                    text: "↓"
+                    iconName: "down"
                     enabled: queue_item_id.length > 0 && queueDelegate.ListView.view !== null && queueDelegate.index < queueDelegate.ListView.view.count - 1
                     implicitWidth: 36
                     implicitHeight: 28
+                    tooltip: "Move down"
                     onClicked: coreController.moveQueueItem(queue_item_id, queueDelegate.index + 1)
                 }
             }
 
-            Button {
-                text: "×"
+            IconButton {
+                iconName: "remove"
                 enabled: queue_item_id.length > 0
                 implicitWidth: 40
                 implicitHeight: 36
+                tooltip: "Remove"
                 onClicked: coreController.removeQueueItem(queue_item_id)
             }
         }
@@ -723,22 +917,26 @@ ApplicationWindow {
                     id: searchField
                     objectName: "searchField"
                     placeholderText: "Search"
+                    text: root.searchPageQuery
                     Layout.fillWidth: true
                     implicitHeight: root.density
                     inputMethodHints: Qt.ImhNoPredictiveText
-                    onTextEdited: coreController.suggestOnline(text)
-                    onAccepted: coreController.searchOnline(text)
+                    onTextEdited: {
+                        root.searchPageQuery = text
+                        coreController.suggestOnline(text)
+                    }
+                    onAccepted: root.submitSearch(text, searchField)
                 }
 
-                Button {
+                IconButton {
                     objectName: "searchButton"
-                    text: "⌕"
+                    iconName: "search"
+                    iconObjectName: "searchSubmitIcon"
                     enabled: searchField.text.length > 0 && coreController.searchStatus !== "Searching"
                     implicitWidth: root.density
                     implicitHeight: root.density
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Search"
-                    onClicked: coreController.searchOnline(searchField.text)
+                    tooltip: "Search"
+                    onClicked: root.submitSearch(searchField.text, searchField)
                 }
             }
 
@@ -764,7 +962,7 @@ ApplicationWindow {
                     implicitHeight: 38
                     text: model.text
                     onClicked: {
-                        searchField.text = model.text
+                        root.searchPageQuery = model.text
                         coreController.acceptSearchSuggestion(model.text)
                     }
                 }
@@ -852,14 +1050,13 @@ ApplicationWindow {
                     detail: downloadsList.count + " items"
                 }
 
-                Button {
+                IconButton {
                     objectName: "downloadRemoveSelectedButton"
-                    text: "×"
+                    iconName: "remove"
                     enabled: root.selectedDownloadId.length > 0
                     implicitWidth: root.density
                     implicitHeight: root.density
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Remove selected"
+                    tooltip: "Remove selected"
                     onClicked: coreController.removeDownload(root.selectedDownloadId)
                 }
             }
@@ -1119,7 +1316,7 @@ ApplicationWindow {
         placeholderText: "Search"
         inputMethodHints: Qt.ImhNoPredictiveText
         onTextEdited: coreController.suggestOnline(text)
-        onAccepted: root.goSearch(text)
+        onAccepted: root.submitSearch(text, globalSearchField)
         background: Rectangle {
             radius: 8
             color: "#e8ffffff"
@@ -1150,21 +1347,24 @@ ApplicationWindow {
             NavPill {
                 objectName: "floatingNavHomeButton"
                 pageIndex: 0
-                glyph: "⌂"
+                iconName: "home"
+                iconObjectName: "floatingNavHomeIcon"
                 label: "Home"
             }
 
             NavPill {
                 objectName: "floatingNavLibraryButton"
                 pageIndex: 1
-                glyph: "▤"
+                iconName: "library"
+                iconObjectName: "floatingNavLibraryIcon"
                 label: "Library"
             }
 
             NavPill {
                 objectName: "floatingNavSettingsButton"
                 pageIndex: 3
-                glyph: "☷"
+                iconName: "settings"
+                iconObjectName: "floatingNavSettingsIcon"
                 label: "Settings"
             }
         }
@@ -1279,7 +1479,7 @@ ApplicationWindow {
         modal: true
         focus: true
         width: Math.min(root.width - 28, 560)
-        height: Math.min(root.height - 48, 520)
+        height: Math.min(root.height - 48, root.compact ? 660 : 520)
         x: Math.round((root.width - width) / 2)
         y: Math.round((root.height - height) / 2)
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -1338,6 +1538,35 @@ ApplicationWindow {
                 elide: Text.ElideRight
             }
 
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 8
+
+                IconButton {
+                    objectName: "nowPlayingFavoriteButton"
+                    iconName: "heart"
+                    enabled: coreController.playbackTrackId.length > 0
+                    tooltip: "Favorite"
+                    onClicked: coreController.favoriteTrack(coreController.playbackTrackId)
+                }
+
+                IconButton {
+                    objectName: "nowPlayingDownloadButton"
+                    iconName: "download"
+                    enabled: coreController.playbackTrackId.length > 0
+                    tooltip: "Download"
+                    onClicked: coreController.downloadTrack(coreController.playbackTrackId)
+                }
+
+                IconButton {
+                    objectName: "nowPlayingQueueButton"
+                    iconName: "queue"
+                    enabled: coreController.playbackTrackId.length > 0
+                    tooltip: "Add to Queue"
+                    onClicked: coreController.addTrackToQueue(coreController.playbackTrackId)
+                }
+            }
+
             Slider {
                 from: 0
                 to: Math.max(1, coreController.playbackDurationMs)
@@ -1347,22 +1576,30 @@ ApplicationWindow {
             }
 
             RowLayout {
-                Layout.alignment: Qt.AlignHCenter
-                spacing: 8
+                id: nowPlayingControls
 
-                Button {
+                property int controlSize: root.compact ? 44 : root.density
+
+                Layout.alignment: Qt.AlignHCenter
+                spacing: root.compact ? 6 : 8
+
+                IconButton {
                     objectName: "miniPreviousButton"
-                    text: "⏮"
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    iconName: "previous"
+                    iconObjectName: "miniPreviousIcon"
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: "Previous"
                     onClicked: coreController.playPreviousQueuedTrack()
                 }
 
-                Button {
+                IconButton {
                     objectName: "miniPlayPauseButton"
-                    text: coreController.playbackState === "playing" ? "⏸" : "▶"
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    iconName: coreController.playbackState === "playing" ? "pause" : "play"
+                    iconObjectName: "miniPlayPauseIcon"
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: coreController.playbackState === "playing" ? "Pause" : "Play"
                     onClicked: {
                         if (coreController.playbackState === "playing") {
                             coreController.pausePlayback()
@@ -1374,39 +1611,47 @@ ApplicationWindow {
                     }
                 }
 
-                Button {
+                IconButton {
                     objectName: "miniNextButton"
-                    text: "⏭"
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    iconName: "next"
+                    iconObjectName: "miniNextIcon"
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: "Next"
                     onClicked: coreController.playNextQueuedTrack()
                 }
 
-                Button {
+                IconButton {
                     objectName: "miniStopButton"
-                    text: "■"
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    iconName: "stop"
+                    iconObjectName: "miniStopIcon"
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: "Stop"
                     onClicked: coreController.stopPlayback()
                 }
 
-                Button {
+                IconButton {
                     objectName: "miniRepeatButton"
-                    text: "↻"
+                    iconName: "repeat"
+                    iconObjectName: "miniRepeatIcon"
                     checkable: true
                     checked: coreController.repeatMode !== "off"
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: "Repeat"
                     onClicked: coreController.toggleRepeatMode()
                 }
 
-                Button {
+                IconButton {
                     objectName: "miniShuffleButton"
-                    text: "⇄"
+                    iconName: "shuffle"
+                    iconObjectName: "miniShuffleIcon"
                     checkable: true
                     checked: coreController.shuffleEnabled
-                    implicitWidth: root.density
-                    implicitHeight: root.density
+                    implicitWidth: nowPlayingControls.controlSize
+                    implicitHeight: nowPlayingControls.controlSize
+                    tooltip: "Shuffle"
                     onClicked: coreController.toggleShuffle()
                 }
             }

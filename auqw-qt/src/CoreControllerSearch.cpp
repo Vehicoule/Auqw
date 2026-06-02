@@ -89,6 +89,40 @@ void CoreController::addSearchResultToQueue(const QString& resultId) {
     refreshTracksFromCore();
 }
 
+void CoreController::playSearchResult(const QString& resultId) {
+    const std::optional<OnlineTrackResult> result = searchResultById(resultId);
+    if (!result.has_value()) {
+        setCoreStatus(QStringLiteral("Search result unavailable"));
+        return;
+    }
+
+    const std::optional<QString> trackId = upsertTrackForSearchResult(*result);
+    if (!trackId.has_value()) {
+        return;
+    }
+
+    const CommandResult queued = invokeCommand(
+        QStringLiteral("queue.add.search_result.play"),
+        QStringLiteral("queue.add"),
+        QJsonObject{{QStringLiteral("track_id"), *trackId}});
+    if (!queued.ok) {
+        setCoreStatus(queued.error);
+        return;
+    }
+
+    const QString queueItemId = queued.data.value(QStringLiteral("item")).toObject().value(QStringLiteral("id")).toString();
+    if (queueItemId.isEmpty()) {
+        setCoreStatus(QStringLiteral("Queue item unavailable"));
+        return;
+    }
+
+    refreshTracksFromCore();
+    if (!refreshQueueFromCore()) {
+        return;
+    }
+    playQueueItem(queueItemId);
+}
+
 void CoreController::favoriteSearchResult(const QString& resultId) {
     const std::optional<OnlineTrackResult> result = searchResultById(resultId);
     if (!result.has_value()) {

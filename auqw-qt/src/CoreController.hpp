@@ -118,6 +118,7 @@ public:
     Q_INVOKABLE void suggestOnline(const QString& query);
     Q_INVOKABLE void acceptSearchSuggestion(const QString& suggestion);
     Q_INVOKABLE void addSearchResultToQueue(const QString& resultId);
+    Q_INVOKABLE void playSearchResult(const QString& resultId);
     Q_INVOKABLE void favoriteSearchResult(const QString& resultId);
     Q_INVOKABLE void favoriteTrack(const QString& trackId);
     Q_INVOKABLE void unfavoriteTrack(const QString& trackId);
