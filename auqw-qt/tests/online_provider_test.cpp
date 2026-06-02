@@ -5,6 +5,8 @@
 #include "../src/YoutubeUmpParser.hpp"
 
 #include <QFile>
+#include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStringView>
 #include <QTcpServer>
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <thread>
 
 namespace {
@@ -31,6 +34,44 @@ QString readTextFile(QStringView relativePath) {
     return QString::fromUtf8(file.readAll());
 }
 
+void writeHttpResponse(QTcpSocket* socket, const QByteArray& payload, const QByteArray& contentType = QByteArrayLiteral("application/json")) {
+    socket->write("HTTP/1.1 200 OK\r\n");
+    socket->write("Content-Type: ");
+    socket->write(contentType);
+    socket->write("\r\nContent-Length: ");
+    socket->write(QByteArray::number(payload.size()));
+    socket->write("\r\nConnection: close\r\n\r\n");
+    socket->write(payload);
+    socket->disconnectFromHost();
+}
+
+bool httpRequestComplete(const QByteArray& request) {
+    const qsizetype headerEnd = request.indexOf("\r\n\r\n");
+    if (headerEnd < 0) {
+        return false;
+    }
+
+    const QList<QByteArray> lines = request.left(headerEnd).split('\n');
+    qsizetype contentLength = 0;
+    for (QByteArray line : lines) {
+        line = line.trimmed();
+        if (line.toLower().startsWith("content-length:")) {
+            contentLength = line.mid(line.indexOf(':') + 1).trimmed().toLongLong();
+        }
+    }
+    return request.size() >= headerEnd + 4 + contentLength;
+}
+
+QByteArray requestTarget(const QByteArray& request) {
+    const QList<QByteArray> firstLineParts = request.left(request.indexOf('\n')).trimmed().split(' ');
+    return firstLineParts.size() >= 2 ? firstLineParts.at(1) : QByteArray{};
+}
+
+QByteArray requestBody(const QByteArray& request) {
+    const qsizetype headerEnd = request.indexOf("\r\n\r\n");
+    return headerEnd < 0 ? QByteArray{} : request.mid(headerEnd + 4);
+}
+
 } // namespace
 
 class OnlineProviderTest final : public QObject {
@@ -38,7 +79,11 @@ class OnlineProviderTest final : public QObject {
 
 private slots:
     void innertubeCapabilitiesEnableDownloads();
+    void providerSourceDoesNotContainHardcodedGoogleApiKey();
+    void searchFetchesBootstrapKeyBeforePostingProviderRequest();
+    void suggestionsFetchBootstrapKeyBeforePostingProviderRequest();
     void parsesTrackShelfFixture();
+    void parsesTrackRendererWithWatchEndpointFixture();
     void parsesSearchSuggestionsFixture();
     void parsesTrackMetadataFixture();
     void ignoresMalformedItems();
@@ -72,6 +117,151 @@ void OnlineProviderTest::innertubeCapabilitiesEnableDownloads() {
         QVERIFY(capabilities.metadata);
         QVERIFY(capabilities.playback);
         QVERIFY(capabilities.downloads);
+}
+
+void OnlineProviderTest::providerSourceDoesNotContainHardcodedGoogleApiKey() {
+        const QString providerSource = readTextFile(u"auqw-qt/src/InnertubeProvider.cpp");
+        const QRegularExpression googleApiKeyPattern(QStringLiteral("AI" "za[0-9A-Za-z_-]{20,}"));
+
+        QVERIFY2(!providerSource.isEmpty(), "InnertubeProvider.cpp should be readable");
+        QVERIFY2(!providerSource.contains(googleApiKeyPattern),
+            "InnertubeProvider.cpp must not ship hardcoded Google API keys");
+}
+
+void OnlineProviderTest::searchFetchesBootstrapKeyBeforePostingProviderRequest() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QVector<QByteArray> requestTargets;
+        QVector<QByteArray> requestBodies;
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&] {
+            QTcpSocket* socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            const auto request = std::make_shared<QByteArray>();
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [&, socket, request] {
+                request->append(socket->readAll());
+                if (!httpRequestComplete(*request)) {
+                    return;
+                }
+
+                const QByteArray target = requestTarget(*request);
+                requestTargets.push_back(target);
+                requestBodies.push_back(requestBody(*request));
+                if (target == QByteArrayLiteral("/?ucbcb=1")) {
+                    writeHttpResponse(socket,
+                        QByteArrayLiteral("<script>\"INNERTUBE_API_KEY\":\"test-bootstrap-key\",\"INNERTUBE_CLIENT_VERSION\":\"1.20260602.00.00\"</script>"),
+                        QByteArrayLiteral("text/html"));
+                    return;
+                }
+
+                QVERIFY(target.startsWith(QByteArrayLiteral("/youtubei/v1/search?")));
+                QVERIFY(target.contains(QByteArrayLiteral("key=test-bootstrap-key")));
+                writeHttpResponse(socket, R"json(
+{
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicShelfRenderer": {
+            "contents": [
+              {
+                "musicResponsiveListItemRenderer": {
+                  "playlistItemData": { "videoId": "video-bootstrap" },
+                  "flexColumns": [
+                    {
+                      "musicResponsiveListItemFlexColumnRenderer": {
+                        "text": { "runs": [ { "text": "Bootstrap Song" } ] }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+)json");
+            });
+        });
+
+        qputenv("AUQW_YTMUSIC_BASE_URL", QStringLiteral("http://127.0.0.1:%1/").arg(server.serverPort()).toUtf8());
+        const auto cleanupBaseUrl = qScopeGuard([] { qunsetenv("AUQW_YTMUSIC_BASE_URL"); });
+        InnertubeProvider provider;
+        QSignalSpy succeeded(&provider, &OnlineProvider::searchSucceeded);
+        QSignalSpy failed(&provider, &OnlineProvider::searchFailed);
+
+        provider.searchTracks(QStringLiteral("bootstrap query"));
+
+        QTRY_COMPARE_WITH_TIMEOUT(succeeded.count(), 1, 5000);
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(requestTargets.size(), 2);
+        QCOMPARE(requestTargets.first(), QByteArrayLiteral("/?ucbcb=1"));
+        QVERIFY(requestTargets.last().startsWith(QByteArrayLiteral("/youtubei/v1/search?")));
+        QVERIFY(requestBodies.last().contains(QByteArrayLiteral("\"clientVersion\":\"1.20260602.00.00\"")));
+}
+
+void OnlineProviderTest::suggestionsFetchBootstrapKeyBeforePostingProviderRequest() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QVector<QByteArray> requestTargets;
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&] {
+            QTcpSocket* socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            const auto request = std::make_shared<QByteArray>();
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [&, socket, request] {
+                request->append(socket->readAll());
+                if (!httpRequestComplete(*request)) {
+                    return;
+                }
+
+                const QByteArray target = requestTarget(*request);
+                requestTargets.push_back(target);
+                if (target == QByteArrayLiteral("/?ucbcb=1")) {
+                    writeHttpResponse(socket,
+                        QByteArrayLiteral("<script>\"INNERTUBE_API_KEY\":\"test-bootstrap-key\",\"INNERTUBE_CLIENT_VERSION\":\"1.20260602.00.00\"</script>"),
+                        QByteArrayLiteral("text/html"));
+                    return;
+                }
+
+                QVERIFY(target.startsWith(QByteArrayLiteral("/youtubei/v1/music/get_search_suggestions?")));
+                QVERIFY(target.contains(QByteArrayLiteral("key=test-bootstrap-key")));
+                writeHttpResponse(socket, R"json(
+{
+  "contents": [
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {
+            "searchSuggestionRenderer": {
+              "suggestion": { "runs": [ { "text": "bootstrap query" } ] }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+)json");
+            });
+        });
+
+        qputenv("AUQW_YTMUSIC_BASE_URL", QStringLiteral("http://127.0.0.1:%1/").arg(server.serverPort()).toUtf8());
+        const auto cleanupBaseUrl = qScopeGuard([] { qunsetenv("AUQW_YTMUSIC_BASE_URL"); });
+        InnertubeProvider provider;
+        QSignalSpy succeeded(&provider, &OnlineProvider::suggestionsSucceeded);
+        QSignalSpy failed(&provider, &OnlineProvider::suggestionsFailed);
+
+        provider.suggestTracks(QStringLiteral("bootstrap"));
+
+        QTRY_COMPARE_WITH_TIMEOUT(succeeded.count(), 1, 5000);
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(requestTargets.size(), 2);
+        QCOMPARE(requestTargets.first(), QByteArrayLiteral("/?ucbcb=1"));
+        QVERIFY(requestTargets.last().startsWith(QByteArrayLiteral("/youtubei/v1/music/get_search_suggestions?")));
 }
 
 void OnlineProviderTest::parsesTrackShelfFixture() {
@@ -153,6 +343,80 @@ void OnlineProviderTest::parsesTrackShelfFixture() {
         QCOMPARE(parsed.tracks.first().artist, QStringLiteral("Aster Band"));
         QCOMPARE(parsed.tracks.first().album, QStringLiteral("Blue Album"));
         QCOMPARE(parsed.tracks.first().durationMs, 213000);
+        QCOMPARE(parsed.tracks.first().artworkUrl, QStringLiteral("https://img.example/large.jpg"));
+}
+
+void OnlineProviderTest::parsesTrackRendererWithWatchEndpointFixture() {
+        const QByteArray payload = R"json(
+{
+  "contents": [
+    {
+      "musicResponsiveListItemRenderer": {
+        "thumbnail": {
+          "musicThumbnailRenderer": {
+            "thumbnail": {
+              "thumbnails": [
+                { "url": "https://img.example/small.jpg" },
+                { "url": "https://img.example/large.jpg" }
+              ]
+            }
+          }
+        },
+        "flexColumns": [
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+                "runs": [
+                  {
+                    "text": "Around the World",
+                    "navigationEndpoint": {
+                      "watchEndpoint": { "videoId": "video-watch-endpoint" }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+                "runs": [
+                  { "text": "Daft Punk" },
+                  { "text": " • " },
+                  { "text": "Homework" },
+                  { "text": " • " },
+                  { "text": "7:10" }
+                ]
+              }
+            }
+          }
+        ],
+        "overlay": {
+          "musicItemThumbnailOverlayRenderer": {
+            "content": {
+              "musicPlayButtonRenderer": {
+                "playNavigationEndpoint": {
+                  "watchEndpoint": { "videoId": "video-watch-endpoint" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+)json";
+
+        const OnlineSearchParseResult parsed = InnertubeProvider::parseTrackSearchResults(payload);
+
+        QVERIFY2(parsed.ok, qPrintable(parsed.errorMessage));
+        QCOMPARE(parsed.tracks.size(), 1);
+        QCOMPARE(parsed.tracks.first().providerTrackId, QStringLiteral("video-watch-endpoint"));
+        QCOMPARE(parsed.tracks.first().title, QStringLiteral("Around the World"));
+        QCOMPARE(parsed.tracks.first().artist, QStringLiteral("Daft Punk"));
+        QCOMPARE(parsed.tracks.first().album, QStringLiteral("Homework"));
+        QCOMPARE(parsed.tracks.first().durationMs, 430000);
         QCOMPARE(parsed.tracks.first().artworkUrl, QStringLiteral("https://img.example/large.jpg"));
 }
 

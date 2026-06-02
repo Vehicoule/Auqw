@@ -19,6 +19,7 @@ namespace {
 
 constexpr auto providerId = "ytmusic";
 constexpr auto modernBrowserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+constexpr auto defaultSearchClientVersion = "1.20240522.01.00";
 
 struct YoutubeWebBootstrap {
     bool ok = false;
@@ -28,6 +29,13 @@ struct YoutubeWebBootstrap {
     QString visitorData;
     QString videoPlaybackUstreamerConfig;
     int signatureTimestamp = 0;
+    QString errorMessage;
+};
+
+struct InnertubeBootstrap {
+    bool ok = false;
+    QString apiKey;
+    QString clientVersion;
     QString errorMessage;
 };
 
@@ -61,6 +69,19 @@ void logSearchNetworkFailure(const QNetworkReply* reply, int statusCode) {
                          << "httpStatus=" << statusCode;
 }
 
+void logBootstrapNetworkFailure(const QNetworkReply* reply, int statusCode) {
+    qWarning().noquote() << "Auqw bootstrap network error="
+                         << (reply == nullptr ? QNetworkReply::UnknownNetworkError : reply->error())
+                         << "errorString="
+                         << (reply == nullptr ? QStringLiteral("missing QNetworkReply") : reply->errorString())
+                         << "httpStatus=" << statusCode;
+}
+
+void logBootstrapParseFailure(qsizetype payloadSize) {
+    qWarning().noquote() << "Auqw bootstrap parse failed"
+                         << "payloadBytes=" << payloadSize;
+}
+
 void logStreamResolveChoice(const char* event, const OnlineStreamResult& stream) {
     if (!playbackTraceEnabled()) {
         return;
@@ -83,17 +104,57 @@ void logStreamResolveChoice(const char* event, const OnlineStreamResult& stream)
 }
 #else
 void logSearchNetworkFailure(const QNetworkReply*, int) {}
+void logBootstrapNetworkFailure(const QNetworkReply*, int) {}
+void logBootstrapParseFailure(qsizetype) {}
 void logStreamResolveChoice(const char*, const OnlineStreamResult&) {}
 #endif
 
-QJsonObject searchContext() {
+QJsonObject searchContext(const QString& clientVersion = {}) {
+    const QString normalizedClientVersion = clientVersion.trimmed().isEmpty()
+        ? QString::fromLatin1(defaultSearchClientVersion)
+        : clientVersion.trimmed();
     return QJsonObject{
         {QStringLiteral("client"),
          QJsonObject{
              {QStringLiteral("clientName"), QStringLiteral("WEB_REMIX")},
-             {QStringLiteral("clientVersion"), QStringLiteral("1.20240522.01.00")},
+             {QStringLiteral("clientVersion"), normalizedClientVersion},
          }},
     };
+}
+
+QUrl youtubeMusicBaseUrl() {
+    const QString configuredBaseUrl = qEnvironmentVariable("AUQW_YTMUSIC_BASE_URL").trimmed();
+    if (!configuredBaseUrl.isEmpty()) {
+        QUrl url(configuredBaseUrl);
+        if (url.isValid() && !url.scheme().isEmpty() && !url.host().isEmpty()) {
+            if (url.path().isEmpty()) {
+                url.setPath(QStringLiteral("/"));
+            }
+            return url;
+        }
+    }
+
+    return QUrl(QStringLiteral("https://music.youtube.com/"));
+}
+
+QUrl youtubeMusicBootstrapUrl() {
+    QUrl url = youtubeMusicBaseUrl();
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("ucbcb"), QStringLiteral("1"));
+    url.setQuery(query);
+    return url;
+}
+
+QUrl innertubeEndpointUrl(const QString& endpoint, const QString& apiKey) {
+    QUrl url = youtubeMusicBaseUrl();
+    url.setPath(QStringLiteral("/youtubei/v1/") + endpoint);
+
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("prettyPrint"), QStringLiteral("false"));
+    query.addQueryItem(QStringLiteral("key"), apiKey);
+    url.setQuery(query);
+    return url;
 }
 
 QNetworkRequest innertubeJsonRequest(const QUrl& url) {
@@ -117,6 +178,27 @@ QString capturedText(const QByteArray& payload, const QString& pattern) {
     const QRegularExpression expression(pattern);
     const QRegularExpressionMatch match = expression.match(QString::fromUtf8(payload));
     return match.hasMatch() ? match.captured(1) : QString{};
+}
+
+InnertubeBootstrap parseInnertubeBootstrap(const QByteArray& payload) {
+    const QString apiKey = capturedText(payload, QStringLiteral("\\\"INNERTUBE_API_KEY\\\"\\s*:\\s*\\\"([^\\\"]+)"));
+    if (apiKey.isEmpty()) {
+        return {
+            .ok = false,
+            .errorMessage = QStringLiteral("Provider returned invalid bootstrap data."),
+        };
+    }
+
+    QString clientVersion = capturedText(payload, QStringLiteral("\\\"INNERTUBE_CLIENT_VERSION\\\"\\s*:\\s*\\\"([^\\\"]+)"));
+    if (clientVersion.isEmpty()) {
+        clientVersion = QString::fromLatin1(defaultSearchClientVersion);
+    }
+
+    return {
+        .ok = true,
+        .apiKey = apiKey,
+        .clientVersion = clientVersion,
+    };
 }
 
 QByteArray extractJsonObject(const QByteArray& payload, const QByteArray& marker) {
@@ -209,10 +291,20 @@ void InnertubeProvider::searchTracks(const QString& query) {
         return;
     }
 
-    QNetworkRequest request = innertubeJsonRequest(QUrl(QStringLiteral("https://music.youtube.com/youtubei/v1/search?prettyPrint=false&key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")));
+    withInnertubeBootstrap(
+        [this, trimmedQuery](const QString& apiKey, const QString& clientVersion) {
+            postSearchRequest(trimmedQuery, apiKey, clientVersion);
+        },
+        [this, trimmedQuery] {
+            emit searchFailed(trimmedQuery, QStringLiteral("Search unavailable. Try again."));
+        });
+}
+
+void InnertubeProvider::postSearchRequest(const QString& trimmedQuery, const QString& apiKey, const QString& clientVersion) {
+    QNetworkRequest request = innertubeJsonRequest(innertubeEndpointUrl(QStringLiteral("search"), apiKey));
 
     const QJsonObject body{
-        {QStringLiteral("context"), searchContext()},
+        {QStringLiteral("context"), searchContext(clientVersion)},
         {QStringLiteral("query"), trimmedQuery},
         {QStringLiteral("params"), QStringLiteral("EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D")},
     };
@@ -247,9 +339,19 @@ void InnertubeProvider::suggestTracks(const QString& query) {
         return;
     }
 
-    QNetworkRequest request = innertubeJsonRequest(QUrl(QStringLiteral("https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false&key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")));
+    withInnertubeBootstrap(
+        [this, trimmedQuery](const QString& apiKey, const QString& clientVersion) {
+            postSuggestionsRequest(trimmedQuery, apiKey, clientVersion);
+        },
+        [this, trimmedQuery] {
+            emit suggestionsFailed(trimmedQuery, QStringLiteral("Suggestions unavailable. Try again."));
+        });
+}
+
+void InnertubeProvider::postSuggestionsRequest(const QString& trimmedQuery, const QString& apiKey, const QString& clientVersion) {
+    QNetworkRequest request = innertubeJsonRequest(innertubeEndpointUrl(QStringLiteral("music/get_search_suggestions"), apiKey));
     const QJsonObject body{
-        {QStringLiteral("context"), searchContext()},
+        {QStringLiteral("context"), searchContext(clientVersion)},
         {QStringLiteral("input"), trimmedQuery},
     };
 
@@ -272,6 +374,46 @@ void InnertubeProvider::suggestTracks(const QString& query) {
         }
 
         emit suggestionsSucceeded(trimmedQuery, parsed.suggestions);
+    });
+}
+
+void InnertubeProvider::withInnertubeBootstrap(
+    std::function<void(const QString& apiKey, const QString& clientVersion)> onReady,
+    std::function<void()> onFailed) {
+    const QString configuredApiKey = qEnvironmentVariable("AUQW_INNERTUBE_API_KEY").trimmed();
+    if (!configuredApiKey.isEmpty()) {
+        onReady(configuredApiKey, QString::fromLatin1(defaultSearchClientVersion));
+        return;
+    }
+
+    if (!innertubeApiKey_.isEmpty()) {
+        onReady(innertubeApiKey_, innertubeClientVersion_);
+        return;
+    }
+
+    QNetworkReply* reply = network_.get(youtubeWatchRequest(youtubeMusicBootstrapUrl()));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, onReady = std::move(onReady), onFailed = std::move(onFailed)]() mutable {
+        const QByteArray payload = reply->readAll();
+        const bool networkFailed = reply->error() != QNetworkReply::NoError;
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+
+        if (networkFailed || statusCode >= 400) {
+            logBootstrapNetworkFailure(reply, statusCode);
+            onFailed();
+            return;
+        }
+
+        const InnertubeBootstrap bootstrap = parseInnertubeBootstrap(payload);
+        if (!bootstrap.ok) {
+            logBootstrapParseFailure(payload.size());
+            onFailed();
+            return;
+        }
+
+        innertubeApiKey_ = bootstrap.apiKey;
+        innertubeClientVersion_ = bootstrap.clientVersion;
+        onReady(innertubeApiKey_, innertubeClientVersion_);
     });
 }
 

@@ -127,17 +127,66 @@ QStringList splitDetailText(const QString& text) {
     return parts;
 }
 
-std::optional<OnlineTrackResult> trackFromRenderer(const QJsonObject& renderer) {
-    const QString videoId = renderer.value(QStringLiteral("playlistItemData"))
+QString firstWatchEndpointVideoId(const QJsonValue& value) {
+    if (value.isArray()) {
+        const QJsonArray array = value.toArray();
+        for (const QJsonValue& child : array) {
+            const QString videoId = firstWatchEndpointVideoId(child);
+            if (!videoId.isEmpty()) {
+                return videoId;
+            }
+        }
+        return {};
+    }
+
+    if (!value.isObject()) {
+        return {};
+    }
+
+    const QJsonObject object = value.toObject();
+    const QString videoId = object.value(QStringLiteral("watchEndpoint"))
                                 .toObject()
                                 .value(QStringLiteral("videoId"))
                                 .toString();
+    if (!videoId.isEmpty()) {
+        return videoId;
+    }
+
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        const QString childVideoId = firstWatchEndpointVideoId(it.value());
+        if (!childVideoId.isEmpty()) {
+            return childVideoId;
+        }
+    }
+
+    return {};
+}
+
+QString videoIdFromRenderer(const QJsonObject& renderer) {
+    const QString playlistVideoId = renderer.value(QStringLiteral("playlistItemData"))
+                                      .toObject()
+                                      .value(QStringLiteral("videoId"))
+                                      .toString();
+    return playlistVideoId.isEmpty() ? firstWatchEndpointVideoId(renderer) : playlistVideoId;
+}
+
+std::optional<OnlineTrackResult> trackFromRenderer(const QJsonObject& renderer) {
+    const QString videoId = videoIdFromRenderer(renderer);
     const QString title = flexColumnText(renderer, 0);
     if (videoId.isEmpty() || title.isEmpty()) {
         return std::nullopt;
     }
 
-    const QStringList detailParts = splitDetailText(flexColumnText(renderer, 1));
+    QStringList detailParts = splitDetailText(flexColumnText(renderer, 1));
+    qint64 durationMs = durationFromText(fixedColumnText(renderer, 0));
+    if (durationMs == 0 && !detailParts.isEmpty()) {
+        const qint64 detailDurationMs = durationFromText(detailParts.last());
+        if (detailDurationMs > 0) {
+            durationMs = detailDurationMs;
+            detailParts.removeLast();
+        }
+    }
+
     const QString artist = detailParts.isEmpty() ? QString{} : detailParts.first();
     const QString album = detailParts.size() > 1 ? detailParts.last() : QString{};
 
@@ -148,7 +197,7 @@ std::optional<OnlineTrackResult> trackFromRenderer(const QJsonObject& renderer) 
         .title = title,
         .artist = artist,
         .album = album,
-        .durationMs = durationFromText(fixedColumnText(renderer, 0)),
+        .durationMs = durationMs,
         .artworkUrl = lastThumbnailUrl(renderer),
     };
 }

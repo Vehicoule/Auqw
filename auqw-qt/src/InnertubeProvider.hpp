@@ -4,6 +4,8 @@
 
 #include <QNetworkAccessManager>
 
+#include <functional>
+
 class InnertubeProvider final : public OnlineProvider {
     Q_OBJECT
 
@@ -23,5 +25,11 @@ public:
     static OnlineStreamResolveResult parseStreamResolution(const QByteArray& payload, const QString& providerTrackId);
 
 private:
+    void withInnertubeBootstrap(std::function<void(const QString& apiKey, const QString& clientVersion)> onReady, std::function<void()> onFailed);
+    void postSearchRequest(const QString& trimmedQuery, const QString& apiKey, const QString& clientVersion);
+    void postSuggestionsRequest(const QString& trimmedQuery, const QString& apiKey, const QString& clientVersion);
+
     QNetworkAccessManager network_;
+    QString innertubeApiKey_;
+    QString innertubeClientVersion_;
 };
