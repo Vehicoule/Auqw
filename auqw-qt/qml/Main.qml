@@ -36,9 +36,24 @@ ApplicationWindow {
     property int currentPageIndex: 0
     property string selectedDownloadId: ""
     property string searchPageQuery: ""
+    property string submittedSearchQuery: ""
+    property bool focusSearchFieldOnPage: false
 
     function goTo(index) {
         currentPageIndex = index
+    }
+
+    function openSearchPage(query, focusField) {
+        searchPageQuery = query
+        if (focusField) {
+            focusSearchFieldOnPage = true
+        }
+        currentPageIndex = 2
+    }
+
+    function updateSearchQuery(query) {
+        searchPageQuery = query
+        coreController.suggestOnline(query)
     }
 
     function submitSearch(query, sourceField) {
@@ -52,14 +67,12 @@ ApplicationWindow {
         }
         currentPageIndex = 2
         searchPageQuery = trimmedQuery
-        if (globalSearchField.text.length > 0) {
-            globalSearchField.text = ""
-        }
+        submittedSearchQuery = trimmedQuery
         coreController.searchOnline(trimmedQuery)
     }
 
     function goSearch(query) {
-        submitSearch(query, null)
+        openSearchPage(query, true)
     }
 
     function playbackDetailText() {
@@ -898,7 +911,10 @@ ApplicationWindow {
     }
 
     component SearchPage: Item {
+        id: searchPage
         objectName: "searchPage"
+        readonly property string trimmedQuery: root.searchPageQuery.trim()
+        readonly property bool submittedQueryActive: root.submittedSearchQuery.length > 0 && root.submittedSearchQuery === trimmedQuery
 
         ColumnLayout {
             anchors.fill: parent
@@ -922,17 +938,35 @@ ApplicationWindow {
                     implicitHeight: root.density
                     inputMethodHints: Qt.ImhNoPredictiveText
                     onTextEdited: {
-                        root.searchPageQuery = text
-                        coreController.suggestOnline(text)
+                        root.updateSearchQuery(text)
                     }
                     onAccepted: root.submitSearch(text, searchField)
+
+                    function takePendingSearchFocus() {
+                        if (root.currentPageIndex === 2 && root.focusSearchFieldOnPage) {
+                            forceActiveFocus()
+                            root.focusSearchFieldOnPage = false
+                        }
+                    }
+
+                    Component.onCompleted: takePendingSearchFocus()
+
+                    Connections {
+                        target: root
+                        function onCurrentPageIndexChanged() {
+                            searchField.takePendingSearchFocus()
+                        }
+                        function onFocusSearchFieldOnPageChanged() {
+                            searchField.takePendingSearchFocus()
+                        }
+                    }
                 }
 
                 IconButton {
                     objectName: "searchButton"
                     iconName: "search"
                     iconObjectName: "searchSubmitIcon"
-                    enabled: searchField.text.length > 0 && coreController.searchStatus !== "Searching"
+                    enabled: searchField.text.trim().length > 0 && coreController.searchStatus !== "Searching"
                     implicitWidth: root.density
                     implicitHeight: root.density
                     tooltip: "Search"
@@ -953,7 +987,7 @@ ApplicationWindow {
                 objectName: "searchSuggestionsList"
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Math.min(count * 38, 128) : 0
-                visible: count > 0
+                visible: count > 0 && searchPage.trimmedQuery.length > 0 && !searchPage.submittedQueryActive
                 clip: true
                 model: coreController.searchSuggestionsModel
                 delegate: ItemDelegate {
@@ -963,6 +997,7 @@ ApplicationWindow {
                     text: model.text
                     onClicked: {
                         root.searchPageQuery = model.text
+                        root.submittedSearchQuery = model.text.trim()
                         coreController.acceptSearchSuggestion(model.text)
                     }
                 }
@@ -976,6 +1011,7 @@ ApplicationWindow {
                     id: searchResultsList
                     objectName: "searchResultsList"
                     anchors.fill: parent
+                    visible: searchPage.submittedQueryActive
                     clip: true
                     model: coreController.searchResultsModel
                     delegate: SearchResultDelegate {}
@@ -983,9 +1019,9 @@ ApplicationWindow {
 
                 EmptyState {
                     anchors.fill: parent
-                    title: coreController.searchStatus === "Searching" ? "Searching" : searchField.text.length > 0 ? "No results" : "No query"
-                    detail: coreController.searchStatus === "Disabled" ? "Online source is disabled" : "Search is ready"
-                    visible: searchResultsList.count === 0
+                    title: coreController.searchStatus === "Searching" ? "Searching" : searchPage.trimmedQuery.length > 0 ? "No results" : "No query"
+                    detail: coreController.searchStatus === "Disabled" ? "Online source is disabled" : searchPage.submittedQueryActive ? "Search is ready" : "Suggestions appear as you type"
+                    visible: searchResultsList.count === 0 || !searchPage.submittedQueryActive
                 }
             }
         }
@@ -1274,7 +1310,7 @@ ApplicationWindow {
             id: mainStack
             objectName: "mainStack"
             anchors.fill: parent
-            anchors.rightMargin: !root.compact ? root.queuePanelWidth + root.pageGap : 0
+            anchors.rightMargin: !root.compact && root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0
             currentIndex: root.currentPageIndex
 
             HomePage {}
@@ -1286,7 +1322,7 @@ ApplicationWindow {
         GlassFrame {
             id: queuePanel
             objectName: "queuePanel"
-            visible: !root.compact
+            visible: !root.compact && root.currentPageIndex !== 2
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.right: parent.right
@@ -1307,6 +1343,7 @@ ApplicationWindow {
     Row {
         id: globalSearchBar
         objectName: "globalSearchBar"
+        visible: root.currentPageIndex === 0 || root.currentPageIndex === 1
         width: root.compact ? Math.min(root.width - 28, 318) : 352
         height: root.density
         anchors.top: parent.top
@@ -1322,8 +1359,17 @@ ApplicationWindow {
             width: globalSearchBar.width - globalSearchButton.width - globalSearchBar.spacing
             height: root.density
             placeholderText: "Search"
+            text: root.searchPageQuery
             inputMethodHints: Qt.ImhNoPredictiveText
-            onTextEdited: coreController.suggestOnline(text)
+            onActiveFocusChanged: {
+                if (activeFocus) {
+                    root.openSearchPage(text, true)
+                }
+            }
+            onTextEdited: {
+                root.updateSearchQuery(text)
+                root.openSearchPage(text, true)
+            }
             onAccepted: root.submitSearch(text, globalSearchField)
             background: Rectangle {
                 radius: 8

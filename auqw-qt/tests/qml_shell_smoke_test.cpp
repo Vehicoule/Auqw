@@ -71,6 +71,35 @@ QObject* findObjectByName(QObject* root, const QString& name) {
     return nullptr;
 }
 
+bool effectivelyVisible(QObject* object) {
+    auto* item = qobject_cast<QQuickItem*>(object);
+    if (item == nullptr) {
+        return object != nullptr && object->property("visible").toBool();
+    }
+
+    for (QQuickItem* current = item; current != nullptr; current = current->parentItem()) {
+        if (!current->isVisible()) {
+            return false;
+        }
+    }
+    return item->width() > 0.0 && item->height() > 0.0;
+}
+
+int visibleSearchFieldCount(QObject* root) {
+    int count = 0;
+    const QStringList fieldNames = {
+        QStringLiteral("globalSearchField"),
+        QStringLiteral("searchField"),
+    };
+    for (const QString& fieldName : fieldNames) {
+        QObject* field = root->findChild<QObject*>(fieldName);
+        if (field != nullptr && effectivelyVisible(field)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 class FakePlaybackBackend final : public PlaybackBackend {
 public:
     void playLocalFile(const QString& path) override {
@@ -322,6 +351,107 @@ private slots:
         QVERIFY(!nowPlayingSheet->property("visible").toBool());
     }
 
+    void globalSearchFocusNavigatesToSearchPage() {
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("currentPageIndex", 0);
+        QObject* globalSearchField = root->findChild<QObject*>(QStringLiteral("globalSearchField"));
+        QVERIFY(globalSearchField != nullptr);
+        QTRY_VERIFY(effectivelyVisible(globalSearchField));
+        root->setProperty("currentPageIndex", 1);
+        QCoreApplication::processEvents();
+        QTRY_VERIFY(effectivelyVisible(globalSearchField));
+
+        QVERIFY(QMetaObject::invokeMethod(globalSearchField, "forceActiveFocus"));
+
+        QTRY_COMPARE(root->property("currentPageIndex").toInt(), 2);
+        QTRY_COMPARE(visibleSearchFieldCount(root), 1);
+        QObject* searchField = root->findChild<QObject*>(QStringLiteral("searchField"));
+        QVERIFY(searchField != nullptr);
+        QTRY_VERIFY(effectivelyVisible(searchField));
+        QVERIFY(!effectivelyVisible(globalSearchField));
+    }
+
+    void searchPageHasOneVisibleSearchFieldAndSettingsHasNone() {
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("currentPageIndex", 2);
+        QCoreApplication::processEvents();
+        QTRY_COMPARE(visibleSearchFieldCount(root), 1);
+
+        root->setProperty("currentPageIndex", 3);
+        QCoreApplication::processEvents();
+        QCOMPARE(visibleSearchFieldCount(root), 0);
+    }
+
+    void typingSearchPageUpdatesSuggestions() {
+        auto provider = std::make_unique<FakeOnlineProvider>();
+        auto* providerPtr = provider.get();
+        provider->nextSuggestions = {
+            OnlineSuggestionResult{.text = QStringLiteral("around the world")},
+        };
+
+        CoreController controller(
+            std::make_unique<FakePlaybackBackend>(),
+            std::move(provider));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        auto* window = qobject_cast<QWindow*>(engine.rootObjects().first());
+        QVERIFY(window != nullptr);
+        QObject* root = window;
+        root->setProperty("currentPageIndex", 2);
+        auto* searchField = qobject_cast<QQuickItem*>(root->findChild<QObject*>(QStringLiteral("searchField")));
+        QVERIFY(searchField != nullptr);
+        QTRY_VERIFY(effectivelyVisible(searchField));
+        searchField->forceActiveFocus();
+        QTRY_VERIFY(searchField->hasActiveFocus());
+
+        for (const QChar ch : QStringLiteral("around")) {
+            QTest::keyClick(window, ch.toLatin1());
+        }
+
+        QTRY_COMPARE(providerPtr->suggestCalls, 6);
+        QCOMPARE(providerPtr->lastSuggestQuery, QStringLiteral("around"));
+        QCOMPARE(root->property("searchPageQuery").toString(), QStringLiteral("around"));
+        auto* suggestions = qobject_cast<QAbstractItemModel*>(controller.property("searchSuggestionsModel").value<QObject*>());
+        QVERIFY(suggestions != nullptr);
+        QTRY_COMPARE(suggestions->rowCount(), 1);
+        const int textRole = roleForName(suggestions, "text");
+        QVERIFY(textRole > 0);
+        QCOMPARE(suggestions->data(suggestions->index(0, 0), textRole).toString(), QStringLiteral("around the world"));
+        QObject* searchSuggestionsList = root->findChild<QObject*>(QStringLiteral("searchSuggestionsList"));
+        QVERIFY(searchSuggestionsList != nullptr);
+        QTRY_VERIFY(effectivelyVisible(searchSuggestionsList));
+    }
+
     void globalSearchButtonSubmitsAndShowsResults() {
         auto provider = std::make_unique<FakeOnlineProvider>();
         auto* providerPtr = provider.get();
@@ -364,8 +494,8 @@ private slots:
         QCOMPARE(providerPtr->lastSearchQuery, QStringLiteral("around the world"));
         QCOMPARE(root->property("currentPageIndex").toInt(), 2);
         QCOMPARE(root->property("searchPageQuery").toString(), QStringLiteral("around the world"));
-        QCOMPARE(globalSearchField->property("text").toString(), QString());
         QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Ready"));
+        QTRY_COMPARE(visibleSearchFieldCount(root), 1);
 
         auto* searchResults = qobject_cast<QAbstractItemModel*>(controller.property("searchResultsModel").value<QObject*>());
         QVERIFY(searchResults != nullptr);
@@ -373,6 +503,42 @@ private slots:
         const int titleRole = roleForName(searchResults, "title");
         QVERIFY(titleRole > 0);
         QCOMPARE(searchResults->data(searchResults->index(0, 0), titleRole).toString(), QStringLiteral("Around the World"));
+        QObject* searchResultsList = root->findChild<QObject*>(QStringLiteral("searchResultsList"));
+        QVERIFY(searchResultsList != nullptr);
+        QTRY_VERIFY(effectivelyVisible(searchResultsList));
+    }
+
+    void queuePanelHiddenOnDesktopSearchPage() {
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        root->setProperty("width", 1180);
+        root->setProperty("height", 760);
+        root->setProperty("currentPageIndex", 0);
+        QCoreApplication::processEvents();
+
+        QObject* queuePanel = root->findChild<QObject*>(QStringLiteral("queuePanel"));
+        QObject* mainStack = root->findChild<QObject*>(QStringLiteral("mainStack"));
+        QVERIFY(queuePanel != nullptr);
+        QVERIFY(mainStack != nullptr);
+        QTRY_VERIFY(effectivelyVisible(queuePanel));
+        const qreal homeStackWidth = mainStack->property("width").toReal();
+        QVERIFY(homeStackWidth < root->property("width").toReal());
+
+        root->setProperty("currentPageIndex", 2);
+        QCoreApplication::processEvents();
+
+        QVERIFY(!effectivelyVisible(queuePanel));
+        QVERIFY(mainStack->property("width").toReal() > homeStackWidth + 100.0);
     }
 
     void compactNowPlayingSheetHasRoomForControls() {
