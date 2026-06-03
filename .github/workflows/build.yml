@@ -40,6 +40,7 @@ jobs:
             qml6-module-qtquick-window \
             qml6-module-qtquick-controls \
             qml6-module-qtquick-dialogs \
+            qml6-module-qtquick-effects \
             qml6-module-qtquick-layouts \
             qml6-module-qtquick-templates \
             qml6-module-qtmultimedia \
@@ -51,6 +52,7 @@ jobs:
             qt6-declarative-private-dev \
             qt6-multimedia-dev \
             xz-utils
+          test -d /usr/lib/x86_64-linux-gnu/qt6/qml/QtQuick/Effects || test -d /usr/lib/qt6/qml/QtQuick/Effects
       - name: Install Zig
         run: |
           zig_version="0.16.0"

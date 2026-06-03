@@ -5,10 +5,12 @@ ARG ZIG_ARCH=x86_64-linux
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
 ARG ANDROID_PLATFORM=android-35
 ARG ANDROID_BUILD_TOOLS=35.0.0
-ARG ANDROID_NDK=28.2.13676358
-ARG QT_VERSION=6.7.3
+ARG ANDROID_NDK=27.3.13750724
+ARG QT_VERSION=6.8.3
 ARG QT_ANDROID_ARCH=android_arm64_v8a
 ARG AQT_VERSION=3.3.0
+ARG ICU73_URL=https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-Ubuntu22.04-x64.tgz
+ARG ICU73_SHA256=ce669c2a36d735dfc36375e8536e030b0b79c5f0bc67025a6413fc1404b07e8b
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -22,6 +24,8 @@ ENV QT_ANDROID_PREFIX=/opt/Qt/${QT_VERSION}/${QT_ANDROID_ARCH}
 ENV QT_HOST_PATH=/opt/Qt/${QT_VERSION}/gcc_64
 ENV CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_ANDROID_ARCH}
 ENV ANDROID_OPENSSL_SOURCE_DIR=/opt/android_openssl
+ENV ICU73_LIB_DIR=/opt/icu73/lib
+ENV LD_LIBRARY_PATH="${ICU73_LIB_DIR}:${LD_LIBRARY_PATH}"
 ENV PATH="/opt/zig:/opt/aqt/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
 RUN apt-get update \
@@ -40,6 +44,10 @@ RUN apt-get update \
     && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
     && mkdir -p /opt/zig \
     && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig \
+    && curl -fsSL "${ICU73_URL}" -o /tmp/icu73.tgz \
+    && printf '%s  %s\n' "${ICU73_SHA256}" /tmp/icu73.tgz | sha256sum -c - \
+    && mkdir -p "${ICU73_LIB_DIR}" \
+    && tar -xzf /tmp/icu73.tgz --strip-components=4 -C "${ICU73_LIB_DIR}" './icu/usr/local/lib/libicu*.so*' \
     && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
     && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android-tools.zip \
     && unzip -q /tmp/android-tools.zip -d /tmp/android-tools \
@@ -56,7 +64,7 @@ RUN apt-get update \
     && git clone https://github.com/KDAB/android_openssl.git "${ANDROID_OPENSSL_SOURCE_DIR}" \
     && git -C "${ANDROID_OPENSSL_SOURCE_DIR}" checkout b71f1470962019bd89534a2919f5925f93bc5779 \
     && rm -rf "${ANDROID_OPENSSL_SOURCE_DIR}/.git" \
-    && rm -rf /tmp/zig.tar.xz /tmp/android-tools.zip /tmp/android-tools /var/lib/apt/lists/*
+    && rm -rf /tmp/zig.tar.xz /tmp/icu73.tgz /tmp/android-tools.zip /tmp/android-tools /var/lib/apt/lists/*
 
 WORKDIR /workspace
 

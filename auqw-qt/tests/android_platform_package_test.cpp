@@ -141,6 +141,15 @@ private slots:
         QVERIFY2(nativePlayer.contains(QStringLiteral("setDataSource")) &&
                 nativePlayer.contains(QStringLiteral("HashMap")),
             "Android native player should pass request headers into MediaPlayer.setDataSource");
+        QVERIFY2(nativePlayer.contains(QStringLiteral("setRemoteDataSource")) &&
+                nativePlayer.contains(QStringLiteral("nextPlayer.setDataSource(url)")),
+            "Android native player should use direct URL MediaPlayer.setDataSource for remote HTTP(S) streams without headers");
+        QVERIFY2(!nativePlayer.contains(QStringLiteral("nextPlayer.setDataSource(url, requestHeaders)")),
+            "Android SDK stubs do not expose MediaPlayer.setDataSource(String, Map)");
+        const qsizetype directSourceStart = nativePlayer.indexOf(QStringLiteral("nextPlayer.setDataSource(url)"));
+        const qsizetype uriSourceStart = nativePlayer.indexOf(QStringLiteral("nextPlayer.setDataSource(context, Uri.parse(url), requestHeaders)"));
+        QVERIFY2(directSourceStart >= 0 && uriSourceStart >= 0 && directSourceStart < uriSourceStart,
+            "remote HTTP(S) playback should choose direct URL setDataSource before URI fallback");
         QVERIFY2(nativePlayer.contains(QStringLiteral("nativeOnPlaybackState")) &&
                 nativePlayer.contains(QStringLiteral("nativeOnPlaybackError")),
             "Android native player should report state and errors to the Qt backend");
@@ -238,12 +247,58 @@ private slots:
             "Android Qt install should include qtmultimedia");
         QVERIFY2(androidBuild.contains(QStringLiteral("Qt6Multimedia/Qt6MultimediaConfig.cmake")),
             "Android build should fail fast when Qt Multimedia is absent");
+        QVERIFY2(androidBuild.contains(QStringLiteral("QtQuick/Effects/qmldir")),
+            "Android build should fail fast when QtQuick.Effects QML runtime is absent");
         QVERIFY2(rootCmake.contains(QStringLiteral("find_package(Qt6 6.4 REQUIRED COMPONENTS Multimedia)")),
             "Android CMake configure should require Qt Multimedia");
         QVERIFY2(!qtCmake.contains(QStringLiteral("Qt6Multimedia_FOUND AND NOT ANDROID")),
             "Qt Multimedia backend should not exclude Android");
         QVERIFY2(qtCmake.contains(QStringLiteral("if(Qt6Multimedia_FOUND)")),
             "Qt Multimedia backend should enable whenever Qt6Multimedia is found");
+    }
+
+    void androidBuildDefaultsToQt683Lts() {
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+        const QString docs = readTextFile(projectSourcePath(u"ci/platform-builds.md"));
+
+        QVERIFY2(!containerfile.isEmpty(), "Android Containerfile should be readable");
+        QVERIFY2(!androidBuild.isEmpty(), "ci/android-build.sh should be readable");
+        QVERIFY2(!docs.isEmpty(), "platform build docs should be readable");
+
+        QVERIFY2(containerfile.contains(QStringLiteral("ARG QT_VERSION=6.8.3")),
+            "Android container should default to the open-source Qt 6.8.3 LTS kit");
+        QVERIFY2(androidBuild.contains(QStringLiteral("QT_VERSION:-6.8.3")),
+            "Android build script should default to the open-source Qt 6.8.3 LTS kit");
+        QVERIFY2(!containerfile.contains(QStringLiteral("ARG QT_VERSION=6.7.3")),
+            "Android container should not pin the older Qt 6.7.3 kit");
+        QVERIFY2(!androidBuild.contains(QStringLiteral("QT_VERSION:-6.7.3")),
+            "Android build script should not pin the older Qt 6.7.3 kit");
+        QVERIFY2(docs.contains(QStringLiteral("Qt 6.8.3")),
+            "platform docs should document Qt 6.8.3 as the Android LTS default");
+    }
+
+    void androidBuildProvidesIcu73ForQt683HostTools() {
+        const QString containerfile = readTextFile(projectSourcePath(u"containers/android-linux/Containerfile"));
+        const QString androidBuild = readTextFile(projectSourcePath(u"ci/android-build.sh"));
+
+        QVERIFY2(!containerfile.isEmpty(), "Android Containerfile should be readable");
+        QVERIFY2(!androidBuild.isEmpty(), "ci/android-build.sh should be readable");
+
+        QVERIFY2(containerfile.contains(QStringLiteral("icu4c-73_2-Ubuntu22.04-x64.tgz")),
+            "Android container should install ICU 73 because Qt 6.8.3 host tools link against libicu*.so.73");
+        QVERIFY2(containerfile.contains(QStringLiteral("ICU73_SHA256")),
+            "Android container should verify the downloaded ICU 73 archive");
+        QVERIFY2(containerfile.contains(QStringLiteral("ICU73_LIB_DIR=/opt/icu73/lib")),
+            "Android container should expose a stable ICU 73 library directory");
+        QVERIFY2(androidBuild.contains(QStringLiteral("configure_qt_host_tool_library_path")),
+            "Android build script should prepare host tool library paths before Qt configure");
+        QVERIFY2(androidBuild.contains(QStringLiteral("libicui18n.so.73")) &&
+                androidBuild.contains(QStringLiteral("libicuuc.so.73")) &&
+                androidBuild.contains(QStringLiteral("libicudata.so.73")),
+            "Android build script should specifically detect ICU 73 runtime libraries");
+        QVERIFY2(androidBuild.contains(QStringLiteral("LD_LIBRARY_PATH")),
+            "Android build script should export ICU 73 path for Qt host tools such as qmlimportscanner");
     }
 
     void androidBuildExtendsGradleWrapperTimeout() {
@@ -267,10 +322,14 @@ private slots:
             "Android build should default to API 35 platform");
         QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_BUILD_TOOLS:-35.0.0")),
             "Android build should default to Android build tools 35.0.0");
+        QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_NDK:-27.3.13750724")),
+            "Android build should default to the latest Android NDK LTS r27d");
         QVERIFY2(containerfile.contains(QStringLiteral("ARG ANDROID_PLATFORM=android-35")),
             "Android container should install API 35 platform");
         QVERIFY2(containerfile.contains(QStringLiteral("ARG ANDROID_BUILD_TOOLS=35.0.0")),
             "Android container should install build tools 35.0.0");
+        QVERIFY2(containerfile.contains(QStringLiteral("ARG ANDROID_NDK=27.3.13750724")),
+            "Android container should install the latest Android NDK LTS r27d");
         QVERIFY2(qtCmake.contains(QStringLiteral("QT_ANDROID_SDK_BUILD_TOOLS_REVISION 35.0.0")),
             "Qt Android package should declare build tools 35.0.0");
         QVERIFY2(qtCmake.contains(QStringLiteral("QT_ANDROID_TARGET_SDK_VERSION 35")),
@@ -278,8 +337,8 @@ private slots:
         QVERIFY2(androidBuild.contains(QStringLiteral("android.aapt2FromMavenOverride")),
             "Android build should force Gradle to use SDK build-tools aapt2 for API 35 resources");
         QVERIFY2(androidBuild.contains(QStringLiteral("android.suppressUnsupportedCompileSdk")) &&
-                androidBuild.contains(QStringLiteral("\"35\"")),
-            "Android build should suppress the expected Qt 6.7 Android Gradle plugin compileSdk 35 warning");
+                androidBuild.contains(QStringLiteral("\"35,36\"")),
+            "Android build should suppress expected Qt Android Gradle plugin compileSdk 35/36 warnings");
     }
 
     void androidQmlModuleUsesStandardFlatResourcePath() {
@@ -323,10 +382,13 @@ private slots:
             "Android build should allow a repo-local Java override for Qt's Gradle wrapper");
         QVERIFY2(androidBuild.contains(QStringLiteral("java_major")),
             "Android build should inspect the active Java major version");
-        QVERIFY2(androidBuild.contains(QStringLiteral("Qt Android Gradle wrapper requires Java")),
-            "Android build should fail fast on unsupported Java runtimes");
-        QVERIFY2(androidBuild.contains(QStringLiteral("Unsupported class file major version")),
-            "Android build should explain the Gradle failure it is preventing");
+        QVERIFY2(androidBuild.contains(QStringLiteral("Android build is standardized on Java 25 LTS")),
+            "Android build should fail fast when the active runtime is not Java 25 LTS");
+        QVERIFY2(androidBuild.contains(QStringLiteral("patch_android_gradle_java25_compatibility")),
+            "Android build should patch Qt's Gradle templates for Java 25 compatibility");
+        QVERIFY2(androidBuild.contains(QStringLiteral("ANDROID_GRADLE_VERSION:-9.1.0")) &&
+                androidBuild.contains(QStringLiteral("ANDROID_GRADLE_PLUGIN_VERSION:-8.13.2")),
+            "Android build should upgrade generated Gradle and Android Gradle Plugin versions for Java 25");
     }
 
     void playbackBackendLogsAndroidMultimediaDiagnostics() {

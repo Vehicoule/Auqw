@@ -564,6 +564,7 @@ void CoreController::applySearchResults(const QVector<OnlineTrackResult>& result
     }
 
     searchResultsModel_->setItems(std::move(items));
+    refreshMoodArtworkUrl();
 }
 
 void CoreController::applySearchSuggestions(const QVector<OnlineSuggestionResult>& suggestions) {

@@ -1,4 +1,7 @@
 qt_standard_project_setup(REQUIRES 6.4)
+if(QT_KNOWN_POLICY_QTP0004)
+    qt_policy(SET QTP0004 NEW)
+endif()
 include(GNUInstallDirs)
 
 set(AUQW_ENABLE_QT_MULTIMEDIA_BACKEND OFF)
@@ -147,12 +150,49 @@ set_source_files_properties(qml/Main.qml
         QT_RESOURCE_ALIAS Main.qml
 )
 
+set_source_files_properties(qml/components/AppTheme.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/AppTheme.qml
+)
+
+set_source_files_properties(qml/components/ArtworkTile.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/ArtworkTile.qml
+)
+
+set_source_files_properties(qml/components/AlbumBackdrop.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/AlbumBackdrop.qml
+)
+
+set_source_files_properties(qml/components/GlassSurface.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/GlassSurface.qml
+)
+
+set_source_files_properties(qml/components/PlayerControls.qml
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/PlayerControls.qml
+)
+
+set_source_files_properties(qml/components/qmldir
+    PROPERTIES
+        QT_RESOURCE_ALIAS components/qmldir
+)
+
 qt_add_qml_module(Auqw
     URI Auqw
     VERSION 1.0
     RESOURCE_PREFIX /qt/qml
     QML_FILES
         qml/Main.qml
+        qml/components/AppTheme.qml
+        qml/components/AlbumBackdrop.qml
+        qml/components/ArtworkTile.qml
+        qml/components/GlassSurface.qml
+        qml/components/PlayerControls.qml
+    RESOURCES
+        qml/components/qmldir
 )
 
 target_link_libraries(Auqw

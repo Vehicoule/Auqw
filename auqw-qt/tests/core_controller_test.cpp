@@ -646,6 +646,89 @@ private slots:
         QCOMPARE(searchHistoryCountForQuery(controller->property("databasePath").toString(), QStringLiteral("stone")), 1);
     }
 
+    void moodArtworkUrlUsesFirstAvailableArtworkByPriority() {
+        FakeOnlineProvider* provider = nullptr;
+        FakePlaybackBackend* backend = nullptr;
+        std::unique_ptr<CoreController> controller = makeController(&provider, &backend);
+        QSignalSpy moodSpy(controller.get(), SIGNAL(moodArtworkUrlChanged()));
+
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QString{});
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:fav"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("fav"),
+                .title = QStringLiteral("Favorite Seed"),
+                .artist = QStringLiteral("Aster Band"),
+                .artworkUrl = QStringLiteral("https://img.example/favorite.jpg"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("favorite"))));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/favorite.jpg"));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "favoriteSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:fav"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QString{})));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/favorite.jpg"));
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:recent"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("recent"),
+                .title = QStringLiteral("Recent Track"),
+                .artist = QStringLiteral("Aster Band"),
+                .artworkUrl = QStringLiteral("https://img.example/recent.jpg"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("recent"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:recent"))));
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("recent"));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/recent.jpg"));
+
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "stopPlayback"));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QString{})));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/recent.jpg"));
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:search"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("search"),
+                .title = QStringLiteral("Search Track"),
+                .artworkUrl = QStringLiteral("https://img.example/search.jpg"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("search"))));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/search.jpg"));
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:playback"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("playback"),
+                .title = QStringLiteral("Playback Track"),
+                .artworkUrl = QStringLiteral("https://img.example/playback.jpg"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("playback"))));
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "playSearchResult", Q_ARG(QString, QStringLiteral("ytmusic:playback"))));
+        provider->emitResolvedStream(QStringLiteral("ytmusic"), QStringLiteral("playback"));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/playback.jpg"));
+
+        provider->nextResults = QVector<OnlineTrackResult>{
+            OnlineTrackResult{
+                .resultId = QStringLiteral("ytmusic:other"),
+                .provider = QStringLiteral("ytmusic"),
+                .providerTrackId = QStringLiteral("other"),
+                .title = QStringLiteral("Other Track"),
+                .artworkUrl = QStringLiteral("https://img.example/search-overridden.jpg"),
+            },
+        };
+        QVERIFY(QMetaObject::invokeMethod(controller.get(), "searchOnline", Q_ARG(QString, QStringLiteral("other"))));
+        QCOMPARE(controller->property("moodArtworkUrl").toString(), QStringLiteral("https://img.example/playback.jpg"));
+        QVERIFY(moodSpy.count() > 0);
+    }
+
     void onlineSuggestionsPopulateModelAndAcceptedSuggestionRunsSearch() {
         FakeOnlineProvider* provider = nullptr;
         const std::unique_ptr<CoreController> controller = makeController(&provider);

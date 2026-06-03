@@ -8,8 +8,10 @@ zig_global_cache="${AUQW_ZIG_GLOBAL_CACHE_DIR:-/tmp/auqw-zig-global-cache}"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 android_platform="${ANDROID_PLATFORM:-android-35}"
 android_build_tools="${ANDROID_BUILD_TOOLS:-35.0.0}"
-android_ndk="${ANDROID_NDK:-28.2.13676358}"
-qt_version="${QT_VERSION:-6.7.3}"
+android_ndk="${ANDROID_NDK:-27.3.13750724}"
+android_gradle_version="${ANDROID_GRADLE_VERSION:-9.1.0}"
+android_gradle_plugin_version="${ANDROID_GRADLE_PLUGIN_VERSION:-8.13.2}"
+qt_version="${QT_VERSION:-6.8.3}"
 qt_android_arch="${QT_ANDROID_ARCH:-android_arm64_v8a}"
 qt_android_abi="${QT_ANDROID_ABI:-arm64-v8a}"
 qt_root="${QT_ROOT:-/opt/Qt}"
@@ -82,6 +84,28 @@ patch_gradle_wrapper_timeout() {
   done < <(find "$qt_root/$qt_version" -path '*/gradle/wrapper/gradle-wrapper.properties' -type f 2>/dev/null)
 }
 
+configure_qt_host_tool_library_path() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${ICU73_LIB_DIR:-}" ]]; then
+    candidates+=("$ICU73_LIB_DIR")
+  fi
+  candidates+=(
+    "/opt/icu73/lib"
+    "${HOME:-}/.local/lib/icu73"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate/libicui18n.so.73" &&
+          -f "$candidate/libicuuc.so.73" &&
+          -f "$candidate/libicudata.so.73" ]]; then
+      export LD_LIBRARY_PATH="$candidate${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      return
+    fi
+  done
+}
+
 set_gradle_property() {
   local file="$1"
   local key="$2"
@@ -116,7 +140,7 @@ patch_android_gradle_api35_compatibility() {
   fi
 
   set_gradle_property "$gradle_properties" "android.aapt2FromMavenOverride" "$aapt2"
-  set_gradle_property "$gradle_properties" "android.suppressUnsupportedCompileSdk" "35"
+  set_gradle_property "$gradle_properties" "android.suppressUnsupportedCompileSdk" "35,36"
 }
 
 patch_android_deployment_qml_settings() {
@@ -161,8 +185,8 @@ configure_gradle_java() {
   local java_version
   local java_major
 
-  if [[ -z "$selected_java_home" && -d /usr/lib/jvm/java-17-openjdk-amd64 ]]; then
-    selected_java_home=/usr/lib/jvm/java-17-openjdk-amd64
+  if [[ -z "$selected_java_home" && -d /usr/lib/jvm/java-25-openjdk-amd64 ]]; then
+    selected_java_home=/usr/lib/jvm/java-25-openjdk-amd64
   fi
 
   if [[ -n "$selected_java_home" ]]; then
@@ -186,11 +210,48 @@ configure_gradle_java() {
     java_major="${java_major%%.*}"
   fi
 
-  if [[ ! "$java_major" =~ ^[0-9]+$ || "$java_major" -lt 17 || "$java_major" -gt 20 ]]; then
-    echo "Qt Android Gradle wrapper requires Java 17-20; found ${java_version:-unknown}." >&2
-    echo "Set AUQW_JAVA_HOME or JAVA_HOME to a compatible JDK to avoid Gradle 'Unsupported class file major version' failures." >&2
+  if [[ ! "$java_major" =~ ^[0-9]+$ || "$java_major" -ne 25 ]]; then
+    echo "Android build is standardized on Java 25 LTS; found ${java_version:-unknown}." >&2
+    echo "Set AUQW_JAVA_HOME or JAVA_HOME to a Java 25 JDK." >&2
     exit 1
   fi
+}
+
+patch_android_gradle_java25_compatibility() {
+  local gradle_wrapper="$qt_prefix/src/3rdparty/gradle/gradle/wrapper/gradle-wrapper.properties"
+  local build_gradle="$qt_prefix/src/android/templates/build.gradle"
+
+  for required in "$gradle_wrapper" "$build_gradle"; do
+    if [[ ! -w "$required" ]]; then
+      echo "missing writable Android Gradle template: $required" >&2
+      exit 1
+    fi
+  done
+
+  set_gradle_property \
+    "$gradle_wrapper" \
+    "distributionUrl" \
+    "https://services.gradle.org/distributions/gradle-${android_gradle_version}-bin.zip"
+
+  python3 - "$build_gradle" "$android_gradle_plugin_version" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+pattern = r"classpath 'com\.android\.tools\.build:gradle:[^']+'"
+if not re.search(pattern, text):
+    raise SystemExit(f"Android Gradle plugin classpath not found in {path}")
+updated = re.sub(
+    pattern,
+    f"classpath 'com.android.tools.build:gradle:{version}'",
+    text,
+    count=1,
+)
+path.write_text(updated, encoding="utf-8")
+PY
 }
 
 require_android_release_signing() {
@@ -265,6 +326,7 @@ for required in \
   "$qt_cmake" \
   "$qt_prefix/lib/cmake/Qt6/Qt6Config.cmake" \
   "$qt_prefix/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" \
+  "$qt_prefix/qml/QtQuick/Effects/qmldir" \
   "$qt_host_path/lib/cmake/Qt6/Qt6Config.cmake"; do
   if [[ ! -e "$required" ]]; then
     echo "missing Android dependency: $required" >&2
@@ -295,8 +357,10 @@ if [[ -n "$android_openssl_source_dir" ]]; then
   cmake_fetchcontent_args+=("-DFETCHCONTENT_SOURCE_DIR_ANDROID_OPENSSL=$android_openssl_source_dir")
 fi
 
+configure_qt_host_tool_library_path
 patch_gradle_wrapper_timeout
 patch_android_gradle_api35_compatibility
+patch_android_gradle_java25_compatibility
 
 cmake -E rm -rf "$build_dir"
 build_type="Debug"

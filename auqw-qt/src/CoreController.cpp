@@ -352,6 +352,10 @@ QString CoreController::playbackArtworkUrl() const {
     return playbackArtworkUrl_;
 }
 
+QString CoreController::moodArtworkUrl() const {
+    return moodArtworkUrl_;
+}
+
 QString CoreController::playbackLocalPath() const {
     return playbackLocalPath_;
 }
@@ -567,6 +571,49 @@ void CoreController::syncOnlineSourceState() {
     onlineSourceStatus_ = nextStatus;
     onlineSourceCapabilities_ = nextCapabilities;
     emit onlineSourceChanged();
+}
+
+QString CoreController::firstArtworkFromModel(const JsonListModel* model) const {
+    if (model == nullptr) {
+        return {};
+    }
+
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QString artworkUrl = model->itemAt(row).value(QStringLiteral("artwork_url")).toString();
+        if (!artworkUrl.isEmpty()) {
+            return artworkUrl;
+        }
+    }
+    return {};
+}
+
+void CoreController::refreshMoodArtworkUrl() {
+    QString nextArtworkUrl = playbackState_ == QStringLiteral("stopped") ? QString{} : playbackArtworkUrl_;
+
+    if (nextArtworkUrl.isEmpty()) {
+        for (const OnlineTrackResult& result : searchResults_) {
+            if (!result.artworkUrl.isEmpty()) {
+                nextArtworkUrl = result.artworkUrl;
+                break;
+            }
+        }
+    }
+    if (nextArtworkUrl.isEmpty()) {
+        nextArtworkUrl = firstArtworkFromModel(recentTracksModel_.get());
+    }
+    if (nextArtworkUrl.isEmpty()) {
+        nextArtworkUrl = firstArtworkFromModel(recommendationsModel_.get());
+    }
+    if (nextArtworkUrl.isEmpty()) {
+        nextArtworkUrl = firstArtworkFromModel(favoriteTracksModel_.get());
+    }
+
+    if (moodArtworkUrl_ == nextArtworkUrl) {
+        return;
+    }
+
+    moodArtworkUrl_ = nextArtworkUrl;
+    emit moodArtworkUrlChanged();
 }
 
 void CoreController::setImportResult(const QString& status, int importedTrackCount) {

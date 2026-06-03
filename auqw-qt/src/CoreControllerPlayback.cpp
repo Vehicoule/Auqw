@@ -391,6 +391,7 @@ bool CoreController::applyPlaybackObject(const QJsonObject& playback) {
             applySearchResults(searchResults_);
         }
     }
+    refreshMoodArtworkUrl();
     return changed;
 }
 

@@ -99,6 +99,11 @@ private slots:
             "Release publishing should be gated to tag refs");
         QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-window")),
             "Linux release workflow should install the QtQuick.Window QML module required by Main.qml");
+        QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-effects")),
+            "Linux release workflow should install the QtQuick.Effects QML module required by the album-first shell");
+        QVERIFY2(workflow.contains(QStringLiteral("QtQuick/Effects")) ||
+                workflow.contains(QStringLiteral("Qt6QuickEffects")),
+            "Release workflow should validate QtQuick.Effects availability before packaging");
         QVERIFY2(workflow.contains(QStringLiteral("flatpak --user remote-add")),
             "Linux release workflow should add Flathub to the user Flatpak installation");
         QVERIFY2(workflow.contains(QStringLiteral("AUQW_FLATPAK_INSTALLATION: user")),
@@ -198,6 +203,8 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("CMAKE_BUILD_TYPE=Release")),
             "Windows CMake configure should build Release artifacts for release Qt runtime deployment");
         QVERIFY2(script.contains(QStringLiteral("Qt6MultimediaConfig.cmake")), "Windows build should fail fast when Qt Multimedia is absent");
+        QVERIFY2(script.contains(QStringLiteral("QtQuick\\Effects")) || script.contains(QStringLiteral("QtQuick/Effects")),
+            "Windows build should fail fast when QtQuick.Effects QML runtime is absent");
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "Windows CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("windeployqt")), "Windows build should deploy Qt runtime with windeployqt");
         QVERIFY2(script.contains(QStringLiteral("Qt6Multimedia.dll")), "Windows package validation should require Qt Multimedia DLL");
@@ -252,6 +259,8 @@ private slots:
         QVERIFY2(script.contains(QStringLiteral("--cache-dir")), "macOS Zig build should use explicit cache dir");
         QVERIFY2(script.contains(QStringLiteral("--global-cache-dir")), "macOS Zig build should use explicit global cache dir");
         QVERIFY2(script.contains(QStringLiteral("Qt6MultimediaConfig.cmake")), "macOS build should fail fast when Qt Multimedia is absent");
+        QVERIFY2(script.contains(QStringLiteral("QtQuick/Effects")),
+            "macOS build should fail fast when QtQuick.Effects QML runtime is absent");
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "macOS CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("macdeployqt")), "macOS build should deploy Qt runtime with macdeployqt");
         QVERIFY2(script.contains(QStringLiteral("otool -L")), "macOS package validation should inspect bundle linkage");
@@ -304,6 +313,8 @@ private slots:
             "Linux Flatpak container should provide the QtQuick Layouts QML import used by Main.qml");
         QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-templates")),
             "Linux Flatpak container should provide the QtQuick Templates QML import used by Qt Quick Controls styles");
+        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-effects")),
+            "Linux Flatpak container should provide the QtQuick Effects QML import used by album backdrops");
     }
 
     void linuxDesktopInstallMetadataAndFlatpakManifestAreWired() {
@@ -491,6 +502,8 @@ private slots:
             "iOS build should discover or accept a Qt iOS kit");
         QVERIFY2(script.contains(QStringLiteral("QT_HOST_PATH")), "iOS build should accept Qt host tools path");
         QVERIFY2(script.contains(QStringLiteral("Qt6MultimediaConfig.cmake")), "iOS build should fail fast when Qt Multimedia is absent");
+        QVERIFY2(script.contains(QStringLiteral("QtQuick/Effects")),
+            "iOS build should fail fast when QtQuick.Effects QML runtime is absent");
         QVERIFY2(script.contains(QStringLiteral("AUQW_REQUIRE_QT_MULTIMEDIA=ON")), "iOS CMake configure should require Qt Multimedia");
         QVERIFY2(script.contains(QStringLiteral("CMAKE_SYSTEM_NAME=iOS")), "iOS build should configure an iOS target");
         QVERIFY2(script.contains(QStringLiteral("AVFoundation")), "iOS validation should verify AVFoundation linkage");

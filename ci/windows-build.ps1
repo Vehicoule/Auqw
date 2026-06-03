@@ -286,6 +286,7 @@ if (-not $Qt6MultimediaConfig) {
     throw "missing Windows dependency: Qt6MultimediaConfig.cmake (install Qt Multimedia or update CMAKE_PREFIX_PATH)"
 }
 $QtPrefix = (Resolve-Path (Join-Path (Split-Path $Qt6Config -Parent) "..\..\..")).Path
+Require-Path (Join-Path $QtPrefix "qml\QtQuick\Effects") "QtQuick\Effects QML runtime"
 $WinDeployQt = Find-WinDeployQt $QtPrefix
 if (-not $WinDeployQt) {
     throw "missing Windows dependency: windeployqt (set WINDEPLOYQT or add Qt bin to PATH)"

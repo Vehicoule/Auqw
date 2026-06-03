@@ -151,13 +151,30 @@ public final class AuqwNativeAudioPlayer {
                 return true;
             });
             HashMap<String, String> requestHeaders = headers == null ? new HashMap<>() : headers;
-            nextPlayer.setDataSource(context, Uri.parse(url), requestHeaders);
+            setRemoteDataSource(context, nextPlayer, url, requestHeaders);
             nextPlayer.prepareAsync();
         } catch (IOException | RuntimeException error) {
             releasePlayer();
             String message = error.getMessage();
             notifyError(playbackId, message == null || message.isEmpty() ? "Android playback failed" : message);
         }
+    }
+
+    private static void setRemoteDataSource(
+            Context context,
+            MediaPlayer nextPlayer,
+            String url,
+            HashMap<String, String> requestHeaders) throws IOException {
+        if (isHttpRemoteUrl(url) && requestHeaders.isEmpty()) {
+            nextPlayer.setDataSource(url);
+            return;
+        }
+        nextPlayer.setDataSource(context, Uri.parse(url), requestHeaders);
+    }
+
+    private static boolean isHttpRemoteUrl(String url) {
+        String lowerUrl = url.toLowerCase();
+        return lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://");
     }
 
     private static boolean isCurrentPlayback(long playbackId) {

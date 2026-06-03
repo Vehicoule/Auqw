@@ -39,6 +39,14 @@ QString readMainQml() {
     return QString::fromUtf8(file.readAll());
 }
 
+QString readQmlFile(QStringView relativePath) {
+    QFile file(QStringLiteral(AUQW_QML_SOURCE_DIR "/") + relativePath.toString());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return {};
+    }
+    return QString::fromUtf8(file.readAll());
+}
+
 int roleForName(const QAbstractItemModel* model, const QByteArray& name) {
     const QHash<int, QByteArray> roles = model->roleNames();
     for (auto it = roles.cbegin(); it != roles.cend(); ++it) {
@@ -115,7 +123,6 @@ bool hasMeaningfulOverlap(QQuickItem* first, QQuickItem* second) {
 int visibleSearchFieldCount(QObject* root) {
     int count = 0;
     const QStringList fieldNames = {
-        QStringLiteral("globalSearchField"),
         QStringLiteral("searchField"),
     };
     for (const QString& fieldName : fieldNames) {
@@ -294,7 +301,8 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("floatingNavHomeButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("floatingNavLibraryButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("floatingNavSettingsButton")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("globalSearchField")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("topRightSearchButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("searchOverlay")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("desktopNavigationRail")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queuePanel")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("queueList")) != nullptr);
@@ -310,6 +318,7 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("listeningDataSettingsGroup")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("aboutSettingsGroup")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("storageSettingsGroup")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadDirectoryDisplay")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadDirectoryField")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("downloadDirectorySaveButton")) != nullptr);
         QVERIFY(findObjectByName(root, QStringLiteral("queueMoveUpButton")) != nullptr);
@@ -333,12 +342,18 @@ private slots:
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayPauseIcon")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniNextButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniNextIcon")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniStopButton")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniStopIcon")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniRepeatButton")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniRepeatIcon")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniShuffleButton")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniShuffleIcon")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerSwipeStopHandle")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingOverflowButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingOverflowMenu")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingDownloadMenuItem")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingQueueMenuItem")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingShuffleMenuItem")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("albumBackdrop")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("appThemeRoot")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniStopButton")) == nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("miniShuffleButton")) == nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerTitle")) != nullptr);
         QVERIFY(root->findChild<QObject*>(QStringLiteral("miniPlayerState")) != nullptr);
 
@@ -351,8 +366,8 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(currentSongBox, "clicked"));
         QTRY_VERIFY(nowPlayingSheet->property("visible").toBool());
         QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingFavoriteButton")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingDownloadButton")) != nullptr);
-        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingQueueButton")) != nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingDownloadButton")) == nullptr);
+        QVERIFY(root->findChild<QObject*>(QStringLiteral("nowPlayingQueueButton")) == nullptr);
 
         QObject* libraryTrackDelegate = nullptr;
         QTRY_VERIFY((libraryTrackDelegate = findObjectByName(root, QStringLiteral("libraryTrackDelegate"))) != nullptr);
@@ -385,7 +400,7 @@ private slots:
         QVERIFY(!nowPlayingSheet->property("visible").toBool());
     }
 
-    void globalSearchFocusNavigatesToSearchPage() {
+    void topRightSearchButtonOpensSearchOverlay() {
         CoreController controller(std::make_unique<FakePlaybackBackend>());
 
         QQmlApplicationEngine engine;
@@ -399,24 +414,21 @@ private slots:
 
         QObject* root = engine.rootObjects().first();
         root->setProperty("currentPageIndex", 0);
-        QObject* globalSearchField = root->findChild<QObject*>(QStringLiteral("globalSearchField"));
-        QVERIFY(globalSearchField != nullptr);
-        QTRY_VERIFY(effectivelyVisible(globalSearchField));
-        root->setProperty("currentPageIndex", 1);
-        QCoreApplication::processEvents();
-        QTRY_VERIFY(effectivelyVisible(globalSearchField));
+        QObject* topRightSearchButton = root->findChild<QObject*>(QStringLiteral("topRightSearchButton"));
+        QVERIFY(topRightSearchButton != nullptr);
+        QTRY_VERIFY(effectivelyVisible(topRightSearchButton));
 
-        QVERIFY(QMetaObject::invokeMethod(globalSearchField, "forceActiveFocus"));
+        QVERIFY(QMetaObject::invokeMethod(topRightSearchButton, "clicked"));
 
-        QTRY_COMPARE(root->property("currentPageIndex").toInt(), 2);
+        QTRY_VERIFY(root->property("searchOverlayOpen").toBool());
+        QCOMPARE(root->property("currentPageIndex").toInt(), 0);
         QTRY_COMPARE(visibleSearchFieldCount(root), 1);
         QObject* searchField = root->findChild<QObject*>(QStringLiteral("searchField"));
         QVERIFY(searchField != nullptr);
         QTRY_VERIFY(effectivelyVisible(searchField));
-        QVERIFY(!effectivelyVisible(globalSearchField));
     }
 
-    void searchPageHasOneVisibleSearchFieldAndSettingsHasNone() {
+    void searchOverlayHasOneVisibleSearchFieldAndSettingsHasNone() {
         CoreController controller(std::make_unique<FakePlaybackBackend>());
 
         QQmlApplicationEngine engine;
@@ -429,11 +441,12 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
 
         QObject* root = engine.rootObjects().first();
+        root->setProperty("searchOverlayOpen", true);
         root->setProperty("currentPageIndex", 2);
         QCoreApplication::processEvents();
         QTRY_COMPARE(visibleSearchFieldCount(root), 1);
 
-        root->setProperty("currentPageIndex", 3);
+        root->setProperty("searchOverlayOpen", false);
         QCoreApplication::processEvents();
         QCOMPARE(visibleSearchFieldCount(root), 0);
     }
@@ -461,7 +474,7 @@ private slots:
         auto* window = qobject_cast<QWindow*>(engine.rootObjects().first());
         QVERIFY(window != nullptr);
         QObject* root = window;
-        root->setProperty("currentPageIndex", 2);
+        root->setProperty("searchOverlayOpen", true);
         auto* searchField = qobject_cast<QQuickItem*>(root->findChild<QObject*>(QStringLiteral("searchField")));
         QVERIFY(searchField != nullptr);
         QTRY_VERIFY(effectivelyVisible(searchField));
@@ -486,7 +499,7 @@ private slots:
         QTRY_VERIFY(effectivelyVisible(searchSuggestionsList));
     }
 
-    void globalSearchButtonSubmitsAndShowsResults() {
+    void searchOverlayButtonSubmitsAndShowsResults() {
         auto provider = std::make_unique<FakeOnlineProvider>();
         auto* providerPtr = provider.get();
         provider->nextResults = {
@@ -516,17 +529,18 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
 
         QObject* root = engine.rootObjects().first();
-        QObject* globalSearchField = root->findChild<QObject*>(QStringLiteral("globalSearchField"));
-        QObject* globalSearchButton = root->findChild<QObject*>(QStringLiteral("globalSearchButton"));
-        QVERIFY(globalSearchField != nullptr);
-        QVERIFY(globalSearchButton != nullptr);
+        root->setProperty("searchOverlayOpen", true);
+        QObject* searchField = root->findChild<QObject*>(QStringLiteral("searchField"));
+        QObject* searchButton = root->findChild<QObject*>(QStringLiteral("searchButton"));
+        QVERIFY(searchField != nullptr);
+        QVERIFY(searchButton != nullptr);
 
-        globalSearchField->setProperty("text", QStringLiteral("  around the world  "));
-        QVERIFY(QMetaObject::invokeMethod(globalSearchButton, "clicked"));
+        searchField->setProperty("text", QStringLiteral("  around the world  "));
+        QVERIFY(QMetaObject::invokeMethod(searchButton, "clicked"));
 
         QCOMPARE(providerPtr->searchCalls, 1);
         QCOMPARE(providerPtr->lastSearchQuery, QStringLiteral("around the world"));
-        QCOMPARE(root->property("currentPageIndex").toInt(), 2);
+        QVERIFY(root->property("searchOverlayOpen").toBool());
         QCOMPARE(root->property("searchPageQuery").toString(), QStringLiteral("around the world"));
         QCOMPARE(controller.property("searchStatus").toString(), QStringLiteral("Ready"));
         QTRY_COMPARE(visibleSearchFieldCount(root), 1);
@@ -569,7 +583,7 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
 
         QObject* root = engine.rootObjects().first();
-        root->setProperty("currentPageIndex", 2);
+        root->setProperty("searchOverlayOpen", true);
         root->setProperty("searchPageQuery", QStringLiteral("around"));
         root->setProperty("submittedSearchQuery", QStringLiteral("around"));
         QVERIFY(QMetaObject::invokeMethod(&controller, "searchOnline", Q_ARG(QString, QStringLiteral("around"))));
@@ -616,22 +630,22 @@ private slots:
         QCoreApplication::processEvents();
 
         auto* desktopNavigationRail = quickItemByName(root, QStringLiteral("desktopNavigationRail"));
-        auto* globalSearchBar = quickItemByName(root, QStringLiteral("globalSearchBar"));
+        auto* topRightSearchButton = quickItemByName(root, QStringLiteral("topRightSearchButton"));
         auto* mainStack = quickItemByName(root, QStringLiteral("mainStack"));
         auto* queuePanel = quickItemByName(root, QStringLiteral("queuePanel"));
         auto* bottomPlaybackBar = quickItemByName(root, QStringLiteral("bottomPlaybackBar"));
         QVERIFY(desktopNavigationRail != nullptr);
-        QVERIFY(globalSearchBar != nullptr);
+        QVERIFY(topRightSearchButton != nullptr);
         QVERIFY(mainStack != nullptr);
         QVERIFY(queuePanel != nullptr);
         QVERIFY(bottomPlaybackBar != nullptr);
         QTRY_VERIFY(effectivelyVisible(desktopNavigationRail));
-        QTRY_VERIFY(effectivelyVisible(globalSearchBar));
+        QTRY_VERIFY(effectivelyVisible(topRightSearchButton));
         QTRY_VERIFY(effectivelyVisible(queuePanel));
         QTRY_VERIFY(effectivelyVisible(bottomPlaybackBar));
 
         QVERIFY2(!hasMeaningfulOverlap(desktopNavigationRail, mainStack), "desktop nav overlaps page content");
-        QVERIFY2(!hasMeaningfulOverlap(globalSearchBar, mainStack), "desktop search overlaps page content");
+        QVERIFY2(!hasMeaningfulOverlap(topRightSearchButton, mainStack), "desktop search button overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(queuePanel, mainStack), "queue panel overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(bottomPlaybackBar, mainStack), "bottom playback bar overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(bottomPlaybackBar, queuePanel), "bottom playback bar overlaps queue panel");
@@ -668,24 +682,25 @@ private slots:
         root->setProperty("currentPageIndex", 0);
         QCoreApplication::processEvents();
 
-        auto* globalSearchBar = quickItemByName(root, QStringLiteral("globalSearchBar"));
+        auto* topRightSearchButton = quickItemByName(root, QStringLiteral("topRightSearchButton"));
         auto* mainStack = quickItemByName(root, QStringLiteral("mainStack"));
         auto* floatingNavigation = quickItemByName(root, QStringLiteral("floatingNavigation"));
         auto* currentSongBox = quickItemByName(root, QStringLiteral("currentSongBox"));
-        QVERIFY(globalSearchBar != nullptr);
+        QVERIFY(topRightSearchButton != nullptr);
         QVERIFY(mainStack != nullptr);
         QVERIFY(floatingNavigation != nullptr);
         QVERIFY(currentSongBox != nullptr);
-        QVERIFY2(!effectivelyVisible(globalSearchBar), "compact home should not use floating/global search");
+        QTRY_VERIFY(effectivelyVisible(topRightSearchButton));
         QTRY_VERIFY(effectivelyVisible(floatingNavigation));
         QTRY_VERIFY(effectivelyVisible(currentSongBox));
 
+        QVERIFY2(!hasMeaningfulOverlap(topRightSearchButton, mainStack), "compact top search overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(floatingNavigation, mainStack), "compact nav overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(currentSongBox, mainStack), "compact mini-player overlaps page content");
         QVERIFY2(!hasMeaningfulOverlap(currentSongBox, floatingNavigation), "compact mini-player overlaps bottom nav");
     }
 
-    void queuePanelHiddenOnDesktopSearchPage() {
+    void queuePanelHiddenWhileDesktopSearchOverlayIsOpen() {
         CoreController controller(std::make_unique<FakePlaybackBackend>());
 
         QQmlApplicationEngine engine;
@@ -711,7 +726,7 @@ private slots:
         const qreal homeStackWidth = mainStack->property("width").toReal();
         QVERIFY(homeStackWidth < root->property("width").toReal());
 
-        root->setProperty("currentPageIndex", 2);
+        root->setProperty("searchOverlayOpen", true);
         QCoreApplication::processEvents();
 
         QVERIFY(!effectivelyVisible(queuePanel));
@@ -763,27 +778,79 @@ private slots:
             nowPlayingSheet->property("height").toReal() >= 640.0,
             qPrintable(QStringLiteral("compact Now Playing popup too short: %1").arg(nowPlayingSheet->property("height").toReal())));
 
-        auto* previousButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniPreviousButton")));
+        auto* favoriteButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("nowPlayingFavoriteButton")));
+        auto* repeatButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniRepeatButton")));
+        auto* overflowButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("nowPlayingOverflowButton")));
+        auto* stopButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniStopButton")));
         auto* shuffleButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniShuffleButton")));
+        QVERIFY(favoriteButton != nullptr);
+        QVERIFY(repeatButton != nullptr);
+        QVERIFY(overflowButton != nullptr);
+        QVERIFY(stopButton == nullptr);
+        QVERIFY(shuffleButton == nullptr);
+
+        auto* previousButton = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniPreviousButton")));
         QVERIFY(previousButton != nullptr);
-        QVERIFY(shuffleButton != nullptr);
-        QQuickItem* controlsRow = previousButton->parentItem();
+        QQuickItem* controlsRow = favoriteButton->parentItem();
         QVERIFY(controlsRow != nullptr);
-        QCOMPARE(shuffleButton->parentItem(), controlsRow);
+        QCOMPARE(repeatButton->parentItem(), controlsRow);
         const qreal availableWidth = nowPlayingSheet->property("width").toReal() - (2.0 * root->property("pagePadding").toReal());
         QVERIFY2(
             controlsRow->width() <= availableWidth + 0.5,
             qPrintable(QStringLiteral("compact Now Playing controls too wide: %1 > %2").arg(controlsRow->width()).arg(availableWidth)));
-        const qreal shuffleRightEdge = shuffleButton->mapToItem(controlsRow, QPointF(shuffleButton->width(), 0)).x();
+        const qreal repeatRightEdge = repeatButton->mapToItem(controlsRow, QPointF(repeatButton->width(), 0)).x();
         QVERIFY2(
-            shuffleRightEdge <= controlsRow->width() + 0.5,
-            qPrintable(QStringLiteral("compact Now Playing controls overflow row: %1 > %2").arg(shuffleRightEdge).arg(controlsRow->width())));
+            repeatRightEdge <= controlsRow->width() + 0.5,
+            qPrintable(QStringLiteral("compact Now Playing controls overflow row: %1 > %2").arg(repeatRightEdge).arg(controlsRow->width())));
 
         auto* previousIcon = qobject_cast<QQuickItem*>(findObjectByName(root, QStringLiteral("miniPreviousIcon")));
         QVERIFY(previousIcon != nullptr);
         QVERIFY2(
             previousIcon->width() >= 20.0,
             qPrintable(QStringLiteral("compact Now Playing control icon too small: %1").arg(previousIcon->width())));
+    }
+
+    void miniPlayerSwipeStopStopsPlaybackAndClosesSheet() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QVERIFY(writeTestFile(QDir(library.path()).filePath(QStringLiteral("alpha.mp3"))));
+
+        CoreController controller(std::make_unique<FakePlaybackBackend>());
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "importLocalFolder",
+            Q_ARG(QUrl, QUrl::fromLocalFile(library.path()))));
+        auto* tracks = qobject_cast<QAbstractItemModel*>(controller.property("tracksModel").value<QObject*>());
+        QVERIFY(tracks != nullptr);
+        const QString trackId = roleValue(tracks, 0, "id").toString();
+        QVERIFY(QMetaObject::invokeMethod(&controller, "addTrackToQueue", Q_ARG(QString, trackId)));
+        QVERIFY(QMetaObject::invokeMethod(&controller, "playFirstQueuedTrack"));
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("coreController"), &controller);
+
+        QSignalSpy creationFailures(&engine, &QQmlApplicationEngine::objectCreationFailed);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(AUQW_QML_SOURCE_DIR "/Main.qml")));
+
+        QVERIFY2(creationFailures.isEmpty(), "Main.qml failed to load");
+        QCOMPARE(engine.rootObjects().size(), 1);
+
+        QObject* root = engine.rootObjects().first();
+        QObject* currentSongBox = root->findChild<QObject*>(QStringLiteral("currentSongBox"));
+        QObject* nowPlayingSheet = root->findChild<QObject*>(QStringLiteral("nowPlayingSheet"));
+        QObject* swipeStopHandle = root->findChild<QObject*>(QStringLiteral("miniPlayerSwipeStopHandle"));
+        QVERIFY(currentSongBox != nullptr);
+        QVERIFY(nowPlayingSheet != nullptr);
+        QVERIFY(swipeStopHandle != nullptr);
+        QTRY_VERIFY(currentSongBox->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(currentSongBox, "clicked"));
+        QTRY_VERIFY(nowPlayingSheet->property("visible").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(swipeStopHandle, "stopFromSwipe"));
+
+        QTRY_COMPARE(controller.property("playbackState").toString(), QStringLiteral("stopped"));
+        QTRY_VERIFY(!currentSongBox->property("visible").toBool());
+        QTRY_VERIFY(!nowPlayingSheet->property("visible").toBool());
     }
 
     void mainQmlUsesDrawnIconsAndSearchTapStartsPlayback() {
@@ -806,6 +873,9 @@ private slots:
         QVERIFY2(iconButtonBody.contains(QStringLiteral("implicitWidth: iconButton.implicitWidth")), "icon content item should report explicit width");
         QVERIFY2(iconButtonBody.contains(QStringLiteral("implicitHeight: iconButton.implicitHeight")), "icon content item should report explicit height");
         QVERIFY2(iconButtonBody.contains(QStringLiteral("Math.min(iconButton.width, iconButton.height, 24)")), "drawn icon size should be based on the button, not a clipped content item");
+        QVERIFY2(iconButtonBody.contains(QStringLiteral("background: Rectangle")) &&
+                iconButtonBody.contains(QStringLiteral("\"transparent\"")),
+            "icon-only buttons should not inherit platform-default light button backgrounds on Android");
 
         const QStringList unsafePrimaryGlyphs = {
             QStringLiteral("glyph: \""),
@@ -829,6 +899,152 @@ private slots:
         for (const QString& glyph : unsafePrimaryGlyphs) {
             QVERIFY2(!qml.contains(glyph), qPrintable(QStringLiteral("unsafe primary glyph remains: %1").arg(glyph)));
         }
+    }
+
+    void mainQmlMatchesStrictOptionBMobileNavigation() {
+        const QString qml = readMainQml();
+        QVERIFY(!qml.isEmpty());
+
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"topRightSearchButton\"")),
+            "Option B shell should expose search only through the top-right search button");
+        QVERIFY2(!qml.contains(QStringLiteral("id: homeSearchField")),
+            "Option B mobile home should not duplicate search with an inline field");
+        QVERIFY2(!qml.contains(QStringLiteral("objectName: \"homeSearchField\"")),
+            "Option B mobile home should not expose a second search entry point");
+        QVERIFY2(!qml.contains(QStringLiteral("objectName: \"globalSearchField\"")),
+            "Option B shell should not expose a second global search text field");
+        QVERIFY2(!qml.contains(QStringLiteral("pageIndex: 2\n                    iconName: \"search\"")),
+            "Search should not be a bottom navigation tab");
+        QVERIFY2(!qml.contains(QStringLiteral("label: \"Search\"")),
+            "Search should not be visible in bottom navigation");
+        QVERIFY2(!qml.contains(QStringLiteral("label: \"Queue\"")),
+            "Queue should not be visible in bottom navigation");
+        const qsizetype settingsNavStart = qml.indexOf(QStringLiteral("objectName: \"floatingNavSettingsButton\""));
+        QVERIFY2(settingsNavStart >= 0, "Settings nav button should exist");
+        const qsizetype settingsNavEnd = qml.indexOf(QStringLiteral("}"), settingsNavStart);
+        const QString settingsNavBody = qml.mid(settingsNavStart, settingsNavEnd - settingsNavStart);
+        QVERIFY2(settingsNavBody.contains(QStringLiteral("pageIndex: 2")) &&
+                settingsNavBody.contains(QStringLiteral("iconName: \"settings\"")),
+            "Settings should move to the third bottom navigation slot");
+    }
+
+    void mainQmlUsesStrictOptionBVisualMarkers() {
+        const QString qml = readMainQml();
+        QVERIFY(!qml.isEmpty());
+
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"immersiveAlbumBackdrop\"")),
+            "Option B shell should name the full-screen album-first backdrop");
+        QVERIFY2(qml.contains(QStringLiteral("sourceUrl: coreController.moodArtworkUrl")),
+            "Album-first backdrop should use mood artwork instead of playback-only artwork");
+        QVERIFY2(!qml.contains(QStringLiteral("source: coreController.playbackArtworkUrl\n")),
+            "Backdrop should not bind directly to playback-only artwork");
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"topResultsGlassPanel\"")),
+            "Option B search should use a glass top-results panel");
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"viewAllResultsRow\"")),
+            "Option B search should expose the view-all-results row");
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"optionBNowPlayingSheet\"")),
+            "Option B shell should expose a large glass now-playing sheet");
+        QVERIFY2(qml.contains(QStringLiteral("objectName: \"bottomGlassNavigation\"")),
+            "Option B bottom navigation should use the glass navigation object");
+        QVERIFY2(!qml.contains(QStringLiteral("component HomeLane:")),
+            "Home should not use old framed HomeLane cards");
+        QVERIFY2(!qml.contains(QStringLiteral("HomeLane {")),
+            "Home should use unframed sections, not framed HomeLane instances");
+        QVERIFY2(qml.contains(QStringLiteral("component HomeSection: Item")),
+            "Home should expose unframed Option B sections");
+    }
+
+    void settingsPageUsesDarkStyledControls() {
+        const QString qml = readMainQml();
+        QVERIFY(!qml.isEmpty());
+
+        QVERIFY2(qml.contains(QStringLiteral("component ShellTextField: TextField")),
+            "text fields should own a dark shell style instead of platform-default focused outlines");
+        QVERIFY2(qml.contains(QStringLiteral("component SettingsGroup: GroupBox")),
+            "settings sections should own a dark GroupBox style instead of platform-default black labels");
+        QVERIFY2(qml.contains(QStringLiteral("component SettingsButton: Button")),
+            "settings buttons should own a dark button style instead of platform-default light pills");
+        QVERIFY2(qml.contains(QStringLiteral("component SettingsComboBox: ComboBox")),
+            "settings combo boxes should own a dark style instead of platform-default light controls");
+        QVERIFY2(qml.contains(QStringLiteral("component SettingsSwitch: Switch")),
+            "settings switches should own a dark style instead of platform-default accent controls");
+
+        const qsizetype settingsStart = qml.indexOf(QStringLiteral("component SettingsPage: Flickable"));
+        QVERIFY(settingsStart >= 0);
+        const QString settingsBody = qml.mid(settingsStart);
+
+        QVERIFY2(settingsBody.contains(QStringLiteral("SettingsGroup {")),
+            "settings page should use dark-styled groups");
+        QVERIFY2(settingsBody.contains(QStringLiteral("SettingsButton {")),
+            "settings page should use dark-styled buttons");
+        QVERIFY2(settingsBody.contains(QStringLiteral("SettingsComboBox {")),
+            "settings page should use dark-styled combo boxes");
+        QVERIFY2(settingsBody.contains(QStringLiteral("SettingsSwitch {")),
+            "settings page should use dark-styled switches");
+        QVERIFY2(settingsBody.contains(QStringLiteral("downloadDirectoryDisplay")) &&
+                settingsBody.contains(QStringLiteral("elide: Text.ElideMiddle")),
+            "download directory display should remain clipped on Android");
+        QVERIFY2(settingsBody.contains(QStringLiteral("ShellTextField {")) &&
+                !settingsBody.contains(QStringLiteral("placeholderText: \"Download folder\"")),
+            "download directory editor should use shell text field styling without an Android floating placeholder");
+        QVERIFY2(qml.contains(QStringLiteral("ShellTextField {\n                    id: searchField")) &&
+                !qml.contains(QStringLiteral("id: homeSearchField")) &&
+                !qml.contains(QStringLiteral("id: globalSearchField")),
+            "Only the search overlay should own a search text field");
+    }
+
+    void libraryPageUsesDarkStyledControls() {
+        const QString qml = readMainQml();
+        QVERIFY(!qml.isEmpty());
+
+        QVERIFY2(qml.contains(QStringLiteral("component ShellButton: Button")),
+            "Library actions should use dark shell-styled buttons");
+        QVERIFY2(qml.contains(QStringLiteral("component ShellSegmentButton: Button")),
+            "Library tabs should use dark shell-styled segmented buttons");
+
+        const qsizetype libraryStart = qml.indexOf(QStringLiteral("component LibraryPage: Item"));
+        QVERIFY(libraryStart >= 0);
+        const qsizetype searchStart = qml.indexOf(QStringLiteral("component SearchPage: Item"), libraryStart);
+        QVERIFY(searchStart > libraryStart);
+        const QString libraryBody = qml.mid(libraryStart, searchStart - libraryStart);
+
+        QVERIFY2(libraryBody.contains(QStringLiteral("ShellButton {")) &&
+                libraryBody.contains(QStringLiteral("objectName: \"importFolderButton\"")),
+            "Import Folder should not use a platform-default light Button");
+        QVERIFY2(libraryBody.contains(QStringLiteral("ShellSegmentButton {")) &&
+                !libraryBody.contains(QStringLiteral("TabBar {")) &&
+                !libraryBody.contains(QStringLiteral("\n                TabButton {")),
+            "Library tabs should not use Qt TabBar/TabButton platform styling on Android");
+    }
+
+    void mainQmlUsesAlbumFirstThemeEffectsAndSplitFiles() {
+        const QString qml = readMainQml();
+        const QString theme = readQmlFile(u"components/AppTheme.qml");
+        const QString artwork = readQmlFile(u"components/ArtworkTile.qml");
+        const QString player = readQmlFile(u"components/PlayerControls.qml");
+        const QString backdrop = readQmlFile(u"components/AlbumBackdrop.qml");
+        const QString glass = readQmlFile(u"components/GlassSurface.qml");
+        QVERIFY(!qml.isEmpty());
+
+        QVERIFY2(qml.contains(QStringLiteral("import QtQuick.Effects")),
+            "Album-first shell should import QtQuick.Effects for blurred artwork backdrops");
+        QVERIFY2(qml.contains(QStringLiteral("AppTheme")) && !theme.isEmpty(),
+            "Main.qml should use a split AppTheme component");
+        QVERIFY2(qml.contains(QStringLiteral("ArtworkTile")) && !artwork.isEmpty(),
+            "Artwork rendering should move into a reusable album-first component");
+        QVERIFY2(qml.contains(QStringLiteral("PlayerControls")) && !player.isEmpty(),
+            "Now Playing controls should move into a reusable player component");
+        QVERIFY2(qml.contains(QStringLiteral("AlbumBackdrop")) && !backdrop.isEmpty(),
+            "Backdrop rendering should move into a reusable album-first component");
+        QVERIFY2(qml.contains(QStringLiteral("GlassSurface")) && !glass.isEmpty(),
+            "Glass surfaces should move into a reusable component");
+        QVERIFY2(backdrop.contains(QStringLiteral("albumBackdrop")) &&
+                backdrop.contains(QStringLiteral("MultiEffect")) &&
+                backdrop.contains(QStringLiteral("blurEnabled")),
+            "Shell should expose a blurred album backdrop through AlbumBackdrop");
+        QVERIFY2(theme.contains(QStringLiteral("fullImmersiveDark")) &&
+                theme.contains(QStringLiteral("lightFallback")),
+            "Theme should carry dark primary and light fallback tokens");
     }
 };
 

@@ -223,6 +223,7 @@ void CoreController::refreshRecommendationsFromModels() {
 
     if (seedTrackIds.isEmpty()) {
         recommendationsModel_->setItems({});
+        refreshMoodArtworkUrl();
         return;
     }
 
@@ -269,6 +270,7 @@ void CoreController::refreshRecommendationsFromModels() {
         recommendations.push_back(std::move(candidates[i].item));
     }
     recommendationsModel_->setItems(std::move(recommendations));
+    refreshMoodArtworkUrl();
 }
 
 void CoreController::favoriteTrack(const QString& trackId) {

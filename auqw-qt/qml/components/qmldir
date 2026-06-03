@@ -1,0 +1,6 @@
+module components
+AppTheme 1.0 AppTheme.qml
+ArtworkTile 1.0 ArtworkTile.qml
+AlbumBackdrop 1.0 AlbumBackdrop.qml
+GlassSurface 1.0 GlassSurface.qml
+PlayerControls 1.0 PlayerControls.qml

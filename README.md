@@ -35,7 +35,7 @@ ctest --test-dir build --output-on-failure
 Enable the Qt shell when Qt 6 Quick/QML development files are installed:
 
 ```bash
-sudo apt install qt6-declarative-dev qt6-multimedia-dev qml6-module-qtquick-window qml6-module-qtquick-controls qml6-module-qtmultimedia
+sudo apt install qt6-declarative-dev qt6-multimedia-dev qml6-module-qtquick-window qml6-module-qtquick-controls qml6-module-qtquick-effects qml6-module-qtmultimedia
 cmake -S . -B build-qt -GNinja -DAUQW_BUILD_QT=ON
 cmake --build build-qt
 ./build-qt/bin/auqw

@@ -124,6 +124,7 @@ fi
 
 require_file "$qt_prefix/lib/cmake/Qt6/Qt6Config.cmake" "Qt6Config.cmake"
 require_file "$qt_prefix/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" "Qt6MultimediaConfig.cmake"
+require_file "$qt_prefix/qml/QtQuick/Effects/qmldir" "QtQuick/Effects QML runtime"
 require_file "$qt_cmake" "qt-cmake"
 require_file "$macdeployqt" "macdeployqt"
 

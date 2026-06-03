@@ -55,6 +55,7 @@ class CoreController final : public QObject {
     Q_PROPERTY(QString playbackArtist READ playbackArtist NOTIFY playbackStateChanged)
     Q_PROPERTY(QString playbackAlbum READ playbackAlbum NOTIFY playbackStateChanged)
     Q_PROPERTY(QString playbackArtworkUrl READ playbackArtworkUrl NOTIFY playbackStateChanged)
+    Q_PROPERTY(QString moodArtworkUrl READ moodArtworkUrl NOTIFY moodArtworkUrlChanged)
     Q_PROPERTY(QString playbackLocalPath READ playbackLocalPath NOTIFY playbackStateChanged)
     Q_PROPERTY(qint64 playbackPositionMs READ playbackPositionMs NOTIFY playbackStateChanged)
     Q_PROPERTY(qint64 playbackDurationMs READ playbackDurationMs NOTIFY playbackStateChanged)
@@ -103,6 +104,7 @@ public:
     [[nodiscard]] QString playbackArtist() const;
     [[nodiscard]] QString playbackAlbum() const;
     [[nodiscard]] QString playbackArtworkUrl() const;
+    [[nodiscard]] QString moodArtworkUrl() const;
     [[nodiscard]] QString playbackLocalPath() const;
     [[nodiscard]] qint64 playbackPositionMs() const;
     [[nodiscard]] qint64 playbackDurationMs() const;
@@ -155,6 +157,7 @@ signals:
     void downloadStateChanged();
     void downloadDirectoryChanged();
     void playbackStateChanged();
+    void moodArtworkUrlChanged();
     void playbackOptionsChanged();
     void onlineSourceChanged();
 
@@ -224,6 +227,8 @@ private:
     void upsertArtworkCacheRecord(const QString& trackId, const QString& sourceUrl, const QString& cachePath);
     bool applyPlaybackObject(const QJsonObject& playback);
     bool applyPlaybackOptionsObject(const QJsonObject& options);
+    void refreshMoodArtworkUrl();
+    [[nodiscard]] QString firstArtworkFromModel(const JsonListModel* model) const;
     void updatePlaybackFromBackend(const QString& playbackState, std::optional<qint64> positionMs, std::optional<qint64> durationMs, const QString& errorMessage = {});
     void recordRecentIfNeeded();
     [[nodiscard]] int queueIndexForItem(const QString& queueItemId) const;
@@ -288,6 +293,7 @@ private:
     QString playbackArtist_;
     QString playbackAlbum_;
     QString playbackArtworkUrl_;
+    QString moodArtworkUrl_;
     QString playbackLocalPath_;
     qint64 playbackPositionMs_ = 0;
     qint64 playbackDurationMs_ = 0;

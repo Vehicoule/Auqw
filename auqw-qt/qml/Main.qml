@@ -1,8 +1,10 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
+import QtQuick.Effects
 import QtQuick.Layouts
 import QtQuick.Window
+import "components"
 
 ApplicationWindow {
     id: root
@@ -14,7 +16,7 @@ ApplicationWindow {
     minimumHeight: 560
     visible: true
     title: coreController.appName.length > 0 ? coreController.appName : "Auqw"
-    color: "#f6f3ee"
+    color: appThemeRoot.background
 
     readonly property bool mobilePlatform: Qt.platform.os === "android" || Qt.platform.os === "ios"
     readonly property bool compact: root.width < 760 || root.mobilePlatform
@@ -27,6 +29,7 @@ ApplicationWindow {
     readonly property int queuePanelWidth: Math.min(330, Math.max(280, Math.round(root.width * 0.27)))
     readonly property int safeTop: root.mobilePlatform ? 44 : 0
     readonly property int safeBottom: root.mobilePlatform ? 10 : 0
+    readonly property int topChromeHeight: root.compact ? 54 : root.density
     readonly property var themeOptions: ["system", "light", "dark"]
     readonly property bool hasPlayback: coreController.playbackState !== "stopped" && coreController.playbackTitle.length > 0
     readonly property real playbackProgress: coreController.playbackDurationMs > 0
@@ -38,9 +41,17 @@ ApplicationWindow {
     property string searchPageQuery: ""
     property string submittedSearchQuery: ""
     property bool focusSearchFieldOnPage: false
+    property bool searchOverlayOpen: false
+    property real miniPlayerDragOffset: 0
+
+    AppTheme {
+        id: appThemeRoot
+        darkPrimary: true
+    }
 
     function goTo(index) {
-        currentPageIndex = index
+        currentPageIndex = Math.max(0, Math.min(index, 2))
+        searchOverlayOpen = false
     }
 
     function openSearchPage(query, focusField) {
@@ -48,7 +59,7 @@ ApplicationWindow {
         if (focusField) {
             focusSearchFieldOnPage = true
         }
-        currentPageIndex = 2
+        searchOverlayOpen = true
     }
 
     function updateSearchQuery(query) {
@@ -65,7 +76,7 @@ ApplicationWindow {
         if (trimmedQuery.length === 0) {
             return
         }
-        currentPageIndex = 2
+        searchOverlayOpen = true
         searchPageQuery = trimmedQuery
         submittedSearchQuery = trimmedQuery
         coreController.searchOnline(trimmedQuery)
@@ -100,6 +111,22 @@ ApplicationWindow {
             return coreController.playbackState
         }
         return position + " / " + duration
+    }
+
+    function handlePlayPause() {
+        if (coreController.playbackState === "playing") {
+            coreController.pausePlayback()
+        } else if (coreController.playbackState === "paused") {
+            coreController.resumePlayback()
+        } else {
+            coreController.playFirstQueuedTrack()
+        }
+    }
+
+    function stopPlaybackFromSwipe() {
+        nowPlayingSheet.close()
+        root.miniPlayerDragOffset = 0
+        coreController.stopPlayback()
     }
 
     component DrawnIcon: Canvas {
@@ -255,6 +282,7 @@ ApplicationWindow {
         property string tooltip: ""
 
         text: ""
+        flat: true
         padding: 0
         implicitWidth: root.density
         implicitHeight: root.density
@@ -269,22 +297,271 @@ ApplicationWindow {
                 objectName: iconButton.iconObjectName
                 kind: iconButton.iconName
                 strokeColor: iconButton.enabled
-                    ? (iconButton.checked ? "#0e5a43" : "#4d5a54")
-                    : "#9aa39e"
+                    ? (iconButton.checked ? appThemeRoot.accent : appThemeRoot.icon)
+                    : appThemeRoot.iconMuted
                 anchors.centerIn: parent
                 width: Math.min(iconButton.width, iconButton.height, 24)
                 height: width
             }
         }
+
+        background: Rectangle {
+            radius: 8
+            color: iconButton.checked
+                ? appThemeRoot.accentSoft
+                : iconButton.pressed ? appThemeRoot.hover : "transparent"
+            border.color: iconButton.checked ? appThemeRoot.accent : "transparent"
+            border.width: 1
+        }
     }
 
     component GlassFrame: Frame {
         padding: root.pagePadding
+        background: GlassSurface {
+            surfaceRadius: 8
+            fillColor: appThemeRoot.panel
+            strokeColor: appThemeRoot.borderSoft
+        }
+    }
+
+    component SettingsGroup: GroupBox {
+        id: settingsGroup
+
+        Layout.fillWidth: true
+        padding: root.pagePadding
+        topPadding: root.pagePadding + 26
+        leftPadding: root.pagePadding
+        rightPadding: root.pagePadding
+        bottomPadding: root.pagePadding
+
+        label: Label {
+            text: settingsGroup.title
+            color: appThemeRoot.textSecondary
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            leftPadding: settingsGroup.leftPadding
+            elide: Text.ElideRight
+        }
+
+        background: Rectangle {
+            y: settingsGroup.topPadding - settingsGroup.padding
+            width: parent.width
+            height: parent.height - y
+            radius: 8
+            color: appThemeRoot.panel
+            border.color: appThemeRoot.borderSoft
+            border.width: 1
+        }
+    }
+
+    component SettingsButton: Button {
+        id: settingsButton
+
+        padding: 0
+        implicitHeight: root.density
+
+        contentItem: Label {
+            text: settingsButton.text
+            color: settingsButton.enabled
+                ? (settingsButton.checked ? appThemeRoot.accent : appThemeRoot.textPrimary)
+                : appThemeRoot.textMuted
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+        }
+
         background: Rectangle {
             radius: 8
-            color: "#dffafafa"
-            border.color: "#80ffffff"
+            color: settingsButton.checked
+                ? appThemeRoot.accentSoft
+                : settingsButton.pressed ? appThemeRoot.hover : appThemeRoot.surfaceStrong
+            border.color: settingsButton.checked ? appThemeRoot.accent : appThemeRoot.border
             border.width: 1
+        }
+    }
+
+    component ShellButton: Button {
+        id: shellButton
+
+        padding: 0
+        implicitHeight: root.density
+
+        contentItem: Label {
+            text: shellButton.text
+            color: shellButton.enabled ? appThemeRoot.textPrimary : appThemeRoot.textMuted
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: shellButton.pressed ? appThemeRoot.hover : appThemeRoot.surfaceStrong
+            border.color: shellButton.hovered ? appThemeRoot.accent : appThemeRoot.border
+            border.width: 1
+        }
+    }
+
+    component ShellSegmentButton: Button {
+        id: shellSegmentButton
+
+        checkable: true
+        padding: 0
+        implicitHeight: root.density
+
+        contentItem: Label {
+            text: shellSegmentButton.text
+            color: shellSegmentButton.checked ? appThemeRoot.accent : appThemeRoot.textSecondary
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: shellSegmentButton.checked ? appThemeRoot.accentSoft : shellSegmentButton.hovered ? appThemeRoot.hover : appThemeRoot.surfaceStrong
+            border.color: shellSegmentButton.checked ? appThemeRoot.accent : appThemeRoot.border
+            border.width: 1
+        }
+    }
+
+    component ShellTextField: TextField {
+        id: shellTextField
+
+        property color fieldColor: appThemeRoot.surfaceStrong
+
+        color: appThemeRoot.textPrimary
+        placeholderTextColor: appThemeRoot.textMuted
+        leftPadding: 16
+        rightPadding: 16
+        verticalAlignment: TextInput.AlignVCenter
+
+        background: Rectangle {
+            radius: 8
+            color: shellTextField.fieldColor
+            border.color: shellTextField.activeFocus ? appThemeRoot.accent : appThemeRoot.border
+            border.width: shellTextField.activeFocus ? 2 : 1
+        }
+    }
+
+    component SettingsComboBox: ComboBox {
+        id: settingsComboBox
+
+        padding: 0
+        implicitHeight: root.density
+
+        contentItem: Label {
+            text: settingsComboBox.displayText
+            color: appThemeRoot.textPrimary
+            leftPadding: 14
+            rightPadding: 42
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+        }
+
+        indicator: DrawnIcon {
+            kind: "down"
+            strokeColor: appThemeRoot.icon
+            anchors.right: parent.right
+            anchors.rightMargin: 14
+            anchors.verticalCenter: parent.verticalCenter
+            width: 18
+            height: 18
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: appThemeRoot.surfaceStrong
+            border.color: appThemeRoot.border
+            border.width: 1
+        }
+
+        delegate: ItemDelegate {
+            width: settingsComboBox.width
+            implicitHeight: root.density
+
+            contentItem: Label {
+                text: modelData
+                color: appThemeRoot.textPrimary
+                leftPadding: 14
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+                font.pixelSize: 14
+            }
+
+            background: Rectangle {
+                color: highlighted ? appThemeRoot.hover : appThemeRoot.surface
+            }
+        }
+
+        popup: Popup {
+            y: settingsComboBox.height + 6
+            width: settingsComboBox.width
+            implicitHeight: contentItem.implicitHeight
+            padding: 1
+
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: settingsComboBox.popup.visible ? settingsComboBox.delegateModel : null
+                currentIndex: settingsComboBox.highlightedIndex
+                ScrollIndicator.vertical: ScrollIndicator {}
+            }
+
+            background: Rectangle {
+                radius: 8
+                color: appThemeRoot.surfaceStrong
+                border.color: appThemeRoot.border
+                border.width: 1
+            }
+        }
+    }
+
+    component SettingsSwitch: Switch {
+        id: settingsSwitch
+
+        implicitHeight: root.density
+        spacing: 10
+
+        indicator: Rectangle {
+            x: settingsSwitch.leftPadding
+            y: Math.round((settingsSwitch.height - height) / 2)
+            width: 58
+            height: 32
+            radius: height / 2
+            color: settingsSwitch.checked ? appThemeRoot.accentSoft : appThemeRoot.surfaceStrong
+            border.color: settingsSwitch.checked ? appThemeRoot.accent : appThemeRoot.border
+            border.width: 1
+
+            Rectangle {
+                width: 24
+                height: 24
+                radius: 12
+                x: settingsSwitch.checked ? parent.width - width - 4 : 4
+                anchors.verticalCenter: parent.verticalCenter
+                color: settingsSwitch.checked ? appThemeRoot.accent : appThemeRoot.textSecondary
+
+                Behavior on x {
+                    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                }
+            }
+        }
+
+        contentItem: Label {
+            text: settingsSwitch.text
+            color: appThemeRoot.textSecondary
+            leftPadding: 68
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            font.pixelSize: 14
         }
     }
 
@@ -299,14 +576,14 @@ ApplicationWindow {
             text: parent.title
             font.pixelSize: root.compact ? 25 : 31
             font.weight: Font.DemiBold
-            color: "#1f2522"
+            color: appThemeRoot.textPrimary
             Layout.fillWidth: true
             elide: Text.ElideRight
         }
 
         Label {
             text: parent.detail
-            color: "#66736d"
+            color: appThemeRoot.textSecondary
             visible: text.length > 0
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
@@ -330,14 +607,14 @@ ApplicationWindow {
                 horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: 17
                 font.weight: Font.DemiBold
-                color: "#1f2522"
+                color: appThemeRoot.textPrimary
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
             }
 
             Label {
                 text: detail
-                color: "#66736d"
+                color: appThemeRoot.textSecondary
                 horizontalAlignment: Text.AlignHCenter
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
@@ -373,7 +650,7 @@ ApplicationWindow {
                 DrawnIcon {
                     objectName: navPill.iconObjectName
                     kind: navPill.iconName
-                    strokeColor: navPill.checked ? "#0e5a43" : "#4d5a54"
+                    strokeColor: navPill.checked ? appThemeRoot.accent : appThemeRoot.icon
                     anchors.centerIn: parent
                     width: 22
                     height: 22
@@ -385,7 +662,7 @@ ApplicationWindow {
                 visible: !root.compact
                 horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: 11
-                color: navPill.checked ? "#0e5a43" : "#6a756f"
+                color: navPill.checked ? appThemeRoot.accent : appThemeRoot.textSecondary
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -393,8 +670,8 @@ ApplicationWindow {
 
         background: Rectangle {
             radius: 8
-            color: parent.checked ? "#d8efe6" : parent.hovered ? "#eff6f3" : "transparent"
-            border.color: parent.checked ? "#9bd1ba" : "transparent"
+            color: parent.checked ? appThemeRoot.accentSoft : parent.hovered ? appThemeRoot.hover : "transparent"
+            border.color: parent.checked ? appThemeRoot.accent : "transparent"
         }
     }
 
@@ -417,7 +694,7 @@ ApplicationWindow {
                 Layout.preferredWidth: 42
                 Layout.preferredHeight: 42
                 radius: 6
-                color: "#e5ece8"
+                color: appThemeRoot.artworkFallback
 
                 Item {
                     anchors.centerIn: parent
@@ -426,7 +703,7 @@ ApplicationWindow {
 
                     DrawnIcon {
                         kind: "track"
-                        strokeColor: "#4f6258"
+                        strokeColor: appThemeRoot.icon
                         anchors.centerIn: parent
                         width: 22
                         height: 22
@@ -441,14 +718,14 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -468,6 +745,8 @@ ApplicationWindow {
     }
 
     component HomeTrackDelegate: ItemDelegate {
+        id: homeTrackDelegate
+
         required property string track_id
         required property string title
         required property string artist
@@ -482,35 +761,15 @@ ApplicationWindow {
         contentItem: RowLayout {
             spacing: 10
 
-            Rectangle {
+            ArtworkTile {
                 Layout.preferredWidth: 42
                 Layout.preferredHeight: 42
-                radius: 6
-                color: "#e9eee9"
-                clip: true
-
-                Image {
-                    anchors.fill: parent
-                    source: artwork_url
-                    visible: artwork_url.length > 0
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                }
-
-                Item {
-                    anchors.centerIn: parent
-                    visible: artwork_url.length === 0
-                    width: 24
-                    height: 24
-
-                    DrawnIcon {
-                        kind: "track"
-                        strokeColor: "#4f6258"
-                        anchors.centerIn: parent
-                        width: 22
-                        height: 22
-                    }
-                }
+                artworkUrl: artwork_url
+                fallbackText: title
+                fallbackColor: appThemeRoot.artworkFallback
+                textColor: appThemeRoot.icon
+                borderColor: appThemeRoot.borderSoft
+                tileRadius: 6
             }
 
             ColumnLayout {
@@ -519,7 +778,7 @@ ApplicationWindow {
 
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
@@ -527,7 +786,7 @@ ApplicationWindow {
 
                 Label {
                     text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -542,9 +801,17 @@ ApplicationWindow {
                 onClicked: coreController.favoriteTrack(track_id)
             }
         }
+
+        background: GlassSurface {
+            surfaceRadius: 8
+            fillColor: homeTrackDelegate.hovered ? appThemeRoot.hover : appThemeRoot.surface
+            strokeColor: appThemeRoot.borderSoft
+        }
     }
 
     component SearchResultDelegate: ItemDelegate {
+        id: searchResultDelegateRoot
+
         required property string result_id
         required property string title
         required property string artist
@@ -563,26 +830,20 @@ ApplicationWindow {
         contentItem: RowLayout {
             spacing: 10
 
-            Rectangle {
+            ArtworkTile {
                 Layout.preferredWidth: root.compact ? 46 : 50
                 Layout.preferredHeight: root.compact ? 46 : 50
-                radius: 6
-                color: "#e2eae6"
-                clip: true
-
-                Image {
-                    anchors.fill: parent
-                    source: artwork_url
-                    fillMode: Image.PreserveAspectCrop
-                    visible: artwork_url.length > 0
-                    asynchronous: true
-                    cache: true
-                }
+                artworkUrl: artwork_url
+                fallbackText: title
+                fallbackColor: appThemeRoot.artworkFallback
+                textColor: appThemeRoot.icon
+                borderColor: is_playing || is_loading ? appThemeRoot.danger : appThemeRoot.borderSoft
+                tileRadius: 6
 
                 Rectangle {
                     anchors.fill: parent
                     color: "transparent"
-                    border.color: is_playing || is_loading ? "#c61f3a" : "transparent"
+                    border.color: is_playing || is_loading ? appThemeRoot.danger : "transparent"
                     border.width: 2
                     radius: parent.radius
                 }
@@ -595,14 +856,14 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album, root.formatDuration(duration_ms)].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -611,7 +872,7 @@ ApplicationWindow {
 
             Label {
                 text: is_playing ? "Playing" : is_loading ? "Loading" : "Play"
-                color: is_playing || is_loading ? "#c61f3a" : "#7b817d"
+                color: is_playing || is_loading ? appThemeRoot.danger : appThemeRoot.textMuted
                 font.pixelSize: 12
                 font.weight: is_playing || is_loading ? Font.DemiBold : Font.Normal
                 Layout.preferredWidth: root.compact ? 58 : 64
@@ -622,7 +883,16 @@ ApplicationWindow {
 
         background: Rectangle {
             radius: 8
-            color: is_playing ? "#fff0f2" : is_loading ? "#fff6e8" : parent.hovered ? "#f3f2ef" : "transparent"
+            color: "transparent"
+
+            GlassSurface {
+                anchors.fill: parent
+                surfaceRadius: 8
+                fillColor: is_playing
+                    ? appThemeRoot.dangerSoft
+                    : is_loading ? appThemeRoot.warningSoft : searchResultDelegateRoot.hovered ? appThemeRoot.hover : appThemeRoot.surface
+                strokeColor: is_playing || is_loading ? appThemeRoot.danger : appThemeRoot.borderSoft
+            }
         }
     }
 
@@ -650,7 +920,7 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
@@ -662,7 +932,7 @@ ApplicationWindow {
 
                 Label {
                     text: error_text.length > 0 ? error_text : target_path
-                    color: error_text.length > 0 ? "#a63b2f" : "#66736d"
+                    color: error_text.length > 0 ? appThemeRoot.danger : appThemeRoot.textSecondary
                     font.pixelSize: 11
                     elide: Text.ElideMiddle
                     visible: text.length > 0 && !root.compact
@@ -708,14 +978,14 @@ ApplicationWindow {
                 Label {
                     text: title.length > 0 ? title : "Untitled track"
                     font.weight: Font.Medium
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
 
                 Label {
                     text: [artist, album].filter(function(item) { return item.length > 0 }).join(" | ")
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     elide: Text.ElideRight
                     visible: text.length > 0
                     Layout.fillWidth: true
@@ -758,26 +1028,26 @@ ApplicationWindow {
         }
     }
 
-    component HomeLane: GlassFrame {
-        id: homeLane
+    component HomeSection: Item {
+        id: homeSection
 
         property string title
-        property alias model: laneList.model
+        property alias model: sectionList.model
         property string emptyText
         property string listObjectName
 
         Layout.fillWidth: true
-        Layout.preferredHeight: root.compact ? 220 : 250
+        Layout.preferredHeight: root.compact ? 210 : 242
 
         ColumnLayout {
             anchors.fill: parent
             spacing: 10
 
             Label {
-                text: homeLane.title
+                text: homeSection.title
                 font.pixelSize: 18
                 font.weight: Font.DemiBold
-                color: "#202622"
+                color: appThemeRoot.textPrimary
                 Layout.fillWidth: true
             }
 
@@ -786,19 +1056,20 @@ ApplicationWindow {
                 Layout.fillHeight: true
 
                 ListView {
-                    id: laneList
-                    objectName: homeLane.listObjectName
+                    id: sectionList
+                    objectName: homeSection.listObjectName
                     anchors.fill: parent
                     clip: true
                     model: []
+                    spacing: 8
                     delegate: HomeTrackDelegate {}
                 }
 
                 EmptyState {
                     anchors.fill: parent
-                    title: homeLane.emptyText
+                    title: homeSection.emptyText
                     detail: ""
-                    visible: laneList.count === 0
+                    visible: sectionList.count === 0
                 }
             }
         }
@@ -823,48 +1094,27 @@ ApplicationWindow {
                     detail: root.hasPlayback ? "Listening now" : "Pick up from recent music or search something new"
                 }
 
-                TextField {
-                    id: homeSearchField
-                    objectName: "homeSearchField"
-                    visible: root.compact
-                    placeholderText: "Search"
-                    text: root.currentPageIndex === 0 ? root.searchPageQuery : ""
-                    Layout.fillWidth: true
-                    implicitHeight: root.density
-                    inputMethodHints: Qt.ImhNoPredictiveText
-                    onActiveFocusChanged: {
-                        if (activeFocus) {
-                            root.openSearchPage(text, true)
-                        }
-                    }
-                    onTextEdited: {
-                        root.updateSearchQuery(text)
-                        root.openSearchPage(text, true)
-                    }
-                    onAccepted: root.submitSearch(text, homeSearchField)
-                }
-
                 GridLayout {
                     columns: root.compact ? 1 : 3
                     Layout.fillWidth: true
                     rowSpacing: root.pageGap
                     columnSpacing: root.pageGap
 
-                    HomeLane {
+                    HomeSection {
                         title: "Recommendations"
                         listObjectName: "recommendationsList"
                         model: coreController.recommendationsModel
                         emptyText: "No recommendations yet"
                     }
 
-                    HomeLane {
+                    HomeSection {
                         title: "Keep Listening"
                         listObjectName: "keepListeningList"
                         model: coreController.recentTracksModel
                         emptyText: "No recent plays"
                     }
 
-                    HomeLane {
+                    HomeSection {
                         title: "Favorites"
                         listObjectName: "favoritesList"
                         model: coreController.favoriteTracksModel
@@ -876,7 +1126,9 @@ ApplicationWindow {
     }
 
     component LibraryPage: Item {
+        id: libraryPageRoot
         objectName: "libraryPage"
+        property int selectedLibraryTab: 0
 
         ColumnLayout {
             anchors.fill: parent
@@ -891,40 +1143,47 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: root.pageGap
 
-                Button {
+                ShellButton {
                     objectName: "importFolderButton"
                     text: "Import Folder"
                     implicitHeight: root.density
+                    Layout.preferredWidth: root.compact ? 156 : 150
                     onClicked: libraryFolderDialog.open()
                 }
 
                 Label {
                     objectName: "importStatusLabel"
                     text: coreController.importStatus
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
                 }
             }
 
-            TabBar {
-                id: libraryTabs
+            RowLayout {
                 objectName: "libraryTabs"
                 Layout.fillWidth: true
+                spacing: 2
 
-                TabButton {
+                ShellSegmentButton {
                     text: "Tracks"
+                    checked: libraryPageRoot.selectedLibraryTab === 0
+                    Layout.fillWidth: true
+                    onClicked: libraryPageRoot.selectedLibraryTab = 0
                 }
 
-                TabButton {
+                ShellSegmentButton {
                     objectName: "libraryDownloadsTab"
                     text: "Downloads"
+                    checked: libraryPageRoot.selectedLibraryTab === 1
+                    Layout.fillWidth: true
+                    onClicked: libraryPageRoot.selectedLibraryTab = 1
                 }
             }
 
             StackLayout {
-                currentIndex: libraryTabs.currentIndex
+                currentIndex: libraryPageRoot.selectedLibraryTab
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
@@ -966,16 +1225,11 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: root.pageGap
 
-            PageHeader {
-                title: "Search"
-                detail: coreController.searchStatus === "Ready" ? searchResultsList.count + " results" : coreController.searchStatus
-            }
-
             RowLayout {
                 Layout.fillWidth: true
                 spacing: root.pageGap
 
-                TextField {
+                ShellTextField {
                     id: searchField
                     objectName: "searchField"
                     placeholderText: "Search"
@@ -989,7 +1243,7 @@ ApplicationWindow {
                     onAccepted: root.submitSearch(text, searchField)
 
                     function takePendingSearchFocus() {
-                        if (root.currentPageIndex === 2 && root.focusSearchFieldOnPage) {
+                        if (root.searchOverlayOpen && root.focusSearchFieldOnPage) {
                             forceActiveFocus()
                             root.focusSearchFieldOnPage = false
                         }
@@ -1000,6 +1254,9 @@ ApplicationWindow {
                     Connections {
                         target: root
                         function onCurrentPageIndexChanged() {
+                            searchField.takePendingSearchFocus()
+                        }
+                        function onSearchOverlayOpenChanged() {
                             searchField.takePendingSearchFocus()
                         }
                         function onFocusSearchFieldOnPageChanged() {
@@ -1024,51 +1281,93 @@ ApplicationWindow {
                 objectName: "searchStatusLabel"
                 text: coreController.searchErrorMessage.length > 0 ? coreController.searchErrorMessage : coreController.searchStatus
                 visible: coreController.searchStatus !== "Idle" && coreController.searchStatus !== "Ready"
-                color: coreController.searchStatus === "Error" || coreController.searchStatus === "Disabled" ? "#a63b2f" : "#66736d"
+                color: coreController.searchStatus === "Error" || coreController.searchStatus === "Disabled" ? appThemeRoot.danger : appThemeRoot.textSecondary
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
 
-            ListView {
-                id: searchSuggestionsList
-                objectName: "searchSuggestionsList"
-                Layout.fillWidth: true
-                Layout.preferredHeight: visible ? Math.min(count * 38, 128) : 0
-                visible: count > 0 && searchPage.trimmedQuery.length > 0 && !searchPage.submittedQueryActive
-                clip: true
-                model: coreController.searchSuggestionsModel
-                delegate: ItemDelegate {
-                    objectName: "searchSuggestionDelegate"
-                    width: ListView.view.width
-                    implicitHeight: 38
-                    text: model.text
-                    onClicked: {
-                        root.searchPageQuery = model.text
-                        root.submittedSearchQuery = model.text.trim()
-                        coreController.acceptSearchSuggestion(model.text)
-                    }
-                }
-            }
-
-            Item {
+            GlassFrame {
+                objectName: "topResultsGlassPanel"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
-                ListView {
-                    id: searchResultsList
-                    objectName: "searchResultsList"
+                ColumnLayout {
                     anchors.fill: parent
-                    visible: searchPage.submittedQueryActive
-                    clip: true
-                    model: coreController.searchResultsModel
-                    delegate: SearchResultDelegate {}
-                }
+                    spacing: root.pageGap
 
-                EmptyState {
-                    anchors.fill: parent
-                    title: coreController.searchStatus === "Searching" ? "Searching" : searchPage.trimmedQuery.length > 0 ? "No results" : "No query"
-                    detail: coreController.searchStatus === "Disabled" ? "Online source is disabled" : searchPage.submittedQueryActive ? "Search is ready" : "Suggestions appear as you type"
-                    visible: searchResultsList.count === 0 || !searchPage.submittedQueryActive
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            text: "Top results"
+                            font.pixelSize: 18
+                            font.weight: Font.DemiBold
+                            color: appThemeRoot.textPrimary
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+
+                        Label {
+                            text: searchResultsList.count + " found"
+                            visible: searchPage.submittedQueryActive
+                            color: appThemeRoot.textMuted
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    ListView {
+                        id: searchSuggestionsList
+                        objectName: "searchSuggestionsList"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: visible ? Math.min(count * 38, 128) : 0
+                        visible: count > 0 && searchPage.trimmedQuery.length > 0 && !searchPage.submittedQueryActive
+                        clip: true
+                        model: coreController.searchSuggestionsModel
+                        delegate: ItemDelegate {
+                            objectName: "searchSuggestionDelegate"
+                            width: ListView.view.width
+                            implicitHeight: 38
+                            text: model.text
+                            onClicked: {
+                                root.searchPageQuery = model.text
+                                root.submittedSearchQuery = model.text.trim()
+                                coreController.acceptSearchSuggestion(model.text)
+                            }
+                        }
+                    }
+
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+
+                        ListView {
+                            id: searchResultsList
+                            objectName: "searchResultsList"
+                            anchors.fill: parent
+                            visible: searchPage.submittedQueryActive
+                            clip: true
+                            model: coreController.searchResultsModel
+                            delegate: SearchResultDelegate {}
+                        }
+
+                        EmptyState {
+                            anchors.fill: parent
+                            title: coreController.searchStatus === "Searching" ? "Searching" : searchPage.trimmedQuery.length > 0 ? "No results" : "No query"
+                            detail: coreController.searchStatus === "Disabled" ? "Online source is disabled" : searchPage.submittedQueryActive ? "Search is ready" : "Suggestions appear as you type"
+                            visible: searchResultsList.count === 0 || !searchPage.submittedQueryActive
+                        }
+                    }
+
+                    ItemDelegate {
+                        objectName: "viewAllResultsRow"
+                        visible: searchPage.submittedQueryActive && searchResultsList.count > 0
+                        Layout.fillWidth: true
+                        implicitHeight: root.density
+                        text: "View all results"
+                        enabled: false
+                    }
                 }
             }
         }
@@ -1147,7 +1446,7 @@ ApplicationWindow {
             Label {
                 objectName: "downloadStatusLabel"
                 text: coreController.downloadStatus
-                color: coreController.downloadStatus.indexOf("unavailable") >= 0 ? "#a63b2f" : "#66736d"
+                color: coreController.downloadStatus.indexOf("unavailable") >= 0 ? appThemeRoot.danger : appThemeRoot.textSecondary
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -1191,10 +1490,9 @@ ApplicationWindow {
                 detail: "Core status: " + (coreController.coreStatus.length > 0 ? coreController.coreStatus : coreController.helloText)
             }
 
-            GroupBox {
+            SettingsGroup {
                 objectName: "settingsAppearancePlaybackGroup"
                 title: "Appearance + Playback"
-                Layout.fillWidth: true
 
                 GridLayout {
                     anchors.fill: parent
@@ -1202,7 +1500,7 @@ ApplicationWindow {
                     rowSpacing: 10
                     columnSpacing: 10
 
-                    ComboBox {
+                    SettingsComboBox {
                         id: themeSelector
                         model: root.themeOptions
                         currentIndex: Math.max(0, root.themeOptions.indexOf(coreController.themeSetting.length > 0 ? coreController.themeSetting : "system"))
@@ -1213,7 +1511,7 @@ ApplicationWindow {
                         }
                     }
 
-                    Button {
+                    SettingsButton {
                         text: coreController.repeatMode === "off" ? "Repeat Off" : "Repeat " + coreController.repeatMode
                         checkable: true
                         checked: coreController.repeatMode !== "off"
@@ -1222,7 +1520,7 @@ ApplicationWindow {
                         onClicked: coreController.toggleRepeatMode()
                     }
 
-                    Button {
+                    SettingsButton {
                         text: "Shuffle"
                         checkable: true
                         checked: coreController.shuffleEnabled
@@ -1233,16 +1531,15 @@ ApplicationWindow {
                 }
             }
 
-            GroupBox {
+            SettingsGroup {
                 objectName: "onlineSourceSettingsGroup"
                 title: "Online Source"
-                Layout.fillWidth: true
 
                 RowLayout {
                     anchors.fill: parent
                     spacing: root.pageGap
 
-                    Switch {
+                    SettingsSwitch {
                         checked: coreController.onlineEnabled
                         text: coreController.onlineSourceStatus
                         onToggled: coreController.setOnlineEnabled(checked)
@@ -1250,57 +1547,87 @@ ApplicationWindow {
 
                     Label {
                         text: coreController.onlineSourceCapabilities.join(" / ")
-                        color: "#66736d"
+                        color: appThemeRoot.textSecondary
                         Layout.fillWidth: true
                         elide: Text.ElideRight
                     }
                 }
             }
 
-            GroupBox {
+            SettingsGroup {
                 objectName: "storageSettingsGroup"
                 title: "Storage"
-                Layout.fillWidth: true
 
-                RowLayout {
+                GridLayout {
                     anchors.fill: parent
-                    spacing: root.pageGap
+                    columns: root.compact ? 1 : 2
+                    rowSpacing: root.pageGap
+                    columnSpacing: root.pageGap
 
-                    TextField {
-                        id: downloadDirectoryField
-                        objectName: "downloadDirectoryField"
-                        text: coreController.downloadDirectory
-                        placeholderText: "Download folder"
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        implicitHeight: root.density
+                        Layout.minimumWidth: 0
+                        spacing: 6
+
+                        Label {
+                            objectName: "downloadDirectoryDisplay"
+                            text: coreController.downloadDirectory
+                            color: appThemeRoot.textSecondary
+                            elide: Text.ElideMiddle
+                            Layout.fillWidth: true
+
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                hoverEnabled: true
+                            }
+                        }
+
+                        ShellTextField {
+                            id: downloadDirectoryField
+                            objectName: "downloadDirectoryField"
+                            text: coreController.downloadDirectory
+                            fieldColor: appThemeRoot.surface
+                            selectByMouse: true
+                            horizontalAlignment: TextInput.AlignLeft
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            implicitHeight: root.density
+                            Component.onCompleted: cursorPosition = 0
+                            onActiveFocusChanged: {
+                                if (!activeFocus) {
+                                    cursorPosition = 0
+                                }
+                            }
+                        }
                     }
 
-                    Button {
+                    SettingsButton {
                         objectName: "downloadDirectorySaveButton"
                         text: "Save"
                         implicitHeight: root.density
+                        Layout.alignment: Qt.AlignBottom
                         onClicked: coreController.setDownloadDirectory(downloadDirectoryField.text)
                     }
                 }
             }
 
-            GroupBox {
+            SettingsGroup {
                 objectName: "listeningDataSettingsGroup"
                 title: "Listening Data"
-                Layout.fillWidth: true
 
                 RowLayout {
                     anchors.fill: parent
                     spacing: root.pageGap
 
-                    Button {
+                    SettingsButton {
                         text: "Clear Listening"
                         implicitHeight: root.density
                         Layout.fillWidth: true
                         onClicked: coreController.clearListeningHistory()
                     }
 
-                    Button {
+                    SettingsButton {
                         text: "Clear Search"
                         implicitHeight: root.density
                         Layout.fillWidth: true
@@ -1309,18 +1636,17 @@ ApplicationWindow {
                 }
             }
 
-            GroupBox {
+            SettingsGroup {
                 id: aboutSettingsGroup
                 objectName: "aboutSettingsGroup"
                 title: "About"
                 property bool expanded: false
-                Layout.fillWidth: true
 
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 6
 
-                    Button {
+                    SettingsButton {
                         text: aboutSettingsGroup.expanded ? "Hide Details" : "Show Details"
                         implicitHeight: root.density
                         onClicked: aboutSettingsGroup.expanded = !aboutSettingsGroup.expanded
@@ -1328,7 +1654,7 @@ ApplicationWindow {
 
                     Label {
                         text: coreController.appId + " | schema " + coreController.schemaVersion
-                        color: "#66736d"
+                        color: appThemeRoot.textSecondary
                         visible: aboutSettingsGroup.expanded
                         Layout.fillWidth: true
                         elide: Text.ElideMiddle
@@ -1336,7 +1662,7 @@ ApplicationWindow {
 
                     Label {
                         text: coreController.databasePath
-                        color: "#66736d"
+                        color: appThemeRoot.textSecondary
                         font.pixelSize: 11
                         visible: aboutSettingsGroup.expanded
                         Layout.fillWidth: true
@@ -1347,7 +1673,51 @@ ApplicationWindow {
         }
     }
 
-    Rectangle {
+    AlbumBackdrop {
+        id: immersiveAlbumBackdrop
+        objectName: "immersiveAlbumBackdrop"
+        anchors.fill: parent
+        z: -20
+        sourceUrl: coreController.moodArtworkUrl
+        fallbackColor: appThemeRoot.background
+        overlayColor: appThemeRoot.backdropOverlay
+    }
+
+    Item {
+        id: topChrome
+        objectName: "topChrome"
+        x: root.compact ? root.pagePadding : root.navWidth + root.pagePadding
+        y: root.safeTop + root.pagePadding
+        width: Math.max(0, root.width - x - root.pagePadding)
+        height: root.topChromeHeight
+        z: 18
+
+        Label {
+            text: "Auqw"
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(0, topRightSearchButton.x - 12)
+            color: appThemeRoot.textPrimary
+            font.pixelSize: root.compact ? 25 : 20
+            font.weight: Font.DemiBold
+            elide: Text.ElideRight
+        }
+
+        IconButton {
+            id: topRightSearchButton
+            objectName: "topRightSearchButton"
+            iconName: "search"
+            iconObjectName: "topRightSearchIcon"
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            implicitWidth: root.density
+            implicitHeight: root.density
+            tooltip: "Search"
+            onClicked: root.openSearchPage(root.searchPageQuery, true)
+        }
+    }
+
+    GlassSurface {
         id: desktopNavigationRail
         objectName: "desktopNavigationRail"
         visible: !root.compact
@@ -1355,8 +1725,9 @@ ApplicationWindow {
         y: 0
         width: root.navWidth
         height: root.height
-        color: "#ffffff"
-        border.color: "#ebe7df"
+        surfaceRadius: 0
+        fillColor: appThemeRoot.surfaceStrong
+        strokeColor: appThemeRoot.border
         z: 10
 
         ColumnLayout {
@@ -1368,14 +1739,14 @@ ApplicationWindow {
                 text: "Auqw"
                 font.pixelSize: 25
                 font.weight: Font.DemiBold
-                color: "#1f2522"
+                color: appThemeRoot.textPrimary
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
 
             Label {
                 text: "Library + online playback"
-                color: "#7a817c"
+                color: appThemeRoot.textMuted
                 font.pixelSize: 12
                 Layout.fillWidth: true
                 elide: Text.ElideRight
@@ -1402,14 +1773,8 @@ ApplicationWindow {
             }
 
             NavPill {
-                pageIndex: 2
-                iconName: "search"
-                label: "Search"
-            }
-
-            NavPill {
                 objectName: "floatingNavSettingsButton"
-                pageIndex: 3
+                pageIndex: 2
                 iconName: "settings"
                 iconObjectName: "floatingNavSettingsIcon"
                 label: "Settings"
@@ -1421,62 +1786,11 @@ ApplicationWindow {
 
             Label {
                 text: coreController.onlineSourceStatus
-                color: coreController.onlineEnabled ? "#0e5a43" : "#a63b2f"
+                color: coreController.onlineEnabled ? appThemeRoot.accent : appThemeRoot.danger
                 font.pixelSize: 12
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
-        }
-    }
-
-    Row {
-        id: globalSearchBar
-        objectName: "globalSearchBar"
-        visible: !root.compact && (root.currentPageIndex === 0 || root.currentPageIndex === 1)
-        width: Math.max(260, Math.min(430, root.width - x - root.pagePadding - (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0)))
-        height: root.density
-        x: root.navWidth + root.pagePadding
-        y: root.safeTop + root.pagePadding
-        spacing: 8
-        z: 15
-
-        TextField {
-            id: globalSearchField
-            objectName: "globalSearchField"
-            width: globalSearchBar.width - globalSearchButton.width - globalSearchBar.spacing
-            height: root.density
-            placeholderText: "Search"
-            text: root.searchPageQuery
-            inputMethodHints: Qt.ImhNoPredictiveText
-            onActiveFocusChanged: {
-                if (activeFocus) {
-                    root.openSearchPage(text, true)
-                }
-            }
-            onTextEdited: {
-                root.updateSearchQuery(text)
-                root.openSearchPage(text, true)
-            }
-            onAccepted: root.submitSearch(text, globalSearchField)
-            background: Rectangle {
-                radius: 8
-                color: "#ffffff"
-                border.color: "#e5e0d7"
-            }
-            leftPadding: 16
-            rightPadding: 16
-        }
-
-        IconButton {
-            id: globalSearchButton
-            objectName: "globalSearchButton"
-            iconName: "search"
-            iconObjectName: "globalSearchSubmitIcon"
-            width: root.density
-            height: root.density
-            enabled: globalSearchField.text.trim().length > 0 && coreController.searchStatus !== "Searching"
-            tooltip: "Search"
-            onClicked: root.submitSearch(globalSearchField.text, globalSearchField)
         }
     }
 
@@ -1488,8 +1802,8 @@ ApplicationWindow {
         anchors.leftMargin: root.compact ? root.pagePadding : root.navWidth + root.pagePadding
         anchors.rightMargin: root.compact
             ? root.pagePadding
-            : root.pagePadding + (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0)
-        anchors.topMargin: root.safeTop + root.pagePadding + (!root.compact && globalSearchBar.visible ? root.density + root.pageGap : 0)
+            : root.pagePadding + (!root.searchOverlayOpen ? root.queuePanelWidth + root.pageGap : 0)
+        anchors.topMargin: root.safeTop + root.pagePadding + root.topChromeHeight + root.pageGap
         anchors.bottomMargin: root.safeBottom + root.pagePadding
             + (root.compact
                 ? floatingNavigation.height + 8 + (root.hasPlayback ? currentSongBox.height + 8 : 0)
@@ -1503,7 +1817,6 @@ ApplicationWindow {
 
             HomePage {}
             LibraryPage {}
-            SearchPage {}
             SettingsPage {}
         }
     }
@@ -1511,7 +1824,7 @@ ApplicationWindow {
     GlassFrame {
         id: queuePanel
         objectName: "queuePanel"
-        visible: !root.compact && root.currentPageIndex !== 2
+        visible: !root.compact && !root.searchOverlayOpen
         x: root.width - root.pagePadding - width
         y: contentHost.y
         width: root.queuePanelWidth
@@ -1523,6 +1836,38 @@ ApplicationWindow {
         }
     }
 
+    Popup {
+        id: searchOverlay
+        objectName: "searchOverlay"
+        modal: root.compact
+        focus: true
+        visible: root.searchOverlayOpen
+        padding: root.pagePadding
+        x: root.compact ? root.pagePadding : root.navWidth + root.pagePadding
+        y: root.safeTop + root.pagePadding
+        width: root.compact ? root.width - root.pagePadding * 2 : root.width - x - root.pagePadding
+        height: Math.max(
+            260,
+            root.height - y - root.safeBottom - root.pagePadding
+                - (root.compact ? floatingNavigation.height + 8 + (root.hasPlayback ? currentSongBox.height + 8 : 0)
+                                : (root.hasPlayback ? bottomPlaybackBar.height + root.pageGap : 0)))
+        z: 30
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onClosed: root.searchOverlayOpen = false
+
+        background: GlassSurface {
+            objectName: "searchOverlayGlassSurface"
+            surfaceRadius: 8
+            fillColor: appThemeRoot.panel
+            strokeColor: appThemeRoot.borderSoft
+        }
+
+        SearchPage {
+            anchors.fill: parent
+            anchors.margins: searchOverlay.padding
+        }
+    }
+
     Frame {
         id: bottomPlaybackBar
         objectName: "bottomPlaybackBar"
@@ -1530,13 +1875,13 @@ ApplicationWindow {
         padding: 0
         x: root.navWidth + root.pagePadding
         y: root.height - root.safeBottom - root.pagePadding - height
-        width: Math.max(0, root.width - x - root.pagePadding - (root.currentPageIndex !== 2 ? root.queuePanelWidth + root.pageGap : 0))
+        width: Math.max(0, root.width - x - root.pagePadding - (!root.searchOverlayOpen ? root.queuePanelWidth + root.pageGap : 0))
         height: 88
         z: 12
-        background: Rectangle {
-            radius: 8
-            color: "#ffffff"
-            border.color: "#e5e0d7"
+        background: GlassSurface {
+            surfaceRadius: 8
+            fillColor: appThemeRoot.surfaceStrong
+            strokeColor: appThemeRoot.border
         }
     }
 
@@ -1550,6 +1895,12 @@ ApplicationWindow {
         x: root.pagePadding
         y: root.height - height - root.safeBottom - 8
         z: 20
+
+        Item {
+            objectName: "bottomGlassNavigation"
+            anchors.fill: parent
+            visible: false
+        }
 
         RowLayout {
             anchors.fill: parent
@@ -1569,12 +1920,6 @@ ApplicationWindow {
 
             NavPill {
                 pageIndex: 2
-                iconName: "search"
-                label: "Search"
-            }
-
-            NavPill {
-                pageIndex: 3
                 iconName: "settings"
                 label: "Settings"
             }
@@ -1588,15 +1933,27 @@ ApplicationWindow {
         width: root.compact ? root.width - root.pagePadding * 2 : bottomPlaybackBar.width
         height: root.compact ? 64 : 72
         x: root.compact ? root.pagePadding : bottomPlaybackBar.x
-        y: root.compact ? floatingNavigation.y - height - 8 : bottomPlaybackBar.y + Math.round((bottomPlaybackBar.height - height) / 2)
+        y: (root.compact ? floatingNavigation.y - height - 8 : bottomPlaybackBar.y + Math.round((bottomPlaybackBar.height - height) / 2)) + root.miniPlayerDragOffset
         z: 21
         flat: true
         onClicked: nowPlayingSheet.open()
 
-        background: Rectangle {
-            radius: 8
-            color: "#ffffff"
-            border.color: "#e5e0d7"
+        background: GlassSurface {
+            surfaceRadius: 8
+            fillColor: appThemeRoot.surfaceStrong
+            strokeColor: appThemeRoot.border
+
+            Rectangle {
+                id: miniPlayerProgressLine
+                objectName: "miniPlayerProgressLine"
+                anchors.left: parent.left
+                anchors.top: parent.top
+                height: 2
+                width: parent.width * root.playbackProgress
+                radius: 1
+                color: appThemeRoot.accent
+                visible: coreController.playbackDurationMs > 0
+            }
         }
 
         contentItem: RowLayout {
@@ -1630,31 +1987,25 @@ ApplicationWindow {
                     }
                 }
 
-                Rectangle {
+                ArtworkTile {
                     anchors.centerIn: parent
                     width: parent.width - 8
                     height: width
-                    radius: 6
-                    color: "#e2eae6"
-                    clip: true
+                    artworkUrl: coreController.playbackArtworkUrl
+                    fallbackText: coreController.playbackTitle
+                    fallbackColor: appThemeRoot.artworkFallback
+                    textColor: appThemeRoot.icon
+                    borderColor: appThemeRoot.borderSoft
+                    tileRadius: 6
 
-                    Image {
+                    Item {
                         objectName: "miniPlayerArtworkImage"
-                        anchors.fill: parent
-                        source: coreController.playbackArtworkUrl
-                        fillMode: Image.PreserveAspectCrop
                         visible: coreController.playbackArtworkUrl.length > 0
-                        asynchronous: true
-                        cache: true
                     }
 
-                    Label {
+                    Item {
                         objectName: "miniPlayerArtworkFallback"
-                        anchors.centerIn: parent
-                        text: "A"
                         visible: coreController.playbackArtworkUrl.length === 0
-                        font.weight: Font.Bold
-                        color: "#4f6258"
                     }
                 }
             }
@@ -1667,7 +2018,7 @@ ApplicationWindow {
                     objectName: "miniPlayerTitle"
                     text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
                     font.weight: Font.DemiBold
-                    color: "#202622"
+                    color: appThemeRoot.textPrimary
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
@@ -1675,12 +2026,42 @@ ApplicationWindow {
                 Label {
                     objectName: "miniPlayerState"
                     text: root.formatProgress()
-                    color: "#66736d"
+                    color: appThemeRoot.textSecondary
                     font.pixelSize: 12
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
             }
+        }
+
+        MouseArea {
+            id: miniPlayerSwipeStopHandle
+            objectName: "miniPlayerSwipeStopHandle"
+            anchors.fill: parent
+            z: 10
+            property real pressY: 0
+
+            function stopFromSwipe() {
+                root.stopPlaybackFromSwipe()
+            }
+
+            onPressed: function(mouse) {
+                pressY = mouse.y
+                root.miniPlayerDragOffset = 0
+            }
+            onPositionChanged: function(mouse) {
+                if (pressed) {
+                    root.miniPlayerDragOffset = Math.max(0, Math.min(90, mouse.y - pressY))
+                }
+            }
+            onReleased: function(mouse) {
+                var offset = root.miniPlayerDragOffset
+                root.miniPlayerDragOffset = 0
+                if (offset > Math.max(34, currentSongBox.height * 0.45) || mouse.y - pressY > Math.max(34, currentSongBox.height * 0.45)) {
+                    stopFromSwipe()
+                }
+            }
+            onClicked: nowPlayingSheet.open()
         }
     }
 
@@ -1700,16 +2081,17 @@ ApplicationWindow {
         objectName: "nowPlayingSheet"
         modal: true
         focus: true
-        width: Math.min(root.width - 28, 560)
-        height: Math.min(root.height - 48, root.compact ? 660 : 520)
-        x: Math.round((root.width - width) / 2)
-        y: Math.round((root.height - height) / 2)
+        width: root.compact ? root.width : Math.min(root.width - 28, 560)
+        height: root.compact ? Math.min(root.height - root.safeTop, 680) : Math.min(root.height - 48, 520)
+        x: root.compact ? 0 : Math.round((root.width - width) / 2)
+        y: root.compact ? root.height - height : Math.round((root.height - height) / 2)
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
-        background: Rectangle {
-            radius: 8
-            color: "#f8ffffff"
-            border.color: "#88ffffff"
+        background: GlassSurface {
+            objectName: "optionBNowPlayingSheet"
+            surfaceRadius: root.compact ? 8 : 8
+            fillColor: appThemeRoot.panel
+            strokeColor: appThemeRoot.borderSoft
         }
 
         ColumnLayout {
@@ -1721,32 +2103,27 @@ ApplicationWindow {
                 text: "Now Playing"
                 font.pixelSize: 24
                 font.weight: Font.DemiBold
-                color: "#202622"
+                color: appThemeRoot.textPrimary
                 Layout.fillWidth: true
             }
 
-            Rectangle {
+            ArtworkTile {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.preferredWidth: Math.min(parent.width, 260)
                 Layout.preferredHeight: Layout.preferredWidth
-                radius: 8
-                color: "#e2eae6"
-                clip: true
-
-                Image {
-                    anchors.fill: parent
-                    source: coreController.playbackArtworkUrl
-                    fillMode: Image.PreserveAspectCrop
-                    visible: coreController.playbackArtworkUrl.length > 0
-                    asynchronous: true
-                }
+                artworkUrl: coreController.playbackArtworkUrl
+                fallbackText: coreController.playbackTitle
+                fallbackColor: appThemeRoot.artworkFallback
+                textColor: appThemeRoot.icon
+                borderColor: appThemeRoot.borderSoft
+                tileRadius: 8
             }
 
             Label {
                 text: coreController.playbackTitle.length > 0 ? coreController.playbackTitle : "Nothing playing"
                 font.pixelSize: 20
                 font.weight: Font.DemiBold
-                color: "#202622"
+                color: appThemeRoot.textPrimary
                 horizontalAlignment: Text.AlignHCenter
                 Layout.fillWidth: true
                 elide: Text.ElideRight
@@ -1754,39 +2131,10 @@ ApplicationWindow {
 
             Label {
                 text: root.playbackDetailText()
-                color: "#66736d"
+                color: appThemeRoot.textSecondary
                 horizontalAlignment: Text.AlignHCenter
                 Layout.fillWidth: true
                 elide: Text.ElideRight
-            }
-
-            RowLayout {
-                Layout.alignment: Qt.AlignHCenter
-                spacing: 8
-
-                IconButton {
-                    objectName: "nowPlayingFavoriteButton"
-                    iconName: "heart"
-                    enabled: coreController.playbackTrackId.length > 0
-                    tooltip: "Favorite"
-                    onClicked: coreController.favoriteTrack(coreController.playbackTrackId)
-                }
-
-                IconButton {
-                    objectName: "nowPlayingDownloadButton"
-                    iconName: "download"
-                    enabled: coreController.playbackTrackId.length > 0
-                    tooltip: "Download"
-                    onClicked: coreController.downloadTrack(coreController.playbackTrackId)
-                }
-
-                IconButton {
-                    objectName: "nowPlayingQueueButton"
-                    iconName: "queue"
-                    enabled: coreController.playbackTrackId.length > 0
-                    tooltip: "Add to Queue"
-                    onClicked: coreController.addTrackToQueue(coreController.playbackTrackId)
-                }
             }
 
             Slider {
@@ -1797,84 +2145,34 @@ ApplicationWindow {
                 onMoved: coreController.seekPlayback(value)
             }
 
-            RowLayout {
-                id: nowPlayingControls
-
-                property int controlSize: root.compact ? 44 : root.density
-
+            PlayerControls {
                 Layout.alignment: Qt.AlignHCenter
-                spacing: root.compact ? 6 : 8
+                compact: root.compact
+                playing: coreController.playbackState === "playing"
+                repeatActive: coreController.repeatMode !== "off"
+                shuffleActive: coreController.shuffleEnabled
+                trackActionEnabled: coreController.playbackTrackId.length > 0
+                accentColor: appThemeRoot.accent
+                iconColor: appThemeRoot.icon
+                mutedColor: appThemeRoot.iconMuted
+                surfaceColor: appThemeRoot.accentSoft
+                borderColor: appThemeRoot.border
+                onFavoriteRequested: coreController.favoriteTrack(coreController.playbackTrackId)
+                onPreviousRequested: coreController.playPreviousQueuedTrack()
+                onPlayPauseRequested: root.handlePlayPause()
+                onNextRequested: coreController.playNextQueuedTrack()
+                onRepeatRequested: coreController.toggleRepeatMode()
+                onDownloadRequested: coreController.downloadTrack(coreController.playbackTrackId)
+                onQueueRequested: coreController.addTrackToQueue(coreController.playbackTrackId)
+                onShuffleRequested: coreController.toggleShuffle()
+            }
+        }
 
-                IconButton {
-                    objectName: "miniPreviousButton"
-                    iconName: "previous"
-                    iconObjectName: "miniPreviousIcon"
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: "Previous"
-                    onClicked: coreController.playPreviousQueuedTrack()
-                }
-
-                IconButton {
-                    objectName: "miniPlayPauseButton"
-                    iconName: coreController.playbackState === "playing" ? "pause" : "play"
-                    iconObjectName: "miniPlayPauseIcon"
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: coreController.playbackState === "playing" ? "Pause" : "Play"
-                    onClicked: {
-                        if (coreController.playbackState === "playing") {
-                            coreController.pausePlayback()
-                        } else if (coreController.playbackState === "paused") {
-                            coreController.resumePlayback()
-                        } else {
-                            coreController.playFirstQueuedTrack()
-                        }
-                    }
-                }
-
-                IconButton {
-                    objectName: "miniNextButton"
-                    iconName: "next"
-                    iconObjectName: "miniNextIcon"
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: "Next"
-                    onClicked: coreController.playNextQueuedTrack()
-                }
-
-                IconButton {
-                    objectName: "miniStopButton"
-                    iconName: "stop"
-                    iconObjectName: "miniStopIcon"
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: "Stop"
-                    onClicked: coreController.stopPlayback()
-                }
-
-                IconButton {
-                    objectName: "miniRepeatButton"
-                    iconName: "repeat"
-                    iconObjectName: "miniRepeatIcon"
-                    checkable: true
-                    checked: coreController.repeatMode !== "off"
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: "Repeat"
-                    onClicked: coreController.toggleRepeatMode()
-                }
-
-                IconButton {
-                    objectName: "miniShuffleButton"
-                    iconName: "shuffle"
-                    iconObjectName: "miniShuffleIcon"
-                    checkable: true
-                    checked: coreController.shuffleEnabled
-                    implicitWidth: nowPlayingControls.controlSize
-                    implicitHeight: nowPlayingControls.controlSize
-                    tooltip: "Shuffle"
-                    onClicked: coreController.toggleShuffle()
+        Connections {
+            target: coreController
+            function onPlaybackStateChanged() {
+                if (!root.hasPlayback) {
+                    nowPlayingSheet.close()
                 }
             }
         }

@@ -115,6 +115,7 @@ fi
 qt_cmake="${QT_CMAKE:-$qt_ios_prefix/bin/qt-cmake}"
 require_file "$qt_ios_prefix/lib/cmake/Qt6/Qt6Config.cmake" "Qt6Config.cmake"
 require_file "$qt_ios_prefix/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" "Qt6MultimediaConfig.cmake"
+require_file "$qt_ios_prefix/qml/QtQuick/Effects/qmldir" "QtQuick/Effects QML runtime"
 require_file "$qt_host_path/lib/cmake/Qt6/Qt6Config.cmake" "host Qt6Config.cmake"
 require_file "$qt_cmake" "qt-cmake"
 

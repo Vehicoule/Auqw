@@ -185,9 +185,10 @@ pushing release tags:
 - `AUQW_ANDROID_KEY_ALIAS`
 - `AUQW_ANDROID_KEY_PASSWORD`
 
-The Android build targets API 35 with build tools 35.0.0. For Qt 6.7's older
-Android Gradle plugin, the script forces Gradle to use the SDK build-tools
-`aapt2` binary so API 35 resources link correctly. On tag runs,
+The Android build defaults to the Qt 6.8.3 LTS Android kit and targets API 35
+with build tools 35.0.0. The script still forces Gradle to use the SDK
+build-tools `aapt2` binary and suppresses Qt/Gradle compileSdk 35/36 warnings
+so API resources link correctly. On tag runs,
 `ci/android-build.sh` fails clearly if any signing secret is missing. The
 signed output is `build/android-linux/apk/auqw-android-arm64.apk`; non-release
 local builds still emit `auqw-android-arm64-debug.apk`.
