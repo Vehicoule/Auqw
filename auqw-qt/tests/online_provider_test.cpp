@@ -1046,8 +1046,8 @@ void OnlineProviderTest::httpAudioDeviceResumesAfterShortNetworkReply() {
 
         QCOMPARE(actual, QByteArrayLiteral("abcdefgh"));
         QCOMPARE(ranges.size(), 2);
-        QCOMPARE(ranges.at(0), QByteArrayLiteral("Range: bytes=0-"));
-        QCOMPARE(ranges.at(1), QByteArrayLiteral("Range: bytes=4-"));
+        QCOMPARE(ranges.at(0).toLower(), QByteArrayLiteral("range: bytes=0-"));
+        QCOMPARE(ranges.at(1).toLower(), QByteArrayLiteral("range: bytes=4-"));
 }
 
 void OnlineProviderTest::httpAudioDeviceContinuesAfterCompletePartialSegment() {
@@ -1114,8 +1114,8 @@ void OnlineProviderTest::httpAudioDeviceContinuesAfterCompletePartialSegment() {
 
         QCOMPARE(actual, QByteArrayLiteral("abcdefgh"));
         QCOMPARE(ranges.size(), 2);
-        QCOMPARE(ranges.at(0), QByteArrayLiteral("Range: bytes=0-"));
-        QCOMPARE(ranges.at(1), QByteArrayLiteral("Range: bytes=4-"));
+        QCOMPARE(ranges.at(0).toLower(), QByteArrayLiteral("range: bytes=0-"));
+        QCOMPARE(ranges.at(1).toLower(), QByteArrayLiteral("range: bytes=4-"));
 }
 
 QTEST_MAIN(OnlineProviderTest)

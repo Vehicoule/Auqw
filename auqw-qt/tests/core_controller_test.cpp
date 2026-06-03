@@ -96,6 +96,23 @@ QByteArray sabrAudioResponse(const QByteArray& audioBytes) {
     return umpFrame(21, mediaPayload);
 }
 
+bool requestContainsHeader(const QByteArray& request, const QByteArray& name, const QByteArray& value) {
+    const QByteArray wantedName = name.toLower();
+    const QList<QByteArray> lines = request.split('\n');
+    for (QByteArray line : lines) {
+        line = line.trimmed();
+        const qsizetype separator = line.indexOf(':');
+        if (separator <= 0) {
+            continue;
+        }
+        if (line.left(separator).toLower() == wantedName &&
+            line.mid(separator + 1).trimmed() == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
 class LocalHttpServer final {
 public:
     struct Response {
@@ -148,8 +165,7 @@ private:
             const int index = requestCount_++;
             const Response response = responses_.value(std::min(index, static_cast<int>(responses_.size()) - 1));
             if (!response.requiredHeaderName.isEmpty()) {
-                const QByteArray wanted = response.requiredHeaderName + QByteArrayLiteral(": ") + response.requiredHeaderValue;
-                sawRequiredHeader_ = buffer->contains(wanted);
+                sawRequiredHeader_ = requestContainsHeader(*buffer, response.requiredHeaderName, response.requiredHeaderValue);
             }
 
             QPointer<QTcpSocket> guardedSocket(socket);
