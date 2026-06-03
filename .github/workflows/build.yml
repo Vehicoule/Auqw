@@ -44,7 +44,7 @@ jobs:
           echo "$RUNNER_TEMP/aqt/bin" >> "$GITHUB_PATH"
       - name: Install Qt
         run: |
-          aqt install-qt linux desktop 6.8.3 gcc_64 --outputdir "$RUNNER_TEMP/Qt" -m qtmultimedia
+          aqt install-qt linux desktop 6.8.3 linux_gcc_64 --outputdir "$RUNNER_TEMP/Qt" -m qtmultimedia
           qt_prefix="$RUNNER_TEMP/Qt/6.8.3/gcc_64"
           echo "CMAKE_PREFIX_PATH=$qt_prefix" >> "$GITHUB_ENV"
           echo "$qt_prefix/bin" >> "$GITHUB_PATH"

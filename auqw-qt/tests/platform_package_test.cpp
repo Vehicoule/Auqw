@@ -101,7 +101,7 @@ private slots:
             "Release job should download package artifacts before publishing assets");
         QVERIFY2(workflow.contains(QStringLiteral("github.ref_type == 'tag'")),
             "Release publishing should be gated to tag refs");
-        QVERIFY2(workflow.contains(QStringLiteral("aqt install-qt linux desktop 6.8.3 gcc_64")) &&
+        QVERIFY2(workflow.contains(QStringLiteral("aqt install-qt linux desktop 6.8.3 linux_gcc_64")) &&
                 workflow.contains(QStringLiteral("qtmultimedia")),
             "Linux release workflow should install the official Qt 6.8.3 LTS desktop kit with qtmultimedia");
         QVERIFY2(workflow.contains(QStringLiteral("CMAKE_PREFIX_PATH=$qt_prefix")),
@@ -310,9 +310,11 @@ private slots:
         QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-pulseaudio")),
             "Linux Flatpak container should provide the PulseAudio GStreamer sink used by Qt Multimedia");
         QVERIFY2(containerfile.contains(QStringLiteral("ARG QT_VERSION=6.8.3")) &&
+                containerfile.contains(QStringLiteral("ARG QT_HOST_ARCH=linux_gcc_64")) &&
+                containerfile.contains(QStringLiteral("ARG QT_HOST_DIR=gcc_64")) &&
                 containerfile.contains(QStringLiteral("aqtinstall==${AQT_VERSION}")),
             "Linux Flatpak container should use the official Qt 6.8.3 LTS host kit");
-        QVERIFY2(containerfile.contains(QStringLiteral("CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_HOST_ARCH}")),
+        QVERIFY2(containerfile.contains(QStringLiteral("CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_HOST_DIR}")),
             "Linux Flatpak container should build against the official Qt kit");
         QVERIFY2(containerfile.contains(QStringLiteral("QtQuick/Effects")),
             "Linux Flatpak container should validate the QtQuick Effects QML import used by album backdrops");
