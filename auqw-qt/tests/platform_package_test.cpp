@@ -106,6 +106,8 @@ private slots:
             "Linux release workflow should install the official Qt 6.8.3 LTS desktop kit with qtmultimedia");
         QVERIFY2(workflow.contains(QStringLiteral("CMAKE_PREFIX_PATH=$qt_prefix")),
             "Linux release workflow should build against the official Qt kit rather than Ubuntu's older Qt packages");
+        QVERIFY2(workflow.contains(QStringLiteral("libgl1-mesa-dev")),
+            "Linux release workflow should install OpenGL development libraries required by official Qt Quick");
         QVERIFY2(workflow.contains(QStringLiteral("QtQuick/Effects")),
             "Release workflow should validate QtQuick.Effects availability before packaging");
         QVERIFY2(workflow.contains(QStringLiteral("flatpak --user remote-add")),
@@ -309,6 +311,8 @@ private slots:
             "Linux Flatpak container should provide common GStreamer playback elements for Qt Multimedia tests");
         QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-pulseaudio")),
             "Linux Flatpak container should provide the PulseAudio GStreamer sink used by Qt Multimedia");
+        QVERIFY2(containerfile.contains(QStringLiteral("libgl1-mesa-dev")),
+            "Linux Flatpak container should provide OpenGL development libraries required by official Qt Quick");
         QVERIFY2(containerfile.contains(QStringLiteral("ARG QT_VERSION=6.8.3")) &&
                 containerfile.contains(QStringLiteral("ARG QT_HOST_ARCH=linux_gcc_64")) &&
                 containerfile.contains(QStringLiteral("ARG QT_HOST_DIR=gcc_64")) &&

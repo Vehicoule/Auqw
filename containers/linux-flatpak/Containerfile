@@ -29,6 +29,7 @@ RUN apt-get update \
         gstreamer1.0-alsa \
         gstreamer1.0-plugins-good \
         gstreamer1.0-pulseaudio \
+        libgl1-mesa-dev \
         libxkbcommon-dev \
         flatpak \
         flatpak-builder \
