@@ -2,16 +2,24 @@ FROM ubuntu:24.04
 
 ARG ZIG_VERSION=0.16.0
 ARG ZIG_ARCH=x86_64-linux
+ARG QT_VERSION=6.8.3
+ARG QT_HOST_ARCH=gcc_64
+ARG AQT_VERSION=3.3.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV PATH="/opt/zig:${PATH}"
+ENV QT_ROOT=/opt/Qt
+ENV QT_HOST_PATH=/opt/Qt/${QT_VERSION}/${QT_HOST_ARCH}
+ENV CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_HOST_ARCH}
+ENV PATH="${QT_HOST_PATH}/bin:/opt/zig:/opt/aqt/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        python3 \
+        python3-venv \
         xz-utils \
         build-essential \
         cmake \
@@ -21,28 +29,15 @@ RUN apt-get update \
         gstreamer1.0-plugins-good \
         gstreamer1.0-pulseaudio \
         libxkbcommon-dev \
-        qt6-base-dev \
-        qt6-base-dev-tools \
-        qt6-base-private-dev \
-        qt6-declarative-dev \
-        qt6-declarative-dev-tools \
-        qt6-declarative-private-dev \
-        qt6-multimedia-dev \
-        qml6-module-qtqml \
-        qml6-module-qtqml-workerscript \
-        qml6-module-qtquick \
-        qml6-module-qtquick-window \
-        qml6-module-qtquick-controls \
-        qml6-module-qtquick-dialogs \
-        qml6-module-qtquick-effects \
-        qml6-module-qtquick-layouts \
-        qml6-module-qtquick-templates \
-        qml6-module-qtmultimedia \
         flatpak \
         flatpak-builder \
     && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
     && mkdir -p /opt/zig \
     && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig \
+    && python3 -m venv /opt/aqt \
+    && /opt/aqt/bin/pip install --no-cache-dir "aqtinstall==${AQT_VERSION}" \
+    && /opt/aqt/bin/aqt install-qt linux desktop "${QT_VERSION}" "${QT_HOST_ARCH}" --outputdir "${QT_ROOT}" -m qtmultimedia \
+    && test -d "${QT_HOST_PATH}/qml/QtQuick/Effects" \
     && rm -rf /tmp/zig.tar.xz /var/lib/apt/lists/*
 
 WORKDIR /workspace

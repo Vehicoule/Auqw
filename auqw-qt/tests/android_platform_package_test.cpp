@@ -291,6 +291,11 @@ private slots:
             "Android container should verify the downloaded ICU 73 archive");
         QVERIFY2(containerfile.contains(QStringLiteral("ICU73_LIB_DIR=/opt/icu73/lib")),
             "Android container should expose a stable ICU 73 library directory");
+        QVERIFY2(containerfile.contains(QStringLiteral("--wildcards")) &&
+                containerfile.contains(QStringLiteral("libicu*.so*")),
+            "Android container should use tar wildcard mode when extracting ICU 73 runtime libraries");
+        QVERIFY2(containerfile.contains(QStringLiteral("--strip-components=5")),
+            "Android container should extract ICU 73 libraries directly into ICU73_LIB_DIR");
         QVERIFY2(androidBuild.contains(QStringLiteral("configure_qt_host_tool_library_path")),
             "Android build script should prepare host tool library paths before Qt configure");
         QVERIFY2(androidBuild.contains(QStringLiteral("libicui18n.so.73")) &&

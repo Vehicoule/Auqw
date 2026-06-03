@@ -84,6 +84,10 @@ private slots:
                 workflow.contains(QStringLiteral("win64_msvc2022_64")) &&
                 workflow.contains(QStringLiteral("qtmultimedia")),
             "Windows workflow should install Qt 6.8.3 win64_msvc2022_64 with qtmultimedia");
+        QVERIFY2(workflow.contains(QStringLiteral("aqt install-qt mac desktop 6.8.3 clang_64")) &&
+                workflow.contains(QStringLiteral("QT_PREFIX=$qt_prefix")) &&
+                workflow.contains(QStringLiteral("QtQuick/Effects/qmldir")),
+            "macOS workflow should install the official Qt 6.8.3 universal kit and validate QtQuick.Effects");
         QVERIFY2(workflow.contains(QStringLiteral("ci\\windows-build.ps1")) ||
                 workflow.contains(QStringLiteral("ci/windows-build.ps1")),
             "Windows workflow should call ci/windows-build.ps1");
@@ -97,12 +101,12 @@ private slots:
             "Release job should download package artifacts before publishing assets");
         QVERIFY2(workflow.contains(QStringLiteral("github.ref_type == 'tag'")),
             "Release publishing should be gated to tag refs");
-        QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-window")),
-            "Linux release workflow should install the QtQuick.Window QML module required by Main.qml");
-        QVERIFY2(workflow.contains(QStringLiteral("qml6-module-qtquick-effects")),
-            "Linux release workflow should install the QtQuick.Effects QML module required by the album-first shell");
-        QVERIFY2(workflow.contains(QStringLiteral("QtQuick/Effects")) ||
-                workflow.contains(QStringLiteral("Qt6QuickEffects")),
+        QVERIFY2(workflow.contains(QStringLiteral("aqt install-qt linux desktop 6.8.3 gcc_64")) &&
+                workflow.contains(QStringLiteral("qtmultimedia")),
+            "Linux release workflow should install the official Qt 6.8.3 LTS desktop kit with qtmultimedia");
+        QVERIFY2(workflow.contains(QStringLiteral("CMAKE_PREFIX_PATH=$qt_prefix")),
+            "Linux release workflow should build against the official Qt kit rather than Ubuntu's older Qt packages");
+        QVERIFY2(workflow.contains(QStringLiteral("QtQuick/Effects")),
             "Release workflow should validate QtQuick.Effects availability before packaging");
         QVERIFY2(workflow.contains(QStringLiteral("flatpak --user remote-add")),
             "Linux release workflow should add Flathub to the user Flatpak installation");
@@ -305,16 +309,13 @@ private slots:
             "Linux Flatpak container should provide common GStreamer playback elements for Qt Multimedia tests");
         QVERIFY2(containerfile.contains(QStringLiteral("gstreamer1.0-pulseaudio")),
             "Linux Flatpak container should provide the PulseAudio GStreamer sink used by Qt Multimedia");
-        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtqml-workerscript")),
-            "Linux Flatpak container should provide the WorkerScript QML import used by Main.qml");
-        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-dialogs")),
-            "Linux Flatpak container should provide the QtQuick Dialogs QML import used by Main.qml");
-        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-layouts")),
-            "Linux Flatpak container should provide the QtQuick Layouts QML import used by Main.qml");
-        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-templates")),
-            "Linux Flatpak container should provide the QtQuick Templates QML import used by Qt Quick Controls styles");
-        QVERIFY2(containerfile.contains(QStringLiteral("qml6-module-qtquick-effects")),
-            "Linux Flatpak container should provide the QtQuick Effects QML import used by album backdrops");
+        QVERIFY2(containerfile.contains(QStringLiteral("ARG QT_VERSION=6.8.3")) &&
+                containerfile.contains(QStringLiteral("aqtinstall==${AQT_VERSION}")),
+            "Linux Flatpak container should use the official Qt 6.8.3 LTS host kit");
+        QVERIFY2(containerfile.contains(QStringLiteral("CMAKE_PREFIX_PATH=/opt/Qt/${QT_VERSION}/${QT_HOST_ARCH}")),
+            "Linux Flatpak container should build against the official Qt kit");
+        QVERIFY2(containerfile.contains(QStringLiteral("QtQuick/Effects")),
+            "Linux Flatpak container should validate the QtQuick Effects QML import used by album backdrops");
     }
 
     void linuxDesktopInstallMetadataAndFlatpakManifestAreWired() {

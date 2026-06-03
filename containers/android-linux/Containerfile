@@ -47,7 +47,7 @@ RUN apt-get update \
     && curl -fsSL "${ICU73_URL}" -o /tmp/icu73.tgz \
     && printf '%s  %s\n' "${ICU73_SHA256}" /tmp/icu73.tgz | sha256sum -c - \
     && mkdir -p "${ICU73_LIB_DIR}" \
-    && tar -xzf /tmp/icu73.tgz --strip-components=4 -C "${ICU73_LIB_DIR}" './icu/usr/local/lib/libicu*.so*' \
+    && tar -xzf /tmp/icu73.tgz --wildcards --strip-components=5 -C "${ICU73_LIB_DIR}" './icu/usr/local/lib/libicu*.so*' \
     && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
     && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android-tools.zip \
     && unzip -q /tmp/android-tools.zip -d /tmp/android-tools \
