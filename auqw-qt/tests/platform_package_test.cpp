@@ -293,6 +293,9 @@ private slots:
 
         QVERIFY2(deploy.contains(QStringLiteral("copy_runtime_libraries")),
             "Linux deploy should copy the runtime library closure into build/lib");
+        QVERIFY2(deploy.contains(QStringLiteral("declare -A copied_runtime_libs")) &&
+                deploy.contains(QStringLiteral("copy_runtime_libraries \"$dest\"")),
+            "Linux deploy should recursively copy plugin and library dependencies");
         QVERIFY2(!deploy.contains(QStringLiteral("$1 ~ /^libQt6Multimedia/")),
             "Linux deploy should not copy only Qt Multimedia libraries");
         QVERIFY2(!deploy.contains(QStringLiteral("awk '$2 == \"=>\"")),

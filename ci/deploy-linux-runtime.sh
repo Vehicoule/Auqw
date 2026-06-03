@@ -35,9 +35,12 @@ should_skip_runtime_library() {
   esac
 }
 
+declare -A copied_runtime_libs=()
+
 copy_runtime_libraries() {
   local binary="$1"
   local dest
+  local key
   local lib
   local -a runtime_libs
   mapfile -t runtime_libs < <(
@@ -51,10 +54,17 @@ copy_runtime_libraries() {
       continue
     fi
 
+    key="$(readlink -f "$lib")"
+    if [[ -n "${copied_runtime_libs[$key]:-}" ]]; then
+      continue
+    fi
+    copied_runtime_libs[$key]=1
+
     dest="$runtime_dir/$(basename "$lib")"
-    if [[ "$(readlink -f "$lib")" != "$(readlink -m "$dest")" ]]; then
+    if [[ "$key" != "$(readlink -m "$dest")" ]]; then
       cp -L "$lib" "$dest"
     fi
+    copy_runtime_libraries "$dest"
   done
 }
 
