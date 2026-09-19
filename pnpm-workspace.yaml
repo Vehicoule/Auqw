@@ -2,8 +2,24 @@ packages:
   - "apps/*"
   - "modules/*"
   - "packages/*"
+# Refuse packages published in the last 7 days — supply-chain floor.
+# The excludes below are the exact lockfile pins that were younger than
+# the window when pinned (Expo SDK + evergreen data packages); any future
+# bump must age past the window before it resolves.
+minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
+  - '@expo/cli@57.0.25'
   - '@expo/cli@57.0.26'
+  - '@expo/router-server@57.0.10'
+  - '@types/node@26.6.1'
+  - babel-preset-expo@57.0.12
+  - baseline-browser-mapping@2.11.25
+  - brace-expansion@5.0.12
+  - browserslist@4.29.0
+  - electron-to-chromium@1.5.430
   - expo-asset@57.0.18
   - expo-constants@57.0.19
+  - expo@57.0.23
   - expo@57.0.24
+  - is-core-module@2.17.0
+  - node-releases@2.0.56
