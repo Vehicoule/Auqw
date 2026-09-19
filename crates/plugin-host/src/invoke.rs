@@ -180,6 +180,16 @@ impl Invocation {
     }
 }
 
+/// Read-only per-invocation context shared by every step.
+struct StepCtx<'a> {
+    plugin: &'a LoadedPlugin,
+    budgets: &'a Budgets,
+    cancel: &'a CancellationToken,
+    http: &'a dyn HttpClient,
+    pot_provider: Option<&'a str>,
+    started: Instant,
+}
+
 /// Invoke `capability` on a loaded plugin with the ABI v0 step loop.
 ///
 /// A fresh Wasmi instance is created per invocation; guest state lives
@@ -206,45 +216,42 @@ pub async fn invoke(
         elapsed: std::time::Duration::ZERO,
         http_trace: Vec::new(),
     };
-    let result = run(
+    let ctx = StepCtx {
         plugin,
-        capability,
-        payload,
         budgets,
-        &cancel,
+        cancel: &cancel,
         http,
         pot_provider,
-        &mut attempt,
         started,
-    )
-    .await;
+    };
+    let result = run(&ctx, capability, payload, &mut attempt).await;
     attempt.elapsed = started.elapsed();
     Invocation { result, attempt }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
-    plugin: &LoadedPlugin,
+    ctx: &StepCtx<'_>,
     capability: &str,
     payload: Value,
-    budgets: &Budgets,
-    cancel: &CancellationToken,
-    http: &dyn HttpClient,
-    pot_provider: Option<&str>,
     attempt: &mut Attempt,
-    started: Instant,
 ) -> Result<Value, InvokeError> {
-    if !plugin.manifest.capabilities.iter().any(|c| c == capability) {
+    if !ctx
+        .plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|c| c == capability)
+    {
         return Err(InvokeError::CapabilityNotDeclared(capability.to_string()));
     }
     let limits = StoreLimitsBuilder::new()
-        .memory_size(budgets.max_memory_bytes)
+        .memory_size(ctx.budgets.max_memory_bytes)
         .build();
-    let mut store = Store::new(&plugin.engine, HostState { limits });
+    let mut store = Store::new(&ctx.plugin.engine, HostState { limits });
     store.limiter(|s| &mut s.limits);
-    let linker = Linker::new(&plugin.engine);
+    let linker = Linker::new(&ctx.plugin.engine);
     let instance = linker
-        .instantiate_and_start(&mut store, &plugin.module)
+        .instantiate_and_start(&mut store, &ctx.plugin.module)
         .map_err(|e| InvokeError::GuestTrap(e.to_string()))?;
     let alloc: TypedFunc<u32, u32> = instance
         .get_typed_func(&store, "alloc")
@@ -265,29 +272,29 @@ async fn run(
     .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
 
     loop {
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             return Err(InvokeError::Cancelled);
         }
-        if started.elapsed() >= budgets.deadline {
+        if ctx.started.elapsed() >= ctx.budgets.deadline {
             return Err(InvokeError::BudgetExceeded {
                 dimension: BudgetDimension::Deadline,
             });
         }
-        if attempt.steps >= budgets.max_steps {
+        if attempt.steps >= ctx.budgets.max_steps {
             return Err(InvokeError::BudgetExceeded {
                 dimension: BudgetDimension::Steps,
             });
         }
         let len = u32::try_from(input.len())
             .map_err(|_| InvokeError::InvalidMessage("step input exceeds u32".into()))?;
-        let ptr = call_entry(&mut store, &alloc, len, budgets, attempt)?;
+        let ptr = call_entry(&mut store, &alloc, len, ctx.budgets, attempt)?;
         if len > 0 && ptr == 0 {
             return Err(InvokeError::InvalidMessage("alloc returned null".into()));
         }
         memory
             .write(&mut store, ptr as usize, &input)
             .map_err(|_| InvokeError::InvalidMessage("alloc buffer out of bounds".into()))?;
-        let packed = call_entry(&mut store, &handle, (ptr, len), budgets, attempt)?;
+        let packed = call_entry(&mut store, &handle, (ptr, len), ctx.budgets, attempt)?;
         attempt.steps += 1;
         let out_ptr = usize::try_from(packed >> 32)
             .map_err(|_| InvokeError::InvalidMessage("response pointer overflow".into()))?;
@@ -326,17 +333,7 @@ async fn run(
                 });
             }
             Some("host_request") => {
-                input = host_request_step(
-                    &msg,
-                    plugin,
-                    budgets,
-                    attempt,
-                    cancel,
-                    http,
-                    started,
-                    pot_provider,
-                )
-                .await?;
+                input = host_request_step(&msg, ctx, attempt).await?;
             }
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
@@ -389,71 +386,119 @@ where
 
 /// Handle one `host_request` step and produce the next `handle` input
 /// (either `http_response` or `host_error`).
-#[allow(clippy::too_many_arguments)]
 async fn host_request_step(
     msg: &Value,
-    plugin: &LoadedPlugin,
-    budgets: &Budgets,
+    ctx: &StepCtx<'_>,
     attempt: &mut Attempt,
-    cancel: &CancellationToken,
-    http: &dyn HttpClient,
-    started: Instant,
-    pot_provider: Option<&str>,
 ) -> Result<Vec<u8>, InvokeError> {
     let id = msg
         .get("id")
         .and_then(Value::as_u64)
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| InvokeError::InvalidMessage("host_request.id missing".into()))?;
-    match msg.get("kind").and_then(Value::as_str) {
-        Some("pot_token") => {
-            return pot_token_step(
-                msg,
-                id,
-                plugin,
-                budgets,
-                attempt,
-                cancel,
-                http,
-                started,
-                pot_provider,
-            )
-            .await;
-        }
-        Some("http_request") => {}
+    let authorized = match msg.get("kind").and_then(Value::as_str) {
+        Some("http_request") => authorize_http_request(&msg["payload"], id, ctx)?,
+        Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx)?,
         _ => {
             return Err(InvokeError::InvalidMessage(
                 "unsupported host_request kind".into(),
             ));
         }
+    };
+    match authorized {
+        Authorized::Denied(reply) => Ok(reply),
+        Authorized::Call(req) => perform_call(req, id, ctx, attempt).await,
     }
-    let req = parse_http_request(&msg["payload"])?;
+}
 
-    if cancel.is_cancelled() {
+/// The outcome of authorizing a host request: an outbound call to
+/// perform, or the `host_error` reply that denies it.
+enum Authorized {
+    Call(ParsedHttpRequest),
+    Denied(Vec<u8>),
+}
+
+/// Validate and authorize an `http_request` payload against the
+/// manifest destination allowlist.
+fn authorize_http_request(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+) -> Result<Authorized, InvokeError> {
+    let req = parse_http_request(payload)?;
+    if !ctx.plugin.manifest.allows_destination(&req.url) {
+        return host_error(id, "permission-denied", "destination not permitted")
+            .map(Authorized::Denied);
+    }
+    Ok(Authorized::Call(req))
+}
+
+/// Authorize a `pot_token` host request: the host mints the token
+/// itself against the configured provider (`POST {provider}/get_pot`),
+/// so a LAN `http://` service stays reachable while guests remain
+/// HTTPS-only. The provider's response passes through verbatim as
+/// `http_response`.
+fn authorize_pot_token(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+) -> Result<Authorized, InvokeError> {
+    if !ctx.plugin.manifest.allows_pot_provider() {
+        return host_error(id, "permission-denied", "pot-provider not permitted")
+            .map(Authorized::Denied);
+    }
+    let Some(provider) = ctx.pot_provider else {
+        return host_error(id, "unsupported", "no pot provider configured").map(Authorized::Denied);
+    };
+    let binding = payload
+        .get("content_binding")
+        .and_then(Value::as_str)
+        .filter(|b| !b.is_empty())
+        .ok_or_else(|| InvokeError::InvalidMessage("pot_token.content_binding missing".into()))?;
+    let body = serde_json::to_vec(&json!({ "content_binding": binding }))
+        .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
+    Ok(Authorized::Call(ParsedHttpRequest {
+        method: "POST".to_string(),
+        url: format!("{}/get_pot", provider.trim_end_matches('/')),
+        headers: vec![("Content-Type".into(), "application/json".into())],
+        body: Some(body),
+    }))
+}
+
+/// Spend budget on one authorized outbound call and relay the outcome
+/// to the guest as `http_response` or `host_error`.
+async fn perform_call(
+    req: ParsedHttpRequest,
+    id: u32,
+    ctx: &StepCtx<'_>,
+    attempt: &mut Attempt,
+) -> Result<Vec<u8>, InvokeError> {
+    if ctx.cancel.is_cancelled() {
         return Err(InvokeError::Cancelled);
     }
-    if attempt.http_calls >= budgets.max_http_calls {
+    if attempt.http_calls >= ctx.budgets.max_http_calls {
         return Err(InvokeError::BudgetExceeded {
             dimension: BudgetDimension::HttpCalls,
         });
     }
-    if !plugin.manifest.allows_destination(&req.url) {
-        return host_error(id, "permission-denied", "destination not permitted");
-    }
     let out_bytes = req.body.as_ref().map_or(0, Vec::len) as u64;
-    if attempt.bytes.saturating_add(out_bytes) > budgets.max_bytes {
+    if attempt.bytes.saturating_add(out_bytes) > ctx.budgets.max_bytes {
         return Err(InvokeError::BudgetExceeded {
             dimension: BudgetDimension::Bytes,
         });
     }
     attempt.http_calls += 1;
-    let remaining = budgets.max_bytes.saturating_sub(attempt.bytes + out_bytes);
-    let timeout = budgets
+    let remaining = ctx
+        .budgets
+        .max_bytes
+        .saturating_sub(attempt.bytes + out_bytes);
+    let timeout = ctx
+        .budgets
         .http_timeout
-        .min(budgets.deadline.saturating_sub(started.elapsed()));
+        .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
     let method = req.method.clone();
     let traced_url = redact_url(&req.url);
-    let call = http.send(
+    let call = ctx.http.send(
         HttpRequest {
             method: req.method,
             url: req.url,
@@ -462,18 +507,18 @@ async fn host_request_step(
             max_response_bytes: remaining,
         },
         timeout,
-        cancel.clone(),
+        ctx.cancel.clone(),
     );
     let t0 = Instant::now();
     let result = tokio::select! {
-        () = cancel.cancelled() => return Err(InvokeError::Cancelled),
+        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
         r = call => r,
     };
     let elapsed = t0.elapsed();
     match result {
         Ok(resp) => {
             attempt.bytes += out_bytes + resp.body.len() as u64;
-            if attempt.bytes > budgets.max_bytes {
+            if attempt.bytes > ctx.budgets.max_bytes {
                 return Err(InvokeError::BudgetExceeded {
                     dimension: BudgetDimension::Bytes,
                 });
@@ -572,118 +617,6 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         headers,
         body,
     })
-}
-
-/// Handle one `pot_token` host request: the host mints the token itself
-/// against the configured provider (`POST {provider}/get_pot`), so a LAN
-/// `http://` service stays reachable while guests remain HTTPS-only.
-/// The provider's response passes through verbatim as `http_response`.
-#[allow(clippy::too_many_arguments)]
-async fn pot_token_step(
-    msg: &Value,
-    id: u32,
-    plugin: &LoadedPlugin,
-    budgets: &Budgets,
-    attempt: &mut Attempt,
-    cancel: &CancellationToken,
-    http: &dyn HttpClient,
-    started: Instant,
-    pot_provider: Option<&str>,
-) -> Result<Vec<u8>, InvokeError> {
-    if !plugin.manifest.allows_pot_provider() {
-        return host_error(id, "permission-denied", "pot-provider not permitted");
-    }
-    let Some(provider) = pot_provider else {
-        return host_error(id, "unsupported", "no pot provider configured");
-    };
-    let binding = msg["payload"]
-        .get("content_binding")
-        .and_then(Value::as_str)
-        .filter(|b| !b.is_empty())
-        .ok_or_else(|| InvokeError::InvalidMessage("pot_token.content_binding missing".into()))?;
-    if cancel.is_cancelled() {
-        return Err(InvokeError::Cancelled);
-    }
-    if attempt.http_calls >= budgets.max_http_calls {
-        return Err(InvokeError::BudgetExceeded {
-            dimension: BudgetDimension::HttpCalls,
-        });
-    }
-    let body = serde_json::to_vec(&json!({ "content_binding": binding }))
-        .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
-    let out_bytes = body.len() as u64;
-    if attempt.bytes.saturating_add(out_bytes) > budgets.max_bytes {
-        return Err(InvokeError::BudgetExceeded {
-            dimension: BudgetDimension::Bytes,
-        });
-    }
-    attempt.http_calls += 1;
-    let remaining = budgets.max_bytes.saturating_sub(attempt.bytes + out_bytes);
-    let timeout = budgets
-        .http_timeout
-        .min(budgets.deadline.saturating_sub(started.elapsed()));
-    let url = format!("{}/get_pot", provider.trim_end_matches('/'));
-    let traced_url = redact_url(&url);
-    let call = http.send(
-        HttpRequest {
-            method: "POST".to_string(),
-            url,
-            headers: vec![("Content-Type".into(), "application/json".into())],
-            body: Some(body),
-            max_response_bytes: remaining,
-        },
-        timeout,
-        cancel.clone(),
-    );
-    let t0 = Instant::now();
-    let result = tokio::select! {
-        () = cancel.cancelled() => return Err(InvokeError::Cancelled),
-        r = call => r,
-    };
-    let elapsed = t0.elapsed();
-    match result {
-        Ok(resp) => {
-            attempt.bytes += out_bytes + resp.body.len() as u64;
-            if attempt.bytes > budgets.max_bytes {
-                return Err(InvokeError::BudgetExceeded {
-                    dimension: BudgetDimension::Bytes,
-                });
-            }
-            attempt.http_trace.push(HttpTraceEntry {
-                method: "POST".to_string(),
-                url: traced_url,
-                status: Some(resp.status),
-                bytes: resp.body.len() as u64,
-                elapsed,
-            });
-            let headers: Vec<Value> = resp.headers.iter().map(|(k, v)| json!([k, v])).collect();
-            serde_json::to_vec(&json!({
-                "type": "http_response",
-                "id": id,
-                "status": resp.status,
-                "headers": headers,
-                "body": base64::engine::general_purpose::STANDARD.encode(resp.body),
-            }))
-            .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
-        }
-        Err(e) => {
-            attempt.bytes += out_bytes;
-            attempt.http_trace.push(HttpTraceEntry {
-                method: "POST".to_string(),
-                url: traced_url,
-                status: None,
-                bytes: 0,
-                elapsed,
-            });
-            match e.kind {
-                HttpErrorKind::Cancelled => Err(InvokeError::Cancelled),
-                HttpErrorKind::BodyTooLarge => Err(InvokeError::BudgetExceeded {
-                    dimension: BudgetDimension::Bytes,
-                }),
-                kind => host_error(id, kind.guest_kind().unwrap_or("transient"), &e.message),
-            }
-        }
-    }
 }
 
 struct ParsedHttpRequest {

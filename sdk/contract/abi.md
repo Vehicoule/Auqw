@@ -34,16 +34,17 @@ Rejection rules (v0):
 
 - `{"type":"invoke","request_id":"<string>","capability":"playback.resolve","payload":{"source_ref":"<video_id>"}}` — always the first step.
 - `{"type":"http_response","id":<u32>,"status":<u16>,"headers":[["name","value"],...],"body":"<base64>"}` — answer to a `host_request` with the same `id`.
-- `{"type":"host_error","id":<u32>,"error":{"kind":"<ErrorKind>","message":"<string>"}}` — the host-side attempt at request `id` failed (denied destination, timeout, transport error).
+- `{"type":"host_error","id":<u32>,"error":{"kind":"<ErrorKind>","message":"<string>"}}` — the host-side attempt at request `id` failed (denied destination or permission, no provider configured, timeout, transport error).
 
 ## Guest → host step messages (`handle` output)
 
 - `{"type":"host_request","id":<u32>,"kind":"http_request","payload":{"method":"GET|POST","url":"<https url>","headers":[["name","value"],...],"body":"<base64 or null>"}}`
+- `{"type":"host_request","id":<u32>,"kind":"pot_token","payload":{"content_binding":"<string>"}}` — asks the host to mint a PO token bound to `content_binding` against its configured provider (`POST {provider}/get_pot`, bgutil contract). Requires the `pot-provider` permission. Answered with the provider's `http_response` verbatim, or `host_error` `permission-denied` (permission not declared) / `unsupported` (no provider configured). The guest never learns the provider URL.
 - `{"type":"done","result":<capability result>}` — for `playback.resolve`:
-  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"client":"<ladder rung name>","prefix_limited":<bool, optional>}`
-  (`prefix_limited` defaults to `false` when absent; `true` means the
-  provider caps anonymous fetches of this URL to a prefix — hosts
-  should label it instead of discovering the cap mid-playback.)
+  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"content_length":<u64|null, optional>,"client":"<ladder rung name>"}`
+  (`content_length` is the full byte length of the stream when the
+  provider reports it, so hosts can range-download and verify
+  completion.)
 - `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}`
 
 ## ErrorKind
@@ -66,14 +67,17 @@ Host-only kinds (produced by the host itself, never sent to the guest):
   "version": "0.1.0",
   "abi": "0.1.0",
   "capabilities": ["playback.resolve"],
-  "permissions": ["network:www.youtube.com", "network:*.googlevideo.com"],
+  "permissions": ["network:www.youtube.com", "network:*.googlevideo.com", "pot-provider"],
   "artifact": { "path": "dist/youtube-music.wasm", "digest": "sha256:<hex>" }
 }
 ```
 
 Permission grammar: `network:<host>` exact match; `network:*.<domain>`
 matches any single- or multi-level subdomain of `<domain>` (not the apex).
-Only `https` destinations are allowed.
+Only `https` destinations are allowed. `pot-provider` grants `pot_token`
+host requests; the destination is host-configured, never guest-supplied,
+so the `https`-only rule for guest `http_request` destinations is
+unaffected.
 
 ## Limits and failure behavior
 

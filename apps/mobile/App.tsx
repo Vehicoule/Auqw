@@ -22,11 +22,11 @@ import {
 
 const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
 
-// PO-token service (bgutil /get_pot contract). `10.0.2.2` is the host
-// machine from the Android emulator; on a physical device this must be
-// a reachable URL (LAN IP or hosted). When unset or unreachable the
-// resolve degrades to the anonymous ladder — bot-checks can surface.
-const POT_PROVIDER_URL: string | undefined = 'http://10.0.2.2:4416';
+// PO-token service (bgutil /get_pot contract). Off unless configured —
+// set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
+// emulator, http://10.0.2.2:4416 reaches a provider on the host
+// machine). Unset: the resolve stays on the anonymous ladder.
+const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
 const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
 const SPIN_WASM = require('./assets/plugins/spin.wasm');

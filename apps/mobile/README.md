@@ -22,6 +22,12 @@ Expo app (Slice 0): one screen, one Play button. The pinned
 From the repo root, in order — every step is required on a fresh
 checkout because the outputs are gitignored:
 
+Optional: PO-token provider — set `EXPO_PUBLIC_POT_PROVIDER_URL` at
+bundle time to a bgutil-compatible service (`POST {url}/get_pot`).
+From the Android emulator, `http://10.0.2.2:4416` reaches a provider
+on the host machine. Unset: the resolve stays on the anonymous
+ladder.
+
 ```sh
 # 1. Rust → .so + generated Kotlin bindings
 ./tooling/build-android-bindings.sh

@@ -3,3 +3,4 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+# export EXPO_PUBLIC_POT_PROVIDER_URL="http://10.0.2.2:4416"  # bgutil provider on the host, reached from the Android emulator

@@ -219,9 +219,11 @@ fn requester_wat(url: &str) -> String {
 }
 
 /// Guest that emits a `pot_token` host request on every step, forever.
-fn potter_wat() -> String {
-    let raw = "{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\
-             \"payload\":{\"content_binding\":\"vid12345678\"}}";
+/// `payload` is the JSON object text placed under `"payload"`.
+fn potter_wat(payload: &str) -> String {
+    let raw = format!(
+        "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\"payload\":{payload}}}"
+    );
     let msg = raw.replace('"', "\\\"");
     format!(
         "(module\n  (memory (export \"memory\") 1)\n  \
@@ -560,7 +562,9 @@ async fn byte_cap_on_response_body() {
 /// `{provider}/get_pot` itself; the guest never sees the URL.
 #[tokio::test]
 async fn pot_token_reaches_configured_provider() {
-    let wasm = ok(wat::parse_str(potter_wat()));
+    let wasm = ok(wat::parse_str(potter_wat(
+        r#"{"content_binding":"vid12345678"}"#,
+    )));
     let mut budgets = default_budgets();
     budgets.max_steps = 2;
     let plugin = ok(load(
@@ -597,7 +601,9 @@ async fn pot_token_reaches_configured_provider() {
 /// and consumes no HTTP budget.
 #[tokio::test]
 async fn pot_token_denied_without_permission() {
-    let wasm = ok(wat::parse_str(potter_wat()));
+    let wasm = ok(wat::parse_str(potter_wat(
+        r#"{"content_binding":"vid12345678"}"#,
+    )));
     let mut budgets = default_budgets();
     budgets.max_steps = 2;
     let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
@@ -626,7 +632,9 @@ async fn pot_token_denied_without_permission() {
 /// again no HTTP budget is consumed.
 #[tokio::test]
 async fn pot_token_unsupported_without_provider() {
-    let wasm = ok(wat::parse_str(potter_wat()));
+    let wasm = ok(wat::parse_str(potter_wat(
+        r#"{"content_binding":"vid12345678"}"#,
+    )));
     let mut budgets = default_budgets();
     budgets.max_steps = 2;
     let plugin = ok(load(
@@ -651,6 +659,34 @@ async fn pot_token_unsupported_without_provider() {
             dimension: BudgetDimension::Steps
         }
     ));
+    assert_eq!(attempt.http_calls, 0);
+    assert!(reqs.lock().map(|r| r.is_empty()).unwrap_or(false));
+}
+
+/// A `pot_token` request without a `content_binding` is a protocol
+/// violation: the invocation ends `invalid-message` and no HTTP is spent.
+#[tokio::test]
+async fn pot_token_without_binding_is_invalid_message() {
+    let wasm = ok(wat::parse_str(potter_wat("{}")));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["pot-provider"]),
+        &budgets,
+    ));
+    let (http, reqs) = RecordingHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        Some("http://pot.local:4416"),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
     assert_eq!(attempt.http_calls, 0);
     assert!(reqs.lock().map(|r| r.is_empty()).unwrap_or(false));
 }
