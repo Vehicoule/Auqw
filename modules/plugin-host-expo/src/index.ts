@@ -4,6 +4,8 @@ import type { EventSubscription, NativeModule } from 'expo-modules-core';
 export type HostConfig = {
   fuelPerEntry: number;
   fuelTotal: number;
+  /** Base URL of a bgutil-compatible PO-token service; omit for anonymous resolves. */
+  potProviderUrl?: string | undefined;
 };
 
 export type AttemptSummary = {

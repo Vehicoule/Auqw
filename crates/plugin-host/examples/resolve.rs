@@ -37,12 +37,17 @@ async fn run(args: &[String]) -> ExitCode {
         .position(|a| a == "--cancel-after-ms")
         .and_then(|pos| args.get(pos + 1))
         .and_then(|v| v.parse::<u64>().ok());
+    let pot_provider = args
+        .iter()
+        .position(|a| a == "--pot-provider")
+        .and_then(|pos| args.get(pos + 1))
+        .cloned();
 
     let mut positional: Vec<&String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--cancel-after-ms" => i += 2,
+            "--cancel-after-ms" | "--pot-provider" => i += 2,
             a if a.starts_with("--") => i += 1,
             _ => {
                 positional.push(&args[i]);
@@ -102,6 +107,7 @@ async fn run(args: &[String]) -> ExitCode {
         &budgets,
         cancel.clone(),
         &http,
+        pot_provider.as_deref(),
     );
     tokio::pin!(fut);
     let outcome = if let Some(ms) = cancel_after {
@@ -179,6 +185,7 @@ async fn run_spin(path: &str) -> ExitCode {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     let (result, attempt) = outcome.into_parts();

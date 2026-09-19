@@ -25,6 +25,9 @@ class HostConfigInput : Record {
 
   @Field
   var fuelTotal: Double = 0.0
+
+  @Field
+  var potProviderUrl: String? = null
 }
 
 class PluginHostExpoModule : Module() {
@@ -40,7 +43,8 @@ class PluginHostExpoModule : Module() {
         PluginHost(
           HostConfig(
             fuelPerEntry = config.fuelPerEntry.toULong(),
-            fuelTotal = config.fuelTotal.toULong()
+            fuelTotal = config.fuelTotal.toULong(),
+            potProviderUrl = config.potProviderUrl
           )
         )
       } catch (e: HostException) {

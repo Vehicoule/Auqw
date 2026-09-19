@@ -57,6 +57,9 @@ impl Manifest {
             ));
         }
         for p in &self.permissions {
+            if p == "pot-provider" {
+                continue;
+            }
             let rest = p
                 .strip_prefix("network:")
                 .ok_or_else(|| ManifestError::InvalidField(format!("bad permission {p:?}")))?;
@@ -87,6 +90,14 @@ impl Manifest {
         };
         let host = host.to_ascii_lowercase();
         self.permissions.iter().any(|p| host_allowed(p, &host))
+    }
+
+    /// Whether the manifest declares the `pot-provider` permission,
+    /// allowing `pot_token` host requests against the host-configured
+    /// provider endpoint.
+    #[must_use]
+    pub fn allows_pot_provider(&self) -> bool {
+        self.permissions.iter().any(|p| p == "pot-provider")
     }
 }
 

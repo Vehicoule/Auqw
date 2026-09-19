@@ -1664,6 +1664,12 @@ data class HostConfig (
      * Total fuel across one invocation.
      */
     var `fuelTotal`: kotlin.ULong
+    , 
+    /**
+     * Base URL of a bgutil-compatible PO-token service
+     * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
+     */
+    var `potProviderUrl`: kotlin.String?
     
 ){
     
@@ -1682,17 +1688,20 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
         return HostConfig(
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: HostConfig) = (
             FfiConverterULong.allocationSize(value.`fuelPerEntry`) +
-            FfiConverterULong.allocationSize(value.`fuelTotal`)
+            FfiConverterULong.allocationSize(value.`fuelTotal`) +
+            FfiConverterOptionalString.allocationSize(value.`potProviderUrl`)
     )
 
     override fun write(value: HostConfig, buf: ByteBuffer) {
             FfiConverterULong.write(value.`fuelPerEntry`, buf)
             FfiConverterULong.write(value.`fuelTotal`, buf)
+            FfiConverterOptionalString.write(value.`potProviderUrl`, buf)
     }
 }
 
@@ -2205,6 +2214,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
         }
     }
 }

@@ -84,28 +84,50 @@
       }
     },
     "hostRequest": {
-      "type": "object",
-      "required": ["type", "id", "kind", "payload"],
-      "additionalProperties": false,
-      "properties": {
-        "type": { "const": "host_request" },
-        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "kind": { "const": "http_request" },
-        "payload": {
+      "anyOf": [
+        {
           "type": "object",
-          "required": ["method", "url", "headers", "body"],
+          "required": ["type", "id", "kind", "payload"],
           "additionalProperties": false,
           "properties": {
-            "method": { "type": "string", "enum": ["GET", "POST"] },
-            "url": { "type": "string", "pattern": "^https://" },
-            "headers": { "$ref": "#/$defs/headerList" },
-            "body": {
-              "type": ["string", "null"],
-              "contentEncoding": "base64"
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "http_request" },
+            "payload": {
+              "type": "object",
+              "required": ["method", "url", "headers", "body"],
+              "additionalProperties": false,
+              "properties": {
+                "method": { "type": "string", "enum": ["GET", "POST"] },
+                "url": { "type": "string", "pattern": "^https://" },
+                "headers": { "$ref": "#/$defs/headerList" },
+                "body": {
+                  "type": ["string", "null"],
+                  "contentEncoding": "base64"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "kind", "payload"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "pot_token" },
+            "payload": {
+              "type": "object",
+              "required": ["content_binding"],
+              "additionalProperties": false,
+              "properties": {
+                "content_binding": { "type": "string", "minLength": 1 }
+              }
             }
           }
         }
-      }
+      ]
     },
     "resolveResult": {
       "type": "object",

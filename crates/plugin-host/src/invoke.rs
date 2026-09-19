@@ -184,6 +184,9 @@ impl Invocation {
 ///
 /// A fresh Wasmi instance is created per invocation; guest state lives
 /// only in that instance's linear memory for the duration of the call.
+/// `pot_provider` is the base URL of a bgutil-compatible PO-token
+/// service (`POST {provider}/get_pot`); `None` makes `pot_token` host
+/// requests answer `unsupported`.
 pub async fn invoke(
     plugin: &LoadedPlugin,
     capability: &str,
@@ -191,6 +194,7 @@ pub async fn invoke(
     budgets: &Budgets,
     cancel: CancellationToken,
     http: &dyn HttpClient,
+    pot_provider: Option<&str>,
 ) -> Invocation {
     let started = Instant::now();
     let mut attempt = Attempt {
@@ -209,6 +213,7 @@ pub async fn invoke(
         budgets,
         &cancel,
         http,
+        pot_provider,
         &mut attempt,
         started,
     )
@@ -225,6 +230,7 @@ async fn run(
     budgets: &Budgets,
     cancel: &CancellationToken,
     http: &dyn HttpClient,
+    pot_provider: Option<&str>,
     attempt: &mut Attempt,
     started: Instant,
 ) -> Result<Value, InvokeError> {
@@ -320,8 +326,17 @@ async fn run(
                 });
             }
             Some("host_request") => {
-                input = host_request_step(&msg, plugin, budgets, attempt, cancel, http, started)
-                    .await?;
+                input = host_request_step(
+                    &msg,
+                    plugin,
+                    budgets,
+                    attempt,
+                    cancel,
+                    http,
+                    started,
+                    pot_provider,
+                )
+                .await?;
             }
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
@@ -374,6 +389,7 @@ where
 
 /// Handle one `host_request` step and produce the next `handle` input
 /// (either `http_response` or `host_error`).
+#[allow(clippy::too_many_arguments)]
 async fn host_request_step(
     msg: &Value,
     plugin: &LoadedPlugin,
@@ -382,16 +398,34 @@ async fn host_request_step(
     cancel: &CancellationToken,
     http: &dyn HttpClient,
     started: Instant,
+    pot_provider: Option<&str>,
 ) -> Result<Vec<u8>, InvokeError> {
     let id = msg
         .get("id")
         .and_then(Value::as_u64)
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| InvokeError::InvalidMessage("host_request.id missing".into()))?;
-    if msg.get("kind").and_then(Value::as_str) != Some("http_request") {
-        return Err(InvokeError::InvalidMessage(
-            "unsupported host_request kind".into(),
-        ));
+    match msg.get("kind").and_then(Value::as_str) {
+        Some("pot_token") => {
+            return pot_token_step(
+                msg,
+                id,
+                plugin,
+                budgets,
+                attempt,
+                cancel,
+                http,
+                started,
+                pot_provider,
+            )
+            .await;
+        }
+        Some("http_request") => {}
+        _ => {
+            return Err(InvokeError::InvalidMessage(
+                "unsupported host_request kind".into(),
+            ));
+        }
     }
     let req = parse_http_request(&msg["payload"])?;
 
@@ -538,6 +572,118 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         headers,
         body,
     })
+}
+
+/// Handle one `pot_token` host request: the host mints the token itself
+/// against the configured provider (`POST {provider}/get_pot`), so a LAN
+/// `http://` service stays reachable while guests remain HTTPS-only.
+/// The provider's response passes through verbatim as `http_response`.
+#[allow(clippy::too_many_arguments)]
+async fn pot_token_step(
+    msg: &Value,
+    id: u32,
+    plugin: &LoadedPlugin,
+    budgets: &Budgets,
+    attempt: &mut Attempt,
+    cancel: &CancellationToken,
+    http: &dyn HttpClient,
+    started: Instant,
+    pot_provider: Option<&str>,
+) -> Result<Vec<u8>, InvokeError> {
+    if !plugin.manifest.allows_pot_provider() {
+        return host_error(id, "permission-denied", "pot-provider not permitted");
+    }
+    let Some(provider) = pot_provider else {
+        return host_error(id, "unsupported", "no pot provider configured");
+    };
+    let binding = msg["payload"]
+        .get("content_binding")
+        .and_then(Value::as_str)
+        .filter(|b| !b.is_empty())
+        .ok_or_else(|| InvokeError::InvalidMessage("pot_token.content_binding missing".into()))?;
+    if cancel.is_cancelled() {
+        return Err(InvokeError::Cancelled);
+    }
+    if attempt.http_calls >= budgets.max_http_calls {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::HttpCalls,
+        });
+    }
+    let body = serde_json::to_vec(&json!({ "content_binding": binding }))
+        .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
+    let out_bytes = body.len() as u64;
+    if attempt.bytes.saturating_add(out_bytes) > budgets.max_bytes {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Bytes,
+        });
+    }
+    attempt.http_calls += 1;
+    let remaining = budgets.max_bytes.saturating_sub(attempt.bytes + out_bytes);
+    let timeout = budgets
+        .http_timeout
+        .min(budgets.deadline.saturating_sub(started.elapsed()));
+    let url = format!("{}/get_pot", provider.trim_end_matches('/'));
+    let traced_url = redact_url(&url);
+    let call = http.send(
+        HttpRequest {
+            method: "POST".to_string(),
+            url,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: Some(body),
+            max_response_bytes: remaining,
+        },
+        timeout,
+        cancel.clone(),
+    );
+    let t0 = Instant::now();
+    let result = tokio::select! {
+        () = cancel.cancelled() => return Err(InvokeError::Cancelled),
+        r = call => r,
+    };
+    let elapsed = t0.elapsed();
+    match result {
+        Ok(resp) => {
+            attempt.bytes += out_bytes + resp.body.len() as u64;
+            if attempt.bytes > budgets.max_bytes {
+                return Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Bytes,
+                });
+            }
+            attempt.http_trace.push(HttpTraceEntry {
+                method: "POST".to_string(),
+                url: traced_url,
+                status: Some(resp.status),
+                bytes: resp.body.len() as u64,
+                elapsed,
+            });
+            let headers: Vec<Value> = resp.headers.iter().map(|(k, v)| json!([k, v])).collect();
+            serde_json::to_vec(&json!({
+                "type": "http_response",
+                "id": id,
+                "status": resp.status,
+                "headers": headers,
+                "body": base64::engine::general_purpose::STANDARD.encode(resp.body),
+            }))
+            .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
+        }
+        Err(e) => {
+            attempt.bytes += out_bytes;
+            attempt.http_trace.push(HttpTraceEntry {
+                method: "POST".to_string(),
+                url: traced_url,
+                status: None,
+                bytes: 0,
+                elapsed,
+            });
+            match e.kind {
+                HttpErrorKind::Cancelled => Err(InvokeError::Cancelled),
+                HttpErrorKind::BodyTooLarge => Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Bytes,
+                }),
+                kind => host_error(id, kind.guest_kind().unwrap_or("transient"), &e.message),
+            }
+        }
+    }
 }
 
 struct ParsedHttpRequest {

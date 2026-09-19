@@ -22,6 +22,12 @@ import {
 
 const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
 
+// PO-token service (bgutil /get_pot contract). `10.0.2.2` is the host
+// machine from the Android emulator; on a physical device this must be
+// a reachable URL (LAN IP or hosted). When unset or unreachable the
+// resolve degrades to the anonymous ladder — bot-checks can surface.
+const POT_PROVIDER_URL: string | undefined = 'http://10.0.2.2:4416';
+
 const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
 const SPIN_WASM = require('./assets/plugins/spin.wasm');
 const PLUGIN_MANIFEST = require('./assets/plugins/youtube-music.manifest.json');
@@ -186,7 +192,11 @@ export function App() {
 
   const ensureHost = useCallback(async () => {
     if (!hostReady.current) {
-      await createHost({ fuelPerEntry: 200_000_000, fuelTotal: 2_000_000_000 });
+      await createHost({
+        fuelPerEntry: 200_000_000,
+        fuelTotal: 2_000_000_000,
+        potProviderUrl: POT_PROVIDER_URL,
+      });
       hostReady.current = true;
     }
   }, []);

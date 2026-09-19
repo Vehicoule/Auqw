@@ -96,6 +96,7 @@ async fn mint(
         budgets,
         CancellationToken::new(),
         http,
+        None,
     )
     .await;
     let (result, _attempt) = outcome.into_parts();

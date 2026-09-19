@@ -111,6 +111,48 @@ impl HttpClient for SleepHttp {
     }
 }
 
+/// Records (url, body) of every request and answers `{poToken}`.
+type RecordedRequests = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+struct RecordingHttp {
+    reqs: RecordedRequests,
+}
+
+impl RecordingHttp {
+    fn new() -> (Self, RecordedRequests) {
+        let reqs = RecordedRequests::default();
+        (
+            Self {
+                reqs: Arc::clone(&reqs),
+            },
+            reqs,
+        )
+    }
+}
+
+impl HttpClient for RecordingHttp {
+    fn send(
+        &self,
+        req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        if let Ok(mut reqs) = self.reqs.lock() {
+            reqs.push((
+                req.url.clone(),
+                String::from_utf8_lossy(req.body.as_deref().unwrap_or(&[])).to_string(),
+            ));
+        }
+        Box::pin(async {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"poToken":"tok-test"}"#.to_vec(),
+            })
+        })
+    }
+}
+
 /// Returns a response body larger than the cap the host requests.
 struct BigBodyHttp {
     size: usize,
@@ -172,6 +214,24 @@ fn requester_wat(url: &str) -> String {
          (i64.extend_i32_u (i32.const {}))))\n  \
          (data (i32.const 2048) \"{}\"))",
         requester_msg(url).len(),
+        msg,
+    )
+}
+
+/// Guest that emits a `pot_token` host request on every step, forever.
+fn potter_wat() -> String {
+    let raw = "{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\
+             \"payload\":{\"content_binding\":\"vid12345678\"}}";
+    let msg = raw.replace('"', "\\\"");
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (i64.or\n      \
+         (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))\n      \
+         (i64.extend_i32_u (i32.const {}))))\n  \
+         (data (i32.const 2048) \"{}\"))",
+        raw.len(),
         msg,
     )
 }
@@ -242,6 +302,7 @@ async fn done_result_round_trips() {
         &default_budgets(),
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     assert_eq!(ok(result), serde_json::json!({"ok": true}));
@@ -274,6 +335,7 @@ async fn fuel_traps_infinite_loop() {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     let elapsed = t0.elapsed();
@@ -313,6 +375,7 @@ async fn step_limit_stops_requester() {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     assert!(
@@ -345,6 +408,7 @@ async fn http_call_limit_stops_requester() {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     assert!(
@@ -380,6 +444,7 @@ async fn destination_denied_consumes_no_http() {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     assert!(
@@ -436,6 +501,7 @@ async fn cancel_aborts_inflight_http() {
         &budgets,
         cancel.clone(),
         &SleepHttp,
+        None,
     );
     tokio::pin!(fut);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -474,6 +540,7 @@ async fn byte_cap_on_response_body() {
         &budgets,
         CancellationToken::new(),
         &BigBodyHttp { size: 4096 },
+        None,
     )
     .await;
     assert!(
@@ -485,6 +552,107 @@ async fn byte_cap_on_response_body() {
         ),
         "expected byte-cap error"
     );
+}
+
+// ---------- pot_token host request ----------
+
+/// With permission and a configured provider the host POSTs to
+/// `{provider}/get_pot` itself; the guest never sees the URL.
+#[tokio::test]
+async fn pot_token_reaches_configured_provider() {
+    let wasm = ok(wat::parse_str(potter_wat()));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["pot-provider"]),
+        &budgets,
+    ));
+    let (http, reqs) = RecordingHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        Some("http://pot.local:4416"),
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Steps
+        }
+    ));
+    assert_eq!(attempt.http_calls, 2);
+    let reqs = reqs.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs.iter().all(|(url, body)| {
+        url == "http://pot.local:4416/get_pot" && body.contains("vid12345678")
+    }));
+}
+
+/// Without the `pot-provider` manifest permission the mint is denied
+/// and consumes no HTTP budget.
+#[tokio::test]
+async fn pot_token_denied_without_permission() {
+    let wasm = ok(wat::parse_str(potter_wat()));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 2;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, reqs) = RecordingHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        Some("http://pot.local:4416"),
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Steps
+        }
+    ));
+    assert_eq!(attempt.http_calls, 0);
+    assert!(reqs.lock().map(|r| r.is_empty()).unwrap_or(false));
+}
+
+/// Permission declared but no provider configured: `unsupported`, and
+/// again no HTTP budget is consumed.
+#[tokio::test]
+async fn pot_token_unsupported_without_provider() {
+    let wasm = ok(wat::parse_str(potter_wat()));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["pot-provider"]),
+        &budgets,
+    ));
+    let (http, reqs) = RecordingHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Steps
+        }
+    ));
+    assert_eq!(attempt.http_calls, 0);
+    assert!(reqs.lock().map(|r| r.is_empty()).unwrap_or(false));
 }
 
 // ---------- conformance echo guest ----------
@@ -505,6 +673,7 @@ async fn echo_guest_returns_step_input() {
         &default_budgets(),
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     let result: Value = ok(result);

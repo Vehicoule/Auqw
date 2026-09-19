@@ -25,6 +25,9 @@ pub struct HostConfig {
     pub fuel_per_entry: u64,
     /// Total fuel across one invocation.
     pub fuel_total: u64,
+    /// Base URL of a bgutil-compatible PO-token service
+    /// (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
+    pub pot_provider_url: Option<String>,
 }
 
 /// Per-invocation accounting, minus the HTTP trace (kept host-side —
@@ -148,6 +151,7 @@ pub struct PluginHost {
     runtime: Runtime,
     http: Arc<ReqwestClient>,
     budgets: Budgets,
+    pot_provider_url: Option<String>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
     counter: AtomicU64,
@@ -199,6 +203,7 @@ impl PluginHost {
             runtime,
             http: Arc::new(http),
             budgets,
+            pot_provider_url: config.pot_provider_url,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
@@ -239,6 +244,7 @@ impl PluginHost {
         lock(&self.cancels)?.insert(request_id.clone(), token.clone());
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
+        let pot_provider = self.pot_provider_url.clone();
         let cancels = Arc::clone(&self.cancels);
         let rid = request_id.clone();
         self.runtime.spawn(async move {
@@ -249,6 +255,7 @@ impl PluginHost {
                 &budgets,
                 token,
                 &*http,
+                pot_provider.as_deref(),
             )
             .await;
             let (result, attempt) = invocation.into_parts();
@@ -295,6 +302,7 @@ impl PluginHost {
             &self.budgets,
             CancellationToken::new(),
             &*self.http,
+            self.pot_provider_url.as_deref(),
         ));
         let (result, attempt) = invocation.into_parts();
         let kind = match &result {
@@ -352,6 +360,7 @@ mod tests {
         HostConfig {
             fuel_per_entry: 200_000_000,
             fuel_total: 2_000_000_000,
+            pot_provider_url: None,
         }
     }
 

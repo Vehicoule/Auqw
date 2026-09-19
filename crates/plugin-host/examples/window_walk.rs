@@ -50,6 +50,7 @@ async fn main() -> ExitCode {
         &budgets,
         CancellationToken::new(),
         &http,
+        None,
     )
     .await;
     let (result, _) = outcome.into_parts();
