@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auqw.dev/contract/messages.schema.json",
+  "title": "Auqw Plugin ABI v0 messages",
+  "description": "UTF-8 JSON step messages exchanged between host and guest. Host→guest messages are the input of `handle`; guest→host messages are its output.",
+  "$defs": {
+    "headerList": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          { "type": "string" },
+          { "type": "string" }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "errorKind": {
+      "type": "string",
+      "enum": [
+        "no-result",
+        "not-applicable",
+        "unsupported",
+        "auth-required",
+        "auth-expired",
+        "rate-limit",
+        "transient",
+        "expired-resource",
+        "permission-denied",
+        "invalid-response",
+        "timeout",
+        "cancelled"
+      ]
+    },
+    "hostErrorKind": {
+      "type": "string",
+      "enum": [
+        "budget-exceeded",
+        "guest-trap",
+        "invalid-message",
+        "artifact-rejected"
+      ]
+    },
+    "invoke": {
+      "type": "object",
+      "required": ["type", "request_id", "capability", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "invoke" },
+        "request_id": { "type": "string", "minLength": 1 },
+        "capability": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" }
+      }
+    },
+    "httpResponse": {
+      "type": "object",
+      "required": ["type", "id", "status", "headers", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "http_response" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "status": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "headers": { "$ref": "#/$defs/headerList" },
+        "body": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "hostError": {
+      "type": "object",
+      "required": ["type", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "host_error" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "error": {
+          "type": "object",
+          "required": ["kind", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "$ref": "#/$defs/errorKind" },
+            "message": { "type": "string" }
+          }
+        }
+      }
+    },
+    "hostRequest": {
+      "type": "object",
+      "required": ["type", "id", "kind", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "host_request" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "kind": { "const": "http_request" },
+        "payload": {
+          "type": "object",
+          "required": ["method", "url", "headers", "body"],
+          "additionalProperties": false,
+          "properties": {
+            "method": { "type": "string", "enum": ["GET", "POST"] },
+            "url": { "type": "string", "pattern": "^https://" },
+            "headers": { "$ref": "#/$defs/headerList" },
+            "body": {
+              "type": ["string", "null"],
+              "contentEncoding": "base64"
+            }
+          }
+        }
+      }
+    },
+    "resolveResult": {
+      "type": "object",
+      "required": ["url", "mime", "bitrate_kbps", "expires_at_ms", "client"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "mime": { "type": "string" },
+        "bitrate_kbps": { "type": ["integer", "null"], "minimum": 0 },
+        "expires_at_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "client": { "type": "string" }
+      }
+    },
+    "done": {
+      "type": "object",
+      "required": ["type", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "done" },
+        "result": true
+      }
+    },
+    "fail": {
+      "type": "object",
+      "required": ["type", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "fail" },
+        "error": {
+          "type": "object",
+          "required": ["kind", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "$ref": "#/$defs/errorKind" },
+            "message": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "anyOf": [
+    { "$ref": "#/$defs/invoke" },
+    { "$ref": "#/$defs/httpResponse" },
+    { "$ref": "#/$defs/hostError" },
+    { "$ref": "#/$defs/hostRequest" },
+    { "$ref": "#/$defs/done" },
+    { "$ref": "#/$defs/fail" }
+  ]
+}

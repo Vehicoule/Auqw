@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plugin-host",
+    "sdk/conformance/echo",
+    "sdk/conformance/spin",
+]
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

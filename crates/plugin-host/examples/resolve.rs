@@ -1,0 +1,273 @@
+//! Slice 0 desktop smoke: invoke a plugin's `playback.resolve` against
+//! real provider endpoints, print the typed result (URLs redacted), then
+//! prove the URL is fetchable with a Range GET.
+//!
+//! Usage:
+//!   resolve <plugin.wasm> <manifest.json> [video_id] [--cancel-after-ms N]
+//!   resolve --spin <spin.wasm>
+
+use std::process::ExitCode;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use auqw_plugin_host::{invoke, load, redact_url, Budgets, Manifest, ReqwestClient};
+use tokio_util::sync::CancellationToken;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build();
+    let Ok(rt) = rt else {
+        eprintln!("failed to start tokio runtime");
+        return ExitCode::FAILURE;
+    };
+    rt.block_on(run(&args))
+}
+
+async fn run(args: &[String]) -> ExitCode {
+    if let Some(pos) = args.iter().position(|a| a == "--spin") {
+        let Some(path) = args.get(pos + 1) else {
+            eprintln!("--spin requires a wasm path");
+            return ExitCode::FAILURE;
+        };
+        return run_spin(path).await;
+    }
+    let cancel_after = args
+        .iter()
+        .position(|a| a == "--cancel-after-ms")
+        .and_then(|pos| args.get(pos + 1))
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let mut positional: Vec<&String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cancel-after-ms" => i += 2,
+            a if a.starts_with("--") => i += 1,
+            _ => {
+                positional.push(&args[i]);
+                i += 1;
+            }
+        }
+    }
+    let (Some(wasm_path), Some(manifest_path)) = (positional.first(), positional.get(1)) else {
+        eprintln!("usage: resolve <plugin.wasm> <manifest.json> [video_id] [--cancel-after-ms N]");
+        return ExitCode::FAILURE;
+    };
+    let video_id = positional
+        .get(2)
+        .map_or("dQw4w9WgXcQ", |s| s.as_str())
+        .to_string();
+
+    let Ok(wasm) = std::fs::read(wasm_path) else {
+        eprintln!("cannot read wasm at {wasm_path}");
+        return ExitCode::FAILURE;
+    };
+    let Ok(manifest_text) = std::fs::read_to_string(manifest_path) else {
+        eprintln!("cannot read manifest at {manifest_path}");
+        return ExitCode::FAILURE;
+    };
+    let manifest = match Manifest::from_json(&manifest_text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("manifest error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("plugin: {} {}", manifest.id, manifest.version);
+    let budgets = Budgets::default();
+    let plugin = match load(&wasm, manifest, &budgets) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("load error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("digest: {}", plugin.digest());
+
+    let http = match ReqwestClient::new() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("http client init failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cancel = CancellationToken::new();
+    let payload = serde_json::json!({ "source_ref": video_id });
+
+    let fut = invoke(
+        &plugin,
+        "playback.resolve",
+        payload,
+        &budgets,
+        cancel.clone(),
+        &http,
+    );
+    tokio::pin!(fut);
+    let outcome = if let Some(ms) = cancel_after {
+        let timer = tokio::time::sleep(Duration::from_millis(ms));
+        tokio::pin!(timer);
+        tokio::select! {
+            o = &mut fut => o,
+            () = &mut timer => {
+                let t0 = Instant::now();
+                cancel.cancel();
+                let o = fut.await;
+                println!("cancel-after-ms: {ms} -> abort latency {:?}", t0.elapsed());
+                o
+            }
+        }
+    } else {
+        fut.await
+    };
+
+    let (result, attempt) = outcome.into_parts();
+    match result {
+        Ok(value) => {
+            print_result(&value);
+            print_attempt(&attempt);
+            if let Some(url) = value.get("url").and_then(|v| v.as_str()) {
+                range_check(url).await;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            println!("invoke failed: kind={} error={err}", err.kind());
+            print_attempt(&attempt);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_spin(path: &str) -> ExitCode {
+    let Ok(wasm) = std::fs::read(path) else {
+        eprintln!("cannot read wasm at {path}");
+        return ExitCode::FAILURE;
+    };
+    let digest = {
+        use sha2::Digest as _;
+        format!("sha256:{:x}", sha2::Sha256::digest(&wasm))
+    };
+    let manifest = Manifest {
+        id: "conformance-spin".to_string(),
+        version: "0.1.0".to_string(),
+        abi: "0.1.0".to_string(),
+        capabilities: vec!["debug.spin".to_string()],
+        permissions: vec![],
+        artifact: auqw_plugin_host::ArtifactRef {
+            path: path.to_string(),
+            digest,
+        },
+    };
+    let budgets = Budgets::default();
+    let plugin = match load(&wasm, manifest, &budgets) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("load error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Ok(http) = ReqwestClient::new() else {
+        eprintln!("http client init failed");
+        return ExitCode::FAILURE;
+    };
+    let t0 = Instant::now();
+    let outcome = invoke(
+        &plugin,
+        "debug.spin",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+    )
+    .await;
+    let (result, attempt) = outcome.into_parts();
+    match result {
+        Err(err) => {
+            println!(
+                "spin: trapped after {:?} (kind={}, fuel_used={}, elapsed={:?})",
+                t0.elapsed(),
+                err.kind(),
+                attempt.fuel_used,
+                attempt.elapsed
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            eprintln!("spin: unexpected success");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_result(result: &serde_json::Value) {
+    let url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let mime = result.get("mime").and_then(|v| v.as_str()).unwrap_or("");
+    let bitrate = result
+        .get("bitrate_kbps")
+        .map_or_else(|| "null".to_string(), |v| v.to_string());
+    let client = result.get("client").and_then(|v| v.as_str()).unwrap_or("");
+    let expiry = result
+        .get("expires_at_ms")
+        .and_then(serde_json::Value::as_u64)
+        .map(|ms| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            format!("{}s", ms.saturating_sub(now) / 1000)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("result: url={} (query redacted)", redact_url(url));
+    println!("        mime={mime} bitrate_kbps={bitrate} expires_in={expiry} client={client}");
+}
+
+fn print_attempt(attempt: &auqw_plugin_host::Attempt) {
+    println!(
+        "attempt: request_id={} steps={} http_calls={} bytes={} fuel_used={} elapsed={:?}",
+        attempt.request_id,
+        attempt.steps,
+        attempt.http_calls,
+        attempt.bytes,
+        attempt.fuel_used,
+        attempt.elapsed
+    );
+    for t in &attempt.http_trace {
+        println!(
+            "  http: {} {} -> status={:?} bytes={} {:?}",
+            t.method, t.url, t.status, t.bytes, t.elapsed
+        );
+    }
+}
+
+/// Prove the resolved URL is fetchable: GET the first 64 KiB with a Range
+/// header and print status/content-type/bytes. The URL is never printed.
+async fn range_check(url: &str) {
+    let Ok(client) = reqwest::Client::builder().use_rustls_tls().build() else {
+        println!("range-check: client init failed");
+        return;
+    };
+    let t0 = Instant::now();
+    let res = client
+        .get(url)
+        .header("Range", "bytes=0-65535")
+        .send()
+        .await;
+    match res {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let bytes = resp.bytes().await.map_or(0, |b| b.len());
+            println!(
+                "range-check: GET {} Range bytes=0-65535 -> {status} {content_type} {bytes}B in {:?}",
+                redact_url(url),
+                t0.elapsed()
+            );
+        }
+        Err(e) => println!("range-check: request failed: {e}"),
+    }
+}

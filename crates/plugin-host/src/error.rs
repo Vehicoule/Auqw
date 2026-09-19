@@ -1,0 +1,151 @@
+//! Typed errors for artifact loading and invocation.
+
+use thiserror::Error;
+
+use crate::budgets::BudgetDimension;
+
+/// Errors produced while parsing `manifest.json`.
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    /// The manifest is not valid JSON for the manifest shape.
+    #[error("invalid manifest JSON: {0}")]
+    InvalidJson(String),
+    /// A required field is missing or violates the grammar.
+    #[error("invalid manifest field: {0}")]
+    InvalidField(String),
+}
+
+/// Errors produced when loading a plugin artifact.
+#[derive(Debug, Error)]
+pub enum LoadError {
+    /// The manifest could not be parsed or validated.
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    /// The artifact is larger than `Budgets::max_artifact_bytes`.
+    #[error("artifact too large: {actual} bytes (max {max})")]
+    ArtifactTooLarge {
+        /// Configured maximum.
+        max: usize,
+        /// Actual artifact size.
+        actual: usize,
+    },
+    /// The manifest pins a different ABI version than this host implements.
+    #[error("ABI mismatch: manifest pins {manifest}, host implements {host}")]
+    AbiMismatch {
+        /// ABI version in the manifest.
+        manifest: String,
+        /// ABI version implemented by the host.
+        host: &'static str,
+    },
+    /// The artifact's sha256 does not match `manifest.artifact.digest`.
+    #[error("artifact digest mismatch: expected {expected}, got {actual}")]
+    DigestMismatch {
+        /// Digest pinned in the manifest.
+        expected: String,
+        /// Computed digest.
+        actual: String,
+    },
+    /// The module declares imports; ABI v0 allows none.
+    #[error("module declares {count} import(s); ABI v0 allows none")]
+    ImportsDeclared {
+        /// Number of declared imports.
+        count: usize,
+    },
+    /// The module contains a start section.
+    #[error("module has a start section")]
+    StartSection,
+    /// A required export is missing or has the wrong signature.
+    #[error("export {name} is missing or has the wrong signature")]
+    BadExport {
+        /// Export name.
+        name: &'static str,
+    },
+    /// The artifact is not a valid WebAssembly module.
+    #[error("invalid wasm module: {0}")]
+    Malformed(String),
+}
+
+/// Classification of an [`HttpClient`] failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpErrorKind {
+    /// The request exceeded its per-call timeout.
+    Timeout,
+    /// Transport or upstream failure; retrying may help.
+    Transient,
+    /// The invocation was cancelled while the request was in flight.
+    Cancelled,
+    /// The response body exceeded the remaining byte budget.
+    BodyTooLarge,
+    /// The request could not be constructed (invalid method/headers/URL).
+    InvalidRequest,
+}
+
+impl HttpErrorKind {
+    /// The ABI error kind sent back to the guest as `host_error`, if the
+    /// invocation continues. `Cancelled` and `BodyTooLarge` end the
+    /// invocation instead.
+    pub fn guest_kind(self) -> Option<&'static str> {
+        match self {
+            Self::Timeout => Some("timeout"),
+            Self::Transient => Some("transient"),
+            Self::InvalidRequest => Some("invalid-response"),
+            Self::Cancelled | Self::BodyTooLarge => None,
+        }
+    }
+}
+
+/// A failure from an [`crate::HttpClient`] implementation.
+#[derive(Debug, Error)]
+#[error("{kind:?}: {message}")]
+pub struct HttpError {
+    /// Failure classification.
+    pub kind: HttpErrorKind,
+    /// Human-readable detail; must not contain secrets or signed URLs.
+    pub message: String,
+}
+
+/// Errors produced while running an invocation.
+#[derive(Debug, Error)]
+pub enum InvokeError {
+    /// The capability is not declared by the plugin manifest.
+    #[error("capability not declared by manifest: {0}")]
+    CapabilityNotDeclared(String),
+    /// The invocation was cancelled; the guest was not re-entered.
+    #[error("cancelled")]
+    Cancelled,
+    /// A cumulative budget was exhausted.
+    #[error("budget exceeded: {dimension}")]
+    BudgetExceeded {
+        /// Which budget ran out.
+        dimension: BudgetDimension,
+    },
+    /// The guest trapped during `alloc`, `handle`, or instantiation.
+    #[error("guest trap: {0}")]
+    GuestTrap(String),
+    /// The guest produced bytes that violate the ABI contract.
+    #[error("invalid guest message: {0}")]
+    InvalidMessage(String),
+    /// The guest completed with a `fail` message.
+    #[error("guest failure ({kind}): {message}")]
+    GuestFail {
+        /// ABI error kind reported by the guest.
+        kind: String,
+        /// Guest-provided detail.
+        message: String,
+    },
+}
+
+impl InvokeError {
+    /// The ABI error-kind string for this error.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::CapabilityNotDeclared(_) => "not-applicable",
+            Self::Cancelled => "cancelled",
+            Self::BudgetExceeded { .. } => "budget-exceeded",
+            Self::GuestTrap(_) => "guest-trap",
+            Self::InvalidMessage(_) => "invalid-message",
+            Self::GuestFail { kind, .. } => kind.as_str(),
+        }
+    }
+}
