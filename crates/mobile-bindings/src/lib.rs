@@ -1,6 +1,6 @@
 //! UniFFI bindings over `auqw-plugin-host`.
 //!
-//! The Android Expo module calls these via the generated Kotlin
+//! The Expo modules call these via the generated Kotlin/Swift
 //! bindings; the slice's TypeScript surface mirrors them. The URL inside
 //! [`ResolvedResource`] is a real signed stream URL — it must never be
 //! logged at any layer.

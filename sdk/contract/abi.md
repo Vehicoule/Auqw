@@ -58,6 +58,9 @@ Guest-visible taxonomy (kebab-case): `no-result`, `not-applicable`,
 
 Host-only kinds (produced by the host itself, never sent to the guest):
 `budget-exceeded`, `guest-trap`, `invalid-message`, `artifact-rejected`.
+A guest that receives off-contract bytes from the host — unparseable
+step input, a response id that matches no outstanding request — fails
+`invalid-response`; the host-only kinds are not a guest vocabulary.
 
 ## Manifest v0
 

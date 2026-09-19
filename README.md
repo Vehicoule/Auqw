@@ -2,7 +2,7 @@
 
 A music player that resolves playback through sandboxed WebAssembly provider
 plugins. This repository holds the host runtime, the ABI contract, and the
-application code (application code arrives in later slices).
+application code.
 
 The product, architecture, and slice plan live in
 [../docs/README.md](../docs/README.md).
@@ -31,8 +31,8 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 | Path | Contents |
 | --- | --- |
 | `crates/plugin-host` | Wasmi host that loads and invokes provider plugins |
-| `crates/mobile-bindings` | UniFFI `PluginHost` over the host (Android path) |
-| `modules/plugin-host-expo` | Expo module wrapping the UniFFI bindings |
+| `crates/mobile-bindings` | UniFFI `PluginHost` over the host (Android + iOS) |
+| `modules/plugin-host-expo` | Expo module wrapping the UniFFI bindings (Android + iOS) |
 | `apps/mobile` | Expo app (Slice 0 play screen) — see `apps/mobile/README.md` |
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |

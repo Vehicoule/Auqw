@@ -3,7 +3,7 @@ name = "auqw-mobile-bindings"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "UniFFI bindings over the Auqw plugin host (Android path)"
+description = "UniFFI bindings over the Auqw plugin host (Android + iOS)"
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
