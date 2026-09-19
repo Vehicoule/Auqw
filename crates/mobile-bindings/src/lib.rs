@@ -360,11 +360,11 @@ mod tests {
     const ECHO_WASM: &[u8] = include_bytes!("../../../sdk/conformance/echo/echo.wasm");
     const SPIN_WASM: &[u8] = include_bytes!("../../../sdk/conformance/spin/spin.wasm");
 
-    fn manifest_json(id: &str, wasm: &[u8]) -> String {
+    fn manifest_json(id: &str, wasm: &[u8], permissions: &str) -> String {
         let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
         format!(
             "{{\"id\":\"{id}\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
-             \"capabilities\":[\"playback.resolve\"],\"permissions\":[],\
+             \"capabilities\":[\"playback.resolve\"],\"permissions\":{permissions},\
              \"artifact\":{{\"path\":\"{id}.wasm\",\"digest\":\"{digest}\"}}}}"
         )
     }
@@ -418,7 +418,10 @@ mod tests {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
         };
-        let id = match host.load_plugin(wasm.clone(), manifest_json("done", &wasm)) {
+        let id = match host.load_plugin(
+            wasm.clone(),
+            manifest_json("done", &wasm, "[\"network:example.com\"]"),
+        ) {
             Ok(id) => id,
             Err(e) => panic!("load: {e}"),
         };
@@ -455,7 +458,8 @@ mod tests {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
         };
-        let id = match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM)) {
+        let id = match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]"))
+        {
             Ok(id) => id,
             Err(e) => panic!("load: {e}"),
         };
@@ -500,7 +504,8 @@ mod tests {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
         };
-        let report = match host.run_spin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM)) {
+        let report = match host.run_spin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
             Ok(r) => r,
             Err(e) => panic!("spin: {e}"),
         };
@@ -514,7 +519,8 @@ mod tests {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
         };
-        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM)) {
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
             Ok(id) => id,
             Err(e) => panic!("load: {e}"),
         };

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use auqw_plugin_host::{
     invoke, load, BudgetDimension, Budgets, HttpClient, HttpError, HttpErrorKind, HttpRequest,
-    HttpResponse, Invocation, InvokeError, LoadError, Manifest,
+    HttpResponse, Invocation, InvokeError, LoadError, Manifest, ManifestError,
 };
 use serde_json::Value;
 use sha2::Digest;
@@ -214,6 +214,24 @@ fn requester_wat(url: &str) -> String {
          (i64.extend_i32_u (i32.const {}))))\n  \
          (data (i32.const 2048) \"{}\"))",
         requester_msg(url).len(),
+        msg,
+    )
+}
+
+/// Guest that immediately returns `done` with `result_json` (raw JSON
+/// text) as its result.
+fn done_wat(result_json: &str) -> String {
+    let raw = format!("{{\"type\":\"done\",\"result\":{result_json}}}");
+    let msg = raw.replace('"', "\\\"");
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (i64.or\n      \
+         (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))\n      \
+         (i64.extend_i32_u (i32.const {}))))\n  \
+         (data (i32.const 2048) \"{}\"))",
+        raw.len(),
         msg,
     )
 }
@@ -485,7 +503,10 @@ fn permission_grammar() {
 
 // ---------- cancellation ----------
 
-/// Cancellation aborts an in-flight HTTP request promptly.
+/// Cancellation aborts an in-flight HTTP request promptly. The invoke
+/// future must actually be polled past the guest's `host_request` first —
+/// polling `invoke` only after `cancel()` would exercise the pre-loop
+/// check, not the in-flight abort.
 #[tokio::test]
 async fn cancel_aborts_inflight_http() {
     let wasm = ok(wat::parse_str(requester_wat("https://example.com/")));
@@ -506,10 +527,15 @@ async fn cancel_aborts_inflight_http() {
         None,
     );
     tokio::pin!(fut);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Drive the invocation until it is parked inside the HTTP send
+    // (SleepHttp never resolves on its own).
+    tokio::select! {
+        _ = &mut fut => panic!("invoke returned before cancel"),
+        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
     let t0 = Instant::now();
     cancel.cancel();
-    let Invocation { result, .. } = fut.await;
+    let Invocation { result, attempt } = fut.await;
     let latency = t0.elapsed();
     eprintln!("cancel abort latency: {latency:?}");
     assert!(
@@ -520,6 +546,10 @@ async fn cancel_aborts_inflight_http() {
         latency < Duration::from_millis(500),
         "abort took {latency:?}"
     );
+    // The cancelled call is accounted: counted and traced.
+    assert_eq!(attempt.http_calls, 1);
+    assert_eq!(attempt.http_trace.len(), 1);
+    assert_eq!(attempt.http_trace[0].status, None);
 }
 
 // ---------- byte budget ----------
@@ -689,6 +719,221 @@ async fn pot_token_without_binding_is_invalid_message() {
     assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
     assert_eq!(attempt.http_calls, 0);
     assert!(reqs.lock().map(|r| r.is_empty()).unwrap_or(false));
+}
+
+// ---------- done.result.url policy ----------
+
+/// A `done` result `url` is the fetch target handed to the caller; it
+/// must be an https destination the manifest's `network:` permissions
+/// already allow — the plugin cannot mint fetch targets outside its own
+/// sandbox. Non-string `url` values are rejected as malformed.
+#[tokio::test]
+async fn done_url_outside_allowlist_is_rejected() {
+    for result in [
+        r#"{"url":"https://evil.example.net/stream"}"#,
+        r#"{"url":"http://192.168.1.1/admin"}"#,
+        r#"{"url":123}"#,
+    ] {
+        let wasm = ok(wat::parse_str(done_wat(result)));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for(&wasm, &["network:example.com"]),
+            &default_budgets(),
+        ));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result: r, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            &http,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(err(r), InvokeError::InvalidMessage(_)),
+            "result {result} must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn done_url_within_allowlist_passes() {
+    let wasm = ok(wat::parse_str(done_wat(
+        r#"{"url":"https://cdn.example.net/stream","mime":"audio/mp4"}"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:*.example.net"]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert_eq!(ok(result)["url"], "https://cdn.example.net/stream");
+}
+
+// ---------- HTTP client redirect policy ----------
+
+/// The host HTTP client never follows redirects: a 3xx from an
+/// allow-listed host would otherwise be chased to an arbitrary
+/// destination the guest never declared. A local server answers
+/// `POST /get_pot` with a 302 to `/redirected`; if the client followed
+/// it, the second path would appear in the hit log.
+#[tokio::test]
+async fn host_http_never_follows_redirects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) => panic!("bind: {e}"),
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => panic!("addr: {e}"),
+    };
+    let hits = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let hits_task = Arc::clone(&hits);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = vec![0u8; 8192];
+            let Ok(n) = socket.read(&mut buf).await else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&buf[..n]);
+            let path = text
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            if let Ok(mut h) = hits_task.lock() {
+                h.push(path.clone());
+            }
+            let response = if path == "/redirected" {
+                let body = br#"{"poToken":"followed"}"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    String::from_utf8_lossy(body)
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let wasm = ok(wat::parse_str(potter_wat(
+        r#"{"content_binding":"vid12345678"}"#,
+    )));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["pot-provider"]),
+        &budgets,
+    ));
+    let http = match auqw_plugin_host::ReqwestClient::new() {
+        Ok(h) => h,
+        Err(e) => panic!("client: {e}"),
+    };
+    let provider = format!("http://127.0.0.1:{port}");
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        Some(&provider),
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Steps
+        }
+    ));
+    let seen = hits.lock().map(|h| h.clone()).unwrap_or_default();
+    assert_eq!(
+        seen,
+        vec!["/get_pot".to_string(); 2],
+        "redirect must not be followed; http_calls={}",
+        attempt.http_calls
+    );
+}
+
+// ---------- manifest validation vs schema ----------
+
+/// `permissions` is a required field in the schema — absent must fail.
+#[test]
+fn manifest_requires_permissions_field() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&wasm));
+    let text = format!(
+        "{{\"id\":\"p\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
+         \"capabilities\":[\"playback.resolve\"],\
+         \"artifact\":{{\"path\":\"p.wasm\",\"digest\":\"{digest}\"}}}}"
+    );
+    assert!(
+        matches!(
+            Manifest::from_json(&text),
+            Err(ManifestError::InvalidJson(_))
+        ),
+        "missing permissions must fail"
+    );
+}
+
+/// Field shapes the schema enforces that serde alone does not.
+#[test]
+fn manifest_field_grammar_matches_schema() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&wasm));
+    let manifest_json = |id: &str, version: &str, caps: &str, path: &str, digest: &str| {
+        format!(
+            "{{\"id\":\"{id}\",\"version\":\"{version}\",\"abi\":\"0.1.0\",\
+             \"capabilities\":{caps},\"permissions\":[],\
+             \"artifact\":{{\"path\":\"{path}\",\"digest\":\"{digest}\"}}}}"
+        )
+    };
+    let caps = "[\"playback.resolve\"]";
+    for bad in [
+        manifest_json("Bad-Id", "0.1.0", caps, "p.wasm", &digest),
+        manifest_json("-bad", "0.1.0", caps, "p.wasm", &digest),
+        manifest_json("p", "0.1", caps, "p.wasm", &digest),
+        manifest_json("p", "0.1.0", "[\"catalog.search\"]", "p.wasm", &digest),
+        manifest_json("p", "0.1.0", caps, "", &digest),
+        manifest_json("p", "0.1.0", caps, "p.wasm", "sha256:xyz"),
+        manifest_json("p", "0.1.0", caps, "p.wasm", "md5:000"),
+    ] {
+        assert!(
+            matches!(
+                Manifest::from_json(&bad),
+                Err(ManifestError::InvalidField(_))
+            ),
+            "{bad} must be rejected"
+        );
+    }
+    ok(Manifest::from_json(&manifest_json(
+        "youtube-music",
+        "0.1.0",
+        caps,
+        "dist/p.wasm",
+        &digest,
+    )));
 }
 
 // ---------- conformance echo guest ----------

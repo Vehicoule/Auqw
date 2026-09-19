@@ -44,7 +44,9 @@ Rejection rules (v0):
   `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"content_length":<u64|null, optional>,"client":"<ladder rung name>"}`
   (`content_length` is the full byte length of the stream when the
   provider reports it, so hosts can range-download and verify
-  completion.)
+  completion.) When a result carries `url`, the host validates it
+  before returning it: https scheme plus a `network:` destination the
+  manifest permits — a violation ends the invocation `invalid-message`.
 - `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}`
 
 ## ErrorKind
@@ -77,11 +79,14 @@ matches any single- or multi-level subdomain of `<domain>` (not the apex).
 Only `https` destinations are allowed. `pot-provider` grants `pot_token`
 host requests; the destination is host-configured, never guest-supplied,
 so the `https`-only rule for guest `http_request` destinations is
-unaffected.
+unaffected. Redirects are never followed by the host HTTP client: a 3xx
+reaches the guest as `http_response`, and a guest that wants the target
+re-requests it through `host_request` (the allowlist applies again).
 
 ## Limits and failure behavior
 
-- Artifact size ≤ 5 MiB; guest linear memory ≤ 64 MiB (host-enforced).
+- Artifact size ≤ 5 MiB; guest linear memory ≤ 64 MiB, tables ≤ 64 Ki
+  elements, and one memory/instance per invocation (host-enforced).
 - Guest response messages ≤ 1 MiB.
 - Budgets (fuel per entry and total, max steps, max HTTP calls, byte
   in+out, per-request timeout, wall-clock deadline) are cumulative per

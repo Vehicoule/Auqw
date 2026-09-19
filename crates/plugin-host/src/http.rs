@@ -59,10 +59,18 @@ pub struct ReqwestClient {
 impl ReqwestClient {
     /// Build a client with rustls TLS.
     ///
+    /// Redirects are never followed: a 3xx from an allow-listed host would
+    /// otherwise be chased to an arbitrary (possibly non-https, non-listed)
+    /// destination, defeating the manifest destination policy. The guest
+    /// sees the 3xx verbatim and may re-request the `Location` target
+    /// through the normal authorization path.
+    ///
     /// # Errors
     /// Returns [`HttpError`] if the TLS backend cannot be initialized.
     pub fn new() -> Result<Self, HttpError> {
-        let builder = reqwest::Client::builder().use_rustls_tls();
+        let builder = reqwest::Client::builder()
+            .use_rustls_tls()
+            .redirect(reqwest::redirect::Policy::none());
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let builder = {
             // rustls-platform-verifier needs an Android Context over JNI

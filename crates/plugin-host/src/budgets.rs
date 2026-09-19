@@ -26,6 +26,10 @@ pub struct Budgets {
     pub deadline: Duration,
     /// Guest linear memory cap.
     pub max_memory_bytes: usize,
+    /// Per-table element cap. Wasmi leaves this unlimited by default;
+    /// elements live outside linear memory (~8 B each on the host), so an
+    /// uncapped table is an allocation channel around `max_memory_bytes`.
+    pub max_table_elements: usize,
     /// Artifact size cap, checked at load.
     pub max_artifact_bytes: usize,
 }
@@ -41,6 +45,10 @@ impl Default for Budgets {
             http_timeout: Duration::from_secs(10),
             deadline: Duration::from_secs(30),
             max_memory_bytes: 64 * 1024 * 1024,
+            // 64 Ki elements/table × ~8 B/element × the 16-table cap stays
+            // well inside the memory budget's spirit; rustc guests emit
+            // tables in the hundreds.
+            max_table_elements: 65_536,
             max_artifact_bytes: 5 * 1024 * 1024,
         }
     }

@@ -264,7 +264,11 @@ fn print_attempt(attempt: &auqw_plugin_host::Attempt) {
 /// mid-stream cap just stops the download early. The URL is never
 /// printed.
 async fn download_to(url: &str, path: &str) {
-    let Ok(client) = reqwest::Client::builder().use_rustls_tls().build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
         println!("download: client init failed");
         return;
     };
@@ -286,7 +290,12 @@ async fn download_to(url: &str, path: &str) {
         match res {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                if status != 200 && status != 206 {
+                // A 200 is only valid at offset 0 — the whole file is the
+                // answer to a range the server ignored. Mid-stream it would
+                // append the full body at the resume offset and corrupt the
+                // evidence file.
+                let acceptable = status == 206 || (status == 200 && start == 0);
+                if !acceptable {
                     println!("download: bytes={start}-{end} -> {status} (stop)");
                     break;
                 }
@@ -316,7 +325,11 @@ async fn download_to(url: &str, path: &str) {
 /// Prove the resolved URL is fetchable: GET the first 64 KiB with a Range
 /// header and print status/content-type/bytes. The URL is never printed.
 async fn range_check(url: &str) {
-    let Ok(client) = reqwest::Client::builder().use_rustls_tls().build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
         println!("range-check: client init failed");
         return;
     };

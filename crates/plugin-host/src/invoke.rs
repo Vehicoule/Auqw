@@ -248,6 +248,13 @@ async fn run(
     }
     let limits = StoreLimitsBuilder::new()
         .memory_size(ctx.budgets.max_memory_bytes)
+        .table_elements(ctx.budgets.max_table_elements)
+        // ABI v0 shape: one instance, one linear memory, a handful of
+        // indirect-call tables. These counts are structural caps, not
+        // budgets — a module needing more is out of contract.
+        .instances(1)
+        .memories(1)
+        .tables(16)
         .build();
     let mut store = Store::new(&ctx.plugin.engine, HostState { limits });
     store.limiter(|s| &mut s.limits);
@@ -316,7 +323,22 @@ async fn run(
 
         match msg.get("type").and_then(Value::as_str) {
             Some("done") => {
-                return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+                let result = msg.get("result").cloned().unwrap_or(Value::Null);
+                // A result `url` is the fetch target the caller will open
+                // on the plugin's behalf; it must be an https destination
+                // the manifest already permits — same policy as the
+                // guest's own requests, no trust by origin.
+                if let Some(url) = result.get("url") {
+                    let permitted = url
+                        .as_str()
+                        .is_some_and(|u| ctx.plugin.manifest.allows_destination(u));
+                    if !permitted {
+                        return Err(InvokeError::InvalidMessage(
+                            "done.result.url is not an allowed destination".into(),
+                        ));
+                    }
+                }
+                return Ok(result);
             }
             Some("fail") => {
                 let error = &msg["error"];
@@ -515,10 +537,21 @@ async fn perform_call(
     );
     let t0 = Instant::now();
     let result = tokio::select! {
-        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
-        r = call => r,
+        () = ctx.cancel.cancelled() => None,
+        r = call => Some(r),
     };
     let elapsed = t0.elapsed();
+    let Some(result) = result else {
+        // http_calls counts the attempt; the trace must record it too.
+        attempt.http_trace.push(HttpTraceEntry {
+            method,
+            url: traced_url,
+            status: None,
+            bytes: 0,
+            elapsed,
+        });
+        return Err(InvokeError::Cancelled);
+    };
     match result {
         Ok(resp) => {
             attempt.bytes += out_bytes + resp.body.len() as u64;

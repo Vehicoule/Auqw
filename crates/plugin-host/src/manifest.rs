@@ -16,8 +16,8 @@ pub struct Manifest {
     pub abi: String,
     /// Capabilities the plugin declares.
     pub capabilities: Vec<String>,
-    /// `network:` permissions; see the ABI contract for the grammar.
-    #[serde(default)]
+    /// `network:` / `pot-provider` permissions; see the ABI contract for
+    /// the grammar. Required by the schema — an explicit empty array.
     pub permissions: Vec<String>,
     /// Artifact reference (path + pinned digest).
     pub artifact: ArtifactRef,
@@ -46,15 +46,37 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Structural validation beyond the JSON shape.
+    /// Structural validation beyond the JSON shape. Mirrors
+    /// `sdk/contract/manifest.schema.json` — the schema is the contract;
+    /// this validator must not accept what it rejects.
     fn validate(&self) -> Result<(), ManifestError> {
-        if self.id.is_empty() {
-            return Err(ManifestError::InvalidField("id must not be empty".into()));
+        let bad = |m: &str| ManifestError::InvalidField(m.to_string());
+        // ^[a-z0-9][a-z0-9-]*$
+        let mut chars = self.id.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+            _ => return Err(bad("id must match [a-z0-9][a-z0-9-]*")),
+        }
+        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(bad("id must match [a-z0-9][a-z0-9-]*"));
+        }
+        // ^[0-9]+\.[0-9]+\.[0-9]+$
+        let version_ok = self.version.split('.').collect::<Vec<_>>().len() == 3
+            && self
+                .version
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !version_ok {
+            return Err(bad("version must be semver x.y.z"));
         }
         if self.capabilities.is_empty() {
             return Err(ManifestError::InvalidField(
                 "capabilities must not be empty".into(),
             ));
+        }
+        // The v0 schema enumerates the only capability the host serves.
+        if self.capabilities.iter().any(|c| c != "playback.resolve") {
+            return Err(bad("capabilities must be a subset of [playback.resolve]"));
         }
         for p in &self.permissions {
             if p == "pot-provider" {
@@ -63,20 +85,33 @@ impl Manifest {
             let rest = p
                 .strip_prefix("network:")
                 .ok_or_else(|| ManifestError::InvalidField(format!("bad permission {p:?}")))?;
-            if rest.is_empty()
-                || rest.contains('/')
-                || rest == "*"
-                || rest.starts_with("*.") && rest.len() <= 2
+            // ^(\*\.)?[a-z0-9.-]+$ — and a wildcard needs a real domain.
+            let body = rest.strip_prefix("*.").unwrap_or(rest);
+            if body.is_empty()
+                || !body
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
             {
                 return Err(ManifestError::InvalidField(format!(
                     "bad network permission {p:?}"
                 )));
             }
         }
-        if !self.artifact.digest.starts_with("sha256:") {
-            return Err(ManifestError::InvalidField(
-                "artifact.digest must be sha256:<hex>".into(),
-            ));
+        if self.artifact.path.is_empty() {
+            return Err(bad("artifact.path must not be empty"));
+        }
+        // ^sha256:[0-9a-f]{64}$
+        let digest_ok = self
+            .artifact
+            .digest
+            .strip_prefix("sha256:")
+            .is_some_and(|h| {
+                h.len() == 64
+                    && h.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+        if !digest_ok {
+            return Err(bad("artifact.digest must be sha256:<64 lowercase hex>"));
         }
         Ok(())
     }
