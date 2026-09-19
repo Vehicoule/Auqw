@@ -40,7 +40,10 @@ Rejection rules (v0):
 
 - `{"type":"host_request","id":<u32>,"kind":"http_request","payload":{"method":"GET|POST","url":"<https url>","headers":[["name","value"],...],"body":"<base64 or null>"}}`
 - `{"type":"done","result":<capability result>}` — for `playback.resolve`:
-  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"client":"<ladder rung name>"}`
+  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"client":"<ladder rung name>","prefix_limited":<bool, optional>}`
+  (`prefix_limited` defaults to `false` when absent; `true` means the
+  provider caps anonymous fetches of this URL to a prefix — hosts
+  should label it instead of discovering the cap mid-playback.)
 - `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}`
 
 ## ErrorKind

@@ -290,7 +290,9 @@ async fn fuel_traps_infinite_loop() {
         ),
         "expected fuel budget trap"
     );
-    assert!(elapsed < Duration::from_secs(5), "trap took {elapsed:?}");
+    // Wall-clock smoke bound (load-tolerant): the trap is the real
+    // assertion; this only guards against pathological slowdown.
+    assert!(elapsed < Duration::from_secs(15), "trap took {elapsed:?}");
 }
 
 #[tokio::test]

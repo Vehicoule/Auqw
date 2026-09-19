@@ -71,6 +71,9 @@ pub struct ResolvedResource {
     pub expires_at_ms: Option<u64>,
     /// Ladder rung that produced the URL.
     pub client: String,
+    /// Provider caps anonymous fetches of this URL to a prefix
+    /// (e.g. GVS PO-token enforcement); hosts label it honestly.
+    pub prefix_limited: bool,
 }
 
 /// Terminal outcome of one `start_resolve` invocation.
@@ -324,6 +327,10 @@ fn resource_from(value: &Value) -> ResolvedResource {
             .and_then(|v| u32::try_from(v).ok()),
         expires_at_ms: value.get("expires_at_ms").and_then(Value::as_u64),
         client: get("client"),
+        prefix_limited: value
+            .get("prefix_limited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
