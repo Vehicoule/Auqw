@@ -16,6 +16,9 @@ apps/mobile/ios/
 # Rust → Android build product (rebuild via tooling/build-android-bindings.sh)
 modules/plugin-host-expo/android/src/main/jniLibs/
 
+# Rust → iOS build product (rebuild via tooling/build-ios-bindings.sh)
+modules/plugin-host-expo/ios/AuqwMobileBindingsFFI.xcframework/
+
 # Plugin artifacts synced from auqw-plugins (rebuild via pnpm sync-plugins)
 apps/mobile/assets/plugins/
 

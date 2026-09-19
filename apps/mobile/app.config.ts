@@ -7,6 +7,12 @@ const config: ExpoConfig = {
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
+  // auqw://play|spin|cancel deep links drive the Slice-0 gate runs
+  // (adb am start / simctl openurl) — no other deep links exist yet.
+  scheme: 'auqw',
+  ios: {
+    bundleIdentifier: 'com.vehicoule.auqw',
+  },
   android: {
     package: 'com.vehicoule.auqw',
     adaptiveIcon: {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Asset } from 'expo-asset';
 import {
   createAudioPlayer,
@@ -32,6 +32,27 @@ const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
 const SPIN_WASM = require('./assets/plugins/spin.wasm');
 const PLUGIN_MANIFEST = require('./assets/plugins/youtube-music.manifest.json');
 const SPIN_MANIFEST = require('./assets/plugins/spin.manifest.json');
+
+// Slice-0 gate evidence: every [slice0] line also lands in the app
+// container so `adb run-as` / `simctl get_app_container` can read it
+// while the screen is off and metro may not be watched.
+let logHandle: ReturnType<File['open']> | null = null;
+function slog(line: string): void {
+  console.log(`[slice0] ${line}`);
+  try {
+    if (!logHandle) {
+      const f = new File(Paths.cache, 'auqw-slice0.log');
+      if (f.exists) {
+        f.delete();
+      }
+      f.create();
+      logHandle = f.open(FileMode.Append);
+    }
+    logHandle.writeBytes(new TextEncoder().encode(`${line}\n`));
+  } catch {
+    // logging must never break the gate path
+  }
+}
 
 type Phase =
   | { kind: 'idle' }
@@ -231,6 +252,7 @@ export function App() {
     ) => {
       try {
         await setAudioModeAsync({
+          playsInSilentMode: true,
           shouldPlayInBackground: true,
           interruptionMode: 'doNotMix',
         });
@@ -246,10 +268,13 @@ export function App() {
           statusSub.current = next.addListener(
             'playbackStatusUpdate',
             (status: AudioStatus) => {
+              const positionS = Math.floor(status.currentTime);
+              const durationS = Math.floor(status.duration);
+              slog(`pos=${positionS}s/${durationS}s t=${Date.now()}`);
               setPhase({
                 kind: 'playing',
-                positionS: Math.floor(status.currentTime),
-                durationS: Math.floor(status.duration),
+                positionS,
+                durationS,
                 client: resource.client,
                 mime: resource.mime,
               });
@@ -290,6 +315,10 @@ export function App() {
         requestId.current = null;
       }
       const outcome = event.outcome;
+      slog(
+        `outcome ${event.requestId} type=${outcome.type}` +
+          `${outcome.type === 'failed' ? ` kind=${outcome.kind}` : ''} t=${Date.now()}`,
+      );
       if (outcome.type === 'resolved') {
         pending.resolve(outcome.resource);
       } else {
@@ -305,42 +334,47 @@ export function App() {
     };
   }, []);
 
-  const onPlay = useCallback(async () => {
-    if (phase.kind === 'resolving' || phase.kind === 'loading-plugin') {
-      return;
-    }
-    try {
-      // Detach the previous player first: its status listener would keep
-      // writing `playing` over the resolving/failed phases while the new
-      // resolve is in flight.
-      statusSub.current?.remove();
-      statusSub.current = null;
-      player.current?.remove();
-      player.current = null;
-      setPhase({ kind: 'loading-plugin' });
-      await ensureHost();
-      setPhase({ kind: 'resolving' });
-      const resource = await resolveOnce(videoId);
-      setPhase({ kind: 'resolving', note: `downloading — ${resource.client}` });
-      await startPlayback(resource, () => resolveOnce(videoId));
-    } catch (error) {
-      const kind = (error as { kind?: string }).kind;
-      if (kind === 'cancelled') {
-        setPhase({ kind: 'cancelled' });
-      } else if (kind) {
-        setPhase({
-          kind: 'failed',
-          errorKind: kind,
-          message: describe(error),
-        });
-      } else {
-        setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
+  const onPlay = useCallback(
+    async (targetId?: string) => {
+      if (phase.kind === 'resolving' || phase.kind === 'loading-plugin') {
+        return;
       }
-    }
-  }, [phase.kind, videoId, ensureHost, resolveOnce, startPlayback]);
+      const vid = targetId ?? videoId;
+      try {
+        // Detach the previous player first: its status listener would keep
+        // writing `playing` over the resolving/failed phases while the new
+        // resolve is in flight.
+        statusSub.current?.remove();
+        statusSub.current = null;
+        player.current?.remove();
+        player.current = null;
+        setPhase({ kind: 'loading-plugin' });
+        await ensureHost();
+        setPhase({ kind: 'resolving' });
+        const resource = await resolveOnce(vid);
+        setPhase({ kind: 'resolving', note: `downloading — ${resource.client}` });
+        await startPlayback(resource, () => resolveOnce(vid));
+      } catch (error) {
+        const kind = (error as { kind?: string }).kind;
+        if (kind === 'cancelled') {
+          setPhase({ kind: 'cancelled' });
+        } else if (kind) {
+          setPhase({
+            kind: 'failed',
+            errorKind: kind,
+            message: describe(error),
+          });
+        } else {
+          setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
+        }
+      }
+    },
+    [phase.kind, videoId, ensureHost, resolveOnce, startPlayback],
+  );
 
   const onCancel = useCallback(() => {
     if (requestId.current) {
+      slog(`cancel-sent ${requestId.current} t=${Date.now()}`);
       cancel(requestId.current);
     } else if (player.current?.playing) {
       player.current.pause();
@@ -354,13 +388,65 @@ export function App() {
       await ensureHost();
       const wasmBase64 = await wasmAssetBase64(SPIN_WASM);
       const report = await runSpin(wasmBase64, JSON.stringify(SPIN_MANIFEST));
-      setFuelLine(
-        `fuel trap: kind=${report.kind} elapsed=${report.elapsedMs}ms fuel=${report.fuelUsed}`,
-      );
+      const line = `fuel trap: kind=${report.kind} elapsed=${report.elapsedMs}ms fuel=${report.fuelUsed}`;
+      slog(line);
+      setFuelLine(line);
     } catch (error) {
       setFuelLine(`fuel trap: failed(${describe(error)})`);
     }
   }, [ensureHost]);
+
+  // auqw://play/<videoId> | auqw://spin | auqw://cancel — the Slice-0
+  // gate runner's handle on the app (adb am start / simctl openurl).
+  // iOS puts a "Open in …?" sheet on every openurl into a running app,
+  // so a headless gate run also accepts the same verbs written one per
+  // line into <cache>/auqw-cmd (simctl container / adb run-as).
+  useEffect(() => {
+    const runCommand = (verb: string, arg: string | undefined) => {
+      slog(`cmd ${verb} ${arg ?? ''} t=${Date.now()}`);
+      if (verb === 'play') {
+        void onPlay(arg || undefined);
+      } else if (verb === 'spin') {
+        void onFuelTrap();
+      } else {
+        onCancel();
+      }
+    };
+    const onUrl = ({ url }: { url: string }) => {
+      const match = url.match(/^auqw:\/\/(play|spin|cancel)\/?([^\s/]*)$/);
+      if (match?.[1]) {
+        runCommand(match[1], match[2]);
+      }
+    };
+    const sub = Linking.addEventListener('url', onUrl);
+    void Linking.getInitialURL().then((initial) => {
+      if (initial) {
+        onUrl({ url: initial });
+      }
+    });
+    const cmdFile = new File(Paths.cache, 'auqw-cmd');
+    const poll = setInterval(() => {
+      try {
+        if (!cmdFile.exists) {
+          return;
+        }
+        const text = cmdFile.textSync();
+        cmdFile.delete();
+        for (const line of text.split('\n')) {
+          const match = line.trim().match(/^(play|spin|cancel)(?:\s+(\S+))?$/);
+          if (match?.[1]) {
+            runCommand(match[1], match[2]);
+          }
+        }
+      } catch {
+        // command channel must never break the gate path
+      }
+    }, 500);
+    return () => {
+      sub.remove();
+      clearInterval(poll);
+    };
+  }, [onPlay, onFuelTrap, onCancel]);
 
   const busy = phase.kind === 'resolving' || phase.kind === 'loading-plugin';
 

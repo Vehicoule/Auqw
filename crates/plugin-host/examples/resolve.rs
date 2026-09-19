@@ -3,7 +3,7 @@
 //! prove the URL is fetchable with a Range GET.
 //!
 //! Usage:
-//!   resolve <plugin.wasm> <manifest.json> [video_id] [--cancel-after-ms N]
+//!   resolve <plugin.wasm> <manifest.json> [video_id] [--cancel-after-ms N] [--download <path>]
 //!   resolve --spin <spin.wasm>
 
 use std::process::ExitCode;
@@ -42,12 +42,17 @@ async fn run(args: &[String]) -> ExitCode {
         .position(|a| a == "--pot-provider")
         .and_then(|pos| args.get(pos + 1))
         .cloned();
+    let download = args
+        .iter()
+        .position(|a| a == "--download")
+        .and_then(|pos| args.get(pos + 1))
+        .cloned();
 
     let mut positional: Vec<&String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--cancel-after-ms" | "--pot-provider" => i += 2,
+            "--cancel-after-ms" | "--pot-provider" | "--download" => i += 2,
             a if a.starts_with("--") => i += 1,
             _ => {
                 positional.push(&args[i]);
@@ -134,6 +139,9 @@ async fn run(args: &[String]) -> ExitCode {
             print_attempt(&attempt);
             if let Some(url) = value.get("url").and_then(|v| v.as_str()) {
                 range_check(url).await;
+                if let Some(path) = download {
+                    download_to(url, &path).await;
+                }
             }
             ExitCode::SUCCESS
         }
@@ -249,6 +257,60 @@ fn print_attempt(attempt: &auqw_plugin_host::Attempt) {
             t.method, t.url, t.status, t.bytes, t.elapsed
         );
     }
+}
+
+/// Fetch the whole stream to `path` so the desktop leg can play real
+/// audio (afplay). 1 MiB Range chunks mirror the app's mint loop; a
+/// mid-stream cap just stops the download early. The URL is never
+/// printed.
+async fn download_to(url: &str, path: &str) {
+    let Ok(client) = reqwest::Client::builder().use_rustls_tls().build() else {
+        println!("download: client init failed");
+        return;
+    };
+    let mut file = match std::fs::File::create(path) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("download: cannot create {path}: {e}");
+            return;
+        }
+    };
+    let mut start = 0u64;
+    loop {
+        let end = start + 1_048_575;
+        let res = client
+            .get(url)
+            .header("Range", format!("bytes={start}-{end}"))
+            .send()
+            .await;
+        match res {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status != 200 && status != 206 {
+                    println!("download: bytes={start}-{end} -> {status} (stop)");
+                    break;
+                }
+                let Ok(bytes) = resp.bytes().await else {
+                    println!("download: body read failed at {start}");
+                    break;
+                };
+                if bytes.is_empty() {
+                    break;
+                }
+                use std::io::Write as _;
+                if file.write_all(&bytes).is_err() {
+                    println!("download: write failed at {start}");
+                    break;
+                }
+                start += bytes.len() as u64;
+            }
+            Err(e) => {
+                println!("download: request failed at {start}: {e}");
+                break;
+            }
+        }
+    }
+    println!("download: wrote {start} bytes to {path}");
 }
 
 /// Prove the resolved URL is fetchable: GET the first 64 KiB with a Range
