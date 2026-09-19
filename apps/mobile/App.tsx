@@ -112,6 +112,10 @@ const CHUNK = 1_048_576;
 const PLAYBACK_MIN_BYTES = 256 * 1024;
 const MINT_BUDGET = 8;
 const ZERO_PROGRESS_MINT_LIMIT = 2;
+// One stalled chunk fetch cannot park the gate run forever: the
+// timeout covers headers AND the body read (1 MiB stays under it even
+// at GVS's ~33 KB/s throttle). `signal` carries Cancel into the loop.
+const CHUNK_TIMEOUT_MS = 60_000;
 
 class StreamCapped extends Error {
   constructor() {
@@ -119,9 +123,51 @@ class StreamCapped extends Error {
   }
 }
 
+type Chunk = {
+  status: number;
+  contentRange: string | null;
+  bytes: Uint8Array;
+};
+
+async function fetchChunk(
+  url: string,
+  start: number,
+  end: number,
+  signal: AbortSignal,
+): Promise<Chunk> {
+  const ctl = new AbortController();
+  const onAbort = () => ctl.abort();
+  signal.addEventListener('abort', onAbort);
+  if (signal.aborted) {
+    ctl.abort();
+  }
+  const timer = setTimeout(() => ctl.abort(), CHUNK_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      headers: { Range: `bytes=${start}-${end}` },
+      signal: ctl.signal,
+    });
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    return {
+      status: resp.status,
+      contentRange: resp.headers.get('content-range'),
+      bytes,
+    };
+  } catch (error) {
+    if (!signal.aborted && (error as Error).name === 'AbortError') {
+      throw new Error(`chunk ${start}-${end}: timed out`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 async function downloadStream(
   first: ResolvedResource,
   remint: () => Promise<ResolvedResource>,
+  signal: AbortSignal,
   onEnoughData: (file: File) => void,
 ): Promise<void> {
   const ext = first.mime === 'audio/mp4' ? 'm4a' : 'webm';
@@ -150,8 +196,8 @@ async function downloadStream(
   try {
     while (total < 0 || start < total) {
       const end = total < 0 ? start + CHUNK - 1 : Math.min(start + CHUNK - 1, total - 1);
-      const resp = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
-      if (resp.status === 403) {
+      const chunk = await fetchChunk(url, start, end, signal);
+      if (chunk.status === 403) {
         zeroProgress = start === mintStart ? zeroProgress + 1 : 0;
         if (zeroProgress >= ZERO_PROGRESS_MINT_LIMIT || mints >= MINT_BUDGET) {
           throw new StreamCapped();
@@ -168,19 +214,25 @@ async function downloadStream(
         }
         continue;
       }
-      if (!resp.ok) {
-        throw new Error(`chunk ${start}-${end}: HTTP ${resp.status}`);
+      // Every request sends a Range, so anything but 206 is a serving
+      // violation — a mid-stream 200 would append the whole file at the
+      // resume offset and corrupt the download.
+      if (chunk.status !== 206) {
+        throw new Error(`chunk ${start}-${end}: HTTP ${chunk.status}`);
       }
       if (total < 0) {
-        const contentRange = resp.headers.get('content-range') ?? '';
-        total = Number(contentRange.split('/').pop());
+        total = Number((chunk.contentRange ?? '').split('/').pop());
         if (!Number.isFinite(total) || total <= 0) {
           throw new Error('stream size probe failed');
         }
       }
-      const bytes = new Uint8Array(await resp.arrayBuffer());
-      handle.writeBytes(bytes);
-      start += bytes.length;
+      // An empty partial body makes no progress — without this check
+      // the loop re-requests the same window forever.
+      if (chunk.bytes.length === 0) {
+        throw new Error(`chunk ${start}-${end}: empty body`);
+      }
+      handle.writeBytes(chunk.bytes);
+      start += chunk.bytes.length;
       if (!playbackStarted && start >= PLAYBACK_MIN_BYTES) {
         playbackStarted = true;
         onEnoughData(file);
@@ -201,6 +253,7 @@ export function App() {
   const player = useRef<AudioPlayer | null>(null);
   const statusSub = useRef<EventSubscription | null>(null);
   const requestId = useRef<string | null>(null);
+  const downloadAbort = useRef<AbortController | null>(null);
   const pendingResolves = useRef(
     new Map<
       string,
@@ -250,13 +303,15 @@ export function App() {
       resource: ResolvedResource,
       remint: () => Promise<ResolvedResource>,
     ) => {
+      const ctl = new AbortController();
+      downloadAbort.current = ctl;
       try {
         await setAudioModeAsync({
           playsInSilentMode: true,
           shouldPlayInBackground: true,
           interruptionMode: 'doNotMix',
         });
-        await downloadStream(resource, remint, (file) => {
+        await downloadStream(resource, remint, ctl.signal, (file) => {
           statusSub.current?.remove();
           player.current?.remove();
           const next = createAudioPlayer({ uri: file.uri });
@@ -284,14 +339,14 @@ export function App() {
         });
       } catch (error) {
         const kind = (error as { kind?: string }).kind;
-        if (error instanceof StreamCapped) {
+        if (ctl.signal.aborted || kind === 'cancelled') {
+          setPhase({ kind: 'cancelled' });
+        } else if (error instanceof StreamCapped) {
           setPhase({
             kind: 'failed',
             errorKind: 'expired-resource',
             message: 'stream capped by provider',
           });
-        } else if (kind === 'cancelled') {
-          setPhase({ kind: 'cancelled' });
         } else {
           setPhase({
             kind: 'failed',
@@ -299,6 +354,8 @@ export function App() {
             message: describe(error),
           });
         }
+      } finally {
+        downloadAbort.current = null;
       }
     },
     [],
@@ -376,7 +433,11 @@ export function App() {
     if (requestId.current) {
       slog(`cancel-sent ${requestId.current} t=${Date.now()}`);
       cancel(requestId.current);
-    } else if (player.current?.playing) {
+    }
+    // A returned resolve leaves no request id — aborting the range
+    // loop is what stops an in-flight download.
+    downloadAbort.current?.abort();
+    if (!requestId.current && player.current?.playing) {
       player.current.pause();
       setPhase({ kind: 'cancelled' });
     }
@@ -400,7 +461,9 @@ export function App() {
   // gate runner's handle on the app (adb am start / simctl openurl).
   // iOS puts a "Open in …?" sheet on every openurl into a running app,
   // so a headless gate run also accepts the same verbs written one per
-  // line into <cache>/auqw-cmd (simctl container / adb run-as).
+  // line into <cache>/auqw-cmd (simctl container / adb run-as). Both
+  // channels are dev-gate instrumentation — remove before any release
+  // build.
   useEffect(() => {
     const runCommand = (verb: string, arg: string | undefined) => {
       slog(`cmd ${verb} ${arg ?? ''} t=${Date.now()}`);

@@ -53,6 +53,27 @@ adb install android/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.vehicoule.auqw/.MainActivity
 ```
 
+iOS, same prerequisites minus JDK/NDK — the Rust `aarch64-apple-ios{,-sim}`
+targets take their place:
+
+```sh
+# 1. Rust → .a + generated Swift bindings + xcframework
+./tooling/build-ios-bindings.sh
+
+# 2-3. Same as Android: pnpm install, pnpm sync-plugins
+
+# 4-5. Project + pods + simulator build
+cd apps/mobile
+npx expo prebuild --platform ios
+pod install --project-directory=ios
+xcodebuild -workspace ios/Auqw.xcworkspace -scheme Auqw \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -derivedDataPath ios/build build
+xcrun simctl install booted \
+  ios/build/Build/Products/Debug-iphonesimulator/Auqw.app
+xcrun simctl launch booted com.vehicoule.auqw
+```
+
 ## Background audio
 
 `setAudioModeAsync({ shouldPlayInBackground: true,
@@ -69,10 +90,14 @@ AudioControlsService); recording permissions are disabled.
 - The signed stream URL is passed to `expo-audio` but never rendered
   or logged.
 - The resolved URL is downloaded to the cache in 1 MiB
-  `Range: bytes=` header chunks; playback starts once the first 2
-  chunks are on disk (ExoPlayer keeps reading the growing file).
-  A 403 mid-download (the GVS prefix cap — always hit on
-  `prefix_limited` IOS URLs, observed on some VISIONOS URLs too)
-  fails honestly as `expired-resource`.
+  `Range: bytes=` chunks; playback starts once the first 256 KiB are
+  on disk (the player keeps reading the growing file). A 403
+  mid-download — the stochastic GVS per-mint cap — re-resolves for a
+  fresh mint and resumes at the written offset; a mint that serves no
+  new bytes counts as zero progress, and after 2 in a row (or 8 mints
+  total) the cap fails honestly as `expired-resource`. A re-mint that
+  returns a different encoding restarts the file. Every chunk is a
+  strict `206` (anything else is a serving violation) with a 60 s
+  stall timeout, and Cancel aborts the loop.
 - `metro.config.js` registers `.wasm` as an asset type; the manifest
   JSONs are `require`d as modules.
