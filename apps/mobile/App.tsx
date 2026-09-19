@@ -271,6 +271,10 @@ export function App() {
   const statusSub = useRef<EventSubscription | null>(null);
   const requestId = useRef<string | null>(null);
   const downloadAbort = useRef<AbortController | null>(null);
+  // `phase` is stale within a tick — two `play` commands delivered in one
+  // auqw-cmd poll would both see 'idle' and spawn parallel resolve+download
+  // chains writing the same cache file. The ref is the synchronous guard.
+  const playBusy = useRef(false);
   const pendingResolves = useRef(
     new Map<
       string,
@@ -417,9 +421,14 @@ export function App() {
 
   const onPlay = useCallback(
     async (targetId?: string) => {
-      if (phase.kind === 'resolving' || phase.kind === 'loading-plugin') {
+      if (
+        playBusy.current ||
+        phase.kind === 'resolving' ||
+        phase.kind === 'loading-plugin'
+      ) {
         return;
       }
+      playBusy.current = true;
       const vid = targetId ?? videoId;
       try {
         // Detach the previous player first: its status listener would keep
@@ -452,6 +461,8 @@ export function App() {
         } else {
           setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
         }
+      } finally {
+        playBusy.current = false;
       }
     },
     [phase.kind, videoId, ensureHost, resolveOnce, startPlayback],
