@@ -1,4 +1,23 @@
 /target
-/node_modules
+node_modules/
 **/*.rs.bk
 .DS_Store
+
+# Expo prebuild output (reproducible via `expo prebuild`)
+apps/mobile/android/
+apps/mobile/ios/
+
+# Gradle build output
+**/android/build/
+**/android/.gradle/
+**/android/.kotlin/
+.gradle/
+
+# Rust → Android build product (rebuild via tooling/build-android-bindings.sh)
+modules/plugin-host-expo/android/src/main/jniLibs/
+
+# Plugin artifacts synced from auqw-plugins (rebuild via pnpm sync-plugins)
+apps/mobile/assets/plugins/
+
+# Local env
+.envrc
