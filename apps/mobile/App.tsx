@@ -71,6 +71,7 @@ type Phase =
       mime: string;
     }
   | { kind: 'failed'; errorKind: string; message: string }
+  | { kind: 'ended' }
   | { kind: 'cancelled' };
 
 function statusText(phase: Phase): string {
@@ -85,6 +86,8 @@ function statusText(phase: Phase): string {
       return `playing(${phase.positionS}s / ${phase.durationS}s, ${phase.client}, ${phase.mime})`;
     case 'failed':
       return `failed(${phase.errorKind}, ${phase.message})`;
+    case 'ended':
+      return 'ended';
     case 'cancelled':
       return 'cancelled';
   }
@@ -447,6 +450,26 @@ export function App() {
               const positionS = Math.floor(status.currentTime);
               const durationS = Math.floor(status.duration);
               slog(`pos=${positionS}s/${durationS}s t=${Date.now()}`);
+              // A player event is not always "playing": a mid-play
+              // error is terminal for this chain and `didJustFinish`
+              // means the track ended — collapsing either into
+              // `playing` would report false success.
+              if (status.error || status.didJustFinish) {
+                statusSub.current?.remove();
+                statusSub.current = null;
+                player.current?.remove();
+                player.current = null;
+                if (status.error) {
+                  setPhase({
+                    kind: 'failed',
+                    errorKind: 'audio',
+                    message: status.error,
+                  });
+                } else {
+                  setPhase({ kind: 'ended' });
+                }
+                return;
+              }
               setPhase({
                 kind: 'playing',
                 positionS,

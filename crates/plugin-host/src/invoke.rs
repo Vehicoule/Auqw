@@ -325,6 +325,7 @@ async fn run(
 
         match msg.get("type").and_then(Value::as_str) {
             Some("done") => {
+                check_keys(&msg, &["type", "result"], "done")?;
                 // `result` is required by the schema — its absence is a
                 // malformed message, not a null result.
                 let result = msg
@@ -348,7 +349,9 @@ async fn run(
                 return Ok(result);
             }
             Some("fail") => {
+                check_keys(&msg, &["type", "error"], "fail")?;
                 let error = &msg["error"];
+                check_keys(error, &["kind", "message"], "fail.error")?;
                 let kind = error
                     .get("kind")
                     .and_then(Value::as_str)
@@ -383,6 +386,24 @@ async fn run(
             }
         }
     }
+}
+
+/// The schema marks every step-message object `additionalProperties:
+/// false` — an unknown key is a protocol violation, not trivia to skip.
+fn check_keys(obj: &Value, allowed: &[&str], what: &str) -> Result<(), InvokeError> {
+    let Some(map) = obj.as_object() else {
+        return Err(InvokeError::InvalidMessage(format!(
+            "{what} must be an object"
+        )));
+    };
+    for key in map.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(InvokeError::InvalidMessage(format!(
+                "{what}.{key} is not in the ABI schema"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The caller-side preemption check: cancellation first (intent), then
@@ -447,6 +468,7 @@ async fn host_request_step(
     ctx: &StepCtx<'_>,
     attempt: &mut Attempt,
 ) -> Result<Vec<u8>, InvokeError> {
+    check_keys(msg, &["type", "id", "kind", "payload"], "host_request")?;
     let id = msg
         .get("id")
         .and_then(Value::as_u64)
@@ -501,6 +523,7 @@ fn authorize_pot_token(
     id: u32,
     ctx: &StepCtx<'_>,
 ) -> Result<Authorized, InvokeError> {
+    check_keys(payload, &["content_binding"], "pot_token.payload")?;
     let binding = payload
         .get("content_binding")
         .and_then(Value::as_str)
@@ -645,6 +668,11 @@ async fn perform_call(
 /// Validate the `payload` of an `http_request` host request.
 fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError> {
     let invalid = |m: &str| InvokeError::InvalidMessage(m.to_string());
+    check_keys(
+        payload,
+        &["method", "url", "headers", "body"],
+        "http_request.payload",
+    )?;
     let method = payload
         .get("method")
         .and_then(Value::as_str)
@@ -667,7 +695,8 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
     for h in raw_headers {
         let pair = h
             .as_array()
-            .ok_or_else(|| invalid("http_request header must be a pair"))?;
+            .filter(|p| p.len() == 2)
+            .ok_or_else(|| invalid("http_request header must be a [name, value] pair"))?;
         let name = pair
             .first()
             .and_then(Value::as_str)
@@ -684,8 +713,11 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         }
         headers.push((name.to_string(), value.to_string()));
     }
+    // `body` is a required key — `null` means bodiless, but its absence
+    // is a malformed envelope per the schema.
     let body = match payload.get("body") {
-        None | Some(Value::Null) => None,
+        None => return Err(invalid("http_request.body missing")),
+        Some(Value::Null) => None,
         Some(Value::String(s)) => Some(
             base64::engine::general_purpose::STANDARD
                 .decode(s)

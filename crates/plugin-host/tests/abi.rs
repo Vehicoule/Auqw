@@ -1238,3 +1238,109 @@ async fn partial_response_bytes_count_toward_budget() {
     assert_eq!(attempt.bytes, 3000);
     assert_eq!(attempt.http_calls, 2);
 }
+
+// ---------- envelope strictness (audit round 6) ----------
+
+/// Guest emitting one literal step message, then checking the result.
+/// `check` inspects the invoke outcome.
+async fn raw_step_outcome(raw: &str, permissions: &[&str]) -> InvokeError {
+    let wasm = ok(wat::parse_str(raw_wat(raw)));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, permissions),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    err(result)
+}
+
+/// `done` carrying an extra key violates `additionalProperties: false`.
+#[tokio::test]
+async fn done_with_unknown_key_is_invalid_message() {
+    let e = raw_step_outcome("{\"type\":\"done\",\"result\":null,\"extra\":1}", &[]).await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// `fail.error` carrying an extra key is likewise off-schema.
+#[tokio::test]
+async fn fail_error_with_unknown_key_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\"message\":\"x\",\"hint\":1}}",
+        &[],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// A `host_request` envelope with an unknown key is rejected before
+/// the request is authorized.
+#[tokio::test]
+async fn host_request_with_unknown_key_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\"note\":\"x\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\"headers\":[],\"body\":null}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// `http_request.payload` accepts no keys beyond the schema's four.
+#[tokio::test]
+async fn http_payload_with_unknown_key_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\"headers\":[],\"body\":null,\"meta\":{}}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// `body` is a required key — `null` is bodiless, absent is malformed.
+#[tokio::test]
+async fn http_payload_missing_body_key_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\"headers\":[]}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// A header tuple is exactly `[name, value]` — three elements is not
+/// a pair the schema admits.
+#[tokio::test]
+async fn http_header_triplet_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+         \"headers\":[[\"Accept\",\"*/*\",\"extra\"]],\"body\":null}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// `pot_token` payload accepts only `content_binding`.
+#[tokio::test]
+async fn pot_payload_with_unknown_key_is_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\
+         \"payload\":{\"content_binding\":\"vid\",\"scope\":\"all\"}}",
+        &["pot-provider"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}

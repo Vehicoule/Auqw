@@ -26,6 +26,16 @@ For Android work there is no system JDK — export the Android Studio JBR
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ```
 
+## Provider artifacts
+
+`pnpm sync-plugins` bundles the pinned provider artifacts from
+`providers.lock.json` into `apps/mobile/assets/plugins/`. Each lock
+`source` is a `local-build:` path into a sibling `auqw-plugins`
+checkout — clone it next to this repository, build the pinned artifact
+(`./tooling/build.sh <plugin-id>`), then sync. Fetching signed release
+artifacts instead of a sibling build is post–Slice 0 tooling
+([../docs/specs/plugin-system.md](../docs/specs/plugin-system.md) §7).
+
 ## Layout
 
 | Path | Contents |
