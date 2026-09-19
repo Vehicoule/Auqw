@@ -135,6 +135,11 @@ async function fetchChunk(
   end: number,
   signal: AbortSignal,
 ): Promise<Chunk> {
+  // The host already validates the resolved url against the manifest
+  // allowlist; this is the app's own belt at the actual fetch site.
+  if (!url.startsWith('https://')) {
+    throw new Error('refusing non-https stream url');
+  }
   const ctl = new AbortController();
   const onAbort = () => ctl.abort();
   signal.addEventListener('abort', onAbort);
@@ -147,7 +152,11 @@ async function fetchChunk(
       headers: { Range: `bytes=${start}-${end}` },
       signal: ctl.signal,
     });
-    const bytes = new Uint8Array(await resp.arrayBuffer());
+    // Only a 206 carries bytes we want. Buffering the body before the
+    // status check would read a whole-file 200 — or an unbounded error
+    // body — into memory for nothing.
+    const bytes =
+      resp.status === 206 ? new Uint8Array(await resp.arrayBuffer()) : new Uint8Array(0);
     return {
       status: resp.status,
       contentRange: resp.headers.get('content-range'),
@@ -197,7 +206,10 @@ async function downloadStream(
     while (total < 0 || start < total) {
       const end = total < 0 ? start + CHUNK - 1 : Math.min(start + CHUNK - 1, total - 1);
       const chunk = await fetchChunk(url, start, end, signal);
-      if (chunk.status === 403) {
+      // 403 is the known cap signal; 416 on an in-range request means the
+      // mint no longer serves the byte window we know exists — same
+      // treatment: re-mint and resume, bounded by the progress budget.
+      if (chunk.status === 403 || chunk.status === 416) {
         zeroProgress = start === mintStart ? zeroProgress + 1 : 0;
         if (zeroProgress >= ZERO_PROGRESS_MINT_LIMIT || mints >= MINT_BUDGET) {
           throw new StreamCapped();
@@ -230,6 +242,11 @@ async function downloadStream(
       // the loop re-requests the same window forever.
       if (chunk.bytes.length === 0) {
         throw new Error(`chunk ${start}-${end}: empty body`);
+      }
+      // A 206 that over-serves would corrupt the file by overlapping
+      // the next range fetch.
+      if (chunk.bytes.length > end - start + 1) {
+        throw new Error(`chunk ${start}-${end}: oversized body`);
       }
       handle.writeBytes(chunk.bytes);
       start += chunk.bytes.length;
@@ -338,6 +355,11 @@ export function App() {
           next.play();
         });
       } catch (error) {
+        // A superseded download (a newer Play owns downloadAbort now)
+        // must not write its outcome over the new chain's phase.
+        if (downloadAbort.current !== ctl) {
+          return;
+        }
         const kind = (error as { kind?: string }).kind;
         if (ctl.signal.aborted || kind === 'cancelled') {
           setPhase({ kind: 'cancelled' });
@@ -355,7 +377,9 @@ export function App() {
           });
         }
       } finally {
-        downloadAbort.current = null;
+        if (downloadAbort.current === ctl) {
+          downloadAbort.current = null;
+        }
       }
     },
     [],
@@ -400,11 +424,15 @@ export function App() {
       try {
         // Detach the previous player first: its status listener would keep
         // writing `playing` over the resolving/failed phases while the new
-        // resolve is in flight.
+        // resolve is in flight. The previous download is aborted too —
+        // an orphaned loop would keep fetching into the deleted file and
+        // clobber downloadAbort.current when it finished.
         statusSub.current?.remove();
         statusSub.current = null;
         player.current?.remove();
         player.current = null;
+        downloadAbort.current?.abort();
+        downloadAbort.current = null;
         setPhase({ kind: 'loading-plugin' });
         await ensureHost();
         setPhase({ kind: 'resolving' });

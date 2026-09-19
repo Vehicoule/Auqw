@@ -46,8 +46,8 @@ public class PluginHostExpoModule: Module {
     AsyncFunction("createHost") { (config: HostConfigInput) in
       let h = try PluginHost(
         config: HostConfig(
-          fuelPerEntry: UInt64(config.fuelPerEntry),
-          fuelTotal: UInt64(config.fuelTotal),
+          fuelPerEntry: Self.clampedU64(config.fuelPerEntry),
+          fuelTotal: Self.clampedU64(config.fuelTotal),
           potProviderUrl: config.potProviderUrl
         )
       )
@@ -101,6 +101,13 @@ public class PluginHostExpoModule: Module {
       throw Exception(name: "ERR_NO_HOST", description: "createHost first")
     }
     return host
+  }
+
+  /// JS numbers arrive as Double; `UInt64(Double)` traps on negative,
+  /// fractional-adjacent overflow, or NaN input. Clamp instead of crashing
+  /// the host boundary.
+  private static func clampedU64(_ value: Double) -> UInt64 {
+    UInt64(exactly: value.rounded(.towardZero)) ?? (value > 0 ? UInt64.max : 0)
   }
 
   private static func attemptDict(_ a: AttemptSummary) -> [String: Any] {
