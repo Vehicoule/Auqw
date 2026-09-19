@@ -21,7 +21,7 @@ export type ResolvedResource = {
   bitrateKbps?: number;
   expiresAtMs?: number;
   client: string;
-  prefixLimited: boolean;
+  contentLength?: number;
 };
 
 export type ResolveOutcome =

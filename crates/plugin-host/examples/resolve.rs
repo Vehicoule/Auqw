@@ -217,13 +217,12 @@ fn print_result(result: &serde_json::Value) {
             format!("{}s", ms.saturating_sub(now) / 1000)
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let prefix_limited = result
-        .get("prefix_limited")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let content_length = result
+        .get("content_length")
+        .map_or_else(|| "null".to_string(), |v| v.to_string());
     println!("result: url={} (query redacted)", redact_url(url));
     println!(
-        "        mime={mime} bitrate_kbps={bitrate} expires_in={expiry} client={client} prefix_limited={prefix_limited}"
+        "        mime={mime} bitrate_kbps={bitrate} expires_in={expiry} client={client} content_length={content_length}"
     );
 }
 

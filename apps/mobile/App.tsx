@@ -17,6 +17,7 @@ import {
   loadPlugin,
   runSpin,
   startResolve,
+  type ResolvedResource,
 } from 'auqw-plugin-host-expo';
 
 const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
@@ -70,14 +71,20 @@ async function wasmAssetBase64(moduleRef: number): Promise<string> {
   return new File(asset.localUri).base64();
 }
 
-// ANDROID_VR-minted googlevideo URLs honour any `Range: bytes=`
-// chunk; IOS-minted URLs are GVS PO-token-capped to a ~1 MiB prefix
-// and 403 the rest. The stream is downloaded in 1 MiB chunks into the
-// cache and playback starts once the first chunks are on disk
-// (m4a is moov-first). A 403 mid-download is reported as
-// `expired-resource` rather than played as a truncated file.
+// Minted googlevideo URLs may stop serving mid-download (GVS caps are
+// stochastic per-mint). On a 403 the downloader re-resolves for a fresh
+// mint and resumes at the written offset — the predecessor's mint
+// loop — but a mint that serves no new bytes counts as zero progress:
+// after two in a row the cap is reported as `expired-resource` rather
+// than hammering /player or playing a truncated file. Playback starts
+// once PLAYBACK_MIN_BYTES are on disk (m4a is moov-first; the old app
+// used 128 KiB, ExoPlayer gets a margin). A re-mint that returns a
+// different encoding (mime/length changed) restarts the file — splicing
+// bytes across encodings would corrupt the stream.
 const CHUNK = 1_048_576;
-const PLAYBACK_MIN_BYTES = 2 * CHUNK;
+const PLAYBACK_MIN_BYTES = 256 * 1024;
+const MINT_BUDGET = 8;
+const ZERO_PROGRESS_MINT_LIMIT = 2;
 
 class StreamCapped extends Error {
   constructor() {
@@ -86,26 +93,53 @@ class StreamCapped extends Error {
 }
 
 async function downloadStream(
-  url: string,
-  mime: string,
+  first: ResolvedResource,
+  remint: () => Promise<ResolvedResource>,
   onEnoughData: (file: File) => void,
 ): Promise<void> {
-  const ext = mime === 'audio/mp4' ? 'm4a' : 'webm';
+  const ext = first.mime === 'audio/mp4' ? 'm4a' : 'webm';
   const file = new File(Paths.cache, `auqw-slice0.${ext}`);
   if (file.exists) {
     file.delete();
   }
   file.create();
-  const handle = file.open(FileMode.Append);
+  let handle = file.open(FileMode.Append);
+  let url = first.url;
   let start = 0;
-  let total = -1;
+  let total = first.contentLength ?? -1;
   let playbackStarted = false;
+  let mints = 0;
+  let zeroProgress = 0;
+  let mintStart = 0;
+  const restart = () => {
+    handle.close();
+    file.delete();
+    file.create();
+    handle = file.open(FileMode.Append);
+    start = 0;
+    mintStart = 0;
+    playbackStarted = false;
+  };
   try {
     while (total < 0 || start < total) {
       const end = total < 0 ? start + CHUNK - 1 : Math.min(start + CHUNK - 1, total - 1);
       const resp = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
       if (resp.status === 403) {
-        throw new StreamCapped();
+        zeroProgress = start === mintStart ? zeroProgress + 1 : 0;
+        if (zeroProgress >= ZERO_PROGRESS_MINT_LIMIT || mints >= MINT_BUDGET) {
+          throw new StreamCapped();
+        }
+        mints += 1;
+        const fresh = await remint();
+        if (fresh.mime === first.mime && fresh.contentLength === first.contentLength) {
+          mintStart = start;
+          url = fresh.url;
+        } else {
+          restart();
+          total = fresh.contentLength ?? -1;
+          url = fresh.url;
+        }
+        continue;
       }
       if (!resp.ok) {
         throw new Error(`chunk ${start}-${end}: HTTP ${resp.status}`);
@@ -140,6 +174,15 @@ export function App() {
   const player = useRef<AudioPlayer | null>(null);
   const statusSub = useRef<EventSubscription | null>(null);
   const requestId = useRef<string | null>(null);
+  const pendingResolves = useRef(
+    new Map<
+      string,
+      {
+        resolve: (resource: ResolvedResource) => void;
+        reject: (error: Error & { kind?: string }) => void;
+      }
+    >(),
+  );
 
   const ensureHost = useCallback(async () => {
     if (!hostReady.current) {
@@ -156,21 +199,39 @@ export function App() {
     return pluginId.current;
   }, []);
 
+  // Promise-shaped resolve: the outcome event settles the deferred
+  // recorded under the request id. `requestId.current` still tracks
+  // the in-flight id so Cancel aborts it at the host.
+  const resolveOnce = useCallback(
+    async (sourceRef: string): Promise<ResolvedResource> => {
+      const id = await ensurePlugin();
+      const reqId = await startResolve(id, sourceRef);
+      requestId.current = reqId;
+      return new Promise<ResolvedResource>((resolve, reject) => {
+        pendingResolves.current.set(reqId, { resolve, reject });
+      });
+    },
+    [ensurePlugin],
+  );
+
   const startPlayback = useCallback(
-    async (url: string, client: string, mime: string) => {
+    async (
+      resource: ResolvedResource,
+      remint: () => Promise<ResolvedResource>,
+    ) => {
       try {
         await setAudioModeAsync({
           shouldPlayInBackground: true,
           interruptionMode: 'doNotMix',
         });
-        await downloadStream(url, mime, (file) => {
+        await downloadStream(resource, remint, (file) => {
           statusSub.current?.remove();
           player.current?.remove();
           const next = createAudioPlayer({ uri: file.uri });
           player.current = next;
           next.setActiveForLockScreen(true, {
             title: 'Auqw Slice 0',
-            artist: `resolved via ${client}`,
+            artist: `resolved via ${resource.client}`,
           });
           statusSub.current = next.addListener(
             'playbackStatusUpdate',
@@ -179,22 +240,29 @@ export function App() {
                 kind: 'playing',
                 positionS: Math.floor(status.currentTime),
                 durationS: Math.floor(status.duration),
-                client,
-                mime,
+                client: resource.client,
+                mime: resource.mime,
               });
             },
           );
           next.play();
         });
       } catch (error) {
+        const kind = (error as { kind?: string }).kind;
         if (error instanceof StreamCapped) {
           setPhase({
             kind: 'failed',
             errorKind: 'expired-resource',
             message: 'stream capped by provider',
           });
+        } else if (kind === 'cancelled') {
+          setPhase({ kind: 'cancelled' });
         } else {
-          setPhase({ kind: 'failed', errorKind: 'audio', message: describe(error) });
+          setPhase({
+            kind: 'failed',
+            errorKind: kind ?? 'audio',
+            message: describe(error),
+          });
         }
       }
     },
@@ -203,49 +271,63 @@ export function App() {
 
   useEffect(() => {
     const subscription = addResolveOutcomeListener((event) => {
-      if (event.requestId !== requestId.current) {
+      const pending = pendingResolves.current.get(event.requestId);
+      if (!pending) {
         return;
       }
-      requestId.current = null;
+      pendingResolves.current.delete(event.requestId);
+      if (requestId.current === event.requestId) {
+        requestId.current = null;
+      }
       const outcome = event.outcome;
-      if (outcome.type === 'failed') {
-        if (outcome.kind === 'cancelled') {
-          setPhase({ kind: 'cancelled' });
-        } else {
-          setPhase({ kind: 'failed', errorKind: outcome.kind, message: outcome.message });
-        }
-        return;
+      if (outcome.type === 'resolved') {
+        pending.resolve(outcome.resource);
+      } else {
+        pending.reject(
+          Object.assign(new Error(outcome.message), { kind: outcome.kind }),
+        );
       }
-      if (outcome.resource.prefixLimited) {
-        setPhase({ kind: 'resolving', note: `capped — ${outcome.resource.client} rung` });
-      }
-      void startPlayback(
-        outcome.resource.url,
-        outcome.resource.client,
-        outcome.resource.mime,
-      );
     });
     return () => {
       subscription.remove();
       statusSub.current?.remove();
       player.current?.remove();
     };
-  }, [startPlayback]);
+  }, []);
 
   const onPlay = useCallback(async () => {
     if (phase.kind === 'resolving' || phase.kind === 'loading-plugin') {
       return;
     }
     try {
+      // Detach the previous player first: its status listener would keep
+      // writing `playing` over the resolving/failed phases while the new
+      // resolve is in flight.
+      statusSub.current?.remove();
+      statusSub.current = null;
+      player.current?.remove();
+      player.current = null;
       setPhase({ kind: 'loading-plugin' });
       await ensureHost();
-      const id = await ensurePlugin();
       setPhase({ kind: 'resolving' });
-      requestId.current = await startResolve(id, videoId);
+      const resource = await resolveOnce(videoId);
+      setPhase({ kind: 'resolving', note: `downloading — ${resource.client}` });
+      await startPlayback(resource, () => resolveOnce(videoId));
     } catch (error) {
-      setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
+      const kind = (error as { kind?: string }).kind;
+      if (kind === 'cancelled') {
+        setPhase({ kind: 'cancelled' });
+      } else if (kind) {
+        setPhase({
+          kind: 'failed',
+          errorKind: kind,
+          message: describe(error),
+        });
+      } else {
+        setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
+      }
     }
-  }, [phase.kind, videoId, ensureHost, ensurePlugin]);
+  }, [phase.kind, videoId, ensureHost, resolveOnce, startPlayback]);
 
   const onCancel = useCallback(() => {
     if (requestId.current) {

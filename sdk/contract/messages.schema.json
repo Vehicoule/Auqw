@@ -116,8 +116,8 @@
         "mime": { "type": "string" },
         "bitrate_kbps": { "type": ["integer", "null"], "minimum": 0 },
         "expires_at_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "client": { "type": "string" },
-        "prefix_limited": { "type": "boolean" }
+        "content_length": { "type": ["integer", "null"], "minimum": 1 },
+        "client": { "type": "string" }
       }
     },
     "done": {

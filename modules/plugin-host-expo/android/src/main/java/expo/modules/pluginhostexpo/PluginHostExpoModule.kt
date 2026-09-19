@@ -141,7 +141,7 @@ class PluginHostExpoModule : Module() {
           outcome.resource.bitrateKbps?.let { putDouble("bitrateKbps", it.toDouble()) }
           outcome.resource.expiresAtMs?.let { putDouble("expiresAtMs", it.toDouble()) }
           putString("client", outcome.resource.client)
-          putBoolean("prefixLimited", outcome.resource.prefixLimited)
+          outcome.resource.contentLength?.let { putDouble("contentLength", it.toDouble()) }
         }
       )
       putBundle("attempt", attemptBundle(outcome.attempt))
