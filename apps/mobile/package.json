@@ -1,0 +1,30 @@
+{
+  "name": "auqw-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "typecheck": "tsc --noEmit"
+  },
+  "expo": {
+    "autolinking": {
+      "searchPaths": ["../../modules"]
+    }
+  },
+  "dependencies": {
+    "auqw-plugin-host-expo": "workspace:*",
+    "expo": "~57.0.24",
+    "expo-asset": "~57.0.18",
+    "expo-audio": "~57.0.5",
+    "expo-file-system": "~57.0.7",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  }
+}
