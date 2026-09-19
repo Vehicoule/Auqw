@@ -19,7 +19,7 @@ import {
   startResolve,
 } from 'auqw-plugin-host-expo';
 
-const VIDEO_ID = 'kJQP7kiw5Fk';
+const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
 
 const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
 const SPIN_WASM = require('./assets/plugins/spin.wasm');
@@ -29,7 +29,7 @@ const SPIN_MANIFEST = require('./assets/plugins/spin.manifest.json');
 type Phase =
   | { kind: 'idle' }
   | { kind: 'loading-plugin' }
-  | { kind: 'resolving' }
+  | { kind: 'resolving'; note?: string }
   | {
       kind: 'playing';
       positionS: number;
@@ -47,7 +47,7 @@ function statusText(phase: Phase): string {
     case 'loading-plugin':
       return 'loading-plugin';
     case 'resolving':
-      return 'resolving';
+      return phase.note ? `resolving — ${phase.note}` : 'resolving';
     case 'playing':
       return `playing(${phase.positionS}s / ${phase.durationS}s, ${phase.client}, ${phase.mime})`;
     case 'failed':
@@ -70,20 +70,26 @@ async function wasmAssetBase64(moduleRef: number): Promise<string> {
   return new File(asset.localUri).base64();
 }
 
-// IOS-minted googlevideo URLs reject plain and open-ended GETs (403)
-// and only serve bounded `&range=start-end` chunks — the observed
-// window ends ~1.1 MiB in, then the URL is spent. ExoPlayer cannot
-// chunk, so the served prefix is downloaded into the cache and the
-// player reads the local file (m4a is moov-first, so it plays).
-const CHUNK = 65_536;
+// ANDROID_VR-minted googlevideo URLs honour any `Range: bytes=`
+// chunk; IOS-minted URLs are GVS PO-token-capped to a ~1 MiB prefix
+// and 403 the rest. The stream is downloaded in 1 MiB chunks into the
+// cache and playback starts once the first chunks are on disk
+// (m4a is moov-first). A 403 mid-download is reported as
+// `expired-resource` rather than played as a truncated file.
+const CHUNK = 1_048_576;
+const PLAYBACK_MIN_BYTES = 2 * CHUNK;
 
-async function downloadStream(url: string, mime: string): Promise<File> {
-  const probe = await fetch(url, { headers: { Range: 'bytes=0-65535' } });
-  const contentRange = probe.headers.get('content-range') ?? '';
-  const total = Number(contentRange.split('/').pop());
-  if (!Number.isFinite(total) || total <= 0) {
-    throw new Error(`stream size probe failed (HTTP ${probe.status})`);
+class StreamCapped extends Error {
+  constructor() {
+    super('stream capped by provider');
   }
+}
+
+async function downloadStream(
+  url: string,
+  mime: string,
+  onEnoughData: (file: File) => void,
+): Promise<void> {
   const ext = mime === 'audio/mp4' ? 'm4a' : 'webm';
   const file = new File(Paths.cache, `auqw-slice0.${ext}`);
   if (file.exists) {
@@ -91,32 +97,43 @@ async function downloadStream(url: string, mime: string): Promise<File> {
   }
   file.create();
   const handle = file.open(FileMode.Append);
-  let written = 0;
+  let start = 0;
+  let total = -1;
+  let playbackStarted = false;
   try {
-    let start = 0;
-    while (start < total) {
-      const end = Math.min(start + CHUNK - 1, total - 1);
-      const resp = await fetch(`${url}&range=${start}-${end}`);
+    while (total < 0 || start < total) {
+      const end = total < 0 ? start + CHUNK - 1 : Math.min(start + CHUNK - 1, total - 1);
+      const resp = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+      if (resp.status === 403) {
+        throw new StreamCapped();
+      }
       if (!resp.ok) {
-        break;
+        throw new Error(`chunk ${start}-${end}: HTTP ${resp.status}`);
+      }
+      if (total < 0) {
+        const contentRange = resp.headers.get('content-range') ?? '';
+        total = Number(contentRange.split('/').pop());
+        if (!Number.isFinite(total) || total <= 0) {
+          throw new Error('stream size probe failed');
+        }
       }
       const bytes = new Uint8Array(await resp.arrayBuffer());
       handle.writeBytes(bytes);
-      written += bytes.length;
-      start = end + 1;
+      start += bytes.length;
+      if (!playbackStarted && start >= PLAYBACK_MIN_BYTES) {
+        playbackStarted = true;
+        onEnoughData(file);
+      }
     }
   } finally {
     handle.close();
   }
-  if (written === 0) {
-    throw new Error('stream served zero bytes');
-  }
-  return file;
 }
 
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [fuelLine, setFuelLine] = useState<string>('');
+  const [videoId, setVideoId] = useState<string>(VIDEO_IDS[0]);
 
   const hostReady = useRef(false);
   const pluginId = useRef<string | null>(null);
@@ -142,34 +159,43 @@ export function App() {
   const startPlayback = useCallback(
     async (url: string, client: string, mime: string) => {
       try {
-        const file = await downloadStream(url, mime);
         await setAudioModeAsync({
           shouldPlayInBackground: true,
           interruptionMode: 'doNotMix',
         });
-        statusSub.current?.remove();
-        player.current?.remove();
-        const next = createAudioPlayer({ uri: file.uri });
-        player.current = next;
-        next.setActiveForLockScreen(true, {
-          title: 'Auqw Slice 0',
-          artist: `resolved via ${client}`,
+        await downloadStream(url, mime, (file) => {
+          statusSub.current?.remove();
+          player.current?.remove();
+          const next = createAudioPlayer({ uri: file.uri });
+          player.current = next;
+          next.setActiveForLockScreen(true, {
+            title: 'Auqw Slice 0',
+            artist: `resolved via ${client}`,
+          });
+          statusSub.current = next.addListener(
+            'playbackStatusUpdate',
+            (status: AudioStatus) => {
+              setPhase({
+                kind: 'playing',
+                positionS: Math.floor(status.currentTime),
+                durationS: Math.floor(status.duration),
+                client,
+                mime,
+              });
+            },
+          );
+          next.play();
         });
-        statusSub.current = next.addListener(
-          'playbackStatusUpdate',
-          (status: AudioStatus) => {
-            setPhase({
-              kind: 'playing',
-              positionS: Math.floor(status.currentTime),
-              durationS: Math.floor(status.duration),
-              client,
-              mime,
-            });
-          },
-        );
-        next.play();
       } catch (error) {
-        setPhase({ kind: 'failed', errorKind: 'audio', message: describe(error) });
+        if (error instanceof StreamCapped) {
+          setPhase({
+            kind: 'failed',
+            errorKind: 'expired-resource',
+            message: 'stream capped by provider',
+          });
+        } else {
+          setPhase({ kind: 'failed', errorKind: 'audio', message: describe(error) });
+        }
       }
     },
     [],
@@ -189,6 +215,9 @@ export function App() {
           setPhase({ kind: 'failed', errorKind: outcome.kind, message: outcome.message });
         }
         return;
+      }
+      if (outcome.resource.prefixLimited) {
+        setPhase({ kind: 'resolving', note: `capped — ${outcome.resource.client} rung` });
       }
       void startPlayback(
         outcome.resource.url,
@@ -212,11 +241,11 @@ export function App() {
       await ensureHost();
       const id = await ensurePlugin();
       setPhase({ kind: 'resolving' });
-      requestId.current = await startResolve(id, VIDEO_ID);
+      requestId.current = await startResolve(id, videoId);
     } catch (error) {
       setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
     }
-  }, [phase.kind, ensureHost, ensurePlugin]);
+  }, [phase.kind, videoId, ensureHost, ensurePlugin]);
 
   const onCancel = useCallback(() => {
     if (requestId.current) {
@@ -251,6 +280,25 @@ export function App() {
         {statusText(phase)}
       </Text>
       {fuelLine !== '' && <Text style={styles.fuel}>{fuelLine}</Text>}
+      <View style={styles.idRow}>
+        {VIDEO_IDS.map((id) => (
+          <Pressable
+            key={id}
+            accessibilityRole="button"
+            accessibilityLabel={`Video ${id}`}
+            accessibilityState={{ disabled: busy, selected: id === videoId }}
+            disabled={busy}
+            onPress={() => setVideoId(id)}
+            style={({ pressed }) => [
+              styles.idButton,
+              id === videoId && styles.idButtonSelected,
+              (busy || pressed) && styles.buttonDim,
+            ]}
+          >
+            <Text style={[styles.idText, id === videoId && styles.idTextSelected]}>{id}</Text>
+          </Pressable>
+        ))}
+      </View>
       <View style={styles.buttons}>
         <Pressable
           accessibilityRole="button"
@@ -308,6 +356,29 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 12,
     color: '#444',
+  },
+  idRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  idButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#0a7ea4',
+  },
+  idButtonSelected: {
+    backgroundColor: '#0a7ea4',
+  },
+  idText: {
+    fontSize: 12,
+    fontFamily: 'monospace',
+    color: '#0a7ea4',
+  },
+  idTextSelected: {
+    color: '#fff',
   },
   buttons: {
     flexDirection: 'column',

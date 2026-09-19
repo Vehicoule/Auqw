@@ -62,5 +62,11 @@ AudioControlsService); recording permissions are disabled.
 - No Expo Router (coding rules: named exports only).
 - The signed stream URL is passed to `expo-audio` but never rendered
   or logged.
+- The resolved URL is downloaded to the cache in 1 MiB
+  `Range: bytes=` header chunks; playback starts once the first 2
+  chunks are on disk (ExoPlayer keeps reading the growing file).
+  A 403 mid-download (the GVS prefix cap — always hit on
+  `prefix_limited` IOS URLs, observed on some VISIONOS URLs too)
+  fails honestly as `expired-resource`.
 - `metro.config.js` registers `.wasm` as an asset type; the manifest
   JSONs are `require`d as modules.
