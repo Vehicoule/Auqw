@@ -62,13 +62,23 @@ impl ReqwestClient {
     /// # Errors
     /// Returns [`HttpError`] if the TLS backend cannot be initialized.
     pub fn new() -> Result<Self, HttpError> {
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .map_err(|e| HttpError {
-                kind: HttpErrorKind::Transient,
-                message: format!("client init: {e}"),
-            })?;
+        let builder = reqwest::Client::builder().use_rustls_tls();
+        #[cfg(target_os = "android")]
+        let builder = {
+            // rustls-platform-verifier needs an Android Context over JNI
+            // that a plain cdylib never receives; verify against the
+            // bundled Mozilla roots instead.
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let tls = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            builder.use_preconfigured_tls(tls)
+        };
+        let client = builder.build().map_err(|e| HttpError {
+            kind: HttpErrorKind::Transient,
+            message: format!("client init: {e}"),
+        })?;
         Ok(Self { client })
     }
 }

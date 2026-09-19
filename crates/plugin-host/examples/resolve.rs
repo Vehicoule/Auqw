@@ -247,6 +247,81 @@ async fn range_check(url: &str) {
         return;
     };
     let t0 = Instant::now();
+    let plain = client.get(url).send().await;
+    match plain {
+        Ok(resp) => println!(
+            "plain-check: GET {} -> {} in {:?}",
+            redact_url(url),
+            resp.status().as_u16(),
+            t0.elapsed()
+        ),
+        Err(e) => println!("plain-check: request failed: {e}"),
+    }
+    let t0 = Instant::now();
+    let open = client.get(url).header("Range", "bytes=0-").send().await;
+    match open {
+        Ok(resp) => println!(
+            "open-range-check: GET {} Range bytes=0- -> {} in {:?}",
+            redact_url(url),
+            resp.status().as_u16(),
+            t0.elapsed()
+        ),
+        Err(e) => println!("open-range-check: request failed: {e}"),
+    }
+    for probe in [
+        "0-2097151",
+        "0-3145727",
+        "0-4194303",
+        "1048576-2097151",
+        "1000000-1999999",
+    ] {
+        let t0 = Instant::now();
+        let r = client
+            .get(url)
+            .header("Range", format!("bytes={probe}"))
+            .send()
+            .await;
+        match r {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let clen = resp.content_length().unwrap_or(0);
+                println!(
+                    "range-probe: GET {} Range bytes={probe} -> {status} len={clen} in {:?}",
+                    redact_url(url),
+                    t0.elapsed()
+                );
+            }
+            Err(e) => println!("range-probe {probe}: request failed: {e}"),
+        }
+    }
+    let mut probe_list = vec![(0u64, 1048575u64)];
+    while let Some(&(_, e)) = probe_list.last().filter(|(_, e)| *e < 3_500_000) {
+        probe_list.push((e + 1, e + 65536));
+    }
+    for (ps, pe) in probe_list {
+        let t0 = Instant::now();
+        let q = format!("{url}&range={ps}-{pe}");
+        let r = client.get(&q).send().await;
+        match r {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let clen = resp.bytes().await.map_or(0, |b| b.len() as u64);
+                if status != 200 {
+                    println!("seq-probe: &range={ps}-{pe} -> {status} (STOP)");
+                    break;
+                }
+                println!(
+                    "seq-probe: &range={ps}-{pe} -> {status} len={clen} in {:?}",
+                    t0.elapsed()
+                );
+            }
+            Err(e) => {
+                println!("seq-probe {ps}-{pe}: request failed: {e}");
+                break;
+            }
+        }
+    }
+    let t0 = Instant::now();
     let res = client
         .get(url)
         .header("Range", "bytes=0-65535")
@@ -261,6 +336,13 @@ async fn range_check(url: &str) {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string();
+            let crange = resp
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            println!("range-check: content-range={crange}");
             let bytes = resp.bytes().await.map_or(0, |b| b.len());
             println!(
                 "range-check: GET {} Range bytes=0-65535 -> {status} {content_type} {bytes}B in {:?}",

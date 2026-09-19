@@ -22,6 +22,13 @@ sha2 = "0.10.9"
 tracing = "0.1.44"
 futures-util = "0.3.31"
 
+# reqwest 0.13 defaults to rustls-platform-verifier, which on Android
+# requires a JNI Context a bare cdylib never receives; bundle the
+# Mozilla roots instead. Versions must track reqwest's rustls line.
+[target.'cfg(target_os = "android")'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+webpki-roots = "1"
+
 [dev-dependencies]
 wat = "1.259.0"
 tokio = { version = "1.52.0", features = ["rt-multi-thread", "time", "macros"] }

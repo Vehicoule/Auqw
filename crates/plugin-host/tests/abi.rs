@@ -261,14 +261,17 @@ async fn fuel_traps_infinite_loop() {
         "/../../sdk/conformance/spin/spin.wasm"
     );
     let wasm = read_wasm(path);
-    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let mut budgets = default_budgets();
+    budgets.fuel_per_entry = 40_000_000;
+    budgets.fuel_total = 40_000_000;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
     let (http, _calls) = CannedHttp::new();
     let t0 = Instant::now();
     let Invocation { result, attempt } = invoke(
         &plugin,
         "playback.resolve",
         serde_json::json!({}),
-        &default_budgets(),
+        &budgets,
         CancellationToken::new(),
         &http,
     )

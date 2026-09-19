@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/mobile-bindings",
     "crates/plugin-host",
     "sdk/conformance/echo",
     "sdk/conformance/spin",
