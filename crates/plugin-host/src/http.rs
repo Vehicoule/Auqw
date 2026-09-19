@@ -63,11 +63,12 @@ impl ReqwestClient {
     /// Returns [`HttpError`] if the TLS backend cannot be initialized.
     pub fn new() -> Result<Self, HttpError> {
         let builder = reqwest::Client::builder().use_rustls_tls();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let builder = {
             // rustls-platform-verifier needs an Android Context over JNI
             // that a plain cdylib never receives; verify against the
-            // bundled Mozilla roots instead.
+            // bundled Mozilla roots instead — same path on iOS so both
+            // mobile targets share one trust store.
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let tls = rustls::ClientConfig::builder()
@@ -110,7 +111,9 @@ impl HttpClient for ReqwestClient {
                     } else {
                         HttpErrorKind::Transient
                     },
-                    message: e.to_string(),
+                    // reqwest's Display embeds the request URL — signed
+                    // params and `pot=` must never reach the guest.
+                    message: e.without_url().to_string(),
                 })?;
                 let status = resp.status().as_u16();
                 let headers = resp
@@ -124,7 +127,7 @@ impl HttpClient for ReqwestClient {
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| HttpError {
                         kind: HttpErrorKind::Transient,
-                        message: e.to_string(),
+                        message: e.without_url().to_string(),
                     })?;
                     if body.len() + chunk.len() > cap {
                         return Err(HttpError {

@@ -196,7 +196,8 @@ struct StepCtx<'a> {
 /// only in that instance's linear memory for the duration of the call.
 /// `pot_provider` is the base URL of a bgutil-compatible PO-token
 /// service (`POST {provider}/get_pot`); `None` makes `pot_token` host
-/// requests answer `unsupported`.
+/// requests answer `unsupported`. Empty or whitespace-only values
+/// normalize to `None` here so every shell boundary behaves the same.
 pub async fn invoke(
     plugin: &LoadedPlugin,
     capability: &str,
@@ -207,6 +208,7 @@ pub async fn invoke(
     pot_provider: Option<&str>,
 ) -> Invocation {
     let started = Instant::now();
+    let pot_provider = pot_provider.map(str::trim).filter(|s| !s.is_empty());
     let mut attempt = Attempt {
         request_id: format!("invoke-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)),
         steps: 0,
@@ -443,6 +445,11 @@ fn authorize_pot_token(
     id: u32,
     ctx: &StepCtx<'_>,
 ) -> Result<Authorized, InvokeError> {
+    let binding = payload
+        .get("content_binding")
+        .and_then(Value::as_str)
+        .filter(|b| !b.is_empty())
+        .ok_or_else(|| InvokeError::InvalidMessage("pot_token.content_binding missing".into()))?;
     if !ctx.plugin.manifest.allows_pot_provider() {
         return host_error(id, "permission-denied", "pot-provider not permitted")
             .map(Authorized::Denied);
@@ -450,11 +457,6 @@ fn authorize_pot_token(
     let Some(provider) = ctx.pot_provider else {
         return host_error(id, "unsupported", "no pot provider configured").map(Authorized::Denied);
     };
-    let binding = payload
-        .get("content_binding")
-        .and_then(Value::as_str)
-        .filter(|b| !b.is_empty())
-        .ok_or_else(|| InvokeError::InvalidMessage("pot_token.content_binding missing".into()))?;
     let body = serde_json::to_vec(&json!({ "content_binding": binding }))
         .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
     Ok(Authorized::Call(ParsedHttpRequest {
