@@ -92,6 +92,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uniffi",
+ "wat",
 ]
 
 [[package]]

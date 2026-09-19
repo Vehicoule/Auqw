@@ -261,10 +261,23 @@ impl PluginHost {
             let (result, attempt) = invocation.into_parts();
             let summary = AttemptSummary::from(&attempt);
             let outcome = match result {
-                Ok(value) => ResolveOutcome::Resolved {
-                    resource: resource_from(&value),
-                    attempt: summary,
-                },
+                // `done.result` is untyped past the boundary — a result
+                // without a url is an invalid response, never Resolved.
+                Ok(value) => {
+                    let resource = resource_from(&value);
+                    if resource.url.is_empty() {
+                        ResolveOutcome::Failed {
+                            kind: "invalid-response".to_string(),
+                            message: "resolve result missing url".to_string(),
+                            attempt: summary,
+                        }
+                    } else {
+                        ResolveOutcome::Resolved {
+                            resource,
+                            attempt: summary,
+                        }
+                    }
+                }
                 Err(e) => ResolveOutcome::Failed {
                     kind: e.kind().to_string(),
                     message: e.to_string(),
@@ -374,8 +387,70 @@ mod tests {
         }
     }
 
+    /// Guest that answers `done` with a fully populated resolve result.
+    fn done_wat(result: &str) -> String {
+        let raw = format!("{{\"type\":\"done\",\"result\":{result}}}");
+        let msg = raw.replace('"', "\\\"");
+        format!(
+            "(module\n  (memory (export \"memory\") 1)\n  \
+             (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+             (func (export \"handle\") (param i32 i32) (result i64)\n    \
+             (i64.or\n      \
+             (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))\n      \
+             (i64.extend_i32_u (i32.const {}))))\n  \
+             (data (i32.const 2048) \"{}\"))",
+            raw.len(),
+            msg,
+        )
+    }
+
     #[test]
-    fn echo_resolves_through_the_channel() {
+    fn resolve_result_fields_reach_the_channel() {
+        let wasm = match wat::parse_str(done_wat(
+            "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
+             \"bitrate_kbps\":129,\"expires_at_ms\":42,\"client\":\"IOS\",\
+             \"content_length\":1234}",
+        )) {
+            Ok(w) => w,
+            Err(e) => panic!("wat: {e}"),
+        };
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(wasm.clone(), manifest_json("done", &wasm)) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let request_id =
+            match host.start_resolve(id, "vid12345678".into(), Box::new(ChannelListener { tx })) {
+                Ok(r) => r,
+                Err(e) => panic!("start: {e}"),
+            };
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        assert_eq!(rid, request_id);
+        match outcome {
+            ResolveOutcome::Resolved { resource, attempt } => {
+                assert_eq!(resource.url, "https://example.com/a.m4a");
+                assert_eq!(resource.mime, "audio/mp4");
+                assert_eq!(resource.client, "IOS");
+                assert_eq!(resource.content_length, Some(1234));
+                assert!(attempt.steps >= 1);
+            }
+            ResolveOutcome::Failed { kind, message, .. } => {
+                panic!("expected Resolved, got Failed {kind}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_without_url_reports_invalid_response() {
+        // The echo guest returns the invoke message as `result` — it has
+        // no `url`, so the outcome must be Failed, never Resolved{""}.
         let host = match PluginHost::new(config()) {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
@@ -397,11 +472,11 @@ mod tests {
         };
         assert_eq!(rid, request_id);
         match outcome {
-            ResolveOutcome::Resolved { attempt, .. } => {
-                assert!(attempt.steps >= 1);
+            ResolveOutcome::Failed { kind, .. } => {
+                assert_eq!(kind, "invalid-response");
             }
-            ResolveOutcome::Failed { kind, message, .. } => {
-                panic!("expected Resolved, got Failed {kind}: {message}");
+            ResolveOutcome::Resolved { .. } => {
+                panic!("echo result has no url — expected Failed");
             }
         }
     }

@@ -25,6 +25,7 @@ thiserror = "2.0.18"
 
 [dev-dependencies]
 sha2 = "0.10.9"
+wat = "1.259.0"
 
 [[bin]]
 name = "uniffi-bindgen"
