@@ -177,15 +177,27 @@ async function downloadStream(
   first: ResolvedResource,
   remint: () => Promise<ResolvedResource>,
   signal: AbortSignal,
-  onEnoughData: (file: File) => void,
+  onEnoughData: (file: File, resource: ResolvedResource) => void,
 ): Promise<void> {
-  const ext = first.mime === 'audio/mp4' ? 'm4a' : 'webm';
-  const file = new File(Paths.cache, `auqw-slice0.${ext}`);
-  if (file.exists) {
-    file.delete();
+  const fileFor = (mime: string) =>
+    new File(Paths.cache, `auqw-slice0.${mime === 'audio/mp4' ? 'm4a' : 'webm'}`);
+  // Clear both possible names: a stale file from a previous run (or an
+  // encoding flip earlier in this download) must never be appended to.
+  for (const ext of ['m4a', 'webm']) {
+    const stale = new File(Paths.cache, `auqw-slice0.${ext}`);
+    if (stale.exists) {
+      stale.delete();
+    }
   }
+  let file = fileFor(first.mime);
   file.create();
   let handle = file.open(FileMode.Append);
+  // The stream whose bytes are on disk right now — the only valid
+  // baseline for resume-vs-restart. Comparing a fresh mint against
+  // `first` splices bytes across encodings after a flip-flop (A -> B ->
+  // A resumes A into a file holding B's bytes). mime+length+bitrate
+  // together approximate itag identity.
+  let current = first;
   let url = first.url;
   let start = 0;
   let total = first.contentLength ?? -1;
@@ -193,11 +205,18 @@ async function downloadStream(
   let mints = 0;
   let zeroProgress = 0;
   let mintStart = 0;
-  const restart = () => {
+  const restart = (next: ResolvedResource) => {
     handle.close();
     file.delete();
+    file = fileFor(next.mime);
+    if (file.exists) {
+      file.delete();
+    }
     file.create();
     handle = file.open(FileMode.Append);
+    current = next;
+    url = next.url;
+    total = next.contentLength ?? -1;
     start = 0;
     mintStart = 0;
     playbackStarted = false;
@@ -216,13 +235,15 @@ async function downloadStream(
         }
         mints += 1;
         const fresh = await remint();
-        if (fresh.mime === first.mime && fresh.contentLength === first.contentLength) {
+        if (
+          fresh.mime === current.mime &&
+          fresh.contentLength === current.contentLength &&
+          fresh.bitrateKbps === current.bitrateKbps
+        ) {
           mintStart = start;
           url = fresh.url;
         } else {
-          restart();
-          total = fresh.contentLength ?? -1;
-          url = fresh.url;
+          restart(fresh);
         }
         continue;
       }
@@ -252,7 +273,7 @@ async function downloadStream(
       start += chunk.bytes.length;
       if (!playbackStarted && start >= PLAYBACK_MIN_BYTES) {
         playbackStarted = true;
-        onEnoughData(file);
+        onEnoughData(file, current);
       }
     }
   } finally {
@@ -275,6 +296,10 @@ export function App() {
   // auqw-cmd poll would both see 'idle' and spawn parallel resolve+download
   // chains writing the same cache file. The ref is the synchronous guard.
   const playBusy = useRef(false);
+  // Generation counter: bumped by onCancel so an in-flight play chain
+  // abandons at the next await even when no requestId exists yet (the
+  // ensureHost/loadPlugin/startResolve window).
+  const playSeq = useRef(0);
   const pendingResolves = useRef(
     new Map<
       string,
@@ -332,14 +357,19 @@ export function App() {
           shouldPlayInBackground: true,
           interruptionMode: 'doNotMix',
         });
-        await downloadStream(resource, remint, ctl.signal, (file) => {
+        await downloadStream(resource, remint, ctl.signal, (file, served) => {
+          // The abort may land between the last write and this callback —
+          // don't start a player the user already cancelled.
+          if (ctl.signal.aborted) {
+            return;
+          }
           statusSub.current?.remove();
           player.current?.remove();
           const next = createAudioPlayer({ uri: file.uri });
           player.current = next;
           next.setActiveForLockScreen(true, {
             title: 'Auqw Slice 0',
-            artist: `resolved via ${resource.client}`,
+            artist: `resolved via ${served.client}`,
           });
           statusSub.current = next.addListener(
             'playbackStatusUpdate',
@@ -351,8 +381,8 @@ export function App() {
                 kind: 'playing',
                 positionS,
                 durationS,
-                client: resource.client,
-                mime: resource.mime,
+                client: served.client,
+                mime: served.mime,
               });
             },
           );
@@ -429,6 +459,7 @@ export function App() {
         return;
       }
       playBusy.current = true;
+      const seq = ++playSeq.current;
       const vid = targetId ?? videoId;
       try {
         // Detach the previous player first: its status listener would keep
@@ -444,11 +475,21 @@ export function App() {
         downloadAbort.current = null;
         setPhase({ kind: 'loading-plugin' });
         await ensureHost();
+        if (seq !== playSeq.current) {
+          return;
+        }
         setPhase({ kind: 'resolving' });
         const resource = await resolveOnce(vid);
+        if (seq !== playSeq.current) {
+          return;
+        }
         setPhase({ kind: 'resolving', note: `downloading — ${resource.client}` });
         await startPlayback(resource, () => resolveOnce(vid));
       } catch (error) {
+        if (seq !== playSeq.current) {
+          // A cancel (or newer play) already owns the phase.
+          return;
+        }
         const kind = (error as { kind?: string }).kind;
         if (kind === 'cancelled') {
           setPhase({ kind: 'cancelled' });
@@ -469,6 +510,9 @@ export function App() {
   );
 
   const onCancel = useCallback(() => {
+    // Invalidate any in-flight play chain first — covers the window
+    // between loadPlugin and startResolve where no requestId exists yet.
+    playSeq.current += 1;
     if (requestId.current) {
       slog(`cancel-sent ${requestId.current} t=${Date.now()}`);
       cancel(requestId.current);
@@ -476,8 +520,14 @@ export function App() {
     // A returned resolve leaves no request id — aborting the range
     // loop is what stops an in-flight download.
     downloadAbort.current?.abort();
-    if (!requestId.current && player.current?.playing) {
+    // Detach the status listener before pausing: a trailing tick from
+    // the just-paused player would write `playing` over `cancelled`.
+    statusSub.current?.remove();
+    statusSub.current = null;
+    if (player.current?.playing) {
       player.current.pause();
+    }
+    if (playBusy.current || player.current) {
       setPhase({ kind: 'cancelled' });
     }
   }, []);
