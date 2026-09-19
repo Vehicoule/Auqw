@@ -1116,6 +1116,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1726,6 +1749,12 @@ data class ResolvedResource (
      * Ladder rung that produced the URL.
      */
     var `client`: kotlin.String
+    , 
+    /**
+     * Provider caps anonymous fetches of this URL to a prefix
+     * (e.g. GVS PO-token enforcement); hosts label it honestly.
+     */
+    var `prefixLimited`: kotlin.Boolean
     
 ){
     
@@ -1747,6 +1776,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -1755,7 +1785,8 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterOptionalUInt.allocationSize(value.`bitrateKbps`) +
             FfiConverterOptionalULong.allocationSize(value.`expiresAtMs`) +
-            FfiConverterString.allocationSize(value.`client`)
+            FfiConverterString.allocationSize(value.`client`) +
+            FfiConverterBoolean.allocationSize(value.`prefixLimited`)
     )
 
     override fun write(value: ResolvedResource, buf: ByteBuffer) {
@@ -1764,6 +1795,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalUInt.write(value.`bitrateKbps`, buf)
             FfiConverterOptionalULong.write(value.`expiresAtMs`, buf)
             FfiConverterString.write(value.`client`, buf)
+            FfiConverterBoolean.write(value.`prefixLimited`, buf)
     }
 }
 
