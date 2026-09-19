@@ -35,7 +35,7 @@ impl Default for Budgets {
         Self {
             fuel_per_entry: 40_000_000,
             fuel_total: 400_000_000,
-            max_steps: 1_000,
+            max_steps: 10_000,
             max_http_calls: 32,
             max_bytes: 8 * 1024 * 1024,
             http_timeout: Duration::from_secs(10),
