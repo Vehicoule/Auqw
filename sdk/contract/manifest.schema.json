@@ -30,7 +30,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^network:(\\*\\.)?[a-z0-9.-]+$"
+        "pattern": "^(network:(\\*\\.)?[a-z0-9.-]+|pot-provider)$"
       }
     },
     "artifact": {

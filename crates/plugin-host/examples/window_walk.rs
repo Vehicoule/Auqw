@@ -88,7 +88,7 @@ async fn main() -> ExitCode {
                 }
             }
             Err(e) => {
-                println!("window {i} -> transport fail: {e}");
+                println!("window {i} -> transport fail: {}", e.without_url());
                 break;
             }
         }

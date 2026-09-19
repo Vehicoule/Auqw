@@ -127,7 +127,10 @@ async fn probe(client: &reqwest::Client, url: &str, tag: &str, start: u64, end: 
             resp.content_length().unwrap_or(0),
             t0.elapsed()
         ),
-        Err(e) => println!("{tag}: Range bytes={start}-{end} -> failed: {e}"),
+        Err(e) => println!(
+            "{tag}: Range bytes={start}-{end} -> failed: {}",
+            e.without_url()
+        ),
     }
 }
 
@@ -143,6 +146,6 @@ async fn probe_query(client: &reqwest::Client, url: &str, tag: &str, start: u64,
                 t0.elapsed()
             );
         }
-        Err(e) => println!("{tag}: &range={start}-{end} -> failed: {e}"),
+        Err(e) => println!("{tag}: &range={start}-{end} -> failed: {}", e.without_url()),
     }
 }

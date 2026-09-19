@@ -438,8 +438,10 @@ fn authorize_http_request(
 /// Authorize a `pot_token` host request: the host mints the token
 /// itself against the configured provider (`POST {provider}/get_pot`),
 /// so a LAN `http://` service stays reachable while guests remain
-/// HTTPS-only. The provider's response passes through verbatim as
-/// `http_response`.
+/// HTTPS-only. The provider's response — status, headers, body —
+/// passes through verbatim as `http_response`; the bgutil contract is
+/// JSON-only, and the guest can only see what an operator-configured
+/// endpoint chose to send.
 fn authorize_pot_token(
     payload: &Value,
     id: u32,

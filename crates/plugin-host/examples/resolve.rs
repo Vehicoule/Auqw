@@ -305,7 +305,7 @@ async fn download_to(url: &str, path: &str) {
                 start += bytes.len() as u64;
             }
             Err(e) => {
-                println!("download: request failed at {start}: {e}");
+                println!("download: request failed at {start}: {}", e.without_url());
                 break;
             }
         }
@@ -329,7 +329,7 @@ async fn range_check(url: &str) {
             resp.status().as_u16(),
             t0.elapsed()
         ),
-        Err(e) => println!("plain-check: request failed: {e}"),
+        Err(e) => println!("plain-check: request failed: {}", e.without_url()),
     }
     let t0 = Instant::now();
     let open = client.get(url).header("Range", "bytes=0-").send().await;
@@ -340,7 +340,7 @@ async fn range_check(url: &str) {
             resp.status().as_u16(),
             t0.elapsed()
         ),
-        Err(e) => println!("open-range-check: request failed: {e}"),
+        Err(e) => println!("open-range-check: request failed: {}", e.without_url()),
     }
     for probe in [
         "0-2097151",
@@ -365,7 +365,7 @@ async fn range_check(url: &str) {
                     t0.elapsed()
                 );
             }
-            Err(e) => println!("range-probe {probe}: request failed: {e}"),
+            Err(e) => println!("range-probe {probe}: request failed: {}", e.without_url()),
         }
     }
     let mut probe_list = vec![(0u64, 1048575u64)];
@@ -390,7 +390,7 @@ async fn range_check(url: &str) {
                 );
             }
             Err(e) => {
-                println!("seq-probe {ps}-{pe}: request failed: {e}");
+                println!("seq-probe {ps}-{pe}: request failed: {}", e.without_url());
                 break;
             }
         }
@@ -424,6 +424,6 @@ async fn range_check(url: &str) {
                 t0.elapsed()
             );
         }
-        Err(e) => println!("range-check: request failed: {e}"),
+        Err(e) => println!("range-check: request failed: {}", e.without_url()),
     }
 }
