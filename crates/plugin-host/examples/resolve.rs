@@ -162,16 +162,24 @@ async fn run_spin(path: &str) -> ExitCode {
         use sha2::Digest as _;
         format!("sha256:{:x}", sha2::Sha256::digest(&wasm))
     };
-    let manifest = Manifest {
-        id: "conformance-spin".to_string(),
-        version: "0.1.0".to_string(),
-        abi: "0.1.0".to_string(),
-        capabilities: vec!["debug.spin".to_string()],
-        permissions: vec![],
-        artifact: auqw_plugin_host::ArtifactRef {
-            path: path.to_string(),
-            digest,
-        },
+    // The manifest goes through `from_json` so the example exercises the
+    // same schema validation a shipped plugin gets — no hand-built
+    // `Manifest` bypassing `validate()`.
+    let manifest_text = serde_json::json!({
+        "id": "conformance-spin",
+        "version": "0.1.0",
+        "abi": "0.1.0",
+        "capabilities": ["playback.resolve"],
+        "permissions": [],
+        "artifact": { "path": path, "digest": digest },
+    })
+    .to_string();
+    let manifest = match Manifest::from_json(&manifest_text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("manifest error: {e}");
+            return ExitCode::FAILURE;
+        }
     };
     let budgets = Budgets::default();
     let plugin = match load(&wasm, manifest, &budgets) {
@@ -188,7 +196,7 @@ async fn run_spin(path: &str) -> ExitCode {
     let t0 = Instant::now();
     let outcome = invoke(
         &plugin,
-        "debug.spin",
+        "playback.resolve",
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
