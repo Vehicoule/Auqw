@@ -35,10 +35,14 @@ const SPIN_MANIFEST = require('./assets/plugins/spin.manifest.json');
 
 // Slice-0 gate evidence: every [slice0] line also lands in the app
 // container so `adb run-as` / `simctl get_app_container` can read it
-// while the screen is off and metro may not be watched.
+// while the screen is off and metro may not be watched. File writes
+// are dev-only — release bundles keep the console line only.
 let logHandle: ReturnType<File['open']> | null = null;
 function slog(line: string): void {
   console.log(`[slice0] ${line}`);
+  if (!__DEV__) {
+    return;
+  }
   try {
     if (!logHandle) {
       const f = new File(Paths.cache, 'auqw-slice0.log');
@@ -551,9 +555,12 @@ export function App() {
   // iOS puts a "Open in …?" sheet on every openurl into a running app,
   // so a headless gate run also accepts the same verbs written one per
   // line into <cache>/auqw-cmd (simctl container / adb run-as). Both
-  // channels are dev-gate instrumentation — remove before any release
-  // build.
+  // channels are dev-gate instrumentation — `__DEV__` keeps them out
+  // of release bundles.
   useEffect(() => {
+    if (!__DEV__) {
+      return;
+    }
     const runCommand = (verb: string, arg: string | undefined) => {
       slog(`cmd ${verb} ${arg ?? ''} t=${Date.now()}`);
       if (verb === 'play') {
