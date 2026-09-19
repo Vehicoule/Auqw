@@ -40,14 +40,19 @@ Rejection rules (v0):
 
 - `{"type":"host_request","id":<u32>,"kind":"http_request","payload":{"method":"GET|POST","url":"<https url>","headers":[["name","value"],...],"body":"<base64 or null>"}}`
 - `{"type":"host_request","id":<u32>,"kind":"pot_token","payload":{"content_binding":"<string>"}}` — asks the host to mint a PO token bound to `content_binding` against its configured provider (`POST {provider}/get_pot`, bgutil contract). Requires the `pot-provider` permission. Answered with the provider's `http_response` verbatim, or `host_error` `permission-denied` (permission not declared) / `unsupported` (no provider configured). The guest never learns the provider URL.
-- `{"type":"done","result":<capability result>}` — for `playback.resolve`:
+- `{"type":"done","result":<capability result>}` — `result` is required
+  (a missing key is `invalid-message`; an explicit `null` is valid).
+  For `playback.resolve`:
   `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"content_length":<u64|null, optional>,"client":"<ladder rung name>"}`
   (`content_length` is the full byte length of the stream when the
   provider reports it, so hosts can range-download and verify
   completion.) When a result carries `url`, the host validates it
   before returning it: https scheme plus a `network:` destination the
   manifest permits — a violation ends the invocation `invalid-message`.
-- `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}`
+- `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}` —
+  `kind` must be one of the guest-visible kinds below; anything else
+  ends the invocation `invalid-message`. `message` is guest-controlled
+  text and reaches callers only in URL-redacted form.
 
 ## ErrorKind
 

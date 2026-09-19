@@ -106,6 +106,7 @@ impl HttpClient for SleepHttp {
             Err(HttpError {
                 kind: HttpErrorKind::Timeout,
                 message: "unreachable".into(),
+                bytes_received: 0,
             })
         })
     }
@@ -172,6 +173,7 @@ impl HttpClient for BigBodyHttp {
                 return Err(HttpError {
                     kind: HttpErrorKind::BodyTooLarge,
                     message: "over cap".into(),
+                    bytes_received: 0,
                 });
             }
             Ok(HttpResponse {
@@ -233,6 +235,37 @@ fn done_wat(result_json: &str) -> String {
          (data (i32.const 2048) \"{}\"))",
         raw.len(),
         msg,
+    )
+}
+
+/// Guest that burns fuel inside `alloc` or `handle` before answering.
+/// `busy_in` is `"alloc"` or `"handle"`.
+fn busy_wat(busy_in: &str) -> String {
+    let busy = "(local $i i32) (local.set $i (i32.const 1000000)) (loop $spin \
+                (local.set $i (i32.sub (local.get $i) (i32.const 1))) \
+                (br_if $spin (local.get $i)))";
+    let raw = "{\"type\":\"done\",\"result\":{\"ok\":true}}";
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) {} (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) {} (i64.const {}))\n  \
+         (data (i32.const 2048) \"{}\"))",
+        if busy_in == "alloc" { busy } else { "" },
+        if busy_in == "handle" { busy } else { "" },
+        (2048u64 << 32) | raw.len() as u64,
+        raw.replace('"', "\\\""),
+    )
+}
+
+/// Guest that emits `raw` (a literal step message) as its output.
+fn raw_wat(raw: &str) -> String {
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) (i64.const {}))\n  \
+         (data (i32.const 2048) \"{}\"))",
+        (2048u64 << 32) | raw.len() as u64,
+        raw.replace('"', "\\\""),
     )
 }
 
@@ -962,4 +995,246 @@ async fn echo_guest_returns_step_input() {
         result["payload"]["source_ref"],
         serde_json::json!("dQw4w9WgXcQ")
     );
+}
+
+// ---------- step-message strictness (audit round 5) ----------
+
+/// `done` without a `result` key is malformed — the schema requires
+/// the field even when the value is null.
+#[tokio::test]
+async fn done_without_result_is_invalid_message() {
+    let wasm = ok(wat::parse_str(raw_wat("{\"type\":\"done\"}")));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+}
+
+/// An explicit `result: null` is well-formed and stays `Ok(Null)`.
+#[tokio::test]
+async fn done_with_null_result_is_ok() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"done\",\"result\":null}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert_eq!(ok(result), Value::Null);
+}
+
+/// A `fail` kind outside the ABI taxonomy is a protocol violation, not
+/// a guest failure — the host must not invent kinds it cannot classify.
+#[tokio::test]
+async fn fail_with_unknown_kind_is_invalid_message() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"BANANA\",\"message\":\"x\"}}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+}
+
+/// A `fail` message is guest-controlled text: a signed URL quoted into
+/// it must reach the error surface only in redacted form.
+#[tokio::test]
+async fn fail_message_is_redacted() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\
+         \"message\":\"see https://media.invalid/play?token=SYNTHETIC_SECRET bye\"}}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    let e = err(result);
+    let InvokeError::GuestFail { kind, message } = &e else {
+        panic!("expected GuestFail, got {e:?}");
+    };
+    assert_eq!(kind, "transient");
+    assert_eq!(message, "see https://media.invalid/play?… bye");
+    assert!(!e.to_string().contains("SYNTHETIC_SECRET"), "{e}");
+}
+
+// ---------- preemption between guest entries ----------
+
+/// A cancel that lands while a CPU-bound `alloc` runs is observed
+/// before `handle` is entered — the token is checked between entries,
+/// not only at the loop top.
+#[tokio::test]
+async fn cancel_during_alloc_is_observed() {
+    let wasm = ok(wat::parse_str(busy_wat("alloc")));
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_secs(60);
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let cancel = CancellationToken::new();
+    let c = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        c.cancel();
+    });
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        cancel,
+        &http,
+        None,
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::Cancelled));
+}
+
+/// A cancel that lands mid-`handle` outranks the `done` the entry
+/// produced — the caller cancelled the result itself.
+#[tokio::test]
+async fn cancel_during_handle_outranks_done() {
+    let wasm = ok(wat::parse_str(busy_wat("handle")));
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_secs(60);
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let cancel = CancellationToken::new();
+    let c = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        c.cancel();
+    });
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        cancel,
+        &http,
+        None,
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::Cancelled));
+}
+
+/// Wasmi cannot preempt a CPU-bound entry mid-run — fuel bounds it —
+/// but a deadline crossed while the guest ran is still the reported
+/// outcome, not the guest's `done`.
+#[tokio::test]
+async fn deadline_crossed_during_entry_wins() {
+    let wasm = ok(wat::parse_str(busy_wat("handle")));
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_millis(5);
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &http,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline budget error"
+    );
+}
+
+// ---------- byte budget on failed calls ----------
+
+/// Bytes pulled before a mid-body failure still count toward the byte
+/// budget — a flaky/capping server cannot stream unaccounted data.
+struct PartialThenFailHttp;
+
+impl HttpClient for PartialThenFailHttp {
+    fn send(
+        &self,
+        _req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        Box::pin(async {
+            Err(HttpError {
+                kind: HttpErrorKind::Transient,
+                message: "body truncated".into(),
+                bytes_received: 1500,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn partial_response_bytes_count_toward_budget() {
+    let wasm = ok(wat::parse_str(requester_wat("https://example.com/")));
+    let mut budgets = default_budgets();
+    budgets.max_bytes = 2048;
+    budgets.max_steps = 10;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        &PartialThenFailHttp,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Bytes
+            }
+        ),
+        "expected byte-cap error from partial bodies"
+    );
+    // Two calls of 1500 received bytes each cross the 2048 cap.
+    assert_eq!(attempt.bytes, 3000);
+    assert_eq!(attempt.http_calls, 2);
 }

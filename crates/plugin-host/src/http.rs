@@ -3,6 +3,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -87,6 +89,7 @@ impl ReqwestClient {
         let client = builder.build().map_err(|e| HttpError {
             kind: HttpErrorKind::Transient,
             message: format!("client init: {e}"),
+            bytes_received: 0,
         })?;
         Ok(Self { client })
     }
@@ -104,6 +107,7 @@ impl HttpClient for ReqwestClient {
                 reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| HttpError {
                     kind: HttpErrorKind::InvalidRequest,
                     message: format!("method: {e}"),
+                    bytes_received: 0,
                 })?;
             let mut rb = self.client.request(method, &req.url);
             for (name, value) in &req.headers {
@@ -112,7 +116,12 @@ impl HttpClient for ReqwestClient {
             if let Some(body) = req.body {
                 rb = rb.body(body);
             }
-            let work = async {
+            // Bytes pulled off the wire so far, shared with the
+            // timeout/cancel arms: a response that errors or is aborted
+            // mid-body still spent those bytes.
+            let received = Arc::new(AtomicU64::new(0));
+            let seen = Arc::clone(&received);
+            let work = async move {
                 let resp = rb.send().await.map_err(|e| HttpError {
                     kind: if e.is_timeout() {
                         HttpErrorKind::Timeout
@@ -122,6 +131,7 @@ impl HttpClient for ReqwestClient {
                     // reqwest's Display embeds the request URL — signed
                     // params and `pot=` must never reach the guest.
                     message: e.without_url().to_string(),
+                    bytes_received: 0,
                 })?;
                 let status = resp.status().as_u16();
                 let headers = resp
@@ -136,11 +146,14 @@ impl HttpClient for ReqwestClient {
                     let chunk = chunk.map_err(|e| HttpError {
                         kind: HttpErrorKind::Transient,
                         message: e.without_url().to_string(),
+                        bytes_received: seen.load(Ordering::Relaxed),
                     })?;
+                    seen.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                     if body.len() + chunk.len() > cap {
                         return Err(HttpError {
                             kind: HttpErrorKind::BodyTooLarge,
                             message: format!("response body exceeds {cap} byte cap"),
+                            bytes_received: seen.load(Ordering::Relaxed),
                         });
                     }
                     body.extend_from_slice(&chunk);
@@ -155,12 +168,14 @@ impl HttpClient for ReqwestClient {
                 () = cancel.cancelled() => Err(HttpError {
                     kind: HttpErrorKind::Cancelled,
                     message: "cancelled".into(),
+                    bytes_received: received.load(Ordering::Relaxed),
                 }),
                 res = tokio::time::timeout(timeout, work) => match res {
                     Ok(inner) => inner,
                     Err(_) => Err(HttpError {
                         kind: HttpErrorKind::Timeout,
                         message: format!("request exceeded {timeout:?}"),
+                        bytes_received: received.load(Ordering::Relaxed),
                     }),
                 },
             }

@@ -19,7 +19,7 @@ pub use error::{HttpError, HttpErrorKind, InvokeError, LoadError, ManifestError}
 pub use http::{HttpClient, HttpRequest, HttpResponse, ReqwestClient};
 pub use invoke::{invoke, load, Invocation, LoadedPlugin};
 pub use manifest::{ArtifactRef, Manifest};
-pub use redact::redact_url;
+pub use redact::{redact_text, redact_url};
 
 /// ABI version implemented by this crate.
 pub const ABI_VERSION: &str = "0.1.0";

@@ -5,7 +5,7 @@
       "id": "youtube-music",
       "version": "0.1.0",
       "abi": "0.1.0",
-      "digest": "sha256:9fbab365dcf6e3c379713e78da551361dc2ec532ec4f4eae78d5496f63990187",
+      "digest": "sha256:fb009ee8ccf8d8d3d6782c1495fdb023a7027b1a1138944b87fd0cfb37f5070a",
       "source": "local-build:../auqw-plugins/plugins/youtube-music/dist/youtube-music.wasm"
     }
   ]

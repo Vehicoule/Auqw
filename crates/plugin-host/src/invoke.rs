@@ -14,10 +14,10 @@ use wasmi::{
 
 use crate::attempt::{Attempt, HttpTraceEntry};
 use crate::budgets::{BudgetDimension, Budgets};
-use crate::error::{HttpErrorKind, InvokeError, LoadError};
+use crate::error::{HttpErrorKind, InvokeError, LoadError, GUEST_FAIL_KINDS};
 use crate::http::{HttpClient, HttpRequest};
 use crate::manifest::Manifest;
-use crate::redact::redact_url;
+use crate::redact::{redact_text, redact_url};
 use crate::ABI_VERSION;
 
 /// Largest guest→host step message accepted (1 MiB).
@@ -281,14 +281,7 @@ async fn run(
     .map_err(|e| InvokeError::InvalidMessage(e.to_string()))?;
 
     loop {
-        if ctx.cancel.is_cancelled() {
-            return Err(InvokeError::Cancelled);
-        }
-        if ctx.started.elapsed() >= ctx.budgets.deadline {
-            return Err(InvokeError::BudgetExceeded {
-                dimension: BudgetDimension::Deadline,
-            });
-        }
+        check_preemption(ctx)?;
         if attempt.steps >= ctx.budgets.max_steps {
             return Err(InvokeError::BudgetExceeded {
                 dimension: BudgetDimension::Steps,
@@ -303,8 +296,17 @@ async fn run(
         memory
             .write(&mut store, ptr as usize, &input)
             .map_err(|_| InvokeError::InvalidMessage("alloc buffer out of bounds".into()))?;
+        // `alloc` and `handle` are separate entries — the token and the
+        // deadline are checked before each, not just at the loop top.
+        check_preemption(ctx)?;
         let packed = call_entry(&mut store, &handle, (ptr, len), ctx.budgets, attempt)?;
         attempt.steps += 1;
+        // A cancellation or deadline that landed while the guest ran
+        // outranks whatever the entry produced: the caller's intent
+        // wins over a result it no longer wants. Wasmi cannot preempt
+        // a CPU-bound entry mid-run — fuel is that bound — but the
+        // outcome is still reported as cancelled/deadline-exceeded.
+        check_preemption(ctx)?;
         let out_ptr = usize::try_from(packed >> 32)
             .map_err(|_| InvokeError::InvalidMessage("response pointer overflow".into()))?;
         let out_len = usize::try_from(packed & 0xFFFF_FFFF)
@@ -323,7 +325,12 @@ async fn run(
 
         match msg.get("type").and_then(Value::as_str) {
             Some("done") => {
-                let result = msg.get("result").cloned().unwrap_or(Value::Null);
+                // `result` is required by the schema — its absence is a
+                // malformed message, not a null result.
+                let result = msg
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| InvokeError::InvalidMessage("done.result missing".into()))?;
                 // A result `url` is the fetch target the caller will open
                 // on the plugin's behalf; it must be an https destination
                 // the manifest already permits — same policy as the
@@ -346,14 +353,23 @@ async fn run(
                     .get("kind")
                     .and_then(Value::as_str)
                     .ok_or_else(|| InvokeError::InvalidMessage("fail.error.kind missing".into()))?;
+                if !GUEST_FAIL_KINDS.contains(&kind) {
+                    return Err(InvokeError::InvalidMessage(format!(
+                        "fail.error.kind {kind:?} is not in the ABI taxonomy"
+                    )));
+                }
+                // Guest-controlled text: a message can quote a signed
+                // URL the guest legitimately saw — redact before it can
+                // reach a log or the caller's error surface.
                 let message = error
                     .get("message")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .ok_or_else(|| {
+                        InvokeError::InvalidMessage("fail.error.message missing".into())
+                    })?;
                 return Err(InvokeError::GuestFail {
                     kind: kind.to_string(),
-                    message,
+                    message: redact_text(message),
                 });
             }
             Some("host_request") => {
@@ -362,11 +378,27 @@ async fn run(
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
                     "unknown message type in guest output: {}",
-                    redact_url(&msg.to_string())
+                    redact_text(&msg.to_string())
                 )));
             }
         }
     }
+}
+
+/// The caller-side preemption check: cancellation first (intent), then
+/// the wall-clock deadline. Runs before every guest entry and once more
+/// after `handle` returns, so a cancel/expiry that landed while the
+/// guest ran is still the reported outcome.
+fn check_preemption(ctx: &StepCtx<'_>) -> Result<(), InvokeError> {
+    if ctx.cancel.is_cancelled() {
+        return Err(InvokeError::Cancelled);
+    }
+    if ctx.started.elapsed() >= ctx.budgets.deadline {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Deadline,
+        });
+    }
+    Ok(())
 }
 
 /// Enter a guest export with fuel accounting. Per-entry fuel is the
@@ -578,12 +610,14 @@ async fn perform_call(
             .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
         }
         Err(e) => {
-            attempt.bytes += out_bytes;
+            // Bytes pulled before the failure still belong to the byte
+            // budget — a mid-stream error is not a refund.
+            attempt.bytes += out_bytes + e.bytes_received;
             attempt.http_trace.push(HttpTraceEntry {
                 method,
                 url: traced_url,
                 status: None,
-                bytes: 0,
+                bytes: e.bytes_received,
                 elapsed,
             });
             match e.kind {
@@ -591,7 +625,18 @@ async fn perform_call(
                 HttpErrorKind::BodyTooLarge => Err(InvokeError::BudgetExceeded {
                     dimension: BudgetDimension::Bytes,
                 }),
-                kind => host_error(id, kind.guest_kind().unwrap_or("transient"), &e.message),
+                _ if attempt.bytes > ctx.budgets.max_bytes => Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Bytes,
+                }),
+                kind => {
+                    // Client messages are host-trusted but still scrubbed
+                    // before they cross into the guest.
+                    host_error(
+                        id,
+                        kind.guest_kind().unwrap_or("transient"),
+                        &redact_text(&e.message),
+                    )
+                }
             }
         }
     }

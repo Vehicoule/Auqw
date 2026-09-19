@@ -65,6 +65,26 @@ pub enum LoadError {
     Malformed(String),
 }
 
+/// The `fail.error.kind` vocabulary a guest may emit — mirrors the
+/// `errorKind` enum in `messages.schema.json`. The host-only kinds
+/// (`budget-exceeded`, `guest-trap`, `invalid-message`,
+/// `artifact-rejected`) are produced by the host itself and must never
+/// appear in a guest `fail`.
+pub(crate) const GUEST_FAIL_KINDS: &[&str] = &[
+    "no-result",
+    "not-applicable",
+    "unsupported",
+    "auth-required",
+    "auth-expired",
+    "rate-limit",
+    "transient",
+    "expired-resource",
+    "permission-denied",
+    "invalid-response",
+    "timeout",
+    "cancelled",
+];
+
 /// Classification of an [`HttpClient`] failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpErrorKind {
@@ -102,6 +122,10 @@ pub struct HttpError {
     pub kind: HttpErrorKind,
     /// Human-readable detail; must not contain secrets or signed URLs.
     pub message: String,
+    /// Response body bytes received before the failure. A mid-stream
+    /// error does not refund the transfer that already happened — the
+    /// invocation's byte budget still owns them.
+    pub bytes_received: u64,
 }
 
 /// Errors produced while running an invocation.

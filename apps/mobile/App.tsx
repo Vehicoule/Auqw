@@ -18,6 +18,7 @@ import {
   runSpin,
   startResolve,
   type ResolvedResource,
+  type ResolveOutcome,
 } from 'auqw-plugin-host-expo';
 
 const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
@@ -120,6 +121,16 @@ const ZERO_PROGRESS_MINT_LIMIT = 2;
 // timeout covers headers AND the body read (1 MiB stays under it even
 // at GVS's ~33 KB/s throttle). `signal` carries Cancel into the loop.
 const CHUNK_TIMEOUT_MS = 60_000;
+
+// `bytes start-end/total` — the only Content-Range shape a 206 may
+// carry here. `*` totals and missing headers are rejected by the caller.
+function parseContentRange(header: string | null): { start: number; total: number } | null {
+  const m = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(header ?? '');
+  if (!m) {
+    return null;
+  }
+  return { start: Number(m[1]), total: Number(m[3]) };
+}
 
 class StreamCapped extends Error {
   constructor() {
@@ -257,11 +268,17 @@ async function downloadStream(
       if (chunk.status !== 206) {
         throw new Error(`chunk ${start}-${end}: HTTP ${chunk.status}`);
       }
+      // The served window must start where we asked — a 206 lying
+      // about its offset (or its total) splices foreign bytes into the
+      // file. Reject; do not resume against a lying mint.
+      const range = parseContentRange(chunk.contentRange);
+      if (!range || range.start !== start || range.total <= 0) {
+        throw new Error(`chunk ${start}-${end}: bad Content-Range ${chunk.contentRange}`);
+      }
       if (total < 0) {
-        total = Number((chunk.contentRange ?? '').split('/').pop());
-        if (!Number.isFinite(total) || total <= 0) {
-          throw new Error('stream size probe failed');
-        }
+        total = range.total;
+      } else if (range.total !== total) {
+        throw new Error(`chunk ${start}-${end}: Content-Range total changed mid-stream`);
       }
       // An empty partial body makes no progress — without this check
       // the loop re-requests the same window forever.
@@ -279,6 +296,12 @@ async function downloadStream(
         playbackStarted = true;
         onEnoughData(file, current);
       }
+    }
+    // A resource smaller than PLAYBACK_MIN_BYTES completes in a single
+    // fetch — a finished file is "enough data" by definition.
+    if (!playbackStarted) {
+      playbackStarted = true;
+      onEnoughData(file, current);
     }
   } finally {
     handle.close();
@@ -304,6 +327,9 @@ export function App() {
   // abandons at the next await even when no requestId exists yet (the
   // ensureHost/loadPlugin/startResolve window).
   const playSeq = useRef(0);
+  // Set by onCancel; a resolveOnce whose request id arrives after the
+  // cancel still forwards it to the host.
+  const cancelRequested = useRef(false);
   const pendingResolves = useRef(
     new Map<
       string,
@@ -313,6 +339,10 @@ export function App() {
       }
     >(),
   );
+  // Outcome events that arrived before their pending entry existed —
+  // the native invoke runs on a worker thread and can emit before the
+  // startResolve promise hands JS the request id.
+  const earlyOutcomes = useRef(new Map<string, ResolveOutcome>());
 
   const ensureHost = useCallback(async () => {
     if (!hostReady.current) {
@@ -333,6 +363,32 @@ export function App() {
     return pluginId.current;
   }, []);
 
+  // Terminal outcome for a request id: settles the registered deferred,
+  // or — when the event outraced startResolve's promise — stashes it for
+  // resolveOnce to drain on registration.
+  const settleOutcome = useCallback((reqId: string, outcome: ResolveOutcome) => {
+    const pending = pendingResolves.current.get(reqId);
+    if (!pending) {
+      earlyOutcomes.current.set(reqId, outcome);
+      return;
+    }
+    pendingResolves.current.delete(reqId);
+    if (requestId.current === reqId) {
+      requestId.current = null;
+    }
+    slog(
+      `outcome ${reqId} type=${outcome.type}` +
+        `${outcome.type === 'failed' ? ` kind=${outcome.kind}` : ''} t=${Date.now()}`,
+    );
+    if (outcome.type === 'resolved') {
+      pending.resolve(outcome.resource);
+    } else {
+      pending.reject(
+        Object.assign(new Error(outcome.message), { kind: outcome.kind }),
+      );
+    }
+  }, []);
+
   // Promise-shaped resolve: the outcome event settles the deferred
   // recorded under the request id. `requestId.current` still tracks
   // the in-flight id so Cancel aborts it at the host.
@@ -343,9 +399,19 @@ export function App() {
       requestId.current = reqId;
       return new Promise<ResolvedResource>((resolve, reject) => {
         pendingResolves.current.set(reqId, { resolve, reject });
+        const early = earlyOutcomes.current.get(reqId);
+        if (early) {
+          earlyOutcomes.current.delete(reqId);
+          settleOutcome(reqId, early);
+        } else if (cancelRequested.current) {
+          // The user cancelled while startResolve was in flight — no
+          // request id existed to cancel; forward it now that it does.
+          slog(`cancel-sent ${reqId} (late) t=${Date.now()}`);
+          cancel(reqId);
+        }
       });
     },
-    [ensurePlugin],
+    [ensurePlugin, settleOutcome],
   );
 
   const startPlayback = useCallback(
@@ -398,6 +464,13 @@ export function App() {
         if (downloadAbort.current !== ctl) {
           return;
         }
+        // A failed download stops whatever the prefix already started:
+        // a trailing tick would write `playing` over the failure and
+        // the player would keep serving a truncated file.
+        statusSub.current?.remove();
+        statusSub.current = null;
+        player.current?.remove();
+        player.current = null;
         const kind = (error as { kind?: string }).kind;
         if (ctl.signal.aborted || kind === 'cancelled') {
           setPhase({ kind: 'cancelled' });
@@ -425,33 +498,14 @@ export function App() {
 
   useEffect(() => {
     const subscription = addResolveOutcomeListener((event) => {
-      const pending = pendingResolves.current.get(event.requestId);
-      if (!pending) {
-        return;
-      }
-      pendingResolves.current.delete(event.requestId);
-      if (requestId.current === event.requestId) {
-        requestId.current = null;
-      }
-      const outcome = event.outcome;
-      slog(
-        `outcome ${event.requestId} type=${outcome.type}` +
-          `${outcome.type === 'failed' ? ` kind=${outcome.kind}` : ''} t=${Date.now()}`,
-      );
-      if (outcome.type === 'resolved') {
-        pending.resolve(outcome.resource);
-      } else {
-        pending.reject(
-          Object.assign(new Error(outcome.message), { kind: outcome.kind }),
-        );
-      }
+      settleOutcome(event.requestId, event.outcome);
     });
     return () => {
       subscription.remove();
       statusSub.current?.remove();
       player.current?.remove();
     };
-  }, []);
+  }, [settleOutcome]);
 
   const onPlay = useCallback(
     async (targetId?: string) => {
@@ -464,6 +518,10 @@ export function App() {
       }
       playBusy.current = true;
       const seq = ++playSeq.current;
+      // A fresh chain clears the stale cancel intent and any outcome
+      // events orphaned by dead chains (their pending entries are gone).
+      cancelRequested.current = false;
+      earlyOutcomes.current.clear();
       const vid = targetId ?? videoId;
       try {
         // Detach the previous player first: its status listener would keep
@@ -517,6 +575,9 @@ export function App() {
     // Invalidate any in-flight play chain first — covers the window
     // between loadPlugin and startResolve where no requestId exists yet.
     playSeq.current += 1;
+    // The request id may not exist yet; resolveOnce forwards the
+    // cancel to the host when startResolve returns it.
+    cancelRequested.current = true;
     if (requestId.current) {
       slog(`cancel-sent ${requestId.current} t=${Date.now()}`);
       cancel(requestId.current);

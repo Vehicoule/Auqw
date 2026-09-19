@@ -31,6 +31,19 @@ for (const plugin of lock.plugins) {
   }
   const manifestPath = join(dirname(wasmPath), '../manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  // The lock pins identity as well as bytes: a manifest whose id,
+  // version, or ABI disagrees with the lock entry is not the artifact
+  // the lock claims, even when the digest matches.
+  for (const key of ['id', 'version', 'abi']) {
+    if (manifest[key] !== plugin[key]) {
+      throw new Error(
+        `${plugin.id}: manifest ${key} ${manifest[key]} != lock ${plugin[key]}`,
+      );
+    }
+  }
+  if (plugin.abi !== lock.abi) {
+    throw new Error(`${plugin.id}: lock abi ${plugin.abi} != lockfile abi ${lock.abi}`);
+  }
   if (manifest.artifact.digest !== plugin.digest) {
     throw new Error(`${plugin.id}: manifest digest ${manifest.artifact.digest} != lock ${plugin.digest}`);
   }
