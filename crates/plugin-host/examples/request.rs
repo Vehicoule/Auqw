@@ -28,16 +28,12 @@ fn main() -> ExitCode {
 }
 
 async fn run(args: &[String]) -> ExitCode {
-    let Some((wasm_path, manifest_path, capability, payload_text)) = args
-        .first()
-        .zip(args.get(1))
-        .zip(args.get(2))
-        .zip(args.get(3))
-        .map(|(((w, m), c), p)| (w, m, c, p))
-    else {
+    if args.len() != 4 {
         eprintln!("usage: request <plugin.wasm> <manifest.json> <capability> '<payload-json>'");
         return ExitCode::FAILURE;
-    };
+    }
+    let (wasm_path, manifest_path, capability, payload_text) =
+        (&args[0], &args[1], &args[2], &args[3]);
     let Ok(wasm) = std::fs::read(wasm_path) else {
         eprintln!("cannot read wasm at {wasm_path}");
         return ExitCode::FAILURE;

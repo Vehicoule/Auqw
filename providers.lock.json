@@ -5,14 +5,14 @@
       "id": "itunes",
       "version": "0.1.0",
       "abi": "0.2.0",
-      "digest": "sha256:1dbc351b5a52cebffb6e5e0705616ec9c6491770da0763e9ea6dca27f605cda8",
+      "digest": "sha256:971c9ca5579f67a59b50520e42acc8d81fb8922c38506600f074265e1a66a737",
       "source": "local-build:../auqw-plugins/plugins/itunes/dist/itunes.wasm"
     },
     {
       "id": "youtube-music",
       "version": "0.2.0",
       "abi": "0.2.0",
-      "digest": "sha256:1819d85525aa0278cbe2a921c6e2c36543dbca037a6b408a4bc27d805806e099",
+      "digest": "sha256:9e464a75fc53343f6c2ad2400baebb2565e958dc9f031c1951758ceda5f8bceb",
       "source": "local-build:../auqw-plugins/plugins/youtube-music/dist/youtube-music.wasm"
     }
   ]

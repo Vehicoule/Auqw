@@ -44,6 +44,9 @@ artifacts instead of a sibling build is post–Slice 0 tooling
 | `crates/mobile-bindings` | UniFFI `PluginHost` over the host (Android + iOS) |
 | `modules/plugin-host-expo` | Expo module wrapping the UniFFI bindings (Android + iOS) |
 | `apps/mobile` | Expo app (Slice 0 play screen) — see `apps/mobile/README.md` |
+| `packages/application` | Pure TypeScript application core (domain, ports, session) |
+| `packages/design-tokens` | DTCG token source and generated TS/CSS design tokens |
+| `packages/storage-sqlite` | Platform-neutral SQLite `StoragePort` with injected drivers |
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |
 | `providers.lock.json` | Pin of known plugin artifact digests |
