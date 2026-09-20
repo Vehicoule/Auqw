@@ -18,7 +18,9 @@ import type {
 import Animated, {
   cancelAnimation,
   Easing,
+  useAnimatedProps,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withRepeat,
   withSequence,
@@ -27,6 +29,9 @@ import Animated, {
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
+import { morphPlayPause, quadPath } from './motion.ts';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 export type TextVariant = keyof Theme['typography'];
 
@@ -80,12 +85,21 @@ export function Text({
   accessibilityLabel,
 }: TextProps) {
   const theme = useTheme();
+  const base = theme.typography[variant];
+  const scaled =
+    theme.textScale === 1
+      ? base
+      : {
+        ...base,
+        fontSize: base.fontSize * theme.textScale,
+        lineHeight: base.lineHeight * theme.textScale,
+      };
   return (
     <RNText
       numberOfLines={numberOfLines}
       accessibilityLabel={accessibilityLabel}
       style={[
-        theme.typography[variant],
+        scaled,
         { color: textColor(theme, color) },
         numeric && styles.numeric,
         uppercase && styles.uppercase,
@@ -230,12 +244,20 @@ export function IconButton({
         style,
       ]}
     >
-      <Icon
-        name={icon}
-        size={iconSize}
-        color={color ?? theme.colors.textSecondary}
-        filled={filled}
-      />
+      {icon === 'heart' || icon === 'heart-filled' ? (
+        <HeartIcon
+          filled={icon === 'heart-filled' || filled}
+          size={iconSize}
+          color={color ?? theme.colors.textSecondary}
+        />
+      ) : (
+        <Icon
+          name={icon}
+          size={iconSize}
+          color={color ?? theme.colors.textSecondary}
+          filled={filled}
+        />
+      )}
     </RNPressable>
   );
 }
@@ -247,6 +269,7 @@ export type ArtworkProps = {
   readonly cornerRadius?: number | undefined;
   readonly monogram?: string | null | undefined;
   readonly dimmed?: boolean | undefined;
+  readonly loading?: boolean | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -257,6 +280,7 @@ export function Artwork({
   cornerRadius,
   monogram,
   dimmed = false,
+  loading = false,
   style,
 }: ArtworkProps) {
   const theme = useTheme();
@@ -277,7 +301,22 @@ export function Artwork({
         style,
       ]}
     >
-      {url === null ? (
+      {loading ? (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: theme.colors.raised,
+          }}
+        >
+          <Spinner size={fill ? 24 : Math.max(10, size * 0.3)} />
+        </View>
+      ) : url === null ? (
         monogram !== null && monogram !== undefined && monogram !== '' ? (
           <RNText
             style={[
@@ -561,6 +600,113 @@ export function Icon({
         }
       })}
     </Svg>
+  );
+}
+
+export function PlayPauseIcon({
+  playing,
+  size = 18,
+  color,
+}: {
+  readonly playing: boolean;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+}) {
+  const theme = useTheme();
+  const amount = useSharedValue(playing ? 1 : 0);
+  useEffect(() => {
+    const target = playing ? 1 : 0;
+    amount.value = theme.reducedMotion
+      ? target
+      : withTiming(target, { duration: theme.motion.state });
+  }, [amount, playing, theme.motion.state, theme.reducedMotion]);
+  const leftPath = useDerivedValue(() =>
+    quadPath(morphPlayPause(amount.value).left),
+  );
+  const rightPath = useDerivedValue(() =>
+    quadPath(morphPlayPause(amount.value).right),
+  );
+  const leftProps = useAnimatedProps(() => ({ d: leftPath.value }));
+  const rightProps = useAnimatedProps(() => ({ d: rightPath.value }));
+  const paint = color ?? theme.colors.textPrimary;
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" accessible={false}>
+      <AnimatedPath
+        d={quadPath(morphPlayPause(playing ? 1 : 0).left)}
+        fill={paint}
+        animatedProps={leftProps}
+      />
+      <AnimatedPath
+        d={quadPath(morphPlayPause(playing ? 1 : 0).right)}
+        fill={paint}
+        animatedProps={rightProps}
+      />
+    </Svg>
+  );
+}
+
+export function HeartIcon({
+  filled,
+  size = 14,
+  color,
+}: {
+  readonly filled: boolean;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+}) {
+  const theme = useTheme();
+  const fill = useSharedValue(filled ? 1 : 0);
+  const scale = useSharedValue(1);
+  useEffect(() => {
+    if (theme.reducedMotion) {
+      fill.value = filled ? 1 : 0;
+      scale.value = 1;
+      return undefined;
+    }
+    if (filled) {
+      fill.value = withTiming(1, { duration: theme.motion.press });
+      scale.value = withSequence(
+        withTiming(1.14, { duration: theme.motion.press }),
+        withTiming(1, { duration: theme.motion.state }),
+      );
+    } else {
+      fill.value = withTiming(0, { duration: theme.motion.press });
+      scale.value = withTiming(1, { duration: theme.motion.press });
+    }
+    return undefined;
+  }, [
+    fill,
+    scale,
+    filled,
+    theme.motion.press,
+    theme.motion.state,
+    theme.reducedMotion,
+  ]);
+  const style = useAnimatedStyle(() => ({
+    opacity: fill.value,
+    transform: [{ scale: scale.value }],
+  }));
+  const paint = color ?? theme.colors.textSecondary;
+  return (
+    <View style={{ width: size, height: size }} accessible={false}>
+      <Icon name="heart" size={size} color={paint} />
+      <Animated.View
+        style={[
+          {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: size,
+            height: size,
+            alignItems: 'center',
+            justifyContent: 'center',
+          },
+          style,
+        ]}
+      >
+        <Icon name="heart-filled" size={size} color={paint} />
+      </Animated.View>
+    </View>
   );
 }
 

@@ -2,11 +2,11 @@ import { useMemo } from 'react';
 import { Platform, View } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { runOnJS } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
 import {
-  Icon,
   IconButton,
+  PlayPauseIcon,
   Pressable,
   Spinner,
   Text,
@@ -49,11 +49,11 @@ export function MiniPlayer({
         .activeOffsetY([-24, 24])
         .onEnd((e) => {
           if (e.translationX < -40 && onNext !== undefined) {
-            runOnJS(onNext)();
+            scheduleOnRN(onNext);
           } else if (e.translationX > 40 && onPrevious !== undefined) {
-            runOnJS(onPrevious)();
+            scheduleOnRN(onPrevious);
           } else if (e.translationY < -40 && onPress !== undefined) {
-            runOnJS(onPress)();
+            scheduleOnRN(onPress);
           }
         }),
     [onNext, onPrevious, onPress],
@@ -167,29 +167,13 @@ export function MiniPlayer({
             {busy ? (
               <Spinner size={14} color={ios ? theme.colors.textBright : theme.colors.accent} />
             ) : (
-              <Icon
-                name={player.status === 'playing' ? 'pause' : 'play'}
+              <PlayPauseIcon
+                playing={player.status === 'playing'}
                 size={16}
                 color={ios ? theme.colors.textBright : theme.colors.accent}
-                filled
               />
             )}
           </Pressable>
-        </View>
-        <View
-          accessible={false}
-          style={{
-            height: theme.strokes.progress,
-            backgroundColor: theme.colors.fg18,
-          }}
-        >
-          <View
-            style={{
-              height: theme.strokes.progress,
-              width: `${progress * 100}%`,
-              backgroundColor: theme.colors.accent,
-            }}
-          />
         </View>
       </View>
     </GestureDetector>

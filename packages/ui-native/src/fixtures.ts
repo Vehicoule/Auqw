@@ -545,6 +545,9 @@ export type GalleryCoverage = {
   readonly platforms: readonly PlatformVariant[];
   readonly reducedMotion: readonly boolean[];
   readonly searchPhases: readonly string[];
+  readonly textScales: readonly number[];
+  readonly artworkConditions: readonly string[];
+  readonly gestureStates: readonly string[];
 };
 
 export const galleryCoverage: GalleryCoverage = {
@@ -566,4 +569,7 @@ export const galleryCoverage: GalleryCoverage = {
   platforms: fixturePlatforms,
   reducedMotion: fixtureMotionModes,
   searchPhases: fixtureSearchStates.map((s) => s.phase),
+  textScales: [1, 2],
+  artworkConditions: ['missing', 'slow', 'extreme'],
+  gestureStates: ['rest', 'mid-drag', 'dismissed'],
 };

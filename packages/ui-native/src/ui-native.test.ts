@@ -34,6 +34,15 @@ import {
   fixtureSettingsModel,
   galleryCoverage,
 } from './fixtures.ts';
+import {
+  quadPath,
+  morphPlayPause,
+  PAUSE_LEFT,
+  PAUSE_RIGHT,
+  PLAY_LEFT,
+  PLAY_RIGHT,
+  progressPathState,
+} from './motion.ts';
 
 function assert(
   condition: unknown,
@@ -121,6 +130,52 @@ function testFormatClock(): void {
   assertEqual(formatRemaining(90_000, 180_000), '-1:30');
   assertEqual(formatRemaining(180_000, 180_000), '-0:00');
   assertEqual(formatRemaining(0, null), '—');
+}
+
+function testPlayPauseMorph(): void {
+  const start = morphPlayPause(0);
+  const end = morphPlayPause(1);
+  const middle = morphPlayPause(0.5);
+  assertEqual(
+    quadPath(start.left),
+    quadPath(PLAY_LEFT),
+    'morph start must be the play triangle',
+  );
+  assertEqual(
+    quadPath(start.right),
+    quadPath(PLAY_RIGHT),
+    'morph start must be the play triangle',
+  );
+  assertEqual(quadPath(end.left), quadPath(PAUSE_LEFT), 'morph end must be pause bars');
+  assertEqual(
+    quadPath(end.right),
+    quadPath(PAUSE_RIGHT),
+    'morph end must be pause bars',
+  );
+  assert(
+    middle.left.xs.every((x, i) => x !== PLAY_LEFT.xs[i] && x !== PAUSE_LEFT.xs[i]),
+    'morph midpoint must interpolate between play and pause',
+  );
+  assertEqual(
+    quadPath(morphPlayPause(-1).left),
+    quadPath(morphPlayPause(0).left),
+    'morph input is clamped low',
+  );
+  assertEqual(
+    quadPath(morphPlayPause(2).right),
+    quadPath(morphPlayPause(1).right),
+    'morph input is clamped high',
+  );
+}
+
+function testProgressPathState(): void {
+  const state = progressPathState(0.25, 200);
+  assertEqual(state.dashLength, 200, 'the complete ring stays in the dash pattern');
+  assertEqual(state.dashOffset, -150, 'offset reveals the first quarter clockwise');
+  assertEqual(state.opacity, 1, 'positive progress is visible');
+  assertEqual(progressPathState(0, 200).opacity, 0, 'zero progress hides the arc');
+  assertEqual(progressPathState(-1, 200).dashOffset, -200, 'progress is clamped low');
+  assertEqual(progressPathState(2, 200).dashOffset, 0, 'progress is clamped high');
 }
 
 function testPickArtworkUrl(): void {
@@ -385,9 +440,26 @@ function testCoverageMatrix(): void {
   );
   const phases = new Set(galleryCoverage.searchPhases);
   assertEqual(phases.size, VALID_PHASES.size, 'search coverage incomplete');
+  assertEqual(
+    galleryCoverage.textScales.join(','),
+    '1,2',
+    'gallery must review normal and 200% text',
+  );
+  assertEqual(
+    galleryCoverage.artworkConditions.join(','),
+    'missing,slow,extreme',
+    'gallery must cover the artwork failure matrix',
+  );
+  assertEqual(
+    galleryCoverage.gestureStates.join(','),
+    'rest,mid-drag,dismissed',
+    'gallery must cover the Stage sheet gesture states',
+  );
 }
 
 testFormatClock();
+testPlayPauseMorph();
+testProgressPathState();
 testPickArtworkUrl();
 testFixtureRecordings();
 testQueueFixture();

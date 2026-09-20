@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, View } from 'react-native';
 import type {
   AccessibilityActionEvent,
@@ -7,12 +7,21 @@ import type {
   ViewStyle,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { runOnJS } from 'react-native-reanimated';
+import Animated, {
+  useAnimatedProps,
+  useDerivedValue,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import Svg, { Path } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import { Artwork, Text } from './primitives.tsx';
 import { formatClock, formatRemaining } from './view-models.ts';
 import type { PlatformVariant } from './view-models.ts';
+import { progressPathState } from './motion';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 type Pt = { readonly x: number; readonly y: number };
 
@@ -152,6 +161,30 @@ export function ArtworkRing({
     : theme.strokes.hairline;
   const pathLength = wavy ? WAVY.length : SQUARED_RING_LENGTH;
   const path = wavy ? WAVY.d : SQUARED_RING_PATH;
+  const animatedProgress = useSharedValue(clamped);
+  const previousProgress = useRef(clamped);
+  useEffect(() => {
+    const delta = Math.abs(clamped - previousProgress.current);
+    previousProgress.current = clamped;
+    const duration =
+      delta > 0.05 ? theme.motion.state : theme.motion.state * 5;
+    animatedProgress.value = theme.reducedMotion
+      ? clamped
+      : withTiming(clamped, { duration });
+  }, [
+    animatedProgress,
+    clamped,
+    theme.motion.state,
+    theme.reducedMotion,
+  ]);
+  const ringState = useDerivedValue(() =>
+    progressPathState(animatedProgress.value, pathLength),
+  );
+  const progressProps = useAnimatedProps(() => ({
+    strokeDasharray: `${ringState.value.dashLength} ${ringState.value.dashLength}`,
+    strokeDashoffset: ringState.value.dashOffset,
+    opacity: ringState.value.opacity,
+  }));
   return (
     <View
       style={[{ width: box, height: box }, style]}
@@ -176,16 +209,14 @@ export function ArtworkRing({
           stroke={theme.colors.fg18}
           strokeWidth={trackStroke}
         />
-        {clamped > 0 && (
-          <Path
-            d={path}
-            fill="none"
-            stroke={theme.colors.accent}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={`${clamped * pathLength} ${pathLength}`}
-          />
-        )}
+        <AnimatedPath
+          d={path}
+          fill="none"
+          stroke={theme.colors.accent}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          animatedProps={progressProps}
+        />
       </Svg>
     </View>
   );
@@ -225,10 +256,10 @@ function useSeekGesture(
         .minDistance(0)
         .enabled(enabled)
         .onBegin((e) => {
-          runOnJS(seek)(e.x);
+          scheduleOnRN(seek, e.x);
         })
         .onUpdate((e) => {
-          runOnJS(seek)(e.x);
+          scheduleOnRN(seek, e.x);
         }),
     [enabled, seek],
   );
