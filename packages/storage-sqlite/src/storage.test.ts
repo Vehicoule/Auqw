@@ -3,17 +3,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CancellationSource } from '@auqw/application';
 import type {
+  ArtworkCacheEntry,
   AttemptTrace,
+  Entity,
+  EntitySourceRef,
+  ExportDocument,
+  Like,
+  LyricsCacheEntry,
   MatchEvidence,
+  MatchReview,
   OperationContext,
   PersistedState,
+  PlayCount,
+  PlayEvent,
+  Playlist,
+  PlaylistEntry,
   QueueOccurrence,
   QueueSnapshot,
   Recording,
   Settings,
   SourceMapping,
   SourceRef,
-  Like,
 } from '@auqw/application';
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
