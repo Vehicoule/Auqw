@@ -165,6 +165,26 @@ export class ProviderRouter {
   }
 
   /**
+   * The provider a lyrics call routes to under `prefer`: the
+   * preferred form picks the capability (`lyrics.synced`, or
+   * `lyrics.plain` when the caller asked plain), with `synced`
+   * degrading to a `lyrics.plain` declarer when nothing declares
+   * synced. Exposed so callers can name the routed provider —
+   * cache provenance — alongside the call itself.
+   */
+  lyricsProviderFor(
+    selection: ProviderSelection,
+    prefer: LyricsPreference,
+  ): Result<ProviderPort> {
+    const primary = prefer === 'plain' ? 'lyrics.plain' : 'lyrics.synced';
+    let resolved = this.providerFor(primary, selection);
+    if (!resolved.ok && prefer === 'synced') {
+      resolved = this.providerFor('lyrics.plain', selection);
+    }
+    return resolved;
+  }
+
+  /**
    * Lyrics dispatch: the preferred form picks the capability used to
    * resolve the provider (`lyrics.synced`, or `lyrics.plain` when the
    * caller asked plain). A `synced` preference on a plain-only
@@ -175,12 +195,7 @@ export class ProviderRouter {
     input: { query: LyricsQuery; prefer: LyricsPreference },
     context: OperationContext,
   ): Promise<Result<LyricsResult>> {
-    const primary =
-      input.prefer === 'plain' ? 'lyrics.plain' : 'lyrics.synced';
-    let resolved = this.providerFor(primary, selection);
-    if (!resolved.ok && input.prefer === 'synced') {
-      resolved = this.providerFor('lyrics.plain', selection);
-    }
+    const resolved = this.lyricsProviderFor(selection, input.prefer);
     if (!resolved.ok) {
       return Promise.resolve(err(resolved.error));
     }
