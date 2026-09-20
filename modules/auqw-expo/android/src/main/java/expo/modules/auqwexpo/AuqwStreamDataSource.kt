@@ -69,8 +69,14 @@ class AuqwStreamDataSource(
   private var handle: String? = null
   private var position: Long = 0
   private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
+  // Latency instrumentation: open()/first-read() wall times into
+  // logcat — one pair per attach, negligible noise.
+  private var openT0 = 0L
+  private var firstReadLogged = false
 
   override fun open(dataSpec: DataSpec): Long {
+    openT0 = android.os.SystemClock.uptimeMillis()
+    firstReadLogged = false
     if (opened) {
       throw AuqwStreamException("internal", "data source already open", null)
     }
@@ -114,6 +120,11 @@ class AuqwStreamDataSource(
     }
     opened = true
     transferStarted(dataSpec)
+    Log.i(
+      TAG,
+      "open h=$streamHandle pos=${dataSpec.position} " +
+        "streamOpen+${android.os.SystemClock.uptimeMillis() - openT0}ms"
+    )
 
     // Contract: a bounded request echoes its length; an unbounded one
     // resolves to remaining length or stays LENGTH_UNSET.
@@ -149,10 +160,20 @@ class AuqwStreamDataSource(
     } else {
       minOf(readLength.toLong(), bytesRemaining)
     }
+    val readT0 = android.os.SystemClock.uptimeMillis()
     val bytes = try {
       currentHost.streamRead(currentHandle, position.toULong(), wanted.toULong())
     } catch (e: StreamException) {
       throw AuqwStreamException(streamKind(e), e.message, e)
+    }
+    if (!firstReadLogged) {
+      firstReadLogged = true
+      Log.i(
+        TAG,
+        "firstRead h=$currentHandle pos=$position want=$wanted got=${bytes.size} " +
+          "readMs=${android.os.SystemClock.uptimeMillis() - readT0} " +
+          "sinceOpen=${android.os.SystemClock.uptimeMillis() - openT0}ms"
+      )
     }
     if (bytes.isEmpty()) {
       bytesRemaining = 0

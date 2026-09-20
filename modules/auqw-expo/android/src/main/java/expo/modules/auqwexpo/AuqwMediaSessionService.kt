@@ -8,6 +8,7 @@ import android.os.Process
 import android.view.KeyEvent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -67,6 +68,37 @@ class AuqwMediaSessionService : MediaSessionService() {
    */
   var remoteDispatcher: RemoteCommandDispatcher? = null
 
+  /**
+   * The session's view of the player. Media3 intersects the
+   * connection result's advertised commands with the session player's
+   * `availableCommands` — and a single-item ExoPlayer never reports
+   * next/previous, so lock-screen/SystemUI buttons would render
+   * disabled and `onPlayerCommandRequest` unreachable. The wrapper
+   * only *reports* the commands: the callback consumes them and the
+   * delegate's own seek never runs.
+   */
+  private class QueuePlayer(player: Player) : ForwardingPlayer(player) {
+    override fun getAvailableCommands(): Player.Commands =
+      super.getAvailableCommands().buildUpon()
+        .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        .add(Player.COMMAND_SEEK_TO_NEXT)
+        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+        .build()
+
+    override fun isCommandAvailable(command: Int): Boolean =
+      command in QUEUE_COMMANDS || super.isCommandAvailable(command)
+
+    private companion object {
+      val QUEUE_COMMANDS = setOf(
+        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+        Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+        Player.COMMAND_SEEK_TO_NEXT,
+        Player.COMMAND_SEEK_TO_PREVIOUS,
+      )
+    }
+  }
+
   inner class LocalBinder : Binder() {
     // The service is exported (MediaSession controllers bind from
     // SystemUI); the raw player/service handles are same-UID only.
@@ -90,12 +122,14 @@ class AuqwMediaSessionService : MediaSessionService() {
       session: MediaSession,
       controller: MediaSession.ControllerInfo
     ): MediaSession.ConnectionResult {
-      // Advertise next/previous-item commands even on a single-item
-      // player: the session consumes them through the projection
-      // cursor, so lock-screen/SystemUI keep their buttons.
+      // Advertise next/previous commands on the session too — the
+      // session consumes them through the projection cursor (the
+      // QueuePlayer is what makes them report *available*).
       val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
         .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
         .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        .add(Player.COMMAND_SEEK_TO_NEXT)
+        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
         .build()
       return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
         .setAvailablePlayerCommands(playerCommands)
@@ -183,7 +217,10 @@ class AuqwMediaSessionService : MediaSessionService() {
       .setLoadControl(loadControl)
       .build()
     player = p
-    session = MediaSession.Builder(this, p)
+    // The session sees the player through QueuePlayer — the module
+    // keeps the raw ExoPlayer, the wrapper only advertises the
+    // next/previous commands the projection cursor consumes.
+    session = MediaSession.Builder(this, QueuePlayer(p))
       .setCallback(sessionCallback)
       .build()
   }

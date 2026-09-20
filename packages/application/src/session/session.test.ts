@@ -1585,6 +1585,14 @@ async function transitionReconcile(): Promise<void> {
   r.player.emit(statusEvent(adoptedIdentity, 'h-svc', 'playing', 5_000));
   await pump();
   assertEqual(readyOf(r).queue.positionMs, 5_000);
+  // The adopted identity must track the post-reconcile revision — the
+  // service re-keys its status echo to every installed projection, so
+  // a stale queueRev here would reject every later status.
+  assertEqual(
+    adoptedIdentity.queueRev,
+    readyOf(r).queue.revision,
+    'adopted identity tracks installed revision',
+  );
   const revBefore = readyOf(r).queue.revision;
   r.player.emit(
     transitionEvent(r, {

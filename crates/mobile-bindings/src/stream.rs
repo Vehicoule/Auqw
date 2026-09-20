@@ -448,6 +448,62 @@ impl PluginHost {
             .map(StreamPhaseMarks::from)
             .map_err(seam_err)
     }
+
+    /// Dev-gate entry: register a session for a bare URL, skipping the
+    /// guest `playback.resolve` (same convention as the Kotlin
+    /// `devAttachFile`). Everything downstream of resolve is the real
+    /// path — sparse store, pump, fetch-through, marks — so the seam
+    /// gates can be exercised while the provider's resolve is
+    /// unreachable. Re-mint is pinned to fail `Expired`; a one-hour
+    /// expiry keeps it out of the measured window.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] when the seam is not configured;
+    /// [`StreamError::Failed`] with the prepare's kind otherwise.
+    pub fn dev_prepare_url(
+        &self,
+        url: String,
+        mime: String,
+        content_length: Option<u64>,
+    ) -> Result<PreparedStream, StreamError> {
+        let expires_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok())
+            .map(|now| now + 3_600_000);
+        let source = PreparedSource {
+            source_ref: url.clone(),
+            provider: "dev-url".to_string(),
+            url,
+            mime,
+            itag: None,
+            bitrate_kbps: None,
+            content_length,
+            expires_at_ms,
+        };
+        let info = self
+            .stream_registry()?
+            .prepare_timed(source, Arc::new(DevRemint), None)
+            .map_err(seam_err)?;
+        Ok(PreparedStream::from(info))
+    }
+}
+
+/// Remint for [`PluginHost::dev_prepare_url`] sessions — a dev fixture
+/// has no provider to re-resolve, so expiry is terminal.
+struct DevRemint;
+
+impl Remint for DevRemint {
+    fn remint(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<PreparedSource, auqw_stream::StreamError>>
+                + Send,
+        >,
+    > {
+        Box::pin(async { Err(auqw_stream::StreamError::Expired) })
+    }
 }
 
 impl PluginHost {

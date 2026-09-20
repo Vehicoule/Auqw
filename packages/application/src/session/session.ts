@@ -1729,11 +1729,21 @@ export class Session {
       prev.timer?.cancel();
     }
     if (event.identity !== null && event.handle !== null && toId !== null) {
-      const occurrence = r.queue
-        .snapshot()
-        .occurrences.find((o) => o.occurrenceId === toId);
+      const snap2 = r.queue.snapshot();
+      const occurrence = snap2.occurrences.find(
+        (o) => o.occurrenceId === toId,
+      );
+      // Adopt the service attemptId but re-key queueRev to the
+      // post-reconcile revision — same rule as every other op
+      // (pause/resume/seek): identity tracks the revision the next
+      // #derived() install carries, or native status echoes under the
+      // fresh revision would be rejected by identityEq.
+      const identity = {
+        attemptId: event.identity.attemptId,
+        queueRev: snap2.revision,
+      };
       const attempt: ActiveAttempt = {
-        identity: event.identity,
+        identity,
         recordingId: occurrence?.recordingId ?? '',
         occurrenceId: toId,
         source: new CancellationSource(),
@@ -1747,7 +1757,7 @@ export class Session {
         type: 'buffering',
         recordingId: attempt.recordingId,
         occurrenceId: toId,
-        identity: event.identity,
+        identity,
         handle: event.handle,
         positionMs: event.positionMs,
       };
