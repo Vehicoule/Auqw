@@ -13,3 +13,5 @@ export * from './queue/queue-engine.ts';
 export * from './matching/matching-engine.ts';
 export * from './search/search-session.ts';
 export * from './session/session.ts';
+export * from './library/playlists.ts';
+export * from './library/history.ts';

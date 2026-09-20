@@ -3,6 +3,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
+  EntityKind,
   Like,
   Recording,
   Settings,
@@ -12,11 +13,30 @@ import type {
 } from '../domain.ts';
 import {
   isSettings,
+  isString,
   isTrackMetadata,
+  isTrackRef,
   recordingFromMetadata,
 } from '../domain.ts';
+import { countsAsPlay, recordPlay } from '../library/history.ts';
 import { isPersistedState } from '../library/library.ts';
-import { toggleTrackLike } from '../library/likes.ts';
+import type {
+  Entity,
+  PlayCount,
+  PlayEvent,
+  Playlist,
+  PlaylistEntry,
+} from '../library/library.ts';
+import { toggleEntityLike, toggleTrackLike } from '../library/likes.ts';
+import {
+  addPlaylistEntry,
+  createPlaylist,
+  deletePlaylist,
+  removePlaylistEntry,
+  renamePlaylist,
+  reorderPlaylistEntry,
+} from '../library/playlists.ts';
+import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import {
   extractVersionLabels,
   MatchingEngine,
@@ -70,6 +90,11 @@ export type ReadySession = {
   readonly type: 'ready';
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly entities: readonly Entity[];
+  readonly playlists: readonly Playlist[];
+  readonly playlistEntries: readonly PlaylistEntry[];
+  readonly playHistory: readonly PlayEvent[];
+  readonly playCounts: readonly PlayCount[];
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
   readonly playback: SessionPlayback;
@@ -161,11 +186,20 @@ type ActiveAttempt = {
 type Ready = {
   recordings: Recording[];
   likes: Like[];
+  entities: Entity[];
+  playlists: Playlist[];
+  playlistEntries: PlaylistEntry[];
+  playHistory: PlayEvent[];
+  playCounts: PlayCount[];
   queue: QueueEngine;
   settings: Settings;
   playback: SessionPlayback;
   persistenceError: AppError | undefined;
 };
+
+function playlistSections(r: Ready): PlaylistState {
+  return { playlists: r.playlists, entries: r.playlistEntries };
+}
 
 /** Latest sent projection plus its install status at the service. */
 type ProjectionMarker = {
@@ -195,6 +229,7 @@ export class Session {
   #deadlineWork = new Set<Promise<unknown>>();
   #eventTail: Promise<void> = Promise.resolve();
   #likeTail: Promise<void> = Promise.resolve();
+  #playlistTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -251,6 +286,11 @@ export class Session {
         type: 'ready' as const,
         recordings: Object.freeze([...ready.recordings]),
         likes: Object.freeze([...ready.likes]),
+        entities: Object.freeze([...ready.entities]),
+        playlists: Object.freeze([...ready.playlists]),
+        playlistEntries: Object.freeze([...ready.playlistEntries]),
+        playHistory: Object.freeze([...ready.playHistory]),
+        playCounts: Object.freeze([...ready.playCounts]),
         queue: ready.queue.snapshot(),
         settings: { ...ready.settings },
         playback: ready.playback,
@@ -478,6 +518,11 @@ export class Session {
     this.#ready = {
       recordings: [...data.recordings],
       likes: [...data.likes],
+      entities: [...data.entities],
+      playlists: [...data.playlists],
+      playlistEntries: [...data.playlistEntries],
+      playHistory: [...data.playHistory],
+      playCounts: [...data.playCounts],
       queue,
       settings: { ...data.settings },
       playback: { type: 'idle' },
@@ -618,6 +663,318 @@ export class Session {
     r.likes = [...next];
     this.#publish();
     return ok(undefined);
+  }
+
+  toggleEntityLike(
+    kind: EntityKind,
+    entityId: string,
+  ): Promise<Result<void>> {
+    const work = this.#likeTail.then(() =>
+      this.#toggleEntityLike(kind, entityId),
+    );
+    this.#likeTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  async #toggleEntityLike(
+    kind: EntityKind,
+    entityId: string,
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (
+      !r.entities.some((e) => e.entityId === entityId && e.kind === kind)
+    ) {
+      return err(appError('not-found', 'unknown entity'));
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const next = toggleEntityLike(r.likes, kind, entityId, now);
+    const persisted = await this.#persist({ likes: next });
+    if (!persisted.ok) {
+      return err(persisted.error);
+    }
+    r.likes = [...next];
+    this.#publish();
+    return ok(undefined);
+  }
+
+  /** Commits both playlist sections atomically, then mirrors them. */
+  async #commitPlaylists(
+    r: Ready,
+    next: PlaylistState,
+  ): Promise<Result<void>> {
+    const persisted = await this.#persist({
+      playlists: next.playlists,
+      playlistEntries: next.entries,
+    });
+    if (!persisted.ok) {
+      return err(persisted.error);
+    }
+    r.playlists = [...next.playlists];
+    r.playlistEntries = [...next.entries];
+    this.#publish();
+    return ok(undefined);
+  }
+
+  #enqueuePlaylistOp<T>(
+    fn: () => Promise<Result<T>>,
+  ): Promise<Result<T>> {
+    const work = this.#playlistTail.then(fn);
+    this.#playlistTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  createPlaylist(name: string): Promise<Result<string>> {
+    return this.#enqueuePlaylistOp(() => this.#createPlaylist(name));
+  }
+
+  async #createPlaylist(name: string): Promise<Result<string>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!isString(name, 512) || name.trim().length === 0) {
+      return err(appError('invalid-response', 'invalid playlist name'));
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const playlistId = this.#ids.next('playlist');
+    const next = createPlaylist(
+      playlistSections(r),
+      playlistId,
+      name,
+      now,
+    );
+    const committed = await this.#commitPlaylists(r, next);
+    if (!committed.ok) {
+      return err(committed.error);
+    }
+    return ok(playlistId);
+  }
+
+  renamePlaylist(playlistId: string, name: string): Promise<Result<void>> {
+    return this.#enqueuePlaylistOp(() =>
+      this.#renamePlaylist(playlistId, name),
+    );
+  }
+
+  async #renamePlaylist(
+    playlistId: string,
+    name: string,
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
+      return err(appError('not-found', 'unknown playlist'));
+    }
+    if (!isString(name, 512) || name.trim().length === 0) {
+      return err(appError('invalid-response', 'invalid playlist name'));
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const next = renamePlaylist(playlistSections(r), playlistId, name, now);
+    return this.#commitPlaylists(r, next);
+  }
+
+  deletePlaylist(playlistId: string): Promise<Result<void>> {
+    return this.#enqueuePlaylistOp(() => this.#deletePlaylist(playlistId));
+  }
+
+  async #deletePlaylist(playlistId: string): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
+      return err(appError('not-found', 'unknown playlist'));
+    }
+    const next = deletePlaylist(playlistSections(r), playlistId);
+    return this.#commitPlaylists(r, next);
+  }
+
+  addPlaylistEntry(
+    playlistId: string,
+    recordingId: string,
+    selectedRef: SourceRef | null = null,
+  ): Promise<Result<string>> {
+    return this.#enqueuePlaylistOp(() =>
+      this.#addPlaylistEntry(playlistId, recordingId, selectedRef),
+    );
+  }
+
+  async #addPlaylistEntry(
+    playlistId: string,
+    recordingId: string,
+    selectedRef: SourceRef | null,
+  ): Promise<Result<string>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
+      return err(appError('not-found', 'unknown playlist'));
+    }
+    if (!r.recordings.some((rec) => rec.id === recordingId)) {
+      return err(appError('not-found', 'unknown recording'));
+    }
+    if (selectedRef !== null && !isTrackRef(selectedRef)) {
+      return err(appError('invalid-response', 'invalid selected ref'));
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const entryId = this.#ids.next('entry');
+    const next = addPlaylistEntry(playlistSections(r), {
+      entryId,
+      playlistId,
+      recordingId,
+      selectedRef,
+      addedMs: now,
+    });
+    const committed = await this.#commitPlaylists(r, next);
+    if (!committed.ok) {
+      return err(committed.error);
+    }
+    return ok(entryId);
+  }
+
+  removePlaylistEntry(entryId: string): Promise<Result<void>> {
+    return this.#enqueuePlaylistOp(() => this.#removePlaylistEntry(entryId));
+  }
+
+  async #removePlaylistEntry(entryId: string): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!r.playlistEntries.some((e) => e.entryId === entryId)) {
+      return err(appError('not-found', 'unknown entry'));
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const next = removePlaylistEntry(playlistSections(r), entryId, now);
+    return this.#commitPlaylists(r, next);
+  }
+
+  reorderPlaylistEntry(
+    entryId: string,
+    move: EntryMove | null,
+  ): Promise<Result<void>> {
+    return this.#enqueuePlaylistOp(() =>
+      this.#reorderPlaylistEntry(entryId, move),
+    );
+  }
+
+  async #reorderPlaylistEntry(
+    entryId: string,
+    move: EntryMove | null,
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    const entry = r.playlistEntries.find((e) => e.entryId === entryId);
+    if (entry === undefined) {
+      return err(appError('not-found', 'unknown entry'));
+    }
+    if (move !== null) {
+      const targetId = 'before' in move ? move.before : move.after;
+      const target = r.playlistEntries.find((e) => e.entryId === targetId);
+      if (
+        target === undefined ||
+        target.playlistId !== entry.playlistId ||
+        targetId === entryId
+      ) {
+        return err(appError('not-found', 'unknown move target'));
+      }
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const next = reorderPlaylistEntry(
+      playlistSections(r),
+      entryId,
+      move,
+      now,
+    );
+    return this.#commitPlaylists(r, next);
+  }
+
+  /**
+   * One counted play per occurrence: 50% of duration or 120 s,
+   * committed first like every owned write. A no-op below the
+   * threshold, on repeat, or when the clock is dead.
+   */
+  async #maybeRecordPlay(
+    occurrenceId: string,
+    recordingId: string,
+    listenedMs: number,
+    durationMs: number | null,
+  ): Promise<void> {
+    const r = this.#ready;
+    if (r === null) {
+      return;
+    }
+    if (
+      !isSafeNonNegative(listenedMs) ||
+      (durationMs !== null && !isSafeNonNegative(durationMs)) ||
+      !countsAsPlay(listenedMs, durationMs) ||
+      r.playHistory.some((e) => e.occurrenceId === occurrenceId)
+    ) {
+      return;
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return;
+    }
+    const next = recordPlay(
+      { playHistory: r.playHistory, playCounts: r.playCounts },
+      {
+        eventId: this.#ids.next('play'),
+        recordingId,
+        occurrenceId,
+        listenedMs,
+        durationMs,
+        nowMs: now,
+      },
+    );
+    if (!next.recorded) {
+      return;
+    }
+    const persisted = await this.#persist({
+      playHistory: next.playHistory,
+      playCounts: next.playCounts,
+    });
+    if (!persisted.ok) {
+      return;
+    }
+    r.playHistory = [...next.playHistory];
+    r.playCounts = [...next.playCounts];
+    this.#publish();
   }
 
   async updateSettings(settings: Settings): Promise<Result<void>> {
@@ -1402,6 +1759,15 @@ export class Session {
       }
       return;
     }
+    await this.#maybeRecordPlay(
+      active.occurrenceId,
+      active.recordingId,
+      event.positionMs,
+      event.durationMs ??
+      r.recordings.find((rec) => rec.id === active.recordingId)
+        ?.durationMs ??
+      null,
+    );
     if (event.state === 'failed') {
       await this.#failAttempt(
         active,
@@ -1728,6 +2094,24 @@ export class Session {
     ) {
       this.#logWarn('queue transition rejected');
       return;
+    }
+    if (event.reason === 'ended' && event.fromOccurrenceId !== null) {
+      // The service completed the occurrence without a JS 'ended':
+      // it crossed the threshold by definition. Duration is the
+      // recording's own; otherwise the last observed position
+      // decides under the 120 s rule.
+      const from = r.queue
+        .snapshot()
+        .occurrences.find((o) => o.occurrenceId === event.fromOccurrenceId);
+      const rec = r.recordings.find((x) => x.id === from?.recordingId);
+      if (from !== undefined) {
+        await this.#maybeRecordPlay(
+          event.fromOccurrenceId,
+          from.recordingId,
+          rec?.durationMs ?? r.queue.snapshot().positionMs,
+          rec?.durationMs ?? null,
+        );
+      }
     }
     const toId = event.toOccurrenceId;
     try {
