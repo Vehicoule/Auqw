@@ -227,12 +227,11 @@ type Scored = {
 };
 
 /**
- * Candidates may carry an ISRC (catalog providers can supply one);
- * `TrackMetadata` itself does not model it, so it is optional here.
+ * A candidate is catalog metadata scored against a recording; the
+ * optional `isrc`/`artistRef`/`albumRef` fields of `TrackMetadata`
+ * carry whatever evidence the provider reported.
  */
-export type MatchCandidate = TrackMetadata & {
-  readonly isrc?: string | null;
-};
+export type MatchCandidate = TrackMetadata;
 
 const HARD_AXES: readonly VersionLabel[] = [
   'live',

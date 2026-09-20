@@ -61,6 +61,10 @@ import type {
   QueueProjectionItem,
 } from '../ports/player.ts';
 import type { ProviderPort, RecordingQuery } from '../ports/provider.ts';
+import {
+  ProviderRouter,
+  selectionFromSettings,
+} from '../providers/provider-router.ts';
 import type {
   PersistedState,
   StorageBatch,
@@ -223,6 +227,7 @@ export class Session {
   readonly #storage: StoragePort;
   readonly #player: PlayerPort;
   readonly #providers: Map<string, ProviderPort>;
+  readonly #router: ProviderRouter;
   readonly #clock: ClockPort;
   readonly #ids: IdPort;
   readonly #log: LogPort;
@@ -262,13 +267,18 @@ export class Session {
     }
     if (
       !providers.has(deps.defaults.catalogProvider) ||
-      !providers.has(deps.defaults.playbackProvider)
+      !providers.has(deps.defaults.playbackProvider) ||
+      (deps.defaults.lyricsProvider != null &&
+        !providers.has(deps.defaults.lyricsProvider)) ||
+      (deps.defaults.radioProvider != null &&
+        !providers.has(deps.defaults.radioProvider))
     ) {
       throw new TypeError('default providers must be injected');
     }
     this.#storage = deps.storage;
     this.#player = deps.player;
     this.#providers = providers;
+    this.#router = new ProviderRouter(deps.providers);
     this.#clock = deps.clock;
     this.#ids = deps.ids;
     this.#log = deps.log;
@@ -574,6 +584,7 @@ export class Session {
         artwork: metadata.artwork,
         explicit: metadata.explicit,
         genre: metadata.genre,
+        isrc: metadata.isrc ?? recording.isrc,
         versionLabels: extractVersionLabels(
           metadata.title,
           metadata.explicit,
@@ -994,7 +1005,11 @@ export class Session {
     if (
       !isSettings(settings) ||
       !this.#providers.has(settings.catalogProvider) ||
-      !this.#providers.has(settings.playbackProvider)
+      !this.#providers.has(settings.playbackProvider) ||
+      (settings.lyricsProvider != null &&
+        !this.#providers.has(settings.lyricsProvider)) ||
+      (settings.radioProvider != null &&
+        !this.#providers.has(settings.radioProvider))
     ) {
       return err(appError('invalid-response', 'invalid settings'));
     }
@@ -1495,11 +1510,13 @@ export class Session {
       );
     }
 
-    const provider = this.#providers.get(r.settings.playbackProvider);
-    if (provider === undefined) {
-      const error = internalError();
-      await this.#failAttempt(attempt, error);
-      return err(error);
+    const routed = this.#router.providerFor(
+      'playback.resolve',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      await this.#failAttempt(attempt, routed.error);
+      return err(routed.error);
     }
     const prepared = await this.#withDeadline(
       () =>
@@ -1546,10 +1563,14 @@ export class Session {
     if (r === null) {
       return err(internalError());
     }
-    const provider = this.#providers.get(r.settings.playbackProvider);
-    if (provider === undefined) {
-      return err(internalError());
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      return err(routed.error);
     }
+    const provider = routed.value;
     const query: RecordingQuery = {
       title: recording.title,
       artist: recording.artist,
@@ -2315,10 +2336,14 @@ export class Session {
     if (this.#pickRef(recording, successor.selectedRef) !== null) {
       return;
     }
-    const provider = this.#providers.get(r.settings.playbackProvider);
-    if (provider === undefined) {
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
       return;
     }
+    const provider = routed.value;
     const source = new CancellationSource();
     this.#mappingSource = source;
     const occurrenceId = successor.occurrenceId;

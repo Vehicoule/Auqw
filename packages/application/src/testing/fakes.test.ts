@@ -250,6 +250,57 @@ async function providerTests(): Promise<void> {
   await p1;
   assertEqual(provider2.pendingCount('search'), 0);
 
+  // The 0.3.0 ops defer and settle like the rest, per declared caps.
+  const provider3 = new FakeProvider('deezer', [
+    'catalog.entity',
+    'radio.seed',
+  ]);
+  const entity = provider3.getEntity(
+    { provider: 'deezer', kind: 'album', id: 'a1' },
+    ctx(),
+  );
+  assertEqual(provider3.pendingCount('entity'), 1);
+  provider3.settleEntity(
+    ok({
+      entity: {
+        sourceRef: { provider: 'deezer', kind: 'album', id: 'a1' },
+        kind: 'album',
+        title: 'Album',
+        subtitle: null,
+        artwork: [],
+      },
+      items: [],
+      continuation: null,
+      complete: true,
+    }),
+  );
+  assert((await entity).ok);
+  const radio = provider3.radioSeed({ continuation: 'c1' }, ctx());
+  provider3.settleRadio(ok({ candidates: [], continuation: null }));
+  assert((await radio).ok);
+  // Undeclared ops are unsupported without queueing.
+  const lyrics = await provider3.getLyrics(
+    {
+      query: {
+        title: 't',
+        artist: null,
+        album: null,
+        durationMs: null,
+        isrc: null,
+      },
+      prefer: 'synced',
+    },
+    ctx(),
+  );
+  assert(!lyrics.ok && lyrics.error.kind === 'unsupported');
+  const search = await provider3.search(
+    { query: 'q', limit: 1, storefront: null },
+    ctx(),
+  );
+  assert(!search.ok && search.error.kind === 'unsupported');
+  assertEqual(provider3.pendingCount('lyrics'), 0);
+  assertEqual(provider3.pendingCount('search'), 0);
+
   assert(new SequenceIds().next('x') === 'x-1');
 }
 

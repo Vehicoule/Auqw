@@ -1,5 +1,6 @@
 import type {
   OperationContext,
+  ProviderCapability,
   Result,
   SourceRef,
 } from '@auqw/application';
@@ -41,6 +42,9 @@ const DOMAIN_TRACK = {
   explicit: false,
   genre: 'Rock',
   storefront: 'US',
+  artistRef: null,
+  albumRef: null,
+  isrc: null,
 };
 
 function attempt(requestId: string) {
@@ -157,8 +161,23 @@ class FakeHost implements AuqwExpoHostLike {
   }
 }
 
-function provider(host: FakeHost) {
-  return createPluginProvider(host, 'plugin-x', 'itunes');
+const ALL_CAPS: readonly ProviderCapability[] = [
+  'catalog.search',
+  'catalog.metadata',
+  'catalog.artwork',
+  'catalog.entity',
+  'playback.candidates',
+  'playback.resolve',
+  'lyrics.plain',
+  'lyrics.synced',
+  'radio.seed',
+];
+
+function provider(
+  host: FakeHost,
+  caps: readonly ProviderCapability[] = ALL_CAPS,
+) {
+  return createPluginProvider(host, 'plugin-x', 'itunes', caps);
 }
 
 /** Lets the pending registration land after startRequest resolves. */
@@ -470,6 +489,303 @@ async function startFailure(): Promise<void> {
   assert(!result.ok && result.error.kind === 'unavailable');
 }
 
+const WIRE_ENTITY = {
+  source_ref: { provider: 'deezer', kind: 'album', id: 'a1' },
+  kind: 'album',
+  title: 'Album Title',
+  subtitle: 'Artist',
+  artwork: [{ url: 'https://art.example/a.png', width: 500, height: 500 }],
+};
+
+// 10. catalog.entity payload and result decode, including the
+// complete flag and the optional continuation.
+async function entityOp(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const call = p.getEntity(
+    { provider: 'deezer', kind: 'album', id: 'a1' },
+    ctx().context,
+  );
+  assertDeepEqual(host.requests[0], {
+    pluginId: 'plugin-x',
+    capability: 'catalog.entity',
+    payload: { ref: { provider: 'deezer', kind: 'album', id: 'a1' } },
+  });
+  host.succeed('req-1', {
+    entity: WIRE_ENTITY,
+    items: [WIRE_TRACK],
+    continuation: 'next-1',
+    complete: false,
+  });
+  const result = await call;
+  assert(result.ok);
+  assertDeepEqual(result.value, {
+    entity: {
+      sourceRef: { provider: 'deezer', kind: 'album', id: 'a1' },
+      kind: 'album',
+      title: 'Album Title',
+      subtitle: 'Artist',
+      artwork: [
+        { url: 'https://art.example/a.png', width: 500, height: 500 },
+      ],
+    },
+    items: [DOMAIN_TRACK],
+    continuation: 'next-1',
+    complete: false,
+  });
+}
+
+// 11. Contradictory or malformed entity pages are invalid-response.
+async function entityMalformed(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const kindMismatch = p.getEntity(
+    { provider: 'deezer', kind: 'album', id: 'a1' },
+    ctx().context,
+  );
+  await flush();
+  host.succeed('req-1', {
+    entity: { ...WIRE_ENTITY, kind: 'artist' },
+    items: [],
+    complete: true,
+  });
+  const r1 = await kindMismatch;
+  assert(!r1.ok && r1.error.kind === 'invalid-response', 'kind mismatch');
+
+  const badComplete = p.getEntity(
+    { provider: 'deezer', kind: 'album', id: 'a1' },
+    ctx().context,
+  );
+  await flush();
+  host.succeed('req-2', {
+    entity: WIRE_ENTITY,
+    items: [],
+    complete: 'yes',
+  });
+  const r2 = await badComplete;
+  assert(!r2.ok && r2.error.kind === 'invalid-response', 'bad complete');
+}
+
+// 12. Lyrics payloads: prefer picks the wire capability; synced
+// degrades to lyrics.plain when the provider declares only that.
+async function lyricsOps(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const query = {
+    title: 'Song',
+    artist: 'Artist',
+    album: 'Album',
+    durationMs: 200_000,
+    isrc: null,
+  };
+  const synced = p.getLyrics({ query, prefer: 'synced' }, ctx().context);
+  assertDeepEqual(host.requests[0], {
+    pluginId: 'plugin-x',
+    capability: 'lyrics.synced',
+    payload: {
+      query: {
+        title: 'Song',
+        artist: 'Artist',
+        album: 'Album',
+        duration_ms: 200_000,
+        isrc: null,
+      },
+    },
+  });
+  host.succeed('req-1', {
+    state: 'synced',
+    lines: [
+      { t_ms: 0, text: 'first' },
+      { t_ms: 1_500, text: '' },
+    ],
+    matched: {
+      title: 'Song',
+      artist: 'Artist',
+      album: 'Album',
+      duration_ms: 199_000,
+    },
+  });
+  const syncedResult = await synced;
+  assert(syncedResult.ok);
+  assertDeepEqual(syncedResult.value, {
+    kind: 'synced',
+    lines: [
+      { tMs: 0, text: 'first' },
+      { tMs: 1_500, text: '' },
+    ],
+    matched: {
+      title: 'Song',
+      artist: 'Artist',
+      album: 'Album',
+      durationMs: 199_000,
+    },
+  });
+
+  const plain = p.getLyrics({ query, prefer: 'plain' }, ctx().context);
+  assertEqual(host.requests[1]?.capability, 'lyrics.plain');
+  host.succeed('req-2', {
+    state: 'instrumental',
+    matched: null,
+  });
+  const plainResult = await plain;
+  assert(plainResult.ok);
+  assertDeepEqual(plainResult.value, {
+    kind: 'instrumental',
+    matched: null,
+  });
+
+  // A plain-only provider answers a synced preference with an honest
+  // plain variant — never a conversion.
+  const plainOnly = provider(host, ['lyrics.plain']);
+  const degraded = plainOnly.getLyrics(
+    { query, prefer: 'synced' },
+    ctx().context,
+  );
+  await flush();
+  assertEqual(host.requests[2]?.capability, 'lyrics.plain');
+  host.succeed('req-3', { state: 'plain', text: 'words', matched: null });
+  const degradedResult = await degraded;
+  assert(degradedResult.ok);
+  assertDeepEqual(degradedResult.value, {
+    kind: 'plain',
+    text: 'words',
+    matched: null,
+  });
+}
+
+// 13. Honest absence and contradictory lyrics payloads.
+async function lyricsHonesty(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const query = {
+    title: 'Song',
+    artist: null,
+    album: null,
+    durationMs: null,
+    isrc: null,
+  };
+  const absent = p.getLyrics({ query, prefer: 'synced' }, ctx().context);
+  await flush();
+  host.succeed('req-1', { state: 'absent', matched: null });
+  const r1 = await absent;
+  assert(r1.ok);
+  assertDeepEqual(r1.value, { kind: 'unavailable', matched: null });
+
+  // synced state without lines is a contradiction, not empty lyrics.
+  const noLines = p.getLyrics({ query, prefer: 'synced' }, ctx().context);
+  await flush();
+  host.succeed('req-2', { state: 'synced', lines: null, matched: null });
+  const r2 = await noLines;
+  assert(!r2.ok && r2.error.kind === 'invalid-response');
+
+  // Plain text never presents as synced.
+  const plainText = p.getLyrics({ query, prefer: 'synced' }, ctx().context);
+  await flush();
+  host.succeed('req-3', { state: 'plain', text: 'x', matched: null });
+  const r3 = await plainText;
+  assert(!r3.ok && r3.error.kind === 'invalid-response');
+}
+
+// 14. radio.seed dual payload and continuation=null honest end.
+async function radioOps(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const seed = p.radioSeed(
+    { sourceRef: { provider: 'youtube-music', kind: 'track', id: 'v1' } },
+    ctx().context,
+  );
+  assertDeepEqual(host.requests[0], {
+    pluginId: 'plugin-x',
+    capability: 'radio.seed',
+    payload: {
+      source_ref: { provider: 'youtube-music', kind: 'track', id: 'v1' },
+    },
+  });
+  host.succeed('req-1', { items: [WIRE_TRACK], continuation: 'cont-1' });
+  const seedResult = await seed;
+  assert(seedResult.ok);
+  assertDeepEqual(seedResult.value, {
+    candidates: [DOMAIN_TRACK],
+    continuation: 'cont-1',
+  });
+
+  const next = p.radioSeed({ continuation: 'cont-1' }, ctx().context);
+  assertDeepEqual(host.requests[1]?.payload, { continuation: 'cont-1' });
+  host.succeed('req-2', { items: [], continuation: null });
+  const nextResult = await next;
+  assert(nextResult.ok);
+  assertDeepEqual(nextResult.value, {
+    candidates: [],
+    continuation: null,
+  });
+}
+
+// 15. An op outside the declared set is unsupported without a host call.
+async function undeclaredCapability(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host, ['catalog.search']);
+  const entity = await p.getEntity(
+    { provider: 'deezer', kind: 'album', id: 'a1' },
+    ctx().context,
+  );
+  assert(!entity.ok && entity.error.kind === 'unsupported');
+  const lyrics = await p.getLyrics(
+    {
+      query: {
+        title: 'x',
+        artist: null,
+        album: null,
+        durationMs: null,
+        isrc: null,
+      },
+      prefer: 'synced',
+    },
+    ctx().context,
+  );
+  assert(!lyrics.ok && lyrics.error.kind === 'unsupported');
+  const radio = await p.radioSeed(
+    { continuation: 'c' },
+    ctx().context,
+  );
+  assert(!radio.ok && radio.error.kind === 'unsupported');
+  const details = await p.getDetails(
+    [ref('itunes', '1')],
+    ctx().context,
+  );
+  assert(!details.ok && details.error.kind === 'unsupported');
+  assertEqual(host.requests.length, 0, 'no host request started');
+}
+
+// 16. Track metadata carries the 0.3.0 entity refs and isrc through.
+async function trackEntityEvidence(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const call = p.search(
+    { query: 'x', limit: 5, storefront: null },
+    ctx().context,
+  );
+  await flush();
+  host.succeed('req-1', {
+    items: [
+      {
+        ...WIRE_TRACK,
+        artist_ref: { provider: 'itunes', kind: 'artist', id: 'ar1' },
+        album_ref: { provider: 'itunes', kind: 'album', id: 'al1' },
+        isrc: 'USRC17607839',
+      },
+    ],
+    storefront: 'US',
+  });
+  const result = await call;
+  assert(result.ok);
+  assertDeepEqual(result.value.items[0], {
+    ...DOMAIN_TRACK,
+    artistRef: { provider: 'itunes', kind: 'artist', id: 'ar1' },
+    albumRef: { provider: 'itunes', kind: 'album', id: 'al1' },
+    isrc: 'USRC17607839',
+  });
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['payloadShapes', payloadShapes],
   ['concurrentCorrelation', concurrentCorrelation],
@@ -480,6 +796,13 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['dispose', dispose],
   ['earlyOutcome', earlyOutcome],
   ['startFailure', startFailure],
+  ['entityOp', entityOp],
+  ['entityMalformed', entityMalformed],
+  ['lyricsOps', lyricsOps],
+  ['lyricsHonesty', lyricsHonesty],
+  ['radioOps', radioOps],
+  ['undeclaredCapability', undeclaredCapability],
+  ['trackEntityEvidence', trackEntityEvidence],
 ];
 
 export async function run(): Promise<void> {

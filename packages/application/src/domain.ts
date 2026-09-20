@@ -27,6 +27,15 @@ export type TrackMetadata = {
   explicit: boolean | null;
   genre: string | null;
   storefront: string | null;
+  /**
+   * ABI 0.3.0 catalog evidence: entity refs into the provider's own
+   * catalog plus the recording's ISRC when the provider reports one
+   * (deezer does, feeding MatchEvidence.exactIsrc). Absent on
+   * pre-0.3 providers — the key may be missing or null.
+   */
+  artistRef?: EntityRef | null;
+  albumRef?: EntityRef | null;
+  isrc?: string | null;
 };
 
 export type VersionLabel =
@@ -97,6 +106,15 @@ export type Settings = {
   qualityKbps: number;
   theme: 'dark' | 'light' | 'oled' | 'system';
   prefetch: boolean;
+  /**
+   * Per-capability provider overrides for lyrics and radio; `null`
+   * (or absent) leaves routing to declared capabilities — the sole
+   * declaring provider serves, and for `radio.seed` the playback
+   * provider is preferred. Optional for schema-v2 compatibility:
+   * persistence of the overrides lands with the next schema.
+   */
+  lyricsProvider?: string | null;
+  radioProvider?: string | null;
 };
 
 const VERSION_LABELS: ReadonlySet<string> = new Set([
@@ -138,6 +156,22 @@ export function hasExactKeys(
 ) {
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
+}
+
+/**
+ * The exact-keys rule extended to declared optionals: every required
+ * key is present and no own key falls outside required ∪ optional.
+ */
+export function hasKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+) {
+  const own = Object.keys(value);
+  return (
+    own.every((k) => required.includes(k) || optional.includes(k)) &&
+    required.every((k) => Object.hasOwn(value, k))
+  );
 }
 
 export function isString(value: unknown, max: number): value is string {
@@ -267,18 +301,22 @@ export function isSourceMapping(value: unknown): value is SourceMapping {
 export function isTrackMetadata(value: unknown): value is TrackMetadata {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      'sourceRef',
-      'title',
-      'artist',
-      'album',
-      'durationMs',
-      'releaseYear',
-      'artwork',
-      'explicit',
-      'genre',
-      'storefront',
-    ]) &&
+    hasKeys(
+      value,
+      [
+        'sourceRef',
+        'title',
+        'artist',
+        'album',
+        'durationMs',
+        'releaseYear',
+        'artwork',
+        'explicit',
+        'genre',
+        'storefront',
+      ],
+      ['artistRef', 'albumRef', 'isrc'],
+    ) &&
     isTrackRef(value['sourceRef']) &&
     isString(value['title'], 512) &&
     isOptString(value['artist'], 512) &&
@@ -293,7 +331,14 @@ export function isTrackMetadata(value: unknown): value is TrackMetadata {
     value['artwork'].every(isArtworkRef) &&
     (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
     isOptString(value['genre'], 512) &&
-    isStorefront(value['storefront'])
+    isStorefront(value['storefront']) &&
+    (value['artistRef'] === undefined ||
+      value['artistRef'] === null ||
+      isEntityRef(value['artistRef'])) &&
+    (value['albumRef'] === undefined ||
+      value['albumRef'] === null ||
+      isEntityRef(value['albumRef'])) &&
+    (value['isrc'] === undefined || isOptString(value['isrc'], 64))
   );
 }
 
@@ -356,14 +401,18 @@ export function isRecording(value: unknown): value is Recording {
 export function isSettings(value: unknown): value is Settings {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      'catalogProvider',
-      'playbackProvider',
-      'storefront',
-      'qualityKbps',
-      'theme',
-      'prefetch',
-    ]) &&
+    hasKeys(
+      value,
+      [
+        'catalogProvider',
+        'playbackProvider',
+        'storefront',
+        'qualityKbps',
+        'theme',
+        'prefetch',
+      ],
+      ['lyricsProvider', 'radioProvider'],
+    ) &&
     isString(value['catalogProvider'], 64) &&
     isString(value['playbackProvider'], 64) &&
     isStorefront(value['storefront']) &&
@@ -375,7 +424,11 @@ export function isSettings(value: unknown): value is Settings {
       value['theme'] === 'light' ||
       value['theme'] === 'oled' ||
       value['theme'] === 'system') &&
-    typeof value['prefetch'] === 'boolean'
+    typeof value['prefetch'] === 'boolean' &&
+    (value['lyricsProvider'] === undefined ||
+      isOptString(value['lyricsProvider'], 64)) &&
+    (value['radioProvider'] === undefined ||
+      isOptString(value['radioProvider'], 64))
   );
 }
 
@@ -481,7 +534,7 @@ export function recordingFromMetadata(
     artwork: metadata.artwork,
     explicit: metadata.explicit,
     genre: metadata.genre,
-    isrc: null,
+    isrc: metadata.isrc ?? null,
     versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
     sourceRefs: [metadata.sourceRef],
     mappings: [],

@@ -2,7 +2,11 @@ import type { CancellationSignal } from '../cancellation.ts';
 import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, ok } from '../errors.ts';
-import type { SourceRef, TrackMetadata } from '../domain.ts';
+import type {
+  EntityRef,
+  SourceRef,
+  TrackMetadata,
+} from '../domain.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -13,8 +17,15 @@ import type {
   QueueProjection,
 } from '../ports/player.ts';
 import type {
+  EntityPage,
+  LyricsPreference,
+  LyricsQuery,
+  LyricsResult,
   PlayableResource,
+  ProviderCapability,
   ProviderPort,
+  RadioPage,
+  RadioSeed,
   RecordingQuery,
   SearchPage,
 } from '../ports/provider.ts';
@@ -170,10 +181,40 @@ export type RecordedCall = {
   readonly context?: OperationContext;
 };
 
-type ProviderMethod = 'search' | 'candidates' | 'resolve' | 'details';
+type ProviderMethod =
+  | 'search'
+  | 'candidates'
+  | 'resolve'
+  | 'details'
+  | 'entity'
+  | 'lyrics'
+  | 'radio';
+
+const ALL_CAPABILITIES: readonly ProviderCapability[] = [
+  'catalog.search',
+  'catalog.metadata',
+  'catalog.artwork',
+  'catalog.entity',
+  'playback.candidates',
+  'playback.resolve',
+  'lyrics.plain',
+  'lyrics.synced',
+  'radio.seed',
+];
+
+function unsupportedCall(capability: ProviderCapability) {
+  return {
+    ok: false as const,
+    error: appError(
+      'unsupported',
+      `provider does not declare ${capability}`,
+    ),
+  };
+}
 
 export class FakeProvider implements ProviderPort {
   readonly id: string;
+  readonly capabilities: readonly ProviderCapability[];
   readonly calls: RecordedCall[] = [];
   readonly cancelledSignals: CancellationSignal[] = [];
   #queues: Record<ProviderMethod, Deferred<Result<unknown>>[]> = {
@@ -181,10 +222,17 @@ export class FakeProvider implements ProviderPort {
     candidates: [],
     resolve: [],
     details: [],
+    entity: [],
+    lyrics: [],
+    radio: [],
   };
 
-  constructor(id = 'fake-provider') {
+  constructor(
+    id = 'fake-provider',
+    capabilities: readonly ProviderCapability[] = ALL_CAPABILITIES,
+  ) {
     this.id = id;
+    this.capabilities = capabilities;
   }
 
   #defer<T>(
@@ -223,6 +271,9 @@ export class FakeProvider implements ProviderPort {
     context: OperationContext,
   ): Promise<Result<SearchPage>> {
     this.calls.push({ method: 'search', input, context });
+    if (!this.capabilities.includes('catalog.search')) {
+      return Promise.resolve(unsupportedCall('catalog.search'));
+    }
     return this.#defer('search', context);
   }
 
@@ -241,6 +292,9 @@ export class FakeProvider implements ProviderPort {
     context: OperationContext,
   ): Promise<Result<readonly TrackMetadata[]>> {
     this.calls.push({ method: 'candidates', input, context });
+    if (!this.capabilities.includes('playback.candidates')) {
+      return Promise.resolve(unsupportedCall('playback.candidates'));
+    }
     return this.#defer('candidates', context);
   }
 
@@ -270,6 +324,9 @@ export class FakeProvider implements ProviderPort {
       input: { ref, input },
       context,
     });
+    if (!this.capabilities.includes('playback.resolve')) {
+      return Promise.resolve(unsupportedCall('playback.resolve'));
+    }
     return this.#defer('resolve', context);
   }
 
@@ -286,7 +343,87 @@ export class FakeProvider implements ProviderPort {
     context: OperationContext,
   ): Promise<Result<readonly TrackMetadata[]>> {
     this.calls.push({ method: 'getDetails', input: refs, context });
+    if (!this.capabilities.includes('catalog.metadata')) {
+      return Promise.resolve(unsupportedCall('catalog.metadata'));
+    }
     return this.#defer('details', context);
+  }
+
+  getEntity(
+    ref: EntityRef,
+    context: OperationContext,
+  ): Promise<Result<EntityPage>> {
+    this.calls.push({ method: 'getEntity', input: ref, context });
+    if (!this.capabilities.includes('catalog.entity')) {
+      return Promise.resolve(unsupportedCall('catalog.entity'));
+    }
+    return this.#defer('entity', context);
+  }
+
+  settleEntity(result: Result<EntityPage>): boolean {
+    return this.#settle('entity', 0, result);
+  }
+
+  settleEntityAt(index: number, result: Result<EntityPage>): boolean {
+    return this.#settle('entity', index, result);
+  }
+
+  /** The wire capability the prefer hint maps to under declared caps. */
+  #lyricsCapability(prefer: LyricsPreference): ProviderCapability | null {
+    if (prefer === 'plain') {
+      return this.capabilities.includes('lyrics.plain')
+        ? 'lyrics.plain'
+        : null;
+    }
+    if (this.capabilities.includes('lyrics.synced')) {
+      return 'lyrics.synced';
+    }
+    return this.capabilities.includes('lyrics.plain')
+      ? 'lyrics.plain'
+      : null;
+  }
+
+  getLyrics(
+    input: { query: LyricsQuery; prefer: LyricsPreference },
+    context: OperationContext,
+  ): Promise<Result<LyricsResult>> {
+    this.calls.push({ method: 'getLyrics', input, context });
+    const capability = this.#lyricsCapability(input.prefer);
+    if (capability === null) {
+      return Promise.resolve(
+        unsupportedCall(
+          input.prefer === 'plain' ? 'lyrics.plain' : 'lyrics.synced',
+        ),
+      );
+    }
+    return this.#defer('lyrics', context);
+  }
+
+  settleLyrics(result: Result<LyricsResult>): boolean {
+    return this.#settle('lyrics', 0, result);
+  }
+
+  settleLyricsAt(index: number, result: Result<LyricsResult>): boolean {
+    return this.#settle('lyrics', index, result);
+  }
+
+  radioSeed(
+    input: RadioSeed,
+    context: OperationContext,
+  ): Promise<Result<RadioPage>> {
+    this.calls.push({ method: 'radioSeed', input, context });
+    if (!this.capabilities.includes('radio.seed')) {
+      return Promise.resolve(unsupportedCall('radio.seed'));
+    }
+    return this.#defer('radio', context);
+  }
+
+  settleRadio(result: Result<RadioPage>): boolean {
+    return this.#settle('radio', 0, result);
+  }
+
+  settleRadioAt(index: number, result: Result<RadioPage>): boolean {
+    return this.#settle('radio', index, result);
   }
 
   settleDetails(result: Result<readonly TrackMetadata[]>): boolean {
