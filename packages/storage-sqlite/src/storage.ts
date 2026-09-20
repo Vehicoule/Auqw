@@ -219,8 +219,8 @@ export class SqliteStorage implements StoragePort {
         this.#check(signal);
         if (version === 0) {
           await conn.execute(
-            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
-             VALUES (1, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               this.#defaults.catalogProvider,
               this.#defaults.playbackProvider,
@@ -228,6 +228,9 @@ export class SqliteStorage implements StoragePort {
               this.#defaults.qualityKbps,
               this.#defaults.theme,
               this.#defaults.prefetch ? 1 : 0,
+              this.#defaults.lyricsProvider ?? null,
+              this.#defaults.radioProvider ?? null,
+              this.#defaults.artworkCacheBytes ?? null,
             ],
             signal,
           );
@@ -612,8 +615,8 @@ export class SqliteStorage implements StoragePort {
         }
         if (rewrite.settings) {
           await conn.execute(
-            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
-             VALUES (1, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               merged.settings.catalogProvider,
               merged.settings.playbackProvider,
@@ -621,6 +624,9 @@ export class SqliteStorage implements StoragePort {
               merged.settings.qualityKbps,
               merged.settings.theme,
               merged.settings.prefetch ? 1 : 0,
+              merged.settings.lyricsProvider ?? null,
+              merged.settings.radioProvider ?? null,
+              merged.settings.artworkCacheBytes ?? null,
             ],
             signal,
           );
@@ -946,8 +952,8 @@ export class SqliteStorage implements StoragePort {
           );
         }
         await conn.execute(
-          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
-           VALUES (1, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             doc.settings.catalogProvider,
             doc.settings.playbackProvider,
@@ -955,6 +961,9 @@ export class SqliteStorage implements StoragePort {
             doc.settings.qualityKbps,
             doc.settings.theme,
             doc.settings.prefetch ? 1 : 0,
+            doc.settings.lyricsProvider ?? null,
+            doc.settings.radioProvider ?? null,
+            doc.settings.artworkCacheBytes ?? null,
           ],
           signal,
         );
@@ -1520,6 +1529,15 @@ function decodeState(rows: TableRows): PersistedState | null {
     qualityKbps: reqInt(settingsRow['quality_kbps']),
     theme: settingsRow['theme'] as Settings['theme'],
     prefetch: reqBool(settingsRow['prefetch']),
+    ...(settingsRow['lyrics_provider'] === null
+      ? {}
+      : { lyricsProvider: optStr(settingsRow['lyrics_provider']) }),
+    ...(settingsRow['radio_provider'] === null
+      ? {}
+      : { radioProvider: optStr(settingsRow['radio_provider']) }),
+    ...(settingsRow['artwork_cache_bytes'] === null
+      ? {}
+      : { artworkCacheBytes: reqInt(settingsRow['artwork_cache_bytes']) }),
   };
   if (bad) {
     return null;

@@ -69,7 +69,10 @@ const MIGRATION_1: readonly string[] = [
   storefront TEXT,
   quality_kbps INTEGER NOT NULL CHECK (quality_kbps BETWEEN 1 AND 512),
   theme TEXT NOT NULL CHECK (theme IN ('dark','light','oled','system')),
-  prefetch INTEGER NOT NULL CHECK (prefetch IN (0,1))
+  prefetch INTEGER NOT NULL CHECK (prefetch IN (0,1)),
+  lyrics_provider TEXT,
+  radio_provider TEXT,
+  artwork_cache_bytes INTEGER CHECK (artwork_cache_bytes BETWEEN 16777216 AND 1073741824)
 )`,
   `CREATE TABLE attempt_traces (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
