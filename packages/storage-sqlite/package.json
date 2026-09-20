@@ -1,0 +1,17 @@
+{
+  "name": "@auqw/storage-sqlite",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/storage.test.ts"
+  },
+  "dependencies": {
+    "@auqw/application": "workspace:*"
+  }
+}
