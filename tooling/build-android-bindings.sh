@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/30.0.16248370}"
-JNILIBS="modules/plugin-host-expo/android/src/main/jniLibs"
-JAVA_OUT="modules/plugin-host-expo/android/src/main/java"
+JNILIBS="modules/auqw-expo/android/src/main/jniLibs"
+JAVA_OUT="modules/auqw-expo/android/src/main/java"
 
 cargo ndk -t arm64-v8a -o "$JNILIBS" build -p auqw-mobile-bindings --release
 

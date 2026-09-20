@@ -1,7 +1,7 @@
 import ExpoModulesCore
 import OSLog
 
-private let logger = Logger(subsystem: "com.vehicoule.auqw", category: "PluginHostExpo")
+private let logger = Logger(subsystem: "com.vehicoule.auqw", category: "AuqwExpo")
 private let eventOutcome = "onResolveOutcome"
 private let eventRequestOutcome = "onRequestOutcome"
 
@@ -59,11 +59,15 @@ final class RequestRelay: RequestListener, @unchecked Sendable {
   }
 }
 
-public class PluginHostExpoModule: Module {
+/// Host surface only. The player surface (prepare/play/…/phaseMarks)
+/// is Android-first: iOS injects through `AVAssetResourceLoaderDelegate`
+/// post-release, and `prefer: mp4` is required there — see
+/// docs/specs/playback.md ("Streaming seam").
+public class AuqwExpoModule: Module {
   private var host: PluginHost?
 
   public func definition() -> ModuleDefinition {
-    Name("PluginHostExpo")
+    Name("AuqwExpo")
 
     Events(eventOutcome, eventRequestOutcome)
 

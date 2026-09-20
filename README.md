@@ -42,7 +42,7 @@ artifacts instead of a sibling build is post–Slice 0 tooling
 | --- | --- |
 | `crates/plugin-host` | Wasmi host that loads and invokes provider plugins |
 | `crates/mobile-bindings` | UniFFI `PluginHost` over the host (Android + iOS) |
-| `modules/plugin-host-expo` | Expo module wrapping the UniFFI bindings (Android + iOS) |
+| `modules/auqw-expo` | Expo module wrapping the UniFFI bindings + Media3 player (Android + iOS) |
 | `apps/mobile` | Expo app (Slice 0 play screen) — see `apps/mobile/README.md` |
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |

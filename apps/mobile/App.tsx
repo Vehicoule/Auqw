@@ -19,7 +19,8 @@ import {
   startResolve,
   type ResolvedResource,
   type ResolveOutcome,
-} from 'auqw-plugin-host-expo';
+} from 'auqw-expo';
+import { runSeamLink } from './seam-dev';
 
 const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
 
@@ -659,6 +660,12 @@ export function App() {
       const match = url.match(/^auqw:\/\/(play|spin|cancel)\/?([^\s/]*)$/);
       if (match?.[1]) {
         runCommand(match[1], match[2]);
+        return;
+      }
+      // Slice 1.5 seam dev links (seam-file/seam-prepare/seam-attach/
+      // seam-metrics) — isolated in seam-dev.ts; drop with the harness.
+      if (url.startsWith('auqw://seam')) {
+        void runSeamLink(url);
       }
     };
     const sub = Linking.addEventListener('url', onUrl);

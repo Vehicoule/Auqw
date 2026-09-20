@@ -8,7 +8,8 @@ const config: ExpoConfig = {
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
   // auqw://play|spin|cancel deep links drive the Slice-0 gate runs
-  // (adb am start / simctl openurl) — no other deep links exist yet.
+  // (adb am start / simctl openurl); auqw://seam-* links are the
+  // Slice 1.5 seam harness — no other deep links exist yet.
   scheme: 'auqw',
   ios: {
     bundleIdentifier: 'com.vehicoule.auqw',

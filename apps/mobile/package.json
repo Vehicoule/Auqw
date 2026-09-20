@@ -14,7 +14,7 @@
     }
   },
   "dependencies": {
-    "auqw-plugin-host-expo": "workspace:*",
+    "auqw-expo": "workspace:*",
     "expo": "~57.0.24",
     "expo-asset": "~57.0.18",
     "expo-audio": "~57.0.5",

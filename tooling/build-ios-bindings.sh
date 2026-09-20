@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IOS_DIR="modules/plugin-host-expo/ios"
+IOS_DIR="modules/auqw-expo/ios"
 
 # aws-lc-sys C objects reference __chkstk_darwin, which lives in the
 # toolchain's compiler-rt archive — rustc doesn't link it on iOS

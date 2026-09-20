@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "sync-plugins": "node tooling/sync-plugins.mjs",
-    "typecheck": "pnpm --filter auqw-mobile --filter auqw-plugin-host-expo typecheck"
+    "typecheck": "pnpm --filter auqw-mobile --filter auqw-expo typecheck"
   },
   "devDependencies": {
     "typescript": "~6.0.3"
