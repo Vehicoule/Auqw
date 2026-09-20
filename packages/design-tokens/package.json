@@ -1,0 +1,15 @@
+{
+  "name": "@auqw/design-tokens",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/tokens.ts"
+  },
+  "scripts": {
+    "generate": "node tooling/generate.mjs",
+    "check": "node tooling/test.mjs --check",
+    "typecheck": "tsc --noEmit",
+    "test": "node tooling/test.mjs"
+  }
+}
