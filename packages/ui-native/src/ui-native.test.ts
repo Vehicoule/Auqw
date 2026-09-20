@@ -1,10 +1,14 @@
 import {
+  entityIdForRef,
   formatClock,
   formatRemaining,
+  toCollectionModel,
+  toEntityModel,
   toHomeModel,
   pickArtworkUrl,
   toLibraryModel,
   toPlayerModel,
+  toPlaylistModel,
   toQueueModel,
   toRailCard,
   toSearchRowModel,
@@ -17,14 +21,29 @@ import type {
 } from './view-models.ts';
 import {
   fixtureDiagnostics,
+  fixtureEntities,
+  fixtureEntityModel,
+  fixtureEntityModelError,
+  fixtureEntityModelLoading,
+  fixtureEntityModelPartial,
+  fixtureEntityPage,
+  fixtureEntityPagePartial,
+  fixtureEntitySourceRefs,
   fixtureHomeModel,
-  fixtureLikes,
   fixtureLibraryModel,
+  fixtureLibraryModelEmpty,
+  fixtureLikes,
   fixtureNavItems,
+  fixturePlayCounts,
+  fixturePlayHistory,
   fixturePlaybackBuffering,
   fixturePlaybackFailed,
   fixturePlaybackPaused,
   fixturePlaybackPlaying,
+  fixturePlaylistEntries,
+  fixturePlaylistModel,
+  fixturePlaylistModelEmpty,
+  fixturePlaylists,
   fixtureQueue,
   fixtureQueueModel,
   fixtureRecordings,
@@ -60,6 +79,18 @@ function assertEqual<T>(actual: T, expected: T, message?: string): void {
       message ??
       `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
+  }
+}
+
+function assertDeepEqual(
+  actual: unknown,
+  expected: unknown,
+  message?: string,
+): void {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  if (a !== e) {
+    throw new Error(message ?? `expected ${e}, got ${a}`);
   }
 }
 
@@ -360,33 +391,43 @@ function testQueueMapper(): void {
 }
 
 function testLibraryAndSettings(): void {
-  assertEqual(fixtureLibraryModel.likedCount, fixtureLikes.length);
+  const trackLikes = fixtureLikes.filter((l) => l.entityKind === 'track');
+  assertEqual(fixtureLibraryModel.likedCount, trackLikes.length);
   assertEqual(
     fixtureLibraryModel.collections.map((c) => c.key).join(','),
     'liked,downloads,top50,history',
     'library must keep the approved 2×2 collection anatomy',
   );
+  const byKey = new Map(
+    fixtureLibraryModel.collections.map((c) => [c.key, c]),
+  );
+  assertEqual(byKey.get('liked')?.enabled, true, 'liked tile live');
+  assertEqual(
+    byKey.get('downloads')?.enabled,
+    false,
+    'downloads stay honestly unavailable in Slice 2',
+  );
   assert(
-    fixtureLibraryModel.collections.every(
-      (c) => c.label.length > 0 && c.count >= 0,
-    ),
-    'every collection needs a label and honest count',
+    byKey.get('downloads')?.note !== null &&
+    byKey.get('downloads')?.note !== undefined,
+    'downloads tile must explain its disabled state',
+  );
+  assertEqual(byKey.get('top50')?.enabled, true, 'top 50 tile live');
+  assertEqual(byKey.get('history')?.enabled, true, 'history tile live');
+  assertEqual(
+    byKey.get('top50')?.count,
+    fixtureLibraryModel.collectionRows.top50.length,
+    'top 50 tile count matches its rows',
   );
   assertEqual(
-    fixtureLibraryModel.collections[0]?.enabled,
-    true,
-    'liked collection is active now',
-  );
-  assert(
-    fixtureLibraryModel.collections
-      .slice(1)
-      .every((c) => !c.enabled && c.note !== null),
-    'future collections must explain their disabled state',
+    byKey.get('history')?.count,
+    fixtureLibraryModel.collectionRows.history.length,
+    'history tile count matches its rows',
   );
   assertEqual(
     fixtureLibraryModel.canCreatePlaylist,
-    false,
-    'playlist creation is not implemented in Slice 1',
+    true,
+    'playlist creation is part of Slice 2',
   );
   assert(
     fixtureLibraryModel.artists.length >= 2,
@@ -401,10 +442,11 @@ function testLibraryAndSettings(): void {
   for (const item of fixtureLibraryModel.items) {
     assert(item.liked, 'library item not liked');
   }
-  const lib = toLibraryModel({ recordings: [], likes: [] });
-  assertEqual(lib.likedCount, 0);
-  assertEqual(lib.items.length, 0);
-  assertEqual(lib.artists.length, 0);
+  assertEqual(fixtureLibraryModelEmpty.likedCount, 0);
+  assertEqual(fixtureLibraryModelEmpty.items.length, 0);
+  assertEqual(fixtureLibraryModelEmpty.artists.length, 0);
+  assertEqual(fixtureLibraryModelEmpty.cards.length, 0);
+  assertEqual(fixtureLibraryModelEmpty.collectionRows.top50.length, 0);
   assertEqual(fixtureSettingsModel.theme, fixtureSettings.theme);
   assert(fixtureSettingsModel.rows.length >= 5, 'settings rows missing');
   const keys2 = new Set(fixtureSettingsModel.rows.map((r) => r.key));
@@ -416,6 +458,271 @@ function testLibraryAndSettings(): void {
   const model = toSettingsModel(fixtureSettings, fixtureDiagnostics);
   const prefetch = model.rows.find((r) => r.key === 'prefetch');
   assert(prefetch !== undefined && prefetch.kind === 'toggle');
+}
+
+function testLibraryCards(): void {
+  const cards = fixtureLibraryModel.cards;
+  const playlistCards = cards.filter((c) => c.kind === 'playlist');
+  assertEqual(
+    playlistCards.length,
+    fixturePlaylists.length,
+    'every playlist is a card',
+  );
+  const lateNight = playlistCards.find((c) => c.title === 'late night drives');
+  assert(lateNight !== undefined, 'missing late night card');
+  assertEqual(lateNight.playlistId, 'pl-late-night');
+  assertEqual(
+    lateNight.count,
+    fixturePlaylistEntries.filter((e) => e.playlistId === 'pl-late-night')
+      .length,
+    'playlist card count = entry count',
+  );
+  assert(
+    lateNight.artworkUrl !== null,
+    'playlist card artwork comes from its first entry',
+  );
+  const entityCards = cards.filter((c) => c.kind !== 'playlist');
+  const likedEntities = new Set(
+    fixtureLikes.filter((l) => l.entityKind !== 'track').map((l) => l.targetId),
+  );
+  assertEqual(
+    entityCards.length,
+    likedEntities.size,
+    'only liked entities become cards',
+  );
+  for (const card of entityCards) {
+    assert(
+      likedEntities.has(card.entityId ?? ''),
+      `unliked entity surfaced as a card: ${card.title}`,
+    );
+  }
+  const orphan = entityCards.find((c) => c.entityId === 'entity-orphan');
+  assert(orphan !== undefined, 'liked orphan entity should still be a card');
+  assertEqual(
+    orphan.entityRef,
+    null,
+    'entity without a source ref must not fake an openable ref',
+  );
+  const deadbeat = entityCards.find((c) => c.title === 'Deadbeat');
+  assert(deadbeat !== undefined && deadbeat.entityRef !== null);
+  assertEqual(deadbeat.entityRef?.id, 'dz-album-deadbeat');
+  const rail = fixtureLibraryModel.artists;
+  const portishead = rail.find((a) => a.name === 'Portishead');
+  assert(
+    portishead !== undefined && portishead.entityRef !== null,
+    'liked artist entity is openable in the rail',
+  );
+  assert(
+    rail.some((a) => a.entityRef === null),
+    'rail also carries derived (unopenable) artists from liked tracks',
+  );
+  const railNames = new Set(rail.map((a) => a.name));
+  assertEqual(railNames.size, rail.length, 'dup artist rail entries');
+}
+
+function testCollections(): void {
+  const top50 = toCollectionModel(fixtureLibraryModel, 'top50');
+  assertEqual(top50.title, 'top 50');
+  assert(top50.rows.length > 0, 'top 50 must not be empty');
+  // count desc ordering, ghost count dropped.
+  const counts = top50.rows.map((r) => r.badge ?? '');
+  assert(
+    counts.every((b) => /plays?$/.test(b)),
+    'top 50 rows carry a play-count badge',
+  );
+  assertEqual(top50.rows[0]?.recordingId, 'rec-dracula', 'top ranked first');
+  assert(
+    !top50.rows.some((r) => r.recordingId === 'rec-ghost'),
+    'unresolvable play counts drop honestly',
+  );
+  const expected = fixturePlayCounts
+    .filter((c) => c.recordingId !== 'rec-ghost')
+    .sort((a, b) => b.count - a.count || b.lastMs - a.lastMs)
+    .map((c) => c.recordingId);
+  assertDeepEqual(
+    top50.rows.map((r) => r.recordingId),
+    expected,
+    'top 50 must follow the playCounts ranking',
+  );
+  const history = toCollectionModel(fixtureLibraryModel, 'history');
+  assertEqual(
+    history.rows.length,
+    fixturePlayHistory.length,
+    'one row per counted play',
+  );
+  const sorted = [...fixturePlayHistory].sort(
+    (a, b) => b.playedMs - a.playedMs,
+  );
+  assertDeepEqual(
+    history.rows.map((r) => r.key),
+    sorted.map((e) => `hist-${e.eventId}`),
+    'history rows must be newest-first and event-keyed',
+  );
+  const dracula = history.rows.filter((r) => r.recordingId === 'rec-dracula');
+  assertEqual(
+    dracula.length,
+    2,
+    'repeated plays keep separate history rows',
+  );
+  assert(
+    new Set(dracula.map((r) => r.key)).size === 2,
+    'repeat history rows keep distinct keys',
+  );
+  const liked = toCollectionModel(fixtureLibraryModel, 'liked');
+  assertEqual(
+    liked.rows.length,
+    fixtureLibraryModel.items.length,
+    'liked collection mirrors the liked items',
+  );
+  const likedKeys = new Set(liked.rows.map((r) => r.key));
+  assertEqual(likedKeys.size, liked.rows.length, 'dup liked collection keys');
+  for (const row of [...top50.rows, ...history.rows, ...liked.rows]) {
+    checkTrackRowModel(row.row, `collection row ${row.key}`);
+  }
+}
+
+function testPlaylistModel(): void {
+  const model = fixturePlaylistModel;
+  assert(model !== null, 'playlist model missing');
+  assertEqual(model.name, 'late night drives');
+  const entries = fixturePlaylistEntries
+    .filter((e) => e.playlistId === 'pl-late-night')
+    .sort((a, b) => a.position - b.position);
+  assertEqual(model.count, entries.length);
+  assertDeepEqual(
+    model.entries.map((e) => e.entryId),
+    entries.map((e) => e.entryId),
+    'entries must follow position order',
+  );
+  const keys = new Set(model.entries.map((e) => e.row.key));
+  assertEqual(
+    keys.size,
+    model.entries.length,
+    'duplicate occurrences keep entryId row keys',
+  );
+  const dups = model.entries.filter((e) => e.recordingId === 'rec-dracula');
+  assertEqual(dups.length, 2, 'expected a duplicated recording');
+  assert(
+    dups.every((e) => e.duplicate),
+    'duplicate occurrences must be flagged for the repeat badge',
+  );
+  const pinned = model.entries.find((e) => e.entryId === 'pe-3');
+  assert(
+    pinned !== undefined &&
+    pinned.selectedRef !== null &&
+    pinned.selectedRef.id === 'ytm-dracula-pinned',
+    'pinned selectedRef must survive into the row model',
+  );
+  assert(
+    model.artworkUrl !== null,
+    'playlist artwork comes from its first entry',
+  );
+  const empty = fixturePlaylistModelEmpty;
+  assert(empty !== null && empty.count === 0 && empty.entries.length === 0);
+  const missing = toPlaylistModel({
+    playlistId: 'pl-missing',
+    playlists: fixturePlaylists,
+    playlistEntries: fixturePlaylistEntries,
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+  });
+  assertEqual(missing, null, 'unknown playlist must map to null');
+  const ghosted = toPlaylistModel({
+    playlistId: 'pl-late-night',
+    playlists: fixturePlaylists,
+    playlistEntries: [
+      {
+        entryId: 'pe-ghost',
+        playlistId: 'pl-late-night',
+        recordingId: 'rec-deleted',
+        position: 0.5,
+        selectedRef: null,
+        addedMs: 0,
+      },
+      ...fixturePlaylistEntries,
+    ],
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+  });
+  const ghost = ghosted?.entries.find((e) => e.entryId === 'pe-ghost');
+  assert(
+    ghost !== undefined && ghost.row.state === 'unavailable',
+    'dangling entries render unavailable, never fabricated',
+  );
+}
+
+function testEntityModel(): void {
+  const model = fixtureEntityModel;
+  assertEqual(model.phase, 'ready');
+  assertEqual(model.kind, 'album');
+  assertEqual(model.title, 'Deadbeat');
+  assertEqual(model.subtitle, 'Tame Impala');
+  assertEqual(model.complete, true);
+  assertEqual(model.liked, true, 'liked album shows liked state');
+  assertEqual(model.canLike, true);
+  assertEqual(model.hasMore, false);
+  assertEqual(model.items.length, fixtureEntityPage.items.length);
+  const itemKeys = new Set(model.items.map((i) => i.key));
+  assertEqual(itemKeys.size, model.items.length, 'dup entity item keys');
+  const partial = fixtureEntityModelPartial;
+  assertEqual(partial.phase, 'ready');
+  assertEqual(
+    partial.complete,
+    false,
+    'partial pages must stay visibly flagged',
+  );
+  assertEqual(partial.hasMore, true, 'continuation exposes load-more');
+  assertEqual(partial.liked, true, 'liked artist shows liked state');
+  assertEqual(
+    entityIdForRef(
+      fixtureEntitySourceRefs,
+      fixtureEntityPage.entity.sourceRef,
+    ),
+    'entity-deadbeat',
+    'entity refs resolve to their materialized entity',
+  );
+  assertEqual(
+    entityIdForRef(fixtureEntitySourceRefs, {
+      provider: 'deezer',
+      kind: 'album',
+      id: 'unknown',
+    }),
+    null,
+    'unknown refs resolve to null, never guessed',
+  );
+  const loading = fixtureEntityModelLoading;
+  assertEqual(loading.phase, 'loading');
+  const errored = fixtureEntityModelError;
+  assertEqual(errored.phase, 'error');
+  assert(errored.message !== null, 'error phase carries the typed message');
+  const unlinked = toEntityModel({
+    page: fixtureEntityPage,
+    error: null,
+    likes: fixtureLikes,
+    entitySourceRefs: [],
+  });
+  assertEqual(unlinked.liked, false);
+  assertEqual(
+    unlinked.canLike,
+    false,
+    'a page with no materialized entity cannot fake a like target',
+  );
+  const refreshError = toEntityModel({
+    page: fixtureEntityPagePartial,
+    error: {
+      kind: 'rate-limit',
+      message: 'rate limited',
+      retryable: true,
+    },
+    likes: fixtureLikes,
+    entitySourceRefs: fixtureEntitySourceRefs,
+  });
+  assertEqual(refreshError.phase, 'ready');
+  assert(
+    refreshError.message !== null,
+    'refresh errors surface as a flag while content stays',
+  );
+  assert(fixtureEntities.length >= 2, 'need entity fixtures');
 }
 
 function testHomeAndNav(): void {
@@ -528,7 +835,7 @@ function testDesignTokenAuthority(): void {
     );
     assert(
       !file.source.includes('fontSize: ') ||
-        file.name === 'primitives.tsx',
+      file.name === 'primitives.tsx',
       `${file.name}: literal font sizes must come from typography tokens`,
     );
     assert(
@@ -602,6 +909,10 @@ testSearchRowMapper();
 testPlayerMapper();
 testQueueMapper();
 testLibraryAndSettings();
+testLibraryCards();
+testCollections();
+testPlaylistModel();
+testEntityModel();
 testHomeAndNav();
 testSearchStates();
 testCoverageMatrix();

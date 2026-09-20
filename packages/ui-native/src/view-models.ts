@@ -1,13 +1,25 @@
 import type { ThemeName } from '@auqw/design-tokens';
 import type {
+  AppError,
   ArtworkRef,
+  Entity,
+  EntityKind,
+  EntityPage,
+  EntityRef,
+  EntitySourceRef,
   Like,
+  Playlist,
+  PlaylistEntry,
+  PlayCount,
+  PlayEvent,
   QueueSnapshot,
   Recording,
   SessionPlayback,
   Settings,
+  SourceRef,
   TrackMetadata,
 } from '@auqw/application';
+import { topPlayed } from '@auqw/application';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -93,23 +105,104 @@ export type HomeModel = {
   readonly suggestions: readonly RailCardModel[];
 };
 
+export type CollectionKey = 'liked' | 'downloads' | 'top50' | 'history';
+
+export type CollectionTileModel = {
+  readonly key: CollectionKey;
+  readonly label: string;
+  readonly count: number;
+  readonly enabled: boolean;
+  readonly note: string | null;
+};
+
+/**
+ * One row inside a collection list. `key` is the React key — unique
+ * per row, so repeated plays of one recording keep row identity;
+ * `recordingId` is the action target for play/like/playlist ops.
+ */
+export type CollectionRowModel = {
+  readonly key: string;
+  readonly recordingId: string;
+  readonly badge: string | null;
+  readonly row: TrackRowModel;
+};
+
+export type CollectionModel = {
+  readonly key: 'liked' | 'top50' | 'history';
+  readonly title: string;
+  readonly rows: readonly CollectionRowModel[];
+};
+
+/**
+ * An ownable-grid card: a user playlist or a liked album/artist
+ * entity. `playlistId` opens the playlist editor; `entityRef` opens
+ * the entity page (null when the entity carries no provider ref —
+ * the card then renders unopenable, honest absence).
+ */
+export type LibraryCardModel = {
+  readonly key: string;
+  readonly kind: 'playlist' | 'album' | 'artist';
+  readonly title: string;
+  readonly subtitle: string;
+  readonly count: number | null;
+  readonly artworkUrl: string | null;
+  readonly sortMs: number;
+  readonly playlistId: string | null;
+  readonly entityRef: EntityRef | null;
+  readonly entityId: string | null;
+};
+
+export type ArtistRailModel = {
+  readonly key: string;
+  readonly name: string;
+  readonly artworkUrl: string | null;
+  readonly entityRef: EntityRef | null;
+};
+
 export type LibraryModel = {
   readonly likedCount: number;
   readonly items: readonly TrackRowModel[];
-  readonly collections: readonly {
-    readonly key: 'liked' | 'downloads' | 'top50' | 'history';
-    readonly label: string;
-    readonly count: number;
-    readonly enabled: boolean;
-    readonly note: string | null;
-  }[];
-  readonly artists: readonly {
-    readonly key: string;
-    readonly name: string;
-    readonly artworkUrl: string | null;
-  }[];
+  readonly collections: readonly CollectionTileModel[];
+  readonly collectionRows: {
+    readonly liked: readonly CollectionRowModel[];
+    readonly top50: readonly CollectionRowModel[];
+    readonly history: readonly CollectionRowModel[];
+  };
+  readonly cards: readonly LibraryCardModel[];
+  readonly artists: readonly ArtistRailModel[];
   readonly recentlyAdded: readonly TrackRowModel[];
   readonly canCreatePlaylist: boolean;
+};
+
+export type PlaylistEntryModel = {
+  readonly entryId: string;
+  readonly recordingId: string;
+  readonly selectedRef: SourceRef | null;
+  readonly duplicate: boolean;
+  readonly row: TrackRowModel;
+};
+
+export type PlaylistModel = {
+  readonly playlistId: string;
+  readonly name: string;
+  readonly count: number;
+  readonly artworkUrl: string | null;
+  readonly entries: readonly PlaylistEntryModel[];
+};
+
+export type EntityScreenModel = {
+  readonly phase: 'loading' | 'ready' | 'error';
+  readonly kind: EntityKind | null;
+  readonly title: string | null;
+  readonly subtitle: string | null;
+  readonly artworkUrl: string | null;
+  readonly complete: boolean;
+  readonly liked: boolean;
+  readonly canLike: boolean;
+  readonly items: readonly TrackRowModel[];
+  readonly hasMore: boolean;
+  readonly loadingMore: boolean;
+  readonly message: string | null;
 };
 
 export type SettingsRowModel = {
@@ -401,9 +494,54 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   };
 }
 
+function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
+  return new Set(
+    likes
+      .filter((like) => like.entityKind !== 'track')
+      .map((like) => `${like.entityKind} ${like.targetId}`),
+  );
+}
+
+function playlistEntriesFor(
+  entries: readonly PlaylistEntry[],
+  playlistId: string,
+): PlaylistEntry[] {
+  return entries
+    .filter((entry) => entry.playlistId === playlistId)
+    .sort((a, b) => a.position - b.position);
+}
+
+function entityRefFor(
+  refs: readonly EntitySourceRef[],
+  entityId: string,
+): EntityRef | null {
+  const hit = refs.find((s) => s.entityId === entityId);
+  return hit === undefined ? null : hit.ref;
+}
+
+/** The app-side entity an EntityRef resolves to, when materialized. */
+export function entityIdForRef(
+  refs: readonly EntitySourceRef[],
+  ref: EntityRef,
+): string | null {
+  const hit = refs.find(
+    (s) =>
+      s.provider === ref.provider &&
+      s.ref.kind === ref.kind &&
+      s.ref.id === ref.id,
+  );
+  return hit === undefined ? null : hit.entityId;
+}
+
 export function toLibraryModel(input: {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly playlists: readonly Playlist[];
+  readonly playlistEntries: readonly PlaylistEntry[];
+  readonly playHistory: readonly PlayEvent[];
+  readonly playCounts: readonly PlayCount[];
+  readonly entities: readonly Entity[];
+  readonly entitySourceRefs: readonly EntitySourceRef[];
 }): LibraryModel {
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
@@ -418,20 +556,129 @@ export function toLibraryModel(input: {
     }
     items.push(toTrackRowModel(recording, { liked: liked.has(recording.id) }));
   }
-  const artists = new Map<
-    string,
-    { readonly key: string; readonly name: string; readonly artworkUrl: string | null }
-  >();
-  for (const item of items) {
-    if (item.artist === null || artists.has(item.artist)) {
-      continue;
-    }
-    artists.set(item.artist, {
-      key: item.artist,
-      name: item.artist,
-      artworkUrl: item.artworkUrl,
+
+  // Top 50: durable play-count ranking (count desc, recency, id) via
+  // the library's own topPlayed — unresolvable ids drop honestly.
+  const top50: CollectionRowModel[] = topPlayed(
+    input.playCounts,
+    input.recordings,
+  ).map((entry, index) => ({
+    key: `top50-${entry.recording.id}-${index}`,
+    recordingId: entry.recording.id,
+    badge: `${entry.count} ${entry.count === 1 ? 'play' : 'plays'}`,
+    row: toTrackRowModel(entry.recording, {
+      key: `top50-${entry.recording.id}-${index}`,
+      liked: liked.has(entry.recording.id),
+    }),
+  }));
+
+  // History: one row per counted play, most recent first; repeated
+  // plays of one recording keep their own event-keyed rows.
+  const history: CollectionRowModel[] = [...input.playHistory]
+    .sort((a, b) => b.playedMs - a.playedMs)
+    .flatMap((event) => {
+      const recording = byId.get(event.recordingId);
+      if (recording === undefined) {
+        return [];
+      }
+      return [
+        {
+          key: `hist-${event.eventId}`,
+          recordingId: recording.id,
+          badge: null,
+          row: toTrackRowModel(recording, {
+            key: `hist-${event.eventId}`,
+            liked: liked.has(recording.id),
+          }),
+        },
+      ];
+    });
+
+  const likedRows: CollectionRowModel[] = items.map((row) => ({
+    key: `liked-${row.key}`,
+    recordingId: row.key,
+    badge: null,
+    row: { ...row, key: `liked-${row.key}` },
+  }));
+
+  // Ownable grid: user playlists plus liked album/artist entities.
+  const entityLikes = likedEntityIds(input.likes);
+  const cards: LibraryCardModel[] = [];
+  for (const playlist of input.playlists) {
+    const entries = playlistEntriesFor(
+      input.playlistEntries,
+      playlist.playlistId,
+    );
+    const first = entries[0];
+    const artworkRecording =
+      first === undefined ? undefined : byId.get(first.recordingId);
+    cards.push({
+      key: `playlist-${playlist.playlistId}`,
+      kind: 'playlist',
+      title: playlist.name,
+      subtitle: `user playlist · ${entries.length} ${entries.length === 1 ? 'track' : 'tracks'}`,
+      count: entries.length,
+      artworkUrl:
+        artworkRecording === undefined
+          ? null
+          : pickArtworkUrl(artworkRecording.artwork),
+      sortMs: playlist.updatedMs,
+      playlistId: playlist.playlistId,
+      entityRef: null,
+      entityId: null,
     });
   }
+  for (const entity of input.entities) {
+    if (!entityLikes.has(`${entity.kind} ${entity.entityId}`)) {
+      continue;
+    }
+    cards.push({
+      key: `entity-${entity.entityId}`,
+      kind: entity.kind,
+      title: entity.title,
+      subtitle:
+        entity.kind === 'album'
+          ? `album · ${entity.artistName ?? '—'}`
+          : 'artist',
+      count: null,
+      artworkUrl: pickArtworkUrl(entity.artwork),
+      sortMs: entity.createdMs,
+      playlistId: null,
+      entityRef: entityRefFor(input.entitySourceRefs, entity.entityId),
+      entityId: entity.entityId,
+    });
+  }
+
+  // Followed-artists rail: liked artist entities (openable) then
+  // artist names derived from liked tracks (browsable only).
+  const rail = new Map<string, ArtistRailModel>();
+  for (const entity of input.entities) {
+    if (
+      entity.kind !== 'artist' ||
+      !entityLikes.has(`artist ${entity.entityId}`) ||
+      rail.has(entity.title)
+    ) {
+      continue;
+    }
+    rail.set(entity.title, {
+      key: `entity-${entity.entityId}`,
+      name: entity.title,
+      artworkUrl: pickArtworkUrl(entity.artwork),
+      entityRef: entityRefFor(input.entitySourceRefs, entity.entityId),
+    });
+  }
+  for (const item of items) {
+    if (item.artist === null || rail.has(item.artist)) {
+      continue;
+    }
+    rail.set(item.artist, {
+      key: `artist-${item.artist}`,
+      name: item.artist,
+      artworkUrl: item.artworkUrl,
+      entityRef: null,
+    });
+  }
+
   return {
     likedCount: items.length,
     items,
@@ -453,21 +700,153 @@ export function toLibraryModel(input: {
       {
         key: 'top50',
         label: 'top 50',
-        count: 0,
-        enabled: false,
-        note: 'needs play history',
+        count: top50.length,
+        enabled: true,
+        note: null,
       },
       {
         key: 'history',
         label: 'history',
-        count: 0,
-        enabled: false,
-        note: 'needs play history',
+        count: history.length,
+        enabled: true,
+        note: null,
       },
     ],
-    artists: [...artists.values()],
+    collectionRows: { liked: likedRows, top50, history },
+    cards,
+    artists: [...rail.values()],
     recentlyAdded: items.slice(0, 3),
-    canCreatePlaylist: false,
+    canCreatePlaylist: true,
+  };
+}
+
+export function toCollectionModel(
+  model: LibraryModel,
+  key: 'liked' | 'top50' | 'history',
+): CollectionModel {
+  const titles = { liked: 'liked', top50: 'top 50', history: 'history' } as const;
+  return { key, title: titles[key], rows: model.collectionRows[key] };
+}
+
+export function toPlaylistModel(input: {
+  readonly playlistId: string;
+  readonly playlists: readonly Playlist[];
+  readonly playlistEntries: readonly PlaylistEntry[];
+  readonly recordings: readonly Recording[];
+  readonly likes: readonly Like[];
+}): PlaylistModel | null {
+  const playlist = input.playlists.find(
+    (p) => p.playlistId === input.playlistId,
+  );
+  if (playlist === undefined) {
+    return null;
+  }
+  const byId = indexById(input.recordings);
+  const liked = likedIds(input.likes);
+  const entries = playlistEntriesFor(
+    input.playlistEntries,
+    playlist.playlistId,
+  );
+  const perRecording = new Map<string, number>();
+  for (const entry of entries) {
+    perRecording.set(
+      entry.recordingId,
+      (perRecording.get(entry.recordingId) ?? 0) + 1,
+    );
+  }
+  const rows: PlaylistEntryModel[] = entries.map((entry) => {
+    const recording = byId.get(entry.recordingId);
+    // Entry rows key on entryId — a duplicate keeps its own row.
+    const row: TrackRowModel =
+      recording === undefined
+        ? {
+          key: entry.entryId,
+          title: 'unknown track',
+          versionLabel: null,
+          artist: null,
+          durationMs: null,
+          artworkUrl: null,
+          liked: false,
+          playing: false,
+          state: 'unavailable',
+          note: 'unavailable',
+        }
+        : toTrackRowModel(recording, {
+          key: entry.entryId,
+          liked: liked.has(recording.id),
+        });
+    return {
+      entryId: entry.entryId,
+      recordingId: entry.recordingId,
+      selectedRef: entry.selectedRef,
+      duplicate: (perRecording.get(entry.recordingId) ?? 0) > 1,
+      row,
+    };
+  });
+  const first = entries[0];
+  const artworkRecording =
+    first === undefined ? undefined : byId.get(first.recordingId);
+  return {
+    playlistId: playlist.playlistId,
+    name: playlist.name,
+    count: rows.length,
+    artworkUrl:
+      artworkRecording === undefined
+        ? null
+        : pickArtworkUrl(artworkRecording.artwork),
+    entries: rows,
+  };
+}
+
+export function toEntityModel(input: {
+  readonly page: EntityPage | null;
+  readonly error: AppError | null;
+  readonly likes: readonly Like[];
+  readonly entitySourceRefs: readonly EntitySourceRef[];
+  readonly loadingMore?: boolean | undefined;
+}): EntityScreenModel {
+  const { page, error } = input;
+  if (page === null) {
+    return {
+      phase: error === null ? 'loading' : 'error',
+      kind: null,
+      title: null,
+      subtitle: null,
+      artworkUrl: null,
+      complete: true,
+      liked: false,
+      canLike: false,
+      items: [],
+      hasMore: false,
+      loadingMore: false,
+      message: error?.message ?? null,
+    };
+  }
+  const entityId = entityIdForRef(
+    input.entitySourceRefs,
+    page.entity.sourceRef,
+  );
+  const liked =
+    entityId !== null &&
+    input.likes.some(
+      (like) =>
+        like.entityKind === page.entity.kind &&
+        like.targetId === entityId,
+    );
+  return {
+    phase: 'ready',
+    kind: page.entity.kind,
+    title: page.entity.title,
+    subtitle: page.entity.subtitle,
+    artworkUrl: pickArtworkUrl(page.entity.artwork, 256),
+    complete: page.complete,
+    liked,
+    canLike: entityId !== null,
+    items: page.items.map((meta, index) => toSearchRowModel(meta, index)),
+    hasMore: page.continuation !== null,
+    loadingMore: input.loadingMore ?? false,
+    // A refresh error while content stays surfaces as a flagged note.
+    message: error?.message ?? null,
   };
 }
 

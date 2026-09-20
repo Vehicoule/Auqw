@@ -29,12 +29,23 @@ import { MiniPlayer } from './mini-player.tsx';
 import { StageSheet, TransportControls } from './stage-sheet.tsx';
 import { SearchScreen } from './search-screen.tsx';
 import { LibraryScreen } from './library-screen.tsx';
+import { CollectionScreen } from './collection-screen.tsx';
+import { PlaylistScreen } from './playlist-screen.tsx';
+import { EntityScreen } from './entity-screen.tsx';
+import { AddToPlaylistSheet, RowActionsSheet } from './sheets.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import { SettingsScreen } from './settings-screen.tsx';
 import { HomeScreen } from './home-screen.tsx';
 import {
+  fixtureCollectionModels,
+  fixtureEntityModel,
+  fixtureEntityModelError,
+  fixtureEntityModelPartial,
   fixtureHomeModel,
   fixtureLibraryModel,
+  fixtureLibraryModelEmpty,
+  fixturePlaylistModel,
+  fixturePlaylistModelEmpty,
   fixtureLyrics,
   fixtureNavItems,
   fixturePlayerBuffering,
@@ -632,15 +643,156 @@ function GalleryBody({
         )}
       </Section>
 
-      <Section title="library" note="liked tracks">
-        <Frame height={480}>
+      <Section title="library" note="collections · ownable grid · artists">
+        <Frame height={560}>
           <LibraryScreen
             model={fixtureLibraryModel}
             onPressItem={noop}
             onToggleLike={noop}
             onContext={noop}
+            onOpenCollection={noop}
+            onPlayCollection={noop}
+            onOpenCard={noop}
+            onOpenArtist={noop}
+            onCreatePlaylist={noop}
             scrollEnabled={false}
           />
+        </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
+          empty library · honest empties
+        </Text>
+        <Frame height={560}>
+          <LibraryScreen
+            model={fixtureLibraryModelEmpty}
+            onPressItem={noop}
+            onToggleLike={noop}
+            onContext={noop}
+            onOpenCollection={noop}
+            onPlayCollection={noop}
+            onOpenCard={noop}
+            onOpenArtist={noop}
+            onCreatePlaylist={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+      </Section>
+
+      <Section title="collection" note="top 50 · history ordering">
+        {fixtureCollectionModels.map((collection) => (
+          <View key={collection.key} style={{ marginBottom: theme.spacing.md }}>
+            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
+              {collection.title} · {collection.rows.length} rows
+            </Text>
+            <Frame height={380}>
+              <CollectionScreen
+                model={collection}
+                onBack={noop}
+                onPlayAll={noop}
+                onPressItem={noop}
+                onToggleLike={noop}
+                onContext={noop}
+                scrollEnabled={false}
+              />
+            </Frame>
+          </View>
+        ))}
+      </Section>
+
+      <Section title="playlist" note="duplicates · reorder · empty">
+        <Frame height={480}>
+          <PlaylistScreen
+            model={fixturePlaylistModel}
+            onBack={noop}
+            onPlayAll={noop}
+            onRename={noop}
+            onDelete={noop}
+            onPressEntry={noop}
+            onToggleLike={noop}
+            onRemoveEntry={noop}
+            onMoveEntry={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Frame height={480}>
+          <PlaylistScreen
+            model={fixturePlaylistModelEmpty}
+            onBack={noop}
+            onPlayAll={noop}
+            onRename={noop}
+            onDelete={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+      </Section>
+
+      <Section title="entity" note="complete · partial+continuation · error">
+        <Frame height={480}>
+          <EntityScreen
+            model={fixtureEntityModel}
+            onBack={noop}
+            onToggleLike={noop}
+            onPressItem={noop}
+            onContext={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Frame height={480}>
+          <EntityScreen
+            model={fixtureEntityModelPartial}
+            onBack={noop}
+            onToggleLike={noop}
+            onPressItem={noop}
+            onContext={noop}
+            onLoadMore={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Frame height={480}>
+          <EntityScreen
+            model={fixtureEntityModelError}
+            onBack={noop}
+            onRetry={noop}
+            scrollEnabled={false}
+          />
+        </Frame>
+      </Section>
+
+      <Section title="sheets" note="row actions · add to playlist">
+        <Frame height={420}>
+          <View style={{ flex: 1 }}>
+            <RowActionsSheet
+              title="Dracula"
+              actions={[
+                { key: 'add', label: 'add to playlist', icon: 'list-plus' },
+                { key: 'album', label: 'open album', icon: 'note' },
+                { key: 'artist', label: 'open artist', icon: 'library' },
+              ]}
+              onAction={noop}
+              onDismiss={noop}
+            />
+          </View>
+        </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Frame height={460}>
+          <View style={{ flex: 1 }}>
+            <AddToPlaylistSheet
+              playlists={fixtureLibraryModel.cards
+                .filter((c) => c.kind === 'playlist' && c.playlistId !== null)
+                .map((c) => ({
+                  playlistId: c.playlistId ?? '',
+                  name: c.title,
+                  count: c.count ?? 0,
+                  artworkUrl: c.artworkUrl,
+                }))}
+              onPick={noop}
+              onCreate={noop}
+              onDismiss={noop}
+            />
+          </View>
         </Frame>
       </Section>
 

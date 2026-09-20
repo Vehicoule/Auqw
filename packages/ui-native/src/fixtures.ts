@@ -1,5 +1,13 @@
 import type {
+  AppError,
+  Entity,
+  EntityPage,
+  EntitySourceRef,
   Like,
+  Playlist,
+  PlaylistEntry,
+  PlayCount,
+  PlayEvent,
   QueueSnapshot,
   Recording,
   SessionPlayback,
@@ -8,7 +16,10 @@ import type {
 } from '@auqw/application';
 import type { ThemeName } from '@auqw/design-tokens';
 import {
+  toCollectionModel,
+  toEntityModel,
   toLibraryModel,
+  toPlaylistModel,
   toQueueModel,
   toRailCard,
   toSearchRowModel,
@@ -16,12 +27,15 @@ import {
   toTrackRowModel,
 } from './view-models.ts';
 import type {
+  CollectionModel,
   DiagnosticsModel,
+  EntityScreenModel,
   HomeModel,
   LibraryModel,
   NavItemModel,
   PlatformVariant,
   PlayerModel,
+  PlaylistModel,
   LyricsModel,
   QueueModel,
   SearchStateModel,
@@ -201,6 +215,180 @@ export const fixtureLikes: readonly Like[] = [
     likedAtMs: 1_700_000_200_000,
   },
   { entityKind: 'track', targetId: 'rec-roads', likedAtMs: 1_700_000_100_000 },
+  {
+    entityKind: 'album',
+    targetId: 'entity-deadbeat',
+    likedAtMs: 1_700_000_180_000,
+  },
+  {
+    entityKind: 'artist',
+    targetId: 'entity-portishead',
+    likedAtMs: 1_700_000_160_000,
+  },
+  {
+    entityKind: 'album',
+    targetId: 'entity-orphan',
+    likedAtMs: 1_700_000_120_000,
+  },
+];
+
+// Owned album/artist entities — the ownable grid renders the liked
+// ones as cards and the artist in the followed rail.
+export const fixtureEntities: readonly Entity[] = [
+  {
+    entityId: 'entity-deadbeat',
+    kind: 'album',
+    title: 'Deadbeat',
+    artistName: 'Tame Impala',
+    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+    createdMs: 1_700_000_050_000,
+  },
+  {
+    entityId: 'entity-portishead',
+    kind: 'artist',
+    title: 'Portishead',
+    artistName: null,
+    artwork: [{ url: art('roads'), width: 300, height: 300 }],
+    createdMs: 1_700_000_040_000,
+  },
+  // Owned but unreferenced: no provider ref means the card renders
+  // unopenable — an honest absence, not a fake link.
+  {
+    entityId: 'entity-orphan',
+    kind: 'album',
+    title: 'Orphaned Pressing',
+    artistName: 'Lost & Found',
+    artwork: [],
+    createdMs: 1_699_000_000_000,
+  },
+];
+
+export const fixtureEntitySourceRefs: readonly EntitySourceRef[] = [
+  {
+    entityId: 'entity-deadbeat',
+    provider: 'deezer',
+    ref: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+  },
+  {
+    entityId: 'entity-portishead',
+    provider: 'deezer',
+    ref: { provider: 'deezer', kind: 'artist', id: 'dz-artist-portishead' },
+  },
+];
+
+// The orphan entity is liked but carries no EntitySourceRef — its
+// card must render unopenable (honest absence, never a fake link).
+
+export const fixturePlaylists: readonly Playlist[] = [
+  {
+    playlistId: 'pl-late-night',
+    name: 'late night drives',
+    createdMs: 1_699_000_000_000,
+    updatedMs: 1_700_000_250_000,
+  },
+  {
+    playlistId: 'pl-morning',
+    name: 'morning slow',
+    createdMs: 1_699_500_000_000,
+    updatedMs: 1_700_000_150_000,
+  },
+  {
+    playlistId: 'pl-fresh',
+    name: 'fresh ideas',
+    createdMs: 1_700_000_400_000,
+    updatedMs: 1_700_000_400_000,
+  },
+];
+
+// `pe-3` repeats `pe-1`'s recording — duplicates are occurrences and
+// must keep entryId row identity; `pe-3` also pins a selectedRef.
+export const fixturePlaylistEntries: readonly PlaylistEntry[] = [
+  {
+    entryId: 'pe-1',
+    playlistId: 'pl-late-night',
+    recordingId: 'rec-dracula',
+    position: 1,
+    selectedRef: null,
+    addedMs: 1_700_000_210_000,
+  },
+  {
+    entryId: 'pe-2',
+    playlistId: 'pl-late-night',
+    recordingId: 'rec-roads',
+    position: 2,
+    selectedRef: null,
+    addedMs: 1_700_000_220_000,
+  },
+  {
+    entryId: 'pe-3',
+    playlistId: 'pl-late-night',
+    recordingId: 'rec-dracula',
+    position: 3,
+    selectedRef: {
+      provider: 'youtube-music',
+      kind: 'track',
+      id: 'ytm-dracula-pinned',
+    },
+    addedMs: 1_700_000_250_000,
+  },
+  {
+    entryId: 'pe-4',
+    playlistId: 'pl-morning',
+    recordingId: 'rec-petit',
+    position: 1,
+    selectedRef: null,
+    addedMs: 1_700_000_160_000,
+  },
+  {
+    entryId: 'pe-5',
+    playlistId: 'pl-morning',
+    recordingId: 'rec-cjk',
+    position: 2,
+    selectedRef: null,
+    addedMs: 1_700_000_170_000,
+  },
+];
+
+// Deliberately unordered — the model must sort newest-first, and
+// `pev-1`/`pev-3` repeat one recording as separate event rows.
+export const fixturePlayHistory: readonly PlayEvent[] = [
+  {
+    eventId: 'pev-4',
+    recordingId: 'rec-petit',
+    occurrenceId: null,
+    playedMs: 1_700_000_700_000,
+    listenedMs: 200_000,
+  },
+  {
+    eventId: 'pev-1',
+    recordingId: 'rec-dracula',
+    occurrenceId: 'occ-3',
+    playedMs: 1_700_001_000_000,
+    listenedMs: 240_000,
+  },
+  {
+    eventId: 'pev-3',
+    recordingId: 'rec-dracula',
+    occurrenceId: 'occ-9',
+    playedMs: 1_700_000_800_000,
+    listenedMs: 240_000,
+  },
+  {
+    eventId: 'pev-2',
+    recordingId: 'rec-self-aware',
+    occurrenceId: 'occ-1',
+    playedMs: 1_700_000_900_000,
+    listenedMs: 180_000,
+  },
+];
+
+// `pc-ghost` counts a deleted recording — topPlayed drops it honestly.
+export const fixturePlayCounts: readonly PlayCount[] = [
+  { recordingId: 'rec-dracula', count: 12, lastMs: 1_700_001_000_000 },
+  { recordingId: 'rec-self-aware', count: 9, lastMs: 1_700_000_900_000 },
+  { recordingId: 'rec-petit', count: 5, lastMs: 1_700_000_700_000 },
+  { recordingId: 'rec-roads', count: 3, lastMs: 1_699_999_000_000 },
+  { recordingId: 'rec-ghost', count: 99, lastMs: 1_800_000_000_000 },
 ];
 
 export const fixtureUnavailableIds: ReadonlySet<string> = new Set([
@@ -454,9 +642,198 @@ export const fixtureSearchStates: readonly SearchStateModel[] = [
   },
 ];
 
+// Entity-page fixtures: one complete album page, one degraded artist
+// page (`complete:false` + a continuation token), mirroring what the
+// deezer `catalog.entity` shape degrades to when a section truncates.
+export const fixtureEntityItems: readonly TrackMetadata[] = [
+  {
+    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-nope' },
+    title: 'Nope',
+    artist: 'Tame Impala',
+    album: 'Deadbeat',
+    durationMs: 251_000,
+    releaseYear: 2025,
+    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
+  },
+  {
+    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-dracula' },
+    title: 'Dracula',
+    artist: 'Tame Impala',
+    album: 'Deadbeat',
+    durationMs: 242_000,
+    releaseYear: 2025,
+    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+    explicit: false,
+    genre: null,
+    storefront: 'AU',
+    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
+  },
+  {
+    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-loser' },
+    title: 'Loser',
+    artist: 'Tame Impala',
+    album: 'Deadbeat',
+    durationMs: 228_000,
+    releaseYear: 2025,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
+  },
+];
+
+export const fixtureEntityPage: EntityPage = {
+  entity: {
+    sourceRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    kind: 'album',
+    title: 'Deadbeat',
+    subtitle: 'Tame Impala',
+    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+  },
+  items: fixtureEntityItems,
+  continuation: null,
+  complete: true,
+};
+
+export const fixtureEntityItemsPartial: readonly TrackMetadata[] = [
+  {
+    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-roads' },
+    title: 'Roads',
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 302_000,
+    releaseYear: 1994,
+    artwork: [{ url: art('roads'), width: 300, height: 300 }],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+    artistRef: {
+      provider: 'deezer',
+      kind: 'artist',
+      id: 'dz-artist-portishead',
+    },
+  },
+  {
+    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-sour' },
+    title: 'Sour Times',
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 252_000,
+    releaseYear: 1994,
+    artwork: [{ url: art('roads'), width: 300, height: 300 }],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+    artistRef: {
+      provider: 'deezer',
+      kind: 'artist',
+      id: 'dz-artist-portishead',
+    },
+  },
+];
+
+export const fixtureEntityPagePartial: EntityPage = {
+  entity: {
+    sourceRef: {
+      provider: 'deezer',
+      kind: 'artist',
+      id: 'dz-artist-portishead',
+    },
+    kind: 'artist',
+    title: 'Portishead',
+    subtitle: '15 albums',
+    artwork: [{ url: art('roads'), width: 300, height: 300 }],
+  },
+  items: fixtureEntityItemsPartial,
+  continuation: 'opaque-next-page-token',
+  complete: false,
+};
+
+export const fixtureEntityError: AppError = {
+  kind: 'transient',
+  message: 'provider hiccup — the page may be incomplete',
+  retryable: true,
+};
+
 export const fixtureLibraryModel: LibraryModel = toLibraryModel({
   recordings: fixtureRecordings,
   likes: fixtureLikes,
+  playlists: fixturePlaylists,
+  playlistEntries: fixturePlaylistEntries,
+  playHistory: fixturePlayHistory,
+  playCounts: fixturePlayCounts,
+  entities: fixtureEntities,
+  entitySourceRefs: fixtureEntitySourceRefs,
+});
+
+export const fixtureLibraryModelEmpty: LibraryModel = toLibraryModel({
+  recordings: [],
+  likes: [],
+  playlists: [],
+  playlistEntries: [],
+  playHistory: [],
+  playCounts: [],
+  entities: [],
+  entitySourceRefs: [],
+});
+
+export const fixtureCollectionModels: readonly CollectionModel[] = [
+  toCollectionModel(fixtureLibraryModel, 'liked'),
+  toCollectionModel(fixtureLibraryModel, 'top50'),
+  toCollectionModel(fixtureLibraryModel, 'history'),
+];
+
+export const fixturePlaylistModel: PlaylistModel | null = toPlaylistModel({
+  playlistId: 'pl-late-night',
+  playlists: fixturePlaylists,
+  playlistEntries: fixturePlaylistEntries,
+  recordings: fixtureRecordings,
+  likes: fixtureLikes,
+});
+
+export const fixturePlaylistModelEmpty: PlaylistModel | null =
+  toPlaylistModel({
+    playlistId: 'pl-fresh',
+    playlists: fixturePlaylists,
+    playlistEntries: fixturePlaylistEntries,
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+  });
+
+export const fixtureEntityModel: EntityScreenModel = toEntityModel({
+  page: fixtureEntityPage,
+  error: null,
+  likes: fixtureLikes,
+  entitySourceRefs: fixtureEntitySourceRefs,
+});
+
+export const fixtureEntityModelPartial: EntityScreenModel = toEntityModel({
+  page: fixtureEntityPagePartial,
+  error: null,
+  likes: fixtureLikes,
+  entitySourceRefs: fixtureEntitySourceRefs,
+});
+
+export const fixtureEntityModelLoading: EntityScreenModel = toEntityModel({
+  page: null,
+  error: null,
+  likes: fixtureLikes,
+  entitySourceRefs: fixtureEntitySourceRefs,
+});
+
+export const fixtureEntityModelError: EntityScreenModel = toEntityModel({
+  page: null,
+  error: fixtureEntityError,
+  likes: fixtureLikes,
+  entitySourceRefs: fixtureEntitySourceRefs,
 });
 
 export const fixtureSettingsModel = toSettingsModel(
@@ -567,6 +944,10 @@ export const galleryCoverage: GalleryCoverage = {
     'stage-sheet',
     'search',
     'library',
+    'collection',
+    'playlist',
+    'entity',
+    'sheets',
     'queue',
     'settings',
     'home',

@@ -1,39 +1,68 @@
 import { useMemo, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
+import { Artwork, Icon, IconButton, Pressable, Text } from './primitives.tsx';
+import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { LibraryModel, TrackRowModel } from './view-models.ts';
+import { NameField } from './sheets.tsx';
+import type {
+  ArtistRailModel,
+  CollectionKey,
+  LibraryCardModel,
+  LibraryModel,
+} from './view-models.ts';
 
 export type LibraryScreenProps = {
   readonly model: LibraryModel;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onPressItem?: ((row: TrackRowModel) => void) | undefined;
-  readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
+  readonly onPressItem?: ((recordingId: string) => void) | undefined;
+  readonly onToggleLike?: ((recordingId: string) => void) | undefined;
+  readonly onContext?: ((recordingId: string) => void) | undefined;
+  readonly onOpenCollection?:
+  | ((key: 'liked' | 'top50' | 'history') => void)
+  | undefined;
+  readonly onPlayCollection?:
+  | ((key: 'liked' | 'top50' | 'history') => void)
+  | undefined;
+  readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
+  readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;
+  readonly onCreatePlaylist?: ((name: string) => void) | undefined;
 };
 
-function CollectionTile({
-  label,
-  count,
-  enabled,
-  note,
-  onPress,
-}: {
+const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
+  liked: 'heart',
+  downloads: 'download',
+  top50: 'queue',
+  history: 'clock',
+};
+
+const KIND_FILTERS: readonly {
+  readonly key: 'playlist' | 'album' | 'artist';
   readonly label: string;
-  readonly count: number;
-  readonly enabled: boolean;
-  readonly note: string | null;
-  readonly onPress?: (() => void) | undefined;
+}[] = [
+    { key: 'playlist', label: 'playlists' },
+    { key: 'album', label: 'albums' },
+    { key: 'artist', label: 'artists' },
+  ];
+
+function CollectionTile({
+  tile,
+  onOpen,
+  onPlay,
+}: {
+  readonly tile: LibraryModel['collections'][number];
+  readonly onOpen?: (() => void) | undefined;
+  readonly onPlay?: (() => void) | undefined;
 }) {
   const theme = useTheme();
+  const enabled = tile.enabled;
   return (
     <Pressable
       compact
-      onPress={onPress}
-      accessibilityLabel={`${label}, ${count} tracks`}
+      onPress={enabled ? onOpen : undefined}
+      accessibilityLabel={`${tile.label}, ${tile.count} tracks`}
       accessibilityState={{ disabled: !enabled }}
       disabled={!enabled}
       style={{
@@ -50,18 +79,36 @@ function CollectionTile({
       }}
     >
       <Icon
-        name={label === 'liked' ? 'heart' : label === 'downloads' ? 'download' : 'clock'}
+        name={COLLECTION_ICONS[tile.key]}
         size={15}
-        color={enabled ? theme.colors.accent : theme.colors.textSecondary}
+        color={
+          enabled ? theme.colors.accent : theme.colors.textSecondary
+        }
       />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="body" color={enabled ? 'bright' : 'primary'}>
-          {label}
+          {tile.label}
         </Text>
         <Text variant="metadata" color="secondary" numberOfLines={2}>
-          {note ?? `${count} ${count === 1 ? 'track' : 'tracks'}`}
+          {tile.note ??
+            `${tile.count} ${tile.count === 1 ? 'track' : 'tracks'}`}
         </Text>
       </View>
+      {/*
+       * Per-tile play affordance: nested pressable wins responder
+       * negotiation, so a play tap never opens the collection.
+       * Empty collections disable honestly.
+       */}
+      {enabled && (
+        <IconButton
+          icon="play"
+          size={30}
+          iconSize={13}
+          color={theme.colors.textBright}
+          accessibilityLabel={`play ${tile.label}`}
+          onPress={tile.count === 0 ? undefined : onPlay}
+        />
+      )}
     </Pressable>
   );
 }
@@ -97,6 +144,143 @@ function ToggleChip({
   );
 }
 
+function NewPlaylistCard({
+  view,
+  onPress,
+}: {
+  readonly view: 'grid' | 'list';
+  readonly onPress?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  if (view === 'list') {
+    return (
+      <Pressable
+        compact
+        onPress={onPress}
+        accessibilityLabel="new playlist"
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.md,
+          minHeight: theme.sizes.trackRow,
+          paddingHorizontal: theme.spacing.sm,
+          borderRadius: theme.radius.control,
+          borderWidth: theme.strokes.hairline,
+          borderStyle: 'dashed',
+          borderColor: theme.colors.fg25,
+        }}
+      >
+        <View
+          style={{
+            width: 40,
+            height: 40,
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Icon name="list-plus" size={15} color={theme.colors.textSecondary} />
+        </View>
+        <Text variant="body" color="secondary">
+          new playlist
+        </Text>
+      </Pressable>
+    );
+  }
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      accessibilityLabel="new playlist"
+      style={{
+        width: 104,
+        minHeight: 140,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: theme.spacing.sm,
+        borderRadius: theme.radius.thumb,
+        borderWidth: theme.strokes.progress,
+        borderStyle: 'dashed',
+        borderColor: theme.colors.fg25,
+      }}
+    >
+      <Icon name="list-plus" size={16} color={theme.colors.textSecondary} />
+      <Text
+        variant="metadata"
+        color="secondary"
+        style={{ textAlign: 'center' }}
+      >
+        new playlist
+      </Text>
+    </Pressable>
+  );
+}
+
+function LibraryCard({
+  card,
+  view,
+  onPress,
+}: {
+  readonly card: LibraryCardModel;
+  readonly view: 'grid' | 'list';
+  readonly onPress?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  const openable =
+    card.playlistId !== null || card.entityRef !== null;
+  const press = openable ? onPress : undefined;
+  const label = `${card.title}, ${card.subtitle}`;
+  if (view === 'list') {
+    return (
+      <Pressable
+        compact
+        onPress={press}
+        accessibilityLabel={label}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.md,
+          minHeight: theme.sizes.trackRow,
+          paddingHorizontal: theme.spacing.sm,
+          borderRadius: theme.radius.control,
+        }}
+      >
+        <Artwork url={card.artworkUrl} size={40} dimmed={!openable} />
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text variant="body" color="primary" numberOfLines={1}>
+            {card.title}
+          </Text>
+          <Text variant="metadata" color="secondary" numberOfLines={1}>
+            {card.subtitle}
+          </Text>
+        </View>
+        {openable && (
+          <Icon
+            name="chevron-right"
+            size={12}
+            color={theme.colors.textSecondary}
+          />
+        )}
+      </Pressable>
+    );
+  }
+  return (
+    <Pressable
+      compact
+      onPress={press}
+      accessibilityLabel={label}
+      style={{ width: 104 }}
+    >
+      <Artwork url={card.artworkUrl} size={104} dimmed={!openable} />
+      <Text variant="body" color="primary" numberOfLines={1}>
+        {card.title}
+      </Text>
+      <Text variant="metadata" color="secondary" numberOfLines={1}>
+        {card.subtitle}
+      </Text>
+    </Pressable>
+  );
+}
+
 export function LibraryScreen({
   model,
   topInset = 0,
@@ -104,29 +288,35 @@ export function LibraryScreen({
   onPressItem,
   onToggleLike,
   onContext,
+  onOpenCollection,
+  onPlayCollection,
+  onOpenCard,
+  onOpenArtist,
+  onCreatePlaylist,
 }: LibraryScreenProps) {
   const theme = useTheme();
-  const [filter, setFilter] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'all' | 'playlist' | 'album' | 'artist'>(
+    'all',
+  );
   const [sort, setSort] = useState<'recent' | 'title'>('recent');
   const [view, setView] = useState<'grid' | 'list'>('grid');
-  const filters = useMemo(() => {
-    const labels = new Set<string>();
-    for (const item of model.items) {
-      if (item.versionLabel !== null) {
-        labels.add(item.versionLabel);
-      }
-    }
-    return [...labels].slice(0, 4);
-  }, [model.items]);
-  const items = useMemo(() => {
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const kindsPresent = useMemo(() => {
+    const kinds = new Set(model.cards.map((card) => card.kind));
+    return KIND_FILTERS.filter((f) => kinds.has(f.key));
+  }, [model.cards]);
+
+  const cards = useMemo(() => {
     const filtered =
-      filter === null
-        ? model.items
-        : model.items.filter((item) => item.versionLabel === filter);
+      filter === 'all'
+        ? model.cards
+        : model.cards.filter((card) => card.kind === filter);
     return sort === 'recent'
-      ? filtered
+      ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
       : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
-  }, [filter, model.items, sort]);
+  }, [filter, model.cards, sort]);
 
   return (
     <ScrollView
@@ -143,6 +333,8 @@ export function LibraryScreen({
       <Text variant="display" color="bright">
         library
       </Text>
+
+      {/* collections 2×2 — liked · downloads · top 50 · history */}
       <View
         style={{
           flexDirection: 'row',
@@ -151,24 +343,38 @@ export function LibraryScreen({
           justifyContent: 'space-between',
         }}
       >
-        {model.collections.map((collection) => (
-          <View
-            key={collection.key}
-            style={{ flexBasis: '48.5%', flexGrow: 1 }}
-          >
-            <CollectionTile
-              label={collection.label}
-              count={collection.count}
-              enabled={collection.enabled}
-              note={collection.note}
-              onPress={collection.enabled ? () => setView('list') : undefined}
-            />
-          </View>
-        ))}
+        {model.collections.map((tile) => {
+          // 'downloads' has no collection screen — it never narrows
+          // into the openable keys.
+          const key = tile.key === 'downloads' ? null : tile.key;
+          return (
+            <View key={tile.key} style={{ flexBasis: '48.5%', flexGrow: 1 }}>
+              <CollectionTile
+                tile={tile}
+                onOpen={
+                  key === null || onOpenCollection === undefined
+                    ? undefined
+                    : () => onOpenCollection(key)
+                }
+                onPlay={
+                  key === null || onPlayCollection === undefined
+                    ? undefined
+                    : () => onPlayCollection(key)
+                }
+              />
+            </View>
+          );
+        })}
       </View>
 
       <View style={{ gap: theme.spacing.sm }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: theme.spacing.sm }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.sm,
+          }}
+        >
           <Text variant="heading" color="bright">
             your library
           </Text>
@@ -193,26 +399,60 @@ export function LibraryScreen({
         >
           <ToggleChip
             label="all"
-            active={filter === null}
-            onPress={() => setFilter(null)}
+            active={filter === 'all'}
+            onPress={() => setFilter('all')}
           />
-          {filters.map((label) => (
+          {kindsPresent.map((f) => (
             <ToggleChip
-              key={label}
-              label={label}
-              active={filter === label}
-              onPress={() => setFilter(label)}
+              key={f.key}
+              label={f.label}
+              active={filter === f.key}
+              onPress={() => setFilter(f.key)}
             />
           ))}
         </View>
       </View>
 
-      {items.length === 0 ? (
-        <EmptyState
-          title="nothing here yet"
-          hint="liked tracks land here"
-          icon="heart"
+      {creating && (
+        <NameField
+          value={draft}
+          placeholder="new playlist name"
+          autoFocus
+          onChange={setDraft}
+          onSubmit={
+            onCreatePlaylist === undefined
+              ? undefined
+              : (name) => {
+                onCreatePlaylist(name);
+                setDraft('');
+                setCreating(false);
+              }
+          }
+          onCancel={() => {
+            setDraft('');
+            setCreating(false);
+          }}
         />
+      )}
+
+      {cards.length === 0 && !creating ? (
+        <View style={{ gap: theme.spacing.lg }}>
+          <EmptyState
+            title="nothing here yet"
+            hint="playlists and liked albums land here"
+            icon="list-plus"
+          />
+          <View style={{ alignItems: 'center' }}>
+            <NewPlaylistCard
+              view="grid"
+              onPress={
+                onCreatePlaylist === undefined
+                  ? undefined
+                  : () => setCreating(true)
+              }
+            />
+          </View>
+        </View>
       ) : view === 'grid' ? (
         <View
           style={{
@@ -221,61 +461,49 @@ export function LibraryScreen({
             gap: theme.spacing.lg,
           }}
         >
-          {items.map((item) => (
-            <Pressable
-              key={item.key}
-              compact
+          {cards.map((card) => (
+            <LibraryCard
+              key={card.key}
+              card={card}
+              view="grid"
               onPress={
-                onPressItem === undefined ? undefined : () => onPressItem(item)
-              }
-              accessibilityLabel={`${item.title}${item.artist === null ? '' : `, ${item.artist}`}`}
-              style={{ width: 104 }}
-            >
-              <Artwork url={item.artworkUrl} size={104} />
-              <Text variant="body" color="primary" numberOfLines={1}>
-                {item.title}
-              </Text>
-              <Text variant="metadata" color="secondary" numberOfLines={1}>
-                {item.artist ?? '—'}
-              </Text>
-            </Pressable>
-          ))}
-          <View
-            style={{
-              width: 104,
-              minHeight: 140,
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: theme.spacing.sm,
-              borderRadius: theme.radius.thumb,
-              borderWidth: theme.strokes.progress,
-              borderStyle: 'dashed',
-              borderColor: theme.colors.fg25,
-            }}
-          >
-            <Icon name="list-plus" size={16} color={theme.colors.textSecondary} />
-            <Text variant="metadata" color="secondary" style={{ textAlign: 'center' }}>
-              playlists arrive in Slice 2
-            </Text>
-          </View>
-        </View>
-      ) : (
-        <View style={{ marginHorizontal: -theme.spacing.sm }}>
-          {items.map((item) => (
-            <TrackRow
-              key={item.key}
-              row={item}
-              onPress={
-                onPressItem === undefined ? undefined : () => onPressItem(item)
-              }
-              onToggleLike={
-                onToggleLike === undefined ? undefined : () => onToggleLike(item)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(item)
+                onOpenCard === undefined ? undefined : () => onOpenCard(card)
               }
             />
           ))}
+          {creating ? null : (
+            <NewPlaylistCard
+              view="grid"
+              onPress={
+                onCreatePlaylist === undefined
+                  ? undefined
+                  : () => setCreating(true)
+              }
+            />
+          )}
+        </View>
+      ) : (
+        <View style={{ marginHorizontal: -theme.spacing.sm, gap: 2 }}>
+          {cards.map((card) => (
+            <LibraryCard
+              key={card.key}
+              card={card}
+              view="list"
+              onPress={
+                onOpenCard === undefined ? undefined : () => onOpenCard(card)
+              }
+            />
+          ))}
+          {creating ? null : (
+            <NewPlaylistCard
+              view="list"
+              onPress={
+                onCreatePlaylist === undefined
+                  ? undefined
+                  : () => setCreating(true)
+              }
+            />
+          )}
         </View>
       )}
 
@@ -286,19 +514,38 @@ export function LibraryScreen({
           </Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <View style={{ flexDirection: 'row', gap: theme.spacing.lg }}>
-              {model.artists.map((artist) => (
-                <View key={artist.key} style={{ width: 76, alignItems: 'center' }}>
-                  <Artwork url={artist.artworkUrl} size={76} cornerRadius={38} />
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    numberOfLines={2}
-                    style={{ marginTop: theme.spacing.xs, textAlign: 'center' }}
+              {model.artists.map((artist) => {
+                const openable =
+                  artist.entityRef !== null && onOpenArtist !== undefined;
+                return (
+                  <Pressable
+                    key={artist.key}
+                    compact
+                    onPress={
+                      openable ? () => onOpenArtist(artist) : undefined
+                    }
+                    accessibilityLabel={artist.name}
+                    style={{ width: 76, alignItems: 'center' }}
                   >
-                    {artist.name}
-                  </Text>
-                </View>
-              ))}
+                    <Artwork
+                      url={artist.artworkUrl}
+                      size={76}
+                      cornerRadius={38}
+                    />
+                    <Text
+                      variant="metadata"
+                      color="secondary"
+                      numberOfLines={2}
+                      style={{
+                        marginTop: theme.spacing.xs,
+                        textAlign: 'center',
+                      }}
+                    >
+                      {artist.name}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
           </ScrollView>
         </View>
@@ -315,10 +562,19 @@ export function LibraryScreen({
                 key={`recent-${item.key}`}
                 row={item}
                 onPress={
-                  onPressItem === undefined ? undefined : () => onPressItem(item)
+                  onPressItem === undefined
+                    ? undefined
+                    : () => onPressItem(item.key)
                 }
                 onToggleLike={
-                  onToggleLike === undefined ? undefined : () => onToggleLike(item)
+                  onToggleLike === undefined
+                    ? undefined
+                    : () => onToggleLike(item.key)
+                }
+                onContext={
+                  onContext === undefined
+                    ? undefined
+                    : () => onContext(item.key)
                 }
               />
             ))}

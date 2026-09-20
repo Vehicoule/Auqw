@@ -69,6 +69,25 @@ export type { SearchScreenProps } from './search-screen.tsx';
 export { LibraryScreen } from './library-screen.tsx';
 export type { LibraryScreenProps } from './library-screen.tsx';
 
+export { CollectionScreen } from './collection-screen.tsx';
+export type { CollectionScreenProps } from './collection-screen.tsx';
+
+export { PlaylistScreen } from './playlist-screen.tsx';
+export type { PlaylistScreenProps } from './playlist-screen.tsx';
+
+export { EntityScreen } from './entity-screen.tsx';
+export type { EntityScreenProps } from './entity-screen.tsx';
+
+export {
+    AddToPlaylistSheet,
+    NameField,
+    RowActionsSheet,
+} from './sheets.tsx';
+export type {
+    PlaylistPickerItem,
+    SheetAction,
+} from './sheets.tsx';
+
 export { QueueScreen } from './queue-screen.tsx';
 export type { QueueScreenProps } from './queue-screen.tsx';
 
