@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/auqw-stream",
+    "crates/integration-runner",
     "crates/mobile-bindings",
     "crates/plugin-host",
     "sdk/conformance/echo",

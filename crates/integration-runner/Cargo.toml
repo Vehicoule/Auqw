@@ -1,0 +1,19 @@
+[package]
+name = "auqw-integration-runner"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Headless plugin pipeline: verify signed releases, then drive canned-upstream journeys through the production host"
+
+[lints]
+workspace = true
+
+[dependencies]
+auqw-plugin-host = { path = "../plugin-host" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+base64 = "0.22.1"
+ed25519-dalek = "2.2"
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
