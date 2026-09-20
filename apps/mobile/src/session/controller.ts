@@ -14,12 +14,16 @@ import { createPluginProvider } from '../adapters/plugin-provider.ts';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
 
-// Metro asset requires must be static literals. Both pairs are
+// Metro asset requires must be static literals. All pairs are
 // produced by tooling/sync-plugins.mjs per providers.lock.json.
 const ITUNES_WASM: number = require('../../assets/plugins/itunes.wasm');
 const ITUNES_MANIFEST: unknown = require('../../assets/plugins/itunes.manifest.json');
 const YOUTUBE_MUSIC_WASM: number = require('../../assets/plugins/youtube-music.wasm');
 const YOUTUBE_MUSIC_MANIFEST: unknown = require('../../assets/plugins/youtube-music.manifest.json');
+const DEEZER_WASM: number = require('../../assets/plugins/deezer.wasm');
+const DEEZER_MANIFEST: unknown = require('../../assets/plugins/deezer.manifest.json');
+const LYRICS_LRCLIB_WASM: number = require('../../assets/plugins/lyrics-lrclib.wasm');
+const LYRICS_LRCLIB_MANIFEST: unknown = require('../../assets/plugins/lyrics-lrclib.manifest.json');
 
 /**
  * Defaults for a fresh install. `qualityKbps: 128` is the spec's
@@ -80,7 +84,7 @@ export type SessionControllerOptions = {
 
 /**
  * Wires a plugin-host module to an application `Session`: host
- * config, both bundled plugins, the two ProviderPorts, expo-sqlite
+ * config, all four bundled plugins, their ProviderPorts, expo-sqlite
  * storage, and the chosen player. `host` is injected — satisfied by
  * `auqw-plugin-host-expo` today and `auqw-expo` at the seam merge.
  *
@@ -97,13 +101,18 @@ export async function createSessionController(
     fuelTotal: 2_000_000_000,
     potProviderUrl: options.potProviderUrl,
   });
-  const [itunesPluginId, youtubeMusicPluginId] = await Promise.all([
-    loadBundledPlugin(host, ITUNES_WASM, ITUNES_MANIFEST),
-    loadBundledPlugin(host, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
-  ]);
+  const [itunesPluginId, youtubeMusicPluginId, deezerPluginId, lyricsLrclibPluginId] =
+    await Promise.all([
+      loadBundledPlugin(host, ITUNES_WASM, ITUNES_MANIFEST),
+      loadBundledPlugin(host, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
+      loadBundledPlugin(host, DEEZER_WASM, DEEZER_MANIFEST),
+      loadBundledPlugin(host, LYRICS_LRCLIB_WASM, LYRICS_LRCLIB_MANIFEST),
+    ]);
   const providers: PluginProvider[] = [
     createPluginProvider(host, itunesPluginId, 'itunes'),
     createPluginProvider(host, youtubeMusicPluginId, 'youtube-music'),
+    createPluginProvider(host, deezerPluginId, 'deezer'),
+    createPluginProvider(host, lyricsLrclibPluginId, 'lyrics-lrclib'),
   ];
   const storage = new SqliteStorage(
     await createExpoSqliteDriver(options.databasePath),
