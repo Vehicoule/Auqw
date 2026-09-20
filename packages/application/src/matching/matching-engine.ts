@@ -277,24 +277,13 @@ export class MatchingEngine {
       }
       if (mapping?.status === 'user-confirmed') {
         // A user-confirmed mapping wins before auto scoring; evidence
-        // is still computed for the record (null if it would have
-        // been hard-rejected, in which case the user verdict stands
-        // with a zero-score evidence record).
-        const scored = this.evidence(recording, candidate);
-        const evidence: MatchEvidence =
-          scored?.evidence ??
-          {
-            titleSimilarity: 0,
-            artistSimilarity: null,
-            durationDeltaMs: null,
-            exactIsrc: false,
-            score: 0,
-            versionLabels: extractVersionLabels(
-              candidate.title,
-              candidate.explicit,
-            ),
-          };
-        return { type: 'matched', candidate, evidence };
+        // is still computed for the record (the user verdict stands
+        // even when the candidate would have been hard-rejected).
+        return {
+          type: 'matched',
+          candidate,
+          evidence: this.userEvidence(recording, candidate),
+        };
       }
       eligible.push({ candidate, index: i });
     }
@@ -331,6 +320,31 @@ export class MatchingEngine {
       return { type: 'ambiguous', candidates: near };
     }
     return { type: 'unavailable', reason: 'below threshold' };
+  }
+
+  /**
+   * Evidence recorded alongside a user verdict (confirm or reject):
+   * the computed score, or a zero record when the candidate would
+   * have been hard-rejected — the verdict is the user's, the evidence
+   * is provenance only.
+   */
+  static userEvidence(
+    recording: Recording,
+    candidate: MatchCandidate,
+  ): MatchEvidence {
+    return (
+      this.evidence(recording, candidate)?.evidence ?? {
+        titleSimilarity: 0,
+        artistSimilarity: null,
+        durationDeltaMs: null,
+        exactIsrc: false,
+        score: 0,
+        versionLabels: extractVersionLabels(
+          candidate.title,
+          candidate.explicit,
+        ),
+      }
+    );
   }
 
   /**
