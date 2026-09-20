@@ -1586,7 +1586,10 @@ function Main({
             setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
             void (async () => {
               try {
-                const text = await new File(importPath).text();
+                const uri = importPath.startsWith('file://')
+                  ? importPath
+                  : `file://${importPath}`;
+                const text = await new File(uri).text();
                 const preview = previewImport(text);
                 if (!preview.ok) {
                   setTransfer((prev) => ({
