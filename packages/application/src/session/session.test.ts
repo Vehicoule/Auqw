@@ -1410,6 +1410,45 @@ async function projectionBasics(): Promise<void> {
   }
 }
 
+async function backgroundTransitionChain(): Promise<void> {
+  const r = rig(persisted({
+    recordings: ['A', 'B', 'C'].map((id) => recording(`r${id}`, [ref('youtube-music', `y${id}`)])),
+    queue: {
+      revision: 2,
+      occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`, ref('youtube-music', `y${id}`))),
+      currentOccurrenceId: 'oA', positionMs: 0, mode: 'paused',
+    },
+  }));
+  await restoreOk(r);
+  await pump();
+  const projection = r.player.projections.at(-1);
+  assert(projection !== undefined);
+  const identity = (id: string): PlaybackIdentity => ({ attemptId: `svc-${id}`, queueRev: projection.queueRev });
+  const move = (from: string, to: string) => transitionEvent(r, {
+    from, to, reason: 'ended', positionMs: 0,
+    identity: identity(to), handle: `h-${to}`,
+    projectionId: projection.projectionId, projectedQueueRev: projection.queueRev,
+  });
+  const first = move('oA', 'oB');
+  // Native already reached C before JS can consume either event.
+  r.player.emit(first);
+  r.player.emit(statusEvent(identity('oB'), 'h-oB', 'ended', 100));
+  r.player.emit(move('oB', 'oC'));
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'queued native moves reconcile through the immutable projection');
+  assertEqual(r.player.projections.at(-1)?.projectionId, projection.projectionId, 'reconciliation does not supersede the service cursor');
+  r.player.emit(statusEvent(identity('oC'), 'h-oC', 'playing', 321));
+  r.player.emit(first);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'old move cannot resurrect B');
+  assertEqual(readyOf(r).queue.positionMs, 321, 'native identity remains valid after reconciliation');
+  await r.session.pause();
+  await pump();
+  r.player.emit(move('oC', 'oB'));
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'new app intent rejects the old projection');
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -1590,7 +1629,7 @@ async function transitionReconcile(): Promise<void> {
   // a stale queueRev here would reject every later status.
   assertEqual(
     adoptedIdentity.queueRev,
-    readyOf(r).queue.revision,
+    r.player.projections.at(-1)?.queueRev,
     'adopted identity tracks installed revision',
   );
   const revBefore = readyOf(r).queue.revision;
@@ -2416,7 +2455,24 @@ async function disposeCleanup(): Promise<void> {
   }
 }
 
+async function concurrentLikes(): Promise<void> {
+  const r = rig(persisted({ recordings: [
+    recording('r1', [ref('itunes', 'i1')]),
+    recording('r2', [ref('itunes', 'i2')]),
+  ] }));
+  await restoreOk(r);
+  const results = await Promise.all([
+    r.session.toggleLike('r1'), r.session.toggleLike('r2'),
+  ]);
+  assert(results.every((result) => result.ok));
+  assertDeepEqual(readyOf(r).likes.map((like) => like.recordingId), ['r1', 'r2']);
+  await Promise.all([r.session.toggleLike('r1'), r.session.toggleLike('r1')]);
+  assertDeepEqual(readyOf(r).likes.map((like) => like.recordingId).sort(), ['r1', 'r2']);
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
+  ['concurrentLikes', concurrentLikes],
   ['restorePlayingSnapshot', restorePlayingSnapshot],
   ['metadataToPrepare', metadataToPrepare],
   ['rapidPlayIntents', rapidPlayIntents],
@@ -2433,6 +2489,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['disposeFlow', disposeFlow],
   ['portThrows', portThrows],
   ['projectionBasics', projectionBasics],
+  ['backgroundTransitionChain', backgroundTransitionChain],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
@@ -2457,4 +2514,3 @@ export async function run(): Promise<void> {
     await fn();
   }
 }
-

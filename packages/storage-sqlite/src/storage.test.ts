@@ -696,7 +696,22 @@ async function parameterization(): Promise<void> {
   driver.close();
 }
 
+async function concurrentOperations(): Promise<void> {
+  const { driver, storage } = rig();
+  assert((await storage.initialize(ctx().context)).ok);
+  const results = await Promise.all([
+    storage.commit({ settings: { ...SETTINGS, theme: 'dark' } }, ctx().context),
+    storage.commit({ settings: { ...SETTINGS, theme: 'light' } }, ctx().context),
+    storage.load(ctx().context),
+    storage.loadAttempts(5, ctx().context),
+  ]);
+  assert(results.every((result) => result.ok), 'concurrent storage operations succeed');
+  assertEqual((await loadOk(storage)).settings.theme, 'light', 'last commit wins');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
+  ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
   ['fullRoundtrip', fullRoundtrip],
   ['commitRollback', commitRollback],

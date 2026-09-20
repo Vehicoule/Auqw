@@ -17,15 +17,18 @@
 //!   honest end-of-stream evidence, not an error.
 //!
 //! Priority: a demand fetch-through outranks speculative fill — an
-//! in-flight fill request is aborted on `ft_notify` and re-picked
-//! later; a fetch-through request is itself never preempted.
+//! demand outside an in-flight fill aborts it and re-picks immediately.
+//! Covered demand rides the current request up to the stall bound;
+//! a fetch-through request is itself never preempted.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::StreamExt;
+
 use crate::error::StreamError;
-use crate::fetch::{Fetch, FetchResponse};
+use crate::fetch::Fetch;
 use crate::session::{Action, SessionInner};
 use crate::Remint;
 
@@ -65,15 +68,8 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
                 len,
                 through,
             }) => match fetch_chunk(&session, &*fetch, offset, len, through).await {
-                Outcome::Bytes(body) => {
-                    if let Err(e) = session
-                        .commit(offset, &body, through.then_some(offset))
-                        .await
-                    {
-                        session.terminate(e);
-                        return;
-                    }
-                }
+                // Body pieces already committed as the wire streamed.
+                Outcome::Bytes => {}
                 Outcome::Eof(at) => session.mark_eof_below(at),
                 Outcome::Preempted => {}
                 Outcome::Stalled(e) => session.stall_transient(e),
@@ -88,8 +84,8 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
 
 /// One chunk-fetch cycle's result.
 enum Outcome {
-    /// Validated `206` body bytes (committed at the requested offset).
-    Bytes(Vec<u8>),
+    /// A validated `206` — its body already committed piecewise.
+    Bytes,
     /// Confirmed end-of-stream at this offset (`416` evidence).
     Eof(u64),
     /// A demand read arrived mid-fill; re-decide.
@@ -104,15 +100,81 @@ enum Outcome {
 /// Intermediate result of the select around an in-flight request.
 enum FetchWait {
     /// The fetch completed.
-    Done(Result<FetchResponse, StreamError>),
+    Done(Result<FetchOutcome, StreamError>),
     /// A demand read preempted speculative fill.
     Preempted,
     /// Session cancel landed mid-flight.
     Cancelled,
 }
 
+/// What one range request produced once headers arrived.
+enum FetchOutcome {
+    /// A validated `206` — its body streamed into piecewise commits.
+    Committed,
+    /// Any other status for the caller's dispatch (403/416/…); the
+    /// body stream was dropped unread.
+    Status(u16),
+}
+
+/// Drive one range request end to end: await headers, and on a `206`
+/// validate the range *before* trusting a byte, then commit each body
+/// piece as it lands — a parked reader wakes at the first network
+/// frame instead of the whole chunk. Any other status returns for the
+/// caller's remint/classify dispatch with the body unread.
+async fn drive_fetch(
+    session: &Arc<SessionInner>,
+    fetch: &dyn Fetch,
+    url: &str,
+    offset: u64,
+    len: u64,
+) -> Result<FetchOutcome, StreamError> {
+    let resp = fetch
+        .get_range(
+            url,
+            offset,
+            len,
+            session.config.stall,
+            session.config.request_deadline,
+            session.cancel.clone(),
+        )
+        .await?;
+    if resp.status != 206 {
+        return Ok(FetchOutcome::Status(resp.status));
+    }
+    let declared = validate_206_head(session, resp.content_range.as_deref(), offset, len)?;
+    let mut body = resp.body;
+    let mut got = 0u64;
+    while let Some(piece) = body.next().await {
+        let piece = piece?;
+        // Commit at most the declared span — an overrun means the
+        // server lied about the range, so the excess never reaches
+        // the store.
+        let take = usize::try_from((declared - got).min(piece.len() as u64)).unwrap_or(usize::MAX);
+        if take > 0 {
+            session.commit(offset + got, &piece[..take])?;
+            got += take as u64;
+        }
+        if take < piece.len() {
+            return Err(StreamError::InvalidResponse {
+                message: format!("body overruns declared range at {offset}"),
+            });
+        }
+    }
+    if got != declared {
+        return Err(StreamError::InvalidResponse {
+            message: format!("body {got} bytes != declared range at {offset}"),
+        });
+    }
+    Ok(FetchOutcome::Committed)
+}
+
 /// Await one range request; cancel and (for speculative fill) demand
-/// preemption both abort it.
+/// preemption both abort it. A demand that lands *inside* the
+/// in-flight range does not preempt immediately: the commit already
+/// serves it — aborting just to re-request the same bytes wastes a
+/// connect + round-trip and delays the reader by a whole request. It
+/// still preempts once the fetch has outlived the stall budget, so a
+/// hung fill cannot hold a reader hostage.
 async fn await_fetch(
     session: &Arc<SessionInner>,
     fetch: &dyn Fetch,
@@ -121,19 +183,62 @@ async fn await_fetch(
     len: u64,
     through: bool,
 ) -> FetchWait {
-    let fut = fetch.get_range(
-        url,
-        offset,
-        len,
-        session.config.stall,
-        session.config.request_deadline,
-        session.cancel.clone(),
-    );
+    use crate::session::DemandCover;
+    let fut = drive_fetch(session, fetch, url, offset, len);
     tokio::pin!(fut);
-    tokio::select! {
-        r = &mut fut => FetchWait::Done(r),
-        () = session.cancel.cancelled() => FetchWait::Cancelled,
-        () = session.ft_notify.notified(), if !through => FetchWait::Preempted,
+    if through {
+        return tokio::select! {
+            r = &mut fut => FetchWait::Done(r),
+            () = session.cancel.cancelled() => FetchWait::Cancelled,
+        };
+    }
+    // When a covered demand first appears, the in-flight fetch gets
+    // `stall` to finish and serve it; past that it is treated as hung
+    // and the demand jumps in as its own request.
+    let mut covered_deadline: Option<tokio::time::Instant> = None;
+    loop {
+        // Register before the coverage re-check so a notify landing
+        // between the check and the wait isn't missed (same pattern
+        // as the `drained` wait in `pump_loop`).
+        let notified = session.ft_notify.notified();
+        tokio::pin!(notified);
+        let _ = notified.as_mut().enable();
+        match session.demand_cover(offset, len) {
+            DemandCover::Outside => return FetchWait::Preempted,
+            DemandCover::None => covered_deadline = None,
+            DemandCover::Covered => {
+                covered_deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + session.config.stall);
+            }
+        }
+        // Copy, not borrow: the bail arm reassigns `covered_deadline`
+        // when it fires on drained demand.
+        let bail_deadline = covered_deadline;
+        let bail = async move {
+            match bail_deadline {
+                Some(d) => tokio::time::sleep_until(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(bail);
+        tokio::select! {
+            r = &mut fut => return FetchWait::Done(r),
+            () = session.cancel.cancelled() => return FetchWait::Cancelled,
+            () = &mut bail => {
+                // The deadline armed on covered demand expired — but
+                // demand removal never signals `ft_notify`, so the
+                // demand it tracked may already be served and gone.
+                // Preempt only if demand is still live; a drained
+                // demand leaves the fill undisturbed.
+                match session.demand_cover(offset, len) {
+                    DemandCover::None => covered_deadline = None,
+                    _ => return FetchWait::Preempted,
+                }
+            }
+            // Wake only re-arms the coverage check — an in-range
+            // demand lets this fetch finish and serve it.
+            () = &mut notified => {}
+        }
     }
 }
 
@@ -153,7 +258,7 @@ async fn fetch_chunk(
         if let Err(e) = session.check_live() {
             return Outcome::Failed(e);
         }
-        let resp = match session.current_url() {
+        let outcome = match session.current_url() {
             Ok(url) => match await_fetch(session, fetch, &url, offset, len, through).await {
                 FetchWait::Done(r) => r,
                 FetchWait::Preempted => return Outcome::Preempted,
@@ -161,43 +266,41 @@ async fn fetch_chunk(
             },
             Err(e) => return Outcome::Failed(e),
         };
-        let resp = match resp {
+        let outcome = match outcome {
             Ok(r) => r,
             Err(e) => match retry_or_stall(session, through, e, &mut transient_left).await {
                 Retry::Again => continue,
                 Retry::Stop(o) => return o,
             },
         };
-        match resp.status {
-            206 => {
-                return match validate_206(session, &resp, offset, len) {
-                    Ok(()) => Outcome::Bytes(resp.body),
-                    Err(e) => Outcome::Failed(e),
-                }
-            }
-            416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
-            403 | 416 => {
-                retried_416 = resp.status == 416;
-                match remint(session).await {
-                    Err(e) => {
-                        return if stallable(&e) {
-                            Outcome::Stalled(e)
-                        } else {
-                            Outcome::Failed(e)
-                        };
+        match outcome {
+            // Pieces already committed as the body streamed.
+            FetchOutcome::Committed => return Outcome::Bytes,
+            FetchOutcome::Status(status) => match status {
+                416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
+                403 | 416 => {
+                    retried_416 = status == 416;
+                    match remint(session).await {
+                        Err(e) => {
+                            return if stallable(&e) {
+                                Outcome::Stalled(e)
+                            } else {
+                                Outcome::Failed(e)
+                            };
+                        }
+                        // A fresh mint is a fresh attempt — the
+                        // transient budget resets with the URL.
+                        Ok(()) => transient_left = session.config.fetch_retries,
                     }
-                    // A fresh mint is a fresh attempt — the transient
-                    // budget resets with the URL.
-                    Ok(()) => transient_left = session.config.fetch_retries,
                 }
-            }
-            status => {
-                let e = classify_status(status, offset);
-                match retry_or_stall(session, through, e, &mut transient_left).await {
-                    Retry::Again => continue,
-                    Retry::Stop(o) => return o,
+                s => {
+                    let e = classify_status(s, offset);
+                    match retry_or_stall(session, through, e, &mut transient_left).await {
+                        Retry::Again => continue,
+                        Retry::Stop(o) => return o,
+                    }
                 }
-            }
+            },
         }
     }
 }
@@ -310,16 +413,18 @@ async fn remint(session: &Arc<SessionInner>) -> Result<(), StreamError> {
     session.finish_mint(source, t0.elapsed())
 }
 
-/// Apply the `206` wire rules to `resp` for a request at `offset` of
-/// `max_len` bytes.
-fn validate_206(
+/// Apply the `206` wire rules to a response's headers for a request
+/// at `offset` of `max_len` bytes — run *before* any body byte is
+/// trusted, so a lying server can't place pieces at wrong offsets.
+/// Returns the declared body length (`end - start + 1`).
+fn validate_206_head(
     session: &Arc<SessionInner>,
-    resp: &FetchResponse,
+    content_range: Option<&str>,
     offset: u64,
     max_len: u64,
-) -> Result<(), StreamError> {
+) -> Result<u64, StreamError> {
     let invalid = |m: String| StreamError::InvalidResponse { message: m };
-    let Some(cr) = resp.content_range.as_deref() else {
+    let Some(cr) = content_range else {
         return Err(invalid(format!("206 without Content-Range at {offset}")));
     };
     let (start, end, total) =
@@ -332,6 +437,12 @@ fn validate_206(
     if end < start {
         return Err(invalid(format!("Content-Range {start}-{end} inverted")));
     }
+    let declared = end - start + 1;
+    if declared > max_len {
+        return Err(invalid(format!(
+            "declared {start}-{end} exceeds requested {max_len} at {offset}"
+        )));
+    }
     if let Some(t) = total {
         if end >= t {
             return Err(invalid(format!(
@@ -340,22 +451,7 @@ fn validate_206(
         }
         session.check_total(t)?;
     }
-    if resp.body.is_empty() {
-        return Err(invalid(format!("empty body at {offset}")));
-    }
-    if resp.body.len() as u64 > max_len {
-        return Err(invalid(format!(
-            "body {} bytes exceeds requested {max_len} at {offset}",
-            resp.body.len()
-        )));
-    }
-    if resp.body.len() as u64 != end - start + 1 {
-        return Err(invalid(format!(
-            "body {} bytes != declared {start}-{end} at {offset}",
-            resp.body.len()
-        )));
-    }
-    Ok(())
+    Ok(declared)
 }
 
 /// Parse `bytes START-END/TOTAL` (TOTAL may be `*`). The header value
@@ -410,7 +506,7 @@ fn classify_status(status: u16, offset: u64) -> StreamError {
 mod tests {
     use super::*;
     use crate::error::lock;
-    use crate::fetch::Fetch;
+    use crate::fetch::{Fetch, FetchResponse};
     use crate::session::PoolSignals;
     use crate::testkit::*;
     use crate::{PreparedSource, StreamConfig};
@@ -418,12 +514,17 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    fn stream_body(body: Vec<u8>) -> crate::fetch::BodyStream {
+        Box::pin(futures_util::stream::once(async move { Ok(body) }))
+    }
+
     fn resp(status: u16, offset: u64, len: u64, total: u64) -> FetchResponse {
         let end = offset + len - 1;
+        let body = vec![1u8; usize::try_from(len).unwrap_or(0)];
         FetchResponse {
             status,
             content_range: Some(format!("bytes {offset}-{end}/{total}")),
-            body: vec![1u8; usize::try_from(len).unwrap_or(0)],
+            body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
         }
     }
 
@@ -546,7 +647,7 @@ mod tests {
                 Step::Reply(FetchResponse {
                     status,
                     content_range: (status == 416).then(|| "bytes */1024".to_string()),
-                    body: vec![],
+                    body: stream_body(vec![]),
                 })
             })
             .collect()
@@ -638,7 +739,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 200,
             content_range: None,
-            body: vec![0u8; 16],
+            body: stream_body(vec![0u8; 16]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| s.is_terminal()).await;
@@ -662,7 +763,7 @@ mod tests {
             let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
                 status: 206,
                 content_range: cr.map(str::to_string),
-                body: vec![1u8; 64],
+                body: stream_body(vec![1u8; 64]),
             })]));
             let task = spawn_pump(&s, fetch);
             wait_until(|| s.is_terminal()).await;
@@ -698,7 +799,7 @@ mod tests {
             let d = TestDir::new(name);
             let s = session(config(&d), remint_ok());
             let mut r = resp(206, 0, 128, 1024);
-            r.body = vec![1u8; body_len];
+            r.body = stream_body(vec![1u8; body_len]);
             let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(r)]));
             let task = spawn_pump(&s, fetch);
             wait_until(|| s.is_terminal()).await;
@@ -721,7 +822,7 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 403,
                 content_range: None,
-                body: vec![],
+                body: stream_body(vec![]),
             }),
             Step::Reply(resp(206, 128, 128, 1024)),
         ]));
@@ -756,7 +857,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| s.is_terminal()).await;
@@ -787,7 +888,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| s.is_terminal()).await;
@@ -814,7 +915,7 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 403,
                 content_range: None,
-                body: vec![],
+                body: stream_body(vec![]),
             }),
             Step::Reply(resp(206, 128, 128, 1024)),
         ]));
@@ -916,7 +1017,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 404,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| s.is_terminal()).await;
@@ -930,7 +1031,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 429,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
         wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
@@ -1056,7 +1157,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| s.is_terminal()).await;
@@ -1148,7 +1249,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
         wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
@@ -1168,8 +1269,167 @@ mod tests {
         let d = TestDir::new("latecommit");
         let s = session(config(&d), remint_ok());
         s.terminate(StreamError::Released);
-        let _ = s.commit(0, &[7u8; 64], None).await;
+        let _ = s.commit(0, &[7u8; 64]);
         assert!(!s.paths.sidecar.exists(), "sidecar resurrected post-evict");
+    }
+
+    /// Requests recorded against one offset — offset-keyed assertions
+    /// survive the pump issuing unrelated fill alongside.
+    fn count_at(fetch: &ScriptedFetch, offset: u64) -> usize {
+        fetch
+            .requests
+            .lock()
+            .map(|r| r.iter().filter(|(o, _)| *o == offset).count())
+            .unwrap_or(0)
+    }
+
+    /// Whether the store covers `pos` — fail-closed for `wait_until`.
+    fn covers(s: &Arc<SessionInner>, pos: u64) -> bool {
+        lock(&s.store).map(|st| st.covers(pos)).unwrap_or(false)
+    }
+
+    /// Queue a demand position the way `queue_through` does (insert +
+    /// `ft_notify`) — mid-flight demand is what `await_fetch` watches.
+    fn queue_demand(s: &Arc<SessionInner>, pos: u64) {
+        {
+            let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
+            sh.fetch_through.insert(pos, 1);
+        }
+        s.ft_notify.notify_one();
+    }
+
+    /// Probe sizing: the first fill rides a small request so first-byte
+    /// and head-ready land a `chunk_bytes` transfer sooner; steady-state
+    /// fill is back to `chunk_bytes`; demand fetches stay probe-sized —
+    /// a parked reader wants unblocking, not bulk fill. An out-of-range
+    /// demand still preempts an in-flight fill outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_sizes_first_fill_and_demand_outside_still_preempts() {
+        let d = TestDir::new("probe");
+        let mut cfg = config(&d);
+        cfg.probe_bytes = 32;
+        let s = session(cfg, remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Reply(resp(206, 0, 32, 1024)),
+            Step::Reply(resp(206, 32, 128, 1024)),
+            Step::Hang,
+            Step::Reply(resp(206, 500, 32, 1024)),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        // (0,32) is the probe fill; (32,128) proves the chunk is back;
+        // (160,96) is the in-flight fill the demand below preempts.
+        wait_until(|| {
+            s.is_terminal() || fetch.requests.lock().map(|r| r.len() >= 3).unwrap_or(false)
+        })
+        .await;
+        queue_demand(&s, 500);
+        wait_until(|| {
+            s.is_terminal() || fetch.requests.lock().map(|r| r.len() >= 4).unwrap_or(false)
+        })
+        .await;
+        stop_pump(&s, task).await;
+        let reqs = fetch
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            reqs[..4],
+            [(0, 32), (32, 128), (160, 96), (500, 32)],
+            "{reqs:?}"
+        );
+    }
+
+    /// A demand that lands inside the in-flight fill's range rides it:
+    /// no preempt, no second request — the arriving body commits and
+    /// serves the reader's position.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn covered_demand_rides_the_in_flight_fill() {
+        let d = TestDir::new("covered");
+        let s = session(config(&d), remint_ok());
+        // Headers in, body gated on the test — the fetch is provably
+        // in flight while the demand queues.
+        let open = Arc::new(tokio::sync::Notify::new());
+        let open2 = Arc::clone(&open);
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 206,
+            content_range: Some("bytes 0-127/1024".into()),
+            body: Box::pin(futures_util::stream::once(async move {
+                open2.notified().await;
+                Ok(vec![1u8; 128])
+            })),
+        })]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| s.is_terminal() || count_at(&fetch, 0) == 1).await;
+        queue_demand(&s, 0);
+        // The covered deadline is `stall` (2 s) out — far past this
+        // window; a preempt would have issued a second request at 0.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            count_at(&fetch, 0),
+            1,
+            "covered demand re-issued the in-flight range"
+        );
+        open.notify_one();
+        wait_until(|| s.is_terminal() || covers(&s, 0)).await;
+        stop_pump(&s, task).await;
+        assert_eq!(count_at(&fetch, 0), 1);
+    }
+
+    /// Past the stall budget the covered demand stops riding: a fill
+    /// that cannot serve it in time is preempted and the demand's own
+    /// request goes out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn covered_deadline_preempts_a_hung_fill() {
+        let d = TestDir::new("bail");
+        let mut cfg = config(&d);
+        cfg.stall = Duration::from_millis(300);
+        let s = session(cfg, remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Hang,
+            Step::Reply(resp(206, 0, 128, 1024)),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| s.is_terminal() || count_at(&fetch, 0) == 1).await;
+        queue_demand(&s, 0);
+        // ~stall of covered riding, then the demand's own fetch — and
+        // its commit lands.
+        wait_until(|| s.is_terminal() || count_at(&fetch, 0) == 2).await;
+        wait_until(|| s.is_terminal() || covers(&s, 0)).await;
+        stop_pump(&s, task).await;
+    }
+
+    /// A covered demand that drains before the deadline must disarm
+    /// it: `drop_through` never signals `ft_notify`, so the bail has
+    /// to re-check demand before preempting — a dead demand must not
+    /// abort a healthy fill.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drained_demand_disarms_the_covered_deadline() {
+        let d = TestDir::new("disarm");
+        let mut cfg = config(&d);
+        cfg.stall = Duration::from_millis(300);
+        let s = session(cfg, remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Hang]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| s.is_terminal() || count_at(&fetch, 0) == 1).await;
+        queue_demand(&s, 0);
+        // Let the pump arm the deadline, then drain the demand the way
+        // a departing reader does — silently, no `ft_notify`.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        {
+            let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
+            sh.fetch_through.remove(&0);
+        }
+        // The deadline fires ~stall after arming; give it ample room
+        // and prove no second request ever went out.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            count_at(&fetch, 0),
+            1,
+            "drained demand still preempted the fill"
+        );
+        assert!(!s.is_terminal());
+        stop_pump(&s, task).await;
     }
 
     #[test]

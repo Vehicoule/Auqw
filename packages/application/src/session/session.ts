@@ -170,6 +170,8 @@ type Ready = {
 /** Latest sent projection plus its install status at the service. */
 type ProjectionMarker = {
   readonly projection: QueueProjection;
+  currentOccurrenceId: string | null;
+  reconciledQueueRev: number;
   status: 'pending' | 'installed' | 'failed';
   done: Promise<void>;
 };
@@ -192,6 +194,7 @@ export class Session {
   #ownedWork = new Set<Promise<unknown>>();
   #deadlineWork = new Set<Promise<unknown>>();
   #eventTail: Promise<void> = Promise.resolve();
+  #likeTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -585,7 +588,15 @@ export class Session {
     return this.playOccurrence(enqueued.value);
   }
 
-  async toggleLike(recordingId: string): Promise<Result<void>> {
+  toggleLike(recordingId: string): Promise<Result<void>> {
+    // Compute each replacement from the previous committed like set.
+    const work = this.#likeTail.then(() => this.#toggleLike(recordingId));
+    this.#likeTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  async #toggleLike(recordingId: string): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
       return ready;
@@ -1410,7 +1421,7 @@ export class Session {
       if (
         marker !== null &&
         marker.status === 'installed' &&
-        marker.projection.currentOccurrenceId === active.occurrenceId
+        marker.currentOccurrenceId === active.occurrenceId
       ) {
         // The service owns the advance inside the installed
         // projection; the queue-transition event reconciles it. JS
@@ -1612,8 +1623,14 @@ export class Session {
     if (projection === null) {
       return;
     }
+    const active = this.#active;
+    if (active !== null && active.occurrenceId === projection.currentOccurrenceId) {
+      active.identity = { ...active.identity, queueRev: projection.queueRev };
+    }
     const marker: ProjectionMarker = {
       projection,
+      currentOccurrenceId: projection.currentOccurrenceId,
+      reconciledQueueRev: projection.queueRev,
       status: 'pending',
       done: Promise.resolve(),
     };
@@ -1643,7 +1660,7 @@ export class Session {
   /**
    * Reconciles a native cursor transition inside the projected queue.
    * The service executes a cursor, not arbitrary queue edits: `from`
-   * must be the projected current, `ended`/`remote-next` may only
+   * must be the last reconciled current, `ended`/`remote-next` may only
    * reach the immediate successor (or null at the tail), and
    * `remote-previous` may only restart the current or step to the
    * immediate predecessor.
@@ -1669,7 +1686,7 @@ export class Session {
       projection === null
         ? -1
         : items.findIndex(
-          (i) => i.occurrenceId === projection.currentOccurrenceId,
+          (i) => i.occurrenceId === marker?.currentOccurrenceId,
         );
     const identityOk =
       event.toOccurrenceId === null
@@ -1678,7 +1695,7 @@ export class Session {
         event.handle !== null &&
         event.handle.length > 0 &&
         event.identity.attemptId.length > 0 &&
-        isSafeNonNegative(event.identity.queueRev);
+        event.identity.queueRev === projection?.queueRev;
     let legal = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
       const successor =
@@ -1699,9 +1716,12 @@ export class Session {
     }
     if (
       projection === null ||
+      marker === null ||
+      cursorIndex < 0 ||
+      r.queue.snapshot().revision !== marker.reconciledQueueRev ||
       event.projectionId !== projection.projectionId ||
       event.projectedQueueRev !== projection.queueRev ||
-      event.fromOccurrenceId !== projection.currentOccurrenceId ||
+      event.fromOccurrenceId !== marker.currentOccurrenceId ||
       !legal ||
       !identityOk ||
       !isSafeNonNegative(event.positionMs)
@@ -1721,6 +1741,8 @@ export class Session {
       this.#logWarn('queue transition rejected');
       return;
     }
+    marker.currentOccurrenceId = toId;
+    marker.reconciledQueueRev = r.queue.snapshot().revision;
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -1733,14 +1755,9 @@ export class Session {
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
       );
-      // Adopt the service attemptId but re-key queueRev to the
-      // post-reconcile revision — same rule as every other op
-      // (pause/resume/seek): identity tracks the revision the next
-      // #derived() install carries, keeping published state coherent.
-      const identity = {
-        attemptId: event.identity.attemptId,
-        queueRev: snap2.revision,
-      };
+      // Statuses continue to echo the immutable service projection until
+      // app intent installs a new one; reconciliation alone must not re-key it.
+      const identity = event.identity;
       const attempt: ActiveAttempt = {
         identity,
         recordingId: occurrence?.recordingId ?? '',
@@ -1782,7 +1799,11 @@ export class Session {
       }
     }
     await this.#persist({ queue: r.queue.snapshot() });
-    this.#derived();
+    // Native may already be several moves ahead. Re-projecting this
+    // intermediate cursor would stop its live stream and reject queued moves.
+    this.#mappingSource?.cancel();
+    this.#mappingSource = null;
+    this.#maybeMapSuccessor();
   }
 
   // ---- successor mapping ----------------------------------------------

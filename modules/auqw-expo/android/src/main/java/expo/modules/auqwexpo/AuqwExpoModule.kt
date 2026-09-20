@@ -68,6 +68,10 @@ private const val POSITION_TICK_MS = 1_000L
  * queued-attach window, so a few hundred is far past any real case. */
 private const val RELEASED_HANDLES_CAP = 512
 
+/** Cap on the released-handle marks — they only matter across the
+ * queued-attach window, so a few hundred is far past any real case. */
+private const val RELEASED_HANDLES_CAP = 512
+
 class HostConfigInput : Record {
   @Field
   var fuelPerEntry: Double = 0.0
@@ -218,10 +222,9 @@ class AuqwExpoModule : Module() {
   // ---- queue projection state (player-looper confined) ----
   // The service executes a cursor inside ONE installed immutable
   // revision, per the PlayerPort contract: never reorder/add/remove,
-  // report every cursor move as a queue-transition. The cursor is the
-  // installed projection's `currentOccurrenceId` — the application is
-  // authoritative on it and re-projects after every adopted move, so
-  // the service keeps no shadow cursor that could drift.
+  // report every cursor move as a queue-transition. The attached
+  // occurrence is the moving cursor; currentOccurrenceId is only its
+  // initial value. JS may consume several moves after resuming.
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
   @Volatile
@@ -1058,23 +1061,10 @@ class AuqwExpoModule : Module() {
     val proj = installedProjection ?: return
     val p = player ?: return
     val att = attached ?: return
-    val from = proj.currentOccurrenceId ?: return
+    val from = attachedForOccurrence ?: return
     // One move at a time: a second press while a target prepares is
     // dropped — the landed attach re-arms the next command.
     if (transitionInFlight != null) {
-      return
-    }
-    // The stream that ended must be the cursor item — otherwise the
-    // cursor and the player already diverged and emitting `from`
-    // would describe a move the application did not see.
-    if (reason == "ended" && attachedForOccurrence != from) {
-      return
-    }
-    // A service-attached stream sitting ahead of the installed cursor
-    // means the application's re-projection is still on the bridge —
-    // a second move now could only emit against a stale revision and
-    // re-attach the item already playing.
-    if (attachedByService && attachedForOccurrence != from) {
       return
     }
     val idx = proj.items.indexOfFirst { it.occurrenceId == from }
@@ -1176,6 +1166,16 @@ class AuqwExpoModule : Module() {
       // while the prepare ran: this event could only arrive stale;
       // free the prepared handle on the host that owns it.
       releaseOutcomeHandle(h, outcome)
+      // installProjection could not re-drive EOF while this old prepare
+      // owned the latch. Now that it is clear, retry against the installed
+      // intent, provided its cursor still owns the ended attachment.
+      val latest = installedProjection
+      if (h === host && latest != null &&
+        attachedForOccurrence == latest.currentOccurrenceId &&
+        p.playbackState == Player.STATE_ENDED
+      ) {
+        driveTransition("ended")
+      }
       return
     }
     when (outcome) {

@@ -71,6 +71,7 @@ export class SqliteStorage implements StoragePort {
   readonly #driver: SqliteDriver;
   readonly #defaults: Settings;
   #init: Promise<Result<void>> | null = null;
+  #transactionTail: Promise<void> = Promise.resolve();
 
   constructor(driver: SqliteDriver, defaultSettings: Settings) {
     if (!isSettings(defaultSettings)) {
@@ -84,6 +85,19 @@ export class SqliteStorage implements StoragePort {
     if (signal?.cancelled === true) {
       throw CANCELLED;
     }
+  }
+
+  /** One connection cannot run overlapping BEGIN/COMMIT sequences. */
+  #transaction<T>(
+    work: (connection: SqliteConnection) => Promise<T>,
+    signal: CancellationSignal,
+  ): Promise<T> {
+    const result = this.#transactionTail.then(() => {
+      this.#check(signal);
+      return this.#driver.transaction(work, signal);
+    });
+    this.#transactionTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   #mapError(thrown: unknown, signal: CancellationSignal): AppError {
@@ -121,7 +135,7 @@ export class SqliteStorage implements StoragePort {
   async #runInitialize(context: OperationContext): Promise<Result<void>> {
     const signal = context.signal;
     try {
-      return await this.#driver.transaction(async (conn) => {
+      return await this.#transaction(async (conn) => {
         this.#check(signal);
         await conn.execute(
           'PRAGMA foreign_keys = ON',
@@ -205,7 +219,7 @@ export class SqliteStorage implements StoragePort {
     }
     const signal = context.signal;
     try {
-      return await this.#driver.transaction(async (conn) => {
+      return await this.#transaction(async (conn) => {
         this.#check(signal);
         return await this.#readState(conn, signal);
       }, signal);
@@ -224,7 +238,7 @@ export class SqliteStorage implements StoragePort {
     }
     const signal = context.signal;
     try {
-      return await this.#driver.transaction(async (conn) => {
+      return await this.#transaction(async (conn) => {
         this.#check(signal);
         const current = await this.#readState(conn, signal);
         if (!current.ok) {
@@ -401,7 +415,7 @@ export class SqliteStorage implements StoragePort {
     }
     const signal = context.signal;
     try {
-      return await this.#driver.transaction(async (conn) => {
+      return await this.#transaction(async (conn) => {
         this.#check(signal);
         const rows = await conn.query<SqlRow>(
           'SELECT request_id, trace_json FROM attempt_traces ORDER BY seq DESC LIMIT ?',

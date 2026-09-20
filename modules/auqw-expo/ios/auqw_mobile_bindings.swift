@@ -588,7 +588,7 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
  * loaded plugin set, and per-request cancellation tokens.
  */
 public protocol PluginHostProtocol: AnyObject, Sendable {
-    
+
     /**
      * Cancel an in-flight request; unknown ids are a no-op. A
      * `cancelPrepare` landing after `prepared` also abandons the
@@ -596,7 +596,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * playing consumer is never cancelled out from under playback.
      */
     func cancel(requestId: String) 
-    
+
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -633,6 +633,21 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      */
     func startResolve(pluginId: String, sourceRef: String, listener: ResolveListener) throws  -> String
     
+    /**
+     * Dev-gate entry: register a session for a bare URL, skipping the
+     * guest `playback.resolve` (same convention as the Kotlin
+     * `devAttachFile`). Everything downstream of resolve is the real
+     * path — sparse store, pump, fetch-through, marks — so the seam
+     * gates can be exercised while the provider's resolve is
+     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
+     * expiry keeps it out of the measured window.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the prepare's kind otherwise.
+     */
+    func devPrepareUrl(url: String, mime: String, contentLength: UInt64?) throws  -> PreparedStream
+
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -799,7 +814,7 @@ open func loadPlugin(wasm: Data, manifestJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -858,6 +873,31 @@ open func startResolve(pluginId: String, sourceRef: String, listener: ResolveLis
 })
 }
     
+    /**
+     * Dev-gate entry: register a session for a bare URL, skipping the
+     * guest `playback.resolve` (same convention as the Kotlin
+     * `devAttachFile`). Everything downstream of resolve is the real
+     * path — sparse store, pump, fetch-through, marks — so the seam
+     * gates can be exercised while the provider's resolve is
+     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
+     * expiry keeps it out of the measured window.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the prepare's kind otherwise.
+     */
+open func devPrepareUrl(url: String, mime: String, contentLength: UInt64?)throws  -> PreparedStream  {
+    return try  FfiConverterTypePreparedStream_lift(try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(url),
+        FfiConverterString.lower(mime),
+        FfiConverterOptionUInt64.lower(contentLength),uniffiCallStatus
+    )
+})
+}
+
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -2998,6 +3038,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() != 51654) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() != 36240) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() != 57130) {
