@@ -1375,23 +1375,37 @@ class AuqwExpoModule : Module() {
   }
 
   private val analyticsListener = object : AnalyticsListener {
-    override fun onRenderedFirstFrame(
-      eventTime: AnalyticsListener.EventTime,
-      output: Any,
-      renderTimeMs: Long
-    ) {
+    private fun markFirstAudioOutput() {
       val a = attached ?: return
       if (a.firstFrameMarked) {
         return
       }
       a.firstFrameMarked = true
       // THE ≤200 ms metric event: attach → first frame handed to output.
+      // Media3 only invokes onRenderedFirstFrame for video renderers. An
+      // audio-only player therefore reports the equivalent boundary here:
+      // the audio sink has begun consuming decoded output (position advancing).
       emitPhaseMark(a, "rendered-first-frame")
       Log.i(
         TAG,
         "attach ${a.handle} rendered-first-frame " +
           "${SystemClock.elapsedRealtime() - a.attachElapsedMs}ms"
       )
+    }
+
+    override fun onRenderedFirstFrame(
+      eventTime: AnalyticsListener.EventTime,
+      output: Any,
+      renderTimeMs: Long
+    ) {
+      markFirstAudioOutput()
+    }
+
+    override fun onAudioPositionAdvancing(
+      eventTime: AnalyticsListener.EventTime,
+      playoutStartSystemTimeMs: Long
+    ) {
+      markFirstAudioOutput()
     }
   }
 
