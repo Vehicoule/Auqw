@@ -808,7 +808,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(`ptr`: Long,`url`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`contentLength`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(`ptr`: Long,`url`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`contentLength`: RustBuffer.ByValue,`remintable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -962,7 +962,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() and 0xFFFF) != 51654) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() and 0xFFFF) != 36240) {
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() and 0xFFFF) != 33360) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() and 0xFFFF) != 57130) {
@@ -1259,6 +1259,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1484,14 +1507,17 @@ public interface PluginHostInterface {
      * `devAttachFile`). Everything downstream of resolve is the real
      * path — sparse store, pump, fetch-through, marks — so the seam
      * gates can be exercised while the provider's resolve is
-     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
-     * expiry keeps it out of the measured window.
+     * unreachable. Re-mint is pinned to fail `Expired` unless
+     * `remintable` opts the session into re-minting the same source —
+     * the fixture URL is its own provider, letting the forced-cap
+     * gate exercise the real 403 → re-mint → resume path on-device.
+     * A one-hour expiry keeps it out of the measured window.
      *
      * # Errors
      * [`StreamError::Unavailable`] when the seam is not configured;
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
-    fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?): PreparedStream
+    fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?, `remintable`: kotlin.Boolean): PreparedStream
     
     /**
      * Resolve `source_ref` and register the result as a prepared
@@ -1799,14 +1825,17 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * `devAttachFile`). Everything downstream of resolve is the real
      * path — sparse store, pump, fetch-through, marks — so the seam
      * gates can be exercised while the provider's resolve is
-     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
-     * expiry keeps it out of the measured window.
+     * unreachable. Re-mint is pinned to fail `Expired` unless
+     * `remintable` opts the session into re-minting the same source —
+     * the fixture URL is its own provider, letting the forced-cap
+     * gate exercise the real 403 → re-mint → resume path on-device.
+     * A one-hour expiry keeps it out of the measured window.
      *
      * # Errors
      * [`StreamError::Unavailable`] when the seam is not configured;
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
-    @Throws(StreamException::class)override fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?): PreparedStream {
+    @Throws(StreamException::class)override fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?, `remintable`: kotlin.Boolean): PreparedStream {
             return FfiConverterTypePreparedStream.lift(
     callWithHandle {
     uniffiRustCallWithError(StreamException) { _status ->
@@ -1815,7 +1844,8 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
         
         FfiConverterString.lower(`url`),
         FfiConverterString.lower(`mime`),
-        FfiConverterOptionalULong.lower(`contentLength`),_status)
+        FfiConverterOptionalULong.lower(`contentLength`),
+        FfiConverterBoolean.lower(`remintable`),_status)
 }
     }
     )

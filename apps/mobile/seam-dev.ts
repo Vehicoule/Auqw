@@ -7,7 +7,14 @@
 //   auqw://seam-attach?handle=…    attach last/provided prepared handle
 //   auqw://seam-metrics            dump Rust-side phase marks
 //   auqw://seam-url?url=…&mime=…   dev seam leg — real prepared session
-//                                  for a bare URL (no guest resolve)
+//                                  for a bare URL (no guest resolve);
+//                                  &remint=1 makes the session's re-mint
+//                                  re-issue the same URL (cap-invisibility
+//                                  gate); &wait=head holds attach until
+//                                  headReadyMs (prepared-path gate);
+//                                  &pos=… attaches at an offset (seek gate)
+//   auqw://seam-release?handle=…   releaseStream on a handle (teardown gate)
+//   auqw://seam-stop             player stop (teardown gate)
 //   auqw://seam-queue?url=…&title=…  projection leg — installs a 2-item
 //                                  projection then attaches: exercises the
 //                                  CURSOR occurrence bind + MediaMetadata
@@ -27,6 +34,8 @@ import {
   phaseMarks,
   play,
   prepare,
+  releaseStream,
+  stop,
   setQueueProjection,
   type PrepareOutcomeEvent,
 } from 'auqw-expo';
@@ -140,7 +149,7 @@ function describe(error: unknown): string {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -219,17 +228,45 @@ export async function runSeamLink(url: string): Promise<void> {
       const mime = param(query, 'mime') ?? 'audio/mp4';
       const bytes = param(query, 'bytes');
       const pos = param(query, 'pos');
+      const remint = param(query, 'remint') === '1';
+      const waitHead = param(query, 'wait') === 'head';
       await ensureHost();
       const t0 = Date.now();
       lastHandle = await devPrepareUrl(
         streamUrl,
         mime,
         bytes ? Number(bytes) : undefined,
+        remint,
       );
-      slog(`seam-url prepared handle=${lastHandle} +${Date.now() - t0}ms`);
+      slog(`seam-url prepared handle=${lastHandle} +${Date.now() - t0}ms remint=${remint}`);
+      if (waitHead) {
+        // The gate's "prepared" is head-fill complete at attach — wait
+        // for the Rust-side headReadyMs mark before playing.
+        const deadline = Date.now() + 10_000;
+        let ready = false;
+        while (Date.now() < deadline) {
+          const marks = await phaseMarks(lastHandle);
+          if (marks.headReadyMs) {
+            ready = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        slog(`seam-url head-ready=${ready} +${Date.now() - t0}ms`);
+      }
       const ta = Date.now();
       await play(lastHandle, `dev-${Date.now()}`, 0, pos ? Number(pos) : undefined);
       slog(`seam-url attach-sent handle=${lastHandle} pos=${pos ?? 0} +${Date.now() - ta}ms total+${Date.now() - t0}ms`);
+    } else if (match[1] === 'seam-release') {
+      const handle = param(query, 'handle') ?? lastHandle;
+      if (!handle) {
+        return;
+      }
+      await releaseStream(handle);
+      slog(`seam-release done handle=${handle} t=${Date.now()}`);
+    } else if (match[1] === 'seam-stop') {
+      await stop();
+      slog(`seam-stop done t=${Date.now()}`);
     } else if (match[1] === 'seam-queue') {
       // Projection leg: install a 2-item identified revision whose
       // cursor carries title/artist, then attach a prepared dev URL —

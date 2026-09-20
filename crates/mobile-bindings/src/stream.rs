@@ -454,8 +454,11 @@ impl PluginHost {
     /// `devAttachFile`). Everything downstream of resolve is the real
     /// path — sparse store, pump, fetch-through, marks — so the seam
     /// gates can be exercised while the provider's resolve is
-    /// unreachable. Re-mint is pinned to fail `Expired`; a one-hour
-    /// expiry keeps it out of the measured window.
+    /// unreachable. Re-mint is pinned to fail `Expired` unless
+    /// `remintable` opts the session into re-minting the same source —
+    /// the fixture URL is its own provider, letting the forced-cap
+    /// gate exercise the real 403 → re-mint → resume path on-device.
+    /// A one-hour expiry keeps it out of the measured window.
     ///
     /// # Errors
     /// [`StreamError::Unavailable`] when the seam is not configured;
@@ -465,6 +468,7 @@ impl PluginHost {
         url: String,
         mime: String,
         content_length: Option<u64>,
+        remintable: bool,
     ) -> Result<PreparedStream, StreamError> {
         let expires_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -481,17 +485,28 @@ impl PluginHost {
             content_length,
             expires_at_ms,
         };
+        let remint: Arc<dyn Remint> = if remintable {
+            Arc::new(DevRemint {
+                source: Some(source.clone()),
+            })
+        } else {
+            Arc::new(DevRemint { source: None })
+        };
         let info = self
             .stream_registry()?
-            .prepare_timed(source, Arc::new(DevRemint), None)
+            .prepare_timed(source, remint, None)
             .map_err(seam_err)?;
         Ok(PreparedStream::from(info))
     }
 }
 
 /// Remint for [`PluginHost::dev_prepare_url`] sessions — a dev fixture
-/// has no provider to re-resolve, so expiry is terminal.
-struct DevRemint;
+/// has no provider to re-resolve, so expiry is terminal unless the
+/// caller pinned the source for re-mint (the fixture serving the same
+/// URL stands in for a provider mint).
+struct DevRemint {
+    source: Option<PreparedSource>,
+}
 
 impl Remint for DevRemint {
     fn remint(
@@ -502,7 +517,13 @@ impl Remint for DevRemint {
                 + Send,
         >,
     > {
-        Box::pin(async { Err(auqw_stream::StreamError::Expired) })
+        let source = self.source.clone();
+        Box::pin(async move {
+            match source {
+                Some(source) => Ok(source),
+                None => Err(auqw_stream::StreamError::Expired),
+            }
+        })
     }
 }
 

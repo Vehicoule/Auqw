@@ -209,6 +209,10 @@ class AuqwMediaSessionService : MediaSessionService() {
         AudioAttributes.Builder()
           .setUsage(C.USAGE_MEDIA)
           .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+          // android.media.AudioAttributes.FLAG_LOW_LATENCY (hidden):
+          // route off the deep-buffer output — its ~240 ms start cost
+          // alone breaks the ≤200 ms attach budget on this APM.
+          .setFlags(0x100)
           .build(),
         /* handleAudioFocus= */ true,
       )
