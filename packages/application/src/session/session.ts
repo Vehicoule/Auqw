@@ -22,11 +22,19 @@ import { countsAsPlay, recordPlay } from '../library/history.ts';
 import { isPersistedState } from '../library/library.ts';
 import type {
   Entity,
+  LyricsCacheEntry,
   PlayCount,
   PlayEvent,
   Playlist,
   PlaylistEntry,
 } from '../library/library.ts';
+import {
+  applyAcceptance,
+  lyricsCacheEntry,
+  lyricsFromCache,
+  lyricsSheet,
+} from '../library/lyrics.ts';
+import type { LyricsSheet } from '../library/lyrics.ts';
 import {
   applyImport,
   exportLibrary,
@@ -60,7 +68,11 @@ import type {
   QueueProjection,
   QueueProjectionItem,
 } from '../ports/player.ts';
-import type { ProviderPort, RecordingQuery } from '../ports/provider.ts';
+import type {
+  LyricsQuery,
+  ProviderPort,
+  RecordingQuery,
+} from '../ports/provider.ts';
 import {
   ProviderRouter,
   selectionFromSettings,
@@ -204,6 +216,13 @@ type Ready = {
   playlistEntries: PlaylistEntry[];
   playHistory: PlayEvent[];
   playCounts: PlayCount[];
+  /**
+   * Disposable lyrics cache (data.md): held for `getLyrics` reads but
+   * deliberately not published — caches are not session state, and
+   * `getLyrics` is the per-recording accessor, same class as the
+   * storage-only artwork cache.
+   */
+  lyricsCache: LyricsCacheEntry[];
   queue: QueueEngine;
   settings: Settings;
   playback: SessionPlayback;
@@ -244,6 +263,7 @@ export class Session {
   #eventTail: Promise<void> = Promise.resolve();
   #likeTail: Promise<void> = Promise.resolve();
   #playlistTail: Promise<void> = Promise.resolve();
+  #lyricsTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -542,6 +562,7 @@ export class Session {
       playlistEntries: [...data.playlistEntries],
       playHistory: [...data.playHistory],
       playCounts: [...data.playCounts],
+      lyricsCache: [...data.lyricsCache],
       queue,
       settings: { ...data.settings },
       playback: { type: 'idle' },
@@ -995,6 +1016,129 @@ export class Session {
     r.playHistory = [...next.playHistory];
     r.playCounts = [...next.playCounts];
     this.#publish();
+  }
+
+  // ---- lyrics ---------------------------------------------------------
+
+  /**
+   * Serves the lyrics sheet for a recording. Serialized like every
+   * owned-write op; the caller's context (if any) links its
+   * cancellation and tightens — never loosens — the op deadline.
+   * A cache hit re-runs the same acceptance rules as a live fetch:
+   * a cached plain stays plain and never presents as synced.
+   */
+  getLyrics(
+    recordingId: string,
+    context?: OperationContext,
+  ): Promise<Result<LyricsSheet>> {
+    const work = this.#lyricsTail.then(() =>
+      this.#getLyrics(recordingId, context),
+    );
+    this.#lyricsTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  async #getLyrics(
+    recordingId: string,
+    context: OperationContext | undefined,
+  ): Promise<Result<LyricsSheet>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    if (context !== undefined && context.signal.cancelled) {
+      return err(appError('cancelled', 'cancelled'));
+    }
+    const r = ready.value;
+    const recording = r.recordings.find((rec) => rec.id === recordingId);
+    if (recording === undefined) {
+      return err(appError('not-found', 'unknown recording'));
+    }
+    const cached = r.lyricsCache.find((e) => e.recordingId === recordingId);
+    if (cached !== undefined) {
+      const accepted = lyricsFromCache(cached, {
+        durationMs: recording.durationMs,
+      });
+      return ok(
+        lyricsSheet(accepted, {
+          provider: cached.provider,
+          fetchedMs: cached.fetchedMs,
+          cached: true,
+        }),
+      );
+    }
+    // Synced is always preferred: the sheet renders timed lines
+    // whenever a provider can honestly produce them; the router
+    // degrades to a lyrics.plain declarer otherwise.
+    const routed = this.#router.lyricsProviderFor(
+      selectionFromSettings(r.settings),
+      'synced',
+    );
+    if (!routed.ok) {
+      return err(routed.error);
+    }
+    const provider = routed.value;
+    const source = new CancellationSource();
+    const unlink = context?.signal.subscribe(() => {
+      source.cancel();
+    });
+    this.#opSources.add(source);
+    try {
+      const ownDeadline = this.#deadline();
+      const deadlineMs =
+        context !== undefined && isSafeNonNegative(context.deadlineMs)
+          ? Math.min(ownDeadline, context.deadlineMs)
+          : ownDeadline;
+      const query: LyricsQuery = {
+        title: recording.title,
+        artist: recording.artist,
+        album: recording.album,
+        durationMs: recording.durationMs,
+        isrc: recording.isrc,
+      };
+      const opContext = this.#newContext('lyrics', deadlineMs, source.signal);
+      const fetched = await this.#withDeadline(
+        () => provider.getLyrics({ query, prefer: 'synced' }, opContext),
+        deadlineMs,
+        source,
+      );
+      if (!fetched.ok) {
+        return err(fetched.error);
+      }
+      const accepted = applyAcceptance(fetched.value, {
+        durationMs: recording.durationMs,
+      });
+      const fetchedMs = this.#safeNow();
+      const entry =
+        fetchedMs === null
+          ? null
+          : lyricsCacheEntry(recording.id, provider.id, accepted, fetchedMs);
+      if (entry !== null) {
+        const next = [
+          ...r.lyricsCache.filter((e) => e.recordingId !== recording.id),
+          entry,
+        ];
+        // The cache is disposable: a failed commit is surfaced as
+        // persistenceError but never withholds the lyrics result —
+        // and per commit-first semantics the in-memory section is
+        // untouched, so the next call simply refetches.
+        const persisted = await this.#persist({ lyricsCache: next });
+        if (persisted.ok) {
+          r.lyricsCache = next;
+        }
+      }
+      return ok(
+        lyricsSheet(accepted, {
+          provider: provider.id,
+          fetchedMs,
+          cached: false,
+        }),
+      );
+    } finally {
+      unlink?.();
+      this.#opSources.delete(source);
+    }
   }
 
   async updateSettings(settings: Settings): Promise<Result<void>> {
