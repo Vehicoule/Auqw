@@ -1,5 +1,8 @@
 import { CancellationSource } from '../cancellation.ts';
-import type { OperationContext } from '../cancellation.ts';
+import type {
+  CancellationSignal,
+  OperationContext,
+} from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
@@ -23,11 +26,21 @@ import { isPersistedState } from '../library/library.ts';
 import type {
   Entity,
   LyricsCacheEntry,
+  MatchReview,
   PlayCount,
   PlayEvent,
   Playlist,
   PlaylistEntry,
 } from '../library/library.ts';
+import {
+  createCorrections,
+  effectiveMapping,
+  isRefRejected,
+} from '../library/corrections.ts';
+import type {
+  Corrections,
+  ReviewFilter,
+} from '../library/corrections.ts';
 import {
   applyAcceptance,
   lyricsCacheEntry,
@@ -264,6 +277,8 @@ export class Session {
   #likeTail: Promise<void> = Promise.resolve();
   #playlistTail: Promise<void> = Promise.resolve();
   #lyricsTail: Promise<void> = Promise.resolve();
+  #reviewTail: Promise<void> = Promise.resolve();
+  readonly #corrections: Corrections;
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -302,6 +317,12 @@ export class Session {
     this.#clock = deps.clock;
     this.#ids = deps.ids;
     this.#log = deps.log;
+    this.#corrections = createCorrections({
+      storage: deps.storage,
+      ids: deps.ids,
+      clock: deps.clock,
+      log: deps.log,
+    });
     this.#playerUnsub = deps.player.subscribe((event) => {
       this.#onPlayerEvent(event);
     });
@@ -655,7 +676,7 @@ export class Session {
     r.queue.enqueue({
       occurrenceId,
       recordingId,
-      selectedRef: this.#pickRef(recording, null),
+      selectedRef: this.#pickRef(recording),
     });
     this.#publish();
     const persisted = await this.#persist({ queue: r.queue.snapshot() });
@@ -1035,6 +1056,104 @@ export class Session {
       this.#getLyrics(recordingId, context),
     );
     this.#lyricsTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  // ---- corrections ----------------------------------------------------
+
+  /**
+   * The match-review queue for Diagnostics — pending reviews by
+   * default; `{status:'all'}` lists resolved ones too. Live reads,
+   * not session state: corrections are user actions, rare by design.
+   */
+  listMatchReviews(
+    filter?: ReviewFilter,
+    context?: OperationContext,
+  ): Promise<Result<readonly MatchReview[]>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return Promise.resolve(err(ready.error));
+    }
+    return this.#corrections.listReviews(filter, context?.signal);
+  }
+
+  confirmReview(
+    reviewId: string,
+    candidateIndex: number,
+    context?: OperationContext,
+  ): Promise<Result<MatchReview>> {
+    return this.#reviewOp(
+      (signal) => this.#corrections.confirm(reviewId, candidateIndex, signal),
+      context,
+    );
+  }
+
+  rejectReview(
+    reviewId: string,
+    context?: OperationContext,
+  ): Promise<Result<MatchReview>> {
+    return this.#reviewOp(
+      (signal) => this.#corrections.reject(reviewId, signal),
+      context,
+    );
+  }
+
+  /**
+   * Reverts a resolution: the written verdict mappings are removed
+   * and the review re-enters the pending queue — the ambiguity was
+   * never actually resolved.
+   */
+  undoReview(
+    reviewId: string,
+    context?: OperationContext,
+  ): Promise<Result<MatchReview>> {
+    return this.#reviewOp(
+      (signal) => this.#corrections.undo(reviewId, signal),
+      context,
+    );
+  }
+
+  /**
+   * Serialized review mutation: the module commits recordings +
+   * matchReviews atomically, then the session reads the affected
+   * recording back so `#pickRef` (via `effectiveMapping`) and the
+   * projected queue follow the verdict. A read-back failure flags
+   * persistenceError like `#persist` does — the verdict still landed.
+   */
+  #reviewOp(
+    op: (signal?: CancellationSignal) => Promise<Result<MatchReview>>,
+    context?: OperationContext,
+  ): Promise<Result<MatchReview>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return Promise.resolve(err(ready.error));
+    }
+    const r = ready.value;
+    const work = this.#reviewTail.then(async () => {
+      const result = await op(context?.signal);
+      if (!result.ok) {
+        return result;
+      }
+      const reloaded = await this.#storage.load(
+        this.#newContext(
+          'reload',
+          this.#deadline(),
+          context?.signal ?? new CancellationSource().signal,
+        ),
+      );
+      if (reloaded.ok && isPersistedState(reloaded.value)) {
+        r.recordings = [...reloaded.value.recordings];
+      } else {
+        r.persistenceError = reloaded.ok
+          ? appError('invalid-response', 'reload after review failed validation')
+          : reloaded.error;
+      }
+      this.#publish();
+      this.#derived();
+      return result;
+    });
+    this.#reviewTail = work.then(() => undefined, () => undefined);
     this.#own(work);
     return work;
   }
@@ -1555,28 +1674,20 @@ export class Session {
 
   // ---- play pipeline ------------------------------------------------
 
-  #pickRef(
-    recording: Recording,
-    occurrenceSelected: SourceRef | null,
-  ): SourceRef | null {
+  // Corrections precedence: a user verdict outranks every automatic
+  // claim, including an occurrence's previously projected pick — so
+  // the queue follows the correction on the next projection.
+  #pickRef(recording: Recording): SourceRef | null {
     const provider = this.#ready?.settings.playbackProvider ?? '';
-    if (
-      occurrenceSelected !== null &&
-      occurrenceSelected.provider === provider
-    ) {
-      return occurrenceSelected;
+    const verdict = effectiveMapping(recording, provider);
+    if (verdict !== null) {
+      return verdict.ref;
     }
-    const mappings = recording.mappings.filter(
-      (m) => m.ref.provider === provider,
-    );
-    const best = winningMapping(mappings);
-    if (best !== undefined && best.status !== 'rejected') {
-      return best.ref;
-    }
-    const vetoed = best?.status === 'rejected' ? best.ref : null;
     return (
       recording.sourceRefs.find(
-        (s) => s.provider === provider && !sameRef(s, vetoed),
+        (s) =>
+          s.provider === provider &&
+          !isRefRejected(recording.mappings, s),
       ) ?? null
     );
   }
@@ -1630,7 +1741,7 @@ export class Session {
       await this.#teardownAttempt(prev);
     }
 
-    let ref = this.#pickRef(recording, occurrence.selectedRef);
+    let ref = this.#pickRef(recording);
     if (ref === null) {
       const resolved = await this.#resolveViaCandidates(
         attempt,
@@ -1744,6 +1855,20 @@ export class Session {
       recording.mappings,
     );
     if (outcome.type === 'ambiguous') {
+      // Park the candidates for user resolution; the attempt still
+      // fails honestly. The enqueue is best-effort — a review-write
+      // failure must not mask the match outcome.
+      const enqueued = await this.#corrections.enqueueReview(
+        recording.id,
+        outcome.candidates.map((c) => ({
+          metadata: c.candidate,
+          ref: c.candidate.sourceRef,
+        })),
+        attempt.source.signal,
+      );
+      if (!enqueued.ok) {
+        this.#logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
+      }
       const error = appError('unavailable', 'match requires confirmation');
       await this.#failAttempt(attempt, error);
       return err(error);
@@ -2208,7 +2333,7 @@ export class Session {
         const selected =
           recording === undefined
             ? null
-            : this.#pickRef(recording, occurrence.selectedRef);
+            : this.#pickRef(recording);
         const artwork = recording?.artwork.find(
           (a) => typeof a.url === 'string' && a.url.startsWith('https://'),
         );
@@ -2477,7 +2602,7 @@ export class Session {
     }
     // A resolved ref — selected, user-confirmed, or unvetoed source
     // ref — is already projected; no mapping task is needed.
-    if (this.#pickRef(recording, successor.selectedRef) !== null) {
+    if (this.#pickRef(recording) !== null) {
       return;
     }
     const routed = this.#router.providerFor(
@@ -2580,7 +2705,7 @@ export class Session {
         immediate === undefined ||
         immediate.occurrenceId !== occurrenceId ||
         ready2.settings.playbackProvider !== provider.id ||
-        !sameRef(this.#pickRef(updated, immediate.selectedRef), ref)
+        !sameRef(this.#pickRef(updated), ref)
       ) {
         return;
       }
