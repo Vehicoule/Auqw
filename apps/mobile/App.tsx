@@ -1342,8 +1342,10 @@ function Main({
   // session methods so emulator/simulator journeys are scriptable.
   // Verbs: open?tab=&playlist=&collection=, entity?provider=&kind=&id=,
   // search?q=, play-result?i=N, next, previous, pause, resume,
-  // like-current, seek?ms=, lyrics, radio?provider=&id=, corrections,
-  // transfer. Never ships in release bundles.
+  // like-current, seek?ms=, lyrics, radio?provider=&id=, stop-radio,
+  // provider?catalog=&playback=&lyrics=&radio=, corrections,
+  // review?list|confirm=&candidate=|reject=|undo=, transfer?export|
+  // import=<path>|apply-import. Never ships in release bundles.
   const journeyDeps = useRef({ session, search, state });
   journeyDeps.current = { session, search, state };
   useEffect(() => {
