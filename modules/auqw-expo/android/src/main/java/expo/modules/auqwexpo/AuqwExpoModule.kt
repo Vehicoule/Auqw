@@ -63,6 +63,8 @@ private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
+private const val FIRST_OUTPUT_POLL_INTERVAL_MS = 8L
+private const val FIRST_OUTPUT_POLL_DEADLINE_MS = 5_000L
 
 /** Cap on the released-handle marks — they only matter across the
  * queued-attach window, so a few hundred is far past any real case. */
@@ -657,11 +659,11 @@ class AuqwExpoModule : Module() {
     // skips only the guest resolve (bot-check-blocked during dev), so
     // prepare→attach→render still runs through the sparse store, pump,
     // fetch-through, and phase marks. Dev instrumentation only.
-    AsyncFunction("devPrepareUrl") Coroutine { url: String, mime: String, contentLength: Double? ->
+    AsyncFunction("devPrepareUrl") Coroutine { url: String, mime: String, contentLength: Double?, remintable: Boolean? ->
       requireDebuggable()
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       val prepared = try {
-        h.devPrepareUrl(url, mime, contentLength?.toULong())
+        h.devPrepareUrl(url, mime, contentLength?.toULong(), remintable == true)
       } catch (e: StreamException) {
         throw CodedException(streamErrCode(e), e.message, e)
       }
@@ -898,6 +900,7 @@ class AuqwExpoModule : Module() {
     attached = a
     attachedByService = bind == OccurrenceBind.FIXED
     attachedForOccurrence = occId
+    armFirstOutputPoll(p, a, positionMs?.toLong() ?: 0L)
   }
 
   private fun stateOf(p: ExoPlayer): String = when (p.playbackState) {
@@ -1374,38 +1377,72 @@ class AuqwExpoModule : Module() {
     }
   }
 
-  private val analyticsListener = object : AnalyticsListener {
-    private fun markFirstAudioOutput() {
-      val a = attached ?: return
-      if (a.firstFrameMarked) {
-        return
-      }
-      a.firstFrameMarked = true
-      // THE ≤200 ms metric event: attach → first frame handed to output.
-      // Media3 only invokes onRenderedFirstFrame for video renderers. An
-      // audio-only player therefore reports the equivalent boundary here:
-      // the audio sink has begun consuming decoded output (position advancing).
-      emitPhaseMark(a, "rendered-first-frame")
-      Log.i(
-        TAG,
-        "attach ${a.handle} rendered-first-frame " +
-          "${SystemClock.elapsedRealtime() - a.attachElapsedMs}ms"
-      )
+  /**
+   * THE ≤200 ms metric event: attach → first frame handed to output.
+   * Media3 only invokes onRenderedFirstFrame for video renderers, so an
+   * audio-only player marks the equivalent boundary: the audio sink has
+   * begun consuming decoded output (position advancing). Deduped per
+   * attach by [Attachment.firstFrameMarked].
+   */
+  private fun markFirstAudioOutput(a: Attachment) {
+    if (a.firstFrameMarked) {
+      return
     }
+    a.firstFrameMarked = true
+    emitPhaseMark(a, "rendered-first-frame")
+    Log.i(
+      TAG,
+      "attach ${a.handle} rendered-first-frame " +
+        "${SystemClock.elapsedRealtime() - a.attachElapsedMs}ms"
+    )
+  }
 
+  /**
+   * onAudioPositionAdvancing is the ideal mark trigger but it is gated
+   * on AudioTimestampPoller reaching an advancing timestamp — a path
+   * this device can starve indefinitely on stream attaches (persistent
+   * `device stall`/`retrograde timestamp` corrections while the track
+   * itself plays fine). Poll the audio clock directly instead: the
+   * first `currentPosition` advance past the attach baseline is the
+   * same observable — the sink consuming decoded output.
+   */
+  private fun armFirstOutputPoll(p: ExoPlayer, a: Attachment, startPositionMs: Long) {
+    val handler = Handler(p.applicationLooper)
+    val baseline = p.currentPosition.coerceAtLeast(startPositionMs)
+    val poll = object : Runnable {
+      override fun run() {
+        if (attached !== a || a.firstFrameMarked) {
+          return
+        }
+        if (SystemClock.elapsedRealtime() - a.attachElapsedMs >
+          FIRST_OUTPUT_POLL_DEADLINE_MS
+        ) {
+          return
+        }
+        if (p.isPlaying && p.currentPosition > baseline) {
+          markFirstAudioOutput(a)
+          return
+        }
+        handler.postDelayed(this, FIRST_OUTPUT_POLL_INTERVAL_MS)
+      }
+    }
+    handler.postDelayed(poll, FIRST_OUTPUT_POLL_INTERVAL_MS)
+  }
+
+  private val analyticsListener = object : AnalyticsListener {
     override fun onRenderedFirstFrame(
       eventTime: AnalyticsListener.EventTime,
       output: Any,
       renderTimeMs: Long
     ) {
-      markFirstAudioOutput()
+      attached?.let(::markFirstAudioOutput)
     }
 
     override fun onAudioPositionAdvancing(
       eventTime: AnalyticsListener.EventTime,
       playoutStartSystemTimeMs: Long
     ) {
-      markFirstAudioOutput()
+      attached?.let(::markFirstAudioOutput)
     }
   }
 

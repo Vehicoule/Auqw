@@ -519,6 +519,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -588,7 +612,7 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
  * loaded plugin set, and per-request cancellation tokens.
  */
 public protocol PluginHostProtocol: AnyObject, Sendable {
-
+    
     /**
      * Cancel an in-flight request; unknown ids are a no-op. A
      * `cancelPrepare` landing after `prepared` also abandons the
@@ -596,7 +620,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * playing consumer is never cancelled out from under playback.
      */
     func cancel(requestId: String) 
-
+    
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -639,15 +663,18 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * `devAttachFile`). Everything downstream of resolve is the real
      * path — sparse store, pump, fetch-through, marks — so the seam
      * gates can be exercised while the provider's resolve is
-     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
-     * expiry keeps it out of the measured window.
+     * unreachable. Re-mint is pinned to fail `Expired` unless
+     * `remintable` opts the session into re-minting the same source —
+     * the fixture URL is its own provider, letting the forced-cap
+     * gate exercise the real 403 → re-mint → resume path on-device.
+     * A one-hour expiry keeps it out of the measured window.
      *
      * # Errors
      * [`StreamError::Unavailable`] when the seam is not configured;
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
-    func devPrepareUrl(url: String, mime: String, contentLength: UInt64?) throws  -> PreparedStream
-
+    func devPrepareUrl(url: String, mime: String, contentLength: UInt64?, remintable: Bool) throws  -> PreparedStream
+    
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -814,7 +841,7 @@ open func loadPlugin(wasm: Data, manifestJson: String)throws  -> String  {
     )
 })
 }
-
+    
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -879,25 +906,29 @@ open func startResolve(pluginId: String, sourceRef: String, listener: ResolveLis
      * `devAttachFile`). Everything downstream of resolve is the real
      * path — sparse store, pump, fetch-through, marks — so the seam
      * gates can be exercised while the provider's resolve is
-     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
-     * expiry keeps it out of the measured window.
+     * unreachable. Re-mint is pinned to fail `Expired` unless
+     * `remintable` opts the session into re-minting the same source —
+     * the fixture URL is its own provider, letting the forced-cap
+     * gate exercise the real 403 → re-mint → resume path on-device.
+     * A one-hour expiry keeps it out of the measured window.
      *
      * # Errors
      * [`StreamError::Unavailable`] when the seam is not configured;
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
-open func devPrepareUrl(url: String, mime: String, contentLength: UInt64?)throws  -> PreparedStream  {
+open func devPrepareUrl(url: String, mime: String, contentLength: UInt64?, remintable: Bool)throws  -> PreparedStream  {
     return try  FfiConverterTypePreparedStream_lift(try rustCallWithError(FfiConverterTypeStreamError_lift) {
         uniffiCallStatus in
     uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(url),
         FfiConverterString.lower(mime),
-        FfiConverterOptionUInt64.lower(contentLength),uniffiCallStatus
+        FfiConverterOptionUInt64.lower(contentLength),
+        FfiConverterBool.lower(remintable),uniffiCallStatus
     )
 })
 }
-
+    
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -3040,7 +3071,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() != 51654) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() != 36240) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() != 33360) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() != 57130) {

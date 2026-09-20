@@ -243,7 +243,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   phaseMarks(handle: string): Promise<StreamPhaseMarks>;
   setQueueProjection(projection: QueueProjection): Promise<void>;
   devAttachFile(path: string): Promise<string>;
-  devPrepareUrl(url: string, mime: string, contentLength?: number): Promise<string>;
+  devPrepareUrl(url: string, mime: string, contentLength?: number, remintable?: boolean): Promise<string>;
 }
 
 const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
@@ -356,8 +356,9 @@ export function devPrepareUrl(
   url: string,
   mime: string,
   contentLength?: number,
+  remintable?: boolean,
 ): Promise<string> {
-  return native.devPrepareUrl(url, mime, contentLength);
+  return native.devPrepareUrl(url, mime, contentLength, remintable);
 }
 
 export function addResolveOutcomeListener(
