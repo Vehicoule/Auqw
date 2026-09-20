@@ -1,11 +1,11 @@
 import type { ThemeName } from '@auqw/design-tokens';
 import type {
   ArtworkRef,
+  Like,
   QueueSnapshot,
   Recording,
   SessionPlayback,
   Settings,
-  TrackLike,
   TrackMetadata,
 } from '@auqw/application';
 
@@ -232,7 +232,7 @@ export type PlayerModelInput = {
   readonly playback: SessionPlayback;
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
-  readonly likes: readonly TrackLike[];
+  readonly likes: readonly Like[];
 };
 
 function indexById(
@@ -245,8 +245,12 @@ function indexById(
   return map;
 }
 
-function likedIds(likes: readonly TrackLike[]): ReadonlySet<string> {
-  return new Set(likes.map((like) => like.recordingId));
+function likedIds(likes: readonly Like[]): ReadonlySet<string> {
+  return new Set(
+    likes
+      .filter((like) => like.entityKind === 'track')
+      .map((like) => like.targetId),
+  );
 }
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
@@ -313,7 +317,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
 export type QueueModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
-  readonly likes?: readonly TrackLike[];
+  readonly likes?: readonly Like[];
   readonly unavailableRecordingIds?: ReadonlySet<string>;
 };
 
@@ -366,14 +370,16 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
 
 export function toLibraryModel(input: {
   readonly recordings: readonly Recording[];
-  readonly likes: readonly TrackLike[];
+  readonly likes: readonly Like[];
 }): LibraryModel {
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
-  const ordered = [...input.likes].sort((a, b) => b.likedAtMs - a.likedAtMs);
+  const ordered = [...input.likes]
+    .filter((like) => like.entityKind === 'track')
+    .sort((a, b) => b.likedAtMs - a.likedAtMs);
   const items: TrackRowModel[] = [];
   for (const like of ordered) {
-    const recording = byId.get(like.recordingId);
+    const recording = byId.get(like.targetId);
     if (recording === undefined) {
       continue;
     }

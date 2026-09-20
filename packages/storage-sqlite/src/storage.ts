@@ -1,9 +1,21 @@
 import type {
   AppError,
+  ArtworkCacheEntry,
   AttemptTrace,
   CancellationSignal,
+  Entity,
+  EntityRef,
+  EntitySourceRef,
+  ExportDocument,
+  Like,
+  LyricsCacheEntry,
+  MatchReview,
   OperationContext,
   PersistedState,
+  PlayCount,
+  PlayEvent,
+  Playlist,
+  PlaylistEntry,
   QueueSnapshot,
   Recording,
   Result,
@@ -12,12 +24,12 @@ import type {
   SourceRef,
   StorageBatch,
   StoragePort,
-  TrackLike,
 } from '@auqw/application';
 import {
   appError,
   err,
   isAttemptTrace,
+  isExportDocument,
   isPersistedState,
   isSettings,
   ok,
@@ -43,6 +55,10 @@ function invalidData(): AppError {
 
 function invalidBatch(): AppError {
   return appError('invalid-response', 'commit batch failed validation');
+}
+
+function invalidImport(): AppError {
+  return appError('invalid-response', 'import document failed validation');
 }
 
 function invalidSchema(): AppError {
@@ -135,6 +151,58 @@ export class SqliteStorage implements StoragePort {
   async #runInitialize(context: OperationContext): Promise<Result<void>> {
     const signal = context.signal;
     try {
+      // The version probe is its own transaction so a pre-migration
+      // backup can run outside BEGIN (VACUUM INTO cannot run inside).
+      const probed = await this.#transaction(async (conn) => {
+        this.#check(signal);
+        await conn.execute(
+          'PRAGMA foreign_keys = ON',
+          undefined,
+          signal,
+        );
+        const found = await conn.query<SqlRow>(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'`,
+          undefined,
+          signal,
+        );
+        if (found.length === 0) {
+          return ok(0);
+        }
+        const rows = await conn.query<SqlRow>(
+          'SELECT version FROM schema_version',
+          undefined,
+          signal,
+        );
+        if (rows.length !== 1) {
+          return err(invalidSchema());
+        }
+        const raw = rows[0]?.['version'];
+        if (
+          typeof raw !== 'number' ||
+          !Number.isSafeInteger(raw) ||
+          raw < 0
+        ) {
+          return err(invalidSchema());
+        }
+        if (raw > CURRENT_SCHEMA_VERSION) {
+          return err(newerSchema());
+        }
+        return ok(raw);
+      }, signal);
+      if (!probed.ok) {
+        return err(probed.error);
+      }
+      const version = probed.value;
+      if (version === CURRENT_SCHEMA_VERSION) {
+        return ok(undefined);
+      }
+      if (version > 0) {
+        // Destructive migrations keep a recoverable backup (data.md):
+        // the v1 -> v2 likes rebuild drops the old table, so the
+        // pre-migration file is copied first.
+        this.#check(signal);
+        await this.#driver.backup(`v${version}`);
+      }
       return await this.#transaction(async (conn) => {
         this.#check(signal);
         await conn.execute(
@@ -142,67 +210,45 @@ export class SqliteStorage implements StoragePort {
           undefined,
           signal,
         );
-        let version = 0;
-        const found = await conn.query<SqlRow>(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'`,
-          undefined,
-          signal,
-        );
-        if (found.length > 0) {
-          const rows = await conn.query<SqlRow>(
-            'SELECT version FROM schema_version',
+        for (let step = version; step < CURRENT_SCHEMA_VERSION; step += 1) {
+          for (const statement of MIGRATIONS[step] ?? []) {
+            this.#check(signal);
+            await conn.execute(statement, undefined, signal);
+          }
+        }
+        this.#check(signal);
+        if (version === 0) {
+          await conn.execute(
+            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
+             VALUES (1, ?, ?, ?, ?, ?, ?)`,
+            [
+              this.#defaults.catalogProvider,
+              this.#defaults.playbackProvider,
+              this.#defaults.storefront,
+              this.#defaults.qualityKbps,
+              this.#defaults.theme,
+              this.#defaults.prefetch ? 1 : 0,
+            ],
+            signal,
+          );
+          await conn.execute(
+            `INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+             VALUES (1, 0, NULL, 0, 'stopped', NULL)`,
             undefined,
             signal,
           );
-          if (rows.length !== 1) {
-            return err(invalidSchema());
-          }
-          const raw = rows[0]?.['version'];
-          if (
-            typeof raw !== 'number' ||
-            !Number.isSafeInteger(raw) ||
-            raw < 0
-          ) {
-            return err(invalidSchema());
-          }
-          if (raw > CURRENT_SCHEMA_VERSION) {
-            return err(newerSchema());
-          }
-          version = raw;
+          await conn.execute(
+            'INSERT INTO schema_version (id, version) VALUES (1, ?)',
+            [CURRENT_SCHEMA_VERSION],
+            signal,
+          );
+        } else {
+          await conn.execute(
+            'UPDATE schema_version SET version = ? WHERE id = 1',
+            [CURRENT_SCHEMA_VERSION],
+            signal,
+          );
         }
-        if (version === CURRENT_SCHEMA_VERSION) {
-          return ok(undefined);
-        }
-        const statements = MIGRATIONS[version] ?? [];
-        for (const statement of statements) {
-          this.#check(signal);
-          await conn.execute(statement, undefined, signal);
-        }
-        this.#check(signal);
-        await conn.execute(
-          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
-           VALUES (1, ?, ?, ?, ?, ?, ?)`,
-          [
-            this.#defaults.catalogProvider,
-            this.#defaults.playbackProvider,
-            this.#defaults.storefront,
-            this.#defaults.qualityKbps,
-            this.#defaults.theme,
-            this.#defaults.prefetch ? 1 : 0,
-          ],
-          signal,
-        );
-        await conn.execute(
-          `INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
-           VALUES (1, 0, NULL, 0, 'stopped', NULL)`,
-          undefined,
-          signal,
-        );
-        await conn.execute(
-          'INSERT INTO schema_version (id, version) VALUES (1, ?)',
-          [CURRENT_SCHEMA_VERSION],
-          signal,
-        );
         return ok(undefined);
       }, signal);
     } catch (thrown) {
@@ -247,6 +293,18 @@ export class SqliteStorage implements StoragePort {
         const merged: PersistedState = {
           recordings: batch.recordings ?? current.value.recordings,
           likes: batch.likes ?? current.value.likes,
+          entities: batch.entities ?? current.value.entities,
+          entitySourceRefs:
+            batch.entitySourceRefs ?? current.value.entitySourceRefs,
+          playlists: batch.playlists ?? current.value.playlists,
+          playlistEntries:
+            batch.playlistEntries ?? current.value.playlistEntries,
+          playHistory: batch.playHistory ?? current.value.playHistory,
+          playCounts: batch.playCounts ?? current.value.playCounts,
+          matchReviews: batch.matchReviews ?? current.value.matchReviews,
+          lyricsCache: batch.lyricsCache ?? current.value.lyricsCache,
+          artworkCache:
+            batch.artworkCache ?? current.value.artworkCache,
           queue: batch.queue ?? current.value.queue,
           settings: batch.settings ?? current.value.settings,
         };
@@ -259,22 +317,65 @@ export class SqliteStorage implements StoragePort {
           return err(invalidBatch());
         }
         this.#check(signal);
-        const coreChanged =
-          batch.recordings !== undefined ||
-          batch.likes !== undefined ||
-          batch.queue !== undefined;
-        if (coreChanged) {
-          for (const statement of [
-            'DELETE FROM queue_occurrences',
-            'DELETE FROM queue_state',
-            'DELETE FROM likes',
-            'DELETE FROM mappings',
-            'DELETE FROM source_refs',
-            'DELETE FROM recordings',
-          ]) {
+        // Each section rewrites its own tables; sections whose rows
+        // foreign-key into a rewritten parent ride along (SQLite FKs
+        // are immediate, so dependents must be deleted first and
+        // reinserted from the merged document).
+        const rewrite = {
+          queueState: batch.queue !== undefined,
+          queueOccurrences:
+            batch.queue !== undefined || batch.recordings !== undefined,
+          playlistEntries:
+            batch.playlistEntries !== undefined ||
+            batch.playlists !== undefined ||
+            batch.recordings !== undefined,
+          playlists: batch.playlists !== undefined,
+          playHistory:
+            batch.playHistory !== undefined ||
+            batch.recordings !== undefined,
+          playCounts:
+            batch.playCounts !== undefined ||
+            batch.recordings !== undefined,
+          matchReviews:
+            batch.matchReviews !== undefined ||
+            batch.recordings !== undefined,
+          lyricsCache:
+            batch.lyricsCache !== undefined ||
+            batch.recordings !== undefined,
+          entitySourceRefs:
+            batch.entitySourceRefs !== undefined ||
+            batch.entities !== undefined,
+          entities: batch.entities !== undefined,
+          likes: batch.likes !== undefined,
+          recordings: batch.recordings !== undefined,
+          artworkCache: batch.artworkCache !== undefined,
+          settings: batch.settings !== undefined,
+        };
+        const deletes: readonly (readonly [boolean, string])[] = [
+          [rewrite.queueOccurrences, 'DELETE FROM queue_occurrences'],
+          [rewrite.playlistEntries, 'DELETE FROM playlist_entries'],
+          [rewrite.playHistory, 'DELETE FROM play_history'],
+          [rewrite.playCounts, 'DELETE FROM play_counts'],
+          [rewrite.matchReviews, 'DELETE FROM match_reviews'],
+          [rewrite.lyricsCache, 'DELETE FROM lyrics_cache'],
+          [rewrite.likes, 'DELETE FROM likes'],
+          [rewrite.entitySourceRefs, 'DELETE FROM entity_source_refs'],
+          [rewrite.entities, 'DELETE FROM entities'],
+          [rewrite.playlists, 'DELETE FROM playlists'],
+          [rewrite.recordings, 'DELETE FROM mappings'],
+          [rewrite.recordings, 'DELETE FROM source_refs'],
+          [rewrite.recordings, 'DELETE FROM recordings'],
+          [rewrite.queueState, 'DELETE FROM queue_state'],
+          [rewrite.settings, 'DELETE FROM settings'],
+          [rewrite.artworkCache, 'DELETE FROM artwork_cache'],
+        ];
+        for (const [enabled, statement] of deletes) {
+          if (enabled) {
             await conn.execute(statement, undefined, signal);
           }
-          this.#check(signal);
+        }
+        this.#check(signal);
+        if (rewrite.recordings) {
           for (const recording of merged.recordings) {
             await conn.execute(
               `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
@@ -323,16 +424,159 @@ export class SqliteStorage implements StoragePort {
               );
             }
           }
-          this.#check(signal);
-          for (const like of merged.likes) {
+        }
+        if (rewrite.entities) {
+          for (const entity of merged.entities) {
             await conn.execute(
-              `INSERT INTO likes (entity_kind, entity_id, liked_at_ms)
-               VALUES ('track', ?, ?)`,
-              [like.recordingId, like.likedAtMs],
+              `INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                entity.entityId,
+                entity.kind,
+                entity.title,
+                entity.artistName,
+                entity.artwork.length === 0
+                  ? null
+                  : JSON.stringify(entity.artwork),
+                entity.createdMs,
+              ],
               signal,
             );
           }
-          this.#check(signal);
+        }
+        if (rewrite.entitySourceRefs) {
+          for (const ref of merged.entitySourceRefs) {
+            await conn.execute(
+              `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
+               VALUES (?, ?, ?)`,
+              [ref.entityId, ref.provider, JSON.stringify(ref.ref)],
+              signal,
+            );
+          }
+        }
+        if (rewrite.playlists) {
+          for (const playlist of merged.playlists) {
+            await conn.execute(
+              `INSERT INTO playlists (playlist_id, name, created_ms, updated_ms)
+               VALUES (?, ?, ?, ?)`,
+              [
+                playlist.playlistId,
+                playlist.name,
+                playlist.createdMs,
+                playlist.updatedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.playlistEntries) {
+          for (const entry of merged.playlistEntries) {
+            await conn.execute(
+              `INSERT INTO playlist_entries (entry_id, playlist_id, recording_id, position, selected_ref_json, added_ms)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                entry.entryId,
+                entry.playlistId,
+                entry.recordingId,
+                entry.position,
+                entry.selectedRef === null
+                  ? null
+                  : JSON.stringify(entry.selectedRef),
+                entry.addedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.likes) {
+          for (const like of merged.likes) {
+            await conn.execute(
+              `INSERT INTO likes (entity_kind, target_id, liked_ms)
+               VALUES (?, ?, ?)`,
+              [like.entityKind, like.targetId, like.likedAtMs],
+              signal,
+            );
+          }
+        }
+        if (rewrite.playHistory) {
+          for (const event of merged.playHistory) {
+            await conn.execute(
+              `INSERT INTO play_history (event_id, recording_id, occurrence_id, played_ms, listened_ms)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                event.eventId,
+                event.recordingId,
+                event.occurrenceId,
+                event.playedMs,
+                event.listenedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.playCounts) {
+          for (const count of merged.playCounts) {
+            await conn.execute(
+              `INSERT INTO play_counts (recording_id, count, last_ms)
+               VALUES (?, ?, ?)`,
+              [count.recordingId, count.count, count.lastMs],
+              signal,
+            );
+          }
+        }
+        if (rewrite.matchReviews) {
+          for (const review of merged.matchReviews) {
+            await conn.execute(
+              `INSERT INTO match_reviews (review_id, recording_id, candidates_json, status, resolution_json, created_ms, resolved_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [
+                review.reviewId,
+                review.recordingId,
+                JSON.stringify(review.candidates),
+                review.status,
+                review.resolution === null
+                  ? null
+                  : JSON.stringify(review.resolution),
+                review.createdMs,
+                review.resolvedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.lyricsCache) {
+          for (const entry of merged.lyricsCache) {
+            await conn.execute(
+              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                entry.recordingId,
+                entry.provider,
+                entry.kind,
+                JSON.stringify(entry.payload),
+                entry.fetchedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.artworkCache) {
+          for (const entry of merged.artworkCache) {
+            await conn.execute(
+              `INSERT INTO artwork_cache (url, file_path, bytes, last_accessed_ms)
+               VALUES (?, ?, ?, ?)`,
+              [
+                entry.url,
+                entry.filePath,
+                entry.bytes,
+                entry.lastAccessedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        this.#check(signal);
+        if (rewrite.queueState) {
           await conn.execute(
             `INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
              VALUES (1, ?, ?, ?, ?, ?)`,
@@ -347,6 +591,8 @@ export class SqliteStorage implements StoragePort {
             ],
             signal,
           );
+        }
+        if (rewrite.queueOccurrences) {
           for (const [ordinal, occurrence] of merged.queue.occurrences
             .entries()) {
             await conn.execute(
@@ -364,9 +610,7 @@ export class SqliteStorage implements StoragePort {
             );
           }
         }
-        this.#check(signal);
-        if (batch.settings !== undefined) {
-          await conn.execute('DELETE FROM settings', undefined, signal);
+        if (rewrite.settings) {
           await conn.execute(
             `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
              VALUES (1, ?, ?, ?, ?, ?, ?)`,
@@ -451,57 +695,289 @@ export class SqliteStorage implements StoragePort {
     }
   }
 
+  async exportOwned(
+    exportedAtMs: number,
+    context: OperationContext,
+  ): Promise<Result<ExportDocument>> {
+    if (!Number.isSafeInteger(exportedAtMs) || exportedAtMs < 0) {
+      throw new TypeError('exportedAtMs must be a safe nonnegative integer');
+    }
+    const init = await this.initialize(context);
+    if (!init.ok) {
+      return init;
+    }
+    const signal = context.signal;
+    try {
+      return await this.#transaction(async (conn) => {
+        this.#check(signal);
+        const state = await this.#readState(conn, signal);
+        if (!state.ok) {
+          return state;
+        }
+        const doc = toExportDocument(state.value, exportedAtMs);
+        if (!isExportDocument(doc)) {
+          return err(invalidData());
+        }
+        return ok(doc);
+      }, signal);
+    } catch (thrown) {
+      return err(this.#mapError(thrown, signal));
+    }
+  }
+
+  async importOwned(
+    doc: ExportDocument,
+    context: OperationContext,
+  ): Promise<Result<void>> {
+    // The entire document validates before any write (data.md).
+    if (!isExportDocument(doc)) {
+      return err(invalidImport());
+    }
+    const init = await this.initialize(context);
+    if (!init.ok) {
+      return init;
+    }
+    const signal = context.signal;
+    try {
+      return await this.#transaction(async (conn) => {
+        this.#check(signal);
+        // Wipe owned tables child-first. Session rows (queue) and
+        // lyrics_cache foreign-key into the recordings being
+        // replaced, so they are cleared; attempt_traces and
+        // artwork_cache have no such keys and are left untouched.
+        for (const statement of [
+          'DELETE FROM queue_occurrences',
+          'DELETE FROM lyrics_cache',
+          'DELETE FROM likes',
+          'DELETE FROM match_reviews',
+          'DELETE FROM play_history',
+          'DELETE FROM play_counts',
+          'DELETE FROM playlist_entries',
+          'DELETE FROM playlists',
+          'DELETE FROM entity_source_refs',
+          'DELETE FROM entities',
+          'DELETE FROM mappings',
+          'DELETE FROM source_refs',
+          'DELETE FROM recordings',
+          'DELETE FROM settings',
+        ]) {
+          await conn.execute(statement, undefined, signal);
+        }
+        // The session survives the import as an empty stopped queue —
+        // its old rows named the recordings just replaced.
+        await conn.execute(
+          `UPDATE queue_state
+           SET revision = revision + 1, current_occurrence_id = NULL,
+               position_ms = 0, mode = 'stopped', blocked_error_json = NULL
+           WHERE id = 1`,
+          undefined,
+          signal,
+        );
+        await conn.execute(
+          `INSERT OR IGNORE INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+           VALUES (1, 0, NULL, 0, 'stopped', NULL)`,
+          undefined,
+          signal,
+        );
+        this.#check(signal);
+        const refsByRecording = new Map<string, SourceRef[]>();
+        for (const row of doc.sourceRefs) {
+          const list = refsByRecording.get(row.recordingId) ?? [];
+          list.push(row.ref);
+          refsByRecording.set(row.recordingId, list);
+        }
+        const mappingsByRecording = new Map<string, SourceMapping[]>();
+        for (const row of doc.mappings) {
+          const list = mappingsByRecording.get(row.recordingId) ?? [];
+          list.push(row.mapping);
+          mappingsByRecording.set(row.recordingId, list);
+        }
+        for (const recording of doc.recordings) {
+          await conn.execute(
+            `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              recording.id,
+              recording.title,
+              recording.artist,
+              recording.album,
+              recording.durationMs,
+              recording.releaseYear,
+              JSON.stringify(recording.artwork),
+              recording.explicit === null
+                ? null
+                : recording.explicit
+                  ? 1
+                  : 0,
+              recording.genre,
+              recording.isrc,
+              JSON.stringify(recording.versionLabels),
+            ],
+            signal,
+          );
+          const refs = refsByRecording.get(recording.id) ?? [];
+          for (const [ordinal, ref] of refs.entries()) {
+            await conn.execute(
+              `INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+               VALUES (?, ?, ?, ?, ?)`,
+              [recording.id, ordinal, ref.provider, ref.kind, ref.id],
+              signal,
+            );
+          }
+          const mappings = mappingsByRecording.get(recording.id) ?? [];
+          for (const [ordinal, mapping] of mappings.entries()) {
+            await conn.execute(
+              `INSERT INTO mappings (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
+               VALUES (?, ?, ?, 'track', ?, ?, ?, ?)`,
+              [
+                recording.id,
+                ordinal,
+                mapping.ref.provider,
+                mapping.ref.id,
+                mapping.status,
+                mapping.matchedAtMs,
+                JSON.stringify(mapping.evidence),
+              ],
+              signal,
+            );
+          }
+        }
+        for (const entity of doc.entities) {
+          await conn.execute(
+            `INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              entity.entityId,
+              entity.kind,
+              entity.title,
+              entity.artistName,
+              entity.artwork.length === 0
+                ? null
+                : JSON.stringify(entity.artwork),
+              entity.createdMs,
+            ],
+            signal,
+          );
+        }
+        for (const ref of doc.entitySourceRefs) {
+          await conn.execute(
+            `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
+             VALUES (?, ?, ?)`,
+            [ref.entityId, ref.provider, JSON.stringify(ref.ref)],
+            signal,
+          );
+        }
+        for (const playlist of doc.playlists) {
+          await conn.execute(
+            `INSERT INTO playlists (playlist_id, name, created_ms, updated_ms)
+             VALUES (?, ?, ?, ?)`,
+            [
+              playlist.playlistId,
+              playlist.name,
+              playlist.createdMs,
+              playlist.updatedMs,
+            ],
+            signal,
+          );
+        }
+        for (const entry of doc.playlistEntries) {
+          await conn.execute(
+            `INSERT INTO playlist_entries (entry_id, playlist_id, recording_id, position, selected_ref_json, added_ms)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              entry.entryId,
+              entry.playlistId,
+              entry.recordingId,
+              entry.position,
+              entry.selectedRef === null
+                ? null
+                : JSON.stringify(entry.selectedRef),
+              entry.addedMs,
+            ],
+            signal,
+          );
+        }
+        for (const like of doc.likes) {
+          await conn.execute(
+            `INSERT INTO likes (entity_kind, target_id, liked_ms)
+             VALUES (?, ?, ?)`,
+            [like.entityKind, like.targetId, like.likedAtMs],
+            signal,
+          );
+        }
+        for (const event of doc.playHistory) {
+          await conn.execute(
+            `INSERT INTO play_history (event_id, recording_id, occurrence_id, played_ms, listened_ms)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+              event.eventId,
+              event.recordingId,
+              event.occurrenceId,
+              event.playedMs,
+              event.listenedMs,
+            ],
+            signal,
+          );
+        }
+        for (const count of doc.playCounts) {
+          await conn.execute(
+            `INSERT INTO play_counts (recording_id, count, last_ms)
+             VALUES (?, ?, ?)`,
+            [count.recordingId, count.count, count.lastMs],
+            signal,
+          );
+        }
+        for (const review of doc.matchReviews) {
+          await conn.execute(
+            `INSERT INTO match_reviews (review_id, recording_id, candidates_json, status, resolution_json, created_ms, resolved_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              review.reviewId,
+              review.recordingId,
+              JSON.stringify(review.candidates),
+              review.status,
+              review.resolution === null
+                ? null
+                : JSON.stringify(review.resolution),
+              review.createdMs,
+              review.resolvedMs,
+            ],
+            signal,
+          );
+        }
+        await conn.execute(
+          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
+           VALUES (1, ?, ?, ?, ?, ?, ?)`,
+          [
+            doc.settings.catalogProvider,
+            doc.settings.playbackProvider,
+            doc.settings.storefront,
+            doc.settings.qualityKbps,
+            doc.settings.theme,
+            doc.settings.prefetch ? 1 : 0,
+          ],
+          signal,
+        );
+        this.#check(signal);
+        return ok(undefined);
+      }, signal);
+    } catch (thrown) {
+      return err(this.#mapError(thrown, signal));
+    }
+  }
+
   /** Reconstructs the persisted document; null marks malformed rows. */
   async #readState(
     conn: SqliteConnection,
     signal: CancellationSignal,
   ): Promise<Result<PersistedState>> {
     this.#check(signal);
-    const recordingRows = await conn.query<SqlRow>(
-      'SELECT * FROM recordings ORDER BY rowid',
-      undefined,
-      signal,
-    );
-    const refRows = await conn.query<SqlRow>(
-      'SELECT * FROM source_refs ORDER BY recording_id, ordinal',
-      undefined,
-      signal,
-    );
-    const mappingRows = await conn.query<SqlRow>(
-      'SELECT * FROM mappings ORDER BY recording_id, ordinal',
-      undefined,
-      signal,
-    );
-    const likeRows = await conn.query<SqlRow>(
-      'SELECT * FROM likes ORDER BY rowid',
-      undefined,
-      signal,
-    );
-    const queueRows = await conn.query<SqlRow>(
-      'SELECT * FROM queue_state WHERE id = 1',
-      undefined,
-      signal,
-    );
-    const occurrenceRows = await conn.query<SqlRow>(
-      'SELECT * FROM queue_occurrences ORDER BY ordinal',
-      undefined,
-      signal,
-    );
-    const settingsRows = await conn.query<SqlRow>(
-      'SELECT * FROM settings WHERE id = 1',
-      undefined,
-      signal,
-    );
+    const rows = {} as TableRows;
+    for (const [key, sql] of TABLE_QUERIES) {
+      rows[key] = await conn.query<SqlRow>(sql, undefined, signal);
+    }
     this.#check(signal);
-    const built = decodeState(
-      recordingRows,
-      refRows,
-      mappingRows,
-      likeRows,
-      queueRows,
-      occurrenceRows,
-      settingsRows,
-    );
+    const built = decodeState(rows);
     if (built === null || !isPersistedState(built)) {
       return err(invalidData());
     }
@@ -509,15 +985,93 @@ export class SqliteStorage implements StoragePort {
   }
 }
 
-function decodeState(
-  recordingRows: readonly SqlRow[],
-  refRows: readonly SqlRow[],
-  mappingRows: readonly SqlRow[],
-  likeRows: readonly SqlRow[],
-  queueRows: readonly SqlRow[],
-  occurrenceRows: readonly SqlRow[],
-  settingsRows: readonly SqlRow[],
-): PersistedState | null {
+/** Owned-data projection of the persisted document, flattened. */
+function toExportDocument(
+  state: PersistedState,
+  exportedAtMs: number,
+): ExportDocument {
+  return {
+    formatVersion: 1,
+    exportedAtMs,
+    recordings: state.recordings.map(
+      ({ sourceRefs: _refs, mappings: _mappings, ...core }) => core,
+    ),
+    sourceRefs: state.recordings.flatMap((recording) =>
+      recording.sourceRefs.map((ref) => ({ recordingId: recording.id, ref })),
+    ),
+    mappings: state.recordings.flatMap((recording) =>
+      recording.mappings.map((mapping) => ({
+        recordingId: recording.id,
+        mapping,
+      })),
+    ),
+    likes: state.likes,
+    entities: state.entities,
+    entitySourceRefs: state.entitySourceRefs,
+    playlists: state.playlists,
+    playlistEntries: state.playlistEntries,
+    playHistory: state.playHistory,
+    playCounts: state.playCounts,
+    matchReviews: state.matchReviews,
+    settings: state.settings,
+  };
+}
+
+type TableRows = {
+  recordings: readonly SqlRow[];
+  sourceRefs: readonly SqlRow[];
+  mappings: readonly SqlRow[];
+  likes: readonly SqlRow[];
+  entities: readonly SqlRow[];
+  entitySourceRefs: readonly SqlRow[];
+  playlists: readonly SqlRow[];
+  playlistEntries: readonly SqlRow[];
+  playHistory: readonly SqlRow[];
+  playCounts: readonly SqlRow[];
+  matchReviews: readonly SqlRow[];
+  lyricsCache: readonly SqlRow[];
+  artworkCache: readonly SqlRow[];
+  queueState: readonly SqlRow[];
+  queueOccurrences: readonly SqlRow[];
+  settings: readonly SqlRow[];
+};
+
+const TABLE_QUERIES: readonly (readonly [keyof TableRows, string])[] = [
+  ['recordings', 'SELECT * FROM recordings ORDER BY rowid'],
+  ['sourceRefs', 'SELECT * FROM source_refs ORDER BY recording_id, ordinal'],
+  ['mappings', 'SELECT * FROM mappings ORDER BY recording_id, ordinal'],
+  ['likes', 'SELECT * FROM likes ORDER BY rowid'],
+  ['entities', 'SELECT * FROM entities ORDER BY rowid'],
+  [
+    'entitySourceRefs',
+    'SELECT * FROM entity_source_refs ORDER BY entity_id, provider',
+  ],
+  ['playlists', 'SELECT * FROM playlists ORDER BY rowid'],
+  [
+    'playlistEntries',
+    'SELECT * FROM playlist_entries ORDER BY playlist_id, position, entry_id',
+  ],
+  [
+    'playHistory',
+    'SELECT * FROM play_history ORDER BY played_ms, event_id',
+  ],
+  ['playCounts', 'SELECT * FROM play_counts ORDER BY rowid'],
+  ['matchReviews', 'SELECT * FROM match_reviews ORDER BY rowid'],
+  ['lyricsCache', 'SELECT * FROM lyrics_cache ORDER BY rowid'],
+  ['artworkCache', 'SELECT * FROM artwork_cache ORDER BY rowid'],
+  ['queueState', 'SELECT * FROM queue_state WHERE id = 1'],
+  ['queueOccurrences', 'SELECT * FROM queue_occurrences ORDER BY ordinal'],
+  ['settings', 'SELECT * FROM settings WHERE id = 1'],
+];
+
+function decodeState(rows: TableRows): PersistedState | null {
+  const recordingRows = rows.recordings;
+  const refRows = rows.sourceRefs;
+  const mappingRows = rows.mappings;
+  const likeRows = rows.likes;
+  const queueRows = rows.queueState;
+  const occurrenceRows = rows.queueOccurrences;
+  const settingsRows = rows.settings;
   if (queueRows.length !== 1 || settingsRows.length !== 1) {
     return null;
   }
@@ -676,13 +1230,234 @@ function decodeState(
       mappings: mappingsByRecording.get(id) ?? [],
     };
   });
-  const likes: TrackLike[] = likeRows.map((row) => {
-    if (row['entity_kind'] !== 'track') {
+  // likes: polymorphic target_id — 'track' names a recording,
+  // 'album'/'artist' name an entity (checked after entity decode).
+  const likeKeys = new Set<string>();
+  const likes: Like[] = likeRows.map((row) => {
+    const kind = row['entity_kind'];
+    if (kind !== 'track' && kind !== 'album' && kind !== 'artist') {
+      fail();
+    }
+    const targetId = reqStr(row['target_id']);
+    const key = `${kind as string} ${targetId}`;
+    if (likeKeys.has(key)) {
+      fail();
+    }
+    likeKeys.add(key);
+    return {
+      entityKind: kind as Like['entityKind'],
+      targetId,
+      likedAtMs: reqNonNegInt(row['liked_ms']),
+    };
+  });
+  // Entities: ids first so entity_source_refs and entity-kind likes
+  // can be verified; duplicate entity rows rejected without the PK.
+  const entityIds = new Set<string>();
+  for (const row of rows.entities) {
+    const id = reqStr(row['entity_id']);
+    if (entityIds.has(id)) {
+      fail();
+    }
+    entityIds.add(id);
+  }
+  const entities: Entity[] = rows.entities.map((row) => {
+    const kind = row['kind'];
+    if (kind !== 'album' && kind !== 'artist') {
       fail();
     }
     return {
-      recordingId: reqStr(row['entity_id']),
-      likedAtMs: reqNonNegInt(row['liked_at_ms']),
+      entityId: reqStr(row['entity_id']),
+      kind: kind as Entity['kind'],
+      title: reqStr(row['title']),
+      artistName: optStr(row['artist_name']),
+      artwork:
+        row['artwork_json'] === null
+          ? []
+          : (json(row['artwork_json']) as Entity['artwork']),
+      createdMs: reqNonNegInt(row['created_ms']),
+    };
+  });
+  for (const like of likes) {
+    const targets = like.entityKind === 'track' ? recordingIds : entityIds;
+    if (!targets.has(like.targetId)) {
+      fail();
+    }
+  }
+  const entityRefKeys = new Set<string>();
+  const entitySourceRefs: EntitySourceRef[] = rows.entitySourceRefs.map(
+    (row) => {
+      const entityId = reqStr(row['entity_id']);
+      if (!entityIds.has(entityId)) {
+        fail();
+      }
+      const provider = reqNonEmpty(row['provider']);
+      const key = `${entityId} ${provider}`;
+      if (entityRefKeys.has(key)) {
+        fail();
+      }
+      entityRefKeys.add(key);
+      return {
+        entityId,
+        provider,
+        ref: json(row['ref_json']) as EntityRef,
+      };
+    },
+  );
+  const playlistIds = new Set<string>();
+  for (const row of rows.playlists) {
+    const id = reqStr(row['playlist_id']);
+    if (playlistIds.has(id)) {
+      fail();
+    }
+    playlistIds.add(id);
+  }
+  const playlists: Playlist[] = rows.playlists.map((row) => ({
+    playlistId: reqStr(row['playlist_id']),
+    name: reqStr(row['name']),
+    createdMs: reqNonNegInt(row['created_ms']),
+    updatedMs: reqNonNegInt(row['updated_ms']),
+  }));
+  const entryIds = new Set<string>();
+  const entryPositions = new Map<string, Set<number>>();
+  const playlistEntries: PlaylistEntry[] = rows.playlistEntries.map(
+    (row) => {
+      const playlistId = reqStr(row['playlist_id']);
+      if (!playlistIds.has(playlistId)) {
+        fail();
+      }
+      const recordingId = reqStr(row['recording_id']);
+      if (!recordingIds.has(recordingId)) {
+        fail();
+      }
+      const entryId = reqStr(row['entry_id']);
+      if (entryIds.has(entryId)) {
+        fail();
+      }
+      entryIds.add(entryId);
+      const position = row['position'];
+      if (typeof position !== 'number' || !Number.isFinite(position)) {
+        fail();
+      }
+      const seen = entryPositions.get(playlistId) ?? new Set<number>();
+      if (seen.has(position as number)) {
+        fail();
+      }
+      seen.add(position as number);
+      entryPositions.set(playlistId, seen);
+      const selectedRef =
+        row['selected_ref_json'] === null
+          ? null
+          : (json(row['selected_ref_json']) as SourceRef);
+      return {
+        entryId,
+        playlistId,
+        recordingId,
+        position: position as number,
+        selectedRef,
+        addedMs: reqNonNegInt(row['added_ms']),
+      };
+    },
+  );
+  const eventIds = new Set<string>();
+  const playHistory: PlayEvent[] = rows.playHistory.map((row) => {
+    const eventId = reqStr(row['event_id']);
+    if (eventIds.has(eventId)) {
+      fail();
+    }
+    eventIds.add(eventId);
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId)) {
+      fail();
+    }
+    return {
+      eventId,
+      recordingId,
+      occurrenceId: optStr(row['occurrence_id']),
+      playedMs: reqNonNegInt(row['played_ms']),
+      listenedMs: reqNonNegInt(row['listened_ms']),
+    };
+  });
+  const countedIds = new Set<string>();
+  const playCounts: PlayCount[] = rows.playCounts.map((row) => {
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId) || countedIds.has(recordingId)) {
+      fail();
+    }
+    countedIds.add(recordingId);
+    return {
+      recordingId,
+      count: reqNonNegInt(row['count']),
+      lastMs: reqNonNegInt(row['last_ms']),
+    };
+  });
+  const reviewIds = new Set<string>();
+  const matchReviews: MatchReview[] = rows.matchReviews.map((row) => {
+    const reviewId = reqStr(row['review_id']);
+    if (reviewIds.has(reviewId)) {
+      fail();
+    }
+    reviewIds.add(reviewId);
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId)) {
+      fail();
+    }
+    const status = row['status'];
+    if (
+      status !== 'pending' &&
+      status !== 'confirmed' &&
+      status !== 'rejected' &&
+      status !== 'dismissed'
+    ) {
+      fail();
+    }
+    const resolvedMs = optInt(row['resolved_ms']);
+    if (resolvedMs !== null && resolvedMs < 0) {
+      fail();
+    }
+    return {
+      reviewId,
+      recordingId,
+      candidates: json(row['candidates_json']) as MatchReview['candidates'],
+      status: status as MatchReview['status'],
+      resolution:
+        row['resolution_json'] === null
+          ? null
+          : (json(row['resolution_json']) as MatchReview['resolution']),
+      createdMs: reqNonNegInt(row['created_ms']),
+      resolvedMs,
+    };
+  });
+  const lyricIds = new Set<string>();
+  const lyricsCache: LyricsCacheEntry[] = rows.lyricsCache.map((row) => {
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId) || lyricIds.has(recordingId)) {
+      fail();
+    }
+    lyricIds.add(recordingId);
+    const kind = row['kind'];
+    if (kind !== 'plain' && kind !== 'synced') {
+      fail();
+    }
+    return {
+      recordingId,
+      provider: reqNonEmpty(row['provider']),
+      kind: kind as LyricsCacheEntry['kind'],
+      payload: json(row['payload_json']) as LyricsCacheEntry['payload'],
+      fetchedMs: reqNonNegInt(row['fetched_ms']),
+    };
+  });
+  const artworkUrls = new Set<string>();
+  const artworkCache: ArtworkCacheEntry[] = rows.artworkCache.map((row) => {
+    const url = reqStr(row['url']);
+    if (artworkUrls.has(url)) {
+      fail();
+    }
+    artworkUrls.add(url);
+    return {
+      url,
+      filePath: reqStr(row['file_path']),
+      bytes: reqNonNegInt(row['bytes']),
+      lastAccessedMs: reqNonNegInt(row['last_accessed_ms']),
     };
   });
   const blocked =
@@ -749,5 +1524,19 @@ function decodeState(
   if (bad) {
     return null;
   }
-  return { recordings, likes, queue, settings };
+  return {
+    recordings,
+    likes,
+    entities,
+    entitySourceRefs,
+    playlists,
+    playlistEntries,
+    playHistory,
+    playCounts,
+    matchReviews,
+    lyricsCache,
+    artworkCache,
+    queue,
+    settings,
+  };
 }

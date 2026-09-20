@@ -428,7 +428,9 @@ function Main({
     const byId = new Map(state.recordings.map((r) => [r.id, r]));
     const recents = [...state.likes]
       .sort((a, b) => b.likedAtMs - a.likedAtMs)
-      .map((like) => byId.get(like.recordingId))
+      .map((like) =>
+        like.entityKind === 'track' ? byId.get(like.targetId) : undefined,
+      )
       .filter((r) => r !== undefined)
       .slice(0, 12)
       .map(toRailCard);

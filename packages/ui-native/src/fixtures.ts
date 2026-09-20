@@ -1,9 +1,9 @@
 import type {
+  Like,
   QueueSnapshot,
   Recording,
   SessionPlayback,
   Settings,
-  TrackLike,
   TrackMetadata,
 } from '@auqw/application';
 import type { ThemeName } from '@auqw/design-tokens';
@@ -187,10 +187,18 @@ export const fixtureRecordings: readonly Recording[] = [
   }),
 ];
 
-export const fixtureLikes: readonly TrackLike[] = [
-  { recordingId: 'rec-self-aware', likedAtMs: 1_700_000_300_000 },
-  { recordingId: 'rec-petit', likedAtMs: 1_700_000_200_000 },
-  { recordingId: 'rec-roads', likedAtMs: 1_700_000_100_000 },
+export const fixtureLikes: readonly Like[] = [
+  {
+    entityKind: 'track',
+    targetId: 'rec-self-aware',
+    likedAtMs: 1_700_000_300_000,
+  },
+  {
+    entityKind: 'track',
+    targetId: 'rec-petit',
+    likedAtMs: 1_700_000_200_000,
+  },
+  { entityKind: 'track', targetId: 'rec-roads', likedAtMs: 1_700_000_100_000 },
 ];
 
 export const fixtureUnavailableIds: ReadonlySet<string> = new Set([

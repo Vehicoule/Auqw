@@ -3,19 +3,19 @@ import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
+  Like,
   Recording,
   Settings,
   SourceMapping,
   SourceRef,
-  TrackLike,
   TrackMetadata,
 } from '../domain.ts';
 import {
-  isPersistedState,
   isSettings,
   isTrackMetadata,
   recordingFromMetadata,
 } from '../domain.ts';
+import { isPersistedState } from '../library/library.ts';
 import { toggleTrackLike } from '../library/likes.ts';
 import {
   extractVersionLabels,
@@ -69,7 +69,7 @@ export type SessionPlayback =
 export type ReadySession = {
   readonly type: 'ready';
   readonly recordings: readonly Recording[];
-  readonly likes: readonly TrackLike[];
+  readonly likes: readonly Like[];
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
   readonly playback: SessionPlayback;
@@ -160,7 +160,7 @@ type ActiveAttempt = {
 
 type Ready = {
   recordings: Recording[];
-  likes: TrackLike[];
+  likes: Like[];
   queue: QueueEngine;
   settings: Settings;
   playback: SessionPlayback;

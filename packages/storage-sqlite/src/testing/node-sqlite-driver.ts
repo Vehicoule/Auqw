@@ -52,10 +52,34 @@ function toRowId(value: number | bigint | undefined): number | null {
  */
 export class NodeSqliteDriver implements SqliteDriver {
   readonly #db: DatabaseSync;
+  readonly backups: string[] = [];
   #closed = false;
 
   constructor(path = ':memory:') {
     this.#db = new DatabaseSync(path);
+  }
+
+  /**
+   * `VACUUM INTO` a `<file>.bak-<tag>` sibling of the main database;
+   * an in-memory database has no durable file to preserve, so the
+   * tag is only recorded.
+   */
+  backup(tag: string): Promise<void> {
+    if (!/^[a-z0-9-]+$/i.test(tag)) {
+      throw new TypeError('backup tag must be alphanumeric/dashes');
+    }
+    this.backups.push(tag);
+    const rows = this.#db.prepare('PRAGMA database_list').all() as {
+      name?: unknown;
+      file?: unknown;
+    }[];
+    const file = rows.find((r) => r['name'] === 'main')?.['file'];
+    if (typeof file === 'string' && file.length > 0) {
+      this.#db.exec(
+        `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
+      );
+    }
+    return Promise.resolve();
   }
 
   async transaction<T>(
@@ -153,6 +177,10 @@ export class FailingDriver implements SqliteDriver {
   /** Runs the hook once at the Nth statement of the next transaction. */
   hookAtStatement(n: number, hook: () => void): void {
     this.#hookAt = { n, hook };
+  }
+
+  backup(tag: string): Promise<void> {
+    return this.inner.backup(tag);
   }
 
   async transaction<T>(

@@ -1,7 +1,14 @@
 import { extractVersionLabels } from './matching/matching-engine.ts';
 import type { QueueSnapshot } from './queue/queue-engine.ts';
 
-export type SourceRef = { provider: string; kind: 'track'; id: string };
+export type EntityKind = 'album' | 'artist';
+
+export type SourceRefKind = 'track' | EntityKind;
+
+export type SourceRef = { provider: string; kind: SourceRefKind; id: string };
+
+/** Provider reference to a non-track entity (album or artist page). */
+export type EntityRef = { provider: string; kind: EntityKind; id: string };
 
 export type ArtworkRef = {
   url: string;
@@ -64,7 +71,18 @@ export type Recording = {
   mappings: readonly SourceMapping[];
 };
 
-export type TrackLike = { recordingId: string; likedAtMs: number };
+export type LikeEntityKind = 'track' | EntityKind;
+
+/**
+ * Polymorphic like target: 'track' ids name a recording, 'album' and
+ * 'artist' ids name an entity. The target table is kind-dependent, so
+ * referential integrity is enforced by the validators, not the schema.
+ */
+export type Like = {
+  entityKind: LikeEntityKind;
+  targetId: string;
+  likedAtMs: number;
+};
 
 export type QueueOccurrence = {
   occurrenceId: string;
@@ -96,24 +114,44 @@ const MAPPING_STATUSES: ReadonlySet<string> = new Set([
   'rejected',
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+const SOURCE_REF_KINDS: ReadonlySet<string> = new Set([
+  'track',
+  'album',
+  'artist',
+]);
+
+const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
+
+const LIKE_ENTITY_KINDS: ReadonlySet<string> = new Set([
+  'track',
+  'album',
+  'artist',
+]);
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]) {
+export function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+) {
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
 }
 
-function isString(value: unknown, max: number): value is string {
+export function isString(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
-function isOptString(value: unknown, max: number): value is string | null {
+export function isOptString(
+  value: unknown,
+  max: number,
+): value is string | null {
   return value === null || isString(value, max);
 }
 
-function isSafeNonNegative(value: unknown): value is number {
+export function isSafeNonNegative(value: unknown): value is number {
   return (
     typeof value === 'number' &&
     Number.isSafeInteger(value) &&
@@ -121,7 +159,7 @@ function isSafeNonNegative(value: unknown): value is number {
   );
 }
 
-function isOptSafeNonNegative(
+export function isOptSafeNonNegative(
   value: unknown,
 ): value is number | null {
   return value === null || isSafeNonNegative(value);
@@ -146,7 +184,7 @@ function isStorefront(value: unknown): value is string | null {
   );
 }
 
-function isArtworkRef(value: unknown): value is ArtworkRef {
+export function isArtworkRef(value: unknown): value is ArtworkRef {
   if (!isRecord(value) || !hasExactKeys(value, ['url', 'width', 'height'])) {
     return false;
   }
@@ -173,8 +211,22 @@ export function isSourceRef(value: unknown): value is SourceRef {
     isRecord(value) &&
     hasExactKeys(value, ['provider', 'kind', 'id']) &&
     isString(value['provider'], 64) &&
-    value['kind'] === 'track' &&
+    typeof value['kind'] === 'string' &&
+    SOURCE_REF_KINDS.has(value['kind']) &&
     isString(value['id'], 512)
+  );
+}
+
+/** Track refs are the only kind a recording/mapping/queue can carry. */
+export function isTrackRef(value: unknown): value is SourceRef {
+  return isSourceRef(value) && value.kind === 'track';
+}
+
+export function isEntityRef(value: unknown): value is EntityRef {
+  return (
+    isSourceRef(value) &&
+    typeof value.kind === 'string' &&
+    ENTITY_KINDS.has(value.kind)
   );
 }
 
@@ -200,11 +252,11 @@ function isMatchEvidence(value: unknown): value is MatchEvidence {
   );
 }
 
-function isSourceMapping(value: unknown): value is SourceMapping {
+export function isSourceMapping(value: unknown): value is SourceMapping {
   return (
     isRecord(value) &&
     hasExactKeys(value, ['ref', 'status', 'matchedAtMs', 'evidence']) &&
-    isSourceRef(value['ref']) &&
+    isTrackRef(value['ref']) &&
     typeof value['status'] === 'string' &&
     MAPPING_STATUSES.has(value['status']) &&
     isSafeNonNegative(value['matchedAtMs']) &&
@@ -227,7 +279,7 @@ export function isTrackMetadata(value: unknown): value is TrackMetadata {
       'genre',
       'storefront',
     ]) &&
-    isSourceRef(value['sourceRef']) &&
+    isTrackRef(value['sourceRef']) &&
     isString(value['title'], 512) &&
     isOptString(value['artist'], 512) &&
     isOptString(value['album'], 512) &&
@@ -294,7 +346,7 @@ export function isRecording(value: unknown): value is Recording {
     isVersionLabelArray(value['versionLabels']) &&
     Array.isArray(value['sourceRefs']) &&
     value['sourceRefs'].length >= 1 &&
-    value['sourceRefs'].every(isSourceRef) &&
+    value['sourceRefs'].every(isTrackRef) &&
     hasUniqueSourceRefs(value['sourceRefs']) &&
     Array.isArray(value['mappings']) &&
     value['mappings'].every(isSourceMapping)
@@ -327,11 +379,13 @@ export function isSettings(value: unknown): value is Settings {
   );
 }
 
-export function isTrackLike(value: unknown): value is TrackLike {
+export function isLike(value: unknown): value is Like {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ['recordingId', 'likedAtMs']) &&
-    isString(value['recordingId'], 64) &&
+    hasExactKeys(value, ['entityKind', 'targetId', 'likedAtMs']) &&
+    typeof value['entityKind'] === 'string' &&
+    LIKE_ENTITY_KINDS.has(value['entityKind']) &&
+    isString(value['targetId'], 64) &&
     isSafeNonNegative(value['likedAtMs'])
   );
 }
@@ -342,7 +396,7 @@ function isQueueOccurrence(value: unknown): value is QueueOccurrence {
     hasExactKeys(value, ['occurrenceId', 'recordingId', 'selectedRef']) &&
     isString(value['occurrenceId'], 64) &&
     isString(value['recordingId'], 64) &&
-    (value['selectedRef'] === null || isSourceRef(value['selectedRef']))
+    (value['selectedRef'] === null || isTrackRef(value['selectedRef']))
   );
 }
 
@@ -409,53 +463,6 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
   }
   if (blockedError !== undefined && mode !== 'paused') {
     return false;
-  }
-  return true;
-}
-
-export type PersistedShape = {
-  readonly recordings: readonly Recording[];
-  readonly likes: readonly TrackLike[];
-  readonly queue: QueueSnapshot;
-  readonly settings: Settings;
-};
-
-/** Validates the whole persisted document, including references. */
-export function isPersistedState(value: unknown): value is PersistedShape {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ['recordings', 'likes', 'queue', 'settings'])
-  ) {
-    return false;
-  }
-  const { recordings, likes, queue, settings } = value;
-  if (
-    !Array.isArray(recordings) ||
-    !recordings.every(isRecording) ||
-    !Array.isArray(likes) ||
-    !likes.every(isTrackLike) ||
-    !isQueueSnapshot(queue) ||
-    !isSettings(settings)
-  ) {
-    return false;
-  }
-  const recordingIds = new Set(recordings.map((r) => r.id));
-  if (recordingIds.size !== recordings.length) {
-    return false;
-  }
-  const likedIds = new Set(likes.map((l) => l.recordingId));
-  if (likedIds.size !== likes.length) {
-    return false;
-  }
-  for (const like of likes) {
-    if (!recordingIds.has(like.recordingId)) {
-      return false;
-    }
-  }
-  for (const occurrence of queue.occurrences) {
-    if (!recordingIds.has(occurrence.recordingId)) {
-      return false;
-    }
   }
   return true;
 }

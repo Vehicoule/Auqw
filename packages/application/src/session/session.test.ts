@@ -3,7 +3,6 @@ import type {
   Recording,
   Settings,
   SourceRef,
-  TrackLike,
   TrackMetadata,
 } from '../domain.ts';
 import { appError, err, ok } from '../errors.ts';
@@ -116,6 +115,15 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
   return {
     recordings: partial.recordings ?? [],
     likes: partial.likes ?? [],
+    entities: partial.entities ?? [],
+    entitySourceRefs: partial.entitySourceRefs ?? [],
+    playlists: partial.playlists ?? [],
+    playlistEntries: partial.playlistEntries ?? [],
+    playHistory: partial.playHistory ?? [],
+    playCounts: partial.playCounts ?? [],
+    matchReviews: partial.matchReviews ?? [],
+    lyricsCache: partial.lyricsCache ?? [],
+    artworkCache: partial.artworkCache ?? [],
     queue: partial.queue ?? emptyQueue(),
     settings: partial.settings ?? SETTINGS,
   };
@@ -1115,6 +1123,10 @@ async function portThrows(): Promise<void> {
       Promise.resolve(ok(undefined)),
     loadAttempts: (_limit: number, _ctx: OperationContext) =>
       Promise.resolve(ok([])),
+    exportOwned: (_atMs: number, _ctx: OperationContext) =>
+      Promise.reject(new Error('raw-secret-message')),
+    importOwned: (_doc: never, _ctx: OperationContext) =>
+      Promise.resolve(ok(undefined)),
   };
   const player = new FakePlayer();
   const session = new Session({
@@ -2456,18 +2468,20 @@ async function disposeCleanup(): Promise<void> {
 }
 
 async function concurrentLikes(): Promise<void> {
-  const r = rig(persisted({ recordings: [
-    recording('r1', [ref('itunes', 'i1')]),
-    recording('r2', [ref('itunes', 'i2')]),
-  ] }));
+  const r = rig(persisted({
+    recordings: [
+      recording('r1', [ref('itunes', 'i1')]),
+      recording('r2', [ref('itunes', 'i2')]),
+    ]
+  }));
   await restoreOk(r);
   const results = await Promise.all([
     r.session.toggleLike('r1'), r.session.toggleLike('r2'),
   ]);
   assert(results.every((result) => result.ok));
-  assertDeepEqual(readyOf(r).likes.map((like) => like.recordingId), ['r1', 'r2']);
+  assertDeepEqual(readyOf(r).likes.map((like) => like.targetId), ['r1', 'r2']);
   await Promise.all([r.session.toggleLike('r1'), r.session.toggleLike('r1')]);
-  assertDeepEqual(readyOf(r).likes.map((like) => like.recordingId).sort(), ['r1', 'r2']);
+  assertDeepEqual(readyOf(r).likes.map((like) => like.targetId).sort(), ['r1', 'r2']);
   await r.session.dispose();
 }
 

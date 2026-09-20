@@ -53,6 +53,22 @@ export async function createExpoSqliteDriver(
   await db.execAsync('PRAGMA foreign_keys = ON');
 
   return {
+    async backup(tag: string): Promise<void> {
+      if (!/^[a-z0-9-]+$/i.test(tag)) {
+        throw new TypeError('backup tag must be alphanumeric/dashes');
+      }
+      // The device path of the main database, resolved from SQLite
+      // itself so the backup lands next to the file it preserves.
+      const rows = await db.getAllAsync<{ name: string; file: string }>(
+        'PRAGMA database_list',
+      );
+      const file = rows.find((r) => r.name === 'main')?.file;
+      if (typeof file === 'string' && file.length > 0) {
+        await db.execAsync(
+          `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
+        );
+      }
+    },
     async transaction<T>(
       work: (connection: SqliteConnection) => Promise<T>,
       signal?: CancellationSignal,

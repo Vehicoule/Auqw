@@ -25,6 +25,15 @@ function state(): PersistedState {
   return {
     recordings: [],
     likes: [],
+    entities: [],
+    entitySourceRefs: [],
+    playlists: [],
+    playlistEntries: [],
+    playHistory: [],
+    playCounts: [],
+    matchReviews: [],
+    lyricsCache: [],
+    artworkCache: [],
     queue: {
       revision: 0,
       occurrences: [],
@@ -139,15 +148,15 @@ async function storageTests(): Promise<void> {
   assert(again.ok && again.value.queue.revision === 0);
 
   // Clone-on-commit: mutating the batch after commit cannot alter it.
-  const likes = [{ recordingId: 'r', likedAtMs: 1 }];
+  const likes = [{ entityKind: 'track' as const, targetId: 'r', likedAtMs: 1 }];
   const committed = await storage.commit({ likes }, ctx());
   assert(committed.ok);
   const first = likes[0];
   if (first !== undefined) {
-    first.recordingId = 'mutated';
+    first.targetId = 'mutated';
   }
   const after = await storage.load(ctx());
-  assert(after.ok && after.value.likes[0]?.recordingId === 'r');
+  assert(after.ok && after.value.likes[0]?.targetId === 'r');
   assertEqual(storage.commits.length, 1);
 
   // Atomic failure injection: one failure, then clean.

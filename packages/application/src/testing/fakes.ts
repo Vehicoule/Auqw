@@ -23,6 +23,8 @@ import type {
   StorageBatch,
   StoragePort,
 } from '../ports/storage.ts';
+import { isExportDocument } from '../library/library.ts';
+import type { ExportDocument } from '../library/library.ts';
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -546,6 +548,17 @@ export class FakeStorage implements StoragePort {
     this.#state = {
       recordings: staged.recordings ?? this.#state.recordings,
       likes: staged.likes ?? this.#state.likes,
+      entities: staged.entities ?? this.#state.entities,
+      entitySourceRefs:
+        staged.entitySourceRefs ?? this.#state.entitySourceRefs,
+      playlists: staged.playlists ?? this.#state.playlists,
+      playlistEntries:
+        staged.playlistEntries ?? this.#state.playlistEntries,
+      playHistory: staged.playHistory ?? this.#state.playHistory,
+      playCounts: staged.playCounts ?? this.#state.playCounts,
+      matchReviews: staged.matchReviews ?? this.#state.matchReviews,
+      lyricsCache: staged.lyricsCache ?? this.#state.lyricsCache,
+      artworkCache: staged.artworkCache ?? this.#state.artworkCache,
       queue: staged.queue ?? this.#state.queue,
       settings: staged.settings ?? this.#state.settings,
     };
@@ -569,6 +582,114 @@ export class FakeStorage implements StoragePort {
     return Promise.resolve(
       ok(this.#clone([...this.#attempts].reverse().slice(0, limit))),
     );
+  }
+
+  /** Owned classes only; session state and caches stay out. */
+  exportOwned(
+    exportedAtMs: number,
+    context: OperationContext,
+  ): Promise<Result<ExportDocument>> {
+    if (!Number.isSafeInteger(exportedAtMs) || exportedAtMs < 0) {
+      throw new TypeError('exportedAtMs must be a safe nonnegative integer');
+    }
+    if (context.signal.cancelled) {
+      return Promise.resolve({
+        ok: false,
+        error: appError('cancelled', 'cancelled'),
+      });
+    }
+    const state = this.#clone(this.#state);
+    const doc: ExportDocument = {
+      formatVersion: 1,
+      exportedAtMs,
+      recordings: state.recordings.map(
+        ({ sourceRefs: _refs, mappings: _mappings, ...core }) => core,
+      ),
+      sourceRefs: state.recordings.flatMap((recording) =>
+        recording.sourceRefs.map((ref) => ({
+          recordingId: recording.id,
+          ref,
+        })),
+      ),
+      mappings: state.recordings.flatMap((recording) =>
+        recording.mappings.map((mapping) => ({
+          recordingId: recording.id,
+          mapping,
+        })),
+      ),
+      likes: state.likes,
+      entities: state.entities,
+      entitySourceRefs: state.entitySourceRefs,
+      playlists: state.playlists,
+      playlistEntries: state.playlistEntries,
+      playHistory: state.playHistory,
+      playCounts: state.playCounts,
+      matchReviews: state.matchReviews,
+      settings: state.settings,
+    };
+    return Promise.resolve(ok(doc));
+  }
+
+  /**
+   * Mirrors the real port: owned sections replace wholesale, the
+   * session queue resets (its rows referenced replaced recordings),
+   * and the disposable lyrics cache is cleared.
+   */
+  importOwned(
+    doc: ExportDocument,
+    context: OperationContext,
+  ): Promise<Result<void>> {
+    if (this.#failWith !== null) {
+      const error = this.#failWith;
+      this.#failWith = null;
+      return Promise.resolve({ ok: false, error });
+    }
+    if (context.signal.cancelled) {
+      return Promise.resolve({
+        ok: false,
+        error: appError('cancelled', 'cancelled'),
+      });
+    }
+    if (!isExportDocument(doc)) {
+      return Promise.resolve({
+        ok: false,
+        error: appError(
+          'invalid-response',
+          'import document failed validation',
+        ),
+      });
+    }
+    const staged = this.#clone(doc);
+    this.#state = {
+      ...this.#state,
+      recordings: staged.recordings.map((rec) => ({
+        ...rec,
+        sourceRefs: staged.sourceRefs
+          .filter((row) => row.recordingId === rec.id)
+          .map((row) => row.ref),
+        mappings: staged.mappings
+          .filter((row) => row.recordingId === rec.id)
+          .map((row) => row.mapping),
+      })),
+      likes: staged.likes,
+      entities: staged.entities,
+      entitySourceRefs: staged.entitySourceRefs,
+      playlists: staged.playlists,
+      playlistEntries: staged.playlistEntries,
+      playHistory: staged.playHistory,
+      playCounts: staged.playCounts,
+      matchReviews: staged.matchReviews,
+      lyricsCache: [],
+      queue: {
+        revision: this.#state.queue.revision + 1,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+      settings: staged.settings,
+    };
+    return Promise.resolve(ok(undefined));
   }
 
   /** The next commit fails with the given typed error once. */

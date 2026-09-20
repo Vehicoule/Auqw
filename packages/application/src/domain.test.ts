@@ -1,7 +1,9 @@
 import {
+  isEntityRef,
   isRecording,
   isSourceRef,
   isTrackMetadata,
+  isTrackRef,
   recordingFromMetadata,
 } from './domain.ts';
 import type { SourceRef, TrackMetadata } from './domain.ts';
@@ -28,11 +30,20 @@ const META: TrackMetadata = {
 
 export function run(): void {
   assert(isSourceRef(REF));
-  assert(!isSourceRef({ ...REF, kind: 'album' }));
+  assert(!isSourceRef({ ...REF, kind: 'playlist' }));
   assert(!isSourceRef({ ...REF, id: '' }));
   assert(!isSourceRef({ ...REF, extra: 1 }));
   assert(!isSourceRef('dQw4w9WgXcQ'));
   assert(!isSourceRef(null));
+
+  // Kind is a union now: album/artist refs are valid source refs but
+  // never valid where a track ref is required.
+  const albumRef = { ...REF, kind: 'album' as const };
+  assert(isSourceRef(albumRef));
+  assert(!isTrackRef(albumRef));
+  assert(isEntityRef(albumRef));
+  assert(isTrackRef(REF));
+  assert(!isEntityRef(REF));
 
   assert(isTrackMetadata(META));
   assert(!isTrackMetadata({ ...META, title: '' }));
@@ -89,6 +100,13 @@ export function run(): void {
   assert(
     !isRecording({ ...recording, sourceRefs: [] }),
     'recordings need at least one source ref',
+  );
+  assert(
+    !isRecording({
+      ...recording,
+      sourceRefs: [{ provider: 'deezer', kind: 'album', id: 'a1' }],
+    }),
+    'recording source refs must be track refs',
   );
   assert(
     !isRecording({

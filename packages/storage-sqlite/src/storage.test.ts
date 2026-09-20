@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CancellationSource } from '@auqw/application';
 import type {
   AttemptTrace,
@@ -10,10 +13,10 @@ import type {
   Settings,
   SourceMapping,
   SourceRef,
-  TrackLike,
+  Like,
 } from '@auqw/application';
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
-import { CURRENT_SCHEMA_VERSION } from './migrations.ts';
+import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
 import { SqliteStorage } from './storage.ts';
 import { FailingDriver, NodeSqliteDriver } from './testing/node-sqlite-driver.ts';
 
@@ -147,7 +150,11 @@ async function initializeAndCoalesce(): Promise<void> {
     storage.initialize(ctx().context),
   ]);
   assert(a.ok && b.ok, 'initialize resolves');
-  assertEqual(failing.transactions, 1, 'one migration transaction');
+  assertEqual(
+    failing.transactions,
+    2,
+    'version probe + one migration transaction',
+  );
   const versions = await failing.transaction(async (conn) =>
     conn.query('SELECT version FROM schema_version'),
   );
@@ -203,9 +210,9 @@ async function fullRoundtrip(): Promise<void> {
       releaseYear: null,
     }),
   ];
-  const likes: TrackLike[] = [
-    { recordingId: 'r1', likedAtMs: 7 },
-    { recordingId: 'r2', likedAtMs: 9 },
+  const likes: Like[] = [
+    { entityKind: 'track', targetId: 'r1', likedAtMs: 7 },
+    { entityKind: 'track', targetId: 'r2', likedAtMs: 9 },
   ];
   const queue: QueueSnapshot = {
     revision: 9,
@@ -262,8 +269,9 @@ async function commitRollback(): Promise<void> {
     ).ok,
   );
   const before = await loadOk(storage);
-  // Commit txn executes: 6 deletes, then inserts — fail mid-inserts.
-  failing.failBeforeExecute(8);
+  // Commit txn executes: 9 deletes (dependent tables first), then
+  // inserts — execute 11 lands mid-insert on r3's source_refs row.
+  failing.failBeforeExecute(11);
   const failed = await storage.commit(
     {
       recordings: [
@@ -303,9 +311,10 @@ async function cancellationRollback(): Promise<void> {
     cancelledCtx,
   );
   assert(!early.ok && early.error.kind === 'cancelled', 'typed cancelled');
-  // Mid-commit: the hook cancels at statement 10 (inside deletes).
+  // Mid-commit: 16 read queries run first, then the rewrite's 9
+  // deletes — statement 20 is a dependent-table delete.
   const { context: midCtx, source: mid } = ctx();
-  failing.hookAtStatement(10, () => mid.cancel());
+  failing.hookAtStatement(20, () => mid.cancel());
   const late = await storage.commit(
     {
       recordings: [
@@ -417,7 +426,7 @@ async function corruptedRelations(): Promise<void> {
                 ],
               ),
             ],
-            likes: [{ recordingId: 'r1', likedAtMs: 1 }],
+            likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
             queue: {
               revision: 1,
               occurrences: [
@@ -449,10 +458,16 @@ async function corruptedRelations(): Promise<void> {
        VALUES ('ghost', 0, 'itunes', 'track', 'g1', 'automatic', 1, '{}')`,
     ],
     [
-      'wrong like kind',
-      `DROP TABLE likes;
-       CREATE TABLE likes (entity_kind TEXT, entity_id TEXT, liked_at_ms INTEGER);
-       INSERT INTO likes VALUES ('track', 'r1', 1), ('album', 'r1', 2)`,
+      'orphan entity like',
+      // likes.target_id is polymorphic, so no SQL FK — an album like
+      // naming a nonexistent entity is app-level corruption.
+      `INSERT INTO likes (entity_kind, target_id, liked_ms)
+       VALUES ('album', 'ghost-entity', 2)`,
+    ],
+    [
+      'orphan track like',
+      `INSERT INTO likes (entity_kind, target_id, liked_ms)
+       VALUES ('track', 'ghost-recording', 2)`,
     ],
     [
       'source_ref ordinal gap',
@@ -504,7 +519,9 @@ async function schemaVersionEdges(): Promise<void> {
   {
     const { driver, storage } = rig();
     assert((await storage.initialize(ctx().context)).ok);
-    driver.execScript('UPDATE schema_version SET version = 2 WHERE id = 1');
+    driver.execScript(
+      `UPDATE schema_version SET version = ${CURRENT_SCHEMA_VERSION + 1} WHERE id = 1`,
+    );
     // A fresh instance re-reads the schema version at initialize.
     const second = new SqliteStorage(driver, SETTINGS);
     const res = await second.load(ctx().context);
@@ -661,7 +678,11 @@ async function coalescedCancel(): Promise<void> {
   // The shared initialize result is unaffected: a fresh caller works.
   const next = await storage.initialize(ctx().context);
   assert(next.ok, 'shared migration survives');
-  assertEqual(failing.transactions, 1, 'still one migration transaction');
+  assertEqual(
+    failing.transactions,
+    2,
+    'still version probe + one migration transaction',
+  );
   driver.close();
 }
 
@@ -710,6 +731,552 @@ async function concurrentOperations(): Promise<void> {
   driver.close();
 }
 
+// 13. v1 -> v2 migration: a backup is taken first, v1 likes copy
+// across as track likes, and every pre-existing row is preserved.
+async function migrationV1toV2(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  // Build a real v1 database: the v1 DDL plus seeded rows through the
+  // old column names (entity_id, liked_at_ms).
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 1);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 4, 'o1', 1200, 'paused', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
+      VALUES
+      ('r1', 'Song r1', 'Artist', 'Album', 300000, 2020, '[]', NULL, 'Rock', NULL, '[]'),
+      ('r2', 'Song r2', NULL, NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1'), ('r2', 0, 'itunes', 'track', 'i2');
+    INSERT INTO queue_occurrences (occurrence_id, ordinal, recording_id, selected_provider, selected_kind, selected_source_id)
+      VALUES ('o1', 0, 'r1', NULL, NULL, NULL);
+    INSERT INTO likes (entity_kind, entity_id, liked_at_ms)
+      VALUES ('track', 'r1', 42), ('track', 'r2', 43);
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  const init = await storage.initialize(ctx().context);
+  assert(init.ok, 'v1 -> v2 initialize resolves');
+  assertDeepEqual(driver.backups, ['v1'], 'pre-migration backup taken');
+  const state = await loadOk(storage);
+  assertDeepEqual(
+    state.likes,
+    [
+      { entityKind: 'track', targetId: 'r1', likedAtMs: 42 },
+      { entityKind: 'track', targetId: 'r2', likedAtMs: 43 },
+    ],
+    'v1 likes copied as track likes',
+  );
+  assertEqual(state.recordings.length, 2, 'recordings preserved');
+  assertEqual(state.recordings[0]?.sourceRefs[0]?.id, 'i1');
+  assertDeepEqual(
+    state.queue,
+    {
+      revision: 4,
+      occurrences: [
+        { occurrenceId: 'o1', recordingId: 'r1', selectedRef: null },
+      ],
+      currentOccurrenceId: 'o1',
+      positionMs: 1200,
+      mode: 'paused',
+    },
+    'queue state preserved',
+  );
+  assertEqual(state.settings.storefront, 'US', 'settings preserved');
+  assertDeepEqual(state.entities, []);
+  assertDeepEqual(state.playlists, []);
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
+// 14. A file-backed database leaves a real pre-migration image at
+// <db>.bak-v1 holding the old rows.
+async function migrationBackupFile(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'auqw-v1-'));
+  try {
+    const file = join(dir, 'library.db');
+    const driver = new NodeSqliteDriver(file);
+    driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+    driver.execScript(`
+      INSERT INTO schema_version (id, version) VALUES (1, 1);
+      INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
+        VALUES (1, 'itunes', 'youtube-music', NULL, 256, 'system', 1);
+      INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+        VALUES (1, 0, NULL, 0, 'stopped', NULL);
+      INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
+        VALUES ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]');
+      INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+        VALUES ('r1', 0, 'itunes', 'track', 'i1');
+      INSERT INTO likes (entity_kind, entity_id, liked_at_ms)
+        VALUES ('track', 'r1', 42);
+    `);
+    const storage = new SqliteStorage(driver, SETTINGS);
+    assert((await storage.initialize(ctx().context)).ok);
+    const backupPath = `${file}.bak-v1`;
+    assert(
+      existsSync(backupPath),
+      'backup file written next to the database',
+    );
+    const backup = new NodeSqliteDriver(backupPath);
+    const likeRows = await backup.transaction(async (conn) =>
+      conn.query('SELECT entity_id, liked_at_ms FROM likes'),
+    );
+    assertDeepEqual(
+      likeRows,
+      [{ entity_id: 'r1', liked_at_ms: 42 }],
+      'backup holds the pre-migration v1 rows',
+    );
+    const versions = await backup.transaction(async (conn) =>
+      conn.query('SELECT version FROM schema_version'),
+    );
+    assertEqual(versions[0]?.['version'], 1, 'backup stays at v1');
+    backup.close();
+    driver.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+type OwnedSections = {
+  recordings: Recording[];
+  likes: Like[];
+  entities: Entity[];
+  entitySourceRefs: EntitySourceRef[];
+  playlists: Playlist[];
+  playlistEntries: PlaylistEntry[];
+  playHistory: PlayEvent[];
+  playCounts: PlayCount[];
+  matchReviews: MatchReview[];
+  lyricsCache: LyricsCacheEntry[];
+  artworkCache: ArtworkCacheEntry[];
+};
+
+function ownedSections(): OwnedSections {
+  const recordings: Recording[] = [
+    recording('r1', [ref('itunes', 'i1'), ref('youtube-music', 'y1')]),
+    recording('r2', [ref('itunes', 'i2')]),
+  ];
+  return {
+    recordings,
+    likes: [
+      { entityKind: 'track', targetId: 'r1', likedAtMs: 7 },
+      { entityKind: 'album', targetId: 'e-album', likedAtMs: 8 },
+      { entityKind: 'artist', targetId: 'e-artist', likedAtMs: 9 },
+    ],
+    entities: [
+      {
+        entityId: 'e-album',
+        kind: 'album',
+        title: 'Dummy',
+        artistName: 'Portishead',
+        artwork: [
+          { url: 'https://art.example/d.png', width: 300, height: 300 },
+        ],
+        createdMs: 10,
+      },
+      {
+        entityId: 'e-artist',
+        kind: 'artist',
+        title: 'Portishead',
+        artistName: null,
+        artwork: [],
+        createdMs: 11,
+      },
+    ],
+    entitySourceRefs: [
+      {
+        entityId: 'e-album',
+        provider: 'deezer',
+        ref: { provider: 'deezer', kind: 'album', id: 'd-alb' },
+      },
+      {
+        entityId: 'e-artist',
+        provider: 'deezer',
+        ref: { provider: 'deezer', kind: 'artist', id: 'd-art' },
+      },
+    ],
+    playlists: [
+      {
+        playlistId: 'p1',
+        name: 'Favorites',
+        createdMs: 20,
+        updatedMs: 30,
+      },
+    ],
+    playlistEntries: [
+      // The same recording twice — occurrence rows keep identity.
+      {
+        entryId: 'pe1',
+        playlistId: 'p1',
+        recordingId: 'r1',
+        position: 1,
+        selectedRef: ref('youtube-music', 'y1'),
+        addedMs: 21,
+      },
+      {
+        entryId: 'pe2',
+        playlistId: 'p1',
+        recordingId: 'r1',
+        position: 2,
+        selectedRef: null,
+        addedMs: 22,
+      },
+      {
+        entryId: 'pe3',
+        playlistId: 'p1',
+        recordingId: 'r2',
+        position: 2.5,
+        selectedRef: null,
+        addedMs: 23,
+      },
+    ],
+    playHistory: [
+      {
+        eventId: 'ev1',
+        recordingId: 'r1',
+        occurrenceId: 'occ-9',
+        playedMs: 100,
+        listenedMs: 121_000,
+      },
+      {
+        eventId: 'ev2',
+        recordingId: 'r2',
+        occurrenceId: null,
+        playedMs: 200,
+        listenedMs: 40_000,
+      },
+    ],
+    playCounts: [
+      { recordingId: 'r1', count: 12, lastMs: 100 },
+      { recordingId: 'r2', count: 1, lastMs: 200 },
+    ],
+    matchReviews: [
+      {
+        reviewId: 'mr1',
+        recordingId: 'r1',
+        candidates: [
+          {
+            metadata: {
+              sourceRef: ref('youtube-music', 'y1'),
+              title: 'Song r1',
+              artist: 'Artist',
+              album: 'Album',
+              durationMs: 300_000,
+              releaseYear: 2020,
+              artwork: [],
+              explicit: null,
+              genre: null,
+              storefront: 'US',
+            },
+            ref: ref('youtube-music', 'y1'),
+          },
+        ],
+        status: 'confirmed',
+        resolution: { ref: ref('youtube-music', 'y1') },
+        createdMs: 50,
+        resolvedMs: 60,
+      },
+      {
+        reviewId: 'mr2',
+        recordingId: 'r2',
+        candidates: [
+          {
+            metadata: {
+              sourceRef: ref('youtube-music', 'y2'),
+              title: 'Song r2',
+              artist: 'Artist',
+              album: null,
+              durationMs: 299_000,
+              releaseYear: null,
+              artwork: [],
+              explicit: null,
+              genre: null,
+              storefront: null,
+            },
+            ref: ref('youtube-music', 'y2'),
+          },
+        ],
+        status: 'pending',
+        resolution: null,
+        createdMs: 70,
+        resolvedMs: null,
+      },
+    ],
+    lyricsCache: [
+      {
+        recordingId: 'r1',
+        provider: 'lyrics-lrclib',
+        kind: 'synced',
+        payload: {
+          plainLyrics: 'words',
+          syncedLyrics: '[00:01.00] words',
+          instrumental: false,
+        },
+        fetchedMs: 80,
+      },
+    ],
+    artworkCache: [
+      {
+        url: 'https://art.example/d.png',
+        filePath: '/tmp/d.png',
+        bytes: 1024,
+        lastAccessedMs: 90,
+      },
+    ],
+  };
+}
+
+async function commitOwned(
+  storage: SqliteStorage,
+  sections: OwnedSections,
+): Promise<void> {
+  const committed = await storage.commit(
+    { ...sections, queue: EMPTY_QUEUE, settings: SETTINGS },
+    ctx().context,
+  );
+  assert(committed.ok, 'owned commit resolves');
+}
+
+// 15. Every v2 owned and cache table round-trips through commit/load.
+async function ownedRoundtrip(): Promise<void> {
+  const { driver, storage } = rig();
+  const sections = ownedSections();
+  await commitOwned(storage, sections);
+  const state = await loadOk(storage);
+  assertDeepEqual(state.recordings, sections.recordings);
+  assertDeepEqual(state.likes, sections.likes);
+  assertDeepEqual(state.entities, sections.entities);
+  assertDeepEqual(state.entitySourceRefs, sections.entitySourceRefs);
+  assertDeepEqual(state.playlists, sections.playlists);
+  assertDeepEqual(state.playlistEntries, sections.playlistEntries);
+  assertDeepEqual(state.playHistory, sections.playHistory);
+  assertDeepEqual(state.playCounts, sections.playCounts);
+  assertDeepEqual(state.matchReviews, sections.matchReviews);
+  assertDeepEqual(state.lyricsCache, sections.lyricsCache);
+  assertDeepEqual(state.artworkCache, sections.artworkCache);
+  driver.close();
+}
+
+// 16. Export carries only owned classes; import into a fresh database
+// reproduces them and re-exports an identical document.
+async function exportImportRoundtrip(): Promise<void> {
+  const { driver, storage } = rig();
+  const sections = ownedSections();
+  await commitOwned(storage, sections);
+  const exported = await storage.exportOwned(5_000, ctx().context);
+  assert(exported.ok, 'export resolves');
+  assertEqual(exported.value.formatVersion, 1);
+  assertEqual(exported.value.exportedAtMs, 5_000);
+  // Session state, caches, and diagnostics never appear in the doc.
+  assert(!('queue' in exported.value), 'queue excluded');
+  assert(!('lyricsCache' in exported.value), 'lyrics cache excluded');
+  assert(!('artworkCache' in exported.value), 'artwork cache excluded');
+  assert(!('attempts' in exported.value), 'attempts excluded');
+
+  const freshDriver = new NodeSqliteDriver();
+  const target = new SqliteStorage(freshDriver, {
+    ...SETTINGS,
+    theme: 'oled',
+  });
+  const imported = await target.importOwned(exported.value, ctx().context);
+  assert(imported.ok, 'import into a fresh database resolves');
+  const state = await loadOk(target);
+  assertDeepEqual(state.recordings, sections.recordings);
+  assertDeepEqual(state.likes, sections.likes);
+  assertDeepEqual(state.entities, sections.entities);
+  assertDeepEqual(state.entitySourceRefs, sections.entitySourceRefs);
+  assertDeepEqual(state.playlists, sections.playlists);
+  assertDeepEqual(state.playlistEntries, sections.playlistEntries);
+  assertDeepEqual(state.playHistory, sections.playHistory);
+  assertDeepEqual(state.playCounts, sections.playCounts);
+  assertDeepEqual(state.matchReviews, sections.matchReviews);
+  // The document's settings land; caches stay empty on the fresh side.
+  assertDeepEqual(state.settings, SETTINGS);
+  assertDeepEqual(state.lyricsCache, []);
+  assertDeepEqual(state.artworkCache, []);
+  const reexported = await target.exportOwned(5_000, ctx().context);
+  assert(reexported.ok);
+  assertDeepEqual(
+    reexported.value,
+    exported.value,
+    'export -> import -> export is stable',
+  );
+  driver.close();
+  freshDriver.close();
+}
+
+// 17. A malformed document is rejected before any write; an injected
+// mid-import failure rolls the whole replace back.
+async function importAtomicity(): Promise<void> {
+  const { driver, failing, storage } = rig();
+  const sections = ownedSections();
+  await commitOwned(storage, sections);
+  const before = await loadOk(storage);
+
+  const malformed = {
+    formatVersion: 1,
+    exportedAtMs: 1,
+    recordings: [],
+    sourceRefs: [
+      { recordingId: 'ghost', ref: ref('itunes', 'g1') },
+    ],
+    mappings: [],
+    likes: [],
+    entities: [],
+    entitySourceRefs: [],
+    playlists: [],
+    playlistEntries: [],
+    playHistory: [],
+    playCounts: [],
+    matchReviews: [],
+    settings: SETTINGS,
+  };
+  const rejected = await storage.importOwned(
+    malformed as ExportDocument,
+    ctx().context,
+  );
+  assert(!rejected.ok, 'orphan junction row rejected');
+  assertEqual(rejected.error.kind, 'invalid-response');
+  assertDeepEqual(
+    await loadOk(storage),
+    before,
+    'malformed import leaves state untouched',
+  );
+
+  // A valid document that dies mid-import also leaves state untouched:
+  // execute 18 lands inside the recording inserts (after 14 deletes
+  // and 2 queue_state statements).
+  const doc: ExportDocument = {
+    formatVersion: 1,
+    exportedAtMs: 2,
+    recordings: [
+      {
+        id: 'r9',
+        title: 'Replacement',
+        artist: 'Someone',
+        album: null,
+        durationMs: null,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+      },
+    ],
+    sourceRefs: [{ recordingId: 'r9', ref: ref('itunes', 'i9') }],
+    mappings: [],
+    likes: [{ entityKind: 'track', targetId: 'r9', likedAtMs: 1 }],
+    entities: [],
+    entitySourceRefs: [],
+    playlists: [],
+    playlistEntries: [],
+    playHistory: [],
+    playCounts: [],
+    matchReviews: [],
+    settings: SETTINGS,
+  };
+  failing.failBeforeExecute(18);
+  const failed = await storage.importOwned(doc, ctx().context);
+  assert(!failed.ok, 'injected failure surfaces');
+  assertEqual(failed.error.kind, 'transient');
+  assertDeepEqual(
+    await loadOk(storage),
+    before,
+    'rolled back to the old state',
+  );
+  driver.close();
+}
+
+// 18. Import resets the rows that foreign-key into the replaced
+// recordings (queue occurrences, lyrics cache); attempt traces and
+// the artwork cache have no such keys and survive untouched.
+async function importResetsExcluded(): Promise<void> {
+  const { driver, storage } = rig();
+  const sections = ownedSections();
+  const queue: QueueSnapshot = {
+    revision: 3,
+    occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+    currentOccurrenceId: 'o1',
+    positionMs: 800,
+    mode: 'playing',
+  };
+  const committed = await storage.commit(
+    {
+      ...sections,
+      queue,
+      settings: SETTINGS,
+      attempts: [trace('t-keep')],
+    },
+    ctx().context,
+  );
+  assert(committed.ok);
+  const doc: ExportDocument = {
+    formatVersion: 1,
+    exportedAtMs: 2,
+    recordings: [
+      {
+        id: 'r9',
+        title: 'Replacement',
+        artist: null,
+        album: null,
+        durationMs: null,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+      },
+    ],
+    sourceRefs: [{ recordingId: 'r9', ref: ref('itunes', 'i9') }],
+    mappings: [],
+    likes: [],
+    entities: [],
+    entitySourceRefs: [],
+    playlists: [],
+    playlistEntries: [],
+    playHistory: [],
+    playCounts: [],
+    matchReviews: [],
+    settings: { ...SETTINGS, theme: 'dark' },
+  };
+  const imported = await storage.importOwned(doc, ctx().context);
+  assert(imported.ok, 'import resolves');
+  const after = await loadOk(storage);
+  assertDeepEqual(after.recordings.map((r) => r.id), ['r9']);
+  assertDeepEqual(
+    after.queue,
+    {
+      revision: 4,
+      occurrences: [],
+      currentOccurrenceId: null,
+      positionMs: 0,
+      mode: 'stopped',
+    },
+    'queue reset to an empty stopped session',
+  );
+  assertDeepEqual(after.lyricsCache, [], 'lyrics cache cleared');
+  assertDeepEqual(
+    after.artworkCache,
+    sections.artworkCache,
+    'artwork cache untouched',
+  );
+  assertEqual(after.settings.theme, 'dark', 'document settings land');
+  const traces = await storage.loadAttempts(10, ctx().context);
+  assert(traces.ok);
+  assertDeepEqual(
+    traces.value.map((t) => t.requestId),
+    ['t-keep'],
+    'attempt traces untouched',
+  );
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -726,6 +1293,12 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['cancelledBoundaries', cancelledBoundaries],
   ['coalescedCancel', coalescedCancel],
   ['parameterization', parameterization],
+  ['migrationV1toV2', migrationV1toV2],
+  ['migrationBackupFile', migrationBackupFile],
+  ['ownedRoundtrip', ownedRoundtrip],
+  ['exportImportRoundtrip', exportImportRoundtrip],
+  ['importAtomicity', importAtomicity],
+  ['importResetsExcluded', importResetsExcluded],
 ];
 
 for (const [name, fn] of TESTS) {

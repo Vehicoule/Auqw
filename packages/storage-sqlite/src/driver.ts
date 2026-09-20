@@ -31,4 +31,14 @@ export interface SqliteDriver {
     work: (connection: SqliteConnection) => Promise<T>,
     signal?: CancellationSignal,
   ): Promise<T>;
+  /**
+   * Recoverable whole-database backup, invoked before a destructive
+   * migration. Runs outside the transaction boundary (a file copy or
+   * `VACUUM INTO` cannot run inside BEGIN). `tag` is a lowercase
+   * alphanumeric label such as `v1`; drivers conventionally write
+   * `<db>.bak-<tag>` next to the database. A driver over an
+   * ephemeral (e.g. `:memory:`) database has nothing durable to
+   * preserve and may no-op.
+   */
+  backup(tag: string): Promise<void>;
 }

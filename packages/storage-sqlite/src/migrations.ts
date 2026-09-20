@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 const MIGRATION_1: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS schema_version (
@@ -79,7 +79,96 @@ const MIGRATION_1: readonly string[] = [
   `CREATE INDEX attempt_traces_request_id_idx ON attempt_traces(request_id)`,
 ];
 
+/**
+ * v1 -> v2: library ownership. `likes` cannot be widened in place —
+ * SQLite CHECK constraints are immutable — so it is rebuilt inside the
+ * transaction: v1 rows copy across as track likes. The new `likes`
+ * has no foreign key on `target_id` by design: 'track' targets name
+ * `recordings.id` while 'album'/'artist' targets name
+ * `entities.entity_id`; the polymorphic reference is enforced by the
+ * application's persisted-document validation, not the schema.
+ */
+const MIGRATION_2: readonly string[] = [
+  `CREATE TABLE entities (
+  entity_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('album','artist')),
+  title TEXT NOT NULL,
+  artist_name TEXT,
+  artwork_json TEXT,
+  created_ms INTEGER NOT NULL CHECK (created_ms >= 0)
+)`,
+  `CREATE TABLE entity_source_refs (
+  entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  ref_json TEXT NOT NULL,
+  PRIMARY KEY (entity_id, provider)
+)`,
+  `CREATE TABLE playlists (
+  playlist_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_ms INTEGER NOT NULL CHECK (created_ms >= 0),
+  updated_ms INTEGER NOT NULL CHECK (updated_ms >= 0)
+)`,
+  `CREATE TABLE playlist_entries (
+  entry_id TEXT PRIMARY KEY,
+  playlist_id TEXT NOT NULL REFERENCES playlists(playlist_id) ON DELETE CASCADE,
+  recording_id TEXT NOT NULL REFERENCES recordings(id),
+  position REAL NOT NULL,
+  selected_ref_json TEXT,
+  added_ms INTEGER NOT NULL CHECK (added_ms >= 0)
+)`,
+  `CREATE INDEX playlist_entries_playlist_idx ON playlist_entries(playlist_id)`,
+  `CREATE TABLE play_history (
+  event_id TEXT PRIMARY KEY,
+  recording_id TEXT NOT NULL REFERENCES recordings(id),
+  occurrence_id TEXT,
+  played_ms INTEGER NOT NULL CHECK (played_ms >= 0),
+  listened_ms INTEGER NOT NULL CHECK (listened_ms >= 0)
+)`,
+  `CREATE INDEX play_history_played_idx ON play_history(played_ms)`,
+  `CREATE TABLE play_counts (
+  recording_id TEXT PRIMARY KEY REFERENCES recordings(id),
+  count INTEGER NOT NULL CHECK (count >= 0),
+  last_ms INTEGER NOT NULL CHECK (last_ms >= 0)
+)`,
+  `CREATE TABLE match_reviews (
+  review_id TEXT PRIMARY KEY,
+  recording_id TEXT NOT NULL REFERENCES recordings(id),
+  candidates_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','confirmed','rejected','dismissed')),
+  resolution_json TEXT,
+  created_ms INTEGER NOT NULL CHECK (created_ms >= 0),
+  resolved_ms INTEGER CHECK (resolved_ms >= 0 OR resolved_ms IS NULL)
+)`,
+  `CREATE INDEX match_reviews_status_idx ON match_reviews(status)`,
+  `CREATE TABLE lyrics_cache (
+  recording_id TEXT PRIMARY KEY REFERENCES recordings(id),
+  provider TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('plain','synced')),
+  payload_json TEXT NOT NULL,
+  fetched_ms INTEGER NOT NULL CHECK (fetched_ms >= 0)
+)`,
+  `CREATE TABLE artwork_cache (
+  url TEXT PRIMARY KEY,
+  file_path TEXT NOT NULL,
+  bytes INTEGER NOT NULL CHECK (bytes >= 0),
+  last_accessed_ms INTEGER NOT NULL CHECK (last_accessed_ms >= 0)
+)`,
+  `CREATE INDEX artwork_cache_accessed_idx ON artwork_cache(last_accessed_ms)`,
+  `CREATE TABLE likes_new (
+  entity_kind TEXT NOT NULL CHECK (entity_kind IN ('track','album','artist')),
+  target_id TEXT NOT NULL,
+  liked_ms INTEGER NOT NULL CHECK (liked_ms >= 0),
+  PRIMARY KEY (entity_kind, target_id)
+)`,
+  `INSERT INTO likes_new (entity_kind, target_id, liked_ms)
+   SELECT entity_kind, entity_id, liked_at_ms FROM likes`,
+  `DROP TABLE likes`,
+  `ALTER TABLE likes_new RENAME TO likes`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
+  Object.freeze([...MIGRATION_2]),
 ]);
