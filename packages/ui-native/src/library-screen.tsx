@@ -58,8 +58,8 @@ function CollectionTile({
         <Text variant="body" color={enabled ? 'bright' : 'primary'}>
           {label}
         </Text>
-        <Text variant="metadata" color="secondary" numberOfLines={1}>
-          {note ?? `${count} tracks`}
+        <Text variant="metadata" color="secondary" numberOfLines={2}>
+          {note ?? `${count} ${count === 1 ? 'track' : 'tracks'}`}
         </Text>
       </View>
     </Pressable>
@@ -147,11 +147,15 @@ export function LibraryScreen({
         style={{
           flexDirection: 'row',
           flexWrap: 'wrap',
-          gap: theme.spacing.sm,
+          rowGap: theme.spacing.sm,
+          justifyContent: 'space-between',
         }}
       >
         {model.collections.map((collection) => (
-          <View key={collection.key} style={{ width: '50%' }}>
+          <View
+            key={collection.key}
+            style={{ flexBasis: '48.5%', flexGrow: 1 }}
+          >
             <CollectionTile
               label={collection.label}
               count={collection.count}
