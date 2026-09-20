@@ -482,7 +482,7 @@ export function toRailCard(recording: Recording): RailCardModel {
 
 export function toHomeModel(input: {
   readonly recordings: readonly Recording[];
-  readonly likes: readonly TrackLike[];
+  readonly likes: readonly Like[];
   readonly suggestions: readonly TrackMetadata[];
   readonly greeting: string;
   readonly subline: string;
@@ -490,7 +490,9 @@ export function toHomeModel(input: {
   const byId = new Map(input.recordings.map((recording) => [recording.id, recording]));
   const recents = [...input.likes]
     .sort((a, b) => b.likedAtMs - a.likedAtMs)
-    .map((like) => byId.get(like.recordingId))
+    .map((like) =>
+      like.entityKind === 'track' ? byId.get(like.targetId) : undefined,
+    )
     .filter((recording): recording is Recording => recording !== undefined)
     .slice(0, 12)
     .map(toRailCard);
