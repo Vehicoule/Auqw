@@ -1,0 +1,181 @@
+import { FlatList, TextInput, View } from 'react-native';
+import { useTheme } from './theme.tsx';
+import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { TrackRow } from './track-row.tsx';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  UnavailableState,
+} from './states.tsx';
+import type { SearchStateModel, TrackRowModel } from './view-models.ts';
+
+export type SearchScreenProps = {
+  readonly state: SearchStateModel;
+  readonly topInset?: number | undefined;
+  readonly scrollEnabled?: boolean | undefined;
+  readonly onQueryChange?: ((query: string) => void) | undefined;
+  readonly onSubmit?: (() => void) | undefined;
+  readonly onCancel?: (() => void) | undefined;
+  readonly onRetry?: (() => void) | undefined;
+  readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
+  readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
+  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
+};
+
+export function SearchScreen({
+  state,
+  topInset = 0,
+  scrollEnabled = true,
+  onQueryChange,
+  onSubmit,
+  onCancel,
+  onRetry,
+  onResultPress,
+  onToggleLike,
+  onContext,
+}: SearchScreenProps) {
+  const theme = useTheme();
+  const loading = state.phase === 'loading';
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: theme.colors.canvas,
+        paddingTop: topInset,
+      }}
+    >
+      <View
+        style={{
+          marginHorizontal: 14,
+          marginTop: theme.spacing.xxs,
+          marginBottom: 10,
+          backgroundColor: theme.colors.fg08,
+          borderRadius: 20,
+          paddingHorizontal: 11,
+          minHeight: theme.sizes.touch,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.sm,
+        }}
+      >
+        <Icon name="search" size={14} color={theme.colors.textSecondary} />
+        <TextInput
+          value={state.query}
+          onChangeText={onQueryChange}
+          onSubmitEditing={onSubmit}
+          placeholder="search"
+          placeholderTextColor={theme.colors.textSecondary}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+          accessibilityLabel="search"
+          style={[
+            theme.typography.body,
+            {
+              flex: 1,
+              color: theme.colors.textPrimary,
+              paddingVertical: theme.spacing.sm,
+              fontSize: 10.5,
+            },
+          ]}
+        />
+        {loading && (
+          <>
+            <Spinner size={14} />
+            {onCancel !== undefined && (
+              <Pressable
+                compact
+                onPress={onCancel}
+                accessibilityLabel="cancel search"
+                style={{ paddingHorizontal: theme.spacing.xs }}
+              >
+                <Text variant="metadata" color="accent">
+                  cancel
+                </Text>
+              </Pressable>
+            )}
+          </>
+        )}
+      </View>
+      {state.phase === 'ready' && (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'baseline',
+            paddingHorizontal: 14,
+            marginBottom: theme.spacing.sm,
+          }}
+        >
+          <Text variant="heading" color="bright" style={{ fontSize: 12.5 }}>
+            results
+          </Text>
+          <Text
+            variant="metadata"
+            color="secondary"
+            style={{ marginLeft: 10 }}
+          >
+            {state.providerId ?? 'catalog'} · {state.results.length} matches
+          </Text>
+        </View>
+      )}
+      {state.phase === 'idle' && (
+        <EmptyState
+          title="search the catalog"
+          hint="results show up here"
+          icon="search"
+        />
+      )}
+      {state.phase === 'loading' && state.results.length === 0 && (
+        <LoadingState title="searching" hint={state.query} />
+      )}
+      {state.phase === 'empty' && (
+        <EmptyState
+          title={`no results for “${state.query}”`}
+          hint="try a different search"
+          icon="search"
+        />
+      )}
+      {state.phase === 'error' && (
+        <ErrorState
+          title="search failed"
+          hint={state.message}
+          onRetry={state.retryable ? onRetry : undefined}
+        />
+      )}
+      {state.phase === 'unavailable' && (
+        <UnavailableState
+          title="search unavailable"
+          hint={state.message}
+        />
+      )}
+      {(state.phase === 'ready' || state.phase === 'loading') &&
+        state.results.length > 0 && (
+          <FlatList
+            data={state.results}
+            keyExtractor={(row) => row.key}
+            scrollEnabled={scrollEnabled}
+            contentContainerStyle={{ paddingHorizontal: 6 }}
+            renderItem={({ item }) => (
+              <TrackRow
+                row={item}
+                onPress={
+                  onResultPress === undefined
+                    ? undefined
+                    : () => onResultPress(item)
+                }
+                onToggleLike={
+                  onToggleLike === undefined
+                    ? undefined
+                    : () => onToggleLike(item)
+                }
+                onContext={
+                  onContext === undefined ? undefined : () => onContext(item)
+                }
+              />
+            )}
+          />
+        )}
+    </View>
+  );
+}

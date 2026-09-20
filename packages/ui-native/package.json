@@ -1,0 +1,36 @@
+{
+  "name": "@auqw/ui-native",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/ui-native.test.ts"
+  },
+  "dependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/design-tokens": "workspace:*"
+  },
+  "peerDependencies": {
+    "expo-blur": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-gesture-handler": "*",
+    "react-native-reanimated": "*",
+    "react-native-safe-area-context": "*",
+    "react-native-svg": "*"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "expo-blur": "~57.0.3",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4"
+  }
+}
