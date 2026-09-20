@@ -68,10 +68,6 @@ private const val POSITION_TICK_MS = 1_000L
  * queued-attach window, so a few hundred is far past any real case. */
 private const val RELEASED_HANDLES_CAP = 512
 
-/** Cap on the released-handle marks — they only matter across the
- * queued-attach window, so a few hundred is far past any real case. */
-private const val RELEASED_HANDLES_CAP = 512
-
 class HostConfigInput : Record {
   @Field
   var fuelPerEntry: Double = 0.0
