@@ -12,7 +12,7 @@
       "id": "youtube-music",
       "version": "0.2.0",
       "abi": "0.2.0",
-      "digest": "sha256:9e464a75fc53343f6c2ad2400baebb2565e958dc9f031c1951758ceda5f8bceb",
+      "digest": "sha256:4cdf573d1804a1a1df64e6260293d97e7c92741799e44367ce7b10240abd00f5",
       "source": "local-build:../auqw-plugins/plugins/youtube-music/dist/youtube-music.wasm"
     }
   ]

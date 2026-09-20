@@ -47,8 +47,12 @@ pub trait Fetch: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>>;
 }
 
-/// [`Fetch`] over `reqwest` + rustls, redirect-free (same policy as the
-/// plugin host: chasing a redirect would leave the minted target).
+/// [`Fetch`] over `reqwest` + rustls. Redirects are not chased by the
+/// client — but googlevideo edge-balances range requests with a 302
+/// to a sibling host, so [`get_range`](Fetch::get_range) re-issues the
+/// same bounded request once against an absolute `https://` `Location`.
+/// One hop is the bound: a longer chain is serving weather, and the
+/// pump's wire rules still run on wherever the chain lands.
 pub struct ReqwestFetch {
     client: reqwest::Client,
 }
@@ -79,6 +83,17 @@ impl ReqwestFetch {
         })?;
         Ok(Self { client })
     }
+}
+
+/// The redirect target worth one re-issue: a 3xx carrying an absolute
+/// `https://` `Location`. Anything else — non-3xx, no header, relative
+/// or plain-http target — is answered verbatim so the caller sees the
+/// same response a redirect-blind fetch would have returned.
+fn follow_target(status: u16, location: Option<&str>) -> Option<&str> {
+    if !(300..400).contains(&status) {
+        return None;
+    }
+    location.filter(|t| t.starts_with("https://"))
 }
 
 /// Collect a streaming body with a per-chunk stall bound and a hard
@@ -126,31 +141,50 @@ impl Fetch for ReqwestFetch {
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         Box::pin(async move {
             let end = offset.saturating_add(max_len.saturating_sub(1));
-            let req = self
-                .client
-                .get(url)
-                .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"));
+            let range = format!("bytes={offset}-{end}");
             let work = async move {
-                let resp = tokio::time::timeout(stall, req.send())
-                    .await
-                    .map_err(|_| StreamError::Transient {
-                        message: format!("headers stalled for {stall:?}"),
-                    })?
-                    .map_err(|e| StreamError::Transient {
-                        message: e.without_url().to_string(),
-                    })?;
-                let status = resp.status().as_u16();
-                let content_range = resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string);
-                let body = collect_body(resp, max_len, stall).await?;
-                Ok(FetchResponse {
-                    status,
-                    content_range,
-                    body,
-                })
+                let mut current = url.to_string();
+                // Up to two issues per range request: the minted URL
+                // plus one edge-balance hop. A redirect without an
+                // absolute https Location is answered verbatim — the
+                // pump classifies it like any other status.
+                for hop in 0..2 {
+                    let req = self
+                        .client
+                        .get(&current)
+                        .header(reqwest::header::RANGE, range.clone());
+                    let resp = tokio::time::timeout(stall, req.send())
+                        .await
+                        .map_err(|_| StreamError::Transient {
+                            message: format!("headers stalled for {stall:?}"),
+                        })?
+                        .map_err(|e| StreamError::Transient {
+                            message: e.without_url().to_string(),
+                        })?;
+                    let location = resp
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok());
+                    if hop == 0 {
+                        if let Some(target) = follow_target(resp.status().as_u16(), location) {
+                            current = target.to_string();
+                            continue;
+                        }
+                    }
+                    let status = resp.status().as_u16();
+                    let content_range = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let body = collect_body(resp, max_len, stall).await?;
+                    return Ok(FetchResponse {
+                        status,
+                        content_range,
+                        body,
+                    });
+                }
+                unreachable!("redirect hop always continues or returns")
             };
             tokio::select! {
                 () = cancel.cancelled() => Err(StreamError::Cancelled),
@@ -164,5 +198,35 @@ impl Fetch for ReqwestFetch {
                 },
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::follow_target;
+
+    #[test]
+    fn follow_target_accepts_https_location_on_3xx() {
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://rr1---sn-x.googlevideo.com/videoplayback?rn=1")
+            ),
+            Some("https://rr1---sn-x.googlevideo.com/videoplayback?rn=1")
+        );
+    }
+
+    #[test]
+    fn follow_target_refuses_downgrade_and_non_3xx() {
+        assert_eq!(
+            follow_target(302, Some("http://rr1---sn-x.googlevideo.com/videoplayback")),
+            None
+        );
+        assert_eq!(follow_target(302, Some("/relative/path")), None);
+        assert_eq!(follow_target(302, None), None);
+        assert_eq!(
+            follow_target(206, Some("https://rr1---sn-x.googlevideo.com/x")),
+            None
+        );
     }
 }
