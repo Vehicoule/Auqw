@@ -65,7 +65,7 @@ export function AndroidNavbar({
                   minWidth: 56,
                   height: 30,
                   borderRadius: 15,
-                  paddingHorizontal: 14,
+                  paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
                   backgroundColor: active
@@ -84,8 +84,10 @@ export function AndroidNavbar({
               <Text
                 variant="metadata"
                 color={active ? 'accent' : 'secondary'}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.8}
                 style={[
-                  { fontSize: 9.5 },
                   active && { fontFamily: theme.fontFamilies.bold },
                 ]}
               >
@@ -111,7 +113,7 @@ export function IosGlassNavbar({
     <View>
       <View
         style={{
-          marginHorizontal: 14,
+          marginHorizontal: theme.spacing.screen,
           marginBottom: theme.spacing.sm,
           borderRadius: 24,
           borderWidth: theme.strokes.hairline,
@@ -175,8 +177,10 @@ export function IosGlassNavbar({
                 <Text
                   variant="metadata"
                   color={active ? 'accent' : 'secondary'}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.8}
                   style={[
-                    { fontSize: 9 },
                     active && { fontFamily: theme.fontFamilies.bold },
                   ]}
                 >

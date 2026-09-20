@@ -27,20 +27,20 @@ import {
   AppNavbar,
   EmptyState,
   ErrorState,
+  GalleryScreen,
   HomeScreen,
   LibraryScreen,
   LoadingState,
   MiniPlayer,
-  QueueScreen,
   SearchScreen,
   SettingsScreen,
   StageSheet,
   ThemeProvider,
   formatClock,
   toLibraryModel,
+  toHomeModel,
   toPlayerModel,
   toQueueModel,
-  toRailCard,
   toSearchRowModel,
   toSettingsModel,
   useTheme,
@@ -56,6 +56,7 @@ import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
+import { devRoute } from './src/dev-routes.ts';
 import { runSeamLink } from './seam-dev.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
@@ -69,9 +70,8 @@ const DIAGNOSTICS_LIMIT = 20;
 
 const NAV_ITEMS: readonly NavItemModel[] = [
   { key: 'home', label: 'home' },
-  { key: 'search', label: 'search' },
+  { key: 'explore', label: 'explore' },
   { key: 'library', label: 'library' },
-  { key: 'queue', label: 'queue' },
   { key: 'settings', label: 'settings' },
 ];
 
@@ -321,6 +321,7 @@ function Main({
   const { session } = controller;
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
+  const [showGallery, setShowGallery] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
@@ -425,25 +426,19 @@ function Main({
   }, [state]);
   const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
   const homeModel = useMemo(() => {
-    const byId = new Map(state.recordings.map((r) => [r.id, r]));
-    const recents = [...state.likes]
-      .sort((a, b) => b.likedAtMs - a.likedAtMs)
-      .map((like) =>
-        like.entityKind === 'track' ? byId.get(like.targetId) : undefined,
-      )
-      .filter((r) => r !== undefined)
-      .slice(0, 12)
-      .map(toRailCard);
-    return {
+    return toHomeModel({
+      recordings: state.recordings,
+      likes: state.likes,
+      suggestions:
+        searchState.type === 'content' ? searchState.page.items : [],
+
       greeting: greeting(new Date()),
       subline:
         state.likes.length === 0
           ? 'search to start your library'
           : `${state.likes.length} liked`,
-      recents,
-      suggestions: [],
-    };
-  }, [state]);
+    });
+  }, [state, searchState]);
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
       providerIds: controller.providers.map((p) => p.id),
@@ -549,9 +544,16 @@ function Main({
       if (url === null || !url.startsWith('auqw://')) {
         return;
       }
+      const route = devRoute(url);
+      // The fixture gallery is a dev route; a normal journey link exits it.
+      if (route === 'gallery') {
+        setShowGallery(true);
+        return;
+      }
+      setShowGallery(false);
       // Slice 1.5 seam dev links (seam-file/seam-prepare/seam-attach/
       // seam-metrics) — isolated in seam-dev.ts; drop with the harness.
-      if (url.startsWith('auqw://seam')) {
+      if (route === 'seam') {
         void runSeamLink(url);
         return;
       }
@@ -560,11 +562,18 @@ function Main({
       const [verb, qs] = body.split('?');
       const params = new URLSearchParams(qs ?? '');
       switch (verb) {
-        case 'open':
-          setTab(params.get('tab') ?? 'home');
+        case 'open': {
+          const target = params.get('tab') ?? 'home';
+          if (target === 'queue') {
+            setStageMode('queue');
+            setExpanded(true);
+          } else {
+            setTab(target === 'search' ? 'explore' : target);
+          }
           break;
+        }
         case 'search':
-          setTab('search');
+          setTab('explore');
           setQuery(params.get('q') ?? '');
           void se?.search({
             query: params.get('q') ?? '',
@@ -628,9 +637,17 @@ function Main({
   searchStateRef.current = searchState;
 
   const topInset = insets.top;
+  if (__DEV__ && showGallery) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <GalleryScreen />
+      </View>
+    );
+  }
   const screen = (() => {
     switch (tab) {
-      case 'search':
+      case 'explore':
         return (
           <SearchScreen
             state={searchModel}
@@ -667,19 +684,6 @@ function Main({
             onToggleLike={(row) => void session.toggleLike(row.key)}
           />
         );
-      case 'queue':
-        return (
-          <QueueScreen
-            queue={queueModel}
-            player={player}
-            reordering={reordering}
-            topInset={topInset}
-            onToggleReorder={() => setReordering((v) => !v)}
-            onPressItem={(id) => void session.playOccurrence(id)}
-            onRemoveItem={(id) => void session.removeOccurrence(id)}
-            onMoveItem={onMoveQueueItem}
-          />
-        );
       case 'settings':
         return (
           <SettingsScreen
@@ -714,7 +718,12 @@ function Main({
           onToggleLike={onToggleLike}
         />
       ) : null}
-      <AppNavbar items={NAV_ITEMS} activeKey={tab} onSelect={setTab} />
+      <AppNavbar
+        items={NAV_ITEMS}
+        activeKey={tab}
+        onSelect={setTab}
+        gestureHandle={Platform.OS === 'android'}
+      />
       {player !== null ? (
         <StageSheet
           player={player}
@@ -723,6 +732,7 @@ function Main({
           mode={stageMode}
           onModeChange={setStageMode}
           queue={queueModel}
+          queueReordering={reordering}
           topInset={topInset}
           onPlayPause={onPlayPause}
           onNext={() => void session.next()}
@@ -731,6 +741,8 @@ function Main({
           onSeek={(ms) => void session.seekTo(ms)}
           onPressQueueItem={(id) => void session.playOccurrence(id)}
           onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+          onToggleQueueReorder={() => setReordering((v) => !v)}
+          onMoveQueueItem={onMoveQueueItem}
         />
       ) : null}
     </View>

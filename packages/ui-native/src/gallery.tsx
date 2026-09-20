@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScrollView, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme, ThemeProvider } from './theme.tsx';
 import {
   Artwork,
@@ -124,7 +125,7 @@ function Frame({
   return (
     <View
       style={{
-        height,
+        height: height * theme.textScale,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.divider,
         borderRadius: theme.radius.float,
@@ -142,7 +143,7 @@ function IconSwatch({ name }: { readonly name: IconName }) {
   return (
     <View style={{ alignItems: 'center', width: 52, gap: 4 }}>
       <Icon name={name} size={16} />
-      <Text variant="metadata" color="secondary" style={{ fontSize: 8 }}>
+      <Text variant="metadata" color="secondary">
         {name}
       </Text>
     </View>
@@ -186,8 +187,11 @@ export function GalleryScreen() {
   const [nav, setNav] = useState('home');
   const [expanded, setExpanded] = useState(true);
   const [searchPhase, setSearchPhase] = useState(2);
+  const [textScale, setTextScale] = useState(1);
+  const [artworkCondition, setArtworkCondition] = useState('missing');
+  const [gestureState, setGestureState] = useState<'rest' | 'mid-drag' | 'dismissed'>('rest');
   return (
-    <ThemeProvider theme={scheme} reducedMotion={reduced}>
+    <ThemeProvider theme={scheme} reducedMotion={reduced} textScale={textScale}>
       <GalleryBody
         scheme={scheme}
         setScheme={setScheme}
@@ -199,6 +203,12 @@ export function GalleryScreen() {
         setExpanded={setExpanded}
         searchPhase={searchPhase}
         setSearchPhase={setSearchPhase}
+        textScale={textScale}
+        setTextScale={setTextScale}
+        artworkCondition={artworkCondition}
+        setArtworkCondition={setArtworkCondition}
+        gestureState={gestureState}
+        setGestureState={setGestureState}
       />
     </ThemeProvider>
   );
@@ -215,6 +225,12 @@ function GalleryBody({
   setExpanded,
   searchPhase,
   setSearchPhase,
+  textScale,
+  setTextScale,
+  artworkCondition,
+  setArtworkCondition,
+  gestureState,
+  setGestureState,
 }: {
   readonly scheme: ThemeName;
   readonly setScheme: (t: ThemeName) => void;
@@ -226,15 +242,23 @@ function GalleryBody({
   readonly setExpanded: (b: boolean) => void;
   readonly searchPhase: number;
   readonly setSearchPhase: (i: number) => void;
+  readonly textScale: number;
+  readonly setTextScale: (value: number) => void;
+  readonly artworkCondition: string;
+  readonly setArtworkCondition: (value: string) => void;
+  readonly gestureState: 'rest' | 'mid-drag' | 'dismissed';
+  readonly setGestureState: (value: 'rest' | 'mid-drag' | 'dismissed') => void;
 }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const search = fixtureSearchStates[searchPhase] ?? fixtureSearchStates[0];
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
       contentContainerStyle={{
         padding: theme.spacing.lg,
-        paddingBottom: theme.spacing.display,
+        paddingTop: insets.top + theme.spacing.lg,
+        paddingBottom: insets.bottom + theme.spacing.display,
       }}
     >
       <Text variant="display" color="bright">
@@ -269,6 +293,14 @@ function GalleryBody({
           active={reduced}
           onPress={() => setReduced(!reduced)}
         />
+        {[1, 2].map((scale) => (
+          <Chip
+            key={scale}
+            label={`text ${scale}×`}
+            active={textScale === scale}
+            onPress={() => setTextScale(scale)}
+          />
+        ))}
       </View>
 
       <Section title="icons" note="custom svg · stroke from tokens">
@@ -276,6 +308,33 @@ function GalleryBody({
           {ICON_SET.map((name) => (
             <IconSwatch key={name} name={name} />
           ))}
+        </View>
+      </Section>
+
+      <Section title="artwork stress" note="missing · slow · extreme">
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.md, marginBottom: theme.spacing.sm }}>
+          {['missing', 'slow', 'extreme'].map((condition) => (
+            <Chip
+              key={condition}
+              label={condition}
+              active={artworkCondition === condition}
+              onPress={() => setArtworkCondition(condition)}
+            />
+          ))}
+        </View>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.lg }}>
+          <Artwork
+            url={artworkCondition === 'missing' ? null : fixturePlayerPlaying.artworkUrl}
+            size={112}
+            loading={artworkCondition === 'slow'}
+          />
+          {artworkCondition === 'extreme' && (
+            <>
+              <Artwork url={fixtureRowStates[0]?.artworkUrl ?? null} size={112} />
+              <Artwork url={fixtureRowStates[2]?.artworkUrl ?? null} size={112} />
+              <Artwork url={fixtureRowStates[3]?.artworkUrl ?? null} size={112} />
+            </>
+          )}
         </View>
       </Section>
 
@@ -294,6 +353,7 @@ function GalleryBody({
             row={fixtureRowStates[1] ?? {
               key: 'fallback',
               title: 'Fallback',
+              versionLabel: null,
               artist: null,
               durationMs: null,
               artworkUrl: null,
@@ -457,7 +517,7 @@ function GalleryBody({
         ))}
       </Section>
 
-      <Section title="stage sheet" note="expanded · drag grab to dismiss">
+      <Section title="stage sheet" note="rest · mid-drag · dismissed">
         <View
           style={{
             flexDirection: 'row',
@@ -465,16 +525,17 @@ function GalleryBody({
             marginBottom: theme.spacing.sm,
           }}
         >
-          <Chip
-            label={expanded ? 'expanded ✓' : 'expand'}
-            active={expanded}
-            onPress={() => setExpanded(true)}
-          />
-          <Chip
-            label="collapse"
-            active={!expanded}
-            onPress={() => setExpanded(false)}
-          />
+          {(['rest', 'mid-drag', 'dismissed'] as const).map((state) => (
+            <Chip
+              key={state}
+              label={state}
+              active={gestureState === state}
+              onPress={() => {
+                setGestureState(state);
+                setExpanded(state !== 'dismissed');
+              }}
+            />
+          ))}
         </View>
         {(['android', 'ios'] as const).map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.lg }}>
@@ -486,6 +547,8 @@ function GalleryBody({
                 player={fixturePlayerPlaying}
                 platform={platform}
                 expanded={expanded}
+                dragPreview={gestureState}
+                queueScrollEnabled={false}
                 onExpandChange={setExpanded}
                 queue={fixtureQueueModel}
                 lyrics={fixtureLyrics}
@@ -516,6 +579,7 @@ function GalleryBody({
           <QueueScreen
             queue={fixtureQueueModel}
             player={fixturePlayerPlaying}
+            scrollEnabled={false}
             onPressItem={noop}
             onRemoveItem={noop}
           />
@@ -526,6 +590,7 @@ function GalleryBody({
             queue={fixtureQueueModelPaused}
             player={fixturePlayerPaused}
             reordering
+            scrollEnabled={false}
             onToggleReorder={noop}
             onPressItem={noop}
             onRemoveItem={noop}

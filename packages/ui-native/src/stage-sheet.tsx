@@ -3,11 +3,11 @@ import { Platform, ScrollView, View } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
-  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
@@ -15,6 +15,7 @@ import {
   Icon,
   IconButton,
   Pressable,
+  PlayPauseIcon,
   Spinner,
   Text,
 } from './primitives.tsx';
@@ -149,11 +150,10 @@ export function TransportControls({
         {busy ? (
           <Spinner size={18} color={playColor} />
         ) : (
-          <Icon
-            name={playing ? 'pause' : 'play'}
+          <PlayPauseIcon
+            playing={playing}
             size={18}
             color={playColor}
-            filled
           />
         )}
       </Pressable>
@@ -226,7 +226,6 @@ export function ModeSegment({
               variant="metadata"
               color={active ? 'bright' : 'secondary'}
               style={[
-                { fontSize: 10.5 },
                 active && { fontFamily: theme.fontFamilies.bold },
               ]}
             >
@@ -247,6 +246,9 @@ export type StageSheetProps = {
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
+  readonly queueReordering?: boolean | undefined;
+  readonly queueScrollEnabled?: boolean | undefined;
+  readonly dragPreview?: 'rest' | 'mid-drag' | 'dismissed' | undefined;
   readonly topInset?: number | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
@@ -256,6 +258,10 @@ export type StageSheetProps = {
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
+  readonly onToggleQueueReorder?: (() => void) | undefined;
+  readonly onMoveQueueItem?:
+    | ((occurrenceId: string, direction: -1 | 1) => void)
+    | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -267,6 +273,9 @@ export function StageSheet({
   mode,
   queue,
   lyrics,
+  queueReordering = false,
+  queueScrollEnabled = true,
+  dragPreview = 'rest',
   topInset = 0,
   onPlayPause,
   onNext,
@@ -276,6 +285,8 @@ export function StageSheet({
   onModeChange,
   onPressQueueItem,
   onRemoveQueueItem,
+  onToggleQueueReorder,
+  onMoveQueueItem,
   style,
 }: StageSheetProps) {
   const theme = useTheme();
@@ -297,6 +308,19 @@ export function StageSheet({
       opacity.value = withTiming(fade, { duration: theme.motion.state });
     }
   }, [expanded, height, theme.reducedMotion, theme.motion, translateY, opacity]);
+
+  useEffect(() => {
+    if (dragPreview === 'rest') {
+      translateY.value = expanded ? 0 : height;
+      opacity.value = expanded ? 1 : 0;
+    } else if (dragPreview === 'mid-drag') {
+      translateY.value = Math.max(0, height * 0.25);
+      opacity.value = 0.86;
+    } else {
+      translateY.value = height;
+      opacity.value = 0;
+    }
+  }, [dragPreview, expanded, height, opacity, translateY]);
 
   const collapse = useCallback(() => {
     onExpandChange?.(false);
@@ -324,7 +348,7 @@ export function StageSheet({
             opacity.value = theme.reducedMotion
               ? 0
               : withTiming(0, { duration: theme.motion.sheet });
-            runOnJS(collapse)();
+            scheduleOnRN(collapse);
           } else {
             translateY.value = theme.reducedMotion
               ? 0
@@ -411,7 +435,7 @@ export function StageSheet({
                 variant="body"
                 color="primary"
                 numberOfLines={1}
-                style={{ marginTop: 4, fontSize: 11.5 }}
+                style={{ marginTop: 4 }}
               >
                 {player.artist ?? '—'}
               </Text>
@@ -506,11 +530,42 @@ export function StageSheet({
           {queue === undefined ? (
             <EmptyState title="queue is empty" icon="queue" />
           ) : (
-            <QueueList
-              queue={queue}
-              onPressItem={onPressQueueItem}
-              onRemoveItem={onRemoveQueueItem}
-            />
+            <>
+              {onToggleQueueReorder !== undefined && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    marginBottom: theme.spacing.xs,
+                  }}
+                >
+                  <IconButton
+                    icon="drag-handle"
+                    size={32}
+                    iconSize={14}
+                    color={
+                      queueReordering
+                        ? theme.colors.accent
+                        : theme.colors.textSecondary
+                    }
+                    accessibilityLabel={
+                      queueReordering ? 'done reordering' : 'reorder queue'
+                    }
+                    active={queueReordering}
+                    onPress={onToggleQueueReorder}
+                  />
+                </View>
+              )}
+              <QueueList
+                queue={queue}
+                reordering={queueReordering}
+                scrollEnabled={queueScrollEnabled}
+                onPressItem={onPressQueueItem}
+                onRemoveItem={onRemoveQueueItem}
+                onMoveItem={onMoveQueueItem}
+              />
+            </>
           )}
         </View>
       )}

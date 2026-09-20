@@ -21,6 +21,8 @@ export const schemes = {
     fg25: 'rgba(169,177,214,0.25)',
     fg40: 'rgba(169,177,214,0.40)',
     glass: 'rgba(20,21,29,0.55)',
+    glassControl: 'rgba(255,255,255,0.12)',
+    scrim: 'rgba(0,0,0,0.45)',
     hairline: 'rgba(169,177,214,0.12)',
   },
   light: {
@@ -41,6 +43,8 @@ export const schemes = {
     fg25: 'rgba(52,58,82,0.24)',
     fg40: 'rgba(52,58,82,0.40)',
     glass: 'rgba(255,255,255,0.55)',
+    glassControl: 'rgba(255,255,255,0.12)',
+    scrim: 'rgba(0,0,0,0.45)',
     hairline: 'rgba(52,58,82,0.12)',
   },
   oled: {
@@ -61,6 +65,8 @@ export const schemes = {
     fg25: 'rgba(169,177,214,0.25)',
     fg40: 'rgba(169,177,214,0.40)',
     glass: 'rgba(14,15,22,0.60)',
+    glassControl: 'rgba(255,255,255,0.12)',
+    scrim: 'rgba(0,0,0,0.45)',
     hairline: 'rgba(169,177,214,0.11)',
   },
 } as const;
@@ -71,6 +77,7 @@ export const spacing = {
   sm: 8,
   md: 12,
   lg: 16,
+  screen: 14,
   xl: 20,
   xxl: 24,
   xxxl: 32,

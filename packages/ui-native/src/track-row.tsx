@@ -13,6 +13,7 @@ import type { TrackRowModel } from './view-models.ts';
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
+  readonly badge?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
@@ -25,6 +26,7 @@ export type TrackRowProps = {
 
 export function TrackRow({
   row,
+  badge = null,
   onPress,
   onLongPress,
   onToggleLike,
@@ -38,8 +40,8 @@ export function TrackRow({
   const unavailable = row.state !== 'available';
   const sub =
     row.note ??
-    [row.artist, formatClock(row.durationMs)]
-      .filter((part): part is string => part !== null && part !== '—')
+    [badge, row.artist, row.versionLabel]
+      .filter((part): part is string => part !== null && part !== '')
       .join(' · ');
   return (
     <View
@@ -47,7 +49,7 @@ export function TrackRow({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 11,
-        height: theme.sizes.trackRow,
+        minHeight: theme.sizes.trackRow * theme.textScale,
         paddingHorizontal: theme.spacing.sm,
         borderRadius: theme.radius.control,
         backgroundColor: row.playing ? theme.colors.accentSoft : 'transparent',
@@ -129,7 +131,7 @@ export function TrackRow({
                 bottom: 0,
                 alignItems: 'center',
                 justifyContent: 'center',
-                backgroundColor: 'rgba(0,0,0,0.45)',
+                backgroundColor: theme.colors.scrim,
               }}
             >
               <EqBars size={11} />
@@ -148,7 +150,6 @@ export function TrackRow({
             }
             numberOfLines={1}
             style={[
-              { fontSize: 11.5 },
               row.playing
                 ? { fontFamily: theme.fontFamilies.bold }
                 : undefined,
@@ -156,12 +157,12 @@ export function TrackRow({
           >
             {row.title}
           </Text>
-          {sub !== '' && (
+        {sub !== '' && (
             <Text
               variant="metadata"
               color="secondary"
               numberOfLines={1}
-              style={{ marginTop: 2, fontSize: 9.5 }}
+              style={{ marginTop: 2 }}
             >
               {sub}
             </Text>
@@ -169,6 +170,14 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Text
+          variant="metadata"
+          color="secondary"
+          numeric
+          style={{ minWidth: 34 * theme.textScale, textAlign: 'right' }}
+        >
+          {formatClock(row.durationMs)}
+        </Text>
         {row.state !== 'available' && (
           <View
             style={{

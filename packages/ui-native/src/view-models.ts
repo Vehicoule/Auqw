@@ -16,6 +16,7 @@ export type TrackRowState = 'available' | 'unavailable' | 'error';
 export type TrackRowModel = {
   readonly key: string;
   readonly title: string;
+  readonly versionLabel: string | null;
   readonly artist: string | null;
   readonly durationMs: number | null;
   readonly artworkUrl: string | null;
@@ -50,6 +51,7 @@ export type QueueItemModel = {
   readonly occurrenceId: string;
   readonly recordingId: string;
   readonly current: boolean;
+  readonly duplicate: boolean;
   readonly row: TrackRowModel;
 };
 
@@ -94,6 +96,20 @@ export type HomeModel = {
 export type LibraryModel = {
   readonly likedCount: number;
   readonly items: readonly TrackRowModel[];
+  readonly collections: readonly {
+    readonly key: 'liked' | 'downloads' | 'top50' | 'history';
+    readonly label: string;
+    readonly count: number;
+    readonly enabled: boolean;
+    readonly note: string | null;
+  }[];
+  readonly artists: readonly {
+    readonly key: string;
+    readonly name: string;
+    readonly artworkUrl: string | null;
+  }[];
+  readonly recentlyAdded: readonly TrackRowModel[];
+  readonly canCreatePlaylist: boolean;
 };
 
 export type SettingsRowModel = {
@@ -201,6 +217,10 @@ export function toTrackRowModel(
   return {
     key: options.key ?? recording.id,
     title: recording.title,
+    versionLabel:
+      recording.versionLabels.length === 0
+        ? null
+        : recording.versionLabels.join(' · '),
     artist: recording.artist,
     durationMs: recording.durationMs,
     artworkUrl: pickArtworkUrl(recording.artwork),
@@ -218,6 +238,7 @@ export function toSearchRowModel(
   return {
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}:${index}`,
     title: metadata.title,
+    versionLabel: null,
     artist: metadata.artist,
     durationMs: metadata.durationMs,
     artworkUrl: pickArtworkUrl(metadata.artwork),
@@ -326,6 +347,11 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const byId = indexById(recordings);
   const liked = likedIds(input.likes ?? []);
   const unavailable = input.unavailableRecordingIds ?? new Set<string>();
+  const occurrencesByRecording = new Map<string, number>();
+  for (const occurrence of queue.occurrences) {
+    const count = occurrencesByRecording.get(occurrence.recordingId) ?? 0;
+    occurrencesByRecording.set(occurrence.recordingId, count + 1);
+  }
   const items: QueueItemModel[] = queue.occurrences.map((occurrence) => {
     const recording = byId.get(occurrence.recordingId);
     const current = occurrence.occurrenceId === queue.currentOccurrenceId;
@@ -334,6 +360,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
         ? {
           key: occurrence.occurrenceId,
           title: 'unknown track',
+          versionLabel: null,
           artist: null,
           durationMs: null,
           artworkUrl: null,
@@ -345,6 +372,10 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
         : {
           key: occurrence.occurrenceId,
           title: recording.title,
+          versionLabel:
+            recording.versionLabels.length === 0
+              ? null
+              : recording.versionLabels.join(' · '),
           artist: recording.artist,
           durationMs: recording.durationMs,
           artworkUrl: pickArtworkUrl(recording.artwork),
@@ -357,6 +388,8 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       occurrenceId: occurrence.occurrenceId,
       recordingId: occurrence.recordingId,
       current,
+      duplicate:
+        (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
       row,
     };
   });
@@ -385,7 +418,57 @@ export function toLibraryModel(input: {
     }
     items.push(toTrackRowModel(recording, { liked: liked.has(recording.id) }));
   }
-  return { likedCount: items.length, items };
+  const artists = new Map<
+    string,
+    { readonly key: string; readonly name: string; readonly artworkUrl: string | null }
+  >();
+  for (const item of items) {
+    if (item.artist === null || artists.has(item.artist)) {
+      continue;
+    }
+    artists.set(item.artist, {
+      key: item.artist,
+      name: item.artist,
+      artworkUrl: item.artworkUrl,
+    });
+  }
+  return {
+    likedCount: items.length,
+    items,
+    collections: [
+      {
+        key: 'liked',
+        label: 'liked',
+        count: items.length,
+        enabled: true,
+        note: null,
+      },
+      {
+        key: 'downloads',
+        label: 'downloads',
+        count: 0,
+        enabled: false,
+        note: 'offline arrives in Slice 3',
+      },
+      {
+        key: 'top50',
+        label: 'top 50',
+        count: 0,
+        enabled: false,
+        note: 'needs play history',
+      },
+      {
+        key: 'history',
+        label: 'history',
+        count: 0,
+        enabled: false,
+        note: 'needs play history',
+      },
+    ],
+    artists: [...artists.values()],
+    recentlyAdded: items.slice(0, 3),
+    canCreatePlaylist: false,
+  };
 }
 
 export function toRailCard(recording: Recording): RailCardModel {
@@ -394,6 +477,34 @@ export function toRailCard(recording: Recording): RailCardModel {
     title: recording.title,
     subtitle: recording.artist,
     artworkUrl: pickArtworkUrl(recording.artwork),
+  };
+}
+
+export function toHomeModel(input: {
+  readonly recordings: readonly Recording[];
+  readonly likes: readonly TrackLike[];
+  readonly suggestions: readonly TrackMetadata[];
+  readonly greeting: string;
+  readonly subline: string;
+}): HomeModel {
+  const byId = new Map(input.recordings.map((recording) => [recording.id, recording]));
+  const recents = [...input.likes]
+    .sort((a, b) => b.likedAtMs - a.likedAtMs)
+    .map((like) => byId.get(like.recordingId))
+    .filter((recording): recording is Recording => recording !== undefined)
+    .slice(0, 12)
+    .map(toRailCard);
+  const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
+    key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
+    title: metadata.title,
+    subtitle: metadata.artist,
+    artworkUrl: pickArtworkUrl(metadata.artwork),
+  }));
+  return {
+    greeting: input.greeting,
+    subline: input.subline,
+    recents,
+    suggestions,
   };
 }
 

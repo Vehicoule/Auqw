@@ -26,6 +26,7 @@ export type Theme = {
   readonly typography: typeof typography;
   readonly motion: typeof motion;
   readonly reducedMotion: boolean;
+  readonly textScale: number;
 };
 
 const ThemeContext = createContext<Theme | null>(null);
@@ -33,12 +34,14 @@ const ThemeContext = createContext<Theme | null>(null);
 export type ThemeProviderProps = {
   readonly theme?: ThemeName;
   readonly reducedMotion?: boolean;
+  readonly textScale?: number;
   readonly children: ReactNode;
 };
 
 export function ThemeProvider({
   theme = 'system',
   reducedMotion,
+  textScale = 1,
   children,
 }: ThemeProviderProps) {
   const system = useColorScheme();
@@ -56,8 +59,9 @@ export function ThemeProvider({
       typography,
       motion,
       reducedMotion: reducedMotion ?? systemReduced,
+      textScale: Math.min(2, Math.max(1, textScale)),
     };
-  }, [theme, system, reducedMotion, systemReduced]);
+  }, [theme, system, reducedMotion, systemReduced, textScale]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 

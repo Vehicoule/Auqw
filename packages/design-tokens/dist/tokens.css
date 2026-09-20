@@ -18,12 +18,15 @@
   --fg25: rgba(169,177,214,0.25);
   --fg40: rgba(169,177,214,0.40);
   --glass: rgba(20,21,29,0.55);
+  --glass-control: rgba(255,255,255,0.12);
+  --scrim: rgba(0,0,0,0.45);
   --hairline: rgba(169,177,214,0.12);
   --spacing-xxs: 2px;
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 12px;
   --spacing-lg: 16px;
+  --spacing-screen: 14px;
   --spacing-xl: 20px;
   --spacing-xxl: 24px;
   --spacing-xxxl: 32px;
@@ -90,6 +93,8 @@
   --fg25: rgba(52,58,82,0.24);
   --fg40: rgba(52,58,82,0.40);
   --glass: rgba(255,255,255,0.55);
+  --glass-control: rgba(255,255,255,0.12);
+  --scrim: rgba(0,0,0,0.45);
   --hairline: rgba(52,58,82,0.12);
 }
 .t-oled {
@@ -110,5 +115,7 @@
   --fg25: rgba(169,177,214,0.25);
   --fg40: rgba(169,177,214,0.40);
   --glass: rgba(14,15,22,0.60);
+  --glass-control: rgba(255,255,255,0.12);
+  --scrim: rgba(0,0,0,0.45);
   --hairline: rgba(169,177,214,0.11);
 }

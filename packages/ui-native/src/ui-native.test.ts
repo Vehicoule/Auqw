@@ -1,6 +1,7 @@
 import {
   formatClock,
   formatRemaining,
+  toHomeModel,
   pickArtworkUrl,
   toLibraryModel,
   toPlayerModel,
@@ -34,6 +35,15 @@ import {
   fixtureSettingsModel,
   galleryCoverage,
 } from './fixtures.ts';
+import {
+  quadPath,
+  morphPlayPause,
+  PAUSE_LEFT,
+  PAUSE_RIGHT,
+  PLAY_LEFT,
+  PLAY_RIGHT,
+  progressPathState,
+} from './motion.ts';
 
 function assert(
   condition: unknown,
@@ -123,6 +133,52 @@ function testFormatClock(): void {
   assertEqual(formatRemaining(0, null), '—');
 }
 
+function testPlayPauseMorph(): void {
+  const start = morphPlayPause(0);
+  const end = morphPlayPause(1);
+  const middle = morphPlayPause(0.5);
+  assertEqual(
+    quadPath(start.left),
+    quadPath(PLAY_LEFT),
+    'morph start must be the play triangle',
+  );
+  assertEqual(
+    quadPath(start.right),
+    quadPath(PLAY_RIGHT),
+    'morph start must be the play triangle',
+  );
+  assertEqual(quadPath(end.left), quadPath(PAUSE_LEFT), 'morph end must be pause bars');
+  assertEqual(
+    quadPath(end.right),
+    quadPath(PAUSE_RIGHT),
+    'morph end must be pause bars',
+  );
+  assert(
+    middle.left.xs.every((x, i) => x !== PLAY_LEFT.xs[i] && x !== PAUSE_LEFT.xs[i]),
+    'morph midpoint must interpolate between play and pause',
+  );
+  assertEqual(
+    quadPath(morphPlayPause(-1).left),
+    quadPath(morphPlayPause(0).left),
+    'morph input is clamped low',
+  );
+  assertEqual(
+    quadPath(morphPlayPause(2).right),
+    quadPath(morphPlayPause(1).right),
+    'morph input is clamped high',
+  );
+}
+
+function testProgressPathState(): void {
+  const state = progressPathState(0.25, 200);
+  assertEqual(state.dashLength, 200, 'the complete ring stays in the dash pattern');
+  assertEqual(state.dashOffset, -150, 'offset reveals the first quarter clockwise');
+  assertEqual(state.opacity, 1, 'positive progress is visible');
+  assertEqual(progressPathState(0, 200).opacity, 0, 'zero progress hides the arc');
+  assertEqual(progressPathState(-1, 200).dashOffset, -200, 'progress is clamped low');
+  assertEqual(progressPathState(2, 200).dashOffset, 0, 'progress is clamped high');
+}
+
 function testPickArtworkUrl(): void {
   assertEqual(pickArtworkUrl([]), null);
   const refs = [
@@ -196,6 +252,7 @@ function testTrackRowMapper(): void {
   const row = toTrackRowModel(rec);
   assertEqual(row.key, rec.id);
   assertEqual(row.title, rec.title);
+  assertEqual(row.versionLabel, rec.versionLabels.join(' · '));
   assertEqual(row.state, 'available');
   assertEqual(row.liked, false);
   const unavailable = toTrackRowModel(rec, {
@@ -282,6 +339,10 @@ function testQueueMapper(): void {
     (i) => i.recordingId === 'rec-self-aware',
   );
   assertEqual(dup.length, 2, 'duplicate occurrence not preserved');
+  assert(
+    dup.every((i) => i.duplicate),
+    'repeat occurrences must be explicit in the row model',
+  );
   const sparse = toQueueModel({
     queue: {
       revision: 0,
@@ -300,6 +361,41 @@ function testQueueMapper(): void {
 
 function testLibraryAndSettings(): void {
   assertEqual(fixtureLibraryModel.likedCount, fixtureLikes.length);
+  assertEqual(
+    fixtureLibraryModel.collections.map((c) => c.key).join(','),
+    'liked,downloads,top50,history',
+    'library must keep the approved 2×2 collection anatomy',
+  );
+  assert(
+    fixtureLibraryModel.collections.every(
+      (c) => c.label.length > 0 && c.count >= 0,
+    ),
+    'every collection needs a label and honest count',
+  );
+  assertEqual(
+    fixtureLibraryModel.collections[0]?.enabled,
+    true,
+    'liked collection is active now',
+  );
+  assert(
+    fixtureLibraryModel.collections
+      .slice(1)
+      .every((c) => !c.enabled && c.note !== null),
+    'future collections must explain their disabled state',
+  );
+  assertEqual(
+    fixtureLibraryModel.canCreatePlaylist,
+    false,
+    'playlist creation is not implemented in Slice 1',
+  );
+  assert(
+    fixtureLibraryModel.artists.length >= 2,
+    'library artists rail needs multiple artists',
+  );
+  assert(
+    fixtureLibraryModel.recentlyAdded.length >= 2,
+    'library needs recent rows',
+  );
   const keys = new Set(fixtureLibraryModel.items.map((i) => i.key));
   assert(keys.size === fixtureLibraryModel.items.length, 'dup library keys');
   for (const item of fixtureLibraryModel.items) {
@@ -307,6 +403,8 @@ function testLibraryAndSettings(): void {
   }
   const lib = toLibraryModel({ recordings: [], likes: [] });
   assertEqual(lib.likedCount, 0);
+  assertEqual(lib.items.length, 0);
+  assertEqual(lib.artists.length, 0);
   assertEqual(fixtureSettingsModel.theme, fixtureSettings.theme);
   assert(fixtureSettingsModel.rows.length >= 5, 'settings rows missing');
   const keys2 = new Set(fixtureSettingsModel.rows.map((r) => r.key));
@@ -337,11 +435,34 @@ function testHomeAndNav(): void {
   assert(first !== undefined);
   const card = toRailCard(first);
   assertEqual(card.title, first.title);
-  assertEqual(fixtureNavItems.length, 5, 'nav must have 5 destinations');
+  const home = toHomeModel({
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    suggestions: fixtureSearchResults,
+    greeting: 'good evening',
+    subline: '3 liked',
+  });
+  assertEqual(home.greeting, 'good evening');
+  assertEqual(home.subline, '3 liked');
+  assertEqual(
+    home.suggestions.length,
+    fixtureSearchResults.length,
+    'home should turn real provider results into suggestion cards',
+  );
+  assertEqual(
+    home.suggestions[0]?.title,
+    fixtureSearchResults[0]?.title,
+    'suggestion card title must survive mapping',
+  );
+  assertEqual(fixtureNavItems.length, 4, 'nav must have 4 destinations');
   assertEqual(
     fixtureNavItems.map((i) => i.key).join(','),
-    'home,search,library,queue,settings',
-    'nav fixture must mirror the app destinations',
+    'home,explore,library,settings',
+    'nav fixture must match the mobile shell contract',
+  );
+  assert(
+    !fixtureNavItems.some((i) => i.key === 'queue'),
+    'queue belongs to the Stage sheet, not the World navbar',
   );
 }
 
@@ -376,9 +497,103 @@ function testCoverageMatrix(): void {
   );
   const phases = new Set(galleryCoverage.searchPhases);
   assertEqual(phases.size, VALID_PHASES.size, 'search coverage incomplete');
+  assertEqual(
+    galleryCoverage.textScales.join(','),
+    '1,2',
+    'gallery must review normal and 200% text',
+  );
+  assertEqual(
+    galleryCoverage.artworkConditions.join(','),
+    'missing,slow,extreme',
+    'gallery must cover the artwork failure matrix',
+  );
+  assertEqual(
+    galleryCoverage.gestureStates.join(','),
+    'rest,mid-drag,dismissed',
+    'gallery must cover the Stage sheet gesture states',
+  );
+}
+
+function testDesignTokenAuthority(): void {
+  const files = readdirSync(new URL('.', import.meta.url))
+    .filter((name) => name.endsWith('.tsx'))
+    .map((name) => ({
+      name,
+      source: readFileSync(new URL(name, import.meta.url), 'utf8'),
+    }));
+  for (const file of files) {
+    assert(
+      !/(#[0-9a-f]{3,8}|rgba\()/i.test(file.source),
+      `${file.name}: raw colors must come from design tokens`,
+    );
+    assert(
+      !file.source.includes('fontSize: ') ||
+        file.name === 'primitives.tsx',
+      `${file.name}: literal font sizes must come from typography tokens`,
+    );
+    assert(
+      !/(padding|margin)Horizontal: 14/.test(file.source),
+      `${file.name}: screen gutters must use the spacing token`,
+    );
+  }
+}
+
+function testGalleryNestingSafety(): void {
+  const source = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('height * theme.textScale'),
+    'fixture frames must grow with the accessibility text scale',
+  );
+  assert(
+    source.includes('queueScrollEnabled={false}'),
+    'embedded Stage queue must not add a second vertical scroller',
+  );
+  assert(
+    /<QueueScreen[\s\S]*?scrollEnabled={false}/.test(source),
+    'embedded queue screens must disable their inner list scrolling',
+  );
+}
+
+function testTrackRowTextScale(): void {
+  const source = readFileSync(new URL('./track-row.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('minHeight: theme.sizes.trackRow * theme.textScale'),
+    'track rows must grow to fit 200% title and metadata lines',
+  );
+  assert(
+    source.includes('minWidth: 34 * theme.textScale'),
+    'the duration column must stay on one line at 200% text',
+  );
+}
+
+function testNavbarTextScale(): void {
+  const source = readFileSync(new URL('./navbar.tsx', import.meta.url), 'utf8');
+  const adaptiveLabels = source.match(/adjustsFontSizeToFit/g)?.length ?? 0;
+  assert(
+    adaptiveLabels >= 2,
+    'both navbar variants must keep destination labels on one adaptive line',
+  );
+}
+
+function testGallerySafeArea(): void {
+  const source = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('useSafeAreaInsets()'),
+    'gallery must respect the platform safe-area insets',
+  );
+  assert(
+    source.includes('insets.top + theme.spacing.lg'),
+    'gallery content must clear the status bar',
+  );
+  assert(
+    source.includes('insets.bottom + theme.spacing.display'),
+    'gallery content must clear the system gesture area',
+  );
 }
 
 testFormatClock();
+testPlayPauseMorph();
+testProgressPathState();
 testPickArtworkUrl();
 testFixtureRecordings();
 testQueueFixture();
@@ -390,5 +605,11 @@ testLibraryAndSettings();
 testHomeAndNav();
 testSearchStates();
 testCoverageMatrix();
+testDesignTokenAuthority();
+testGalleryNestingSafety();
+testTrackRowTextScale();
+testNavbarTextScale();
+testGallerySafeArea();
 
 console.log('ui-native tests passed');
+import { readdirSync, readFileSync } from 'node:fs';

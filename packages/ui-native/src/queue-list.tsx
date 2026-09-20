@@ -50,6 +50,7 @@ export function QueueList({
       )}
       <TrackRow
         row={item.row}
+        badge={item.duplicate ? 'repeat' : null}
         reorderControls={reordering ? 'buttons' : 'none'}
         onPress={
           onPressItem === undefined

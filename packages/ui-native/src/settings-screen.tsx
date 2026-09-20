@@ -71,7 +71,7 @@ function SettingsRow({
         flexDirection: 'row',
         alignItems: 'center',
         minHeight: theme.sizes.touch,
-        paddingHorizontal: 14,
+        paddingHorizontal: theme.spacing.screen,
         gap: theme.spacing.md,
       }}
     >
@@ -121,13 +121,13 @@ export function SettingsScreen({
         variant="label"
         color="secondary"
         uppercase
-        style={{ paddingHorizontal: 14, marginTop: theme.spacing.sm, marginBottom: theme.spacing.sm }}
+        style={{ paddingHorizontal: theme.spacing.screen, marginTop: theme.spacing.sm, marginBottom: theme.spacing.sm }}
       >
         settings
       </Text>
       <View
         style={{
-          marginHorizontal: 14,
+          marginHorizontal: theme.spacing.screen,
           borderRadius: theme.radius.control,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
@@ -150,7 +150,7 @@ export function SettingsScreen({
         color="secondary"
         uppercase
         style={{
-          paddingHorizontal: 14,
+          paddingHorizontal: theme.spacing.screen,
           marginTop: theme.spacing.xl,
           marginBottom: theme.spacing.sm,
         }}
@@ -159,7 +159,7 @@ export function SettingsScreen({
       </Text>
       <View
         style={{
-          marginHorizontal: 14,
+          marginHorizontal: theme.spacing.screen,
           borderRadius: theme.radius.control,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
