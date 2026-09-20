@@ -81,19 +81,31 @@ export type RequestOutcomeEvent = {
 // "Streaming seam"). Event payloads never carry the signed URL.
 // ---------------------------------------------------------------------------
 
-/** ABI error taxonomy plus the seam's terminal-transition kinds. */
+/** ABI error taxonomy plus the seam's terminal-transition kinds —
+ * mirrors `packages/application/src/errors.ts` (wire kinds surface
+ * verbatim from the host, so the union must cover the whole set). */
 export type ErrorKind =
-  | 'transient'
+  | 'no-result'
+  | 'not-applicable'
+  | 'unsupported'
+  | 'auth-required'
+  | 'auth-expired'
   | 'rate-limit'
-  | 'streams-capped'
+  | 'transient'
+  | 'expired-resource'
+  | 'permission-denied'
+  | 'invalid-response'
+  | 'timeout'
   | 'cancelled'
+  | 'budget-exceeded'
+  | 'guest-trap'
+  | 'invalid-message'
+  | 'artifact-rejected'
+  | 'streams-capped'
   | 'released'
   | 'superseded'
   | 'evicted'
   | 'expired'
-  | 'invalid-response'
-  | 'no-result'
-  | 'not-applicable'
   | 'not-found'
   | 'unavailable'
   | 'internal';
@@ -231,6 +243,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   phaseMarks(handle: string): Promise<StreamPhaseMarks>;
   setQueueProjection(projection: QueueProjection): Promise<void>;
   devAttachFile(path: string): Promise<string>;
+  devPrepareUrl(url: string, mime: string, contentLength?: number): Promise<string>;
 }
 
 const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
@@ -331,6 +344,20 @@ export function setQueueProjection(projection: QueueProjection): Promise<void> {
  */
 export function devAttachFile(path: string): Promise<string> {
   return native.devAttachFile(path);
+}
+
+/**
+ * Dev-gate URL leg: prepare a real seam session for a bare URL —
+ * skips only the guest resolve, so prepare→attach→render still runs
+ * through the sparse store, pump, and fetch-through. Resolves with
+ * the stream handle for `play`. Dev instrumentation.
+ */
+export function devPrepareUrl(
+  url: string,
+  mime: string,
+  contentLength?: number,
+): Promise<string> {
+  return native.devPrepareUrl(url, mime, contentLength);
 }
 
 export function addResolveOutcomeListener(

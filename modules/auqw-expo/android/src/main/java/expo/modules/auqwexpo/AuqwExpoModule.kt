@@ -59,6 +59,10 @@ private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 
+/** Cap on the released-handle marks — they only matter across the
+ * queued-attach window, so a few hundred is far past any real case. */
+private const val RELEASED_HANDLES_CAP = 512
+
 class HostConfigInput : Record {
   @Field
   var fuelPerEntry: Double = 0.0
@@ -144,6 +148,7 @@ class QueueProjectionInput : Record {
 
 @androidx.annotation.OptIn(UnstableApi::class)
 class AuqwExpoModule : Module() {
+  @Volatile
   private var host: PluginHost? = null
   private val streamRegistry = AuqwStreamRegistry()
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
@@ -176,6 +181,7 @@ class AuqwExpoModule : Module() {
   // installed projection's `currentOccurrenceId` — the application is
   // authoritative on it and re-projects after every adopted move, so
   // the service keeps no shadow cursor that could drift.
+  @Volatile
   private var boundService: AuqwMediaSessionService? = null
   @Volatile
   private var installedProjection: QueueProjectionInput? = null
@@ -186,13 +192,17 @@ class AuqwExpoModule : Module() {
   private var attachedForOccurrence: String? = null
   @Volatile
   private var attachedByService: Boolean = false
-  // The projection a pending service-initiated attach derives from —
-  // a fresh install or another move supersedes it by identity, so a
-  // late prepare outcome can never emit a transition the application
-  // would only reject as stale.
+  // The projection a pending service-initiated attach derives from,
+  // stamped with a monotonic move seq: an off-looper clear (host swap,
+  // disconnect) can free the slot, and a stale outcome can never
+  // misattribute a *newer* move's latch because the seqs differ.
+  private class ArmedMove(val proj: QueueProjectionInput, val seq: Long)
+
   @Volatile
-  private var transitionInFlight: QueueProjectionInput? = null
+  private var transitionInFlight: ArmedMove? = null
+  private var transitionSeq = 0L
   private var svcSeq = 0
+  @Volatile
   private var notificationsRequested = false
 
   /** Which occurrence an attach binds the stream to. */
@@ -229,6 +239,7 @@ class AuqwExpoModule : Module() {
 
     OnDestroy {
       try {
+        boundService?.remoteDispatcher = null
         appContext.reactContext?.unbindService(serviceConnection)
       } catch (e: Exception) {
         Log.w(TAG, "unbind: ${e.message}")
@@ -265,8 +276,22 @@ class AuqwExpoModule : Module() {
       releasedHandles.clear()
       // A pending service move prepared on the old host is already
       // stale — free it now so a fresh move isn't stalled waiting on
-      // an outcome the new host can never use.
+      // an outcome the new host can never use. (Off-looper clear is
+      // safe: the latch is seq-stamped, so a stale outcome can never
+      // take a newer move's slot.)
       transitionInFlight = null
+      // Every handle the old host served is dead — stop playback and
+      // drop the join rather than let the old stream keep playing
+      // until its reads fail one by one.
+      player?.let { p ->
+        Handler(p.applicationLooper).post {
+          attached = null
+          attachedForOccurrence = null
+          attachedByService = false
+          p.stop()
+          p.clearMediaItems()
+        }
+      }
       Log.i(TAG, "host created")
       null
     }
@@ -422,6 +447,11 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("play") Coroutine { handle: String, attemptId: String, queueRev: Double, positionMs: Double? ->
+      if (attemptId.isEmpty() || !isSafeNonNegative(queueRev) ||
+        (positionMs != null && !isSafeNonNegative(positionMs))
+      ) {
+        throw CodedException("ERR_INVALID_ARGUMENT", "bad play arguments", null)
+      }
       if (streamRegistry.hostFor(handle) == null) {
         throw CodedException("ERR_HANDLE_UNKNOWN", "unknown stream handle", null)
       }
@@ -441,6 +471,11 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("seekTo") Coroutine { positionMs: Double ->
+      if (!isSafeNonNegative(positionMs)) {
+        throw CodedException(
+          "ERR_INVALID_ARGUMENT", "positionMs must be a safe non-negative integer", null
+        )
+      }
       val p = awaitPlayer()
       onPlayerThread(p) { p.seekTo(positionMs.toLong()) }
       null
@@ -473,27 +508,19 @@ class AuqwExpoModule : Module() {
       // Mark the handle ended before terminating: an attach still
       // queued on the player looper checks the mark and skips, so a
       // released handle is never resurrected into a stale status.
-      releasedHandles.add(handle)
-      // Clear the status join before terminating the session: an
-      // in-flight read unwinding Released must not emit a stale
-      // "failed" status for a handle the caller just ended.
-      val a = attached
-      if (a?.handle == handle) {
-        attached = null
-        attachedForOccurrence = null
-        attachedByService = false
+      // The set is bounded — marks only matter across the queued-
+      // attach window.
+      if (releasedHandles.size < RELEASED_HANDLES_CAP) {
+        releasedHandles.add(handle)
       }
       try {
         h.streamRelease(handle)
       } catch (e: StreamException) {
-        // Release failed — unmark and restore the join only while the
-        // session is still routable: a release that failed because the
-        // handle was already ended must not resurrect it.
+        // Release failed — unmark only while the session is still
+        // routable: a release that failed because the handle was
+        // already ended must not resurrect it.
         if (streamRegistry.hostFor(handle) != null) {
           releasedHandles.remove(handle)
-          if (a?.handle == handle && attached == null) {
-            attached = a
-          }
         }
         // The UniFFI message already formats "{kind}: {detail}" — do
         // not prefix the kind a second time.
@@ -502,19 +529,17 @@ class AuqwExpoModule : Module() {
       // Released — unmap only on success so a failed release keeps the
       // handle routable (the session is still alive).
       streamRegistry.unregister(handle)
-      // Releasing the attached stream stops its playback — on the
-      // player looper, and only if this handle still owns the player:
-      // a newer attach that landed mid-release must not be stopped.
-      if (a?.handle == handle) {
-        val p = awaitPlayer()
-        onPlayerThread(p) {
-          if (attached == null || attached?.handle == handle) {
-            attached = null
-            attachedForOccurrence = null
-            attachedByService = false
-            p.stop()
-            p.clearMediaItems()
-          }
+      // Releasing the attached stream stops its playback — the check
+      // and the stop are one atomic looper block, so a newer attach
+      // that landed mid-release keeps both its join and its playback.
+      val p = awaitPlayer()
+      onPlayerThread(p) {
+        if (attached?.handle == handle) {
+          attached = null
+          attachedForOccurrence = null
+          attachedByService = false
+          p.stop()
+          p.clearMediaItems()
         }
       }
       null
@@ -550,6 +575,21 @@ class AuqwExpoModule : Module() {
         OccurrenceBind.NONE, null
       )
       handle
+    }
+
+    // Dev-gate URL leg: registers a real seam session for a bare URL —
+    // skips only the guest resolve (bot-check-blocked during dev), so
+    // prepare→attach→render still runs through the sparse store, pump,
+    // fetch-through, and phase marks. Dev instrumentation only.
+    AsyncFunction("devPrepareUrl") Coroutine { url: String, mime: String, contentLength: Double? ->
+      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val prepared = try {
+        h.devPrepareUrl(url, mime, contentLength?.toULong())
+      } catch (e: StreamException) {
+        throw CodedException("ERR_STREAM", e.message, e)
+      }
+      streamRegistry.register(prepared.handle, h)
+      prepared.handle
     }
 
     /**
@@ -596,9 +636,15 @@ class AuqwExpoModule : Module() {
     override fun onServiceDisconnected(name: ComponentName?) {
       boundService?.remoteDispatcher = null
       boundService = null
+      // The bound player is dead — the join must not survive into the
+      // next service instance: a stale attach would emit statuses for
+      // a stream no player owns.
+      attached = null
+      attachedForOccurrence = null
+      attachedByService = false
       transitionInFlight = null
-      // The bound player is dead — reset so the next awaitPlayer
-      // rebinds instead of resolving a stale deferred.
+      // Reset so the next awaitPlayer rebinds instead of resolving a
+      // stale deferred.
       player = null
       bound = false
       playerReady = CompletableDeferred()
@@ -704,6 +750,14 @@ class AuqwExpoModule : Module() {
     // The mark is emitted only once the attach is accepted — a
     // skipped attach leaves no stale mark behind.
     emitPhaseMark(a, "attach")
+    val source = ProgressiveMediaSource.Factory(dataSourceFactory)
+      .createMediaSource(MediaItem.fromUri(uri))
+    p.setMediaSource(source, positionMs?.toLong() ?: 0L)
+    p.prepare()
+    p.play()
+    // The join is committed only once the player accepted the source:
+    // a thrown setMediaSource leaves no Attachment echoing statuses
+    // for a stream that never played.
     attached = a
     attachedByService = bind == OccurrenceBind.FIXED
     attachedForOccurrence = when (bind) {
@@ -711,11 +765,6 @@ class AuqwExpoModule : Module() {
       OccurrenceBind.CURSOR -> installedProjection?.currentOccurrenceId
       OccurrenceBind.NONE -> null
     }
-    val source = ProgressiveMediaSource.Factory(dataSourceFactory)
-      .createMediaSource(MediaItem.fromUri(uri))
-    p.setMediaSource(source, positionMs?.toLong() ?: 0L)
-    p.prepare()
-    p.play()
   }
 
   private fun stateOf(p: ExoPlayer): String = when (p.playbackState) {
@@ -849,6 +898,10 @@ class AuqwExpoModule : Module() {
         p.clearMediaItems()
       }
     }
+    // The application re-keys its active identity's queueRev to the
+    // revision every mutation produces — statuses only join while
+    // they echo that revision, so the surviving attach must track it.
+    attached?.queueRev = proj.queueRev
     if (attachedForOccurrence != null &&
       attachedForOccurrence == proj.currentOccurrenceId &&
       p.playbackState == Player.STATE_ENDED
@@ -937,11 +990,13 @@ class AuqwExpoModule : Module() {
     if (provider.isNullOrEmpty() || sourceRef.isNullOrEmpty()) {
       // Honest unavailable: the item cannot produce a handle, so no
       // legal nonnull-target transition exists — park on the cursor.
+      failEndedAttach(reason, "unavailable", "queue successor is unplayable")
       Log.i(TAG, "queue transition parked: target unavailable")
       return
     }
     val h = host ?: return
-    transitionInFlight = proj
+    val seq = ++transitionSeq
+    transitionInFlight = ArmedMove(proj, seq)
     val listener = object : PrepareListener {
       override fun onOutcome(requestId: String, outcome: PrepareOutcome) {
         // Prepare outcomes fire on a host runtime worker — hop back
@@ -952,15 +1007,17 @@ class AuqwExpoModule : Module() {
           return
         }
         Handler(pl.applicationLooper).post {
-          finishTransition(pl, h, proj, from, target.occurrenceId, reason, outcome)
+          finishTransition(pl, h, proj, seq, from, target.occurrenceId, reason, outcome)
         }
       }
     }
     try {
+      // startPrepare only registers the request — it never blocks on
+      // resolve, so the player looper (= main thread) is safe.
       h.startPrepare(provider, sourceRef, listener)
     } catch (e: HostException) {
       transitionInFlight = null
-      // Park: no valid transition can be emitted without a handle.
+      failEndedAttach(reason, "unavailable", e.message)
       Log.w(TAG, "transition prepare rejected: ${e.message}")
     }
   }
@@ -969,12 +1026,13 @@ class AuqwExpoModule : Module() {
     p: ExoPlayer,
     h: PluginHost,
     proj: QueueProjectionInput,
+    seq: Long,
     from: String,
     to: String,
     reason: String,
     outcome: PrepareOutcome,
   ) {
-    if (transitionInFlight !== proj) {
+    if (transitionInFlight?.seq != seq) {
       releaseOutcomeHandle(h, outcome)
       return
     }
@@ -995,10 +1053,16 @@ class AuqwExpoModule : Module() {
           outcome.stream.handle, attemptId, proj.queueRev,
           SystemClock.elapsedRealtime()
         )
-        attachOnPlayerThread(
-          p, a, 0.0, Uri.parse("auqw-stream://${outcome.stream.handle}"),
-          streamDataSourceFactory, OccurrenceBind.FIXED, to
-        )
+        try {
+          attachOnPlayerThread(
+            p, a, 0.0, Uri.parse("auqw-stream://${outcome.stream.handle}"),
+            streamDataSourceFactory, OccurrenceBind.FIXED, to
+          )
+        } catch (e: Exception) {
+          Log.w(TAG, "transition attach failed: ${e.message}")
+          failEndedAttach(reason, "internal", e.message)
+          return
+        }
         // Emit only once the attach was accepted — a skipped attach
         // leaves the cursor parked, not advanced.
         if (attached === a) {
@@ -1010,10 +1074,29 @@ class AuqwExpoModule : Module() {
       }
       is PrepareOutcome.Failed -> {
         // The target could not be resolved — park on the cursor; a
-        // remote retry drives the move again.
+        // remote retry drives the move again. `ended` is deferred
+        // app-side: surface the failure or the queue freezes here.
+        failEndedAttach(reason, outcome.kind, outcome.message)
         Log.i(TAG, "transition prepare failed kind=${outcome.kind}")
       }
     }
+  }
+
+  /** `ended` defers the queue's advance to this transition — when no
+   * legal move exists the app must hear the block as a failure on the
+   * attach that ended, or it waits forever. Remote presses simply
+   * no-op: the app is not deferring on them. */
+  private fun failEndedAttach(reason: String, kind: String, message: String?) {
+    if (reason != "ended") {
+      return
+    }
+    emitStatus(
+      "failed",
+      Bundle().apply {
+        putString("kind", kind)
+        putString("message", message)
+      }
+    )
   }
 
   /** Free a prepared stream the projection can no longer use — on

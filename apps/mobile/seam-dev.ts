@@ -6,6 +6,8 @@
 //   auqw://seam-prepare?provider=…&ref=…   stream prepare (staged leg)
 //   auqw://seam-attach?handle=…    attach last/provided prepared handle
 //   auqw://seam-metrics            dump Rust-side phase marks
+//   auqw://seam-url?url=…&mime=…   dev seam leg — real prepared session
+//                                  for a bare URL (no guest resolve)
 // Self-contained (own logger + listeners) so App.tsx stays a one-block
 // diff for the s1 merge. Dev-gate only — no shipped semantics.
 import { Asset } from 'expo-asset';
@@ -17,6 +19,7 @@ import {
   addPrepareOutcomeListener,
   createHost,
   devAttachFile,
+  devPrepareUrl,
   loadPlugin,
   phaseMarks,
   play,
@@ -82,7 +85,7 @@ function arm(): void {
   });
 }
 
-async function ensureSeam(): Promise<string> {
+async function ensureHost(): Promise<void> {
   if (!hostReady) {
     // Same fuel config as App.tsx's ensureHost.
     await createHost({
@@ -92,6 +95,10 @@ async function ensureSeam(): Promise<string> {
     });
     hostReady = true;
   }
+}
+
+async function ensureSeam(): Promise<string> {
+  await ensureHost();
   if (!pluginId) {
     const asset = Asset.fromModule(PLUGIN_WASM);
     await asset.downloadAsync();
@@ -121,7 +128,7 @@ function describe(error: unknown): string {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -189,6 +196,28 @@ export async function runSeamLink(url: string): Promise<void> {
       const provider = param(query, 'provider') ?? id;
       lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
       slog(`seam-prepare sent req=${lastRequestId} t=${Date.now()}`);
+    } else if (match[1] === 'seam-url') {
+      // Dev E2E leg: real prepared session for a bare URL — sparse
+      // store, pump, fetch-through, DataSource, Media3 all exercised;
+      // only the guest resolve is skipped.
+      const streamUrl = param(query, 'url');
+      if (!streamUrl) {
+        return;
+      }
+      const mime = param(query, 'mime') ?? 'audio/mp4';
+      const bytes = param(query, 'bytes');
+      const pos = param(query, 'pos');
+      await ensureHost();
+      const t0 = Date.now();
+      lastHandle = await devPrepareUrl(
+        streamUrl,
+        mime,
+        bytes ? Number(bytes) : undefined,
+      );
+      slog(`seam-url prepared handle=${lastHandle} +${Date.now() - t0}ms`);
+      const ta = Date.now();
+      await play(lastHandle, `dev-${Date.now()}`, 0, pos ? Number(pos) : undefined);
+      slog(`seam-url attach-sent handle=${lastHandle} pos=${pos ?? 0} +${Date.now() - ta}ms total+${Date.now() - t0}ms`);
     } else if (match[1] === 'seam-attach') {
       const handle = param(query, 'handle') ?? lastHandle;
       if (!handle) {

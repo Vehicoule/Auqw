@@ -749,6 +749,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_close(
@@ -805,6 +807,8 @@ internal object UniffiLib {
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`capability`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(`ptr`: Long,`url`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`contentLength`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -956,6 +960,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() and 0xFFFF) != 51654) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_dev_prepare_url() and 0xFFFF) != 36240) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() and 0xFFFF) != 57130) {
@@ -1472,6 +1479,21 @@ public interface PluginHostInterface {
     fun `startResolve`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: ResolveListener): kotlin.String
     
     /**
+     * Dev-gate entry: register a session for a bare URL, skipping the
+     * guest `playback.resolve` (same convention as the Kotlin
+     * `devAttachFile`). Everything downstream of resolve is the real
+     * path — sparse store, pump, fetch-through, marks — so the seam
+     * gates can be exercised while the provider's resolve is
+     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
+     * expiry keeps it out of the measured window.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the prepare's kind otherwise.
+     */
+    fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?): PreparedStream
+    
+    /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
      * including the opaque stream handle — arrives on `listener`.
@@ -1764,6 +1786,36 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
         FfiConverterString.lower(`pluginId`),
         FfiConverterString.lower(`sourceRef`),
         FfiConverterTypeResolveListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Dev-gate entry: register a session for a bare URL, skipping the
+     * guest `playback.resolve` (same convention as the Kotlin
+     * `devAttachFile`). Everything downstream of resolve is the real
+     * path — sparse store, pump, fetch-through, marks — so the seam
+     * gates can be exercised while the provider's resolve is
+     * unreachable. Re-mint is pinned to fail `Expired`; a one-hour
+     * expiry keeps it out of the measured window.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the prepare's kind otherwise.
+     */
+    @Throws(StreamException::class)override fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?): PreparedStream {
+            return FfiConverterTypePreparedStream.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(
+        it,
+        
+        FfiConverterString.lower(`url`),
+        FfiConverterString.lower(`mime`),
+        FfiConverterOptionalULong.lower(`contentLength`),_status)
 }
     }
     )
