@@ -100,6 +100,21 @@ export function createExpoArtwork(
     destFor(url: string): string {
       return `${directory.uri}/${artworkKey(url)}.img`;
     },
+    async exists(
+      filePath: string,
+      signal: CancellationSignal,
+    ): Promise<Result<boolean>> {
+      if (signal.cancelled) {
+        return err(appError('cancelled', 'cancelled'));
+      }
+      try {
+        return ok(new File(filePath).exists);
+      } catch (thrown) {
+        return err(
+          appError('internal', `artwork stat failed: ${thrownName(thrown)}`),
+        );
+      }
+    },
     async remove(
       filePath: string,
       signal: CancellationSignal,

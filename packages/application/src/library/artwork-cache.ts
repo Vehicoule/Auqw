@@ -50,11 +50,20 @@ export interface ArtworkFetchPort {
  * adapter surface that owns the cache directory owns the whole file
  * lifecycle; the fetch port only transfers bytes. `remove` treats an
  * absent file as success — eviction is idempotent.
+ *
+ * `exists` answers whether a file is still on disk: the directory is
+ * OS-reclaimable (Paths.cache), so a persisted row can outlive its
+ * file. An error means the check could not be made — the caller must
+ * not assume either presence or absence.
  */
 export interface ArtworkPathsPort {
   /** Absolute path of the cache directory this port owns. */
   readonly dir: string;
   destFor(url: string): string;
+  exists(
+    filePath: string,
+    signal: CancellationSignal,
+  ): Promise<Result<boolean>>;
   remove(
     filePath: string,
     signal: CancellationSignal,
@@ -73,6 +82,9 @@ export type ArtworkLookup = {
 };
 
 export type ArtworkSweepReport = {
+  /** Rows dropped because their file is gone (OS-reaped). */
+  readonly reaped: number;
+  readonly reapedBytes: number;
   readonly evicted: number;
   readonly evictedBytes: number;
   readonly totalBytes: number;
@@ -344,7 +356,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     url: string,
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
-    // Phase 1 (serialized): a present entry is touched write-through.
+    // Phase 1 (serialized): a present entry is touched write-through,
+    // but only after proving its file still exists — the directory is
+    // OS-reclaimable, so a row can outlive its file. A reaped entry is
+    // dropped and the url re-downloads like any absent one.
     const probed = await serialized(
       async (): Promise<Result<Probe>> => {
         const section = await loadSection(context);
@@ -355,6 +370,21 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (entry === undefined) {
           return ok({ type: 'absent' });
         }
+        const present = await call(() =>
+          deps.paths.exists(entry.filePath, context.signal),
+        );
+        if (!present.ok) {
+          return err(present.error);
+        }
+        const entries = section.value.entries;
+        if (!present.value) {
+          entries.delete(url);
+          const committed = await commitSection(entries, context);
+          if (!committed.ok) {
+            return committed;
+          }
+          return ok({ type: 'absent' });
+        }
         const now = safeNow();
         if (now === null) {
           return err(
@@ -362,10 +392,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
           );
         }
         entry.lastAccessedMs = now;
-        const committed = await commitSection(
-          section.value.entries,
-          context,
-        );
+        const committed = await commitSection(entries, context);
         if (!committed.ok) {
           return committed;
         }
@@ -547,34 +574,68 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (!section.ok) {
           return section;
         }
+        const entries = section.value.entries;
+        // Reap rows whose files the OS already reclaimed — the cache
+        // dir is reclaimable, so a row can outlive its file. A stat
+        // failure keeps the row (presence was never disproven) but is
+        // reported like a removal failure.
+        let reaped = 0;
+        let reapedBytes = 0;
+        let firstError: AppError | null = null;
+        for (const entry of [...entries.values()]) {
+          if (context.signal.cancelled) {
+            if (firstError === null) {
+              firstError = appError('cancelled', 'cancelled');
+            }
+            break;
+          }
+          const present = await call(() =>
+            deps.paths.exists(entry.filePath, context.signal),
+          );
+          if (!present.ok) {
+            if (firstError === null) {
+              firstError = present.error;
+            }
+            warn('artwork cache stat failed');
+            continue;
+          }
+          if (!present.value) {
+            entries.delete(entry.url);
+            reaped += 1;
+            reapedBytes += entry.bytes;
+          }
+        }
         const budgetBytes = artworkCacheBudgetBytes(
           section.value.settings,
         );
         const eviction = await evictUnderBudget(
-          section.value.entries,
+          entries,
           budgetBytes,
           null,
           context.signal,
         );
-        if (eviction.evicted > 0) {
-          const committed = await commitSection(
-            section.value.entries,
-            context,
-          );
+        if (firstError === null) {
+          firstError = eviction.firstError;
+        }
+        if (reaped > 0 || eviction.evicted > 0) {
+          const committed = await commitSection(entries, context);
           if (!committed.ok) {
             return committed;
           }
         }
         const report: ArtworkSweepReport = {
+          reaped,
+          reapedBytes,
           evicted: eviction.evicted,
           evictedBytes: eviction.evictedBytes,
-          totalBytes: totalBytes(section.value.entries),
+          totalBytes: totalBytes(entries),
           budgetBytes,
         };
-        // A removal failure is honest: achieved evictions are already
-        // committed, but the sweep reports the error it hit.
-        if (eviction.firstError !== null) {
-          return err(eviction.firstError);
+        // A stat/removal failure is honest: achieved reaps and
+        // evictions are already committed, but the sweep reports the
+        // error it hit.
+        if (firstError !== null) {
+          return err(firstError);
         }
         return ok(report);
       },

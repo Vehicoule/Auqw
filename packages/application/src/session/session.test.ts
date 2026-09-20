@@ -17,8 +17,9 @@ import type { PlayerPort } from '../ports/player.ts';
 import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import { isPersistedState } from '../library/library.ts';
-import type { Entity } from '../library/library.ts';
+import type { Entity, MatchReview } from '../library/library.ts';
 import type { OperationContext } from '../cancellation.ts';
+import { CancellationSource } from '../cancellation.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { ProviderPort } from '../ports/provider.ts';
 import { Session } from './session.ts';
@@ -2857,6 +2858,311 @@ async function playRecordingsFlow(): Promise<void> {
   );
 }
 
+async function occurrencePinPlayed(): Promise<void> {
+  // A pin for the active playback provider plays verbatim: no
+  // candidates round, no mapping required, no clobber.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [
+          ref('youtube-music', 'y1'),
+          ref('youtube-music', 'y2'),
+        ]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y2'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'a valid pin never asks candidates',
+  );
+  const prep = calls(r, 'prepare').at(-1);
+  assertEqual(
+    (prep?.input as { sourceRef: string } | undefined)?.sourceRef,
+    'y2',
+    'the pinned ref prepares',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-pin'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-pin')));
+  assert((await started).ok, 'playOccurrence failed');
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences[0]?.selectedRef?.id,
+    'y2',
+    'pin survives playback untouched',
+  );
+}
+
+async function occurrencePinProjection(): Promise<void> {
+  // The queue projection reports the same ref playback would use:
+  // the occurrence pin, not a mapping or first source ref.
+  const r = rig(
+    persisted({
+      recordings: [
+        {
+          ...recording('r1', [
+            ref('youtube-music', 'y1'),
+            ref('youtube-music', 'y2'),
+          ]),
+          mappings: [
+            {
+              ref: ref('youtube-music', 'y1'),
+              status: 'automatic' as const,
+              matchedAtMs: 1,
+              evidence: {
+                titleSimilarity: 1,
+                artistSimilarity: null,
+                durationDeltaMs: null,
+                exactIsrc: false,
+                score: 1,
+                versionLabels: [],
+              },
+            },
+          ],
+        },
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y2'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const item = r.player.projections
+    .at(-1)
+    ?.items.find((i) => i.occurrenceId === 'o1');
+  assertEqual(item?.provider, 'youtube-music', 'projection provider');
+  assertEqual(item?.sourceRef, 'y2', 'projection reports the pin');
+}
+
+async function foreignPinFallsBack(): Promise<void> {
+  // A pin for another playback provider is ignored: selection falls
+  // through to the unvetoed source ref for the active provider.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [
+          ref('itunes', 'i1'),
+          ref('youtube-music', 'y1'),
+        ]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('itunes', 'i1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  assertEqual(
+    (prep?.input as { sourceRef: string } | undefined)?.sourceRef,
+    'y1',
+    'foreign pin falls back to the provider source ref',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-fb'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-fb')));
+  assert((await started).ok);
+}
+
+async function foreignPinResolves(): Promise<void> {
+  // A foreign pin with no provider source ref resolves via
+  // candidates; the resolved ref becomes the occurrence selection.
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('itunes', 'i1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  assert(
+    r.ytm.pendingCount('candidates') > 0,
+    'no provider ref asks candidates',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'ytm-1', 'Song r1', 'Artist', 300_000)]),
+  );
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  assertEqual(
+    (prep?.input as { sourceRef: string } | undefined)?.sourceRef,
+    'ytm-1',
+    'resolved ref prepares, not the foreign pin',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-res'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-res')));
+  assert((await started).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences[0]?.selectedRef?.id,
+    'ytm-1',
+    'resolution replaces the inapplicable pin',
+  );
+}
+
+async function successorPinSkipsMapping(): Promise<void> {
+  // A pinned successor needs no prefetch mapping task even when its
+  // pin is not among the recording's source refs — the pin rides
+  // verbatim and survives untouched.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [ref('youtube-music', 'y1')]),
+        recording('r2', [ref('itunes', 'i2')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+          occurrence('o2', 'r2', ref('youtube-music', 'y9')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'pinned successor never triggers a mapping task',
+  );
+  assertEqual(
+    readyOf(r).queue.occurrences[1]?.selectedRef?.id,
+    'y9',
+    'successor pin untouched',
+  );
+  const second = r.session.playOccurrence('o2');
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  assertEqual(
+    (prep?.input as { sourceRef: string } | undefined)?.sourceRef,
+    'y9',
+    'pinned successor plays verbatim',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-o2'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-o2')));
+  assert((await second).ok);
+}
+
+async function reviewReloadPreservesMemory(): Promise<void> {
+  // A review op reloads persisted state after its own commit. A
+  // concurrent recording mutation mirrored in memory but absent from
+  // that reload must not be dropped.
+  const review: MatchReview = {
+    reviewId: 'rev1',
+    recordingId: 'r1',
+    candidates: [
+      {
+        metadata: meta(
+          'youtube-music',
+          'y9',
+          'Song r1',
+          'Artist',
+          300_000,
+        ),
+        ref: ref('youtube-music', 'y9'),
+      },
+    ],
+    status: 'pending',
+    resolution: null,
+    createdMs: 1,
+    resolvedMs: null,
+  };
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+    matchReviews: [review],
+  });
+  const r = rig(base);
+  await restoreOk(r);
+  // Defer the corrections load, settle it so the verdict commits.
+  // FakeStorage queues every load's deferred — earlier resolved ones
+  // sit ahead, so drain until the held cor-load shifts out.
+  r.storage.holdNextLoad();
+  const confirmed = r.session.confirmReview('rev1', 0);
+  await pump();
+  const reviewState = persisted({
+    recordings: base.recordings,
+    matchReviews: base.matchReviews,
+  });
+  let drained = 0;
+  while (r.storage.settleLoad(ok(reviewState))) {
+    drained += 1;
+  }
+  assert(drained > 0, 'corrections load pending');
+  // Defer the post-commit reload so a concurrent mutation lands
+  // between the verdict commit and the reload snapshot.
+  r.storage.holdNextLoad();
+  await pump();
+  // The snapshot the reload will return: post-verdict, pre-mutation.
+  const captured = await r.storage.load({
+    requestId: 'cap',
+    deadlineMs: Number.MAX_SAFE_INTEGER,
+    signal: new CancellationSource().signal,
+  });
+  assert(captured.ok, 'snapshot capture failed');
+  const created = await r.session.ensureRecording(
+    meta('itunes', 'i9', 'Roads', 'Portishead', 300_000),
+  );
+  assert(created.ok, 'ensureRecording failed');
+  assert(
+    r.storage.settleLoad(captured),
+    'review reload pending',
+  );
+  const res = await confirmed;
+  assert(res.ok, 'confirmReview failed');
+  await pump();
+  const recs = readyOf(r).recordings;
+  assert(
+    recs.some((rec) => rec.id === created.value),
+    'concurrent recording survives the review reload',
+  );
+  const reviewed = recs.find((rec) => rec.id === 'r1');
+  assert(
+    reviewed?.mappings.some(
+      (m) => m.status === 'user-confirmed' && m.ref.id === 'y9',
+    ) === true,
+    'the verdict mapping merges in',
+  );
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentLikes', concurrentLikes],
   ['libraryFlow', libraryFlow],
@@ -2898,6 +3204,12 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['entityPageFlow', entityPageFlow],
   ['ensureRecordingFlow', ensureRecordingFlow],
   ['playRecordingsFlow', playRecordingsFlow],
+  ['occurrencePinPlayed', occurrencePinPlayed],
+  ['occurrencePinProjection', occurrencePinProjection],
+  ['foreignPinFallsBack', foreignPinFallsBack],
+  ['foreignPinResolves', foreignPinResolves],
+  ['successorPinSkipsMapping', successorPinSkipsMapping],
+  ['reviewReloadPreservesMemory', reviewReloadPreservesMemory],
 ] as const;
 
 export async function run(): Promise<void> {

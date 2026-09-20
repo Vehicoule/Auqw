@@ -707,7 +707,7 @@ export class Session {
     r.queue.enqueue({
       occurrenceId,
       recordingId,
-      selectedRef: this.#pickRef(recording),
+      selectedRef: this.#pickRef(recording, null),
     });
     this.#publish();
     const persisted = await this.#persist({ queue: r.queue.snapshot() });
@@ -1322,8 +1322,11 @@ export class Session {
    * Serialized review mutation: the module commits recordings +
    * matchReviews atomically, then the session reads the affected
    * recording back so `#pickRef` (via `effectiveMapping`) and the
-   * projected queue follow the verdict. A read-back failure flags
-   * persistenceError like `#persist` does — the verdict still landed.
+   * projected queue follow the verdict. The read-back merges into
+   * in-memory recordings rather than replacing them — a concurrent
+   * mutation on another tail can be newer than the reload. A
+   * read-back failure flags persistenceError like `#persist` does —
+   * the verdict still landed.
    */
   #reviewOp(
     op: (signal?: CancellationSignal) => Promise<Result<MatchReview>>,
@@ -1347,7 +1350,32 @@ export class Session {
         ),
       );
       if (reloaded.ok && isPersistedState(reloaded.value)) {
-        r.recordings = [...reloaded.value.recordings];
+        // Merge, never replace: a concurrent recording mutation on
+        // another tail may sit between its in-memory mirror and its
+        // persist, so the reload can be older than memory for any
+        // recording but the reviewed one. The reviewed recording
+        // takes the committed version — the reload post-dates the
+        // op's own commit, so it carries the verdict. Every other
+        // in-memory entry wins; committed rows memory doesn't know
+        // (committed by a racing op just before this load) join at
+        // the tail.
+        const committed = reloaded.value.recordings;
+        const byId = new Map(committed.map((rec) => [rec.id, rec]));
+        const affectedId = result.value.recordingId;
+        const seen = new Set<string>();
+        const merged: Recording[] = [];
+        for (const rec of r.recordings) {
+          seen.add(rec.id);
+          merged.push(
+            rec.id === affectedId ? (byId.get(rec.id) ?? rec) : rec,
+          );
+        }
+        for (const rec of committed) {
+          if (!seen.has(rec.id)) {
+            merged.push(rec);
+          }
+        }
+        r.recordings = merged;
       } else {
         r.persistenceError = reloaded.ok
           ? appError('invalid-response', 'reload after review failed validation')
@@ -2170,11 +2198,24 @@ export class Session {
 
   // ---- play pipeline ------------------------------------------------
 
-  // Corrections precedence: a user verdict outranks every automatic
-  // claim, including an occurrence's previously projected pick — so
-  // the queue follows the correction on the next projection.
-  #pickRef(recording: Recording): SourceRef | null {
+  // Selection order: an occurrence pin for the active playback
+  // provider wins verbatim (a pin for another provider falls
+  // through); then the effective mapping — a user verdict outranks
+  // every automatic claim — then any unvetoed source ref for the
+  // provider. Corrections therefore move the queue on the next
+  // projection for unpinned occurrences, and a stale automatic
+  // resolution can never overwrite a valid pin.
+  #pickRef(
+    recording: Recording,
+    occurrenceSelected: SourceRef | null,
+  ): SourceRef | null {
     const provider = this.#ready?.settings.playbackProvider ?? '';
+    if (
+      occurrenceSelected !== null &&
+      occurrenceSelected.provider === provider
+    ) {
+      return occurrenceSelected;
+    }
     const verdict = effectiveMapping(recording, provider);
     if (verdict !== null) {
       return verdict.ref;
@@ -2237,7 +2278,7 @@ export class Session {
       await this.#teardownAttempt(prev);
     }
 
-    let ref = this.#pickRef(recording);
+    let ref = this.#pickRef(recording, occurrence.selectedRef);
     if (ref === null) {
       const resolved = await this.#resolveViaCandidates(
         attempt,
@@ -2829,7 +2870,7 @@ export class Session {
         const selected =
           recording === undefined
             ? null
-            : this.#pickRef(recording);
+            : this.#pickRef(recording, occurrence.selectedRef);
         const artwork = recording?.artwork.find(
           (a) => typeof a.url === 'string' && a.url.startsWith('https://'),
         );
@@ -3099,9 +3140,10 @@ export class Session {
     if (recording === undefined) {
       return;
     }
-    // A resolved ref — selected, user-confirmed, or unvetoed source
-    // ref — is already projected; no mapping task is needed.
-    if (this.#pickRef(recording) !== null) {
+    // A resolved ref — occurrence pin, user-confirmed mapping, or
+    // unvetoed source ref — is already projected; no mapping task is
+    // needed.
+    if (this.#pickRef(recording, successor.selectedRef) !== null) {
       return;
     }
     const routed = this.#router.providerFor(
@@ -3204,7 +3246,7 @@ export class Session {
         immediate === undefined ||
         immediate.occurrenceId !== occurrenceId ||
         ready2.settings.playbackProvider !== provider.id ||
-        !sameRef(this.#pickRef(updated), ref)
+        !sameRef(this.#pickRef(updated, immediate.selectedRef), ref)
       ) {
         return;
       }

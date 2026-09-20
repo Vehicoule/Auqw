@@ -20,7 +20,7 @@ import {
   FakeStorage,
   SequenceIds,
 } from '../testing/fakes.ts';
-import { assert, assertEqual } from '../testing/assert.ts';
+import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 import {
   artworkCacheBudgetBytes,
   createArtworkCache,
@@ -162,15 +162,36 @@ class FakeArtworkFetch implements ArtworkFetchPort {
 class FakeArtworkPaths implements ArtworkPathsPort {
   readonly dir = '/art';
   readonly removed: string[] = [];
+  /** Paths the OS is simulated to have reclaimed. */
+  readonly missing = new Set<string>();
   #failRemove: AppError | null = null;
+  #failExists: AppError | null = null;
 
   /** The next remove fails once with the given typed error. */
   failNextRemove(error: AppError): void {
     this.#failRemove = error;
   }
 
+  /** The next exists check fails once with the given typed error. */
+  failNextExists(error: AppError): void {
+    this.#failExists = error;
+  }
+
   destFor(url: string): string {
     return `${this.dir}/${encodeURIComponent(url)}`;
+  }
+
+  exists(
+    filePath: string,
+    signal: CancellationSignal,
+  ): Promise<Result<boolean>> {
+    void signal;
+    if (this.#failExists !== null) {
+      const error = this.#failExists;
+      this.#failExists = null;
+      return Promise.resolve(err(error));
+    }
+    return Promise.resolve(ok(!this.missing.has(filePath)));
   }
 
   remove(
@@ -501,6 +522,69 @@ async function budgetResolution(): Promise<void> {
   assertEqual(r.paths.removed.length, 0, 'nothing near 200 MB budget');
 }
 
+async function osReapedFileScoresMiss(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  // The OS reclaimed the file but the row survived.
+  r.paths.missing.add(destOf(A));
+  r.fetch.respondBytes(8 * MB);
+  const res = await r.cache.get(A, ctx());
+  assert(res.ok, 'reaped get failed');
+  assertEqual(res.value.hit, false, 'a reaped entry scores a miss');
+  assertEqual(res.value.filePath, destOf(A));
+  assertEqual(r.fetch.calls.length, 1, 'the entry re-downloads');
+  // The stale row was replaced, not duplicated.
+  assertDeepEqual(await storedUrls(r.storage), [A]);
+}
+
+async function getExistsErrorIsHonest(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  r.paths.failNextExists(appError('transient', 'fs busy'));
+  const res = await r.cache.get(A, ctx());
+  assert(!res.ok && res.error.kind === 'transient');
+  // Presence was never disproven: the row survives and no
+  // download ran.
+  assertDeepEqual(await storedUrls(r.storage), [A]);
+  assertEqual(r.fetch.calls.length, 0);
+}
+
+async function sweepReapsMissing(): Promise<void> {
+  const r = rig(
+    persisted({
+      artworkCache: [
+        seed(A, 8 * MB, 10),
+        seed(B, 8 * MB, 20),
+        seed(C, 8 * MB, 30),
+      ],
+    }),
+  );
+  r.paths.missing.add(destOf(B));
+  const swept = await r.cache.sweep(ctx());
+  assert(swept.ok, 'sweep failed');
+  assertEqual(swept.value.reaped, 1);
+  assertEqual(swept.value.reapedBytes, 8 * MB);
+  assertEqual(swept.value.evicted, 0, 'reap alone fits the budget');
+  assertDeepEqual(await storedUrls(r.storage), [A, C]);
+  // A reaped row's file is already gone — nothing to remove.
+  assertEqual(r.paths.removed.length, 0);
+}
+
+async function sweepExistsErrorKeepsRow(): Promise<void> {
+  const r = rig(
+    persisted({
+      artworkCache: [seed(A, 8 * MB, 10), seed(B, 8 * MB, 20)],
+    }),
+  );
+  r.paths.failNextExists(appError('transient', 'fs busy'));
+  const res = await r.cache.sweep(ctx());
+  assert(!res.ok && res.error.kind === 'transient');
+  // A stat failure never deletes the row.
+  assertDeepEqual(await storedUrls(r.storage), [A, B]);
+  assert(
+    r.log.entries.some((e) => e.level === 'warn'),
+    'stat failure must log a warning',
+  );
+}
+
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
@@ -514,4 +598,8 @@ export async function run(): Promise<void> {
   await sweepShrinkAndNoop();
   await sweepRemoveFailure();
   await budgetResolution();
+  await osReapedFileScoresMiss();
+  await getExistsErrorIsHonest();
+  await sweepReapsMissing();
+  await sweepExistsErrorKeepsRow();
 }
