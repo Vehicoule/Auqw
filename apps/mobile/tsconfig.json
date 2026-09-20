@@ -1,3 +1,12 @@
 {
-  "extends": ["expo/tsconfig.base", "../../tsconfig.base.json"]
+  "extends": [
+    "expo/tsconfig.base",
+    "../../tsconfig.base.json"
+  ],
+  "compilerOptions": {
+    // The repo's packages ship .ts source through their exports maps and
+    // `node --experimental-strip-types` needs explicit extensions, so
+    // relative imports here carry the .ts suffix like everywhere else.
+    "allowImportingTsExtensions": true
+  }
 }

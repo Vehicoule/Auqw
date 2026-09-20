@@ -6,7 +6,8 @@
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/shell.test.ts"
   },
   "expo": {
     "autolinking": {
@@ -16,6 +17,8 @@
     }
   },
   "dependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/storage-sqlite": "workspace:*",
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
     "auqw-plugin-host-expo": "workspace:*",
     "expo": "~57.0.24",
@@ -24,6 +27,7 @@
     "expo-blur": "~57.0.3",
     "expo-file-system": "~57.0.7",
     "expo-font": "~57.0.4",
+    "expo-sqlite": "~57.0.3",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.3",

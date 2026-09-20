@@ -33,6 +33,7 @@ const config: ExpoConfig = {
         recordAudioAndroid: false,
       },
     ],
+    'expo-sqlite',
   ],
 };
 
