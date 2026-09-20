@@ -64,6 +64,7 @@ function recording(partial: {
   artSeed?: string | null;
   explicit?: boolean | null;
   genre?: string | null;
+  versionLabels?: Recording['versionLabels'];
   provider?: string;
   providerId?: string;
 }): Recording {
@@ -88,7 +89,7 @@ function recording(partial: {
     explicit: partial.explicit ?? null,
     genre: partial.genre ?? null,
     isrc: null,
-    versionLabels: [],
+    versionLabels: partial.versionLabels ?? [],
     sourceRefs: [
       {
         provider,
@@ -109,6 +110,7 @@ export const fixtureRecordings: readonly Recording[] = [
     durationMs: 180_000,
     releaseYear: 2024,
     artSeed: 'self-aware',
+    versionLabels: ['remaster'],
   }),
   recording({
     id: 'rec-petit',
@@ -485,9 +487,8 @@ export const fixtureHomeModel: HomeModel = {
 // destinations the app actually shows, not a stale model.
 export const fixtureNavItems: readonly NavItemModel[] = [
   { key: 'home', label: 'home' },
-  { key: 'search', label: 'search' },
+  { key: 'explore', label: 'explore' },
   { key: 'library', label: 'library' },
-  { key: 'queue', label: 'queue' },
   { key: 'settings', label: 'settings' },
 ];
 

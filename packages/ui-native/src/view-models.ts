@@ -16,6 +16,7 @@ export type TrackRowState = 'available' | 'unavailable' | 'error';
 export type TrackRowModel = {
   readonly key: string;
   readonly title: string;
+  readonly versionLabel: string | null;
   readonly artist: string | null;
   readonly durationMs: number | null;
   readonly artworkUrl: string | null;
@@ -50,6 +51,7 @@ export type QueueItemModel = {
   readonly occurrenceId: string;
   readonly recordingId: string;
   readonly current: boolean;
+  readonly duplicate: boolean;
   readonly row: TrackRowModel;
 };
 
@@ -201,6 +203,10 @@ export function toTrackRowModel(
   return {
     key: options.key ?? recording.id,
     title: recording.title,
+    versionLabel:
+      recording.versionLabels.length === 0
+        ? null
+        : recording.versionLabels.join(' · '),
     artist: recording.artist,
     durationMs: recording.durationMs,
     artworkUrl: pickArtworkUrl(recording.artwork),
@@ -218,6 +224,7 @@ export function toSearchRowModel(
   return {
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}:${index}`,
     title: metadata.title,
+    versionLabel: null,
     artist: metadata.artist,
     durationMs: metadata.durationMs,
     artworkUrl: pickArtworkUrl(metadata.artwork),
@@ -322,6 +329,11 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const byId = indexById(recordings);
   const liked = likedIds(input.likes ?? []);
   const unavailable = input.unavailableRecordingIds ?? new Set<string>();
+  const occurrencesByRecording = new Map<string, number>();
+  for (const occurrence of queue.occurrences) {
+    const count = occurrencesByRecording.get(occurrence.recordingId) ?? 0;
+    occurrencesByRecording.set(occurrence.recordingId, count + 1);
+  }
   const items: QueueItemModel[] = queue.occurrences.map((occurrence) => {
     const recording = byId.get(occurrence.recordingId);
     const current = occurrence.occurrenceId === queue.currentOccurrenceId;
@@ -330,6 +342,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
         ? {
           key: occurrence.occurrenceId,
           title: 'unknown track',
+          versionLabel: null,
           artist: null,
           durationMs: null,
           artworkUrl: null,
@@ -341,6 +354,10 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
         : {
           key: occurrence.occurrenceId,
           title: recording.title,
+          versionLabel:
+            recording.versionLabels.length === 0
+              ? null
+              : recording.versionLabels.join(' · '),
           artist: recording.artist,
           durationMs: recording.durationMs,
           artworkUrl: pickArtworkUrl(recording.artwork),
@@ -353,6 +370,8 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       occurrenceId: occurrence.occurrenceId,
       recordingId: occurrence.recordingId,
       current,
+      duplicate:
+        (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
       row,
     };
   });

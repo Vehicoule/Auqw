@@ -294,6 +294,7 @@ function GalleryBody({
             row={fixtureRowStates[1] ?? {
               key: 'fallback',
               title: 'Fallback',
+              versionLabel: null,
               artist: null,
               durationMs: null,
               artworkUrl: null,

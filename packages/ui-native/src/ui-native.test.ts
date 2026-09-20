@@ -196,6 +196,7 @@ function testTrackRowMapper(): void {
   const row = toTrackRowModel(rec);
   assertEqual(row.key, rec.id);
   assertEqual(row.title, rec.title);
+  assertEqual(row.versionLabel, rec.versionLabels.join(' · '));
   assertEqual(row.state, 'available');
   assertEqual(row.liked, false);
   const unavailable = toTrackRowModel(rec, {
@@ -282,6 +283,10 @@ function testQueueMapper(): void {
     (i) => i.recordingId === 'rec-self-aware',
   );
   assertEqual(dup.length, 2, 'duplicate occurrence not preserved');
+  assert(
+    dup.every((i) => i.duplicate),
+    'repeat occurrences must be explicit in the row model',
+  );
   const sparse = toQueueModel({
     queue: {
       revision: 0,
@@ -337,11 +342,15 @@ function testHomeAndNav(): void {
   assert(first !== undefined);
   const card = toRailCard(first);
   assertEqual(card.title, first.title);
-  assertEqual(fixtureNavItems.length, 5, 'nav must have 5 destinations');
+  assertEqual(fixtureNavItems.length, 4, 'nav must have 4 destinations');
   assertEqual(
     fixtureNavItems.map((i) => i.key).join(','),
-    'home,search,library,queue,settings',
-    'nav fixture must mirror the app destinations',
+    'home,explore,library,settings',
+    'nav fixture must match the mobile shell contract',
+  );
+  assert(
+    !fixtureNavItems.some((i) => i.key === 'queue'),
+    'queue belongs to the Stage sheet, not the World navbar',
   );
 }
 

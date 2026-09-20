@@ -31,7 +31,6 @@ import {
   LibraryScreen,
   LoadingState,
   MiniPlayer,
-  QueueScreen,
   SearchScreen,
   SettingsScreen,
   StageSheet,
@@ -69,9 +68,8 @@ const DIAGNOSTICS_LIMIT = 20;
 
 const NAV_ITEMS: readonly NavItemModel[] = [
   { key: 'home', label: 'home' },
-  { key: 'search', label: 'search' },
+  { key: 'explore', label: 'explore' },
   { key: 'library', label: 'library' },
-  { key: 'queue', label: 'queue' },
   { key: 'settings', label: 'settings' },
 ];
 
@@ -558,11 +556,18 @@ function Main({
       const [verb, qs] = body.split('?');
       const params = new URLSearchParams(qs ?? '');
       switch (verb) {
-        case 'open':
-          setTab(params.get('tab') ?? 'home');
+        case 'open': {
+          const target = params.get('tab') ?? 'home';
+          if (target === 'queue') {
+            setStageMode('queue');
+            setExpanded(true);
+          } else {
+            setTab(target === 'search' ? 'explore' : target);
+          }
           break;
+        }
         case 'search':
-          setTab('search');
+          setTab('explore');
           setQuery(params.get('q') ?? '');
           void se?.search({
             query: params.get('q') ?? '',
@@ -628,7 +633,7 @@ function Main({
   const topInset = insets.top;
   const screen = (() => {
     switch (tab) {
-      case 'search':
+      case 'explore':
         return (
           <SearchScreen
             state={searchModel}
@@ -665,19 +670,6 @@ function Main({
             onToggleLike={(row) => void session.toggleLike(row.key)}
           />
         );
-      case 'queue':
-        return (
-          <QueueScreen
-            queue={queueModel}
-            player={player}
-            reordering={reordering}
-            topInset={topInset}
-            onToggleReorder={() => setReordering((v) => !v)}
-            onPressItem={(id) => void session.playOccurrence(id)}
-            onRemoveItem={(id) => void session.removeOccurrence(id)}
-            onMoveItem={onMoveQueueItem}
-          />
-        );
       case 'settings':
         return (
           <SettingsScreen
@@ -712,7 +704,12 @@ function Main({
           onToggleLike={onToggleLike}
         />
       ) : null}
-      <AppNavbar items={NAV_ITEMS} activeKey={tab} onSelect={setTab} />
+      <AppNavbar
+        items={NAV_ITEMS}
+        activeKey={tab}
+        onSelect={setTab}
+        gestureHandle={Platform.OS === 'android'}
+      />
       {player !== null ? (
         <StageSheet
           player={player}
@@ -721,6 +718,7 @@ function Main({
           mode={stageMode}
           onModeChange={setStageMode}
           queue={queueModel}
+          queueReordering={reordering}
           topInset={topInset}
           onPlayPause={onPlayPause}
           onNext={() => void session.next()}
@@ -729,6 +727,8 @@ function Main({
           onSeek={(ms) => void session.seekTo(ms)}
           onPressQueueItem={(id) => void session.playOccurrence(id)}
           onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+          onToggleQueueReorder={() => setReordering((v) => !v)}
+          onMoveQueueItem={onMoveQueueItem}
         />
       ) : null}
     </View>

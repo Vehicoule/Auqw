@@ -175,15 +175,6 @@ export function MiniPlayer({
               />
             )}
           </Pressable>
-          {onNext !== undefined && (
-            <IconButton
-              icon="next"
-              size={32}
-              iconSize={14}
-              accessibilityLabel="next"
-              onPress={onNext}
-            />
-          )}
         </View>
         <View
           accessible={false}

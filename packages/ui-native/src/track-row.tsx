@@ -13,6 +13,7 @@ import type { TrackRowModel } from './view-models.ts';
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
+  readonly badge?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
@@ -25,6 +26,7 @@ export type TrackRowProps = {
 
 export function TrackRow({
   row,
+  badge = null,
   onPress,
   onLongPress,
   onToggleLike,
@@ -38,8 +40,8 @@ export function TrackRow({
   const unavailable = row.state !== 'available';
   const sub =
     row.note ??
-    [row.artist, formatClock(row.durationMs)]
-      .filter((part): part is string => part !== null && part !== '—')
+    [badge, row.artist, row.versionLabel]
+      .filter((part): part is string => part !== null && part !== '')
       .join(' · ');
   return (
     <View
@@ -156,7 +158,7 @@ export function TrackRow({
           >
             {row.title}
           </Text>
-          {sub !== '' && (
+        {sub !== '' && (
             <Text
               variant="metadata"
               color="secondary"
@@ -169,6 +171,14 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Text
+          variant="metadata"
+          color="secondary"
+          numeric
+          style={{ width: 34, textAlign: 'right' }}
+        >
+          {formatClock(row.durationMs)}
+        </Text>
         {row.state !== 'available' && (
           <View
             style={{

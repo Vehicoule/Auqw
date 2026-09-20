@@ -247,6 +247,7 @@ export type StageSheetProps = {
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
+  readonly queueReordering?: boolean | undefined;
   readonly topInset?: number | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
@@ -256,6 +257,10 @@ export type StageSheetProps = {
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
+  readonly onToggleQueueReorder?: (() => void) | undefined;
+  readonly onMoveQueueItem?:
+    | ((occurrenceId: string, direction: -1 | 1) => void)
+    | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -267,6 +272,7 @@ export function StageSheet({
   mode,
   queue,
   lyrics,
+  queueReordering = false,
   topInset = 0,
   onPlayPause,
   onNext,
@@ -276,6 +282,8 @@ export function StageSheet({
   onModeChange,
   onPressQueueItem,
   onRemoveQueueItem,
+  onToggleQueueReorder,
+  onMoveQueueItem,
   style,
 }: StageSheetProps) {
   const theme = useTheme();
@@ -506,11 +514,41 @@ export function StageSheet({
           {queue === undefined ? (
             <EmptyState title="queue is empty" icon="queue" />
           ) : (
-            <QueueList
-              queue={queue}
-              onPressItem={onPressQueueItem}
-              onRemoveItem={onRemoveQueueItem}
-            />
+            <>
+              {onToggleQueueReorder !== undefined && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    marginBottom: theme.spacing.xs,
+                  }}
+                >
+                  <IconButton
+                    icon="drag-handle"
+                    size={32}
+                    iconSize={14}
+                    color={
+                      queueReordering
+                        ? theme.colors.accent
+                        : theme.colors.textSecondary
+                    }
+                    accessibilityLabel={
+                      queueReordering ? 'done reordering' : 'reorder queue'
+                    }
+                    active={queueReordering}
+                    onPress={onToggleQueueReorder}
+                  />
+                </View>
+              )}
+              <QueueList
+                queue={queue}
+                reordering={queueReordering}
+                onPressItem={onPressQueueItem}
+                onRemoveItem={onRemoveQueueItem}
+                onMoveItem={onMoveQueueItem}
+              />
+            </>
           )}
         </View>
       )}
