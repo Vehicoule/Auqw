@@ -32,22 +32,41 @@ import { LibraryScreen } from './library-screen.tsx';
 import { CollectionScreen } from './collection-screen.tsx';
 import { PlaylistScreen } from './playlist-screen.tsx';
 import { EntityScreen } from './entity-screen.tsx';
-import { AddToPlaylistSheet, RowActionsSheet } from './sheets.tsx';
+import {
+  AddToPlaylistSheet,
+  ProviderPickerSheet,
+  RowActionsSheet,
+} from './sheets.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import { SettingsScreen } from './settings-screen.tsx';
+import { CorrectionsScreen } from './corrections-screen.tsx';
+import { TransferScreen } from './transfer-screen.tsx';
 import { HomeScreen } from './home-screen.tsx';
 import {
   fixtureCollectionModels,
+  fixtureCorrectionsModel,
+  fixtureCorrectionsModelEmpty,
+  fixtureCorrectionsModelError,
+  fixtureCorrectionsModelLoading,
+  fixtureCorrectionsModelPending,
   fixtureEntityModel,
   fixtureEntityModelError,
   fixtureEntityModelPartial,
   fixtureHomeModel,
   fixtureLibraryModel,
   fixtureLibraryModelEmpty,
+  fixtureLyricsError,
+  fixtureLyricsInstrumental,
+  fixtureLyricsPlain,
+  fixtureLyricsUnavailable,
   fixturePlaylistModel,
   fixturePlaylistModelEmpty,
   fixtureLyrics,
   fixtureNavItems,
+  fixtureRadioModels,
+  fixtureTransferModelDone,
+  fixtureTransferModelError,
+  fixtureTransferModelPreview,
   fixturePlayerBuffering,
   fixturePlayerFailed,
   fixturePlayerPaused,
@@ -189,6 +208,8 @@ const ICON_SET: readonly IconName[] = [
   'chevron-right',
   'chevron-up',
   'chevron-down',
+  'radio',
+  'check',
   'menu',
 ];
 
@@ -563,17 +584,19 @@ function GalleryBody({
                 onExpandChange={setExpanded}
                 queue={fixtureQueueModel}
                 lyrics={fixtureLyrics}
+                radio={fixtureRadioModels[1]}
                 onPlayPause={noop}
                 onNext={noop}
                 onPrevious={noop}
                 onToggleLike={noop}
                 onSeek={noop}
+                onStopRadio={noop}
               />
             </Frame>
           </View>
         ))}
         <Text variant="metadata" color="secondary">
-          failed playback · honest error
+          failed playback · honest error · failed radio tail
         </Text>
         <Frame height={620}>
           <StageSheet
@@ -581,8 +604,44 @@ function GalleryBody({
             platform="android"
             expanded
             onExpandChange={noop}
+            radio={fixtureRadioModels[4]}
+            onStopRadio={noop}
           />
         </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Text variant="metadata" color="secondary">
+          lyrics · plain / instrumental / unavailable / error — never
+          synced-treated
+        </Text>
+        {(
+          [
+            ['plain', fixtureLyricsPlain],
+            ['instrumental', fixtureLyricsInstrumental],
+            ['unavailable', fixtureLyricsUnavailable],
+            ['error', fixtureLyricsError],
+          ] as const
+        ).map(([label, lyrics]) => (
+          <View key={label} style={{ marginTop: theme.spacing.sm }}>
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ marginBottom: 4 }}
+            >
+              {label}
+            </Text>
+            <Frame height={420}>
+              <StageSheet
+                player={fixturePlayerPlaying}
+                platform="android"
+                expanded
+                mode="lyrics"
+                lyrics={lyrics}
+                onExpandChange={noop}
+                onRetryLyrics={noop}
+              />
+            </Frame>
+          </View>
+        ))}
       </Section>
 
       <Section title="queue" note="duplicates · unavailable · reorder">
@@ -794,6 +853,22 @@ function GalleryBody({
             />
           </View>
         </Frame>
+        <View style={{ height: theme.spacing.md }} />
+        <Frame height={360}>
+          <View style={{ flex: 1 }}>
+            <ProviderPickerSheet
+              title="lyrics provider"
+              options={[
+                { key: 'auto', label: 'auto', detail: 'route by capability' },
+                { key: 'lyrics-lrclib', label: 'lrclib', detail: 'lyrics.plain · lyrics.synced' },
+                { key: 'deezer', label: 'deezer', detail: 'lyrics.plain' },
+              ]}
+              selectedKey="lyrics-lrclib"
+              onPick={noop}
+              onDismiss={noop}
+            />
+          </View>
+        </Frame>
       </Section>
 
       <Section title="settings" note="rows + diagnostics">
@@ -802,6 +877,7 @@ function GalleryBody({
             model={fixtureSettingsModel}
             onSelectRow={noop}
             onToggleRow={noop}
+            onOpenCorrections={noop}
             scrollEnabled={false}
           />
         </Frame>
@@ -811,9 +887,78 @@ function GalleryBody({
             model={fixtureSettingsModelDegraded}
             onSelectRow={noop}
             onToggleRow={noop}
+            onOpenCorrections={noop}
             scrollEnabled={false}
           />
         </Frame>
+      </Section>
+
+      <Section
+        title="corrections"
+        note="pending · resolved · empty · loading · error"
+      >
+        {(
+          [
+            ['all reviews', fixtureCorrectionsModel],
+            ['pending only', fixtureCorrectionsModelPending],
+            ['empty queue', fixtureCorrectionsModelEmpty],
+            ['loading', fixtureCorrectionsModelLoading],
+            ['error', fixtureCorrectionsModelError],
+          ] as const
+        ).map(([label, model]) => (
+          <View key={label} style={{ marginBottom: theme.spacing.md }}>
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ marginBottom: 4 }}
+            >
+              {label}
+            </Text>
+            <Frame height={480}>
+              <CorrectionsScreen
+                model={model}
+                onBack={noop}
+                onFilter={noop}
+                onConfirm={noop}
+                onReject={noop}
+                onUndo={noop}
+              />
+            </Frame>
+          </View>
+        ))}
+      </Section>
+
+      <Section
+        title="transfer"
+        note="preview → confirm → apply · typed errors"
+      >
+        {(
+          [
+            ['preview', fixtureTransferModelPreview],
+            ['applied', fixtureTransferModelDone],
+            ['error', fixtureTransferModelError],
+          ] as const
+        ).map(([label, model]) => (
+          <View key={label} style={{ marginBottom: theme.spacing.md }}>
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ marginBottom: 4 }}
+            >
+              {label}
+            </Text>
+            <Frame height={520}>
+              <TransferScreen
+                model={model}
+                onBack={noop}
+                onExport={noop}
+                onPickImportFile={noop}
+                onApplyImport={noop}
+                onResetImport={noop}
+              />
+            </Frame>
+          </View>
+        ))}
       </Section>
 
       <Section title="home" note="recents + suggestions">

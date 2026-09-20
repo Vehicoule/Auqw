@@ -6,6 +6,7 @@ import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
   JetBrainsMono_400Regular,
@@ -13,22 +14,31 @@ import {
   JetBrainsMono_700Bold,
 } from '@expo-google-fonts/jetbrains-mono';
 import * as AuqwExpo from 'auqw-expo';
-import { CancellationSource, SearchSession } from '@auqw/application';
+import {
+  CancellationSource,
+  SearchSession,
+  previewImport,
+} from '@auqw/application';
 import type {
   AppError,
   AttemptTrace,
   EntityPage,
   EntityRef,
+  LyricsSheet,
+  MatchReview,
   OperationContext,
+  ProviderCapability,
   ReadySession,
   SearchState,
   SessionState,
+  SourceRef,
   TrackMetadata,
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
   AppNavbar,
   CollectionScreen,
+  CorrectionsScreen,
   EmptyState,
   EntityScreen,
   ErrorState,
@@ -38,31 +48,40 @@ import {
   LoadingState,
   MiniPlayer,
   PlaylistScreen,
+  ProviderPickerSheet,
   RowActionsSheet,
   SearchScreen,
   SettingsScreen,
   StageSheet,
   ThemeProvider,
+  TransferScreen,
   entityIdForRef,
   formatClock,
   toCollectionModel,
+  toCorrectionsModel,
   toEntityModel,
+  toImportPreviewModel,
   toLibraryModel,
   toHomeModel,
+  toLyricsModel,
   toPlayerModel,
   toPlaylistModel,
   toQueueModel,
+  toRadioModel,
   toSearchRowModel,
   toSettingsModel,
   useTheme,
 } from '@auqw/ui-native';
 import type {
   CollectionRowModel,
+  CorrectionsFilter,
   DiagnosticsModel,
+  LyricsModel,
   NavItemModel,
   SearchStateModel,
   StageMode,
   TrackRowModel,
+  TransferModel,
 } from '@auqw/ui-native';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
@@ -324,7 +343,9 @@ function attemptLabel(trace: AttemptTrace): string {
 type Overlay =
   | { readonly type: 'collection'; readonly key: 'liked' | 'top50' | 'history' }
   | { readonly type: 'playlist'; readonly playlistId: string }
-  | { readonly type: 'entity'; readonly ref: EntityRef };
+  | { readonly type: 'entity'; readonly ref: EntityRef }
+  | { readonly type: 'corrections' }
+  | { readonly type: 'transfer' };
 
 type EntityFetch = {
   readonly ref: EntityRef;
@@ -334,9 +355,62 @@ type EntityFetch = {
   readonly loadingMore: boolean;
 };
 
+type LyricsFetch = {
+  readonly recordingId: string;
+  readonly sheet: LyricsSheet | null;
+  readonly error: AppError | null;
+  readonly loading: boolean;
+};
+
+type ReviewFetch = {
+  readonly reviews: readonly MatchReview[] | null;
+  readonly error: AppError | null;
+};
+
 type ActionTarget =
   | { readonly kind: 'recording'; readonly recordingId: string }
   | { readonly kind: 'metadata'; readonly meta: TrackMetadata };
+
+// The settings provider slots and the capabilities each one routes
+// by — a picker only ever lists providers that declared the slot's
+// capability (manifest-derived, via ProviderPort.capabilities).
+type ProviderSlot =
+  | 'catalogProvider'
+  | 'playbackProvider'
+  | 'lyricsProvider'
+  | 'radioProvider';
+
+const SLOT_CAPABILITIES: Record<
+  ProviderSlot,
+  readonly ProviderCapability[]
+> = {
+  catalogProvider: ['catalog.search'],
+  playbackProvider: ['playback.resolve'],
+  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
+  radioProvider: ['radio.seed'],
+};
+
+const SLOT_LABELS: Record<ProviderSlot, string> = {
+  catalogProvider: 'catalog provider',
+  playbackProvider: 'playback provider',
+  lyricsProvider: 'lyrics provider',
+  radioProvider: 'radio provider',
+};
+
+// Lyrics and radio are nullable overrides — 'auto' returns routing
+// to capability declaration; the required slots never offer it.
+const OPTIONAL_SLOTS: ReadonlySet<ProviderSlot> = new Set([
+  'lyricsProvider',
+  'radioProvider',
+]);
+
+const IDLE_TRANSFER: TransferModel = {
+  exportPhase: 'idle',
+  exportDetail: null,
+  importPhase: 'idle',
+  importDetail: null,
+  preview: null,
+};
 
 function Main({
   controller,
@@ -363,6 +437,24 @@ function Main({
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
+  // Lyrics are a live read off the Stage's lyrics mode, not session
+  // state — the fetch is keyed to the playing recording and canceled
+  // when superseded.
+  const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(null);
+  const lyricsSource = useRef<CancellationSource | null>(null);
+  // Corrections are live reads too (session.listMatchReviews); the
+  // queue reloads after every op so a verdict renders immediately.
+  const [reviewFetch, setReviewFetch] = useState<ReviewFetch>({
+    reviews: null,
+    error: null,
+  });
+  const [reviewFilter, setReviewFilter] =
+    useState<CorrectionsFilter>('pending');
+  // Export/import state lives in the transfer overlay; the picked
+  // file's text is stashed between preview and confirm.
+  const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
+  const importText = useRef<string | null>(null);
+  const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
   const catalogProvider =
     controller.providers.find(
@@ -402,8 +494,11 @@ function Main({
     }
   }, [searchState]);
 
+  const [pendingReviews, setPendingReviews] = useState<number | null>(null);
+
   // Diagnostics: attempt traces are persisted by the session; load a
-  // page whenever the settings tab becomes active.
+  // page whenever the settings tab becomes active. The pending-review
+  // count is a live read on the same visit.
   useEffect(() => {
     if (tab !== 'settings') {
       return;
@@ -421,8 +516,13 @@ function Main({
         }
       },
     );
+    void session.listMatchReviews().then((result) => {
+      if (!source.signal.cancelled) {
+        setPendingReviews(result.ok ? result.value.length : null);
+      }
+    });
     return () => source.cancel();
-  }, [tab, controller]);
+  }, [tab, controller, session]);
 
   const player = useMemo(
     () =>
@@ -573,8 +673,9 @@ function Main({
             ? 'failed'
             : 'degraded',
       persistenceDetail: state.persistenceError?.message ?? null,
+      pendingReviews,
     }),
-    [state, controller, attempts],
+    [state, controller, attempts, pendingReviews],
   );
   const settingsModel = useMemo(
     () => toSettingsModel(state.settings, diagnostics),
@@ -607,9 +708,24 @@ function Main({
         const i = THEME_ORDER.indexOf(state.settings.theme);
         const theme = THEME_ORDER[(i + 1) % THEME_ORDER.length] ?? 'system';
         void session.updateSettings({ ...state.settings, theme });
+        return;
       }
-      // catalog/playback provider, storefront, and quality rows are
-      // display-only until a second provider exists.
+      if (
+        key === 'catalogProvider' ||
+        key === 'playbackProvider' ||
+        key === 'lyricsProvider' ||
+        key === 'radioProvider'
+      ) {
+        setProviderSlot(key);
+        return;
+      }
+      if (key === 'exportLibrary' || key === 'importLibrary') {
+        importText.current = null;
+        setTransfer(IDLE_TRANSFER);
+        setOverlay({ type: 'transfer' });
+        return;
+      }
+      // storefront and quality rows are display-only.
     },
     [session, state.settings],
   );
@@ -648,6 +764,353 @@ function Main({
       }
     },
     [session, state.queue],
+  );
+
+  // ---- lyrics (Stage lyrics mode — live read, cancel superseded) --
+
+  const fetchLyrics = useCallback(
+    (recordingId: string) => {
+      lyricsSource.current?.cancel();
+      const source = new CancellationSource();
+      lyricsSource.current = source;
+      setLyricsFetch({
+        recordingId,
+        sheet: null,
+        error: null,
+        loading: true,
+      });
+      const context: OperationContext = {
+        requestId: createIds().next('lyrics'),
+        deadlineMs: Date.now() + 15_000,
+        signal: source.signal,
+      };
+      void session.getLyrics(recordingId, context).then((result) => {
+        setLyricsFetch((prev) =>
+          prev === null ||
+            prev.recordingId !== recordingId ||
+            source.signal.cancelled
+            ? prev
+            : result.ok
+              ? {
+                recordingId,
+                sheet: result.value,
+                error: null,
+                loading: false,
+              }
+              : {
+                recordingId,
+                sheet: null,
+                error: result.error,
+                loading: false,
+              },
+        );
+      });
+    },
+    [session],
+  );
+
+  // Lyrics load lazily — only while the Stage's lyrics mode is
+  // actually showing — and refetch whenever the track under it
+  // changes. Leaving lyrics mode keeps the last sheet cached.
+  useEffect(() => {
+    if (!expanded || stageMode !== 'lyrics' || currentRecordingId === null) {
+      return;
+    }
+    if (lyricsFetch?.recordingId === currentRecordingId) {
+      return;
+    }
+    fetchLyrics(currentRecordingId);
+  }, [
+    expanded,
+    stageMode,
+    currentRecordingId,
+    lyricsFetch,
+    fetchLyrics,
+  ]);
+
+  const lyricsModel: LyricsModel | undefined = useMemo(() => {
+    if (currentRecordingId === null) {
+      return undefined;
+    }
+    const fetch =
+      lyricsFetch !== null && lyricsFetch.recordingId === currentRecordingId
+        ? lyricsFetch
+        : null;
+    return toLyricsModel({
+      sheet: fetch?.sheet ?? null,
+      error: fetch?.error ?? null,
+      loading: fetch === null ? true : fetch.loading,
+      positionMs: player?.positionMs ?? 0,
+    });
+  }, [lyricsFetch, currentRecordingId, player]);
+
+  const onRetryLyrics = useCallback(() => {
+    if (currentRecordingId !== null) {
+      fetchLyrics(currentRecordingId);
+    }
+  }, [fetchLyrics, currentRecordingId]);
+
+  // ---- radio (session.radio tail — start from the playing ref) ---
+
+  const radioModel = useMemo(() => toRadioModel(state.radio), [state.radio]);
+  const radioCapable = useMemo(
+    () =>
+      controller.providers.some((p) =>
+        p.capabilities.includes('radio.seed'),
+      ),
+    [controller],
+  );
+
+  const onStartRadio = useCallback(() => {
+    const current = state.queue.occurrences.find(
+      (o) => o.occurrenceId === state.queue.currentOccurrenceId,
+    );
+    const recording =
+      currentRecordingId === null
+        ? undefined
+        : state.recordings.find((r) => r.id === currentRecordingId);
+    const ref: SourceRef | null =
+      current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
+    if (ref !== null) {
+      void session.startRadio(ref);
+    }
+  }, [session, state, currentRecordingId]);
+
+  const onStopRadio = useCallback(() => {
+    session.stopRadio();
+  }, [session]);
+
+  // ---- corrections (live read + serialized review ops) -----------
+
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
+  // The queue reloads whenever the corrections overlay opens — the
+  // rows are live reads, never stale session state.
+  useEffect(() => {
+    if (overlay?.type === 'corrections') {
+      loadReviews();
+    }
+  }, [overlay, loadReviews]);
+
+  const correctionsModel = useMemo(
+    () =>
+      toCorrectionsModel({
+        reviews: reviewFetch.reviews,
+        error: reviewFetch.error,
+        recordings: state.recordings,
+        filter: reviewFilter,
+      }),
+    [reviewFetch, state.recordings, reviewFilter],
+  );
+
+  // A failed op surfaces its typed error as the screen's error state;
+  // a landed verdict reloads the queue so the row resolves in place.
+  const reviewOp = useCallback(
+    (op: () => ReturnType<typeof session.confirmReview>) => {
+      void op().then((result) => {
+        if (result.ok) {
+          loadReviews();
+        } else {
+          setReviewFetch({ reviews: null, error: result.error });
+        }
+      });
+    },
+    [session, loadReviews],
+  );
+
+  // ---- library transfer (export file write · import preview) -----
+
+  const onExport = useCallback(() => {
+    setTransfer((prev) => ({
+      ...prev,
+      exportPhase: 'working',
+      exportDetail: null,
+    }));
+    void session.exportLibrary().then((result) => {
+      if (!result.ok) {
+        setTransfer((prev) => ({
+          ...prev,
+          exportPhase: 'error',
+          exportDetail: result.error.message,
+        }));
+        return;
+      }
+      try {
+        const name = `auqw-library-${new Date().toISOString().slice(0, 10)}.json`;
+        const file = new File(Paths.document, name);
+        if (file.exists) {
+          file.delete();
+        }
+        file.create();
+        file.write(result.value.json);
+        // expo-sharing is not a dependency: the document-directory URI
+        // is the honest destination and renders as the detail line.
+        setTransfer((prev) => ({
+          ...prev,
+          exportPhase: 'done',
+          exportDetail: file.uri,
+        }));
+      } catch (thrown) {
+        setTransfer((prev) => ({
+          ...prev,
+          exportPhase: 'error',
+          exportDetail:
+            thrown instanceof Error ? thrown.message : 'export write failed',
+        }));
+      }
+    });
+  }, [session]);
+
+  const onPickImportFile = useCallback(() => {
+    setTransfer((prev) => ({
+      ...prev,
+      importPhase: 'reading',
+      importDetail: null,
+      preview: null,
+    }));
+    void (async () => {
+      try {
+        const picked = await File.pickFileAsync({
+          mimeTypes: ['application/json', 'text/*'],
+        });
+        if (picked.canceled) {
+          setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+          return;
+        }
+        const file = picked.result;
+        const text = await file.text();
+        // Preview validates without mutating — a typed error here is
+        // the honest reject; nothing was applied.
+        const preview = previewImport(text);
+        if (!preview.ok) {
+          setTransfer((prev) => ({
+            ...prev,
+            importPhase: 'error',
+            importDetail: preview.error.message,
+            preview: null,
+          }));
+          return;
+        }
+        importText.current = text;
+        setTransfer((prev) => ({
+          ...prev,
+          importPhase: 'preview',
+          preview: toImportPreviewModel(
+            preview.value,
+            file.uri.split('/').pop() ?? file.uri,
+          ),
+        }));
+      } catch (thrown) {
+        setTransfer((prev) => ({
+          ...prev,
+          importPhase: 'error',
+          importDetail:
+            thrown instanceof Error
+              ? thrown.message
+              : 'could not read the picked file',
+          preview: null,
+        }));
+      }
+    })();
+  }, []);
+
+  const onApplyImport = useCallback(() => {
+    const text = importText.current;
+    if (text === null) {
+      return;
+    }
+    setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
+    // session.importLibrary revalidates and commits atomically; the
+    // returned preview doubles as the applied-summary counts.
+    void session.importLibrary(text).then((result) => {
+      if (!result.ok) {
+        setTransfer((prev) => ({
+          ...prev,
+          importPhase: 'error',
+          importDetail: result.error.message,
+        }));
+        return;
+      }
+      importText.current = null;
+      const counts = result.value.counts;
+      setTransfer((prev) => ({
+        ...prev,
+        importPhase: 'done',
+        importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
+      }));
+    });
+  }, [session]);
+
+  const onResetImport = useCallback(() => {
+    importText.current = null;
+    setTransfer((prev) => ({
+      ...prev,
+      importPhase: 'idle',
+      importDetail: null,
+      preview: null,
+    }));
+  }, []);
+
+  // ---- provider pickers (capability-gated manifest options) -------
+
+  const providerPicker = useMemo(() => {
+    if (providerSlot === null) {
+      return null;
+    }
+    const required = SLOT_CAPABILITIES[providerSlot];
+    const options = controller.providers
+      .filter((provider) =>
+        required.some((capability) =>
+          provider.capabilities.includes(capability),
+        ),
+      )
+      .map((provider) => ({
+        key: provider.id,
+        label: provider.id,
+        detail: provider.capabilities.join(' · '),
+      }));
+    const selected = state.settings[providerSlot];
+    return {
+      title: SLOT_LABELS[providerSlot],
+      options: OPTIONAL_SLOTS.has(providerSlot)
+        ? [
+          {
+            key: 'auto',
+            label: 'auto',
+            detail: 'route by declared capability',
+          },
+          ...options,
+        ]
+        : options,
+      selectedKey: selected ?? 'auto',
+    };
+  }, [providerSlot, controller, state.settings]);
+
+  const onPickProvider = useCallback(
+    (key: string) => {
+      const slot = providerSlot;
+      setProviderSlot(null);
+      if (slot === null) {
+        return;
+      }
+      const next = { ...state.settings };
+      if (slot === 'lyricsProvider' || slot === 'radioProvider') {
+        next[slot] = key === 'auto' ? null : key;
+      } else {
+        next[slot] = key;
+      }
+      void session.updateSettings(next);
+    },
+    [providerSlot, session, state.settings],
   );
 
   // ---- library world: overlay routes + entity fetch --------------
@@ -822,6 +1285,20 @@ function Main({
         case 'add':
           setPickerFor(target);
           break;
+        case 'radio': {
+          // Track-seeded at this release: a metadata row seeds its own
+          // ref; a library row seeds its first source ref. No ref
+          // means no seed — the row action simply doesn't fire.
+          const ref =
+            target.kind === 'metadata'
+              ? target.meta.sourceRef
+              : (state.recordings.find((r) => r.id === target.recordingId)
+                ?.sourceRefs[0] ?? null);
+          if (ref !== null) {
+            void session.startRadio(ref);
+          }
+          break;
+        }
         case 'album':
           if (target.kind === 'metadata' && target.meta.albumRef) {
             openEntity(target.meta.albumRef);
@@ -836,7 +1313,7 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity],
+    [actionsFor, session, openEntity, state.recordings],
   );
 
   const onOpenCard = useCallback(
@@ -865,7 +1342,8 @@ function Main({
   // session methods so emulator/simulator journeys are scriptable.
   // Verbs: open?tab=&playlist=&collection=, entity?provider=&kind=&id=,
   // search?q=, play-result?i=N, next, previous, pause, resume,
-  // like-current, seek?ms=. Never ships in release bundles.
+  // like-current, seek?ms=, lyrics, radio?provider=&id=, corrections,
+  // transfer. Never ships in release bundles.
   const journeyDeps = useRef({ session, search, state });
   journeyDeps.current = { session, search, state };
   useEffect(() => {
@@ -1009,6 +1487,37 @@ function Main({
           }
           break;
         }
+        case 'lyrics':
+          // auqw://lyrics — open the Stage straight into lyrics mode.
+          setStageMode('lyrics');
+          setExpanded(true);
+          break;
+        case 'radio': {
+          // auqw://radio?provider=<p>&id=<track id> — seed the lazy
+          // tail; the session owns validation and routing.
+          const provider = params.get('provider');
+          const id = params.get('id');
+          if (provider !== null && id !== null) {
+            void s.startRadio({ provider, kind: 'track', id });
+          }
+          break;
+        }
+        case 'corrections':
+          // auqw://corrections — the review queue rides the settings
+          // tab's overlay stack like a pushed settings detail.
+          setTab('settings');
+          setOverlay({ type: 'corrections' });
+          break;
+        case 'transfer':
+          // auqw://transfer — export/import surface, import state reset.
+          setTab('settings');
+          importText.current = null;
+          setTransfer(IDLE_TRANSFER);
+          setOverlay({ type: 'transfer' });
+          break;
+        case 'stop-radio':
+          void s.stopRadio();
+          break;
         default:
           break;
       }
@@ -1102,6 +1611,9 @@ function Main({
             topInset={topInset}
             onSelectRow={onSettingsSelect}
             onToggleRow={onSettingsToggle}
+            onOpenCorrections={() =>
+              setOverlay({ type: 'corrections' })
+            }
           />
         );
       default:
@@ -1220,6 +1732,36 @@ function Main({
           />
         );
       }
+      case 'corrections':
+        return (
+          <CorrectionsScreen
+            model={correctionsModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onFilter={setReviewFilter}
+            onConfirm={(reviewId, candidateIndex) =>
+              reviewOp(() => session.confirmReview(reviewId, candidateIndex))
+            }
+            onReject={(reviewId) =>
+              reviewOp(() => session.rejectReview(reviewId))
+            }
+            onUndo={(reviewId) =>
+              reviewOp(() => session.undoReview(reviewId))
+            }
+          />
+        );
+      case 'transfer':
+        return (
+          <TransferScreen
+            model={transfer}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onExport={onExport}
+            onPickImportFile={onPickImportFile}
+            onApplyImport={onApplyImport}
+            onResetImport={onResetImport}
+          />
+        );
       default:
         return null;
     }
@@ -1258,11 +1800,16 @@ function Main({
           queue={queueModel}
           queueReordering={reordering}
           topInset={topInset}
+          lyrics={lyricsModel}
+          radio={radioModel}
           onPlayPause={onPlayPause}
           onNext={() => void session.next()}
           onPrevious={() => void session.previous()}
           onToggleLike={onToggleLike}
           onSeek={(ms) => void session.seekTo(ms)}
+          onRetryLyrics={onRetryLyrics}
+          onStartRadio={radioCapable ? onStartRadio : undefined}
+          onStopRadio={onStopRadio}
           onPressQueueItem={(id) => void session.playOccurrence(id)}
           onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
           onToggleQueueReorder={() => setReordering((v) => !v)}
@@ -1289,6 +1836,17 @@ function Main({
               label: 'add to playlist',
               icon: 'list-plus' as const,
             },
+            // Only offer the seed affordance when a bundled provider
+            // declares radio.seed — an unsupported start is a dead end.
+            ...(radioCapable
+              ? [
+                {
+                  key: 'radio',
+                  label: 'start radio',
+                  icon: 'radio' as const,
+                },
+              ]
+              : []),
             ...(actionsFor.kind === 'metadata' &&
               actionsFor.meta.albumRef != null
               ? [
@@ -1320,6 +1878,15 @@ function Main({
           onPick={onPickPlaylist}
           onCreate={onCreateAndPick}
           onDismiss={() => setPickerFor(null)}
+        />
+      )}
+      {providerPicker !== null && (
+        <ProviderPickerSheet
+          title={providerPicker.title}
+          options={providerPicker.options}
+          selectedKey={providerPicker.selectedKey}
+          onPick={onPickProvider}
+          onDismiss={() => setProviderSlot(null)}
         />
       )}
     </View>

@@ -3,18 +3,23 @@ import {
   formatClock,
   formatRemaining,
   toCollectionModel,
+  toCorrectionsModel,
   toEntityModel,
   toHomeModel,
   pickArtworkUrl,
+  toImportPreviewModel,
   toLibraryModel,
+  toLyricsModel,
   toPlayerModel,
   toPlaylistModel,
   toQueueModel,
+  toRadioModel,
   toRailCard,
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
 } from './view-models.ts';
+import type { LyricsSheet } from '@auqw/application';
 import type {
   QueueModel,
   TrackRowModel,
@@ -30,10 +35,25 @@ import {
   fixtureEntityPagePartial,
   fixtureEntitySourceRefs,
   fixtureHomeModel,
+  fixtureImportPreview,
+  fixtureImportPreviewModel,
   fixtureLibraryModel,
   fixtureLibraryModelEmpty,
   fixtureLikes,
+  fixtureLyricsStates,
+  fixtureMatchReviews,
+  fixtureCorrectionsModel,
+  fixtureCorrectionsModelEmpty,
+  fixtureCorrectionsModelError,
+  fixtureCorrectionsModelLoading,
+  fixtureCorrectionsModelPending,
   fixtureNavItems,
+  fixtureRadioModels,
+  fixtureRadioTailFailed,
+  fixtureRadioTailGrowing,
+  fixtureTransferModelDone,
+  fixtureTransferModelError,
+  fixtureTransferModelPreview,
   fixturePlayCounts,
   fixturePlayHistory,
   fixturePlaybackBuffering,
@@ -792,6 +812,262 @@ function testSearchStates(): void {
   }
 }
 
+function sheetOf(kind: LyricsSheet['kind']): LyricsSheet {
+  const base = {
+    provider: 'lyrics-lrclib',
+    fetchedMs: 1_700_000_000_000,
+    cached: false,
+    matched: null,
+  };
+  switch (kind) {
+    case 'synced':
+      return {
+        ...base,
+        kind,
+        lines: [
+          { tMs: 0, text: 'first' },
+          { tMs: 10_000, text: 'second' },
+          { tMs: 20_000, text: 'third' },
+        ],
+      };
+    case 'plain':
+      return { ...base, kind, text: 'first\nsecond\nthird' };
+    case 'instrumental':
+      return { ...base, kind };
+    case 'unavailable':
+      return { ...base, kind };
+  }
+}
+
+function testLyricsModel(): void {
+  // Synced earns the active line; the index tracks positionMs.
+  const synced = toLyricsModel({
+    sheet: sheetOf('synced'),
+    error: null,
+    loading: false,
+    positionMs: 15_000,
+  });
+  assertEqual(synced.state, 'synced');
+  assertEqual(synced.activeIndex, 1, 'active line follows position');
+  assertEqual(synced.lines.length, 3);
+  assert(
+    synced.syncLabel !== null && synced.syncLabel.startsWith('synced'),
+    'synced label must name the form',
+  );
+  const before = toLyricsModel({
+    sheet: sheetOf('synced'),
+    error: null,
+    loading: false,
+    positionMs: 5_000,
+  });
+  assertEqual(before.activeIndex, 0);
+  const ahead = toLyricsModel({
+    sheet: sheetOf('synced'),
+    error: null,
+    loading: false,
+    positionMs: 0,
+  });
+  // tMs:0 line is active at position 0 — the first timed line is the
+  // earliest honest highlight, never a phantom earlier line.
+  assertEqual(ahead.activeIndex, 0);
+  // Plain is plain — untimed text never receives a highlight.
+  const plain = toLyricsModel({
+    sheet: sheetOf('plain'),
+    error: null,
+    loading: false,
+    positionMs: 99_000,
+  });
+  assertEqual(plain.state, 'plain');
+  assertEqual(plain.activeIndex, null, 'plain must never mark a line');
+  assertEqual(plain.lines.length, 3);
+  assert(
+    plain.syncLabel !== null && plain.syncLabel.startsWith('unsynced'),
+    'plain label must say unsynced',
+  );
+  // Instrumental / unavailable / error / loading are explicit states.
+  const instrumental = toLyricsModel({
+    sheet: sheetOf('instrumental'),
+    error: null,
+    loading: false,
+    positionMs: 0,
+  });
+  assertEqual(instrumental.state, 'instrumental');
+  assertEqual(instrumental.lines.length, 0);
+  assert(instrumental.message !== null, 'instrumental explains itself');
+  const unavailable = toLyricsModel({
+    sheet: sheetOf('unavailable'),
+    error: null,
+    loading: false,
+    positionMs: 0,
+  });
+  assertEqual(unavailable.state, 'unavailable');
+  const loading = toLyricsModel({
+    sheet: null,
+    error: null,
+    loading: true,
+    positionMs: 0,
+  });
+  assertEqual(loading.state, 'loading');
+  const errored = toLyricsModel({
+    sheet: null,
+    error: { kind: 'rate-limit', message: 'rate limited', retryable: true },
+    loading: false,
+    positionMs: 0,
+  });
+  assertEqual(errored.state, 'error');
+  assertEqual(errored.message, 'rate limited');
+  // No sheet and no error is the honest absence, not an error.
+  const absent = toLyricsModel({
+    sheet: null,
+    error: null,
+    loading: false,
+    positionMs: 0,
+  });
+  assertEqual(absent.state, 'unavailable');
+  // Fixtures: every state appears, only synced carries an index.
+  const states = new Set(fixtureLyricsStates.map((l) => l.state));
+  for (const s of ['synced', 'plain', 'instrumental', 'unavailable', 'error', 'loading']) {
+    assert(states.has(s as never), `missing lyrics fixture ${s}`);
+  }
+  for (const model of fixtureLyricsStates) {
+    if (model.state === 'synced') {
+      assert(model.activeIndex !== null, 'synced needs an active line');
+    } else {
+      assertEqual(
+        model.activeIndex,
+        null,
+        `${model.state} must never carry an active line`,
+      );
+    }
+  }
+}
+
+function testRadioModel(): void {
+  const unarmed = toRadioModel(null);
+  assertEqual(unarmed.armed, false);
+  assertEqual(unarmed.status, null);
+  const growing = toRadioModel(fixtureRadioTailGrowing);
+  assertEqual(growing.armed, true);
+  assertEqual(growing.status, 'growing');
+  assertEqual(growing.detail, 'deezer', 'detail names the tail provider');
+  const failed = toRadioModel(fixtureRadioTailFailed);
+  assertEqual(failed.status, 'failed');
+  assert(
+    failed.detail !== null && failed.detail.includes('timed out'),
+    'failed tail carries the typed error message',
+  );
+  const statuses = new Set(
+    fixtureRadioModels.filter((m) => m.armed).map((m) => m.status),
+  );
+  for (const s of ['growing', 'ended', 'failed']) {
+    assert(statuses.has(s as never), `missing radio fixture ${s}`);
+  }
+}
+
+function testCorrectionsModel(): void {
+  const model = fixtureCorrectionsModel;
+  assertEqual(model.state, 'ready');
+  assertEqual(model.filter, 'all');
+  assertEqual(model.rows.length, fixtureMatchReviews.length);
+  assertEqual(model.pendingCount, 1);
+  assertEqual(model.resolvedCount, 2);
+  // Pending sorts first — the actionable queue leads.
+  assertEqual(model.rows[0]?.status, 'pending');
+  // Candidates keep their wire index for confirmReview.
+  const pending = model.rows[0];
+  assert(pending !== undefined && pending.candidates.length === 2);
+  assertDeepEqual(
+    pending.candidates.map((c) => c.index),
+    [0, 1],
+  );
+  assert(
+    pending.candidates.every((c) => c.subtitle.includes('·')),
+    'candidate subtitle carries artist + provider',
+  );
+  // Confirmed rows name their resolution provider.
+  const confirmed = model.rows.find((r) => r.status === 'confirmed');
+  assert(
+    confirmed !== undefined && confirmed.statusLabel.includes('deezer'),
+    'confirmed label names the resolved provider',
+  );
+  const rejected = model.rows.find((r) => r.status === 'rejected');
+  assert(rejected !== undefined && rejected.statusLabel.includes('reject'));
+  // Filters: pending shows only pending; counts are unfiltered.
+  const pendingOnly = fixtureCorrectionsModelPending;
+  assertEqual(pendingOnly.rows.length, 1);
+  assertEqual(pendingOnly.pendingCount, 1);
+  assertEqual(pendingOnly.resolvedCount, 2);
+  const resolvedOnly = toCorrectionsModel({
+    reviews: fixtureMatchReviews,
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'resolved',
+  });
+  assertEqual(resolvedOnly.rows.length, 2);
+  assert(
+    resolvedOnly.rows.every((r) => r.status !== 'pending'),
+    'resolved filter must drop pending rows',
+  );
+  // Lifecycle states.
+  assertEqual(fixtureCorrectionsModelLoading.state, 'loading');
+  assertEqual(fixtureCorrectionsModelError.state, 'error');
+  assert(
+    fixtureCorrectionsModelError.message !== null,
+    'error state carries the typed message',
+  );
+  assertEqual(fixtureCorrectionsModelEmpty.rows.length, 0);
+  // Unknown recordings title honestly.
+  const orphaned = toCorrectionsModel({
+    reviews: [
+      {
+        reviewId: 'rev-ghost',
+        recordingId: 'rec-deleted',
+        candidates: [],
+        status: 'pending',
+        resolution: null,
+        createdMs: 1,
+        resolvedMs: null,
+      },
+    ],
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'all',
+  });
+  assertEqual(orphaned.rows[0]?.title, 'unknown recording');
+}
+
+function testTransferModel(): void {
+  const preview = fixtureImportPreviewModel;
+  assertEqual(preview.formatVersion, fixtureImportPreview.doc.formatVersion);
+  assert(preview.rows.length >= 8, 'preview covers every owned section');
+  const recordings = preview.rows.find((r) => r.key === 'recordings');
+  assertEqual(
+    recordings?.count,
+    fixtureImportPreview.counts.recordings,
+    'preview counts survive mapping',
+  );
+  assert(
+    preview.exportedLabel !== null && /\d{4}-\d{2}-\d{2}/.test(preview.exportedLabel),
+    'exported date renders as ISO',
+  );
+  assertEqual(
+    fixtureTransferModelPreview.preview?.formatVersion,
+    1,
+    'preview fixture carries the doc version',
+  );
+  assertEqual(fixtureTransferModelPreview.importPhase, 'preview');
+  assertEqual(fixtureTransferModelDone.importPhase, 'done');
+  assert(
+    fixtureTransferModelDone.importDetail !== null,
+    'done carries the applied summary',
+  );
+  assertEqual(fixtureTransferModelError.importPhase, 'error');
+  assert(
+    fixtureTransferModelError.importDetail !== null,
+    'error carries the typed message',
+  );
+}
+
 function testCoverageMatrix(): void {
   assert(galleryCoverage.sections.length >= 10, 'coverage sections too thin');
   assertEqual(galleryCoverage.schemes.length, 3, 'need all three schemes');
@@ -915,6 +1191,10 @@ testPlaylistModel();
 testEntityModel();
 testHomeAndNav();
 testSearchStates();
+testLyricsModel();
+testRadioModel();
+testCorrectionsModel();
+testTransferModel();
 testCoverageMatrix();
 testDesignTokenAuthority();
 testGalleryNestingSafety();

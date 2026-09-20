@@ -7,12 +7,17 @@ import type {
   EntityPage,
   EntityRef,
   EntitySourceRef,
+  ImportPreview,
   Like,
+  LyricsSheet,
+  MatchReview,
+  MatchReviewStatus,
   Playlist,
   PlaylistEntry,
   PlayCount,
   PlayEvent,
   QueueSnapshot,
+  RadioTail,
   Recording,
   SessionPlayback,
   Settings,
@@ -219,6 +224,12 @@ export type DiagnosticsModel = {
   readonly lastAttemptLabel: string | null;
   readonly persistence: 'ok' | 'degraded' | 'failed';
   readonly persistenceDetail: string | null;
+  /**
+   * Pending corrections-queue reviews when the caller has loaded
+   * them; `null` renders the row without a count (reviews are live
+   * reads, not session state).
+   */
+  readonly pendingReviews: number | null;
 };
 
 export type SettingsModel = {
@@ -234,10 +245,314 @@ export type NavItemModel = {
 
 export type StageMode = 'player' | 'lyrics' | 'queue';
 
+/**
+ * The Stage lyrics mode's honest states (design.md — "title +
+ * honest sync state"). The gate that matters: only a `synced` sheet
+ * earns `state: 'synced'` and a non-null `activeIndex`; `plain`,
+ * `instrumental`, and `unavailable` results never receive line
+ * highlighting or any synced treatment.
+ */
+export type LyricsState =
+  | 'loading'
+  | 'synced'
+  | 'plain'
+  | 'instrumental'
+  | 'unavailable'
+  | 'error';
+
 export type LyricsModel = {
+  readonly state: LyricsState;
   readonly lines: readonly string[];
+  /** Non-null only when `state === 'synced'` — never else. */
   readonly activeIndex: number | null;
+  /** The honest sync-state label (`synced` / `unsynced` + provenance). */
   readonly syncLabel: string | null;
+  /** Detail for non-content states — the typed error's message. */
+  readonly message: string | null;
+};
+
+/**
+ * Maps the session's `LyricsSheet` (plus the fetch lifecycle the
+ * caller tracks) to the Stage lyrics model. `activeIndex` is the
+ * last timed line at or before `positionMs` — null before the first
+ * line — and provenance rides the sync label as
+ * `<state> · <provider>[ · cached]`.
+ */
+export function toLyricsModel(input: {
+  readonly sheet: LyricsSheet | null;
+  readonly error: AppError | null;
+  readonly loading: boolean;
+  readonly positionMs: number;
+}): LyricsModel {
+  const empty = {
+    lines: [],
+    activeIndex: null,
+    syncLabel: null,
+  };
+  const { sheet, error, loading } = input;
+  if (sheet === null) {
+    if (loading) {
+      return { ...empty, state: 'loading', message: null };
+    }
+    return {
+      ...empty,
+      state: error === null ? 'unavailable' : 'error',
+      message: error?.message ?? null,
+    };
+  }
+  const provenance = `${sheet.provider}${sheet.cached ? ' · cached' : ''}`;
+  switch (sheet.kind) {
+    case 'synced': {
+      let activeIndex: number | null = null;
+      sheet.lines.forEach((line, index) => {
+        if (line.tMs <= input.positionMs) {
+          activeIndex = index;
+        }
+      });
+      return {
+        state: 'synced',
+        lines: sheet.lines.map((line) => line.text),
+        activeIndex,
+        syncLabel: `synced · ${provenance}`,
+        message: null,
+      };
+    }
+    case 'plain':
+      return {
+        state: 'plain',
+        lines: sheet.text.split('\n'),
+        activeIndex: null,
+        syncLabel: `unsynced · ${provenance}`,
+        message: null,
+      };
+    case 'instrumental':
+      return {
+        ...empty,
+        state: 'instrumental',
+        message: 'this track is instrumental',
+      };
+    case 'unavailable':
+      return {
+        ...empty,
+        state: 'unavailable',
+        message: 'no lyrics matched this recording',
+      };
+  }
+}
+
+/**
+ * The Now-Playing radio affordance model. `armed` mirrors
+ * `session.radio !== null`; `detail` carries the provider that owns
+ * the tail, or the typed error when the tail failed.
+ */
+export type RadioModel = {
+  readonly armed: boolean;
+  readonly status: 'growing' | 'ended' | 'failed' | null;
+  readonly fetching: boolean;
+  readonly label: string | null;
+  readonly detail: string | null;
+};
+
+export function toRadioModel(radio: RadioTail | null): RadioModel {
+  if (radio === null) {
+    return {
+      armed: false,
+      status: null,
+      fetching: false,
+      label: null,
+      detail: null,
+    };
+  }
+  return {
+    armed: true,
+    status: radio.status,
+    fetching: radio.fetching,
+    label: `radio · ${radio.status}`,
+    detail:
+      radio.status === 'failed'
+        ? (radio.error?.message ?? 'continuation failed')
+        : radio.providerId,
+  };
+}
+
+// ---- corrections (diagnostics review queue) ------------------------
+
+export type ReviewCandidateModel = {
+  /** The index `confirmReview` expects — never renumbered. */
+  readonly index: number;
+  readonly title: string;
+  readonly subtitle: string;
+};
+
+export type ReviewRowModel = {
+  readonly reviewId: string;
+  readonly title: string;
+  readonly artist: string | null;
+  readonly status: MatchReviewStatus;
+  readonly statusLabel: string;
+  readonly candidates: readonly ReviewCandidateModel[];
+};
+
+export type CorrectionsFilter = 'pending' | 'resolved' | 'all';
+
+export type CorrectionsModel = {
+  /** Live-read lifecycle — never an indefinite spinner. */
+  readonly state: 'loading' | 'ready' | 'error';
+  readonly message: string | null;
+  readonly filter: CorrectionsFilter;
+  readonly pendingCount: number;
+  readonly resolvedCount: number;
+  readonly rows: readonly ReviewRowModel[];
+};
+
+function reviewStatusLabel(review: MatchReview): string {
+  switch (review.status) {
+    case 'confirmed': {
+      const ref = review.resolution?.ref;
+      return ref === null || ref === undefined
+        ? 'confirmed'
+        : `confirmed · ${ref.provider}`;
+    }
+    case 'rejected':
+      return 'all candidates rejected';
+    default:
+      return review.status;
+  }
+}
+
+/**
+ * The diagnostics review queue: pending reviews first (they are the
+ * actionable queue), then resolved ones newest-first. Candidates
+ * keep their wire index — `confirmReview` addresses them by it.
+ * `reviews: null` is the loading state; counts always reflect the
+ * full list while `rows` honor the display filter.
+ */
+export function toCorrectionsModel(input: {
+  readonly reviews: readonly MatchReview[] | null;
+  readonly error: AppError | null;
+  readonly recordings: readonly Recording[];
+  readonly filter: CorrectionsFilter;
+}): CorrectionsModel {
+  if (input.reviews === null) {
+    return {
+      state: input.error === null ? 'loading' : 'error',
+      message: input.error?.message ?? null,
+      filter: input.filter,
+      pendingCount: 0,
+      resolvedCount: 0,
+      rows: [],
+    };
+  }
+  const byId = indexById(input.recordings);
+  const rank = (review: MatchReview): number =>
+    review.status === 'pending' ? 0 : 1;
+  const rows: ReviewRowModel[] = [...input.reviews]
+    .sort(
+      (a, b) => rank(a) - rank(b) || b.createdMs - a.createdMs,
+    )
+    .map((review) => {
+      const recording = byId.get(review.recordingId);
+      return {
+        reviewId: review.reviewId,
+        title: recording?.title ?? 'unknown recording',
+        artist: recording?.artist ?? null,
+        status: review.status,
+        statusLabel: reviewStatusLabel(review),
+        candidates: review.candidates.map((candidate, index) => ({
+          index,
+          title: candidate.metadata.title,
+          subtitle: `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}`,
+        })),
+      };
+    });
+  const pending = rows.filter((row) => row.status === 'pending').length;
+  const visible =
+    input.filter === 'all'
+      ? rows
+      : rows.filter((row) =>
+        input.filter === 'pending'
+          ? row.status === 'pending'
+          : row.status !== 'pending',
+      );
+  return {
+    state: 'ready',
+    message: null,
+    filter: input.filter,
+    pendingCount: pending,
+    resolvedCount: rows.length - pending,
+    rows: visible,
+  };
+}
+
+// ---- library transfer (export / import) ----------------------------
+
+export type ImportPreviewRowModel = {
+  readonly key: string;
+  readonly label: string;
+  readonly count: number;
+};
+
+export type ImportPreviewModel = {
+  readonly formatVersion: number;
+  readonly sourceLabel: string;
+  readonly exportedLabel: string | null;
+  readonly rows: readonly ImportPreviewRowModel[];
+};
+
+function formatExportDate(ms: number): string | null {
+  if (!Number.isSafeInteger(ms) || ms < 0) {
+    return null;
+  }
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+
+/** The confirm screen's section counts for an import document. */
+export function toImportPreviewModel(
+  preview: ImportPreview,
+  sourceLabel: string,
+): ImportPreviewModel {
+  const counts = preview.counts;
+  return {
+    formatVersion: preview.doc.formatVersion,
+    sourceLabel,
+    exportedLabel: formatExportDate(preview.exportedAtMs),
+    rows: [
+      { key: 'recordings', label: 'tracks', count: counts.recordings },
+      { key: 'likes', label: 'likes', count: counts.likes },
+      { key: 'playlists', label: 'playlists', count: counts.playlists },
+      {
+        key: 'playlistEntries',
+        label: 'playlist entries',
+        count: counts.playlistEntries,
+      },
+      { key: 'entities', label: 'albums & artists', count: counts.entities },
+      { key: 'playEvents', label: 'play history', count: counts.playEvents },
+      { key: 'playCounts', label: 'play counts', count: counts.playCounts },
+      {
+        key: 'matchReviews',
+        label: 'match reviews',
+        count: counts.matchReviews,
+      },
+      { key: 'mappings', label: 'match mappings', count: counts.mappings },
+    ],
+  };
+}
+
+export type TransferModel = {
+  readonly exportPhase: 'idle' | 'working' | 'done' | 'error';
+  /** The written path on `done`; the typed message on `error`. */
+  readonly exportDetail: string | null;
+  readonly importPhase:
+  | 'idle'
+  | 'reading'
+  | 'preview'
+  | 'applying'
+  | 'done'
+  | 'error';
+  /** The typed message on `error`; the applied summary on `done`. */
+  readonly importDetail: string | null;
+  readonly preview: ImportPreviewModel | null;
 };
 
 export function formatClock(ms: number | null): string {
@@ -918,6 +1233,20 @@ export function toSettingsModel(
         enabled: true,
       },
       {
+        key: 'lyricsProvider',
+        label: 'lyrics provider',
+        value: settings.lyricsProvider ?? 'auto',
+        kind: 'navigation',
+        enabled: true,
+      },
+      {
+        key: 'radioProvider',
+        label: 'radio provider',
+        value: settings.radioProvider ?? 'auto',
+        kind: 'navigation',
+        enabled: true,
+      },
+      {
         key: 'storefront',
         label: 'storefront',
         value: settings.storefront ?? 'not set',
@@ -937,6 +1266,20 @@ export function toSettingsModel(
         value: settings.prefetch ? 'on' : 'off',
         kind: 'toggle',
         enabled: settings.prefetch,
+      },
+      {
+        key: 'exportLibrary',
+        label: 'export library',
+        value: null,
+        kind: 'navigation',
+        enabled: true,
+      },
+      {
+        key: 'importLibrary',
+        label: 'import library',
+        value: null,
+        kind: 'navigation',
+        enabled: true,
       },
     ],
     diagnostics,

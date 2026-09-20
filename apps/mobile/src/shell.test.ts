@@ -7,11 +7,20 @@ import { devRoute } from './dev-routes.ts';
 assertEqual(devRoute('auqw://gallery'), 'gallery');
 assertEqual(devRoute('auqw://seam-file'), 'seam');
 assertEqual(devRoute('auqw://open?tab=home'), 'journey');
+assertEqual(devRoute('auqw://open?tab=settings'), 'journey');
 assertEqual(devRoute('auqw://open?tab=library&playlist=pl-1'), 'journey');
 assertEqual(
   devRoute('auqw://entity?provider=deezer&kind=album&id=a1'),
   'journey',
 );
+assertEqual(devRoute('auqw://lyrics'), 'journey');
+assertEqual(
+  devRoute('auqw://radio?provider=deezer&id=dz-t-1'),
+  'journey',
+);
+assertEqual(devRoute('auqw://corrections'), 'journey');
+assertEqual(devRoute('auqw://transfer'), 'journey');
+assertEqual(devRoute('auqw://stop-radio'), 'journey');
 assertEqual(devRoute('https://example.test'), null);
 
 await runPlayer();

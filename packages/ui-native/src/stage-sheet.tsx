@@ -22,12 +22,13 @@ import {
 import type { IconName } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list.tsx';
-import { EmptyState } from './states.tsx';
+import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   LyricsModel,
   PlatformVariant,
   PlayerModel,
   QueueModel,
+  RadioModel,
   StageMode,
 } from './view-models.ts';
 
@@ -246,6 +247,7 @@ export type StageSheetProps = {
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
+  readonly radio?: RadioModel | undefined;
   readonly queueReordering?: boolean | undefined;
   readonly queueScrollEnabled?: boolean | undefined;
   readonly dragPreview?: 'rest' | 'mid-drag' | 'dismissed' | undefined;
@@ -255,13 +257,16 @@ export type StageSheetProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly onRetryLyrics?: (() => void) | undefined;
+  readonly onStartRadio?: (() => void) | undefined;
+  readonly onStopRadio?: (() => void) | undefined;
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onToggleQueueReorder?: (() => void) | undefined;
   readonly onMoveQueueItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
+  | ((occurrenceId: string, direction: -1 | 1) => void)
+  | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -273,6 +278,7 @@ export function StageSheet({
   mode,
   queue,
   lyrics,
+  radio,
   queueReordering = false,
   queueScrollEnabled = true,
   dragPreview = 'rest',
@@ -282,6 +288,9 @@ export function StageSheet({
   onPrevious,
   onToggleLike,
   onSeek,
+  onRetryLyrics,
+  onStartRadio,
+  onStopRadio,
   onModeChange,
   onPressQueueItem,
   onRemoveQueueItem,
@@ -480,6 +489,65 @@ export function StageSheet({
               onToggleLike={onToggleLike}
             />
           </View>
+          {/*
+           * The live radio element: a seed affordance when no tail is
+           * armed, the tail's honest status when one is — 'failed'
+           * carries the typed message, and stop always clears.
+           */}
+          {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: theme.spacing.sm,
+                marginTop: theme.spacing.md,
+              }}
+            >
+              <Icon
+                name="radio"
+                size={13}
+                color={
+                  radio.armed && radio.status !== 'failed'
+                    ? theme.colors.accent
+                    : theme.colors.textSecondary
+                }
+              />
+              {radio.armed ? (
+                <>
+                  <Text
+                    variant="metadata"
+                    color={radio.status === 'failed' ? 'warn' : 'secondary'}
+                  >
+                    {radio.label}
+                    {radio.fetching ? ' · fetching' : ''}
+                    {radio.detail === null ? '' : ` · ${radio.detail}`}
+                  </Text>
+                  <Pressable
+                    compact
+                    onPress={onStopRadio}
+                    accessibilityLabel="stop radio"
+                    style={{ paddingHorizontal: theme.spacing.xs }}
+                  >
+                    <Text variant="metadata" color="primary">
+                      stop
+                    </Text>
+                  </Pressable>
+                </>
+              ) : (
+                <Pressable
+                  compact
+                  onPress={onStartRadio}
+                  accessibilityLabel="start radio"
+                  style={{ paddingHorizontal: theme.spacing.xs }}
+                >
+                  <Text variant="metadata" color="secondary">
+                    start radio
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+          )}
         </>
       )}
       {activeMode === 'lyrics' && (
@@ -498,7 +566,35 @@ export function StageSheet({
               {lyrics?.syncLabel != null ? ` · ${lyrics.syncLabel}` : ''}
             </Text>
           </View>
-          {lyrics === undefined || lyrics.lines.length === 0 ? (
+          {/*
+           * Honest lyrics: only `state === 'synced'` highlights the
+           * active line — plain text never gets synced treatment,
+           * instrumental/unavailable/error are explicit states, and
+           * loading is bounded by the session's own op deadline.
+           */}
+          {lyrics === undefined ? (
+            <EmptyState title="no lyrics" icon="lyrics" />
+          ) : lyrics.state === 'loading' ? (
+            <LoadingState title="loading lyrics" />
+          ) : lyrics.state === 'error' ? (
+            <ErrorState
+              title="couldn't load lyrics"
+              hint={lyrics.message}
+              onRetry={onRetryLyrics}
+            />
+          ) : lyrics.state === 'instrumental' ? (
+            <EmptyState
+              title="instrumental"
+              hint={lyrics.message}
+              icon="lyrics"
+            />
+          ) : lyrics.state === 'unavailable' ? (
+            <EmptyState
+              title="no lyrics"
+              hint={lyrics.message}
+              icon="lyrics"
+            />
+          ) : lyrics.lines.length === 0 ? (
             <EmptyState title="no lyrics" icon="lyrics" />
           ) : (
             <ScrollView style={{ flex: 1, marginTop: theme.spacing.sm }}>
@@ -506,7 +602,13 @@ export function StageSheet({
                 <Text
                   key={i}
                   variant="body"
-                  color={i === lyrics.activeIndex ? 'accent' : 'secondary'}
+                  color={
+                    i === lyrics.activeIndex
+                      ? 'accent'
+                      : lyrics.state === 'plain'
+                        ? 'primary'
+                        : 'secondary'
+                  }
                   style={[
                     {
                       paddingVertical: 9,

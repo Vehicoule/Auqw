@@ -392,6 +392,8 @@ export type IconName =
   | 'chevron-right'
   | 'chevron-up'
   | 'chevron-down'
+  | 'radio'
+  | 'check'
   | 'menu';
 
 type GlyphShape =
@@ -536,6 +538,15 @@ const GLYPHS: Record<IconName, Glyph> = {
   'chevron-right': { filled: false, shapes: [p('m10 6 6 6-6 6')] },
   'chevron-up': { filled: false, shapes: [p('m6 14 6-6 6 6')] },
   'chevron-down': { filled: false, shapes: [p('m6 10 6 6 6-6')] },
+  radio: {
+    filled: false,
+    shapes: [
+      c(12, 12, 1.6),
+      p('M8.46 8.46a5 5 0 0 0 0 7.08M15.54 8.46a5 5 0 0 1 0 7.08'),
+      p('M5.64 5.64a9 9 0 0 0 0 12.72M18.36 5.64a9 9 0 0 1 0 12.72'),
+    ],
+  },
+  check: { filled: false, shapes: [p('m5 12.5 4.5 4.5L19 7')] },
   menu: {
     filled: false,
     shapes: [p('M4 7h16M4 12h16M4 17h16')],

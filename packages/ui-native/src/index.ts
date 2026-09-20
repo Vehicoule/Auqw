@@ -81,10 +81,12 @@ export type { EntityScreenProps } from './entity-screen.tsx';
 export {
     AddToPlaylistSheet,
     NameField,
+    ProviderPickerSheet,
     RowActionsSheet,
 } from './sheets.tsx';
 export type {
     PlaylistPickerItem,
+    ProviderPickerOption,
     SheetAction,
 } from './sheets.tsx';
 
@@ -93,6 +95,12 @@ export type { QueueScreenProps } from './queue-screen.tsx';
 
 export { SettingsScreen } from './settings-screen.tsx';
 export type { SettingsScreenProps } from './settings-screen.tsx';
+
+export { CorrectionsScreen } from './corrections-screen.tsx';
+export type { CorrectionsScreenProps } from './corrections-screen.tsx';
+
+export { TransferScreen } from './transfer-screen.tsx';
+export type { TransferScreenProps } from './transfer-screen.tsx';
 
 export { HomeScreen } from './home-screen.tsx';
 export type { HomeScreenProps } from './home-screen.tsx';

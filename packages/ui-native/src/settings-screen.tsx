@@ -9,6 +9,7 @@ export type SettingsScreenProps = {
   readonly scrollEnabled?: boolean | undefined;
   readonly onSelectRow?: ((key: string) => void) | undefined;
   readonly onToggleRow?: ((key: string) => void) | undefined;
+  readonly onOpenCorrections?: (() => void) | undefined;
 };
 
 // Visual-only track+thumb — the row itself is the `switch` element;
@@ -106,6 +107,7 @@ export function SettingsScreen({
   scrollEnabled = true,
   onSelectRow,
   onToggleRow,
+  onOpenCorrections,
 }: SettingsScreenProps) {
   const theme = useTheme();
   const diagnostics = model.diagnostics;
@@ -201,6 +203,40 @@ export function SettingsScreen({
               : ` · ${diagnostics.persistenceDetail}`}
           </Text>
         </View>
+        <Hairline />
+        {/*
+         * The corrections queue entry — management-oriented: a count
+         * when the caller has loaded reviews, the chevron always. Row
+         * is inert without the callback (gallery).
+         */}
+        <Pressable
+          onPress={onOpenCorrections}
+          disabled={onOpenCorrections === undefined}
+          accessibilityLabel="match reviews"
+          accessibilityRole="button"
+          style={({ pressed }) => [
+            {
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.sm,
+            },
+            pressed && { opacity: 0.6 },
+          ]}
+        >
+          <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
+            match reviews
+          </Text>
+          {diagnostics.pendingReviews !== null && (
+            <Text variant="metadata" color="primary" numeric>
+              {diagnostics.pendingReviews} pending
+            </Text>
+          )}
+          <Icon
+            name="chevron-right"
+            size={12}
+            color={theme.colors.textSecondary}
+          />
+        </Pressable>
       </View>
     </ScrollView>
   );

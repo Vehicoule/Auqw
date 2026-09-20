@@ -232,6 +232,97 @@ export function RowActionsSheet({
   );
 }
 
+export type ProviderPickerOption = {
+  /** The settings value — a provider id, or 'auto' for auto-routing. */
+  readonly key: string;
+  readonly label: string;
+  readonly detail?: string | null | undefined;
+};
+
+/**
+ * One settings slot's provider choices — only providers that
+ * declared the slot's capability reach `options` (the caller gates);
+ * the selected option reads accent + check, never a fake default.
+ */
+export function ProviderPickerSheet({
+  title = 'provider',
+  options,
+  selectedKey,
+  onPick,
+  onDismiss,
+}: {
+  readonly title?: string | undefined;
+  readonly options: readonly ProviderPickerOption[];
+  readonly selectedKey: string | null;
+  readonly onPick?: ((key: string) => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <SheetScaffold title={title} onDismiss={onDismiss}>
+      {options.length === 0 ? (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.md,
+            minHeight: theme.sizes.touch,
+            paddingHorizontal: theme.spacing.sm,
+          }}
+        >
+          <Icon name="warn" size={15} color={theme.colors.warn} />
+          <Text variant="body" color="secondary">
+            no provider declares this capability
+          </Text>
+        </View>
+      ) : (
+        options.map((option) => {
+          const selected = option.key === selectedKey;
+          return (
+            <Pressable
+              key={option.key}
+              onPress={
+                onPick === undefined ? undefined : () => onPick(option.key)
+              }
+              accessibilityLabel={option.label}
+              accessibilityState={{ selected }}
+              style={({ pressed }) => [
+                {
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: theme.spacing.md,
+                  minHeight: theme.sizes.touch,
+                  paddingHorizontal: theme.spacing.sm,
+                  borderRadius: theme.radius.control,
+                },
+                pressed && { backgroundColor: theme.colors.fg08 },
+              ]}
+            >
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                  variant="body"
+                  color={selected ? 'accent' : 'primary'}
+                  numberOfLines={1}
+                >
+                  {option.label}
+                </Text>
+                {option.detail != null && (
+                  <Text variant="metadata" color="secondary" numberOfLines={1}>
+                    {option.detail}
+                  </Text>
+                )}
+              </View>
+              {selected && (
+                <Icon name="check" size={14} color={theme.colors.accent} />
+              )}
+            </Pressable>
+          );
+        })
+      )}
+    </SheetScaffold>
+  );
+}
+
 export type PlaylistPickerItem = {
   readonly playlistId: string;
   readonly name: string;

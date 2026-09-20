@@ -3,12 +3,16 @@ import type {
   Entity,
   EntityPage,
   EntitySourceRef,
+  ExportDocument,
+  ImportPreview,
   Like,
+  MatchReview,
   Playlist,
   PlaylistEntry,
   PlayCount,
   PlayEvent,
   QueueSnapshot,
+  RadioTail,
   Recording,
   SessionPlayback,
   Settings,
@@ -17,20 +21,25 @@ import type {
 import type { ThemeName } from '@auqw/design-tokens';
 import {
   toCollectionModel,
+  toCorrectionsModel,
   toEntityModel,
+  toImportPreviewModel,
   toLibraryModel,
   toPlaylistModel,
   toQueueModel,
   toRailCard,
+  toRadioModel,
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
 } from './view-models.ts';
 import type {
   CollectionModel,
+  CorrectionsModel,
   DiagnosticsModel,
   EntityScreenModel,
   HomeModel,
+  ImportPreviewModel,
   LibraryModel,
   NavItemModel,
   PlatformVariant,
@@ -38,8 +47,10 @@ import type {
   PlaylistModel,
   LyricsModel,
   QueueModel,
+  RadioModel,
   SearchStateModel,
   TrackRowModel,
+  TransferModel,
 } from './view-models.ts';
 
 // Embedded solid-color tiles: the gallery must render artwork without a
@@ -470,6 +481,7 @@ export const fixtureDiagnostics: DiagnosticsModel = {
   lastAttemptLabel: 'ok · 212 ms',
   persistence: 'ok',
   persistenceDetail: null,
+  pendingReviews: 2,
 };
 
 export const fixtureDiagnosticsDegraded: DiagnosticsModel = {
@@ -478,6 +490,7 @@ export const fixtureDiagnosticsDegraded: DiagnosticsModel = {
   lastAttemptLabel: 'timeout · 15 000 ms',
   persistence: 'degraded',
   persistenceDetail: 'last write not flushed',
+  pendingReviews: null,
 };
 
 export const fixtureSearchResults: readonly TrackMetadata[] = [
@@ -877,20 +890,327 @@ export const fixtureNavItems: readonly NavItemModel[] = [
   { key: 'settings', label: 'settings' },
 ];
 
-export const fixtureLyrics: LyricsModel = {
-  lines: [
-    '(Oh)',
-    'No smoke with no fire',
-    'No silence if there’s no sound',
-    'One way or another',
-    'You’re going to put me out',
-    'Drinks flowing like water',
-    'Too drunk to turn off the light',
-    'Stay under the covers',
-    'Who knows how we’ll end the night',
-  ],
+const SYNCED_LINES: readonly string[] = [
+  '(Oh)',
+  'No smoke with no fire',
+  'No silence if there’s no sound',
+  'One way or another',
+  'You’re going to put me out',
+  'Drinks flowing like water',
+  'Too drunk to turn off the light',
+  'Stay under the covers',
+  'Who knows how we’ll end the night',
+];
+
+export const fixtureLyricsSynced: LyricsModel = {
+  state: 'synced',
+  lines: SYNCED_LINES,
   activeIndex: 6,
-  syncLabel: 'estimated timing',
+  syncLabel: 'synced · lyrics-lrclib',
+  message: null,
+};
+
+// Plain text never earns synced treatment: no activeIndex, no
+// accent — the sync label says `unsynced` and names the provider.
+export const fixtureLyricsPlain: LyricsModel = {
+  state: 'plain',
+  lines: SYNCED_LINES,
+  activeIndex: null,
+  syncLabel: 'unsynced · lyrics-lrclib',
+  message: null,
+};
+
+export const fixtureLyricsInstrumental: LyricsModel = {
+  state: 'instrumental',
+  lines: [],
+  activeIndex: null,
+  syncLabel: null,
+  message: 'this track is instrumental',
+};
+
+export const fixtureLyricsUnavailable: LyricsModel = {
+  state: 'unavailable',
+  lines: [],
+  activeIndex: null,
+  syncLabel: null,
+  message: 'no lyrics matched this recording',
+};
+
+export const fixtureLyricsError: LyricsModel = {
+  state: 'error',
+  lines: [],
+  activeIndex: null,
+  syncLabel: null,
+  message: 'rate limited by provider',
+};
+
+export const fixtureLyricsLoading: LyricsModel = {
+  state: 'loading',
+  lines: [],
+  activeIndex: null,
+  syncLabel: null,
+  message: null,
+};
+
+export const fixtureLyricsStates: readonly LyricsModel[] = [
+  fixtureLyricsSynced,
+  fixtureLyricsPlain,
+  fixtureLyricsInstrumental,
+  fixtureLyricsUnavailable,
+  fixtureLyricsError,
+  fixtureLyricsLoading,
+];
+
+// Kept for the gallery's default Stage preview.
+export const fixtureLyrics: LyricsModel = fixtureLyricsSynced;
+
+// ---- radio --------------------------------------------------------
+
+export const fixtureRadioTailGrowing: RadioTail = {
+  seedRef: { provider: 'deezer', kind: 'track', id: 'dz-t-roads' },
+  providerId: 'deezer',
+  status: 'growing',
+  fetching: false,
+};
+
+export const fixtureRadioTailFetching: RadioTail = {
+  ...fixtureRadioTailGrowing,
+  fetching: true,
+};
+
+export const fixtureRadioTailEnded: RadioTail = {
+  ...fixtureRadioTailGrowing,
+  status: 'ended',
+};
+
+export const fixtureRadioTailFailed: RadioTail = {
+  ...fixtureRadioTailGrowing,
+  status: 'failed',
+  error: {
+    kind: 'transient',
+    message: 'continuation timed out',
+    retryable: true,
+  },
+};
+
+export const fixtureRadioModels: readonly RadioModel[] = [
+  toRadioModel(null),
+  toRadioModel(fixtureRadioTailGrowing),
+  toRadioModel(fixtureRadioTailFetching),
+  toRadioModel(fixtureRadioTailEnded),
+  toRadioModel(fixtureRadioTailFailed),
+];
+
+// ---- corrections --------------------------------------------------
+
+function reviewCandidate(
+  metadata: TrackMetadata,
+): MatchReview['candidates'][number] {
+  return { metadata, ref: metadata.sourceRef };
+}
+
+function candidateMeta(partial: {
+  provider: string;
+  id: string;
+  title: string;
+  artist: string | null;
+  durationMs: number | null;
+}): TrackMetadata {
+  return {
+    sourceRef: { provider: partial.provider, kind: 'track', id: partial.id },
+    title: partial.title,
+    artist: partial.artist,
+    album: null,
+    durationMs: partial.durationMs,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+  };
+}
+
+export const fixtureMatchReviews: readonly MatchReview[] = [
+  {
+    reviewId: 'rev-roads',
+    recordingId: 'rec-roads',
+    candidates: [
+      reviewCandidate(
+        candidateMeta({
+          provider: 'deezer',
+          id: 'dz-roads',
+          title: 'Roads',
+          artist: 'Portishead',
+          durationMs: 302_000,
+        }),
+      ),
+      reviewCandidate(
+        candidateMeta({
+          provider: 'youtube-music',
+          id: 'ytm-roads',
+          title: 'Roads',
+          artist: 'Portishead',
+          durationMs: 297_000,
+        }),
+      ),
+    ],
+    status: 'pending',
+    resolution: null,
+    createdMs: 1_700_000_600_000,
+    resolvedMs: null,
+  },
+  {
+    reviewId: 'rev-religion',
+    recordingId: 'rec-religion',
+    candidates: [
+      reviewCandidate(
+        candidateMeta({
+          provider: 'deezer',
+          id: 'dz-religion',
+          title: 'New Religion',
+          artist: null,
+          durationMs: 211_000,
+        }),
+      ),
+    ],
+    status: 'confirmed',
+    resolution: {
+      ref: { provider: 'deezer', kind: 'track', id: 'dz-religion' },
+    },
+    createdMs: 1_700_000_400_000,
+    resolvedMs: 1_700_000_450_000,
+  },
+  {
+    reviewId: 'rev-cjk',
+    recordingId: 'rec-cjk',
+    candidates: [
+      reviewCandidate(
+        candidateMeta({
+          provider: 'itunes',
+          id: 'it-cjk',
+          title: '夜のドライブ',
+          artist: 'metropolitan echo',
+          durationMs: 196_000,
+        }),
+      ),
+    ],
+    status: 'rejected',
+    resolution: { ref: null },
+    createdMs: 1_700_000_200_000,
+    resolvedMs: 1_700_000_260_000,
+  },
+];
+
+export const fixtureCorrectionsModel: CorrectionsModel =
+  toCorrectionsModel({
+    reviews: fixtureMatchReviews,
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'all',
+  });
+
+export const fixtureCorrectionsModelPending: CorrectionsModel =
+  toCorrectionsModel({
+    reviews: fixtureMatchReviews,
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'pending',
+  });
+
+export const fixtureCorrectionsModelEmpty: CorrectionsModel =
+  toCorrectionsModel({
+    reviews: [],
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'pending',
+  });
+
+export const fixtureCorrectionsModelLoading: CorrectionsModel =
+  toCorrectionsModel({
+    reviews: null,
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'pending',
+  });
+
+export const fixtureCorrectionsModelError: CorrectionsModel =
+  toCorrectionsModel({
+    reviews: null,
+    error: fixtureEntityError,
+    recordings: fixtureRecordings,
+    filter: 'pending',
+  });
+
+// ---- library transfer ----------------------------------------------
+
+export const fixtureExportDoc: ExportDocument = {
+  formatVersion: 1,
+  exportedAtMs: 1_700_001_100_000,
+  recordings: fixtureRecordings
+    .slice(0, 3)
+    .map(({ sourceRefs: _sourceRefs, mappings: _mappings, ...rest }) => rest),
+  sourceRefs: [],
+  mappings: [],
+  likes: fixtureLikes.slice(0, 3),
+  entities: fixtureEntities.slice(0, 2),
+  entitySourceRefs: fixtureEntitySourceRefs,
+  playlists: fixturePlaylists.slice(0, 2),
+  playlistEntries: fixturePlaylistEntries.slice(0, 3),
+  playHistory: fixturePlayHistory,
+  playCounts: fixturePlayCounts.slice(0, 3),
+  matchReviews: fixtureMatchReviews.slice(0, 1),
+  settings: fixtureSettings,
+};
+
+export const fixtureImportPreview: ImportPreview = {
+  doc: fixtureExportDoc,
+  exportedAtMs: fixtureExportDoc.exportedAtMs,
+  counts: {
+    recordings: fixtureExportDoc.recordings.length,
+    sourceRefs: fixtureExportDoc.sourceRefs.length,
+    mappings: fixtureExportDoc.mappings.length,
+    likes: fixtureExportDoc.likes.length,
+    entities: fixtureExportDoc.entities.length,
+    entitySourceRefs: fixtureExportDoc.entitySourceRefs.length,
+    playlists: fixtureExportDoc.playlists.length,
+    playlistEntries: fixtureExportDoc.playlistEntries.length,
+    playEvents: fixtureExportDoc.playHistory.length,
+    playCounts: fixtureExportDoc.playCounts.length,
+    matchReviews: fixtureExportDoc.matchReviews.length,
+  },
+};
+
+export const fixtureImportPreviewModel: ImportPreviewModel =
+  toImportPreviewModel(fixtureImportPreview, 'auqw-library.json');
+
+export const fixtureTransferModel: TransferModel = {
+  exportPhase: 'idle',
+  exportDetail: null,
+  importPhase: 'idle',
+  importDetail: null,
+  preview: null,
+};
+
+export const fixtureTransferModelPreview: TransferModel = {
+  exportPhase: 'done',
+  exportDetail: 'auqw-library-2023-11-14.json',
+  importPhase: 'preview',
+  importDetail: null,
+  preview: fixtureImportPreviewModel,
+};
+
+export const fixtureTransferModelDone: TransferModel = {
+  ...fixtureTransferModelPreview,
+  importPhase: 'done',
+  importDetail: 'imported 3 tracks · 3 likes · 2 playlists',
+};
+
+export const fixtureTransferModelError: TransferModel = {
+  exportPhase: 'idle',
+  exportDetail: null,
+  importPhase: 'error',
+  importDetail: 'import document failed validation',
+  preview: null,
 };
 
 export const fixtureRowStates: readonly TrackRowModel[] = [
@@ -950,6 +1270,8 @@ export const galleryCoverage: GalleryCoverage = {
     'sheets',
     'queue',
     'settings',
+    'corrections',
+    'transfer',
     'home',
     'states',
     'progress',
