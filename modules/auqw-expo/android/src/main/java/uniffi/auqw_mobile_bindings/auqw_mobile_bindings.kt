@@ -745,6 +745,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve(
@@ -804,6 +806,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_run_spin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(`ptr`: Long,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`capability`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -954,6 +958,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() and 0xFFFF) != 34269) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() and 0xFFFF) != 14712) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() and 0xFFFF) != 7187) {
@@ -1483,6 +1490,15 @@ public interface PluginHostInterface {
     fun `runSpin`(`wasm`: kotlin.ByteArray, `manifestJson`: kotlin.String): SpinReport
     
     /**
+     * Set or clear the OAuth access token merged as `access_token`
+     * into every session-trust payload (`Authorization: Bearer` on
+     * InnerTube calls). Prepared sessions read the same slot at
+     * re-mint, so a refreshed token applies to in-flight playback
+     * recovery. Never logged.
+     */
+    fun `setAuthToken`(`token`: kotlin.String?)
+    
+    /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
      *
@@ -1766,6 +1782,26 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Set or clear the OAuth access token merged as `access_token`
+     * into every session-trust payload (`Authorization: Bearer` on
+     * InnerTube calls). Prepared sessions read the same slot at
+     * re-mint, so a refreshed token applies to in-flight playback
+     * recovery. Never logged.
+     */override fun `setAuthToken`(`token`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(
+        it,
+        
+        FfiConverterOptionalString.lower(`token`),_status)
+}
+    }
+    
     
 
     
@@ -2211,6 +2247,20 @@ data class HostConfig (
      * synchronously.
      */
     var `streamPath`: kotlin.String?
+    , 
+    /**
+     * Container preference order sent on `playback.resolve` — the
+     * surface's `prefer` hint (webm-first on Android+desktop, mp4-only
+     * on iOS). `None` leaves the guest's own default order.
+     */
+    var `prefer`: List<kotlin.String>?
+    , 
+    /**
+     * Initial OAuth access token for session-trust `Authorization:
+     * Bearer` on InnerTube calls. `None` starts anonymous; update it
+     * later with [`PluginHost::set_auth_token`]. Never logged.
+     */
+    var `authToken`: kotlin.String?
     
 ){
     
@@ -2232,6 +2282,8 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -2240,7 +2292,9 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterULong.allocationSize(value.`fuelTotal`) +
             FfiConverterOptionalString.allocationSize(value.`potProviderUrl`) +
             FfiConverterOptionalString.allocationSize(value.`statePath`) +
-            FfiConverterOptionalString.allocationSize(value.`streamPath`)
+            FfiConverterOptionalString.allocationSize(value.`streamPath`) +
+            FfiConverterOptionalSequenceString.allocationSize(value.`prefer`) +
+            FfiConverterOptionalString.allocationSize(value.`authToken`)
     )
 
     override fun write(value: HostConfig, buf: ByteBuffer) {
@@ -2249,6 +2303,8 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterOptionalString.write(value.`potProviderUrl`, buf)
             FfiConverterOptionalString.write(value.`statePath`, buf)
             FfiConverterOptionalString.write(value.`streamPath`, buf)
+            FfiConverterOptionalSequenceString.write(value.`prefer`, buf)
+            FfiConverterOptionalString.write(value.`authToken`, buf)
     }
 }
 
@@ -3548,6 +3604,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
+    override fun read(buf: ByteBuffer): List<kotlin.String>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceString.read(buf)
+    }
+
+    override fun allocationSize(value: List<kotlin.String>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceString.write(value, buf)
         }
     }
 }

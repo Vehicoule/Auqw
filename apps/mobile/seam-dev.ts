@@ -15,6 +15,14 @@
 //                                  &pos=… attaches at an offset (seek gate)
 //   auqw://seam-release?handle=…   releaseStream on a handle (teardown gate)
 //   auqw://seam-stop             player stop (teardown gate)
+//   auqw://seam-auth?token=…       session-trust leg — set the OAuth
+//                                  access token merged into resolves
+//   auqw://seam-auth-start?client_id=…;client_secret=…
+//                                  OAuth device flow: prints user_code +
+//                                  verification_url for the user to approve
+//   auqw://seam-auth-poll          completes the flow → setAuthToken
+//   auqw://seam-auth-refresh       refresh-grant → setAuthToken
+//   auqw://seam-auth-clear         drop token + stored device state
 //   auqw://seam-queue?url=…&title=…  projection leg — installs a 2-item
 //                                  projection then attaches: exercises the
 //                                  CURSOR occurrence bind + MediaMetadata
@@ -35,6 +43,7 @@ import {
   play,
   prepare,
   releaseStream,
+  setAuthToken,
   stop,
   setQueueProjection,
   type PrepareOutcomeEvent,
@@ -75,6 +84,41 @@ let audioLeg: AudioPlayer | null = null;
 // sequential, so one slot suffices.
 let pendingPrepare: ((e: PrepareOutcomeEvent) => void) | null = null;
 
+// ── Session-trust (OAuth device flow) ───────────────────────────────
+// The app side owns credentials + refresh — the guest only ever sees
+// the short-lived access token. Device codes and refresh tokens are
+// credentials: kept in module state, never logged.
+const OAUTH_DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code';
+const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube';
+const OAUTH_DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+
+let oauthClient: { id: string; secret: string | null } | null = null;
+let deviceFlow: { deviceCode: string; expiresAtMs: number } | null = null;
+let oauthRefresh: string | null = null;
+
+async function oauthPost(url: string, pairs: Record<string, string>): Promise<Record<string, unknown>> {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: Object.entries(pairs)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join('&'),
+  });
+  // Device-flow errors answer HTTP 400 with a JSON `error` body —
+  // parse before judging so pending/denied/expired surface distinctly
+  // instead of collapsing into a bare status. Only an unparseable body
+  // falls back to the raw status.
+  const body = (await resp.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
+  if (body === null) {
+    throw new Error(`oauth http ${resp.status}`);
+  }
+  return body;
+}
+
 function arm(): void {
   if (armed) {
     return;
@@ -100,11 +144,13 @@ function arm(): void {
 
 async function ensureHost(): Promise<void> {
   if (!hostReady) {
-    // Same fuel config as App.tsx's ensureHost.
+    // Same fuel config as App.tsx's ensureHost; Android runs the
+    // decided webm-first prefer hint.
     await createHost({
       fuelPerEntry: 200_000_000,
       fuelTotal: 2_000_000_000,
       potProviderUrl: POT_PROVIDER_URL,
+      prefer: ['audio/webm', 'audio/mp4'],
     });
     hostReady = true;
   }
@@ -149,7 +195,7 @@ function describe(error: unknown): string {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam-auth-start|seam-auth-poll|seam-auth-refresh|seam-auth-clear|seam-auth|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -267,6 +313,117 @@ export async function runSeamLink(url: string): Promise<void> {
     } else if (match[1] === 'seam-stop') {
       await stop();
       slog(`seam-stop done t=${Date.now()}`);
+    } else if (match[1] === 'seam-auth') {
+      const token = param(query, 'token');
+      if (!token) {
+        return;
+      }
+      await ensureHost();
+      setAuthToken(token);
+      slog(`seam-auth token set t=${Date.now()}`);
+    } else if (match[1] === 'seam-auth-start') {
+      const id = param(query, 'client_id');
+      if (!id) {
+        return;
+      }
+      const body = await oauthPost(OAUTH_DEVICE_CODE_URL, {
+        client_id: id,
+        scope: OAUTH_SCOPE,
+      });
+      if (typeof body.error === 'string') {
+        slog(`seam-auth-start ${body.error}`);
+        return;
+      }
+      const deviceCode = typeof body.device_code === 'string' ? body.device_code : '';
+      const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : 1800;
+      // Only commit state on a live flow — a failed start must not
+      // orphan a prior session's client/refresh pairing.
+      oauthClient = { id, secret: param(query, 'client_secret') };
+      deviceFlow = deviceCode
+        ? { deviceCode, expiresAtMs: Date.now() + expiresIn * 1000 }
+        : null;
+      // user_code + verification_url are the user-facing pair — safe to
+      // print; device_code itself is a credential and stays unlogged.
+      slog(
+        `seam-auth-start user_code=${String(body.user_code ?? '?')} url=${String(
+          body.verification_url ?? 'https://www.google.com/device',
+        )} interval=${String(body.interval ?? 5)}s expires_in=${expiresIn}s`,
+      );
+    } else if (match[1] === 'seam-auth-poll') {
+      if (!oauthClient || !deviceFlow) {
+        slog('seam-auth-poll no in-flight flow');
+        return;
+      }
+      if (Date.now() > deviceFlow.expiresAtMs) {
+        deviceFlow = null;
+        slog('seam-auth-poll device code expired — restart');
+        return;
+      }
+      const pairs: Record<string, string> = {
+        client_id: oauthClient.id,
+        device_code: deviceFlow.deviceCode,
+        grant_type: OAUTH_DEVICE_GRANT,
+      };
+      if (oauthClient.secret) {
+        pairs.client_secret = oauthClient.secret;
+      }
+      const body = await oauthPost(OAUTH_TOKEN_URL, pairs);
+      if (typeof body.error === 'string') {
+        // authorization_pending / slow_down leave the flow alive for
+        // the next poll; terminal answers (access_denied,
+        // expired_token, invalid_grant) retire it.
+        if (body.error !== 'authorization_pending' && body.error !== 'slow_down') {
+          deviceFlow = null;
+        }
+        slog(`seam-auth-poll ${body.error}`);
+        return;
+      }
+      const access = typeof body.access_token === 'string' ? body.access_token : '';
+      if (!access) {
+        slog('seam-auth-poll no access_token in response');
+        return;
+      }
+      await ensureHost();
+      setAuthToken(access);
+      oauthRefresh = typeof body.refresh_token === 'string' ? body.refresh_token : null;
+      deviceFlow = null;
+      slog(`seam-auth-poll logged_in refresh=${oauthRefresh != null} t=${Date.now()}`);
+    } else if (match[1] === 'seam-auth-refresh') {
+      if (!oauthClient || !oauthRefresh) {
+        slog('seam-auth-refresh no stored grant');
+        return;
+      }
+      const pairs: Record<string, string> = {
+        client_id: oauthClient.id,
+        refresh_token: oauthRefresh,
+        grant_type: 'refresh_token',
+      };
+      if (oauthClient.secret) {
+        pairs.client_secret = oauthClient.secret;
+      }
+      const body = await oauthPost(OAUTH_TOKEN_URL, pairs);
+      const access = typeof body.access_token === 'string' ? body.access_token : '';
+      if (!access) {
+        // A dead grant (invalid_grant — revoked or expired) must not
+        // be retried forever; drop it so the next poll reports the
+        // honest "no stored grant".
+        if (body.error === 'invalid_grant') {
+          oauthRefresh = null;
+        }
+        slog(`seam-auth-refresh failed ${String(body.error ?? 'no access_token')}`);
+        return;
+      }
+      await ensureHost();
+      setAuthToken(access);
+      slog(`seam-auth-refresh renewed t=${Date.now()}`);
+    } else if (match[1] === 'seam-auth-clear') {
+      if (hostReady) {
+        setAuthToken(null);
+      }
+      oauthClient = null;
+      deviceFlow = null;
+      oauthRefresh = null;
+      slog(`seam-auth-clear done t=${Date.now()}`);
     } else if (match[1] === 'seam-queue') {
       // Projection leg: install a 2-item identified revision whose
       // cursor carries title/artist, then attach a prepared dev URL —

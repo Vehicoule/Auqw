@@ -86,6 +86,17 @@ class HostConfigInput : Record {
 
   @Field
   var streamPath: String? = null
+
+  /** Container preference order for playback.resolve — the surface's
+   * prefer hint (webm-first here); null = guest default. */
+  @Field
+  var prefer: List<String>? = null
+
+  /** Initial OAuth access token for Authorization: Bearer on InnerTube
+   * calls — the session-trust header. null = anonymous; refresh via
+   * setAuthToken. Never logged. */
+  @Field
+  var authToken: String? = null
 }
 
 /**
@@ -336,7 +347,9 @@ class AuqwExpoModule : Module() {
             fuelTotal = config.fuelTotal.toULong(),
             potProviderUrl = config.potProviderUrl,
             statePath = statePath,
-            streamPath = streamPath
+            streamPath = streamPath,
+            prefer = config.prefer,
+            authToken = config.authToken
           )
         )
       } catch (e: HostException) {
@@ -368,6 +381,11 @@ class AuqwExpoModule : Module() {
       }
       Log.i(TAG, "host created")
       null
+    }
+
+    Function("setAuthToken") { token: String? ->
+      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      h.setAuthToken(token)
     }
 
     AsyncFunction("loadPlugin") { wasmBase64: String, manifestJson: String ->

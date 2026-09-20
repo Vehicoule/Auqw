@@ -1,5 +1,6 @@
 import { Asset } from 'expo-asset';
 import { File } from 'expo-file-system';
+import { Platform } from 'react-native';
 import { CancellationSource, Session } from '@auqw/application';
 import type {
   ArtworkCache,
@@ -111,6 +112,11 @@ export async function createSessionController(
     fuelPerEntry: 200_000_000,
     fuelTotal: 2_000_000_000,
     potProviderUrl: options.potProviderUrl,
+    // The decided per-surface container pick: webm-first on Android
+    // (higher bitrate, Matroska Cues seek verified on-device); iOS is
+    // mp4-required — AVPlayer has no WebM/Opus.
+    prefer:
+      Platform.OS === 'ios' ? ['audio/mp4'] : ['audio/webm', 'audio/mp4'],
   });
   const [itunesPluginId, youtubeMusicPluginId, deezerPluginId, lyricsLrclibPluginId] =
     await Promise.all([

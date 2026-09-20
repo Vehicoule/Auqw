@@ -473,6 +473,14 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 50
+        },
+        "access_token": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 8192
         }
       }
     },
@@ -537,6 +545,14 @@
             "null"
           ],
           "minimum": 0
+        },
+        "access_token": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 8192
         }
       }
     },
@@ -805,6 +821,14 @@
           "properties": {
             "source_ref": {
               "$ref": "#/$defs/sourceRef"
+            },
+            "access_token": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 8192
             }
           }
         },
@@ -818,6 +842,14 @@
             "continuation": {
               "type": "string",
               "minLength": 1
+            },
+            "access_token": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 8192
             }
           }
         }

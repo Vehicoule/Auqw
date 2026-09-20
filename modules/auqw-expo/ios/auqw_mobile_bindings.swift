@@ -639,6 +639,15 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
     func runSpin(wasm: Data, manifestJson: String) throws  -> SpinReport
     
     /**
+     * Set or clear the OAuth access token merged as `access_token`
+     * into every session-trust payload (`Authorization: Bearer` on
+     * InnerTube calls). Prepared sessions read the same slot at
+     * re-mint, so a refreshed token applies to in-flight playback
+     * recovery. Never logged.
+     */
+    func setAuthToken(token: String?) 
+    
+    /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
      *
@@ -858,6 +867,22 @@ open func runSpin(wasm: Data, manifestJson: String)throws  -> SpinReport  {
         FfiConverterString.lower(manifestJson),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Set or clear the OAuth access token merged as `access_token`
+     * into every session-trust payload (`Authorization: Bearer` on
+     * InnerTube calls). Prepared sessions read the same slot at
+     * re-mint, so a refreshed token applies to in-flight playback
+     * recovery. Never logged.
+     */
+open func setAuthToken(token: String?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(token),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -1318,6 +1343,18 @@ public struct HostConfig: Equatable, Hashable {
      * synchronously.
      */
     public var streamPath: String?
+    /**
+     * Container preference order sent on `playback.resolve` — the
+     * surface's `prefer` hint (webm-first on Android+desktop, mp4-only
+     * on iOS). `None` leaves the guest's own default order.
+     */
+    public var prefer: [String]?
+    /**
+     * Initial OAuth access token for session-trust `Authorization:
+     * Bearer` on InnerTube calls. `None` starts anonymous; update it
+     * later with [`PluginHost::set_auth_token`]. Never logged.
+     */
+    public var authToken: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1341,12 +1378,24 @@ public struct HostConfig: Equatable, Hashable {
          * streaming seam — every `stream_*` call then fails
          * [`StreamError::Unavailable`] and `start_prepare` fails
          * synchronously.
-         */streamPath: String?) {
+         */streamPath: String?, 
+        /**
+         * Container preference order sent on `playback.resolve` — the
+         * surface's `prefer` hint (webm-first on Android+desktop, mp4-only
+         * on iOS). `None` leaves the guest's own default order.
+         */prefer: [String]?, 
+        /**
+         * Initial OAuth access token for session-trust `Authorization:
+         * Bearer` on InnerTube calls. `None` starts anonymous; update it
+         * later with [`PluginHost::set_auth_token`]. Never logged.
+         */authToken: String?) {
         self.fuelPerEntry = fuelPerEntry
         self.fuelTotal = fuelTotal
         self.potProviderUrl = potProviderUrl
         self.statePath = statePath
         self.streamPath = streamPath
+        self.prefer = prefer
+        self.authToken = authToken
     }
 
     
@@ -1369,7 +1418,9 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
                 fuelTotal: FfiConverterUInt64.read(from: &buf), 
                 potProviderUrl: FfiConverterOptionString.read(from: &buf), 
                 statePath: FfiConverterOptionString.read(from: &buf), 
-                streamPath: FfiConverterOptionString.read(from: &buf)
+                streamPath: FfiConverterOptionString.read(from: &buf), 
+                prefer: FfiConverterOptionSequenceString.read(from: &buf), 
+                authToken: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1379,6 +1430,8 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.potProviderUrl, into: &buf)
         FfiConverterOptionString.write(value.statePath, into: &buf)
         FfiConverterOptionString.write(value.streamPath, into: &buf)
+        FfiConverterOptionSequenceString.write(value.prefer, into: &buf)
+        FfiConverterOptionString.write(value.authToken, into: &buf)
     }
 }
 
@@ -2969,6 +3022,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -3063,6 +3140,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() != 34269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() != 14712) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() != 7187) {

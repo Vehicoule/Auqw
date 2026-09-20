@@ -14,6 +14,14 @@ export type HostConfig = {
   statePath?: string | undefined;
   /** Stream-seam sparse cache dir; defaults to the app-private cache dir. */
   streamPath?: string | undefined;
+  /** Container preference order for playback.resolve — the surface's
+   * prefer hint (webm-first Android/desktop, mp4-only iOS); omit for
+   * the guest's own default. */
+  prefer?: readonly string[] | undefined;
+  /** Initial OAuth access token for `Authorization: Bearer` on
+   * InnerTube calls — session trust. Omit for anonymous; refresh via
+   * {@link setAuthToken}. Never logged. */
+  authToken?: string | undefined;
 };
 
 export type HttpTraceSummary = {
@@ -228,6 +236,7 @@ type AuqwExpoEvents = {
 
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   createHost(config: HostConfig): Promise<void>;
+  setAuthToken(token: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   startResolve(pluginId: string, sourceRef: string): Promise<string>;
   startRequest(pluginId: string, capability: string, payloadJson: string): Promise<string>;
@@ -250,6 +259,17 @@ const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
 
 export function createHost(config: HostConfig): Promise<void> {
   return native.createHost(config);
+}
+
+/**
+ * Set or clear the OAuth access token merged as `access_token` into
+ * every session-trust payload (`playback.resolve`,
+ * `playback.candidates`, `radio.seed`) — the `Authorization: Bearer`
+ * source on InnerTube calls. Prepared sessions read the same slot at
+ * re-mint, so a refreshed token reaches mid-stream recovery.
+ */
+export function setAuthToken(token: string | null): void {
+  native.setAuthToken(token);
 }
 
 export function loadPlugin(wasmBase64: string, manifestJson: string): Promise<string> {

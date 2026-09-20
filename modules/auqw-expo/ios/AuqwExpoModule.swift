@@ -14,6 +14,13 @@ struct HostConfigInput: Record {
   // Android-first, so streamPath stays unset (seam unavailable)
   // unless a caller deliberately overrides it.
   @Field var streamPath: String? = nil
+  // Container preference order for playback.resolve — iOS is
+  // mp4-required (AVPlayer has no WebM/Opus); nil = guest default.
+  @Field var prefer: [String]? = nil
+  // Initial OAuth access token for Authorization: Bearer on InnerTube
+  // calls — the session-trust header. nil = anonymous; refresh via
+  // setAuthToken. Never logged.
+  @Field var authToken: String? = nil
 }
 
 /// Relays the UniFFI callback into the Expo event channel. The outcome
@@ -83,11 +90,18 @@ public class AuqwExpoModule: Module {
           fuelTotal: Self.clampedU64(config.fuelTotal),
           potProviderUrl: config.potProviderUrl,
           statePath: try config.statePath ?? Self.statePath(),
-          streamPath: config.streamPath
+          streamPath: config.streamPath,
+          prefer: config.prefer,
+          authToken: config.authToken
         )
       )
       self.host = h
       logger.info("host created")
+    }
+
+    Function("setAuthToken") { (token: String?) in
+      let h = try self.requireHost()
+      h.setAuthToken(token: token)
     }
 
     AsyncFunction("loadPlugin") { (wasmBase64: String, manifestJson: String) -> String in

@@ -21,6 +21,10 @@ export type AuqwExpoHostConfig = {
   statePath?: string | undefined;
   /** Stream-seam sparse cache dir; defaults to the app-private cache dir. */
   streamPath?: string | undefined;
+  /** Container preference order for playback.resolve — the surface's
+   * prefer hint (webm-first Android/desktop, mp4-only iOS); omit for
+   * the guest's own default. */
+  prefer?: readonly string[] | undefined;
 };
 
 /** Diagnostics for one guest attempt; identical shape to AttemptTrace. */
@@ -165,16 +169,17 @@ export type AuqwExpoPlayerLike = {
 export type AuqwExpoLike = AuqwExpoHostLike &
   AuqwExpoPlayerLike & {
     createHost(config: AuqwExpoHostConfig): Promise<void>;
+    setAuthToken(token: string | null): void;
     loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   };
 
 /**
- * The host half plus lifecycle — satisfied by both the seam
- * `auqw-expo` module and the slice-0 `auqw-plugin-host-expo` module,
- * so providers can run before the seam lands.
+ * The host half plus lifecycle — satisfied by the `auqw-expo` module
+ * (which absorbed the retired slice-0 `auqw-plugin-host-expo` surface).
  */
 export type AuqwExpoHostModuleLike = AuqwExpoHostLike & {
   createHost(config: AuqwExpoHostConfig): Promise<void>;
+  setAuthToken(token: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
 };
 

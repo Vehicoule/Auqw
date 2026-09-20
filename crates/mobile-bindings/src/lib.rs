@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
@@ -40,7 +40,22 @@ pub struct HostConfig {
     /// [`StreamError::Unavailable`] and `start_prepare` fails
     /// synchronously.
     pub stream_path: Option<String>,
+    /// Container preference order sent on `playback.resolve` — the
+    /// surface's `prefer` hint (webm-first on Android+desktop, mp4-only
+    /// on iOS). `None` leaves the guest's own default order.
+    pub prefer: Option<Vec<String>>,
+    /// Initial OAuth access token for session-trust `Authorization:
+    /// Bearer` on InnerTube calls. `None` starts anonymous; update it
+    /// later with [`PluginHost::set_auth_token`]. Never logged.
+    pub auth_token: Option<String>,
 }
+
+/// Capabilities whose payloads reach InnerTube — the host-owned
+/// `access_token` is merged into these at the `start_typed` funnel so
+/// every path (seam resolve, prepare, generic `start_request`) carries
+/// the same session trust.
+const SESSION_TRUST_CAPABILITIES: &[&str] =
+    &["playback.resolve", "playback.candidates", "radio.seed"];
 
 /// One HTTP call from the attempt trace. `url` is already stripped of
 /// query and fragment by the host — the signed parameters never cross
@@ -249,6 +264,13 @@ pub struct PluginHost {
     kv: Arc<dyn KeyValueStore>,
     budgets: Budgets,
     pot_provider_url: Option<String>,
+    /// Surface `prefer` hint merged into every `playback.resolve`.
+    prefer: Option<Vec<String>>,
+    /// App-held OAuth access token merged as `access_token` into every
+    /// session-trust payload — the `Authorization: Bearer` source.
+    /// Shared with each prepared session's remint so a refreshed token
+    /// reaches re-mints.
+    auth_token: Arc<RwLock<Option<String>>>,
     stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
@@ -332,12 +354,25 @@ impl PluginHost {
             kv,
             budgets,
             pot_provider_url: config.pot_provider_url,
+            prefer: config.prefer,
+            auth_token: Arc::new(RwLock::new(config.auth_token)),
             stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             prepared_handles: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
         }))
+    }
+
+    /// Set or clear the OAuth access token merged as `access_token`
+    /// into every session-trust payload (`Authorization: Bearer` on
+    /// InnerTube calls). Prepared sessions read the same slot at
+    /// re-mint, so a refreshed token applies to in-flight playback
+    /// recovery. Never logged.
+    pub fn set_auth_token(&self, token: Option<String>) {
+        if let Ok(mut slot) = self.auth_token.write() {
+            *slot = token;
+        }
     }
 
     /// Validate and register a plugin artifact. Returns the manifest id.
@@ -362,10 +397,19 @@ impl PluginHost {
         source_ref: String,
         listener: Box<dyn ResolveListener>,
     ) -> Result<String, HostError> {
+        // `prefer` is a key, not a value: absent means guest default,
+        // never a null that fails payload validation. `access_token`
+        // rides via the `start_typed` merge, so the bare path carries
+        // the same session trust as the prepared one.
+        let mut payload = serde_json::Map::new();
+        payload.insert("source_ref".to_string(), json!(source_ref));
+        if let Some(prefer) = &self.prefer {
+            payload.insert("prefer".to_string(), json!(prefer));
+        }
         self.start_typed(
             plugin_id,
             "playback.resolve".to_string(),
-            json!({ "source_ref": source_ref }),
+            Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
@@ -523,6 +567,23 @@ impl PluginHost {
                 None => return Err(HostError::UnknownPlugin { id: plugin_id }),
             }
         };
+        // Session trust: the host-owned token is merged as a key, not a
+        // value — absent slot means the payload passes untouched (a
+        // caller-supplied key stays, e.g. a dev seam journey); a live
+        // slot replaces it, so a stale caller value can't override the
+        // app's current credential.
+        let payload = if SESSION_TRUST_CAPABILITIES.contains(&capability.as_str()) {
+            match self.auth_token.read().ok().and_then(|s| s.clone()) {
+                Some(token) => {
+                    let mut obj = payload.as_object().cloned().unwrap_or_default();
+                    obj.insert("access_token".to_string(), json!(token));
+                    Value::Object(obj)
+                }
+                None => payload,
+            }
+        } else {
+            payload
+        };
         let request_id = format!("req-{}", self.counter.fetch_add(1, Ordering::Relaxed));
         let token = CancellationToken::new();
         lock(&self.cancels)?.insert(request_id.clone(), token.clone());
@@ -610,6 +671,8 @@ mod tests {
             pot_provider_url: None,
             state_path: None,
             stream_path: None,
+            prefer: None,
+            auth_token: None,
         }
     }
 

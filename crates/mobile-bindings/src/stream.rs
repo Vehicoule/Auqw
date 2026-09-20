@@ -170,6 +170,13 @@ struct PluginRemint {
     /// The itag the first resolve minted, set by `prepare_outcome` —
     /// sent as `pin_itag` on every re-mint.
     pin_itag: Option<u32>,
+    /// The surface `prefer` hint — identical to the first resolve's so
+    /// a re-mint never re-picks under a different container order.
+    prefer: Option<Vec<String>>,
+    /// The host's live token slot — read at re-mint so a refreshed
+    /// token reaches mid-stream recovery, not the snapshot from
+    /// prepare time.
+    auth_token: Arc<std::sync::RwLock<Option<String>>>,
     budgets: Budgets,
     http: Arc<ReqwestClient>,
     kv: Arc<dyn KeyValueStore>,
@@ -189,6 +196,10 @@ impl Remint for PluginRemint {
         let provider = self.provider.clone();
         let source_ref = self.source_ref.clone();
         let pin_itag = self.pin_itag;
+        let prefer = self.prefer.clone();
+        // Read the live slot at re-mint time — a token refreshed since
+        // prepare is exactly what a cap-death recovery should carry.
+        let auth_token = self.auth_token.read().ok().and_then(|slot| slot.clone());
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -198,7 +209,7 @@ impl Remint for PluginRemint {
             let invocation = invoke(
                 &plugin,
                 "playback.resolve",
-                remint_payload(&source_ref, pin_itag),
+                remint_payload(&source_ref, pin_itag, &prefer, &auth_token),
                 &budgets,
                 CancellationToken::new(),
                 HostServices {
@@ -234,12 +245,26 @@ impl Remint for PluginRemint {
 /// The `playback.resolve` payload for a re-mint: `source_ref` plus
 /// `pin_itag` when the first resolve minted one — the guest keeps the
 /// same encode across cap-death recovery instead of re-walking the
-/// format ladder into a different itag under the same mime.
-fn remint_payload(source_ref: &str, pin_itag: Option<u32>) -> Value {
+/// format ladder into a different itag under the same mime. The
+/// surface `prefer` hint and the live `access_token` ride verbatim —
+/// the re-mint path bypasses `start_typed`, so it carries the merge
+/// itself.
+fn remint_payload(
+    source_ref: &str,
+    pin_itag: Option<u32>,
+    prefer: &Option<Vec<String>>,
+    auth_token: &Option<String>,
+) -> Value {
     let mut payload = serde_json::Map::new();
     payload.insert("source_ref".to_string(), json!(source_ref));
     if let Some(itag) = pin_itag {
         payload.insert("pin_itag".to_string(), json!(itag));
+    }
+    if let Some(prefer) = prefer {
+        payload.insert("prefer".to_string(), json!(prefer));
+    }
+    if let Some(token) = auth_token {
+        payload.insert("access_token".to_string(), json!(token));
     }
     Value::Object(payload)
 }
@@ -325,6 +350,8 @@ impl PluginHost {
             provider: plugin_id.clone(),
             source_ref: source_ref.clone(),
             pin_itag: None,
+            prefer: self.prefer.clone(),
+            auth_token: Arc::clone(&self.auth_token),
             budgets: self.budgets.clone(),
             http: Arc::clone(&self.http),
             kv: Arc::clone(&self.kv),
@@ -332,10 +359,18 @@ impl PluginHost {
         };
         let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);
+        // `prefer` is a key, not a value: absent means "guest default",
+        // never a null that fails payload validation. `access_token`
+        // rides via the `start_typed` merge.
+        let mut payload = serde_json::Map::new();
+        payload.insert("source_ref".to_string(), json!(source_ref));
+        if let Some(prefer) = &self.prefer {
+            payload.insert("prefer".to_string(), json!(prefer));
+        }
         self.start_typed(
             plugin_id,
             "playback.resolve".to_string(),
-            json!({ "source_ref": source_ref }),
+            Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
@@ -539,17 +574,32 @@ mod tests {
 
     /// The re-mint payload carries the itag pin verbatim when the
     /// first resolve minted one, and omits the key entirely when it
-    /// did not — a guest must never observe a null pin.
+    /// did not — a guest must never observe a null pin. The surface
+    /// `prefer` hint and `access_token` ride verbatim and are likewise
+    /// omitted when unset.
     #[test]
     fn remint_payload_carries_the_pin() {
+        let prefer = Some(vec!["audio/webm".to_string(), "audio/mp4".to_string()]);
+        let token = Some("tok".to_string());
         assert_eq!(
-            remint_payload("vid", Some(140)),
-            json!({ "source_ref": "vid", "pin_itag": 140 })
+            remint_payload("vid", Some(140), &prefer, &token),
+            json!({
+                "source_ref": "vid",
+                "pin_itag": 140,
+                "prefer": ["audio/webm", "audio/mp4"],
+                "access_token": "tok"
+            })
         );
-        assert_eq!(remint_payload("vid", None), json!({ "source_ref": "vid" }));
+        assert_eq!(
+            remint_payload("vid", None, &None, &None),
+            json!({ "source_ref": "vid" })
+        );
+        let bare = remint_payload("vid", None, &None, &None);
         assert!(
-            remint_payload("vid", None).get("pin_itag").is_none(),
-            "no pin_itag key may be emitted without a pin"
+            bare.get("pin_itag").is_none()
+                && bare.get("prefer").is_none()
+                && bare.get("access_token").is_none(),
+            "no pin/prefer/token keys may be emitted when unset"
         );
     }
 }
