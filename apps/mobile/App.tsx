@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { Linking, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   SafeAreaProvider,
@@ -521,6 +521,93 @@ function Main({
     },
     [session, state.queue],
   );
+
+  // __DEV__-only gate instrumentation: `auqw://` links drive the real
+  // session methods so emulator/simulator journeys are scriptable.
+  // Verbs: search?q=, play-result?i=N, next, previous, pause, resume,
+  // like-current, seek?ms=. Never ships in release bundles.
+  const journeyDeps = useRef({ session, search, state });
+  journeyDeps.current = { session, search, state };
+  useEffect(() => {
+    if (!__DEV__) {
+      return undefined;
+    }
+    const handle = (url: string | null): void => {
+      console.log(`[journey] url=${url ?? 'null'}`);
+      if (url === null || !url.startsWith('auqw://')) {
+        return;
+      }
+      const { session: s, search: se, state: st } = journeyDeps.current;
+      const body = url.slice('auqw://'.length);
+      const [verb, qs] = body.split('?');
+      const params = new URLSearchParams(qs ?? '');
+      switch (verb) {
+        case 'open':
+          setTab(params.get('tab') ?? 'home');
+          break;
+        case 'search':
+          setTab('search');
+          setQuery(params.get('q') ?? '');
+          void se?.search({
+            query: params.get('q') ?? '',
+            limit: SEARCH_LIMIT,
+            storefront:
+              st.type === 'ready' ? st.settings.storefront : null,
+          });
+          break;
+        case 'play-result': {
+          const i = Number(params.get('i') ?? '0');
+          const meta =
+            searchStateRef.current.type === 'content'
+              ? searchStateRef.current.page.items[i]
+              : undefined;
+          if (meta !== undefined) {
+            void s.addAndPlay(meta);
+          }
+          break;
+        }
+        case 'next':
+          void s.next();
+          break;
+        case 'previous':
+          void s.previous();
+          break;
+        case 'pause':
+          void s.pause();
+          break;
+        case 'resume':
+          void s.resume();
+          break;
+        case 'like-current':
+          if (st.type === 'ready' && st.playback.type !== 'idle') {
+            const id = st.playback.recordingId;
+            if (id !== null) {
+              void s.toggleLike(id);
+            }
+          }
+          break;
+        case 'seek': {
+          const ms = Number(params.get('ms') ?? '0');
+          if (Number.isSafeInteger(ms) && ms >= 0) {
+            void s.seekTo(ms);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    };
+    const sub = Linking.addEventListener('url', ({ url }) =>
+      handle(url),
+    );
+    void Linking.getInitialURL().then(handle);
+    return () => sub.remove();
+  }, []);
+
+  // Mirror of searchState for the journey handler (which is stable
+  // across renders via journeyDeps but reads items from the map).
+  const searchStateRef = useRef(searchState);
+  searchStateRef.current = searchState;
 
   const topInset = insets.top;
   const screen = (() => {
