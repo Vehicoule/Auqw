@@ -17,6 +17,7 @@ expect_used = "deny"
 
 [dependencies]
 auqw-plugin-host = { path = "../plugin-host" }
+auqw-stream = { path = "../auqw-stream" }
 uniffi = { version = "0.32", features = ["cli"] }
 tokio = { version = "1.52.0", features = ["rt-multi-thread", "time", "sync"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }

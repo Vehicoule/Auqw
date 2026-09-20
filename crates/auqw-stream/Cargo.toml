@@ -1,0 +1,29 @@
+[package]
+name = "auqw-stream"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Sparse byte store, pump, and session registry for the Auqw streaming seam"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.0", features = ["rt", "time", "sync", "macros"] }
+tokio-util = "0.7.18"
+futures-util = "0.3.31"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
+
+# Same rationale as auqw-plugin-host: rustls-platform-verifier needs a
+# JNI Context a bare cdylib never receives on Android, so the Mozilla
+# roots are bundled instead (iOS shares the path). Track reqwest's
+# rustls line.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "time", "sync", "macros"] }

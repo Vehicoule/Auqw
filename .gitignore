@@ -14,10 +14,13 @@ apps/mobile/ios/
 .gradle/
 
 # Rust → Android build product (rebuild via tooling/build-android-bindings.sh)
-modules/plugin-host-expo/android/src/main/jniLibs/
+modules/auqw-expo/android/src/main/jniLibs/
 
 # Rust → iOS build product (rebuild via tooling/build-ios-bindings.sh)
-modules/plugin-host-expo/ios/AuqwMobileBindingsFFI.xcframework/
+modules/auqw-expo/ios/AuqwMobileBindingsFFI.xcframework/
+
+# Agent worktrees
+.worktrees/
 
 # Plugin artifacts synced from auqw-plugins (rebuild via pnpm sync-plugins)
 apps/mobile/assets/plugins/

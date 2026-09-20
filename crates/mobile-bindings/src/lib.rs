@@ -13,6 +13,7 @@ use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
     KeyValueStore, LoadedPlugin, Manifest, MemoryKeyValueStore, ReqwestClient, SystemClock,
 };
+use auqw_stream::{StreamConfig, StreamRegistry};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::runtime::Runtime;
@@ -34,6 +35,11 @@ pub struct HostConfig {
     /// Path of the on-disk KV store the native shell supplies;
     /// `None` keeps plugin state volatile.
     pub state_path: Option<String>,
+    /// Directory for the sparse stream cache; `None` disables the
+    /// streaming seam — every `stream_*` call then fails
+    /// [`StreamError::Unavailable`] and `start_prepare` fails
+    /// synchronously.
+    pub stream_path: Option<String>,
 }
 
 /// One HTTP call from the attempt trace. `url` is already stripped of
@@ -134,7 +140,7 @@ pub struct ResolvedResource {
     pub client: String,
     /// Reported `contentLength` of the picked format in bytes.
     pub content_length: Option<u64>,
-    /// The picked format's itag — re-mints pin it across cap recovery.
+    /// Provider format itag when the guest reported one.
     pub itag: Option<u32>,
 }
 
@@ -243,8 +249,13 @@ pub struct PluginHost {
     kv: Arc<dyn KeyValueStore>,
     budgets: Budgets,
     pot_provider_url: Option<String>,
+    stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// `prepare` request id → produced stream handle, so a
+    /// `cancelPrepare` landing after `prepared` can abandon the session
+    /// (only while still unattached — see `cancel`).
+    prepared_handles: Arc<Mutex<HashMap<String, String>>>,
     counter: AtomicU64,
 }
 
@@ -303,14 +314,28 @@ impl PluginHost {
             fuel_total: config.fuel_total,
             ..Budgets::default()
         };
+        // A configured stream path must yield a working cache dir;
+        // silently degrading to "unavailable" would hide a broken
+        // shell config, so a failure here fails the host.
+        let stream = match &config.stream_path {
+            Some(path) => Some(Arc::new(
+                StreamRegistry::new(StreamConfig::new(path.into()), runtime.handle().clone())
+                    .map_err(|e| HostError::Runtime {
+                        detail: format!("stream: {e}"),
+                    })?,
+            )),
+            None => None,
+        };
         Ok(Arc::new(Self {
             runtime,
             http: Arc::new(http),
             kv,
             budgets,
             pot_provider_url: config.pot_provider_url,
+            stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            prepared_handles: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
         }))
     }
@@ -341,7 +366,7 @@ impl PluginHost {
             plugin_id,
             "playback.resolve".to_string(),
             json!({ "source_ref": source_ref }),
-            move |request_id, invocation| {
+            move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
@@ -399,7 +424,7 @@ impl PluginHost {
             plugin_id,
             capability,
             payload,
-            move |request_id, invocation| {
+            move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
@@ -418,12 +443,26 @@ impl PluginHost {
         )
     }
 
-    /// Cancel an in-flight request; unknown ids are a no-op.
+    /// Cancel an in-flight request; unknown ids are a no-op. A
+    /// `cancelPrepare` landing after `prepared` also abandons the
+    /// produced session — but only while it is still unattached: a
+    /// playing consumer is never cancelled out from under playback.
     pub fn cancel(&self, request_id: String) {
         if let Ok(m) = self.cancels.lock() {
             if let Some(token) = m.get(&request_id) {
                 token.cancel();
             }
+        }
+        // Coalesced prepares hand one session handle to several
+        // request ids — abandoning it is only safe once the cancelled
+        // request was its last owner, or a surviving request's
+        // `stream_open` would hit `cancelled`.
+        let handle = self.prepared_handles.lock().ok().and_then(|mut m| {
+            m.remove(&request_id)
+                .filter(|h| !m.values().any(|v| v == h))
+        });
+        if let (Some(stream), Some(handle)) = (&self.stream, handle) {
+            let _ = stream.cancel_if_unattached(&handle);
         }
     }
 
@@ -463,8 +502,10 @@ impl PluginHost {
 
 impl PluginHost {
     /// Spawn one invocation on the runtime and deliver it to `deliver`
-    /// on a worker thread.
-    fn start_typed<F>(
+    /// on a worker thread — `deliver` returns a future so callers can
+    /// offload blocking work with `spawn_blocking` instead of stalling
+    /// a runtime worker.
+    fn start_typed<F, Fut>(
         &self,
         plugin_id: String,
         capability: String,
@@ -472,7 +513,8 @@ impl PluginHost {
         deliver: F,
     ) -> Result<String, HostError>
     where
-        F: FnOnce(String, auqw_plugin_host::Invocation) + Send + 'static,
+        F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let plugin = {
             let plugins = lock(&self.plugins)?;
@@ -506,7 +548,7 @@ impl PluginHost {
                 },
             )
             .await;
-            deliver(rid.clone(), invocation);
+            deliver(rid.clone(), invocation).await;
             if let Ok(mut m) = cancels.lock() {
                 m.remove(&rid);
             }
@@ -540,6 +582,9 @@ fn resource_from(value: &Value) -> ResolvedResource {
     }
 }
 
+mod stream;
+pub use stream::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +609,7 @@ mod tests {
             fuel_total: 2_000_000_000,
             pot_provider_url: None,
             state_path: None,
+            stream_path: None,
         }
     }
 
@@ -599,7 +645,7 @@ mod tests {
         let wasm = match wat::parse_str(done_wat(
             "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
              \"bitrate_kbps\":129,\"expires_at_ms\":42,\"client\":\"IOS\",\
-             \"content_length\":1234,\"itag\":140}",
+             \"content_length\":1234}",
         )) {
             Ok(w) => w,
             Err(e) => panic!("wat: {e}"),
@@ -632,7 +678,6 @@ mod tests {
                 assert_eq!(resource.mime, "audio/mp4");
                 assert_eq!(resource.client, "IOS");
                 assert_eq!(resource.content_length, Some(1234));
-                assert_eq!(resource.itag, Some(140));
                 assert!(attempt.steps >= 1);
             }
             ResolveOutcome::Failed { kind, message, .. } => {
@@ -734,6 +779,234 @@ mod tests {
                 );
             }
             ResolveOutcome::Resolved { .. } => panic!("spin resolved?"),
+        }
+    }
+
+    struct PrepareChannelListener {
+        tx: mpsc::Sender<(String, PrepareOutcome)>,
+    }
+
+    impl PrepareListener for PrepareChannelListener {
+        fn on_outcome(&self, request_id: String, outcome: PrepareOutcome) {
+            let _ = self.tx.send((request_id, outcome));
+        }
+    }
+
+    #[test]
+    fn itag_reaches_the_resource() {
+        let wasm = match wat::parse_str(done_wat(
+            "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
+             \"itag\":140,\"client\":\"IOS\"}",
+        )) {
+            Ok(w) => w,
+            Err(e) => panic!("wat: {e}"),
+        };
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(
+            wasm.clone(),
+            manifest_json("done", &wasm, "[\"network:example.com\"]"),
+        ) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let _ = match host.start_resolve(id, "vid12345678".into(), Box::new(ChannelListener { tx }))
+        {
+            Ok(r) => r,
+            Err(e) => panic!("start: {e}"),
+        };
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        match outcome {
+            ResolveOutcome::Resolved { resource, .. } => {
+                assert_eq!(resource.itag, Some(140));
+            }
+            ResolveOutcome::Failed { kind, message, .. } => {
+                panic!("expected Resolved, got Failed {kind}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn stream_calls_fail_unavailable_without_stream_path() {
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        for result in [
+            host.stream_open("st-0".into(), 0).map(|_| ()),
+            host.stream_read("st-0".into(), 0, 64).map(|_| ()),
+            host.stream_close("st-0".into()),
+            host.stream_release("st-0".into()),
+            host.stream_phase_marks("st-0".into()).map(|_| ()),
+        ] {
+            match result {
+                Err(StreamError::Unavailable) => {}
+                other => panic!("expected Unavailable, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_fails_synchronously_without_stream_path() {
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let (tx, _rx) = mpsc::channel();
+        match host.start_prepare(
+            "any".into(),
+            "x".into(),
+            Box::new(PrepareChannelListener { tx }),
+        ) {
+            Err(HostError::Runtime { detail }) => {
+                assert!(detail.contains("stream"), "{detail}");
+            }
+            other => panic!("expected Runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_with_urlless_result_reports_failed() {
+        // The echo guest resolves to a url-less result; the seam is
+        // configured, so the outcome must be Failed invalid-response —
+        // and no session (or pump, or network) is ever started.
+        let dir = std::env::temp_dir().join(format!(
+            "auqw-mb-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut cfg = config();
+        cfg.stream_path = Some(dir.to_string_lossy().into_owned());
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let request_id = match host.start_prepare(
+            id,
+            "vid12345678".into(),
+            Box::new(PrepareChannelListener { tx }),
+        ) {
+            Ok(r) => r,
+            Err(e) => panic!("start_prepare: {e}"),
+        };
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        assert_eq!(rid, request_id);
+        match outcome {
+            PrepareOutcome::Failed { kind, .. } => {
+                assert_eq!(kind, "invalid-response");
+            }
+            PrepareOutcome::Prepared { .. } => {
+                panic!("echo result has no url — expected Failed");
+            }
+        }
+    }
+
+    #[test]
+    fn cancel_on_coalesced_request_keeps_the_shared_session() {
+        // Two prepares for the same (provider, source_ref) coalesce
+        // onto one session handle. Cancelling one request must not
+        // abandon a session the other still owns — its `stream_open`
+        // would otherwise die `cancelled` with no signal to re-prepare.
+        // The URL's host passes the destination check, but the bare
+        // listener never answers the TLS hello: the speculative head
+        // fetch parks and the session stays live and detached instead
+        // of racing the test to a terminal fetch error.
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => panic!("bind: {e}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => panic!("addr: {e}"),
+        };
+        let wasm = match wat::parse_str(done_wat(&format!(
+            "{{\"url\":\"https://127.0.0.1:{port}/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\"}}"
+        ))) {
+            Ok(w) => w,
+            Err(e) => panic!("wat: {e}"),
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "auqw-mb-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut cfg = config();
+        cfg.stream_path = Some(dir.to_string_lossy().into_owned());
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(
+            wasm.clone(),
+            manifest_json("done", &wasm, "[\"network:127.0.0.1\"]"),
+        ) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let mut request_ids = Vec::new();
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let request_id = match host.start_prepare(
+                id.clone(),
+                "vid12345678".into(),
+                Box::new(PrepareChannelListener { tx: tx.clone() }),
+            ) {
+                Ok(r) => r,
+                Err(e) => panic!("start_prepare: {e}"),
+            };
+            let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(v) => v,
+                Err(e) => panic!("listener: {e}"),
+            };
+            request_ids.push(request_id);
+            match outcome {
+                PrepareOutcome::Prepared { stream, .. } => handles.push(stream.handle),
+                PrepareOutcome::Failed { kind, message, .. } => {
+                    panic!("expected Prepared, got Failed {kind}: {message}");
+                }
+            }
+        }
+        assert_eq!(
+            handles[0], handles[1],
+            "coalesced prepares share one session handle"
+        );
+        let handle = handles.into_iter().next().unwrap_or_default();
+        // The first request's cancel leaves the second as sole owner —
+        // the session must survive and still attach.
+        host.cancel(request_ids[0].clone());
+        if let Err(e) = host.stream_open(handle.clone(), 0) {
+            panic!("shared session died with the cancelled request: {e}");
+        }
+        if let Err(e) = host.stream_close(handle.clone()) {
+            panic!("close: {e}");
+        }
+        // Cancelling the last owner abandons the still-unattached session.
+        host.cancel(request_ids[1].clone());
+        match host.stream_open(handle, 0) {
+            Err(StreamError::Failed { kind, .. }) => assert_eq!(kind, "cancelled"),
+            other => panic!("expected cancelled, got {other:?}"),
         }
     }
 }

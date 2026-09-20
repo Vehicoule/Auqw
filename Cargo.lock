@@ -103,6 +103,7 @@ name = "auqw-mobile-bindings"
 version = "0.1.0"
 dependencies = [
  "auqw-plugin-host",
+ "auqw-stream",
  "serde_json",
  "sha2",
  "thiserror",
@@ -129,6 +130,21 @@ dependencies = [
  "wasmi",
  "wasmparser 0.259.0",
  "wat",
+ "webpki-roots",
+]
+
+[[package]]
+name = "auqw-stream"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
  "webpki-roots",
 ]
 

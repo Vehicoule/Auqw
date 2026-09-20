@@ -1,0 +1,32 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.auqwexpo'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.auqwexpo"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation "net.java.dev.jna:jna:5.19.1@aar"
+  // kotlinx-coroutines for suspend AsyncFunction bodies (same pin as
+  // expo-modules-core's api dependency).
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2"
+  // Media3 — the app's single player (stream-seam decision, recorded in
+  // docs/decisions.md). Pinned to 1.11.0: released 2026-08-07, ~6 weeks
+  // old at pin time — comfortably past the repo's 7-day no-fresh-
+  // packages floor (1.11.1, the newest stable, was only 9 days old).
+  implementation "androidx.media3:media3-exoplayer:1.11.0"
+  implementation "androidx.media3:media3-session:1.11.0"
+  implementation "androidx.media3:media3-datasource:1.11.0"
+}

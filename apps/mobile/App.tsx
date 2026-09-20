@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, View } from 'react-native';
+import { Linking, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   SafeAreaProvider,
@@ -12,7 +12,7 @@ import {
   JetBrainsMono_500Medium,
   JetBrainsMono_700Bold,
 } from '@expo-google-fonts/jetbrains-mono';
-import * as PluginHostExpo from 'auqw-plugin-host-expo';
+import * as AuqwExpo from 'auqw-expo';
 import { CancellationSource, SearchSession } from '@auqw/application';
 import type {
   AppError,
@@ -54,7 +54,9 @@ import type {
 } from '@auqw/ui-native';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
+import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
+import { runSeamLink } from './seam-dev.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
 // set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
@@ -95,8 +97,15 @@ export function App() {
     setBoot({ type: 'loading' });
     void (async () => {
       try {
-        const created = await createSessionController(PluginHostExpo, {
+        const created = await createSessionController(AuqwExpo, {
           potProviderUrl: POT_PROVIDER_URL,
+          // Android plays through the native Media3 seam (background
+          // queue projection + lock-screen controls); iOS keeps the
+          // provisional expo-audio path until the seam's iOS player
+          // lands — auqw-expo is host-only there.
+          ...(Platform.OS === 'android'
+            ? { player: () => createAuqwExpoPlayer(AuqwExpo) }
+            : {}),
         });
         if (disposed) {
           await created.dispose();
@@ -535,6 +544,12 @@ function Main({
     const handle = (url: string | null): void => {
       console.log(`[journey] url=${url ?? 'null'}`);
       if (url === null || !url.startsWith('auqw://')) {
+        return;
+      }
+      // Slice 1.5 seam dev links (seam-file/seam-prepare/seam-attach/
+      // seam-metrics) — isolated in seam-dev.ts; drop with the harness.
+      if (url.startsWith('auqw://seam')) {
+        void runSeamLink(url);
         return;
       }
       const { session: s, search: se, state: st } = journeyDeps.current;

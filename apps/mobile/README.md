@@ -2,7 +2,8 @@
 
 Expo app (Slice 0): one screen, one Play button. The pinned
 `youtube-music` guest resolves inside the Wasmi host → UniFFI →
-`auqw-plugin-host-expo` → `expo-audio`.
+`auqw-expo` → `expo-audio`. Slice 1.5 adds the Media3 stream seam
+inside the same module (`auqw://seam-*` dev links, `seam-dev.ts`).
 
 ## Prerequisites
 

@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["AuqwExpoModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.auqwexpo.AuqwExpoModule"]
+  }
+}

@@ -21,7 +21,7 @@
     "@auqw/storage-sqlite": "workspace:*",
     "@auqw/ui-native": "workspace:*",
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
-    "auqw-plugin-host-expo": "workspace:*",
+    "auqw-expo": "workspace:*",
     "expo": "~57.0.24",
     "expo-asset": "~57.0.18",
     "expo-audio": "~57.0.5",
