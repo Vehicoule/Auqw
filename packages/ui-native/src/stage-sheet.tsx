@@ -226,7 +226,6 @@ export function ModeSegment({
               variant="metadata"
               color={active ? 'bright' : 'secondary'}
               style={[
-                { fontSize: 10.5 },
                 active && { fontFamily: theme.fontFamilies.bold },
               ]}
             >
@@ -434,7 +433,7 @@ export function StageSheet({
                 variant="body"
                 color="primary"
                 numberOfLines={1}
-                style={{ marginTop: 4, fontSize: 11.5 }}
+                style={{ marginTop: 4 }}
               >
                 {player.artist ?? '—'}
               </Text>

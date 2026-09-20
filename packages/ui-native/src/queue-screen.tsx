@@ -51,12 +51,12 @@ export function QueueScreen({
         style={{
           flexDirection: 'row',
           alignItems: 'center',
-          paddingHorizontal: 14,
+          paddingHorizontal: theme.spacing.screen,
           marginTop: theme.spacing.sm,
           marginBottom: theme.spacing.md,
         }}
       >
-        <Text variant="heading" color="bright" style={{ fontSize: 12.5 }}>
+        <Text variant="heading" color="bright">
           queue
         </Text>
         <Text variant="metadata" color="secondary" style={{ marginLeft: 10 }}>
@@ -83,7 +83,7 @@ export function QueueScreen({
             flexDirection: 'row',
             alignItems: 'center',
             gap: 11,
-            marginHorizontal: 14,
+            marginHorizontal: theme.spacing.screen,
             marginBottom: theme.spacing.sm,
             padding: theme.spacing.sm,
             borderRadius: theme.radius.control,
@@ -109,7 +109,7 @@ export function QueueScreen({
                   bottom: 0,
                   alignItems: 'center',
                   justifyContent: 'center',
-                  backgroundColor: 'rgba(0,0,0,0.45)',
+                  backgroundColor: theme.colors.scrim,
                 }}
               >
                 <EqBars size={11} />

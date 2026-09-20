@@ -514,6 +514,30 @@ function testCoverageMatrix(): void {
   );
 }
 
+function testDesignTokenAuthority(): void {
+  const files = readdirSync(new URL('.', import.meta.url))
+    .filter((name) => name.endsWith('.tsx'))
+    .map((name) => ({
+      name,
+      source: readFileSync(new URL(name, import.meta.url), 'utf8'),
+    }));
+  for (const file of files) {
+    assert(
+      !/(#[0-9a-f]{3,8}|rgba\()/i.test(file.source),
+      `${file.name}: raw colors must come from design tokens`,
+    );
+    assert(
+      !file.source.includes('fontSize: ') ||
+        file.name === 'primitives.tsx',
+      `${file.name}: literal font sizes must come from typography tokens`,
+    );
+    assert(
+      !/(padding|margin)Horizontal: 14/.test(file.source),
+      `${file.name}: screen gutters must use the spacing token`,
+    );
+  }
+}
+
 testFormatClock();
 testPlayPauseMorph();
 testProgressPathState();
@@ -528,5 +552,7 @@ testLibraryAndSettings();
 testHomeAndNav();
 testSearchStates();
 testCoverageMatrix();
+testDesignTokenAuthority();
 
 console.log('ui-native tests passed');
+import { readdirSync, readFileSync } from 'node:fs';

@@ -131,7 +131,7 @@ export function TrackRow({
                 bottom: 0,
                 alignItems: 'center',
                 justifyContent: 'center',
-                backgroundColor: 'rgba(0,0,0,0.45)',
+                backgroundColor: theme.colors.scrim,
               }}
             >
               <EqBars size={11} />
@@ -150,7 +150,6 @@ export function TrackRow({
             }
             numberOfLines={1}
             style={[
-              { fontSize: 11.5 },
               row.playing
                 ? { fontFamily: theme.fontFamilies.bold }
                 : undefined,
@@ -163,7 +162,7 @@ export function TrackRow({
               variant="metadata"
               color="secondary"
               numberOfLines={1}
-              style={{ marginTop: 2, fontSize: 9.5 }}
+              style={{ marginTop: 2 }}
             >
               {sub}
             </Text>

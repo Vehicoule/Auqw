@@ -86,6 +86,7 @@ export function Text({
 }: TextProps) {
   const theme = useTheme();
   const base = theme.typography[variant];
+  const letterSpacing = (base as TextStyle).letterSpacing;
   const scaled =
     theme.textScale === 1
       ? base
@@ -93,6 +94,11 @@ export function Text({
         ...base,
         fontSize: base.fontSize * theme.textScale,
         lineHeight: base.lineHeight * theme.textScale,
+        ...(letterSpacing === undefined
+          ? undefined
+          : {
+            letterSpacing: letterSpacing * theme.textScale,
+          }),
       };
   return (
     <RNText

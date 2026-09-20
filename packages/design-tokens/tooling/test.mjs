@@ -63,6 +63,8 @@ const ROLES = [
   'fg25',
   'fg40',
   'glass',
+  'glassControl',
+  'scrim',
   'hairline',
 ];
 const SCHEMES = ['dark', 'light', 'oled'];
@@ -72,6 +74,7 @@ const SPACING = {
   sm: 8,
   md: 12,
   lg: 16,
+  screen: 14,
   xl: 20,
   xxl: 24,
   xxxl: 32,

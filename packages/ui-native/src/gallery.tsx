@@ -142,7 +142,7 @@ function IconSwatch({ name }: { readonly name: IconName }) {
   return (
     <View style={{ alignItems: 'center', width: 52, gap: 4 }}>
       <Icon name={name} size={16} />
-      <Text variant="metadata" color="secondary" style={{ fontSize: 8 }}>
+      <Text variant="metadata" color="secondary">
         {name}
       </Text>
     </View>

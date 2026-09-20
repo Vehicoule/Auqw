@@ -34,11 +34,11 @@ function Rail({
         style={{
           flexDirection: 'row',
           alignItems: 'baseline',
-          paddingHorizontal: 14,
+          paddingHorizontal: theme.spacing.screen,
           marginBottom: theme.spacing.md,
         }}
       >
-        <Text variant="heading" color="bright" style={{ fontSize: 12.5 }}>
+        <Text variant="heading" color="bright">
           {title}
         </Text>
         {subtitle !== null && (
@@ -71,7 +71,7 @@ function Rail({
           keyExtractor={(card) => card.key}
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={{
-            paddingHorizontal: 14,
+            paddingHorizontal: theme.spacing.screen,
             gap: theme.spacing.lg,
           }}
           renderItem={({ item }) => (
@@ -90,7 +90,7 @@ function Rail({
                 variant="body"
                 color="primary"
                 numberOfLines={1}
-                style={{ marginTop: theme.spacing.sm, fontSize: 11 }}
+                style={{ marginTop: theme.spacing.sm }}
               >
                 {item.title}
               </Text>
@@ -98,7 +98,7 @@ function Rail({
                 variant="metadata"
                 color="secondary"
                 numberOfLines={1}
-                style={{ marginTop: 2, fontSize: 9.5 }}
+                style={{ marginTop: 2 }}
               >
                 {item.subtitle ?? '—'}
               </Text>
@@ -130,7 +130,7 @@ export function HomeScreen({
       <Text
         variant="display"
         color="bright"
-        style={{ paddingHorizontal: 14 }}
+        style={{ paddingHorizontal: theme.spacing.screen }}
       >
         {model.greeting}
       </Text>
@@ -139,7 +139,7 @@ export function HomeScreen({
           variant="metadata"
           color="secondary"
           style={{
-            paddingHorizontal: 14,
+            paddingHorizontal: theme.spacing.screen,
             marginTop: theme.spacing.xs + 1,
           }}
         >

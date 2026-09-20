@@ -55,7 +55,7 @@ export function SearchScreen({
     >
       <View
         style={{
-          marginHorizontal: 14,
+          marginHorizontal: theme.spacing.screen,
           marginTop: theme.spacing.xxs,
           marginBottom: 10,
           backgroundColor: theme.colors.fg08,
@@ -84,7 +84,6 @@ export function SearchScreen({
               flex: 1,
               color: theme.colors.textPrimary,
               paddingVertical: theme.spacing.sm,
-              fontSize: 10.5,
             },
           ]}
         />
@@ -111,11 +110,11 @@ export function SearchScreen({
           style={{
             flexDirection: 'row',
             alignItems: 'baseline',
-            paddingHorizontal: 14,
+            paddingHorizontal: theme.spacing.screen,
             marginBottom: theme.spacing.sm,
           }}
         >
-          <Text variant="heading" color="bright" style={{ fontSize: 12.5 }}>
+          <Text variant="heading" color="bright">
             results
           </Text>
           <Text

@@ -121,7 +121,7 @@ export function MiniPlayer({
                 variant="body"
                 color="bright"
                 numberOfLines={1}
-                style={{ fontSize: 11.5, fontFamily: theme.fontFamilies.medium }}
+                style={{ fontFamily: theme.fontFamilies.medium }}
               >
                 {player.title}
               </Text>
@@ -129,7 +129,6 @@ export function MiniPlayer({
                 variant="metadata"
                 color="secondary"
                 numberOfLines={1}
-                style={{ fontSize: 9 }}
               >
                 {player.artist ?? '—'}
               </Text>
@@ -158,7 +157,7 @@ export function MiniPlayer({
               justifyContent: 'center',
               borderRadius: ios ? 16 : 12,
               backgroundColor: ios
-                ? 'rgba(255,255,255,0.12)'
+                ? theme.colors.glassControl
                 : theme.colors.accentSoft,
               borderWidth: ios ? theme.strokes.hairline : 0,
               borderColor: theme.colors.hairline,
