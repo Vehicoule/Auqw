@@ -1,0 +1,19 @@
+import { run as runErrors } from './errors.test.ts';
+import { run as runCancellation } from './cancellation.test.ts';
+import { run as runDomain } from './domain.test.ts';
+import { run as runLikes } from './library/likes.test.ts';
+import { run as runQueue } from './queue/queue-engine.test.ts';
+import { run as runMatching } from './matching/matching-engine.test.ts';
+import { run as runSearch } from './search/search-session.test.ts';
+import { run as runFakes } from './testing/fakes.test.ts';
+import { run as runSession } from './session/session.test.ts';
+
+runErrors();
+runCancellation();
+runDomain();
+runLikes();
+runQueue();
+runMatching();
+await runSearch();
+await runFakes();
+await runSession();
