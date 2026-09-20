@@ -33,7 +33,7 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 `source` is a `local-build:` path into a sibling `auqw-plugins`
 checkout — clone it next to this repository, build the pinned artifact
 (`./tooling/build.sh <plugin-id>`), then sync. Fetching signed release
-artifacts instead of a sibling build is post–Slice 0 tooling
+artifacts instead of a sibling build is post–Slice 1 tooling
 ([../docs/specs/plugin-system.md](../docs/specs/plugin-system.md) §7).
 
 ## Layout
@@ -42,8 +42,8 @@ artifacts instead of a sibling build is post–Slice 0 tooling
 | --- | --- |
 | `crates/plugin-host` | Wasmi host that loads and invokes provider plugins |
 | `crates/mobile-bindings` | UniFFI `PluginHost` over the host (Android + iOS) |
-| `modules/auqw-expo` | Expo module wrapping the UniFFI bindings + Media3 player (Android + iOS) |
-| `apps/mobile` | Expo app (Slice 0 play screen) — see `apps/mobile/README.md` |
+| `modules/auqw-expo` | Expo module wrapping the UniFFI bindings and the Android Media3 stream player |
+| `apps/mobile` | Expo daily-driver app — see `apps/mobile/README.md` |
 | `packages/application` | Pure TypeScript application core (domain, ports, session) |
 | `packages/design-tokens` | DTCG token source and generated TS/CSS design tokens |
 | `packages/storage-sqlite` | Platform-neutral SQLite `StoragePort` with injected drivers |

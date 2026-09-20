@@ -1,7 +1,7 @@
 # auqw-expo
 
 Expo module (Android + iOS, Slice 1.5) wrapping the UniFFI `PluginHost`
-from `crates/mobile-bindings` plus the app's single Media3 player —
+from `crates/mobile-bindings` plus the app's Android Media3 player —
 the streaming-seam transport side of `PlayerPort`. Strict superset of
 the retired `plugin-host-expo`: same host functions and events, same
 payload shapes. Headless: functions + events, no view.

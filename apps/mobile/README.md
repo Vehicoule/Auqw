@@ -1,9 +1,11 @@
 # auqw-mobile
 
-Expo app (Slice 0): one screen, one Play button. The pinned
-`youtube-music` guest resolves inside the Wasmi host → UniFFI →
-`auqw-expo` → `expo-audio`. Slice 1.5 adds the Media3 stream seam
-inside the same module (`auqw://seam-*` dev links, `seam-dev.ts`).
+Expo daily-driver app: search, matching, playback, queue, likes,
+settings, and restart-restore. Android plays through the `auqw-expo`
+Media3 stream seam; iOS keeps the provisional `expo-audio` path until
+its native seam adapter lands. The pinned provider guests run inside
+the Wasmi host through UniFFI. `auqw://seam-*` dev links exercise the
+transport gates directly (`seam-dev.ts`).
 
 ## Prerequisites
 
@@ -77,28 +79,24 @@ xcrun simctl launch booted com.vehicoule.auqw
 
 ## Background audio
 
-`setAudioModeAsync({ shouldPlayInBackground: true,
-interruptionMode: 'doNotMix' })` plus
-`player.setActiveForLockScreen(true, metadata)` — on Android the
-lock-screen activation is what keeps playback alive past ~3 min in
-the background (per Expo SDK 57 docs). The `expo-audio` config plugin
-in `app.config.ts` enables background playback (FOREGROUND_SERVICE +
-AudioControlsService); recording permissions are disabled.
+Android uses the `AuqwMediaSessionService` foreground service, its
+MediaSession lock-screen controls, and the service-owned queue
+projection. The provisional iOS player requests background playback
+with `setAudioModeAsync`. The `expo-audio` config plugin supplies the
+Android manifest permissions and keeps recording disabled.
 
 ## Notes
 
 - No Expo Router (coding rules: named exports only).
-- The signed stream URL is passed to `expo-audio` but never rendered
-  or logged.
-- The resolved URL is downloaded to the cache in 1 MiB
-  `Range: bytes=` chunks; playback starts once the first 256 KiB are
-  on disk (the player keeps reading the growing file). A 403
-  mid-download — the stochastic GVS per-mint cap — re-resolves for a
-  fresh mint and resumes at the written offset; a mint that serves no
-  new bytes counts as zero progress, and after 2 in a row (or 8 mints
-  total) the cap fails honestly as `expired-resource`. A re-mint that
-  returns a different encoding restarts the file. Every chunk is a
-  strict `206` (anything else is a serving violation) with a 60 s
-  stall timeout, and Cancel aborts the loop.
+- Android playback uses opaque stream handles and the `auqw://stream`
+  Media3 data source; the signed URL stays below the Rust seam and is
+  never rendered or logged. The sparse store commits body pieces as
+  they arrive, persists extents for restart recovery, and the pump
+  enforces strict range responses, remint budgets, cancellation, and
+  seek-driven fetch-through.
+- The provisional iOS adapter still downloads through bounded
+  `Range: bytes=` requests to a growing cache file and plays it with
+  `expo-audio`; cap recovery and response validation follow the same
+  typed-error rules until the iOS seam replaces it.
 - `metro.config.js` registers `.wasm` as an asset type; the manifest
   JSONs are `require`d as modules.
