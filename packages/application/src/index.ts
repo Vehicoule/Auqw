@@ -9,6 +9,7 @@ export * from './ports/clock.ts';
 export * from './ports/log.ts';
 export * from './library/likes.ts';
 export * from './library/library.ts';
+export * from './library/corrections.ts';
 export * from './queue/queue-engine.ts';
 export * from './matching/matching-engine.ts';
 export * from './search/search-session.ts';
