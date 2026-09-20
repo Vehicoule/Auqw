@@ -16,7 +16,7 @@
 //! notify lands.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,19 @@ pub(crate) struct PumpCore {
 }
 
 /// What the pump should do next, computed under `shared`+`store`.
+/// Parked demand's position relative to an in-flight speculative
+/// fetch's `[offset, offset+len)` range.
+pub(crate) enum DemandCover {
+    /// No demand is queued — the fill runs undisturbed.
+    None,
+    /// Every queued demand lies inside the in-flight range; the
+    /// commit will serve it, so the fetch may keep running.
+    Covered,
+    /// Some demand lies outside — the fill should abort so the pump
+    /// can re-decide on the demand first.
+    Outside,
+}
+
 pub(crate) enum Action {
     /// Terminal state or fully covered file — the pump exits.
     Stop,
@@ -175,11 +188,17 @@ pub(crate) struct SessionInner {
     /// Serializes an in-flight persist job's sidecar write against a
     /// terminal transition's `paths.evict()` — see the lock order.
     pub persist_lock: Mutex<()>,
+    /// One persist worker at a time — commits must not queue up
+    /// behind the fsync+rename chain, so the worker is a detached
+    /// loop rather than an awaited join.
+    persist_running: AtomicBool,
 }
 
 impl SessionInner {
-    /// Build the session files and in-memory state; writes the initial
-    /// (empty-extents) sidecar so a crash leaves a valid pair.
+    /// Build the session files and in-memory state. The sidecar is
+    /// deferred to the first commit's persist job — an empty-extents
+    /// fsync chain would only stall prepare → pump start, and a crash
+    /// before it leaves an orphan `.bin` the next sweep deletes.
     pub(crate) fn new(
         handle: String,
         source: PreparedSource,
@@ -188,7 +207,7 @@ impl SessionInner {
         pool: Arc<PoolSignals>,
     ) -> Result<Arc<Self>, StreamError> {
         let paths = SessionPaths::new(&config.cache_dir, &handle);
-        let mut store = SparseStore::create(&paths, source.content_length)?;
+        let store = SparseStore::create(&paths, source.content_length)?;
         let meta = SidecarMeta {
             source_ref: source.source_ref.clone(),
             provider: source.provider.clone(),
@@ -197,7 +216,10 @@ impl SessionInner {
             bitrate_kbps: source.bitrate_kbps,
             expires_at_ms: source.expires_at_ms,
         };
-        store.persist(&paths, &meta)?;
+        // No initial persist: the first commit's persist job writes
+        // the sidecar with real extents — the empty-extents fsync
+        // chain would only stall prepare → pump start. A crash in
+        // between leaves an orphan `.bin` the next sweep deletes.
         Ok(Arc::new(Self {
             paths,
             meta,
@@ -235,6 +257,7 @@ impl SessionInner {
             created: Instant::now(),
             pool,
             persist_lock: Mutex::new(()),
+            persist_running: AtomicBool::new(false),
         }))
     }
 
@@ -415,19 +438,15 @@ impl SessionInner {
 
     /// Commit fetched bytes: extent merge, marks, then wake parked
     /// readers *before* the sidecar flush — parked readers are never
-    /// stalled on the durability chain. The fsync+rename chain itself
-    /// runs on `spawn_blocking` off a snapshot, so neither a runtime
-    /// worker nor covered `try_serve` reads sit behind an fsync. Store
-    /// work happens before the `shared` guard is taken (see module
-    /// lock order). A commit landing after a terminal transition is a
-    /// no-op past the data write — never a post-evict sidecar
-    /// resurrection.
-    pub(crate) async fn commit(
-        self: &Arc<Self>,
-        offset: u64,
-        bytes: &[u8],
-        through: Option<u64>,
-    ) -> Result<(), StreamError> {
+    /// stalled on the durability chain. Called per body piece as the
+    /// wire streams, so readers wake on the first bytes of a chunk
+    /// rather than its end; a covered demand position is released by
+    /// the reader's `drop_through` (or pruned by `next_action`), never
+    /// by the commit itself. Store work happens before the `shared`
+    /// guard is taken (see module lock order). A commit landing after
+    /// a terminal transition is a no-op past the data write — never a
+    /// post-evict sidecar resurrection.
+    pub(crate) fn commit(self: &Arc<Self>, offset: u64, bytes: &[u8]) -> Result<(), StreamError> {
         let (head_covered, due) = {
             let mut store = lock(&self.store)?;
             store.insert(offset, bytes)?;
@@ -441,10 +460,6 @@ impl SessionInner {
             if sh.terminal.is_some() {
                 return Ok(());
             }
-            if let Some(p) = through {
-                sh.fetch_through.remove(&p);
-                self.publish_demand(&mut sh);
-            }
             sh.committed += bytes.len() as u64;
             if sh.marks.first_byte_ms.is_none() {
                 sh.marks.first_byte_ms = Some(now_ms());
@@ -457,32 +472,85 @@ impl SessionInner {
         };
         self.readers.notify_all();
         if became_ready || due {
-            let job = lock(&self.store)?.persist_job(&self.meta)?;
-            let me = Arc::clone(self);
-            let paths = self.paths.clone();
-            tokio::task::spawn_blocking(move || {
-                job.sync_data()?;
-                // `persist_lock` serializes the sidecar write against a
-                // terminal transition's `paths.evict()`: either this
-                // write lands first (and the evict removes it) or the
-                // terminal flag is already set and the write is skipped
-                // — an in-flight persist can never resurrect the
-                // sidecar of a dead session. `shared` is held only for
-                // the check, never across I/O, so readers don't wait
-                // on the durability chain.
-                let _pg = lock(&me.persist_lock)?;
-                let live = lock(&me.shared).map(|sh| sh.terminal.is_none())?;
-                if live {
-                    job.persist(&paths)?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|_| StreamError::Internal {
-                message: "persist worker failed".into(),
-            })??;
+            self.kick_persist();
         }
         Ok(())
+    }
+
+    /// Spawn the persist worker if none is running. It loops while the
+    /// store stays due, so commits landing mid-persist are picked up
+    /// without a second task — and the pump never stalls behind the
+    /// fsync+rename chain. A persist failure terminates the session:
+    /// a sidecar it cannot write is a cache it cannot trust.
+    fn kick_persist(self: &Arc<Self>) {
+        if self.persist_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let job = match lock(&me.store).and_then(|mut s| s.persist_job(&me.meta)) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        me.terminate(e);
+                        break;
+                    }
+                };
+                let me2 = Arc::clone(&me);
+                let paths = me.paths.clone();
+                let r = tokio::task::spawn_blocking(move || {
+                    job.sync_data()?;
+                    // `persist_lock` serializes the sidecar write
+                    // against a terminal transition's `paths.evict()`:
+                    // either this write lands first (and the evict
+                    // removes it) or the terminal flag is already set
+                    // and the write is skipped — an in-flight persist
+                    // can never resurrect the sidecar of a dead
+                    // session. `shared` is held only for the check,
+                    // never across I/O, so readers don't wait on the
+                    // durability chain.
+                    let _pg = lock(&me2.persist_lock)?;
+                    let live = lock(&me2.shared).map(|sh| sh.terminal.is_none())?;
+                    if live {
+                        job.persist(&paths)?;
+                    }
+                    Ok::<bool, StreamError>(live)
+                })
+                .await;
+                match r {
+                    // Terminal sessions need no sidecar: stop, whatever
+                    // `persist_due` says — post-terminal commits can
+                    // still re-dirty the store.
+                    Ok(Ok(false)) => break,
+                    Ok(Ok(true)) => {}
+                    Ok(Err(e)) => {
+                        me.terminate(e);
+                        break;
+                    }
+                    Err(_) => {
+                        me.terminate(StreamError::Internal {
+                            message: "persist worker failed".into(),
+                        });
+                        break;
+                    }
+                }
+                if !lock(&me.store).map(|s| s.persist_due()).unwrap_or(false) {
+                    break;
+                }
+            }
+            me.persist_running.store(false, Ordering::SeqCst);
+            // A commit between the last due-check and this flag clear
+            // was skipped by `swap` — re-kick so the flush isn't lost.
+            // Never re-arm for a dead session: a repeated `persist_job`
+            // failure would otherwise churn spawn → terminate → re-kick.
+            let due = lock(&me.store).map(|s| s.persist_due()).unwrap_or(false);
+            let live = lock(&me.shared)
+                .map(|sh| sh.terminal.is_none())
+                .unwrap_or(false);
+            if due && live {
+                me.kick_persist();
+            }
+        });
     }
 
     /// Latch a retriable failure (`Transient`/`RateLimited` after the
@@ -555,7 +623,12 @@ impl SessionInner {
         if let Some(&pos) = sh.fetch_through.keys().next() {
             return Ok(Action::Fetch {
                 offset: pos,
-                len: self.config.chunk_bytes,
+                // Probe-sized: the parked reader wakes on the first
+                // commit covering `pos`, so a small range unblocks it
+                // a `chunk_bytes` transfer sooner; the reader re-queues
+                // demand (or attached fill chases `read_pos`) for the
+                // rest of its want. A cap, never a floor.
+                len: self.config.probe_bytes.min(self.config.chunk_bytes),
                 through: true,
             });
         }
@@ -583,7 +656,14 @@ impl SessionInner {
         match store.first_gap(lo, bound) {
             Some(gap) => Ok(Action::Fetch {
                 offset: gap,
-                len: (bound - gap).min(self.config.chunk_bytes),
+                // Probe-sized until the first commit exists: `first_byte`
+                // and any early demand both ride this fetch, so landing
+                // it fast beats filling wide. A cap, never a floor.
+                len: (bound - gap).min(if sh.committed == 0 {
+                    self.config.probe_bytes.min(self.config.chunk_bytes)
+                } else {
+                    self.config.chunk_bytes
+                }),
                 through: false,
             }),
             None => {
@@ -806,6 +886,25 @@ impl SessionInner {
         if last {
             sh.fetch_through.remove(&position);
             self.publish_demand(sh);
+        }
+    }
+
+    /// Where parked demand sits relative to an in-flight
+    /// `[offset, offset+len)` fetch: `Outside` preempts at once,
+    /// `Covered` rides the in-flight fetch up to the stall budget,
+    /// `None` leaves the fill alone. Fail-open on a poisoned lock.
+    pub(crate) fn demand_cover(&self, offset: u64, len: u64) -> DemandCover {
+        let Ok(sh) = lock(&self.shared) else {
+            return DemandCover::Outside;
+        };
+        if sh.fetch_through.is_empty() {
+            return DemandCover::None;
+        }
+        let end = offset.saturating_add(len);
+        if sh.fetch_through.keys().all(|&p| offset <= p && p < end) {
+            DemandCover::Covered
+        } else {
+            DemandCover::Outside
         }
     }
 

@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::StreamError;
 
-/// Number of chunk writes between sidecar flushes. Persisted extents
-/// may lag the file by at most this many chunks; under-reporting is
-/// the safe direction.
-pub(crate) const PERSIST_EVERY_CHUNKS: u32 = 8;
+/// Committed bytes between sidecar flushes. Persisted extents may lag
+/// the file by at most this many bytes; under-reporting is the safe
+/// direction. Bytes, not piece count — the cadence must not depend on
+/// how the network frames the body.
+pub(crate) const PERSIST_EVERY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Upper bound on one `read_at` serve. `max_len` arrives across the
 /// FFI boundary unbounded — this keeps the allocation sized for real
@@ -147,8 +148,12 @@ pub(crate) struct SparseStore {
     /// Guest-reported `content_length` hint, used until the wire
     /// answers a `Content-Range`.
     hint_total: Option<u64>,
-    /// Chunk writes since the last sidecar flush.
-    dirty: u32,
+    /// Bytes written since the last sidecar flush.
+    dirty_bytes: u64,
+    /// Whether the sidecar has been written at least once — the first
+    /// persist is deferred off `create` (and off `prepare`) until real
+    /// bytes exist to claim.
+    ever_persisted: bool,
 }
 
 impl SparseStore {
@@ -171,7 +176,8 @@ impl SparseStore {
             extents: BTreeMap::new(),
             total: None,
             hint_total,
-            dirty: 0,
+            dirty_bytes: 0,
+            ever_persisted: false,
         })
     }
 
@@ -250,7 +256,7 @@ impl SparseStore {
             }
         }
         self.extents.insert(new_start, new_end);
-        self.dirty += 1;
+        self.dirty_bytes += bytes.len() as u64;
         Ok(())
     }
 
@@ -302,9 +308,10 @@ impl SparseStore {
         self.total.or(self.hint_total)
     }
 
-    /// Persist the extent map when the dirty-chunk threshold or a
-    /// milestone says so. File data is synced first — see the module
-    /// ordering invariant.
+    /// Persist the extent map synchronously — tests only; production
+    /// commits go through [`SparseStore::persist_job`] so the fsync
+    /// chain runs off the store lock and off the runtime worker.
+    #[cfg(test)]
     pub(crate) fn persist(
         &mut self,
         paths: &SessionPaths,
@@ -333,13 +340,15 @@ impl SparseStore {
             expires_at_ms: meta.expires_at_ms,
             extents: self.extents.iter().map(|(s, e)| (*s, *e)).collect(),
         };
-        self.dirty = 0;
+        self.dirty_bytes = 0;
+        self.ever_persisted = true;
         Ok(PersistJob { file, sidecar })
     }
 
-    /// Whether a flush is due by chunk count.
+    /// Whether a flush is due — always until the sidecar exists, then
+    /// by committed bytes.
     pub(crate) fn persist_due(&self) -> bool {
-        self.dirty >= PERSIST_EVERY_CHUNKS
+        !self.ever_persisted || self.dirty_bytes >= PERSIST_EVERY_BYTES
     }
 }
 
@@ -373,7 +382,9 @@ pub(crate) struct PersistJob {
 
 impl PersistJob {
     /// `sync_data` the file first, then write the sidecar that claims
-    /// its extents — the module's crash-honesty ordering.
+    /// its extents — the module's crash-honesty ordering. Tests only;
+    /// `commit` splits the halves to interpose a liveness check.
+    #[cfg(test)]
     pub(crate) fn run(self, paths: &SessionPaths) -> Result<(), StreamError> {
         self.sync_data()?;
         self.persist(paths)
@@ -510,6 +521,38 @@ mod tests {
         std::fs::write(&paths.sidecar, b"{not json").unwrap_or_else(|e| panic!("w: {e}"));
         assert!(Sidecar::load(&paths.sidecar).is_err());
         drop(dir);
+    }
+
+    /// The persist cadence is a byte budget, not a piece count — the
+    /// fsync chain must not run at the mercy of how the wire frames
+    /// the body. The first commit's flush is exempt: the sidecar is
+    /// deferred until real bytes exist to claim.
+    #[test]
+    fn persist_due_counts_bytes_not_pieces() {
+        let (_d, paths, mut s) = store("persistbytes");
+        let meta = SidecarMeta {
+            source_ref: "vid".into(),
+            provider: "test".into(),
+            mime: "audio/mp4".into(),
+            itag: Some(140),
+            bitrate_kbps: Some(129),
+            expires_at_ms: Some(99),
+        };
+        // No sidecar yet — due until the first real flush lands.
+        assert!(s.persist_due());
+        insert(&mut s, 0, 64);
+        s.persist(&paths, &meta)
+            .unwrap_or_else(|e| panic!("persist: {e}"));
+        assert!(!s.persist_due(), "a fresh sidecar resets the budget");
+        // Hundreds of small pieces under the byte threshold must never
+        // trip it — the piece-count storm regression.
+        for i in 0..512u64 {
+            insert(&mut s, 1_000_000 + i * 64, 64);
+            assert!(!s.persist_due(), "piece {i} tripped the byte budget");
+        }
+        // One write crossing the byte threshold trips it at once.
+        insert(&mut s, 0, PERSIST_EVERY_BYTES + 1);
+        assert!(s.persist_due());
     }
 
     #[test]

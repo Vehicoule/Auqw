@@ -25,6 +25,8 @@ import androidx.media3.datasource.FileDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
@@ -152,6 +154,23 @@ class AuqwExpoModule : Module() {
   private var host: PluginHost? = null
   private val streamRegistry = AuqwStreamRegistry()
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
+  // The seam's terminal kinds (released/expired/superseded/…) can
+  // never succeed on retry — let them fail to onPlayerError at once
+  // instead of burning the default policy's ~3s of retries; the
+  // latched transient/rate-limit hints stay retryable because a
+  // re-read re-drives the pump and may recover.
+  private val streamLoadErrorPolicy = object : DefaultLoadErrorHandlingPolicy() {
+    override fun getRetryDelayMsFor(error: LoadErrorInfo): Long {
+      val kind = (error.exception as? AuqwStreamException)?.kind
+      if (kind != null && kind != "transient" && kind != "rate-limit") {
+        return C.TIME_UNSET
+      }
+      return super.getRetryDelayMsFor(error)
+    }
+  }
+  private val streamMediaSourceFactory = ProgressiveMediaSource
+    .Factory(streamDataSourceFactory)
+    .setLoadErrorHandlingPolicy(streamLoadErrorPolicy)
 
   // Warm singleton player, owned by AuqwMediaSessionService and reached
   // via an in-process binder — bound at module create so the bind never
@@ -455,12 +474,14 @@ class AuqwExpoModule : Module() {
       if (streamRegistry.hostFor(handle) == null) {
         throw CodedException("ERR_HANDLE_UNKNOWN", "unknown stream handle", null)
       }
-      maybeRequestNotificationPermission()
       attachNow(
         handle, attemptId, queueRev, positionMs,
         Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
         OccurrenceBind.CURSOR, null
       )
+      // After the attach post so a first-play permission prompt can't
+      // queue ahead of it on the main looper.
+      maybeRequestNotificationPermission()
       null
     }
 
@@ -747,14 +768,18 @@ class AuqwExpoModule : Module() {
       )
       return
     }
-    // The mark is emitted only once the attach is accepted — a
-    // skipped attach leaves no stale mark behind.
-    emitPhaseMark(a, "attach")
-    val source = ProgressiveMediaSource.Factory(dataSourceFactory)
-      .createMediaSource(MediaItem.fromUri(uri))
+    val source = (if (dataSourceFactory === streamDataSourceFactory) {
+      streamMediaSourceFactory
+    } else {
+      ProgressiveMediaSource.Factory(dataSourceFactory)
+    }).createMediaSource(MediaItem.fromUri(uri))
     p.setMediaSource(source, positionMs?.toLong() ?: 0L)
     p.prepare()
     p.play()
+    // The mark is emitted only once the attach is accepted — a
+    // skipped attach leaves no stale mark behind; after play() the
+    // sendEvent cost stays off the source-creation path.
+    emitPhaseMark(a, "attach")
     // The join is committed only once the player accepted the source:
     // a thrown setMediaSource leaves no Attachment echoing statuses
     // for a stream that never played.

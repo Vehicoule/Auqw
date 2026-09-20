@@ -37,7 +37,7 @@ mod store;
 mod testkit;
 
 pub use error::StreamError;
-pub use fetch::{Fetch, FetchResponse, ReqwestFetch};
+pub use fetch::{BodyStream, Fetch, FetchResponse, ReqwestFetch};
 pub use marks::PhaseMarks;
 pub use registry::{PrepareInfo, StreamRegistry, SweepReport};
 
@@ -65,6 +65,12 @@ pub struct StreamConfig {
     pub read_ahead: u64,
     /// Max bytes per range request.
     pub chunk_bytes: u64,
+    /// Granularity for latency-critical fetches: demand reads and a
+    /// session's first speculative fill. A smaller range lands the
+    /// first commit — and unblocks the parked reader — a `chunk_bytes`
+    /// transfer sooner. Steady-state fill still uses `chunk_bytes`.
+    /// A cap, never a floor.
+    pub probe_bytes: u64,
     /// No-progress bound inside one request (headers wait or a body
     /// stall) — aborts the chunk fetch into `Transient`.
     pub stall: Duration,
@@ -114,6 +120,7 @@ impl StreamConfig {
             head_bytes: 3 * 1024 * 1024,
             read_ahead: 4 * 1024 * 1024,
             chunk_bytes: 256 * 1024,
+            probe_bytes: 64 * 1024,
             stall: Duration::from_secs(10),
             mint_budget: 4,
             max_zero_progress_mints: 2,

@@ -197,11 +197,15 @@ impl Fetch for MapFetch {
     }
 }
 
+fn stream_body(body: Vec<u8>) -> auqw_stream::BodyStream {
+    Box::pin(futures_util::stream::once(async move { Ok(body) }))
+}
+
 fn chunk(offset: u64, len: u64, total: u64, byte: u8) -> FetchResponse {
     FetchResponse {
         status: 206,
         content_range: Some(format!("bytes {}-{}/{}", offset, offset + len - 1, total)),
-        body: vec![byte; usize::try_from(len).unwrap_or(0)],
+        body: stream_body(vec![byte; usize::try_from(len).unwrap_or(0)]),
     }
 }
 
@@ -875,7 +879,7 @@ async fn hung_remint_is_bounded_by_mint_deadline() {
         VecDeque::from([Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
-            body: vec![],
+            body: stream_body(vec![]),
         })]),
     );
     let reg = StreamRegistry::with_fetch(
@@ -926,7 +930,7 @@ async fn malformed_content_range_never_echoes_server_text() {
         Step::Reply(FetchResponse {
             status: 206,
             content_range: Some("bytes sig=SECRET-echo/9".into()),
-            body: vec![1u8],
+            body: stream_body(vec![1u8]),
         })
     };
     pages.insert(0u64, VecDeque::from([malformed(), malformed()]));
@@ -962,12 +966,12 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */1024".into()),
-                body: vec![],
+                body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */1024".into()),
-                body: vec![],
+                body: stream_body(vec![]),
             }),
         ]),
     );
@@ -1340,4 +1344,121 @@ async fn detached_session_evicted_by_detached_age() {
     wait_until(|| !reg.is_live(&h)).await;
     let e = err_of(reg.attach(&h, 0));
     assert_eq!(e.kind(), "evicted", "{e}");
+}
+
+/// A body that yields its first piece and then hangs must still serve
+/// a parked reader — the seam commits incrementally as the wire
+/// streams, so a reader wakes on the first network frame rather than
+/// the whole declared range.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reader_is_served_from_the_first_body_piece() {
+    struct FirstPieceOnly;
+    impl Fetch for FirstPieceOnly {
+        fn get_range<'a>(
+            &'a self,
+            _url: &'a str,
+            offset: u64,
+            max_len: u64,
+            _stall: Duration,
+            _deadline: Duration,
+            _cancel: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
+            Box::pin(async move {
+                let mut sent = false;
+                let body = Box::pin(futures_util::stream::poll_fn(move |cx| {
+                    let _ = cx;
+                    if sent {
+                        return std::task::Poll::Pending;
+                    }
+                    sent = true;
+                    std::task::Poll::Ready(Some(Ok(vec![7u8; 64])))
+                }));
+                Ok(FetchResponse {
+                    status: 206,
+                    content_range: Some(format!("bytes {offset}-{}/1024", offset + max_len - 1)),
+                    body,
+                })
+            })
+        }
+    }
+    let d = TestDir::new("piecewise");
+    let mut c = config(&d);
+    c.probe_bytes = 128;
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(FirstPieceOnly),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    // The demand fetch declares 128 bytes but its body stops after 64:
+    // a buffered-commit seam would park the read forever.
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 0, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert_eq!(got, vec![7u8; 64]);
+}
+
+/// A demand read landing inside the in-flight fill's range is served
+/// by that fetch's body — it must not preempt into a second request
+/// for the same bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn covered_demand_read_is_served_by_the_in_flight_fill() {
+    let d = TestDir::new("coveredride");
+    let open = Arc::new(tokio::sync::Notify::new());
+    let open2 = Arc::clone(&open);
+    let mut pages = HashMap::new();
+    // Headers arrive at once; the body waits on the test's gate, so the
+    // fill is provably in flight while the reader's demand queues.
+    pages.insert(
+        0u64,
+        VecDeque::from([Step::Reply(FetchResponse {
+            status: 206,
+            content_range: Some("bytes 0-127/1024".into()),
+            body: Box::pin(futures_util::stream::once(async move {
+                open2.notified().await;
+                Ok(vec![9u8; 128])
+            })),
+        })]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let mut c = config(&d);
+    // The covered ride is bounded by `stall` — keep it far outside the
+    // parked window below so only a genuine preempt can add a request.
+    c.stall = Duration::from_secs(2);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    std::thread::scope(|s| {
+        let t = s.spawn(|| reg.read(&h, 0, 64));
+        wait_until_blocking(|| fetch.issued(0));
+        // The fill's body is still gated, so the reader is parked on
+        // demand covered by [0,128) — a preempt would re-issue the
+        // range at once.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            fetch.count_at(0),
+            1,
+            "covered demand re-issued the in-flight range"
+        );
+        open.notify_one();
+        let got = t
+            .join()
+            .unwrap_or_else(|e| panic!("join: {e:?}"))
+            .unwrap_or_else(|e| panic!("read: {e}"));
+        assert_eq!(got, vec![9u8; 64]);
+        assert_eq!(fetch.count_at(0), 1);
+    });
 }
