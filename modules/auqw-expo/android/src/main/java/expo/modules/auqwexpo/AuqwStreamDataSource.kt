@@ -96,8 +96,21 @@ class AuqwStreamDataSource(
 
     val remaining = try {
       streamHost.streamOpen(streamHandle, dataSpec.position.toULong())
-    } catch (e: StreamException) {
-      throw AuqwStreamException(streamKind(e), e.message, e)
+    } catch (e: Exception) {
+      // The transferInitializing above always wants its transferEnded
+      // — close() skips it here because `opened` was never set.
+      transferEnded()
+      if (e is StreamException) {
+        // `not-found` means the session is gone from the Rust map —
+        // the routing entry is dead weight; drop it so the registry
+        // only ever names live-or-terminal handles. Terminal kinds
+        // keep their entry: a re-open must still raise the typed error.
+        if (streamKind(e) == "not-found") {
+          registry.unregister(streamHandle)
+        }
+        throw AuqwStreamException(streamKind(e), e.message, e)
+      }
+      throw e
     }
     opened = true
     transferStarted(dataSpec)
@@ -174,8 +187,9 @@ class AuqwStreamDataSource(
     if (opened && currentHost != null && currentHandle != null) {
       try {
         currentHost.streamClose(currentHandle)
-      } catch (e: StreamException) {
-        Log.i(TAG, "streamClose: ${streamKind(e)} (already terminal)")
+      } catch (e: Exception) {
+        val kind = if (e is StreamException) streamKind(e) else "internal"
+        Log.i(TAG, "streamClose: $kind (already terminal)")
       }
       transferEnded()
     }

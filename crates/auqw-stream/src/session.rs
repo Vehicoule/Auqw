@@ -3,8 +3,12 @@
 //! bridge deadlock-free.
 //!
 //! Lock order (the only nestings allowed): the registry's `sessions`
-//! map is outermost, then `shared` → `core` → `store`. `store` is
-//! always innermost: nothing takes another lock while holding it, and
+//! map is outermost, then `persist_lock` → `shared` → `core` → `store`.
+//! `persist_lock` exists only to serialize a persist job's sidecar
+//! write against a terminal transition's `paths.evict()` — the `shared`
+//! guard is taken under it just long enough to check `terminal`, so
+//! readers never wait on the fsync+rename chain. `store` is always
+//! innermost: nothing takes another lock while holding it, and
 //! `shared` is never taken while holding `core`.
 //! Readers wait on `readers` with the `shared` guard; producers commit
 //! store writes first, then take `shared` to record marks and notify —
@@ -53,6 +57,19 @@ pub(crate) struct Shared {
     /// This session's contribution to `PoolSignals::demand` — kept so
     /// every `fetch_through` mutation can apply just the delta.
     pub demand_published: usize,
+    /// Latched retriable failure (`Transient`/`RateLimited` after the
+    /// pump's bounded retries ran out): the pump parks on it, parked
+    /// readers observe it once, and a re-read or `attach` clears it and
+    /// re-drives demand. Distinct from `terminal` — a network wobble
+    /// is not a session death.
+    pub transient_error: Option<StreamError>,
+    /// When the session last became detached: `Some` from creation
+    /// until the first attach, `None` while a consumer is attached,
+    /// re-armed by `close`. The reaper's clock — abandonment is
+    /// measured by detached duration, not session age, so a
+    /// previously attached session survives the DataSource
+    /// close→open window regardless of how long it has been playing.
+    pub detached_since: Option<Instant>,
 }
 
 /// Fetch-through backpressure shared across one registry's sessions:
@@ -155,6 +172,9 @@ pub(crate) struct SessionInner {
     /// Cross-session demand accounting — attached fetch-through
     /// outranks this session's speculative fill.
     pub pool: Arc<PoolSignals>,
+    /// Serializes an in-flight persist job's sidecar write against a
+    /// terminal transition's `paths.evict()` — see the lock order.
+    pub persist_lock: Mutex<()>,
 }
 
 impl SessionInner {
@@ -171,6 +191,7 @@ impl SessionInner {
         let mut store = SparseStore::create(&paths, source.content_length)?;
         let meta = SidecarMeta {
             source_ref: source.source_ref.clone(),
+            provider: source.provider.clone(),
             mime: source.mime.clone(),
             itag: source.itag,
             bitrate_kbps: source.bitrate_kbps,
@@ -191,6 +212,8 @@ impl SessionInner {
                 committed: 0,
                 detach_epoch: 0,
                 demand_published: 0,
+                transient_error: None,
+                detached_since: Some(Instant::now()),
                 marks: PhaseMarks {
                     prepare_started_ms: now_ms(),
                     ..PhaseMarks::default()
@@ -211,6 +234,7 @@ impl SessionInner {
             task: Mutex::new(None),
             created: Instant::now(),
             pool,
+            persist_lock: Mutex::new(()),
         }))
     }
 
@@ -229,6 +253,17 @@ impl SessionInner {
         lock(&self.shared).map(|sh| sh.attached).unwrap_or(false)
     }
 
+    /// How long the session has sat detached — `None` while attached.
+    /// The reaper and coalesce-reuse measure staleness from detach,
+    /// not creation: a prepare that never became a play is abandoned
+    /// from the start, but a session that played and detached (the
+    /// DataSource close→open on a seek) only counts its dark window.
+    pub(crate) fn detached_for(&self) -> Option<Duration> {
+        lock(&self.shared)
+            .ok()
+            .and_then(|sh| sh.detached_since.map(|d| d.elapsed()))
+    }
+
     /// Enter terminal state: first error wins, parked readers wake into
     /// it, in-flight work is aborted, and the partial file is evicted
     /// (v1 pins nothing offline).
@@ -241,6 +276,14 @@ impl SessionInner {
     /// transition stay atomic, so an attach landing between them wins.
     pub(crate) fn terminate_if(&self, e: StreamError, cond: impl FnOnce(&Shared) -> bool) {
         {
+            // `persist_lock` → `shared` (lock order): the persist job
+            // holds `persist_lock` across its sidecar write and checks
+            // `terminal` under `shared`, so the write either lands
+            // before this evict (and is removed) or is skipped — never
+            // an orphan sidecar outliving the session.
+            let Ok(_pg) = lock(&self.persist_lock) else {
+                return;
+            };
             let Ok(mut sh) = lock(&self.shared) else {
                 return;
             };
@@ -252,6 +295,7 @@ impl SessionInner {
             // must not hold back other sessions' speculative fill.
             sh.fetch_through.clear();
             self.publish_demand(&mut sh);
+            self.paths.evict();
         }
         self.cancel.cancel();
         self.readers.notify_all();
@@ -261,7 +305,6 @@ impl SessionInner {
                 h.abort();
             }
         }
-        self.paths.evict();
     }
 
     /// The URL the pump fetches next (current mint).
@@ -330,9 +373,11 @@ impl SessionInner {
         Ok(())
     }
 
-    /// Adopt a re-minted source. The MIME pin is enforced: a re-mint
-    /// that returns a different container is terminal, never a silent
-    /// swap. Returns the source to install only when it passes.
+    /// Adopt a re-minted source. The MIME pin and the itag pin are
+    /// both enforced: a re-mint that returns a different container —
+    /// or a different encode under the same container — is terminal,
+    /// never a silent swap spliced into the extents. Returns the
+    /// source to install only when it passes.
     pub(crate) fn finish_mint(
         &self,
         source: PreparedSource,
@@ -345,6 +390,14 @@ impl SessionInner {
                 message: format!(
                     "re-mint changed mime {} -> {}",
                     core.pinned_mime, source.mime
+                ),
+            });
+        }
+        if source.itag != core.source.itag {
+            return Err(StreamError::InvalidResponse {
+                message: format!(
+                    "re-mint changed itag {:?} -> {:?}",
+                    core.source.itag, source.itag
                 ),
             });
         }
@@ -370,7 +423,7 @@ impl SessionInner {
     /// no-op past the data write — never a post-evict sidecar
     /// resurrection.
     pub(crate) async fn commit(
-        &self,
+        self: &Arc<Self>,
         offset: u64,
         bytes: &[u8],
         through: Option<u64>,
@@ -405,14 +458,52 @@ impl SessionInner {
         self.readers.notify_all();
         if became_ready || due {
             let job = lock(&self.store)?.persist_job(&self.meta)?;
+            let me = Arc::clone(self);
             let paths = self.paths.clone();
-            tokio::task::spawn_blocking(move || job.run(&paths))
-                .await
-                .map_err(|_| StreamError::Internal {
-                    message: "persist worker failed".into(),
-                })??;
+            tokio::task::spawn_blocking(move || {
+                job.sync_data()?;
+                // `persist_lock` serializes the sidecar write against a
+                // terminal transition's `paths.evict()`: either this
+                // write lands first (and the evict removes it) or the
+                // terminal flag is already set and the write is skipped
+                // — an in-flight persist can never resurrect the
+                // sidecar of a dead session. `shared` is held only for
+                // the check, never across I/O, so readers don't wait
+                // on the durability chain.
+                let _pg = lock(&me.persist_lock)?;
+                let live = lock(&me.shared).map(|sh| sh.terminal.is_none())?;
+                if live {
+                    job.persist(&paths)?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| StreamError::Internal {
+                message: "persist worker failed".into(),
+            })??;
         }
         Ok(())
+    }
+
+    /// Latch a retriable failure (`Transient`/`RateLimited` after the
+    /// pump's bounded retries): the session stays live, the pump parks
+    /// on the latch, and a parked reader observes the error once. A
+    /// re-read's demand or an `attach` clears it — network wobble is
+    /// never terminal on its own. Queued demand positions are left in
+    /// place: they are real parked readers, and their holds keep the
+    /// refcount honest while the latch holds the pump.
+    pub(crate) fn stall_transient(&self, e: StreamError) {
+        {
+            let Ok(mut sh) = lock(&self.shared) else {
+                return;
+            };
+            if sh.terminal.is_some() {
+                return;
+            }
+            sh.transient_error = Some(e);
+        }
+        self.readers.notify_all();
+        self.pump_notify.notify_one();
     }
 
     /// Note a confirmed end-of-stream ceiling (`416` evidence): wake
@@ -437,6 +528,11 @@ impl SessionInner {
         let mut sh = lock(&self.shared)?;
         if sh.terminal.is_some() {
             return Ok(Action::Stop);
+        }
+        if sh.transient_error.is_some() {
+            // A retriable failure is latched: park until a reader's
+            // demand (or an attach) clears it and re-drives the pump.
+            return Ok(Action::Park { on_demand: false });
         }
         let store = lock(&self.store)?;
         let total = store.effective_total();
@@ -511,10 +607,13 @@ impl SessionInner {
             let core = lock(&self.core)?;
             // Expiry and the prepare TTL gate the *first* attach — a
             // stale speculative prepare ends `Expired`. A re-attach on
-            // an already-attached session (DataSource reopen) is not a
-            // fresh intent: the session is live and the pump's re-mint
-            // path owns staleness from here on.
-            if !sh.attached {
+            // an already-attached session (DataSource reopen after
+            // `close`) is not a fresh intent: the session is live and
+            // the pump's re-mint path owns staleness from here on. The
+            // gate keys on the attach mark, not `attached` — a session
+            // that played, detached, and reopens must not die to the
+            // prepare TTL on its own creation clock.
+            if sh.marks.attach_ms.is_none() {
                 if let Some(exp) = core.source.expires_at_ms {
                     let margin =
                         u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
@@ -533,7 +632,12 @@ impl SessionInner {
                 }
             }
             sh.attached = true;
+            sh.detached_since = None;
             sh.read_pos = position;
+            // A (re-)attach is fresh intent: drop a latched retriable
+            // failure so the pump re-drives instead of staying parked
+            // on a stale wobble.
+            sh.transient_error = None;
             if sh.marks.attach_ms.is_none() {
                 sh.marks.attach_ms = Some(now_ms());
             }
@@ -552,6 +656,7 @@ impl SessionInner {
         let detached = if let Ok(mut sh) = lock(&self.shared) {
             if sh.attached {
                 sh.attached = false;
+                sh.detached_since = Some(Instant::now());
                 sh.detach_epoch += 1;
                 true
             } else {
@@ -562,6 +667,12 @@ impl SessionInner {
         };
         if detached {
             self.readers.notify_all();
+            // A pump parked in `Action::Park` re-evaluates on this
+            // wake: the unattached head bound can still have holes
+            // (e.g. a seek pre-empted the fill), and the detached
+            // keep-alive window is exactly when that speculative
+            // work should run.
+            self.pump_notify.notify_one();
         }
     }
 
@@ -571,8 +682,10 @@ impl SessionInner {
     /// (`position` at or past the known end, or a confirmed `416`
     /// ceiling). Every terminal transition wakes into its typed error;
     /// `read_deadline` bounds the whole call into `Transient`. A
-    /// `close` landing mid-read wakes `Cancelled` — the DataSource
-    /// that owned the read is gone.
+    /// latched retriable failure surfaces its kind once — the next
+    /// read queues demand and re-drives the pump. A `close` landing
+    /// mid-read wakes `Cancelled` — the DataSource that owned the read
+    /// is gone.
     pub(crate) fn read(&self, position: u64, max_len: u64) -> Result<Vec<u8>, StreamError> {
         if max_len == 0 {
             return Ok(Vec::new());
@@ -596,6 +709,16 @@ impl SessionInner {
                 Ok(Some(served)) => break Ok(served),
                 Ok(None) => {}
                 Err(e) => break Err(e),
+            }
+            if let Some(e) = sh.transient_error.take() {
+                // The pump's retries ran out while this read parked:
+                // surface the typed error once — the next read (a
+                // Media3 retry) queues demand and re-drives the pump.
+                // Wake the pump too: siblings still parked keep their
+                // demand positions queued, and with the latch gone the
+                // pump can retry for them immediately.
+                self.pump_notify.notify_one();
+                break Err(e);
             }
             if !holding {
                 self.queue_through(&mut sh, position);

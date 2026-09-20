@@ -21,6 +21,11 @@ use crate::error::StreamError;
 /// the safe direction.
 pub(crate) const PERSIST_EVERY_CHUNKS: u32 = 8;
 
+/// Upper bound on one `read_at` serve. `max_len` arrives across the
+/// FFI boundary unbounded — this keeps the allocation sized for real
+/// consumer reads, not a pathological caller.
+const MAX_READ_CHUNK: u64 = 16 * 1024 * 1024;
+
 /// The session files under `cache_dir`: `{handle}.bin` (data) and
 /// `{handle}.json` (extent sidecar). `{handle}.json.tmp` is the
 /// in-flight sidecar write.
@@ -58,6 +63,10 @@ impl SessionPaths {
 pub(crate) struct Sidecar {
     /// Provider's source reference (not a secret).
     pub source_ref: String,
+    /// Provider (plugin id) that minted the session — diagnostics for
+    /// the sweep report; absent on sidecars written before the field.
+    #[serde(default)]
+    pub provider: String,
     /// Pinned MIME type.
     pub mime: String,
     /// Format itag when known.
@@ -191,7 +200,10 @@ impl SparseStore {
                 message: format!("read of uncovered offset {pos}"),
             });
         };
-        let n = (end - pos).min(max_len);
+        // `max_len` crosses the FFI boundary unbounded: cap the served
+        // chunk so `with_capacity` can never be asked for gigabytes by
+        // a misbehaving caller. Short reads are already the contract.
+        let n = (end - pos).min(max_len).min(MAX_READ_CHUNK);
         self.file
             .seek(SeekFrom::Start(pos))
             .map_err(|e| StreamError::Internal {
@@ -312,6 +324,7 @@ impl SparseStore {
         })?;
         let sidecar = Sidecar {
             source_ref: meta.source_ref.clone(),
+            provider: meta.provider.clone(),
             mime: meta.mime.clone(),
             itag: meta.itag,
             bitrate_kbps: meta.bitrate_kbps,
@@ -335,6 +348,8 @@ impl SparseStore {
 pub(crate) struct SidecarMeta {
     /// Provider source reference.
     pub source_ref: String,
+    /// Provider (plugin id) that minted the session.
+    pub provider: String,
     /// Pinned MIME.
     pub mime: String,
     /// Format itag.
@@ -360,15 +375,27 @@ impl PersistJob {
     /// `sync_data` the file first, then write the sidecar that claims
     /// its extents — the module's crash-honesty ordering.
     pub(crate) fn run(self, paths: &SessionPaths) -> Result<(), StreamError> {
+        self.sync_data()?;
+        self.persist(paths)
+    }
+
+    /// Flush the data file — the first half of the ordering invariant,
+    /// split so `commit` can interpose a liveness check before the
+    /// sidecar write.
+    pub(crate) fn sync_data(&self) -> Result<(), StreamError> {
         self.file.sync_data().map_err(|e| StreamError::Internal {
             message: format!("sync: {e}"),
-        })?;
+        })
+    }
+
+    /// Write the sidecar that claims the synced extents — the second
+    /// half, run under the caller's liveness serialization.
+    pub(crate) fn persist(self, paths: &SessionPaths) -> Result<(), StreamError> {
         self.sidecar
             .persist(&paths.sidecar, &paths.tmp)
             .map_err(|e| StreamError::Internal {
                 message: format!("sidecar: {e}"),
-            })?;
-        Ok(())
+            })
     }
 }
 
@@ -462,6 +489,7 @@ mod tests {
         let (dir, paths, mut s) = store("sidecar");
         let meta = SidecarMeta {
             source_ref: "vid".into(),
+            provider: "test".into(),
             mime: "audio/mp4".into(),
             itag: Some(140),
             bitrate_kbps: Some(129),

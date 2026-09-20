@@ -453,11 +453,14 @@ impl PluginHost {
                 token.cancel();
             }
         }
-        let handle = self
-            .prepared_handles
-            .lock()
-            .ok()
-            .and_then(|mut m| m.remove(&request_id));
+        // Coalesced prepares hand one session handle to several
+        // request ids — abandoning it is only safe once the cancelled
+        // request was its last owner, or a surviving request's
+        // `stream_open` would hit `cancelled`.
+        let handle = self.prepared_handles.lock().ok().and_then(|mut m| {
+            m.remove(&request_id)
+                .filter(|h| !m.values().any(|v| v == h))
+        });
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
         }
@@ -913,6 +916,97 @@ mod tests {
             PrepareOutcome::Prepared { .. } => {
                 panic!("echo result has no url — expected Failed");
             }
+        }
+    }
+
+    #[test]
+    fn cancel_on_coalesced_request_keeps_the_shared_session() {
+        // Two prepares for the same (provider, source_ref) coalesce
+        // onto one session handle. Cancelling one request must not
+        // abandon a session the other still owns — its `stream_open`
+        // would otherwise die `cancelled` with no signal to re-prepare.
+        // The URL's host passes the destination check, but the bare
+        // listener never answers the TLS hello: the speculative head
+        // fetch parks and the session stays live and detached instead
+        // of racing the test to a terminal fetch error.
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => panic!("bind: {e}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => panic!("addr: {e}"),
+        };
+        let wasm = match wat::parse_str(done_wat(&format!(
+            "{{\"url\":\"https://127.0.0.1:{port}/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\"}}"
+        ))) {
+            Ok(w) => w,
+            Err(e) => panic!("wat: {e}"),
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "auqw-mb-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut cfg = config();
+        cfg.stream_path = Some(dir.to_string_lossy().into_owned());
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(
+            wasm.clone(),
+            manifest_json("done", &wasm, "[\"network:127.0.0.1\"]"),
+        ) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let mut request_ids = Vec::new();
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let request_id = match host.start_prepare(
+                id.clone(),
+                "vid12345678".into(),
+                Box::new(PrepareChannelListener { tx: tx.clone() }),
+            ) {
+                Ok(r) => r,
+                Err(e) => panic!("start_prepare: {e}"),
+            };
+            let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(v) => v,
+                Err(e) => panic!("listener: {e}"),
+            };
+            request_ids.push(request_id);
+            match outcome {
+                PrepareOutcome::Prepared { stream, .. } => handles.push(stream.handle),
+                PrepareOutcome::Failed { kind, message, .. } => {
+                    panic!("expected Prepared, got Failed {kind}: {message}");
+                }
+            }
+        }
+        assert_eq!(
+            handles[0], handles[1],
+            "coalesced prepares share one session handle"
+        );
+        let handle = handles.into_iter().next().unwrap_or_default();
+        // The first request's cancel leaves the second as sole owner —
+        // the session must survive and still attach.
+        host.cancel(request_ids[0].clone());
+        if let Err(e) = host.stream_open(handle.clone(), 0) {
+            panic!("shared session died with the cancelled request: {e}");
+        }
+        if let Err(e) = host.stream_close(handle.clone()) {
+            panic!("close: {e}");
+        }
+        // Cancelling the last owner abandons the still-unattached session.
+        host.cancel(request_ids[1].clone());
+        match host.stream_open(handle, 0) {
+            Err(StreamError::Failed { kind, .. }) => assert_eq!(kind, "cancelled"),
+            other => panic!("expected cancelled, got {other:?}"),
         }
     }
 }

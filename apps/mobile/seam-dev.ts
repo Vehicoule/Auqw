@@ -1,8 +1,9 @@
 // ── Slice 1.5 seam dev instrumentation ─────────────────────────────
-// Driven ONLY by the auqw://seam-* deep links dispatched from App.tsx:
+// Driven ONLY by the auqw://seam* deep links dispatched from App.tsx:
 //   auqw://seam-file?path=…        gate-0 file leg (same warm player)
 //   auqw://seam-audio?path=…       gate-0 expo-audio file:// leg
-//   auqw://seam-prepare?provider=…&ref=…   stream prepare
+//   auqw://seam?provider=…&ref=…   prepared path — prepare + attach
+//   auqw://seam-prepare?provider=…&ref=…   stream prepare (staged leg)
 //   auqw://seam-attach?handle=…    attach last/provided prepared handle
 //   auqw://seam-metrics            dump Rust-side phase marks
 // Self-contained (own logger + listeners) so App.tsx stays a one-block
@@ -20,6 +21,7 @@ import {
   phaseMarks,
   play,
   prepare,
+  type PrepareOutcomeEvent,
 } from 'auqw-expo';
 
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
@@ -53,6 +55,9 @@ let pluginId: string | null = null;
 let lastHandle: string | null = null;
 let lastRequestId: string | null = null;
 let audioLeg: AudioPlayer | null = null;
+// Single pending outcome for the one-shot `seam` leg — the harness is
+// sequential, so one slot suffices.
+let pendingPrepare: ((e: PrepareOutcomeEvent) => void) | null = null;
 
 function arm(): void {
   if (armed) {
@@ -66,6 +71,8 @@ function arm(): void {
     } else {
       slog(`prepare-failed req=${e.requestId} kind=${e.outcome.kind} t=${Date.now()}`);
     }
+    pendingPrepare?.(e);
+    pendingPrepare = null;
   });
   addPlaybackStatusListener((e) => {
     slog(`status ${e.handle} ${e.state} pos=${e.positionMs}ms t=${Date.now()}`);
@@ -114,7 +121,7 @@ function describe(error: unknown): string {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -151,6 +158,28 @@ export async function runSeamLink(url: string): Promise<void> {
       });
       player.play();
       slog(`seam-audio sent uri=${uri} t=${t0}`);
+    } else if (match[1] === 'seam') {
+      // The prepared-path leg the slice names `seam`: prepare, then
+      // attach the produced handle — attach→rendered-first-frame is
+      // the ≤200 ms metric the gates measure.
+      const ref = param(query, 'ref');
+      if (!ref) {
+        return;
+      }
+      const id = await ensureSeam();
+      const provider = param(query, 'provider') ?? id;
+      const outcomeP = new Promise<PrepareOutcomeEvent>((resolve) => {
+        pendingPrepare = resolve;
+      });
+      lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
+      const e = await outcomeP;
+      if (e.outcome.type !== 'prepared') {
+        slog(`seam prepare failed kind=${e.outcome.kind}`);
+        return;
+      }
+      lastHandle = e.outcome.stream.handle;
+      await play(lastHandle, `dev-${Date.now()}`, 0);
+      slog(`seam prepared+attached handle=${lastHandle} t=${Date.now()}`);
     } else if (match[1] === 'seam-prepare') {
       const ref = param(query, 'ref');
       if (!ref) {

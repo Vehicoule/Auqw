@@ -1979,6 +1979,11 @@ public enum PrepareOutcome: Equatable, Hashable {
          * The prepared session handle + metadata.
          */stream: PreparedStream, 
         /**
+         * Handles this prepare superseded or pruned — the caller's
+         * handle routing must drop these so a dead session's entry
+         * can never serve a later attach.
+         */superseded: [String], 
+        /**
          * Invocation accounting for the resolve.
          */attempt: AttemptSummary
     )
@@ -2017,7 +2022,7 @@ public struct FfiConverterTypePrepareOutcome: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .prepared(stream: try FfiConverterTypePreparedStream.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
+        case 1: return .prepared(stream: try FfiConverterTypePreparedStream.read(from: &buf), superseded: try FfiConverterSequenceString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
         
         case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
@@ -2031,9 +2036,10 @@ public struct FfiConverterTypePrepareOutcome: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .prepared(stream,attempt):
+        case let .prepared(stream,superseded,attempt):
             writeInt(&buf, Int32(1))
             FfiConverterTypePreparedStream.write(stream, into: &buf)
+            FfiConverterSequenceString.write(superseded, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
             
         
@@ -2886,6 +2892,31 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         case 1: return try FfiConverterString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
     }
 }
 

@@ -44,6 +44,12 @@ pub struct PrepareInfo {
     pub content_length: Option<u64>,
     /// URL expiry, epoch ms.
     pub expires_at_ms: Option<u64>,
+    /// Handles this prepare ended or pruned: sessions it superseded
+    /// plus already-terminal entries dropped from the map. Callers
+    /// routing streams through a per-handle map (the mobile bindings)
+    /// unregister these so a superseded handle can never be attached
+    /// against a stale routing entry. Empty on a coalesced prepare.
+    pub superseded: Vec<String>,
 }
 
 /// How the startup sweep settled leftover session files.
@@ -180,11 +186,14 @@ impl StreamRegistry {
     /// the session's [`PhaseMarks::resolve_ms`] for the port's
     /// intent→prepared join.
     ///
-    /// Per-sourceRef coalescing (the prepare policy's debounce): a
-    /// live, still-fresh *unattached* session for the same
-    /// `source_ref` is returned as-is — repeated intent on the same
-    /// source finishes the in-flight prepare rather than cancelling
-    /// and restarting it. A stale candidate is superseded normally.
+    /// Per-(provider, sourceRef) coalescing (the prepare policy's
+    /// debounce): a live, still-fresh *unattached* session minted by
+    /// the same provider for the same `source_ref` is returned as-is —
+    /// repeated intent on the same source finishes the in-flight
+    /// prepare rather than cancelling and restarting it. Two providers
+    /// answering the same `source_ref` mint different URLs, mimes, and
+    /// itags, so the key carries provider identity; a stale candidate
+    /// is superseded normally.
     ///
     /// # Errors
     /// As [`Self::prepare`].
@@ -217,10 +226,10 @@ impl StreamRegistry {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(StreamError::Cancelled);
         }
-        if let Some(info) = self.reusable(&source.source_ref)? {
+        if let Some(info) = self.reusable(&source.provider, &source.source_ref)? {
             return Ok(info);
         }
-        self.supersede_unattached()?;
+        let superseded = self.supersede_unattached()?;
         let handle = format!(
             "st-{}-{}",
             self.instance,
@@ -252,6 +261,7 @@ impl StreamRegistry {
             bitrate_kbps: source.bitrate_kbps,
             content_length: source.content_length,
             expires_at_ms: source.expires_at_ms,
+            superseded,
         })
     }
 
@@ -271,11 +281,13 @@ impl StreamRegistry {
     /// Blocking read — **foreign (JNI/DataSource) threads only**;
     /// parking a runtime worker is a bug. Empty `Vec` = EOF. Bounded by
     /// `StreamConfig::read_deadline`; every terminal transition wakes
-    /// into its typed error.
+    /// into its typed error; a latched retriable failure surfaces its
+    /// kind once — the next read re-drives the pump.
     ///
     /// # Errors
     /// [`StreamError::NotFound`] for an unknown handle; the session's
-    /// terminal error; [`StreamError::Transient`] on deadline.
+    /// terminal error; [`StreamError::Transient`] on deadline or a
+    /// latched retriable failure.
     pub fn read(&self, handle: &str, position: u64, max_len: u64) -> Result<Vec<u8>, StreamError> {
         self.session(handle)?.read(position, max_len)
     }
@@ -384,22 +396,31 @@ impl StreamRegistry {
         Ok(lock(&self.sessions)?.get(handle).cloned())
     }
 
-    /// A live, unattached, still-fresh session for `source_ref`, if one
-    /// exists — the coalescing candidate for a repeated prepare on the
-    /// same source. A stale candidate (TTL or expiry margin breached)
-    /// is left for the supersede scan instead.
-    fn reusable(&self, source_ref: &str) -> Result<Option<PrepareInfo>, StreamError> {
+    /// A live, unattached, still-fresh session minted by `provider` for
+    /// `source_ref`, if one exists — the coalescing candidate for a
+    /// repeated prepare on the same source. Provider identity is part
+    /// of the key: a same-ref prepare on a different provider must
+    /// never inherit this session's URL, mime, itag, or remint. A
+    /// stale candidate (detached past the TTL or inside the expiry
+    /// margin) is left for the supersede scan instead.
+    fn reusable(
+        &self,
+        provider: &str,
+        source_ref: &str,
+    ) -> Result<Option<PrepareInfo>, StreamError> {
         let sessions = lock(&self.sessions)?;
         let margin = u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
         for (handle, s) in sessions.iter() {
             if s.is_terminal() || s.is_attached() {
                 continue;
             }
-            if s.created.elapsed() >= self.config.prepare_ttl {
+            if s.detached_for()
+                .is_none_or(|d| d >= self.config.prepare_ttl)
+            {
                 continue;
             }
             let core = lock(&s.core)?;
-            if core.source.source_ref != source_ref {
+            if core.source.provider != provider || core.source.source_ref != source_ref {
                 continue;
             }
             if let Some(exp) = core.source.expires_at_ms {
@@ -414,6 +435,7 @@ impl StreamRegistry {
                 bitrate_kbps: core.source.bitrate_kbps,
                 content_length: core.source.content_length,
                 expires_at_ms: core.source.expires_at_ms,
+                superseded: Vec::new(),
             }));
         }
         Ok(None)
@@ -423,22 +445,39 @@ impl StreamRegistry {
     /// `Superseded` and drop terminal handles from the map. The
     /// still-unattached check is re-done inside the terminal
     /// transition — an attach that lands after the scan wins, so a
-    /// playing consumer is never superseded by accident.
-    fn supersede_unattached(&self) -> Result<(), StreamError> {
-        let doomed: Vec<Arc<SessionInner>> = {
+    /// playing consumer is never superseded by accident. Returns the
+    /// handles the scan actually ended or pruned: callers routing by
+    /// handle unregister these so a dead session's routing entry can
+    /// never serve a later attach.
+    fn supersede_unattached(&self) -> Result<Vec<String>, StreamError> {
+        let (doomed, mut superseded) = {
             let mut sessions = lock(&self.sessions)?;
-            let doomed = sessions
-                .values()
-                .filter(|s| !s.is_attached() && !s.is_terminal())
-                .cloned()
+            let doomed: Vec<(String, Arc<SessionInner>)> = sessions
+                .iter()
+                .filter(|(_, s)| !s.is_attached() && !s.is_terminal())
+                .map(|(h, s)| (h.clone(), Arc::clone(s)))
                 .collect();
-            sessions.retain(|_, s| !s.is_terminal());
-            doomed
+            let mut pruned = Vec::new();
+            sessions.retain(|h, s| {
+                if s.is_terminal() {
+                    pruned.push(h.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            (doomed, pruned)
         };
-        for s in doomed {
+        for (h, s) in doomed {
             s.terminate_if(StreamError::Superseded, |sh| !sh.attached);
+            // An attach landing in the race window keeps the session
+            // live — only handles the transition actually ended belong
+            // on the unregister list.
+            if s.is_terminal() {
+                superseded.push(h);
+            }
         }
-        Ok(())
+        Ok(superseded)
     }
 }
 
@@ -448,10 +487,13 @@ impl Drop for StreamRegistry {
     }
 }
 
-/// The abandoned-prepare reaper: every `interval`, unattached sessions
-/// older than `ttl` end `Evicted` (readers woken, partial files
-/// dropped) — an intent that never became a play does not pin cache
-/// space or a parked pump forever.
+/// The abandoned-prepare reaper: every `interval`, sessions detached
+/// longer than `ttl` end `Evicted` (readers woken, partial files
+/// dropped) — an intent that never became a play, or a consumer that
+/// detached and never came back, does not pin cache space or a parked
+/// pump forever. Detached duration is the clock, not session age: a
+/// session that played past the TTL and then closed survives the
+/// DataSource close→open window its age would otherwise forfeit.
 async fn reap_loop(
     sessions: Arc<Mutex<HashMap<String, Arc<SessionInner>>>>,
     ttl: Duration,
@@ -464,13 +506,19 @@ async fn reap_loop(
             .lock()
             .map(|m| {
                 m.values()
-                    .filter(|s| !s.is_terminal() && !s.is_attached() && s.created.elapsed() >= ttl)
+                    .filter(|s| !s.is_terminal() && s.detached_for().is_some_and(|d| d >= ttl))
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
         for s in doomed {
-            s.terminate_if(StreamError::Evicted, |sh| !sh.attached);
+            // Recheck under `shared`: an attach landing between the
+            // filter and here clears `detached_since`, so the recheck
+            // fails and the attach wins — never an evict on a session
+            // a consumer just reconnected to.
+            s.terminate_if(StreamError::Evicted, |sh| {
+                sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
+            });
         }
     }
 }

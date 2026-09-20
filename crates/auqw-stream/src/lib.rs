@@ -49,9 +49,11 @@ use std::time::Duration;
 /// Tuning knobs for one [`StreamRegistry`].
 ///
 /// The defaults carry the slice's policy: a ~3 MiB speculative head
-/// fill, a 4 MiB attached read-ahead window, a named 15 s read deadline
-/// (resolve budget + mint + head fetch), and a bounded re-mint budget
-/// for cap-death recovery.
+/// fill, a 4 MiB attached read-ahead window, a named read deadline that
+/// outlives the recovery path it parks on (one re-mint plus one bounded
+/// fetch attempt), a bounded re-mint budget for cap-death recovery, and
+/// a small retry budget so a lone transport hiccup cannot kill a
+/// playing session.
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     /// Directory holding `{handle}.bin` data files and `{handle}.json`
@@ -72,7 +74,12 @@ pub struct StreamConfig {
     /// session aborts `StreamsCapped`.
     pub max_zero_progress_mints: u32,
     /// Total bound on one blocking `read` call — the named deadline of
-    /// the seam (resolve + mint + head-fetch budget).
+    /// the seam. It must outlive the recovery path a parked read waits
+    /// on: one re-mint (`mint_deadline`) plus one full fetch attempt
+    /// (`request_deadline`), plus slack. Recovery deeper than that
+    /// surfaces `transient` to the reader — the session stays live and
+    /// a re-read resumes the wait — so this bound orders *under* the
+    /// worst-case retry window, never under a single mint.
     pub read_deadline: Duration,
     /// Bound on one re-mint (`playback.resolve`) — a hung resolve ends
     /// the attempt `Transient` instead of zombieing the session.
@@ -81,6 +88,13 @@ pub struct StreamConfig {
     /// bounds progress gaps inside the request; this caps the total so
     /// a dribbling body cannot outlive it.
     pub request_deadline: Duration,
+    /// Retries for one fetch's `Transient` failures (and one re-mint's)
+    /// before the failure latches — a single dropped connection must
+    /// not end playback.
+    pub fetch_retries: u32,
+    /// Backoff between transient retries — interruptible by cancel and,
+    /// for speculative fill, by demand-read preemption.
+    pub retry_backoff: Duration,
     /// How long a prepared session may sit before `attach` fails it
     /// `Expired` and the reaper evicts it.
     pub prepare_ttl: Duration,
@@ -103,9 +117,17 @@ impl StreamConfig {
             stall: Duration::from_secs(10),
             mint_budget: 4,
             max_zero_progress_mints: 2,
-            read_deadline: Duration::from_secs(15),
             mint_deadline: Duration::from_secs(20),
             request_deadline: Duration::from_secs(60),
+            // The named bound a parked reader waits on — one remint +
+            // one bounded fetch + slack. A read deadline *shorter* than
+            // the recovery it parks on surfaces cap death to the player
+            // as `transient`, so this orders above the parts it covers.
+            read_deadline: Duration::from_secs(20)
+                + Duration::from_secs(60)
+                + Duration::from_secs(10),
+            fetch_retries: 2,
+            retry_backoff: Duration::from_millis(250),
             prepare_ttl: Duration::from_secs(120),
             reap_interval: Duration::from_secs(15),
             expiry_margin: Duration::from_secs(60),
@@ -135,6 +157,11 @@ pub struct PreparedSource {
     /// Provider source reference (not a secret) — carried for sidecar
     /// metadata and diagnostics.
     pub source_ref: String,
+    /// Identity of the provider that minted this source (the plugin
+    /// id). Part of the session's identity: two providers answering the
+    /// same `source_ref` mint different URLs, mimes, and itags, so
+    /// prepare coalescing must never cross providers.
+    pub provider: String,
 }
 
 // `Debug` prints every field but `url` — one `{:?}` anywhere must not
@@ -150,6 +177,7 @@ impl std::fmt::Debug for PreparedSource {
             .field("content_length", &self.content_length)
             .field("expires_at_ms", &self.expires_at_ms)
             .field("source_ref", &self.source_ref)
+            .field("provider", &self.provider)
             .finish()
     }
 }

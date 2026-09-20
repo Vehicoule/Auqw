@@ -58,6 +58,10 @@ pub enum PrepareOutcome {
     Prepared {
         /// The prepared session handle + metadata.
         stream: PreparedStream,
+        /// Handles this prepare superseded or pruned — the caller's
+        /// handle routing must drop these so a dead session's entry
+        /// can never serve a later attach.
+        superseded: Vec<String>,
         /// Invocation accounting for the resolve.
         attempt: AttemptSummary,
     },
@@ -153,10 +157,19 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
 
 /// Re-mints a session's source by re-running `playback.resolve` with
 /// the same plugin, budgets, and services as a normal invocation. The
-/// pump pins the prepared mime on the returned source.
+/// resolve carries `pin_itag` for the minted format so a re-mint
+/// cannot silently land a different encode, and the session still
+/// pins mime and itag on the returned source — a swap is terminal
+/// even if a guest ignores the pin.
 struct PluginRemint {
     plugin: Arc<LoadedPlugin>,
+    /// The manifest id — the minted source's provider identity, part
+    /// of the session's coalescing key.
+    provider: String,
     source_ref: String,
+    /// The itag the first resolve minted, set by `prepare_outcome` —
+    /// sent as `pin_itag` on every re-mint.
+    pin_itag: Option<u32>,
     budgets: Budgets,
     http: Arc<ReqwestClient>,
     kv: Arc<dyn KeyValueStore>,
@@ -173,7 +186,9 @@ impl Remint for PluginRemint {
         >,
     > {
         let plugin = Arc::clone(&self.plugin);
+        let provider = self.provider.clone();
         let source_ref = self.source_ref.clone();
+        let pin_itag = self.pin_itag;
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -183,7 +198,7 @@ impl Remint for PluginRemint {
             let invocation = invoke(
                 &plugin,
                 "playback.resolve",
-                json!({ "source_ref": source_ref }),
+                remint_payload(&source_ref, pin_itag),
                 &budgets,
                 CancellationToken::new(),
                 HostServices {
@@ -210,9 +225,23 @@ impl Remint for PluginRemint {
                 content_length: resource.content_length,
                 expires_at_ms: resource.expires_at_ms,
                 source_ref,
+                provider,
             })
         })
     }
+}
+
+/// The `playback.resolve` payload for a re-mint: `source_ref` plus
+/// `pin_itag` when the first resolve minted one — the guest keeps the
+/// same encode across cap-death recovery instead of re-walking the
+/// format ladder into a different itag under the same mime.
+fn remint_payload(source_ref: &str, pin_itag: Option<u32>) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("source_ref".to_string(), json!(source_ref));
+    if let Some(itag) = pin_itag {
+        payload.insert("pin_itag".to_string(), json!(itag));
+    }
+    Value::Object(payload)
 }
 
 /// Turn a successful resolve value into a [`PrepareOutcome`]: register
@@ -220,9 +249,10 @@ impl Remint for PluginRemint {
 fn prepare_outcome(
     value: &Value,
     stream: &StreamRegistry,
-    remint: PluginRemint,
+    mut remint: PluginRemint,
     attempt: &Attempt,
     source_ref: String,
+    provider: String,
 ) -> PrepareOutcome {
     let resource = resource_from(value);
     let summary = AttemptSummary::from(attempt);
@@ -233,6 +263,7 @@ fn prepare_outcome(
             attempt: summary,
         };
     }
+    remint.pin_itag = resource.itag;
     let source = PreparedSource {
         url: resource.url,
         mime: resource.mime,
@@ -241,9 +272,11 @@ fn prepare_outcome(
         content_length: resource.content_length,
         expires_at_ms: resource.expires_at_ms,
         source_ref,
+        provider,
     };
     match stream.prepare_timed(source, Arc::new(remint), Some(attempt.elapsed)) {
         Ok(info) => PrepareOutcome::Prepared {
+            superseded: info.superseded.clone(),
             stream: PreparedStream::from(info),
             attempt: summary,
         },
@@ -289,12 +322,15 @@ impl PluginHost {
         };
         let remint = PluginRemint {
             plugin,
+            provider: plugin_id.clone(),
             source_ref: source_ref.clone(),
+            pin_itag: None,
             budgets: self.budgets.clone(),
             http: Arc::clone(&self.http),
             kv: Arc::clone(&self.kv),
             pot_provider: self.pot_provider_url.clone(),
         };
+        let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);
         self.start_typed(
             plugin_id,
@@ -312,7 +348,7 @@ impl PluginHost {
                         // blocking pool, not a runtime worker shared
                         // with guest wasm.
                         let work = tokio::task::spawn_blocking(move || {
-                            prepare_outcome(&value, &stream, remint, &attempt, source_ref)
+                            prepare_outcome(&value, &stream, remint, &attempt, source_ref, provider)
                         });
                         match work.await {
                             Ok(o) => o,
@@ -417,5 +453,26 @@ impl PluginHost {
 impl PluginHost {
     fn stream_registry(&self) -> Result<&StreamRegistry, StreamError> {
         self.stream.as_deref().ok_or(StreamError::Unavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The re-mint payload carries the itag pin verbatim when the
+    /// first resolve minted one, and omits the key entirely when it
+    /// did not — a guest must never observe a null pin.
+    #[test]
+    fn remint_payload_carries_the_pin() {
+        assert_eq!(
+            remint_payload("vid", Some(140)),
+            json!({ "source_ref": "vid", "pin_itag": 140 })
+        );
+        assert_eq!(remint_payload("vid", None), json!({ "source_ref": "vid" }));
+        assert!(
+            remint_payload("vid", None).get("pin_itag").is_none(),
+            "no pin_itag key may be emitted without a pin"
+        );
     }
 }

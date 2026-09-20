@@ -69,6 +69,7 @@ fn source(len: u64) -> PreparedSource {
         content_length: Some(len),
         expires_at_ms: None,
         source_ref: "vid".into(),
+        provider: "test".into(),
     }
 }
 
@@ -104,6 +105,8 @@ impl Remint for OkRemint {
 /// What the fake answers for one request.
 enum Step {
     Reply(FetchResponse),
+    /// Fail with the typed error (transient-stall scripts).
+    Fail(StreamError),
     /// Park forever — the request is still recorded.
     Hang,
 }
@@ -151,6 +154,14 @@ impl MapFetch {
             .map(|u| u.iter().filter(|s| s.as_str() == url).count())
             .unwrap_or(0)
     }
+
+    /// Queue another reply for `offset` — tests script the recovery
+    /// fetch after a stall has been observed.
+    fn push(&self, offset: u64, step: Step) {
+        if let Ok(mut p) = self.pages.lock() {
+            p.entry(offset).or_default().push_back(step);
+        }
+    }
 }
 
 impl Fetch for MapFetch {
@@ -179,6 +190,7 @@ impl Fetch for MapFetch {
         Box::pin(async move {
             match step {
                 Step::Reply(r) => Ok(r),
+                Step::Fail(e) => Err(e),
                 Step::Hang => std::future::pending().await,
             }
         })
@@ -853,7 +865,7 @@ async fn cancel_if_unattached_leaves_attached_sessions_alone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hung_remint_terminates_inside_mint_deadline() {
+async fn hung_remint_is_bounded_by_mint_deadline() {
     let d = TestDir::new("mintdeadline");
     let mut c = config(&d);
     c.mint_deadline = Duration::from_millis(50);
@@ -1116,4 +1128,216 @@ async fn dropped_reader_keeps_siblings_demand_visible() {
         reg.cancel(&b.handle)
             .unwrap_or_else(|e| panic!("cancel b: {e}"));
     });
+}
+
+/// Coalescing keys on (provider, source_ref): a different provider
+/// answering the same ref mints a different URL/mime — it must never
+/// inherit the first session, and the supersede list must name the
+/// ended handle so routing maps can drop it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_coalescing_requires_same_provider() {
+    let d = TestDir::new("procoalesce");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut a = source(1024);
+    a.provider = "provider-a".into();
+    let first = reg
+        .prepare(a, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"));
+    // Same provider, same ref: the repeated intent coalesces.
+    let mut again_src = source(1024);
+    again_src.provider = "provider-a".into();
+    let again = reg
+        .prepare(again_src, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("reprepare: {e}"));
+    assert_eq!(again.handle, first.handle, "same provider+ref coalesces");
+    assert!(
+        again.superseded.is_empty(),
+        "a coalesced prepare ends nothing: {:?}",
+        again.superseded
+    );
+    // A different provider, same ref: a new session, and the old one
+    // is named on the supersede list.
+    let mut b = source(1024);
+    b.provider = "provider-b".into();
+    b.mime = "audio/webm".into();
+    let second = reg
+        .prepare(b, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert_ne!(
+        second.handle, first.handle,
+        "provider B must not coalesce onto A's session"
+    );
+    assert!(
+        second.superseded.contains(&first.handle),
+        "superseded list must name A's handle: {:?}",
+        second.superseded
+    );
+    // And A's ended session answers attach with its typed error.
+    assert_eq!(err_of(reg.attach(&first.handle, 0)).kind(), "superseded");
+}
+
+/// The named read bound must outlive the recovery path a parked read
+/// waits on: one re-mint plus one bounded fetch attempt. A shorter
+/// deadline would surface cap death to the player as `transient`.
+#[test]
+fn read_deadline_covers_mint_plus_fetch() {
+    let c = StreamConfig::new(std::path::PathBuf::from("/nonexistent-auqw-test"));
+    assert!(
+        c.read_deadline > c.mint_deadline + c.request_deadline,
+        "read_deadline {:?} must exceed mint {:?} + request {:?}",
+        c.read_deadline,
+        c.mint_deadline,
+        c.request_deadline
+    );
+}
+
+/// A retriable failure latches instead of killing the session: the
+/// parked reader observes `transient` once, and the next read's
+/// demand re-drives the pump to a successful fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_pump_surfaces_transient_once_then_demand_recovers() {
+    let d = TestDir::new("stallread");
+    let mut pages: HashMap<u64, VecDeque<Step>> = HashMap::new();
+    // Head fill covers 0..256; the demand read at 500 fails
+    // transiently for the first attempt plus fetch_retries retries.
+    pages.insert(0u64, VecDeque::from([Step::Reply(chunk(0, 128, 1024, 1))]));
+    pages.insert(
+        128u64,
+        VecDeque::from([Step::Reply(chunk(128, 128, 1024, 2))]),
+    );
+    let fail = || {
+        Step::Fail(StreamError::Transient {
+            message: "conn reset".into(),
+        })
+    };
+    pages.insert(500u64, VecDeque::from([fail(), fail(), fail()]));
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    // The parked read observes the latched error once — the session
+    // stays live, so this is a hint to retry, not a terminal verdict.
+    let e = err_of(
+        std::thread::scope(|s| s.spawn(|| reg.read(&h, 500, 64)).join())
+            .unwrap_or_else(|e| panic!("join: {e:?}")),
+    );
+    assert_eq!(e.kind(), "transient", "{e}");
+    assert!(reg.is_live(&h), "network wobble must not kill the session");
+    // The recovery fetch is scripted to succeed; a re-read queues the
+    // demand and the pump serves it.
+    fetch.push(500, Step::Reply(chunk(500, 128, 1024, 9)));
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 500, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert_eq!(got, vec![9u8; 64]);
+    assert!(reg.is_live(&h));
+}
+
+/// A session that played past the prepare TTL and then detached —
+/// the Media3 DataSource close→open on a seek — re-attaches on its
+/// detached clock, not its creation clock: the expiry/TTL gate is
+/// first-attach only, and the pump's re-mint path owns staleness
+/// from there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reattach_past_prepare_ttl_is_not_expired() {
+    let d = TestDir::new("reattach");
+    let mut c = config(&d);
+    c.prepare_ttl = Duration::from_millis(120);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    // The first attach lands inside the TTL; the session then ages
+    // past it while attached — attached sessions are reaper-exempt.
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    reg.close(&h).unwrap_or_else(|e| panic!("close: {e}"));
+    // The DataSource close→open gap stays well under the TTL, but the
+    // session's creation age is already past it — a re-attach gated
+    // on age dies Expired here.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        reg.attach(&h, 0)
+            .unwrap_or_else(|e| panic!("re-attach: {e}")),
+        Some(1024)
+    );
+}
+
+/// The prepare TTL still gates a session that was never attached —
+/// an abandoned speculative prepare dies `Expired` on first attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_attach_past_prepare_ttl_is_expired() {
+    let d = TestDir::new("firstattach");
+    let mut c = config(&d);
+    c.prepare_ttl = Duration::from_millis(120);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let e = err_of(reg.attach(&h, 0));
+    assert_eq!(e.kind(), "expired", "{e}");
+}
+
+/// The reaper's clock is detached duration, not session age: a
+/// session that played past the TTL and closed survives its
+/// post-close window, and is only evicted once it has sat detached
+/// past the TTL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_session_evicted_by_detached_age() {
+    let d = TestDir::new("detachevict");
+    let mut c = config(&d);
+    c.prepare_ttl = Duration::from_millis(150);
+    c.reap_interval = Duration::from_millis(40);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    // Attached well past the TTL — the session is reaper-exempt even
+    // though its creation age is already stale.
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    assert!(reg.is_live(&h), "attached session reaped");
+    reg.close(&h).unwrap_or_else(|e| panic!("close: {e}"));
+    // Partway through the detached window the session must still be
+    // live: an age-based reaper would have evicted it at the first
+    // post-close scan, the creation age already being past the TTL.
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert!(reg.is_live(&h), "reaped on session age, not detached age");
+    // Once the detached window itself reaches the TTL the reaper ends
+    // it — Evicted, the abandon verdict.
+    wait_until(|| !reg.is_live(&h)).await;
+    let e = err_of(reg.attach(&h, 0));
+    assert_eq!(e.kind(), "evicted", "{e}");
 }

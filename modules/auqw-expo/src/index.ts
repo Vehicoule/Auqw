@@ -167,12 +167,51 @@ export type StreamPhaseMarks = {
   attachMs?: number;
 };
 
+/** One immutable projected queue item — never carries a signed URL. */
+export type QueueProjectionItem = {
+  occurrenceId: string;
+  provider: string | null;
+  sourceRef: string | null;
+  title: string;
+  artist: string | null;
+  artworkUrl: string | null;
+};
+
+/**
+ * The application's identified queue revision, installed whole: the
+ * service moves only a cursor within it and reports
+ * `queue-transition` events for reconciliation.
+ */
+export type QueueProjection = {
+  projectionId: string;
+  queueRev: number;
+  currentOccurrenceId: string | null;
+  positionMs: number;
+  mode: 'stopped' | 'paused' | 'playing';
+  items: QueueProjectionItem[];
+};
+
+export type QueueTransitionReason = 'ended' | 'remote-next' | 'remote-previous';
+
+/** Service-reported cursor move inside the installed projection. */
+export type QueueTransitionEvent = {
+  projectionId: string;
+  projectedQueueRev: number;
+  fromOccurrenceId: string | null;
+  toOccurrenceId: string | null;
+  reason: QueueTransitionReason;
+  positionMs: number;
+  identity: { attemptId: string; queueRev: number } | null;
+  handle: string | null;
+};
+
 type AuqwExpoEvents = {
   onResolveOutcome: (event: OutcomeEvent) => void;
   onRequestOutcome: (event: RequestOutcomeEvent) => void;
   onPrepareOutcome: (event: PrepareOutcomeEvent) => void;
   onPlaybackStatus: (event: PlaybackStatusEvent) => void;
   onPhaseMark: (event: PhaseMarkEvent) => void;
+  onQueueTransition: (event: QueueTransitionEvent) => void;
 };
 
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
@@ -190,6 +229,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   cancelPrepare(requestId: string): Promise<void>;
   releaseStream(handle: string): Promise<void>;
   phaseMarks(handle: string): Promise<StreamPhaseMarks>;
+  setQueueProjection(projection: QueueProjection): Promise<void>;
   devAttachFile(path: string): Promise<string>;
 }
 
@@ -276,6 +316,15 @@ export function phaseMarks(handle: string): Promise<StreamPhaseMarks> {
 }
 
 /**
+ * Install one immutable identified queue revision for background
+ * execution; the service moves only a cursor inside it and reports
+ * `onQueueTransition` events.
+ */
+export function setQueueProjection(projection: QueueProjection): Promise<void> {
+  return native.setQueueProjection(projection);
+}
+
+/**
  * Gate-0 file leg: attach a pushed local file through the SAME warm
  * player so the attach→rendered-first-frame floor is measured without
  * the seam. Dev instrumentation; resolves with the dev handle.
@@ -312,4 +361,10 @@ export function addPhaseMarkListener(
   listener: (event: PhaseMarkEvent) => void,
 ): EventSubscription {
   return native.addListener('onPhaseMark', listener);
+}
+
+export function addQueueTransitionListener(
+  listener: (event: QueueTransitionEvent) => void,
+): EventSubscription {
+  return native.addListener('onQueueTransition', listener);
 }

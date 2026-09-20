@@ -24,4 +24,9 @@ class AuqwStreamRegistry {
   }
 
   fun hostFor(handle: String): PluginHost? = hosts[handle]
+
+  /** Drop every routing entry — a replaced host can never serve them. */
+  fun clear() {
+    hosts.clear()
+  }
 }

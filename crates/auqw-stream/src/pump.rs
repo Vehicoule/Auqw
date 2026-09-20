@@ -76,6 +76,7 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
                 }
                 Outcome::Eof(at) => session.mark_eof_below(at),
                 Outcome::Preempted => {}
+                Outcome::Stalled(e) => session.stall_transient(e),
                 Outcome::Failed(e) => {
                     session.terminate(e);
                     return;
@@ -93,6 +94,9 @@ enum Outcome {
     Eof(u64),
     /// A demand read arrived mid-fill; re-decide.
     Preempted,
+    /// Retriable failure after the bounded retries ran out — the
+    /// session latches it and parks instead of dying.
+    Stalled(StreamError),
     /// Terminal failure for the session.
     Failed(StreamError),
 }
@@ -133,8 +137,9 @@ async fn await_fetch(
     }
 }
 
-/// Fetch one chunk at `offset`, looping through `403`/`416` re-mints.
-/// Always issues range requests — never a full-file GET.
+/// Fetch one chunk at `offset`, looping through `403`/`416` re-mints
+/// and bounded `Transient` retries. Always issues range requests —
+/// never a full-file GET.
 async fn fetch_chunk(
     session: &Arc<SessionInner>,
     fetch: &dyn Fetch,
@@ -143,6 +148,7 @@ async fn fetch_chunk(
     through: bool,
 ) -> Outcome {
     let mut retried_416 = false;
+    let mut transient_left = session.config.fetch_retries;
     loop {
         if let Err(e) = session.check_live() {
             return Outcome::Failed(e);
@@ -157,7 +163,10 @@ async fn fetch_chunk(
         };
         let resp = match resp {
             Ok(r) => r,
-            Err(e) => return Outcome::Failed(e),
+            Err(e) => match retry_or_stall(session, through, e, &mut transient_left).await {
+                Retry::Again => continue,
+                Retry::Stop(o) => return o,
+            },
         };
         match resp.status {
             206 => {
@@ -167,19 +176,102 @@ async fn fetch_chunk(
                 }
             }
             416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
-            403 => {
-                retried_416 = false;
-                if let Err(e) = remint(session).await {
-                    return Outcome::Failed(e);
+            403 | 416 => {
+                retried_416 = resp.status == 416;
+                match remint(session).await {
+                    Err(e) => {
+                        return if stallable(&e) {
+                            Outcome::Stalled(e)
+                        } else {
+                            Outcome::Failed(e)
+                        };
+                    }
+                    // A fresh mint is a fresh attempt — the transient
+                    // budget resets with the URL.
+                    Ok(()) => transient_left = session.config.fetch_retries,
                 }
             }
-            416 => {
-                retried_416 = true;
-                if let Err(e) = remint(session).await {
-                    return Outcome::Failed(e);
+            status => {
+                let e = classify_status(status, offset);
+                match retry_or_stall(session, through, e, &mut transient_left).await {
+                    Retry::Again => continue,
+                    Retry::Stop(o) => return o,
                 }
             }
-            status => return Outcome::Failed(classify_status(status, offset)),
+        }
+    }
+}
+
+/// What a failed fetch attempt resolved to.
+enum Retry {
+    /// Transient budget remained — backoff slept, retry the request.
+    Again,
+    /// The fetch cycle ends with this outcome.
+    Stop(Outcome),
+}
+
+/// Whether a failure is retriable network wobble that must never kill
+/// a session on its own: it latches (`Outcome::Stalled`) so a parked
+/// reader observes it once and demand re-drives the pump. Every other
+/// kind is a terminal verdict — `InvalidResponse`, `NotFound`,
+/// `StreamsCapped`, `Expired`, `Internal`, and the lifecycle kinds.
+fn stallable(e: &StreamError) -> bool {
+    matches!(
+        e,
+        StreamError::Transient { .. } | StreamError::RateLimited { .. }
+    )
+}
+
+/// Apply the retry policy to one failed attempt: `Transient` retries
+/// with backoff until `fetch_retries` runs out, `RateLimited` latches
+/// straight away (a 429 wants real cooldown, not a 250 ms hammer),
+/// and everything else is terminal.
+async fn retry_or_stall(
+    session: &Arc<SessionInner>,
+    through: bool,
+    e: StreamError,
+    transient_left: &mut u32,
+) -> Retry {
+    if matches!(e, StreamError::Transient { .. }) && *transient_left > 0 {
+        *transient_left -= 1;
+        return match retry_backoff(session, through).await {
+            Backoff::Waited => Retry::Again,
+            Backoff::Preempted => Retry::Stop(Outcome::Preempted),
+            Backoff::Cancelled => Retry::Stop(Outcome::Failed(StreamError::Cancelled)),
+        };
+    }
+    Retry::Stop(if stallable(&e) {
+        Outcome::Stalled(e)
+    } else {
+        Outcome::Failed(e)
+    })
+}
+
+/// How the retry backoff ended.
+enum Backoff {
+    /// The sleep elapsed.
+    Waited,
+    /// A demand read preempted a speculative fill's backoff.
+    Preempted,
+    /// Session cancel landed mid-sleep.
+    Cancelled,
+}
+
+/// Interruptible sleep between transient retries — a speculative
+/// fill's backoff yields to demand reads the same way its fetch does.
+async fn retry_backoff(session: &Arc<SessionInner>, through: bool) -> Backoff {
+    let sleep = tokio::time::sleep(session.config.retry_backoff);
+    tokio::pin!(sleep);
+    if through {
+        tokio::select! {
+            () = &mut sleep => Backoff::Waited,
+            () = session.cancel.cancelled() => Backoff::Cancelled,
+        }
+    } else {
+        tokio::select! {
+            () = &mut sleep => Backoff::Waited,
+            () = session.ft_notify.notified() => Backoff::Preempted,
+            () = session.cancel.cancelled() => Backoff::Cancelled,
         }
     }
 }
@@ -392,6 +484,7 @@ mod tests {
     struct CountingRemint {
         calls: AtomicU32,
         mime: String,
+        itag: Option<u32>,
         fail: Mutex<Option<StreamError>>,
     }
 
@@ -404,6 +497,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let fail = self.fail.lock().ok().and_then(|mut f| f.take());
             let mime = self.mime.clone();
+            let itag = self.itag;
             Box::pin(async move {
                 if let Some(e) = fail {
                     return Err(e);
@@ -411,11 +505,12 @@ mod tests {
                 Ok(PreparedSource {
                     url: "https://reminted.example/s".into(),
                     mime,
-                    itag: Some(140),
+                    itag,
                     bitrate_kbps: None,
                     content_length: Some(1024),
                     expires_at_ms: None,
                     source_ref: "vid".into(),
+                    provider: "test".into(),
                 })
             })
         }
@@ -430,6 +525,7 @@ mod tests {
             content_length: Some(1024),
             expires_at_ms: None,
             source_ref: "vid".into(),
+            provider: "test".into(),
         }
     }
 
@@ -460,6 +556,7 @@ mod tests {
         Arc::new(CountingRemint {
             calls: AtomicU32::new(0),
             mime: "audio/mp4".into(),
+            itag: Some(140),
             fail: Mutex::new(None),
         })
     }
@@ -497,6 +594,13 @@ mod tests {
         lock(&s.shared)
             .map(|sh| sh.marks.head_ready_ms.is_some())
             .unwrap_or(false)
+    }
+
+    /// The session's latched retriable error, if the pump stalled.
+    fn latched(s: &Arc<SessionInner>) -> Option<StreamError> {
+        lock(&s.shared)
+            .ok()
+            .and_then(|sh| sh.transient_error.clone())
     }
 
     fn eof_below(s: &Arc<SessionInner>) -> Option<u64> {
@@ -645,6 +749,7 @@ mod tests {
         let remint = Arc::new(CountingRemint {
             calls: AtomicU32::new(0),
             mime: "audio/webm".into(), // different container — must fail
+            itag: Some(140),
             fail: Mutex::new(None),
         });
         let s = session(config(&d), remint);
@@ -662,6 +767,69 @@ mod tests {
             }
             other => panic!("expected InvalidResponse, got {other:?}"),
         }
+        stop_pump(&s, task).await;
+    }
+
+    /// The itag pin is the mime pin's twin: a re-mint that returns a
+    /// different encode under the *same* container is terminal
+    /// `InvalidResponse` — a silent itag swap spliced into the extents
+    /// is a bug, not a recovery.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn itag_swap_on_remint_is_terminal() {
+        let d = TestDir::new("itagswap");
+        let remint = Arc::new(CountingRemint {
+            calls: AtomicU32::new(0),
+            mime: "audio/mp4".into(), // same container — the itag differs
+            itag: Some(599),          // the source minted Some(140)
+            fail: Mutex::new(None),
+        });
+        let s = session(config(&d), remint);
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 403,
+            content_range: None,
+            body: vec![],
+        })]));
+        let task = spawn_pump(&s, fetch);
+        wait_until(|| s.is_terminal()).await;
+        match s.terminal_err() {
+            Some(StreamError::InvalidResponse { message }) => {
+                assert!(message.contains("itag"), "{message}");
+                assert!(!message.contains("reminted.example"), "{message}");
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+        stop_pump(&s, task).await;
+    }
+
+    /// A re-mint that keeps the same itag under the pinned mime is
+    /// adopted — the pin rejects swaps, not re-mints. The pump takes
+    /// the fresh URL and resumes the fill at the cap-death offset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn matching_itag_remint_adopts() {
+        let d = TestDir::new("itagmatch");
+        let remint = remint_ok(); // same mime, same itag Some(140)
+        let s = session(config(&d), remint.clone());
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Reply(resp(206, 0, 128, 1024)),
+            Step::Reply(FetchResponse {
+                status: 403,
+                content_range: None,
+                body: vec![],
+            }),
+            Step::Reply(resp(206, 128, 128, 1024)),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| head_ready(&s) || s.is_terminal()).await;
+        assert!(
+            !s.is_terminal(),
+            "a matching-itag re-mint must not be terminal"
+        );
+        assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
+        let (committed, minted) = lock(&s.shared)
+            .map(|sh| (sh.committed, sh.marks.mint_ms.is_some()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(committed, 256);
+        assert!(minted);
         stop_pump(&s, task).await;
     }
 
@@ -739,29 +907,73 @@ mod tests {
         assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
     }
 
+    /// `404` is a terminal verdict; `429` and `5xx` are retriable and
+    /// latch instead of killing the session.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rate_limit_and_not_found_map_kinds() {
-        for (status, want) in [
-            (429u16, "rate-limit"),
-            (404, "not-found"),
-            (503, "transient"),
-        ] {
-            let d = TestDir::new(want);
-            let s = session(config(&d), remint_ok());
-            let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
-                status,
-                content_range: None,
-                body: vec![],
-            })]));
-            let task = spawn_pump(&s, fetch);
-            wait_until(|| s.is_terminal()).await;
-            assert_eq!(
-                s.terminal_err().map(|e| e.kind().to_string()),
-                Some(want.to_string()),
-                "status {status}"
-            );
-            stop_pump(&s, task).await;
-        }
+    async fn not_found_terminates_retriable_statuses_latch() {
+        let d = TestDir::new("nf404");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 404,
+            content_range: None,
+            body: vec![],
+        })]));
+        let task = spawn_pump(&s, fetch);
+        wait_until(|| s.is_terminal()).await;
+        assert!(matches!(s.terminal_err(), Some(StreamError::NotFound)));
+        stop_pump(&s, task).await;
+
+        // 429 latches immediately — a rate-limit wants real cooldown,
+        // not a backoff hammer.
+        let d = TestDir::new("rl429");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 429,
+            content_range: None,
+            body: vec![],
+        })]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        assert!(
+            matches!(latched(&s), Some(StreamError::RateLimited { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert!(!s.is_terminal(), "a 429 must never kill a session");
+        assert_eq!(
+            fetch
+                .requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "rate-limit must not be retried inline"
+        );
+        stop_pump(&s, task).await;
+
+        // 5xx classifies Transient: retried `fetch_retries` times, then
+        // latched — still not terminal.
+        let d = TestDir::new("t503");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(status_steps(503, 3)));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        assert!(
+            matches!(latched(&s), Some(StreamError::Transient { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert!(!s.is_terminal(), "a 503 must never kill a session");
+        assert_eq!(
+            fetch
+                .requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            3,
+            "transient retry budget is fetch_retries + the first attempt"
+        );
+        stop_pump(&s, task).await;
     }
 
     /// A file shorter than `head_bytes` still marks head-ready: the
@@ -837,6 +1049,7 @@ mod tests {
         let remint = Arc::new(CountingRemint {
             calls: AtomicU32::new(0),
             mime: "audio/mp4".into(),
+            itag: Some(140),
             fail: Mutex::new(Some(StreamError::Expired)),
         });
         let s = session(config(&d), remint);
@@ -851,27 +1064,71 @@ mod tests {
         stop_pump(&s, task).await;
     }
 
-    /// The pump errors surface the fetch's typed error.
+    /// A transient transport failure retries within `fetch_retries`,
+    /// then latches — the session stays live, and an attach (fresh
+    /// intent) clears the latch and re-drives the pump to success.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fetch_error_terminates() {
+    async fn transient_fetch_latches_then_attach_recovers() {
         let d = TestDir::new("fetcherr");
         let s = session(config(&d), remint_ok());
-        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Fail(
-            StreamError::Transient {
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Fail(StreamError::Transient {
                 message: "conn reset".into(),
-            },
-        )]));
-        let task = spawn_pump(&s, fetch);
-        wait_until(|| s.is_terminal()).await;
-        assert!(matches!(
-            s.terminal_err(),
-            Some(StreamError::Transient { .. })
-        ));
+            }),
+            Step::Fail(StreamError::Transient {
+                message: "conn reset".into(),
+            }),
+            Step::Fail(StreamError::Transient {
+                message: "conn reset".into(),
+            }),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        assert!(
+            matches!(latched(&s), Some(StreamError::Transient { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert!(
+            !s.is_terminal(),
+            "network wobble must never be session death"
+        );
+        assert_eq!(
+            fetch
+                .requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            3,
+            "first attempt plus fetch_retries retries"
+        );
+        // Fresh intent (a DataSource open) clears the latch — the next
+        // fetch is scripted to succeed and the fill completes.
+        fetch
+            .steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(Step::Reply(resp(206, 0, 128, 1024)));
+        s.attach(0).unwrap_or_else(|e| panic!("attach: {e}"));
+        wait_until(|| {
+            s.is_terminal()
+                || lock(&s.shared)
+                    .map(|sh| sh.committed >= 128)
+                    .unwrap_or(false)
+        })
+        .await;
+        assert_eq!(
+            lock(&s.shared).map(|sh| sh.committed).unwrap_or(0),
+            128,
+            "the re-driven pump must commit the recovered fetch"
+        );
         stop_pump(&s, task).await;
     }
 
     /// A hung `playback.resolve` must not zombie the session — the
-    /// re-mint is bounded by `mint_deadline` and ends `Transient`.
+    /// re-mint is bounded by `mint_deadline` and ends `Transient`,
+    /// which latches: a stalled mint is retriable, so the session
+    /// survives it for the next attempt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hung_remint_times_out() {
         struct HangingRemint;
@@ -894,11 +1151,13 @@ mod tests {
             body: vec![],
         })]));
         let task = spawn_pump(&s, fetch);
-        wait_until(|| s.is_terminal()).await;
-        assert!(matches!(
-            s.terminal_err(),
-            Some(StreamError::Transient { .. })
-        ));
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        assert!(
+            matches!(latched(&s), Some(StreamError::Transient { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert!(!s.is_terminal(), "a stalled mint must not kill the session");
         stop_pump(&s, task).await;
     }
 

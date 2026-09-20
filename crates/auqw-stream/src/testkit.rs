@@ -49,5 +49,6 @@ pub(crate) fn test_config(dir: &TestDir) -> StreamConfig {
     c.read_ahead = 512;
     c.stall = std::time::Duration::from_secs(2);
     c.read_deadline = std::time::Duration::from_secs(2);
+    c.retry_backoff = std::time::Duration::from_millis(5);
     c
 }

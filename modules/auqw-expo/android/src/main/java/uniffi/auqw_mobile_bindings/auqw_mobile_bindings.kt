@@ -2689,6 +2689,12 @@ sealed class PrepareOutcome {
          */
         val `stream`: uniffi.auqw_mobile_bindings.PreparedStream, 
         /**
+         * Handles this prepare superseded or pruned — the caller's
+         * handle routing must drop these so a dead session's entry
+         * can never serve a later attach.
+         */
+        val `superseded`: List<kotlin.String>, 
+        /**
          * Invocation accounting for the resolve.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : PrepareOutcome()
@@ -2740,6 +2746,7 @@ public object FfiConverterTypePrepareOutcome : FfiConverterRustBuffer<PrepareOut
         return when(buf.getInt()) {
             1 -> PrepareOutcome.Prepared(
                 FfiConverterTypePreparedStream.read(buf),
+                FfiConverterSequenceString.read(buf),
                 FfiConverterTypeAttemptSummary.read(buf),
                 )
             2 -> PrepareOutcome.Failed(
@@ -2757,6 +2764,7 @@ public object FfiConverterTypePrepareOutcome : FfiConverterRustBuffer<PrepareOut
             (
                 4UL
                 + FfiConverterTypePreparedStream.allocationSize(value.`stream`)
+                + FfiConverterSequenceString.allocationSize(value.`superseded`)
                 + FfiConverterTypeAttemptSummary.allocationSize(value.`attempt`)
             )
         }
@@ -2776,6 +2784,7 @@ public object FfiConverterTypePrepareOutcome : FfiConverterRustBuffer<PrepareOut
             is PrepareOutcome.Prepared -> {
                 buf.putInt(1)
                 FfiConverterTypePreparedStream.write(value.`stream`, buf)
+                FfiConverterSequenceString.write(value.`superseded`, buf)
                 FfiConverterTypeAttemptSummary.write(value.`attempt`, buf)
                 Unit
             }
@@ -3457,6 +3466,34 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
         }
     }
 }
