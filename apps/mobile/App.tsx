@@ -1501,7 +1501,13 @@ function Main({
           const provider = params.get('provider');
           const id = params.get('id');
           if (provider !== null && id !== null) {
-            void s.startRadio({ provider, kind: 'track', id });
+            void s.startRadio({ provider, kind: 'track', id }).then((res) => {
+              console.log(
+                res.ok
+                  ? '[journey] radio seeded'
+                  : `[journey] radio seed failed: ${res.error.kind} — ${res.error.message}`,
+              );
+            });
           }
           break;
         }
