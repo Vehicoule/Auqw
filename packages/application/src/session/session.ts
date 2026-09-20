@@ -110,8 +110,8 @@ function sameRef(a: SourceRef | null, b: SourceRef | null): boolean {
   return a.provider === b.provider && a.kind === b.kind && a.id === b.id;
 }
 
-function identityEq(a: PlaybackIdentity, b: PlaybackIdentity): boolean {
-  return a.attemptId === b.attemptId && a.queueRev === b.queueRev;
+function attemptEq(a: PlaybackIdentity, b: PlaybackIdentity): boolean {
+  return a.attemptId === b.attemptId;
 }
 
 function internalError(): AppError {
@@ -1073,7 +1073,7 @@ export class Session {
     if (
       ready2 !== null &&
       ready2.playback.type === 'preparing' &&
-      identityEq(ready2.playback.identity, attempt.identity)
+      attemptEq(ready2.playback.identity, attempt.identity)
     ) {
       ready2.playback = { ...ready2.playback, requestId: prepared.value };
       this.#publish();
@@ -1379,7 +1379,7 @@ export class Session {
     const active = this.#active;
     if (
       active === null ||
-      !identityEq(event.identity, active.identity) ||
+      !attemptEq(event.identity, active.identity) ||
       active.handle === undefined ||
       event.handle !== active.handle ||
       !isSafeNonNegative(event.positionMs) ||
@@ -1508,7 +1508,7 @@ export class Session {
     if (
       active === null ||
       r === null ||
-      !identityEq(event.identity, active.identity) ||
+      !attemptEq(event.identity, active.identity) ||
       this.#isStale(active)
     ) {
       // Stale identity: release the handle idempotently, never play —
@@ -1736,8 +1736,7 @@ export class Session {
       // Adopt the service attemptId but re-key queueRev to the
       // post-reconcile revision — same rule as every other op
       // (pause/resume/seek): identity tracks the revision the next
-      // #derived() install carries, or native status echoes under the
-      // fresh revision would be rejected by identityEq.
+      // #derived() install carries, keeping published state coherent.
       const identity = {
         attemptId: event.identity.attemptId,
         queueRev: snap2.revision,

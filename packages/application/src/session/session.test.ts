@@ -1695,6 +1695,45 @@ async function remotePausePlay(): Promise<void> {
   assertEqual(snapR.queue.positionMs, 2_000);
 }
 
+async function statusJoinAcrossQueueEdits(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const idA = lastPrepareIdentity(r);
+  // A queue edit ticks the revision without re-keying the active
+  // identity; native re-keys attached.queueRev on the next install, so
+  // status echoes carry the newer revision.
+  const enq = await r.session.enqueueMetadata(
+    meta('itunes', 'it-2', 'Two', 'B', 300_000),
+  );
+  assert(enq.ok, 'enqueue failed');
+  await pump();
+  const newerRev = readyOf(r).queue.revision;
+  assert(newerRev > idA.queueRev, 'edit ticked the revision');
+  const echoed = { attemptId: idA.attemptId, queueRev: newerRev };
+  r.player.emit(statusEvent(echoed, 'h-o1', 'playing', 5_000));
+  await pump();
+  assertEqual(
+    readyOf(r).queue.positionMs,
+    5_000,
+    'status joins after a queue edit',
+  );
+  r.player.emit(statusEvent(echoed, 'h-o1', 'paused', 5_000));
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'paused', 'remote pause reconciles');
+}
+
 async function successorMapping(): Promise<void> {
   const twoItem = () =>
     persisted({
@@ -2396,6 +2435,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['projectionBasics', projectionBasics],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
+  ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
   ['successorMapping', successorMapping],
   ['duplicatePrepareSafety', duplicatePrepareSafety],
   ['deadClockSkipsPort', deadClockSkipsPort],

@@ -510,9 +510,12 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       }
     },
 
-    pause() {
+    pause(identity) {
       for (const record of prepared.values()) {
-        record.attached?.player.pause();
+        if (record.attached !== null) {
+          record.attached.identity = identity;
+          record.attached.player.pause();
+        }
       }
       return Promise.resolve(ok(undefined));
     },
@@ -520,6 +523,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
     seekTo(input) {
       for (const record of prepared.values()) {
         if (record.attached !== null) {
+          record.attached.identity = input.identity;
           void record.attached.player
             .seekTo(input.positionMs / 1000)
             .catch(() => undefined);
