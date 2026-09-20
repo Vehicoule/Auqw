@@ -84,6 +84,9 @@ export function AndroidNavbar({
               <Text
                 variant="metadata"
                 color={active ? 'accent' : 'secondary'}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.8}
                 style={[
                   active && { fontFamily: theme.fontFamilies.bold },
                 ]}
@@ -174,6 +177,9 @@ export function IosGlassNavbar({
                 <Text
                   variant="metadata"
                   color={active ? 'accent' : 'secondary'}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.8}
                   style={[
                     active && { fontFamily: theme.fontFamilies.bold },
                   ]}

@@ -49,7 +49,7 @@ export function TrackRow({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 11,
-        height: theme.sizes.trackRow,
+        minHeight: theme.sizes.trackRow * theme.textScale,
         paddingHorizontal: theme.spacing.sm,
         borderRadius: theme.radius.control,
         backgroundColor: row.playing ? theme.colors.accentSoft : 'transparent',
@@ -174,7 +174,7 @@ export function TrackRow({
           variant="metadata"
           color="secondary"
           numeric
-          style={{ width: 34, textAlign: 'right' }}
+          style={{ minWidth: 34 * theme.textScale, textAlign: 'right' }}
         >
           {formatClock(row.durationMs)}
         </Text>

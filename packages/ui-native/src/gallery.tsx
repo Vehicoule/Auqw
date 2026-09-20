@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScrollView, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme, ThemeProvider } from './theme.tsx';
 import {
   Artwork,
@@ -124,7 +125,7 @@ function Frame({
   return (
     <View
       style={{
-        height,
+        height: height * theme.textScale,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.divider,
         borderRadius: theme.radius.float,
@@ -249,13 +250,15 @@ function GalleryBody({
   readonly setGestureState: (value: 'rest' | 'mid-drag' | 'dismissed') => void;
 }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const search = fixtureSearchStates[searchPhase] ?? fixtureSearchStates[0];
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
       contentContainerStyle={{
         padding: theme.spacing.lg,
-        paddingBottom: theme.spacing.display,
+        paddingTop: insets.top + theme.spacing.lg,
+        paddingBottom: insets.bottom + theme.spacing.display,
       }}
     >
       <Text variant="display" color="bright">
@@ -545,6 +548,7 @@ function GalleryBody({
                 platform={platform}
                 expanded={expanded}
                 dragPreview={gestureState}
+                queueScrollEnabled={false}
                 onExpandChange={setExpanded}
                 queue={fixtureQueueModel}
                 lyrics={fixtureLyrics}
@@ -575,6 +579,7 @@ function GalleryBody({
           <QueueScreen
             queue={fixtureQueueModel}
             player={fixturePlayerPlaying}
+            scrollEnabled={false}
             onPressItem={noop}
             onRemoveItem={noop}
           />
@@ -585,6 +590,7 @@ function GalleryBody({
             queue={fixtureQueueModelPaused}
             player={fixturePlayerPaused}
             reordering
+            scrollEnabled={false}
             onToggleReorder={noop}
             onPressItem={noop}
             onRemoveItem={noop}

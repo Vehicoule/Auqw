@@ -538,6 +538,59 @@ function testDesignTokenAuthority(): void {
   }
 }
 
+function testGalleryNestingSafety(): void {
+  const source = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('height * theme.textScale'),
+    'fixture frames must grow with the accessibility text scale',
+  );
+  assert(
+    source.includes('queueScrollEnabled={false}'),
+    'embedded Stage queue must not add a second vertical scroller',
+  );
+  assert(
+    /<QueueScreen[\s\S]*?scrollEnabled={false}/.test(source),
+    'embedded queue screens must disable their inner list scrolling',
+  );
+}
+
+function testTrackRowTextScale(): void {
+  const source = readFileSync(new URL('./track-row.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('minHeight: theme.sizes.trackRow * theme.textScale'),
+    'track rows must grow to fit 200% title and metadata lines',
+  );
+  assert(
+    source.includes('minWidth: 34 * theme.textScale'),
+    'the duration column must stay on one line at 200% text',
+  );
+}
+
+function testNavbarTextScale(): void {
+  const source = readFileSync(new URL('./navbar.tsx', import.meta.url), 'utf8');
+  const adaptiveLabels = source.match(/adjustsFontSizeToFit/g)?.length ?? 0;
+  assert(
+    adaptiveLabels >= 2,
+    'both navbar variants must keep destination labels on one adaptive line',
+  );
+}
+
+function testGallerySafeArea(): void {
+  const source = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    source.includes('useSafeAreaInsets()'),
+    'gallery must respect the platform safe-area insets',
+  );
+  assert(
+    source.includes('insets.top + theme.spacing.lg'),
+    'gallery content must clear the status bar',
+  );
+  assert(
+    source.includes('insets.bottom + theme.spacing.display'),
+    'gallery content must clear the system gesture area',
+  );
+}
+
 testFormatClock();
 testPlayPauseMorph();
 testProgressPathState();
@@ -553,6 +606,10 @@ testHomeAndNav();
 testSearchStates();
 testCoverageMatrix();
 testDesignTokenAuthority();
+testGalleryNestingSafety();
+testTrackRowTextScale();
+testNavbarTextScale();
+testGallerySafeArea();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';

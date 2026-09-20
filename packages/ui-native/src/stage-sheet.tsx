@@ -247,6 +247,7 @@ export type StageSheetProps = {
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
   readonly queueReordering?: boolean | undefined;
+  readonly queueScrollEnabled?: boolean | undefined;
   readonly dragPreview?: 'rest' | 'mid-drag' | 'dismissed' | undefined;
   readonly topInset?: number | undefined;
   readonly onPlayPause?: (() => void) | undefined;
@@ -273,6 +274,7 @@ export function StageSheet({
   queue,
   lyrics,
   queueReordering = false,
+  queueScrollEnabled = true,
   dragPreview = 'rest',
   topInset = 0,
   onPlayPause,
@@ -558,6 +560,7 @@ export function StageSheet({
               <QueueList
                 queue={queue}
                 reordering={queueReordering}
+                scrollEnabled={queueScrollEnabled}
                 onPressItem={onPressQueueItem}
                 onRemoveItem={onRemoveQueueItem}
                 onMoveItem={onMoveQueueItem}

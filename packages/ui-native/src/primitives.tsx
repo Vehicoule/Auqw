@@ -69,6 +69,8 @@ export type TextProps = {
   readonly numeric?: boolean | undefined;
   readonly uppercase?: boolean | undefined;
   readonly numberOfLines?: number | undefined;
+  readonly adjustsFontSizeToFit?: boolean | undefined;
+  readonly minimumFontScale?: number | undefined;
   readonly style?: StyleProp<TextStyle>;
   readonly children: ReactNode;
   readonly accessibilityLabel?: string | undefined;
@@ -80,6 +82,8 @@ export function Text({
   numeric = false,
   uppercase = false,
   numberOfLines,
+  adjustsFontSizeToFit,
+  minimumFontScale,
   style,
   children,
   accessibilityLabel,
@@ -103,6 +107,8 @@ export function Text({
   return (
     <RNText
       numberOfLines={numberOfLines}
+      adjustsFontSizeToFit={adjustsFontSizeToFit}
+      minimumFontScale={minimumFontScale}
       accessibilityLabel={accessibilityLabel}
       style={[
         scaled,
