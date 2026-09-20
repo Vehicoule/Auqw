@@ -15,6 +15,8 @@ import type {
 import type { PlayerPort } from '../ports/player.ts';
 import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { StoragePort } from '../ports/storage.ts';
+import { isPersistedState } from '../library/library.ts';
+import type { Entity } from '../library/library.ts';
 import type { OperationContext } from '../cancellation.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { ProviderPort } from '../ports/provider.ts';
@@ -2485,8 +2487,213 @@ async function concurrentLikes(): Promise<void> {
   await r.session.dispose();
 }
 
+/** Replays every recorded commit onto the base persisted document. */
+function applyCommits(
+  base: PersistedState,
+  commits: readonly { batch: StorageBatch }[],
+): PersistedState {
+  return commits.reduce(
+    (state, { batch }) => ({
+      recordings: batch.recordings ?? state.recordings,
+      likes: batch.likes ?? state.likes,
+      entities: batch.entities ?? state.entities,
+      entitySourceRefs: batch.entitySourceRefs ?? state.entitySourceRefs,
+      playlists: batch.playlists ?? state.playlists,
+      playlistEntries: batch.playlistEntries ?? state.playlistEntries,
+      playHistory: batch.playHistory ?? state.playHistory,
+      playCounts: batch.playCounts ?? state.playCounts,
+      matchReviews: batch.matchReviews ?? state.matchReviews,
+      lyricsCache: batch.lyricsCache ?? state.lyricsCache,
+      artworkCache: batch.artworkCache ?? state.artworkCache,
+      queue: batch.queue ?? state.queue,
+      settings: batch.settings ?? state.settings,
+    }),
+    base,
+  );
+}
+
+/** Each commit in sequence must leave a valid persisted document. */
+function assertAllCommitsValid(
+  base: PersistedState,
+  commits: readonly { batch: StorageBatch }[],
+): void {
+  let state = base;
+  for (const { batch } of commits) {
+    state = applyCommits(state, [{ batch }]);
+    assert(isPersistedState(state), 'commit batch validates');
+  }
+}
+
+async function libraryFlow(): Promise<void> {
+  const album: Entity = {
+    entityId: 'ent-1',
+    kind: 'album',
+    title: 'Dummy',
+    artistName: 'Portishead',
+    artwork: [],
+    createdMs: 0,
+  };
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+    entities: [album],
+  });
+  const r = rig(base);
+  await restoreOk(r);
+
+  // Playlists: create -> add (duplicates keep row identity) -> reorder.
+  const created = await r.session.createPlaylist('Mix');
+  assert(created.ok, 'createPlaylist failed');
+  const playlistId = created.value;
+  assertEqual(readyOf(r).playlists.length, 1);
+  const e1 = await r.session.addPlaylistEntry(playlistId, 'r1');
+  const e2 = await r.session.addPlaylistEntry(playlistId, 'r1');
+  assert(e1.ok && e2.ok, 'addPlaylistEntry failed');
+  assert(e1.value !== e2.value, 'duplicate entries keep distinct ids');
+  const moved = await r.session.reorderPlaylistEntry(e2.value, {
+    before: e1.value,
+  });
+  assert(moved.ok, 'reorder failed');
+  assertDeepEqual(
+    readyOf(r)
+      .playlistEntries.slice()
+      .sort((a, b) => a.position - b.position)
+      .map((e) => e.entryId),
+    [e2.value, e1.value],
+  );
+  const renamed = await r.session.renamePlaylist(playlistId, 'Late Night');
+  assert(renamed.ok);
+  assertEqual(readyOf(r).playlists[0]?.name, 'Late Night');
+  const removed = await r.session.removePlaylistEntry(e1.value);
+  assert(removed.ok);
+  assertEqual(readyOf(r).playlistEntries.length, 1);
+
+  // Typed failures: not-found vs invalid input.
+  const missing = await r.session.addPlaylistEntry('pl-x', 'r1');
+  assert(!missing.ok && missing.error.kind === 'not-found');
+  const badName = await r.session.createPlaylist('   ');
+  assert(!badName.ok && badName.error.kind === 'invalid-response');
+  const badMove = await r.session.reorderPlaylistEntry(e2.value, {
+    before: 'nope',
+  });
+  assert(!badMove.ok && badMove.error.kind === 'not-found');
+
+  // Entity likes toggle through the same likes section.
+  const unknownEntity = await r.session.toggleEntityLike('album', 'ent-x');
+  assert(!unknownEntity.ok && unknownEntity.error.kind === 'not-found');
+  assert((await r.session.toggleEntityLike('album', 'ent-1')).ok);
+  assertDeepEqual(
+    readyOf(r).likes.map((l) => `${l.entityKind}:${l.targetId}`),
+    ['album:ent-1'],
+  );
+  assert((await r.session.toggleEntityLike('album', 'ent-1')).ok);
+  assertEqual(readyOf(r).likes.length, 0, 'entity like toggled off');
+
+  // Delete cascades entries inside one commit.
+  assert((await r.session.deletePlaylist(playlistId)).ok);
+  assertEqual(readyOf(r).playlists.length, 0);
+  assertEqual(readyOf(r).playlistEntries.length, 0, 'entries cascaded');
+
+  // Every commit batch merged onto the base validates whole-document.
+  assertAllCommitsValid(base, r.storage.commits);
+  await r.session.dispose();
+}
+
+async function historyFlow(): Promise<void> {
+  // An ended occurrence records exactly one play, committed to
+  // play_history + play_counts; the same occurrence never repeats.
+  const base = persisted({
+    recordings: [
+      recording('rA', [ref('youtube-music', 'yA')]),
+      recording('rB', [ref('youtube-music', 'yB')]),
+    ],
+    queue: {
+      revision: 2,
+      occurrences: [
+        occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+        occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+      ],
+      currentOccurrenceId: null,
+      positionMs: 0,
+      mode: 'stopped',
+    },
+  });
+  const r = rig(base);
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const snap0 = readyOf(r);
+  const idA = 'identity' in snap0.playback ? snap0.playback.identity : undefined;
+  assert(idA !== undefined);
+  r.player.emit(statusEvent(idA, 'h-oA', 'ended', 300_000));
+  await pump();
+  const snap1 = readyOf(r);
+  assertEqual(snap1.playHistory.length, 1, 'ended records one play');
+  assertEqual(snap1.playHistory[0]?.occurrenceId, 'oA');
+  assertEqual(snap1.playHistory[0]?.recordingId, 'rA');
+  assertEqual(snap1.playCounts[0]?.count, 1);
+  // A duplicate ended for the same occurrence is a no-op.
+  r.player.emit(statusEvent(idA, 'h-oA', 'ended', 300_000));
+  await pump();
+  assertEqual(readyOf(r).playHistory.length, 1, 'occurrence dedupes');
+  // Under-threshold listens never reach history.
+  const svc: PlaybackIdentity = {
+    attemptId: 'svc-1',
+    queueRev: r.player.projections.at(-1)?.queueRev ?? 0,
+  };
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oB',
+      reason: 'ended',
+      positionMs: 0,
+      identity: svc,
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    1,
+    'transition does not double count',
+  );
+  // Under-threshold positions on the successor are not plays.
+  r.player.emit(statusEvent(svc, 'h-svc', 'playing', 5_000));
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    1,
+    'short listen is not a play',
+  );
+  // A service-side completion counts even without a JS 'ended':
+  // a finished occurrence crossed the threshold by definition.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 0,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    2,
+    'completed occurrence counts',
+  );
+  assertEqual(readyOf(r).playHistory[1]?.occurrenceId, 'oB');
+  assertEqual(
+    readyOf(r).playCounts.find((c) => c.recordingId === 'rB')?.count,
+    1,
+  );
+  assertAllCommitsValid(base, r.storage.commits);
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentLikes', concurrentLikes],
+  ['libraryFlow', libraryFlow],
+  ['historyFlow', historyFlow],
   ['restorePlayingSnapshot', restorePlayingSnapshot],
   ['metadataToPrepare', metadataToPrepare],
   ['rapidPlayIntents', rapidPlayIntents],
