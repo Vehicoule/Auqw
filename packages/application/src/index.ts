@@ -11,6 +11,7 @@ export * from './library/export-import.ts';
 export * from './library/likes.ts';
 export * from './library/library.ts';
 export * from './queue/queue-engine.ts';
+export * from './queue/radio-tail.ts';
 export * from './matching/matching-engine.ts';
 export * from './search/search-session.ts';
 export * from './session/session.ts';

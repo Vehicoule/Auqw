@@ -540,3 +540,28 @@ export function recordingFromMetadata(
     mappings: [],
   };
 }
+
+/**
+ * Refreshes a recording's metadata fields from a provider record for
+ * one of its own refs — version labels are re-derived and an ISRC is
+ * only ever filled in, never removed. Identity fields (`id`,
+ * `sourceRefs`, `mappings`) are untouched.
+ */
+export function mergeRecordingMetadata(
+  recording: Recording,
+  metadata: TrackMetadata,
+): Recording {
+  return {
+    ...recording,
+    title: metadata.title,
+    artist: metadata.artist,
+    album: metadata.album,
+    durationMs: metadata.durationMs,
+    releaseYear: metadata.releaseYear,
+    artwork: metadata.artwork,
+    explicit: metadata.explicit,
+    genre: metadata.genre,
+    isrc: metadata.isrc ?? recording.isrc,
+    versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
+  };
+}

@@ -13,9 +13,11 @@ import type {
 } from '../domain.ts';
 import {
   isSettings,
+  isSourceRef,
   isString,
   isTrackMetadata,
   isTrackRef,
+  mergeRecordingMetadata,
   recordingFromMetadata,
 } from '../domain.ts';
 import { countsAsPlay, recordPlay } from '../library/history.ts';
@@ -46,10 +48,7 @@ import {
   reorderPlaylistEntry,
 } from '../library/playlists.ts';
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
-import {
-  extractVersionLabels,
-  MatchingEngine,
-} from '../matching/matching-engine.ts';
+import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -60,7 +59,12 @@ import type {
   QueueProjection,
   QueueProjectionItem,
 } from '../ports/player.ts';
-import type { ProviderPort, RecordingQuery } from '../ports/provider.ts';
+import type {
+  ProviderPort,
+  RadioPage,
+  RadioSeed,
+  RecordingQuery,
+} from '../ports/provider.ts';
 import {
   ProviderRouter,
   selectionFromSettings,
@@ -72,6 +76,15 @@ import type {
 } from '../ports/storage.ts';
 import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
+import {
+  isRadioPage,
+  planRadioPage,
+  publishRadio,
+  remainingAfterCurrent,
+  shouldGrowRadio,
+  RADIO_FETCH_AHEAD,
+} from '../queue/radio-tail.ts';
+import type { RadioTail, RadioTailRecord } from '../queue/radio-tail.ts';
 
 export type SessionPlayback =
   | { readonly type: 'idle' }
@@ -111,6 +124,12 @@ export type ReadySession = {
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
   readonly playback: SessionPlayback;
+  /**
+   * The lazy radio tail (queue/radio-tail.ts): `null` unless a radio
+   * was seeded this session — runtime-only, never persisted; the
+   * queue occurrences it appended are ordinary persisted rows.
+   */
+  readonly radio: RadioTail | null;
   readonly persistenceError?: AppError;
 };
 
@@ -207,6 +226,7 @@ type Ready = {
   queue: QueueEngine;
   settings: Settings;
   playback: SessionPlayback;
+  radio: RadioTailRecord | null;
   persistenceError: AppError | undefined;
 };
 
@@ -244,6 +264,7 @@ export class Session {
   #eventTail: Promise<void> = Promise.resolve();
   #likeTail: Promise<void> = Promise.resolve();
   #playlistTail: Promise<void> = Promise.resolve();
+  #radioTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -313,6 +334,7 @@ export class Session {
         queue: ready.queue.snapshot(),
         settings: { ...ready.settings },
         playback: ready.playback,
+        radio: publishRadio(ready.radio),
       };
       this.#state =
         ready.persistenceError === undefined
@@ -485,6 +507,7 @@ export class Session {
     this.#mappingSource = null;
     this.#own(this.#projectQueue());
     this.#maybeMapSuccessor();
+    this.#maybeGrowRadio();
   }
 
   // ---- restore ----------------------------------------------------
@@ -545,6 +568,7 @@ export class Session {
       queue,
       settings: { ...data.settings },
       playback: { type: 'idle' },
+      radio: null,
       persistenceError: undefined,
     };
     // Restore never starts the player; it always restores paused.
@@ -575,20 +599,7 @@ export class Session {
     if (recording !== undefined) {
       const hasRef = recording.sourceRefs.some((s) => sameRef(s, ref));
       const updated: Recording = {
-        ...recording,
-        title: metadata.title,
-        artist: metadata.artist,
-        album: metadata.album,
-        durationMs: metadata.durationMs,
-        releaseYear: metadata.releaseYear,
-        artwork: metadata.artwork,
-        explicit: metadata.explicit,
-        genre: metadata.genre,
-        isrc: metadata.isrc ?? recording.isrc,
-        versionLabels: extractVersionLabels(
-          metadata.title,
-          metadata.explicit,
-        ),
+        ...mergeRecordingMetadata(recording, metadata),
         sourceRefs: hasRef
           ? recording.sourceRefs
           : [...recording.sourceRefs, ref],
@@ -1087,6 +1098,12 @@ export class Session {
       // Successor mapping may be resolving against the old rows.
       this.#mappingSource?.cancel();
       this.#mappingSource = null;
+      // An armed radio tail cannot survive the queue replace:
+      // cancel any in-flight continuation and drop the record.
+      const replaced = this.#ready;
+      if (replaced !== null) {
+        this.#clearRadio(replaced);
+      }
       const deadlineMs = this.#deadline();
       const context = this.#newContext('import', deadlineMs, source.signal);
       const applied = await this.#withDeadline(
@@ -1109,6 +1126,292 @@ export class Session {
     } finally {
       this.#opSources.delete(source);
     }
+  }
+
+  // ---- radio tail -----------------------------------------------------
+
+  /**
+   * Seed a lazy radio tail from a track ref (`radio.seed`'s dual
+   * payload). The seed routes to the provider that minted the ref —
+   * provenance is the only honest route. The page mints recordings +
+   * occurrences in one atomic write, then the tail keeps the returned
+   * continuation armed. Ops serialize on the radio tail; a new seed
+   * replaces the armed one.
+   */
+  startRadio(ref: SourceRef): Promise<Result<void>> {
+    const work = this.#radioTail.then(() => this.#startRadio(ref));
+    this.#radioTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  /**
+   * Disarm the radio tail. Queued occurrences are untouched — the
+   * queue simply stops growing.
+   */
+  stopRadio(): Result<void> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    this.#clearRadio(ready.value);
+    this.#publish();
+    return ok(undefined);
+  }
+
+  /**
+   * Drops the tail record and cancels any in-flight continuation;
+   * stale fetch results are rejected by record identity, never
+   * applied.
+   */
+  #clearRadio(r: Ready): void {
+    const record = r.radio;
+    if (record === null) {
+      return;
+    }
+    record.source?.cancel();
+    r.radio = null;
+  }
+
+  async #startRadio(ref: SourceRef): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (!isSourceRef(ref)) {
+      return err(appError('invalid-response', 'invalid radio seed'));
+    }
+    if (ref.kind !== 'track') {
+      // Track-seeded at first release (providers.md).
+      return err(
+        appError('not-applicable', 'radio seeds are track refs'),
+      );
+    }
+    const routed = this.#router.providerForRef(ref, 'radio.seed');
+    if (!routed.ok) {
+      return err(routed.error);
+    }
+    this.#clearRadio(r);
+    const record: RadioTailRecord = {
+      seedRef: ref,
+      providerId: routed.value.id,
+      continuation: null,
+      status: 'growing',
+      error: undefined,
+      fetching: true,
+      source: null,
+    };
+    r.radio = record;
+    this.#publish();
+    const seeded = await this.#radioCall(
+      routed.value,
+      { sourceRef: ref },
+      record,
+    );
+    record.fetching = false;
+    if (r.radio !== record) {
+      // Superseded or cleared while the seed was in flight — same
+      // honesty rule as superseded playback attempts.
+      return err(appError('superseded', 'radio seed superseded'));
+    }
+    if (!seeded.ok) {
+      // A failed seed never armed a radio: the state stays absent
+      // and the typed error is the caller's.
+      r.radio = null;
+      this.#publish();
+      return err(seeded.error);
+    }
+    const applied = this.#applyRadioPage(r, seeded.value);
+    if (!applied.ok) {
+      r.radio = null;
+      this.#publish();
+      return err(applied.error);
+    }
+    record.continuation = seeded.value.continuation;
+    if (record.continuation === null) {
+      record.status = 'ended';
+    }
+    this.#publish();
+    if (applied.value.changed) {
+      const persisted = await this.#persist({
+        recordings: r.recordings,
+        queue: r.queue.snapshot(),
+      });
+      this.#derived();
+      if (!persisted.ok) {
+        return err(persisted.error);
+      }
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * Lazy fetch-ahead: called from #derived (every queue transition)
+   * and the native transition reconcile — never from a timer. The
+   * predicate lives in queue/radio-tail.ts; the fetch serializes on
+   * the radio tail so at most one continuation is in flight.
+   */
+  #maybeGrowRadio(): void {
+    const r = this.#ready;
+    if (r === null || this.#disposed) {
+      return;
+    }
+    const record = r.radio;
+    if (record === null || !shouldGrowRadio(record, r.queue.snapshot())) {
+      return;
+    }
+    record.fetching = true;
+    this.#publish();
+    const work = this.#radioTail.then(() => this.#growRadio(record));
+    this.#radioTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+  }
+
+  async #growRadio(record: RadioTailRecord): Promise<void> {
+    const r = this.#ready;
+    if (r === null || r.radio !== record) {
+      return;
+    }
+    // Re-check the trigger's predicate: queued behind other radio
+    // ops the window may already be filled — a stale trigger is a
+    // no-op, not a wasted fetch. The trigger published `fetching`;
+    // clearing it needs a publish so the flag never reads as a
+    // stuck spinner.
+    const snap = r.queue.snapshot();
+    if (
+      record.status !== 'growing' ||
+      record.continuation === null ||
+      snap.currentOccurrenceId === null ||
+      remainingAfterCurrent(snap) >= RADIO_FETCH_AHEAD
+    ) {
+      record.fetching = false;
+      this.#publish();
+      return;
+    }
+    // The continuation token's issuer is the only honest target —
+    // route by the seed's provenance, not the settings slot.
+    const routed = this.#router.providerForRef(record.seedRef, 'radio.seed');
+    if (!routed.ok) {
+      record.fetching = false;
+      record.status = 'failed';
+      record.error = routed.error;
+      this.#publish();
+      return;
+    }
+    const result = await this.#radioCall(
+      routed.value,
+      { continuation: record.continuation },
+      record,
+    );
+    record.fetching = false;
+    if (r.radio !== record || this.#disposed) {
+      return;
+    }
+    if (!result.ok) {
+      if (result.error.kind === 'cancelled') {
+        return;
+      }
+      // Honest stop: the tail fails terminal — no retry loop, the
+      // queue simply plays out what it has.
+      record.status = 'failed';
+      record.error = result.error;
+      this.#publish();
+      return;
+    }
+    const applied = this.#applyRadioPage(r, result.value);
+    if (!applied.ok) {
+      record.status = 'failed';
+      record.error = applied.error;
+      this.#publish();
+      return;
+    }
+    record.continuation = result.value.continuation;
+    if (record.continuation === null) {
+      record.status = 'ended';
+    }
+    this.#publish();
+    if (applied.value.changed) {
+      await this.#persist({
+        recordings: r.recordings,
+        queue: r.queue.snapshot(),
+      });
+      // derived() re-evaluates the window: a page that still leaves
+      // the tail short chains the next continuation immediately.
+      this.#derived();
+    }
+    // A page that appended nothing does not chain — the next real
+    // queue transition re-evaluates, so all-dupe pages cannot spin.
+  }
+
+  /**
+   * One bounded provider call for the tail. The cancellation source
+   * lives on the record so clears can cancel it, and is tracked in
+   * #opSources so dispose cancels it too.
+   */
+  async #radioCall(
+    provider: ProviderPort,
+    input: RadioSeed,
+    record: RadioTailRecord,
+  ): Promise<Result<RadioPage>> {
+    const source = new CancellationSource();
+    record.source = source;
+    this.#opSources.add(source);
+    try {
+      const deadlineMs = this.#deadline();
+      const context = this.#newContext('radio', deadlineMs, source.signal);
+      return await this.#withDeadline(
+        () => provider.radioSeed(input, context),
+        deadlineMs,
+        source,
+      );
+    } finally {
+      this.#opSources.delete(source);
+      if (record.source === source) {
+        record.source = null;
+      }
+    }
+  }
+
+  /**
+   * Applies a fetched page to library + queue: validates the wire
+   * shape (one corrupt item fails the whole page), dedupes against
+   * the queue, mints/merges recordings, then enqueues the survivors.
+   * Atomic at the persist batch — the caller writes `recordings` +
+   * `queue` in a single commit, all items or none.
+   */
+  #applyRadioPage(r: Ready, page: RadioPage): Result<{ changed: boolean }> {
+    if (!isRadioPage(page)) {
+      return err(
+        appError('invalid-response', 'radio page failed validation'),
+      );
+    }
+    const now = this.#safeNow();
+    if (now === null) {
+      return err(internalError());
+    }
+    const plan = planRadioPage(
+      r.recordings,
+      r.queue.snapshot().occurrences,
+      page.candidates,
+      this.#ids,
+      r.settings.playbackProvider,
+      now,
+    );
+    const recordingsChanged = plan.recordings !== r.recordings;
+    if (recordingsChanged) {
+      r.recordings = [...plan.recordings];
+    }
+    try {
+      for (const occurrence of plan.occurrences) {
+        r.queue.enqueue(occurrence);
+      }
+    } catch (thrown) {
+      return err(fromUnknown(thrown));
+    }
+    return ok({
+      changed: recordingsChanged || plan.occurrences.length > 0,
+    });
   }
 
   // ---- transport ----------------------------------------------------
@@ -2293,6 +2596,9 @@ export class Session {
     this.#mappingSource?.cancel();
     this.#mappingSource = null;
     this.#maybeMapSuccessor();
+    // The cursor moved inside the projection — the radio tail's
+    // fetch-ahead window may have opened.
+    this.#maybeGrowRadio();
   }
 
   // ---- successor mapping ----------------------------------------------

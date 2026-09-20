@@ -335,9 +335,11 @@ export class MatchingEngine {
 
   /**
    * Scores one candidate; returns null when hard label axes reject it
-   * or it fails the similarity floor.
+   * or it fails the similarity floor. Public so provider-asserted
+   * pairings (e.g. a radio page's own refs) can record real evidence
+   * instead of a fabricated score.
    */
-  private static evidence(
+  static evidence(
     recording: Recording,
     candidate: MatchCandidate,
   ): { evidence: MatchEvidence } | null {
