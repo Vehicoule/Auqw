@@ -1,13 +1,15 @@
 import { Asset } from 'expo-asset';
 import { File } from 'expo-file-system';
-import { Session } from '@auqw/application';
+import { CancellationSource, Session } from '@auqw/application';
 import type {
+  ArtworkCache,
   PlayerPort,
   ProviderPort,
   Settings,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
 import type { AuqwExpoHostModuleLike } from '../adapters/auqw-expo-surface.ts';
+import { createExpoArtwork } from '../adapters/expo-artwork.ts';
 import { createExpoAudioPlayer } from '../adapters/expo-audio-player.ts';
 import type { PluginProvider } from '../adapters/plugin-provider.ts';
 import {
@@ -50,6 +52,12 @@ export type SessionController = {
   readonly storage: SqliteStorage;
   readonly providers: readonly ProviderPort[];
   readonly player: PlayerPort;
+  /**
+   * The bounded LRU artwork cache (spec: ~200 MB, settings-managed).
+   * Image components resolve artwork through `cache.get`; the
+   * settings surface calls `sweep` after shrinking the budget.
+   */
+  readonly artworkCache: ArtworkCache;
   dispose(): Promise<void>;
 };
 
@@ -149,20 +157,37 @@ export async function createSessionController(
       qualityKbps: DEFAULT_SETTINGS.qualityKbps,
     });
   }))(providerMap);
+  const ids = createIds();
+  const clock = createClock();
   const session = new Session({
     storage,
     player,
     providers,
-    clock: createClock(),
-    ids: createIds(),
+    clock,
+    ids,
     log: createLog(),
     defaults: DEFAULT_SETTINGS,
+  });
+  const { cache: artworkCache } = createExpoArtwork({
+    storage,
+    clock,
+    ids,
+    log: createLog(),
+  });
+  // Startup sweep: reap anything the OS already reclaimed and honor
+  // a budget shrunk last launch. Fire-and-forget — the cache
+  // serializes it behind any early `get` calls itself.
+  void artworkCache.sweep({
+    requestId: ids.next('artwork-sweep'),
+    deadlineMs: clock.nowMs() + 60_000,
+    signal: new CancellationSource().signal,
   });
   return {
     session,
     storage,
     providers,
     player,
+    artworkCache,
     async dispose() {
       await session.dispose();
       for (const provider of providers) {
