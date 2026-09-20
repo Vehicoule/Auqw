@@ -1535,6 +1535,41 @@ function Main({
           setTab('settings');
           setOverlay({ type: 'corrections' });
           break;
+        case 'review': {
+          // auqw://review?list — dumps the pending queue to logcat.
+          // auqw://review?confirm=<id>&candidate=<n> / ?reject=<id> /
+          // ?undo=<id> — drive the real session delegates so the
+          // corrections gate can run unattended on-device.
+          if (params.has('list')) {
+            void s.listMatchReviews({ status: 'all' }).then((listed) => {
+              if (!listed.ok) {
+                console.log('[journey] review list failed:', listed.error);
+                return;
+              }
+              for (const review of listed.value) {
+                console.log(
+                  `[journey] review ${review.reviewId} status=${review.status}` +
+                  ` candidates=${review.candidates.length}` +
+                  ` recording=${review.recordingId}`,
+                );
+              }
+              console.log(`[journey] ${listed.value.length} review(s)`);
+            });
+            break;
+          }
+          const confirmId = params.get('confirm');
+          const rejectId = params.get('reject');
+          const undoId = params.get('undo');
+          if (confirmId !== null) {
+            const candidate = Number(params.get('candidate') ?? '0');
+            void s.confirmReview(confirmId, candidate);
+          } else if (rejectId !== null) {
+            void s.rejectReview(rejectId);
+          } else if (undoId !== null) {
+            void s.undoReview(undoId);
+          }
+          break;
+        }
         case 'transfer': {
           // auqw://transfer — export/import surface, import state reset.
           // ?import=<path> reads the file directly (no picker) into the
