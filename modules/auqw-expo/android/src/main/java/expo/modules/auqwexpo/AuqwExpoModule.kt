@@ -107,6 +107,13 @@ class AuqwExpoModule : Module() {
   private var attached: Attachment? = null
   private val devAttachSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
+  // Handles `releaseStream` was invoked for. The mark is set before the
+  // session's terminal transition, so an attach still queued on the
+  // player looper sees it and skips instead of resurrecting an ended
+  // handle into a stale "failed" status. Marks are lifted only while
+  // the session is still routable (a genuinely failed release).
+  private val releasedHandles = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
   override fun definition() = ModuleDefinition {
     Name("AuqwExpo")
 
@@ -349,6 +356,10 @@ class AuqwExpoModule : Module() {
 
     AsyncFunction("releaseStream") Coroutine { handle: String ->
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      // Mark the handle ended before terminating: an attach still
+      // queued on the player looper checks the mark and skips, so a
+      // released handle is never resurrected into a stale status.
+      releasedHandles.add(handle)
       // Clear the status join before terminating the session: an
       // in-flight read unwinding Released must not emit a stale
       // "failed" status for a handle the caller just ended.
@@ -359,22 +370,31 @@ class AuqwExpoModule : Module() {
       try {
         h.streamRelease(handle)
       } catch (e: StreamException) {
-        // Release failed — the session is still alive, so restore the
-        // join unless something else attached in the gap.
-        if (a?.handle == handle && attached == null) {
-          attached = a
+        // Release failed — unmark and restore the join only while the
+        // session is still routable: a release that failed because the
+        // handle was already ended must not resurrect it.
+        if (streamRegistry.hostFor(handle) != null) {
+          releasedHandles.remove(handle)
+          if (a?.handle == handle && attached == null) {
+            attached = a
+          }
         }
         throw CodedException("ERR_STREAM", "${streamKind(e)}: ${e.message}", e)
       }
       // Released — unmap only on success so a failed release keeps the
       // handle routable (the session is still alive).
       streamRegistry.unregister(handle)
-      // Releasing the attached stream stops its playback.
+      // Releasing the attached stream stops its playback — on the
+      // player looper, and only if this handle still owns the player:
+      // a newer attach that landed mid-release must not be stopped.
       if (a?.handle == handle) {
         val p = awaitPlayer()
         onPlayerThread(p) {
-          p.stop()
-          p.clearMediaItems()
+          if (attached == null || attached?.handle == handle) {
+            attached = null
+            p.stop()
+            p.clearMediaItems()
+          }
         }
       }
       null
@@ -494,6 +514,12 @@ class AuqwExpoModule : Module() {
     val a = Attachment(handle, attemptId, queueRev, SystemClock.elapsedRealtime())
     emitPhaseMark(a, "attach")
     onPlayerThread(p) {
+      // A release that landed while this attach was queued ended the
+      // handle before it reached the player — skip rather than emit a
+      // stale failure for a stream the caller already ended.
+      if (releasedHandles.contains(handle)) {
+        return@onPlayerThread
+      }
       attached = a
       val source = ProgressiveMediaSource.Factory(dataSourceFactory)
         .createMediaSource(MediaItem.fromUri(uri))
