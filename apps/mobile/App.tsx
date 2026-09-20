@@ -1351,10 +1351,13 @@ function Main({
       return undefined;
     }
     const handle = (url: string | null): void => {
-      console.log(`[journey] url=${url ?? 'null'}`);
       if (url === null || !url.startsWith('auqw://')) {
         return;
       }
+      // Log the verb only — seam links carry client credentials in the
+      // query and journey params can embed paths; neither belongs in
+      // logcat (redaction rule).
+      console.log(`[journey] ${url.slice('auqw://'.length).split('?')[0]}`);
       const route = devRoute(url);
       // The fixture gallery is a dev route; a normal journey link exits it.
       if (route === 'gallery') {
