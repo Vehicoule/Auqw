@@ -1,15 +1,34 @@
 import type {
   AppError,
+  EntityMetadata,
+  EntityPage,
+  EntityRef,
+  LyricsLine,
+  LyricsMatch,
+  LyricsPreference,
+  LyricsQuery,
+  LyricsResult,
   OperationContext,
   PlayableResource,
+  ProviderCapability,
   ProviderPort,
+  RadioPage,
+  RadioSeed,
   RecordingQuery,
   Result,
   SearchPage,
   SourceRef,
   TrackMetadata,
 } from '@auqw/application';
-import { appError, err, isTrackMetadata, ok } from '@auqw/application';
+import {
+  appError,
+  err,
+  isArtworkRef,
+  isEntityRef,
+  isProviderCapability,
+  isTrackMetadata,
+  ok,
+} from '@auqw/application';
 import type {
   AuqwExpoHostLike,
   AuqwExpoRequestOutcome,
@@ -41,6 +60,19 @@ function hasExactKeys(
   return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
 }
 
+/** Exact-keys with declared optionals: required present, own keys ⊆ required ∪ optional. */
+function hasKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const own = Object.keys(value);
+  return (
+    own.every((k) => required.includes(k) || optional.includes(k)) &&
+    required.every((k) => Object.hasOwn(value, k))
+  );
+}
+
 function isStorefront(value: unknown): value is string | null {
   return (
     value === null || (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
@@ -65,6 +97,34 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   if (!isRecord(value)) {
     return null;
   }
+  // ABI 0.3.0 optional catalog evidence; absent and null normalize
+  // to null, a malformed value rejects the whole track.
+  const artistRef = value['artist_ref'];
+  if (
+    artistRef !== undefined &&
+    artistRef !== null &&
+    !isEntityRef(artistRef)
+  ) {
+    return null;
+  }
+  const albumRef = value['album_ref'];
+  if (
+    albumRef !== undefined &&
+    albumRef !== null &&
+    !isEntityRef(albumRef)
+  ) {
+    return null;
+  }
+  const isrc = value['isrc'];
+  if (
+    isrc !== undefined &&
+    !(
+      isrc === null ||
+      (typeof isrc === 'string' && isrc.length > 0 && isrc.length <= 16)
+    )
+  ) {
+    return null;
+  }
   const candidate = {
     sourceRef: value['source_ref'],
     title: value['title'],
@@ -76,6 +136,9 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
     explicit: value['explicit'],
     genre: value['genre'],
     storefront: value['storefront'],
+    artistRef: artistRef ?? null,
+    albumRef: albumRef ?? null,
+    isrc: isrc ?? null,
   };
   return isTrackMetadata(candidate) ? candidate : null;
 }
@@ -190,6 +253,222 @@ function toPlayableResource(value: unknown): PlayableResource | null {
   return { url, mime, bitrateKbps, expiresAtMs, contentLength, client, itag };
 }
 
+/** Wire `entityMetadata` → domain `EntityMetadata`. */
+function toEntityMetadata(value: unknown): EntityMetadata | null {
+  if (
+    !isRecord(value) ||
+    !hasKeys(value, ['source_ref', 'kind', 'title', 'artwork'], ['subtitle'])
+  ) {
+    return null;
+  }
+  const sourceRef = value['source_ref'];
+  if (!isEntityRef(sourceRef) || value['kind'] !== sourceRef.kind) {
+    // `kind` and `source_ref.kind` name the same field; a mismatch is
+    // ambiguous rather than decorative.
+    return null;
+  }
+  const title = value['title'];
+  const subtitle = value['subtitle'] ?? null;
+  const artwork = value['artwork'];
+  if (
+    typeof title !== 'string' ||
+    title.length === 0 ||
+    title.length > 512 ||
+    (subtitle !== null &&
+      (typeof subtitle !== 'string' || subtitle.length === 0)) ||
+    !Array.isArray(artwork) ||
+    artwork.length > 8 ||
+    !artwork.every(isArtworkRef)
+  ) {
+    return null;
+  }
+  return {
+    sourceRef,
+    kind: sourceRef.kind,
+    title,
+    subtitle,
+    artwork,
+  };
+}
+
+/** Wire `catalogEntityResult` → domain `EntityPage`. */
+function toEntityPage(value: unknown): EntityPage | null {
+  if (
+    !isRecord(value) ||
+    !hasKeys(value, ['entity', 'items', 'complete'], ['continuation'])
+  ) {
+    return null;
+  }
+  const entity = toEntityMetadata(value['entity']);
+  if (entity === null || typeof value['complete'] !== 'boolean') {
+    return null;
+  }
+  const items = value['items'];
+  if (!Array.isArray(items)) {
+    return null;
+  }
+  const tracks: TrackMetadata[] = [];
+  for (const item of items) {
+    const track = toTrackMetadata(item);
+    if (track === null) {
+      return null;
+    }
+    tracks.push(track);
+  }
+  const continuation = value['continuation'] ?? null;
+  if (
+    continuation !== null &&
+    (typeof continuation !== 'string' || continuation.length === 0)
+  ) {
+    return null;
+  }
+  return {
+    entity,
+    items: tracks,
+    continuation,
+    complete: value['complete'],
+  };
+}
+
+/** Wire `lyricsMatched` → domain `LyricsMatch`; null stays null. */
+function toLyricsMatch(value: unknown): LyricsMatch | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['title', 'artist', 'album', 'duration_ms'])
+  ) {
+    return null;
+  }
+  const title = value['title'];
+  const artist = value['artist'];
+  const album = value['album'];
+  const durationMs = value['duration_ms'];
+  if (
+    typeof title !== 'string' ||
+    title.length === 0 ||
+    title.length > 512 ||
+    !(artist === null || (typeof artist === 'string' && artist.length > 0)) ||
+    !(album === null || (typeof album === 'string' && album.length > 0)) ||
+    !isOptInt(durationMs, 0)
+  ) {
+    return null;
+  }
+  return { title, artist, album, durationMs };
+}
+
+function matchedField(value: Record<string, unknown>): LyricsMatch | null | undefined {
+  const raw = value['matched'];
+  return raw === null ? null : (toLyricsMatch(raw) ?? undefined);
+}
+
+/** Wire `lyricsSyncedResult` → domain `LyricsResult`. */
+function toSyncedLyrics(value: unknown): LyricsResult | null {
+  if (
+    !isRecord(value) ||
+    !hasKeys(value, ['state', 'matched'], ['lines'])
+  ) {
+    return null;
+  }
+  const matched = matchedField(value);
+  if (matched === undefined) {
+    return null;
+  }
+  const state = value['state'];
+  const rawLines = value['lines'] ?? null;
+  if (state === 'synced') {
+    if (!Array.isArray(rawLines) || rawLines.length === 0) {
+      return null;
+    }
+    const lines: LyricsLine[] = [];
+    for (const raw of rawLines) {
+      if (!isRecord(raw) || !hasExactKeys(raw, ['t_ms', 'text'])) {
+        return null;
+      }
+      const tMs = raw['t_ms'];
+      const text = raw['text'];
+      if (
+        typeof tMs !== 'number' ||
+        !Number.isSafeInteger(tMs) ||
+        tMs < 0 ||
+        typeof text !== 'string' ||
+        text.length > 1024
+      ) {
+        return null;
+      }
+      lines.push({ tMs, text });
+    }
+    return { kind: 'synced', lines, matched };
+  }
+  // Timed lines on a non-synced state contradict it; never dropped.
+  if (rawLines !== null) {
+    return null;
+  }
+  if (state === 'instrumental') {
+    return { kind: 'instrumental', matched };
+  }
+  if (state === 'absent') {
+    return { kind: 'unavailable', matched };
+  }
+  return null;
+}
+
+/** Wire `lyricsPlainResult` → domain `LyricsResult`. */
+function toPlainLyrics(value: unknown): LyricsResult | null {
+  if (
+    !isRecord(value) ||
+    !hasKeys(value, ['state', 'matched'], ['text'])
+  ) {
+    return null;
+  }
+  const matched = matchedField(value);
+  if (matched === undefined) {
+    return null;
+  }
+  const state = value['state'];
+  const text = value['text'] ?? null;
+  if (state === 'plain') {
+    return typeof text === 'string' && text.length > 0
+      ? { kind: 'plain', text, matched }
+      : null;
+  }
+  if (text !== null) {
+    return null;
+  }
+  if (state === 'instrumental') {
+    return { kind: 'instrumental', matched };
+  }
+  if (state === 'absent') {
+    return { kind: 'unavailable', matched };
+  }
+  return null;
+}
+
+/** Wire `radioSeedResult` → domain `RadioPage`. */
+function toRadioPage(value: unknown): RadioPage | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['items', 'continuation'])) {
+    return null;
+  }
+  const items = value['items'];
+  if (!Array.isArray(items)) {
+    return null;
+  }
+  const candidates: TrackMetadata[] = [];
+  for (const item of items) {
+    const track = toTrackMetadata(item);
+    if (track === null) {
+      return null;
+    }
+    candidates.push(track);
+  }
+  const continuation = value['continuation'];
+  if (
+    continuation !== null &&
+    (typeof continuation !== 'string' || continuation.length === 0)
+  ) {
+    return null;
+  }
+  return { candidates, continuation };
+}
+
 function wireRecordingQuery(query: RecordingQuery): Record<string, unknown> {
   return {
     title: query.title,
@@ -197,6 +476,16 @@ function wireRecordingQuery(query: RecordingQuery): Record<string, unknown> {
     album: query.album,
     duration_ms: query.durationMs,
     version_labels: query.versionLabels,
+    isrc: query.isrc,
+  };
+}
+
+function wireLyricsQuery(query: LyricsQuery): Record<string, unknown> {
+  return {
+    title: query.title,
+    artist: query.artist,
+    album: query.album,
+    duration_ms: query.durationMs,
     isrc: query.isrc,
   };
 }
@@ -221,10 +510,29 @@ type Pending = {
 
 export type PluginProvider = ProviderPort & { dispose(): void };
 
+/**
+ * The manifest's declared capability set, filtered to names the ABI
+ * knows — anything else cannot be invoked anyway. An absent or
+ * malformed list means "declares nothing": every op is `unsupported`.
+ */
+export function manifestCapabilities(
+  manifest: unknown,
+): readonly ProviderCapability[] {
+  if (!isRecord(manifest)) {
+    return [];
+  }
+  const raw = manifest['capabilities'];
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return [...new Set(raw)].filter(isProviderCapability);
+}
+
 export function createPluginProvider(
   host: AuqwExpoHostLike,
   pluginId: string,
   providerId: string,
+  capabilities: readonly ProviderCapability[],
 ): PluginProvider {
   const pending = new Map<string, Pending>();
   /** Outcomes that arrived before their pending entry existed. */
@@ -254,6 +562,16 @@ export function createPluginProvider(
   function dropRequest(requestId: string, entry: Pending): void {
     entry.unsubscribe();
     pending.delete(requestId);
+  }
+
+  /** An op the manifest never declared never reaches the host. */
+  function guard(capability: ProviderCapability): AppError | null {
+    return capabilities.includes(capability)
+      ? null
+      : appError(
+        'unsupported',
+        `provider does not declare ${capability}`,
+      );
   }
 
   function request<T>(
@@ -357,7 +675,12 @@ export function createPluginProvider(
 
   return {
     id: providerId,
+    capabilities,
     search(input, context) {
+      const blocked = guard('catalog.search');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
       return request(
         'catalog.search',
         {
@@ -370,6 +693,10 @@ export function createPluginProvider(
       );
     },
     candidates(input, context) {
+      const blocked = guard('playback.candidates');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
       return request(
         'playback.candidates',
         { query: wireRecordingQuery(input.query), limit: input.limit },
@@ -378,6 +705,10 @@ export function createPluginProvider(
       );
     },
     resolvePlayback(ref, input, context) {
+      const blocked = guard('playback.resolve');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
       return request(
         'playback.resolve',
         {
@@ -392,11 +723,60 @@ export function createPluginProvider(
       );
     },
     getDetails(refs, context) {
+      const blocked = guard('catalog.metadata');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
       return request(
         'catalog.metadata',
         { refs: refs.map(wireSourceRef) },
         context,
         toTrackList,
+      );
+    },
+    getEntity(ref, context) {
+      const blocked = guard('catalog.entity');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'catalog.entity',
+        { ref: wireSourceRef(ref) },
+        context,
+        toEntityPage,
+      );
+    },
+    getLyrics(input, context) {
+      // `prefer` picks the capability: a synced request degrades to
+      // lyrics.plain when the provider declares only that; a plain
+      // request never climbs to synced.
+      const capability =
+        input.prefer === 'plain' || !capabilities.includes('lyrics.synced')
+          ? 'lyrics.plain'
+          : 'lyrics.synced';
+      const blocked = guard(capability);
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        capability,
+        { query: wireLyricsQuery(input.query) },
+        context,
+        capability === 'lyrics.synced' ? toSyncedLyrics : toPlainLyrics,
+      );
+    },
+    radioSeed(input, context) {
+      const blocked = guard('radio.seed');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'radio.seed',
+        'sourceRef' in input
+          ? { source_ref: wireSourceRef(input.sourceRef) }
+          : { continuation: input.continuation },
+        context,
+        toRadioPage,
       );
     },
     dispose() {

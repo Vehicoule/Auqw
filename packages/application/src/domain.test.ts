@@ -1,6 +1,7 @@
 import {
   isEntityRef,
   isRecording,
+  isSettings,
   isSourceRef,
   isTrackMetadata,
   isTrackRef,
@@ -82,6 +83,21 @@ export function run(): void {
   assert(!isTrackMetadata({ ...META, storefront: 'USA' }));
   assert(!isTrackMetadata({ ...META, storefront: 'U1' }));
 
+  // ABI 0.3.0 optional evidence: entity refs and isrc may be absent
+  // or null, but a malformed value rejects the record.
+  const artistRef = { provider: 'deezer', kind: 'artist' as const, id: 'x' };
+  assert(
+    isTrackMetadata({ ...META, artistRef, albumRef, isrc: 'USRC17607839' }),
+  );
+  assert(
+    isTrackMetadata({ ...META, artistRef: null, albumRef: null, isrc: null }),
+  );
+  assert(!isTrackMetadata({ ...META, artistRef: REF }), 'track ref rejected');
+  assert(!isTrackMetadata({ ...META, albumRef: 'al1' }));
+  assert(!isTrackMetadata({ ...META, isrc: 42 }));
+  assert(!isTrackMetadata({ ...META, isrc: '' }));
+  assert(!isTrackMetadata({ ...META, isrc: 'x'.repeat(65) }));
+
   const recording = recordingFromMetadata(META, 'rec-1');
   assert(isRecording(recording));
   assertEqual(recording.id, 'rec-1');
@@ -90,6 +106,37 @@ export function run(): void {
   assertEqual(recording.sourceRefs.length, 1);
   assertEqual(recording.mappings.length, 0);
   assertEqual(recording.isrc, null);
+  // Provider-supplied isrc lands on the recording.
+  const withIsrc = recordingFromMetadata(
+    { ...META, isrc: 'USRC17607839' },
+    'rec-2',
+  );
+  assertEqual(withIsrc.isrc, 'USRC17607839');
+
+  // Settings optional provider overrides: absent or null, otherwise
+  // a provider id; malformed values reject.
+  const settings = {
+    catalogProvider: 'itunes',
+    playbackProvider: 'youtube-music',
+    storefront: 'US',
+    qualityKbps: 256,
+    theme: 'system' as const,
+    prefetch: true,
+  };
+  assert(isSettings(settings));
+  assert(
+    isSettings({ ...settings, lyricsProvider: 'lyrics-lrclib' }),
+  );
+  assert(
+    isSettings({
+      ...settings,
+      lyricsProvider: null,
+      radioProvider: 'youtube-music',
+    }),
+  );
+  assert(!isSettings({ ...settings, lyricsProvider: 7 }));
+  assert(!isSettings({ ...settings, radioProvider: '' }));
+  assert(!isSettings({ ...settings, strayProvider: 'x' }));
 
   assert(!isRecording({ ...recording, id: '' }));
   assert(!isRecording({ ...recording, versionLabels: ['bogus'] }));

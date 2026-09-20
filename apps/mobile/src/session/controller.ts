@@ -10,7 +10,10 @@ import { SqliteStorage } from '@auqw/storage-sqlite';
 import type { AuqwExpoHostModuleLike } from '../adapters/auqw-expo-surface.ts';
 import { createExpoAudioPlayer } from '../adapters/expo-audio-player.ts';
 import type { PluginProvider } from '../adapters/plugin-provider.ts';
-import { createPluginProvider } from '../adapters/plugin-provider.ts';
+import {
+  createPluginProvider,
+  manifestCapabilities,
+} from '../adapters/plugin-provider.ts';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
 
@@ -102,8 +105,18 @@ export async function createSessionController(
     loadBundledPlugin(host, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
   ]);
   const providers: PluginProvider[] = [
-    createPluginProvider(host, itunesPluginId, 'itunes'),
-    createPluginProvider(host, youtubeMusicPluginId, 'youtube-music'),
+    createPluginProvider(
+      host,
+      itunesPluginId,
+      'itunes',
+      manifestCapabilities(ITUNES_MANIFEST),
+    ),
+    createPluginProvider(
+      host,
+      youtubeMusicPluginId,
+      'youtube-music',
+      manifestCapabilities(YOUTUBE_MUSIC_MANIFEST),
+    ),
   ];
   const storage = new SqliteStorage(
     await createExpoSqliteDriver(options.databasePath),

@@ -1150,6 +1150,7 @@ async function portThrows(): Promise<void> {
   const r = rig(persisted());
   const badProvider: ProviderPort = {
     id: 'youtube-music',
+    capabilities: ['playback.candidates'],
     search: () => Promise.resolve(ok({ items: [], storefront: null })),
     candidates: () => Promise.reject(new Error('secret-boom')),
     resolvePlayback: () =>
@@ -1157,6 +1158,9 @@ async function portThrows(): Promise<void> {
         err(appError('internal', 'unused')),
       ) as Promise<Result<never>> as never,
     getDetails: () => Promise.resolve(ok([])),
+    getEntity: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };
   const r2 = new Session({
     storage: new FakeStorage(persisted()),
