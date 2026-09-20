@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use auqw_plugin_host::{invoke, load, Attempt, Budgets, LoadedPlugin, Manifest, ReqwestClient};
+use auqw_plugin_host::{
+    invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
+    KeyValueStore, LoadedPlugin, Manifest, MemoryKeyValueStore, ReqwestClient, SystemClock,
+};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::runtime::Runtime;
@@ -28,10 +31,38 @@ pub struct HostConfig {
     /// Base URL of a bgutil-compatible PO-token service
     /// (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
     pub pot_provider_url: Option<String>,
+    /// Path of the on-disk KV store the native shell supplies;
+    /// `None` keeps plugin state volatile.
+    pub state_path: Option<String>,
 }
 
-/// Per-invocation accounting, minus the HTTP trace (kept host-side —
-/// its URLs are signed).
+/// One HTTP call from the attempt trace. `url` is already stripped of
+/// query and fragment by the host — the signed parameters never cross
+/// this boundary.
+#[derive(uniffi::Record)]
+pub struct HttpTraceSummary {
+    /// HTTP method.
+    pub method: String,
+    /// URL without query or fragment.
+    pub url: String,
+    /// Response status when one was received.
+    pub status: Option<u16>,
+    /// Body bytes received.
+    pub bytes: u64,
+    /// Round-trip milliseconds.
+    pub elapsed_ms: u64,
+}
+
+/// One guest `log` entry, already redacted by the host.
+#[derive(uniffi::Record)]
+pub struct GuestLogSummary {
+    /// `debug` | `info` | `warn` | `error`.
+    pub level: String,
+    /// Redacted message text.
+    pub message: String,
+}
+
+/// Per-invocation accounting for diagnostics.
 #[derive(uniffi::Record)]
 pub struct AttemptSummary {
     /// Host-generated request id.
@@ -46,6 +77,10 @@ pub struct AttemptSummary {
     pub fuel_used: u64,
     /// Wall-clock elapsed.
     pub elapsed_ms: u64,
+    /// Sanitized HTTP trace entries.
+    pub http_trace: Vec<HttpTraceSummary>,
+    /// Guest log entries.
+    pub guest_log: Vec<GuestLogSummary>,
 }
 
 impl From<&Attempt> for AttemptSummary {
@@ -57,6 +92,29 @@ impl From<&Attempt> for AttemptSummary {
             bytes: a.bytes,
             fuel_used: a.fuel_used,
             elapsed_ms: u64::try_from(a.elapsed.as_millis()).unwrap_or(u64::MAX),
+            http_trace: a.http_trace.iter().map(HttpTraceSummary::from).collect(),
+            guest_log: a.guest_log.iter().map(GuestLogSummary::from).collect(),
+        }
+    }
+}
+
+impl From<&HttpTraceEntry> for HttpTraceSummary {
+    fn from(e: &HttpTraceEntry) -> Self {
+        Self {
+            method: e.method.clone(),
+            url: e.url.clone(),
+            status: e.status,
+            bytes: e.bytes,
+            elapsed_ms: u64::try_from(e.elapsed.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+impl From<&GuestLogEntry> for GuestLogSummary {
+    fn from(e: &GuestLogEntry) -> Self {
+        Self {
+            level: e.level.clone(),
+            message: e.message.clone(),
         }
     }
 }
@@ -93,6 +151,28 @@ pub enum ResolveOutcome {
         /// Taxonomy kind (`no-result`, `cancelled`, ...).
         kind: String,
         /// Human-readable detail (never contains the URL).
+        message: String,
+        /// Invocation accounting.
+        attempt: AttemptSummary,
+    },
+}
+
+/// Terminal outcome of one `start_request` invocation. The result is
+/// raw JSON — the typed [`ResolveOutcome`] remains for resolve callers.
+#[derive(uniffi::Enum)]
+pub enum RequestOutcome {
+    /// The invocation produced a `done` result.
+    Succeeded {
+        /// `done.result` serialized to JSON.
+        result_json: String,
+        /// Invocation accounting.
+        attempt: AttemptSummary,
+    },
+    /// The invocation failed; `kind` is the ABI error taxonomy.
+    Failed {
+        /// Taxonomy kind.
+        kind: String,
+        /// Human-readable detail (never contains signed URLs).
         message: String,
         /// Invocation accounting.
         attempt: AttemptSummary,
@@ -144,12 +224,21 @@ pub trait ResolveListener: Send + Sync {
     fn on_outcome(&self, request_id: String, outcome: ResolveOutcome);
 }
 
+/// Receives the terminal outcome of an invocation started with
+/// [`PluginHost::start_request`].
+#[uniffi::export(callback_interface)]
+pub trait RequestListener: Send + Sync {
+    /// Called exactly once per request, on a runtime worker thread.
+    fn on_outcome(&self, request_id: String, outcome: RequestOutcome);
+}
+
 /// The plugin host object: owns a tokio runtime, an HTTP client, the
 /// loaded plugin set, and per-request cancellation tokens.
 #[derive(uniffi::Object)]
 pub struct PluginHost {
     runtime: Runtime,
     http: Arc<ReqwestClient>,
+    kv: Arc<dyn KeyValueStore>,
     budgets: Budgets,
     pot_provider_url: Option<String>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
@@ -194,6 +283,19 @@ impl PluginHost {
         let http = ReqwestClient::new().map_err(|e| HostError::Runtime {
             detail: e.to_string(),
         })?;
+        // A configured state path must yield a working durable store;
+        // falling back to volatile memory would silently lose plugin
+        // state, so a failure here fails the host.
+        let kv: Arc<dyn KeyValueStore> = match &config.state_path {
+            Some(path) => {
+                Arc::new(
+                    FileKeyValueStore::new(path).map_err(|e| HostError::Runtime {
+                        detail: format!("kv store: {e}"),
+                    })?,
+                )
+            }
+            None => Arc::new(MemoryKeyValueStore::new()),
+        };
         let budgets = Budgets {
             fuel_per_entry: config.fuel_per_entry,
             fuel_total: config.fuel_total,
@@ -202,6 +304,7 @@ impl PluginHost {
         Ok(Arc::new(Self {
             runtime,
             http: Arc::new(http),
+            kv,
             budgets,
             pot_provider_url: config.pot_provider_url,
             plugins: Mutex::new(HashMap::new()),
@@ -232,64 +335,85 @@ impl PluginHost {
         source_ref: String,
         listener: Box<dyn ResolveListener>,
     ) -> Result<String, HostError> {
-        let plugin = {
-            let plugins = lock(&self.plugins)?;
-            match plugins.get(&plugin_id) {
-                Some(p) => Arc::clone(p),
-                None => return Err(HostError::UnknownPlugin { id: plugin_id }),
-            }
-        };
-        let request_id = format!("req-{}", self.counter.fetch_add(1, Ordering::Relaxed));
-        let token = CancellationToken::new();
-        lock(&self.cancels)?.insert(request_id.clone(), token.clone());
-        let budgets = self.budgets.clone();
-        let http = Arc::clone(&self.http);
-        let pot_provider = self.pot_provider_url.clone();
-        let cancels = Arc::clone(&self.cancels);
-        let rid = request_id.clone();
-        self.runtime.spawn(async move {
-            let invocation = invoke(
-                &plugin,
-                "playback.resolve",
-                json!({ "source_ref": source_ref }),
-                &budgets,
-                token,
-                &*http,
-                pot_provider.as_deref(),
-            )
-            .await;
-            let (result, attempt) = invocation.into_parts();
-            let summary = AttemptSummary::from(&attempt);
-            let outcome = match result {
-                // `done.result` is untyped past the boundary — a result
-                // without a url is an invalid response, never Resolved.
-                Ok(value) => {
-                    let resource = resource_from(&value);
-                    if resource.url.is_empty() {
-                        ResolveOutcome::Failed {
-                            kind: "invalid-response".to_string(),
-                            message: "resolve result missing url".to_string(),
-                            attempt: summary,
-                        }
-                    } else {
-                        ResolveOutcome::Resolved {
-                            resource,
-                            attempt: summary,
+        self.start_typed(
+            plugin_id,
+            "playback.resolve".to_string(),
+            json!({ "source_ref": source_ref }),
+            move |request_id, invocation| {
+                let (result, attempt) = invocation.into_parts();
+                let summary = AttemptSummary::from(&attempt);
+                let outcome = match result {
+                    // `done.result` is untyped past the boundary — a result
+                    // without a url is an invalid response, never Resolved.
+                    Ok(value) => {
+                        let resource = resource_from(&value);
+                        if resource.url.is_empty() {
+                            ResolveOutcome::Failed {
+                                kind: "invalid-response".to_string(),
+                                message: "resolve result missing url".to_string(),
+                                attempt: summary,
+                            }
+                        } else {
+                            ResolveOutcome::Resolved {
+                                resource,
+                                attempt: summary,
+                            }
                         }
                     }
-                }
-                Err(e) => ResolveOutcome::Failed {
-                    kind: e.kind().to_string(),
-                    message: e.to_string(),
-                    attempt: summary,
-                },
-            };
-            listener.on_outcome(rid.clone(), outcome);
-            if let Ok(mut m) = cancels.lock() {
-                m.remove(&rid);
-            }
-        });
-        Ok(request_id)
+                    Err(e) => ResolveOutcome::Failed {
+                        kind: e.kind().to_string(),
+                        message: e.to_string(),
+                        attempt: summary,
+                    },
+                };
+                listener.on_outcome(request_id, outcome);
+            },
+        )
+    }
+
+    /// Start any declared capability with a JSON object payload. The
+    /// outcome carries the raw `done.result` JSON.
+    ///
+    /// # Errors
+    /// [`HostError::Runtime`] when `payload_json` is not a JSON object;
+    /// [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
+    pub fn start_request(
+        &self,
+        plugin_id: String,
+        capability: String,
+        payload_json: String,
+        listener: Box<dyn RequestListener>,
+    ) -> Result<String, HostError> {
+        let payload: Value =
+            serde_json::from_str(&payload_json).map_err(|e| HostError::Runtime {
+                detail: format!("payload_json: {e}"),
+            })?;
+        if !payload.is_object() {
+            return Err(HostError::Runtime {
+                detail: "payload_json must be a JSON object".into(),
+            });
+        }
+        self.start_typed(
+            plugin_id,
+            capability,
+            payload,
+            move |request_id, invocation| {
+                let (result, attempt) = invocation.into_parts();
+                let summary = AttemptSummary::from(&attempt);
+                let outcome = match result {
+                    Ok(value) => RequestOutcome::Succeeded {
+                        result_json: value.to_string(),
+                        attempt: summary,
+                    },
+                    Err(e) => RequestOutcome::Failed {
+                        kind: e.kind().to_string(),
+                        message: e.to_string(),
+                        attempt: summary,
+                    },
+                };
+                listener.on_outcome(request_id, outcome);
+            },
+        )
     }
 
     /// Cancel an in-flight request; unknown ids are a no-op.
@@ -308,14 +432,19 @@ impl PluginHost {
     /// [`HostError::Load`] if the artifact fails validation.
     pub fn run_spin(&self, wasm: Vec<u8>, manifest_json: String) -> Result<SpinReport, HostError> {
         let plugin = parse_manifest_and_load(&wasm, &manifest_json, &self.budgets)?;
+        let clock = SystemClock;
         let invocation = self.runtime.block_on(invoke(
             &plugin,
             "playback.resolve",
             json!({}),
             &self.budgets,
             CancellationToken::new(),
-            &*self.http,
-            self.pot_provider_url.as_deref(),
+            HostServices {
+                http: &*self.http,
+                kv: &*self.kv,
+                clock: &clock,
+                pot_provider: self.pot_provider_url.as_deref(),
+            },
         ));
         let (result, attempt) = invocation.into_parts();
         let kind = match &result {
@@ -327,6 +456,60 @@ impl PluginHost {
             fuel_used: attempt.fuel_used,
             kind,
         })
+    }
+}
+
+impl PluginHost {
+    /// Spawn one invocation on the runtime and deliver it to `deliver`
+    /// on a worker thread.
+    fn start_typed<F>(
+        &self,
+        plugin_id: String,
+        capability: String,
+        payload: Value,
+        deliver: F,
+    ) -> Result<String, HostError>
+    where
+        F: FnOnce(String, auqw_plugin_host::Invocation) + Send + 'static,
+    {
+        let plugin = {
+            let plugins = lock(&self.plugins)?;
+            match plugins.get(&plugin_id) {
+                Some(p) => Arc::clone(p),
+                None => return Err(HostError::UnknownPlugin { id: plugin_id }),
+            }
+        };
+        let request_id = format!("req-{}", self.counter.fetch_add(1, Ordering::Relaxed));
+        let token = CancellationToken::new();
+        lock(&self.cancels)?.insert(request_id.clone(), token.clone());
+        let budgets = self.budgets.clone();
+        let http = Arc::clone(&self.http);
+        let kv = Arc::clone(&self.kv);
+        let pot_provider = self.pot_provider_url.clone();
+        let cancels = Arc::clone(&self.cancels);
+        let rid = request_id.clone();
+        self.runtime.spawn(async move {
+            let clock = SystemClock;
+            let invocation = invoke(
+                &plugin,
+                &capability,
+                payload,
+                &budgets,
+                token,
+                HostServices {
+                    http: &*http,
+                    kv: &*kv,
+                    clock: &clock,
+                    pot_provider: pot_provider.as_deref(),
+                },
+            )
+            .await;
+            deliver(rid.clone(), invocation);
+            if let Ok(mut m) = cancels.lock() {
+                m.remove(&rid);
+            }
+        });
+        Ok(request_id)
     }
 }
 
@@ -374,6 +557,7 @@ mod tests {
             fuel_per_entry: 200_000_000,
             fuel_total: 2_000_000_000,
             pot_provider_url: None,
+            state_path: None,
         }
     }
 

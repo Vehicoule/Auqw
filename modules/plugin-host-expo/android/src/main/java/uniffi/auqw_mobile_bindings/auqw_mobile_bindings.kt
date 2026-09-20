@@ -650,8 +650,30 @@ internal open class UniffiForeignFutureResultVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceRequestListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceResolveListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onOutcome")
+internal open class UniffiVTableCallbackInterfaceRequestListener(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onOutcome`: UniffiCallbackInterfaceRequestListenerMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onOutcome`: UniffiCallbackInterfaceRequestListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfaceRequestListener(`uniffiFree`,`uniffiClone`,`onOutcome`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceRequestListener) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onOutcome` = other.`onOutcome`
+    }
+
 }
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onOutcome")
 internal open class UniffiVTableCallbackInterfaceResolveListener(
@@ -701,9 +723,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_requestlistener_on_outcome(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome(
     ): Int
@@ -723,6 +749,7 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "auqw_mobile_bindings"))
+        uniffiCallbackInterfaceRequestListener.register(this)
         uniffiCallbackInterfaceResolveListener.register(this)
         
     }
@@ -738,8 +765,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_run_spin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`capability`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_requestlistener(`vtable`: UniffiVTableCallbackInterfaceRequestListener,
+    ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_resolvelistener(`vtable`: UniffiVTableCallbackInterfaceResolveListener,
     ): Unit
     external fun ffi_auqw_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -870,10 +901,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() and 0xFFFF) != 34269) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() and 0xFFFF) != 7187) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() and 0xFFFF) != 51654) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new() and 0xFFFF) != 45559) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_requestlistener_on_outcome() and 0xFFFF) != 46008) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome() and 0xFFFF) != 25209) {
@@ -1065,6 +1102,33 @@ private class JavaLangRefCleanable(
     val cleanable: java.lang.ref.Cleaner.Cleanable
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    fun lift(value: Int): UShort {
+        return value.toUShort()
+    }
+
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
+    }
+
+    override fun lower(value: UShort): Short {
+        return value.toShort()
+    }
+
+    override fun allocationSize(value: UShort) = 2UL
+
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
+    }
 }
 
 /**
@@ -1314,6 +1378,16 @@ public interface PluginHostInterface {
     fun `runSpin`(`wasm`: kotlin.ByteArray, `manifestJson`: kotlin.String): SpinReport
     
     /**
+     * Start any declared capability with a JSON object payload. The
+     * outcome carries the raw `done.result` JSON.
+     *
+     * # Errors
+     * [`HostError::Runtime`] when `payload_json` is not a JSON object;
+     * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
+     */
+    fun `startRequest`(`pluginId`: kotlin.String, `capability`: kotlin.String, `payloadJson`: kotlin.String, `listener`: RequestListener): kotlin.String
+    
+    /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
      *
@@ -1508,6 +1582,32 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
 
     
     /**
+     * Start any declared capability with a JSON object payload. The
+     * outcome carries the raw `done.result` JSON.
+     *
+     * # Errors
+     * [`HostError::Runtime`] when `payload_json` is not a JSON object;
+     * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
+     */
+    @Throws(HostException::class)override fun `startRequest`(`pluginId`: kotlin.String, `capability`: kotlin.String, `payloadJson`: kotlin.String, `listener`: RequestListener): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(HostException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(
+        it,
+        
+        FfiConverterString.lower(`pluginId`),
+        FfiConverterString.lower(`capability`),
+        FfiConverterString.lower(`payloadJson`),
+        FfiConverterTypeRequestListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
      *
@@ -1571,8 +1671,7 @@ public object FfiConverterTypePluginHost: FfiConverter<PluginHost, Long> {
 
 
 /**
- * Per-invocation accounting, minus the HTTP trace (kept host-side —
- * its URLs are signed).
+ * Per-invocation accounting for diagnostics.
  */
 data class AttemptSummary (
     /**
@@ -1604,6 +1703,16 @@ data class AttemptSummary (
      * Wall-clock elapsed.
      */
     var `elapsedMs`: kotlin.ULong
+    , 
+    /**
+     * Sanitized HTTP trace entries.
+     */
+    var `httpTrace`: List<HttpTraceSummary>
+    , 
+    /**
+     * Guest log entries.
+     */
+    var `guestLog`: List<GuestLogSummary>
     
 ){
     
@@ -1626,6 +1735,8 @@ public object FfiConverterTypeAttemptSummary: FfiConverterRustBuffer<AttemptSumm
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterSequenceTypeHttpTraceSummary.read(buf),
+            FfiConverterSequenceTypeGuestLogSummary.read(buf),
         )
     }
 
@@ -1635,7 +1746,9 @@ public object FfiConverterTypeAttemptSummary: FfiConverterRustBuffer<AttemptSumm
             FfiConverterUInt.allocationSize(value.`httpCalls`) +
             FfiConverterULong.allocationSize(value.`bytes`) +
             FfiConverterULong.allocationSize(value.`fuelUsed`) +
-            FfiConverterULong.allocationSize(value.`elapsedMs`)
+            FfiConverterULong.allocationSize(value.`elapsedMs`) +
+            FfiConverterSequenceTypeHttpTraceSummary.allocationSize(value.`httpTrace`) +
+            FfiConverterSequenceTypeGuestLogSummary.allocationSize(value.`guestLog`)
     )
 
     override fun write(value: AttemptSummary, buf: ByteBuffer) {
@@ -1645,6 +1758,55 @@ public object FfiConverterTypeAttemptSummary: FfiConverterRustBuffer<AttemptSumm
             FfiConverterULong.write(value.`bytes`, buf)
             FfiConverterULong.write(value.`fuelUsed`, buf)
             FfiConverterULong.write(value.`elapsedMs`, buf)
+            FfiConverterSequenceTypeHttpTraceSummary.write(value.`httpTrace`, buf)
+            FfiConverterSequenceTypeGuestLogSummary.write(value.`guestLog`, buf)
+    }
+}
+
+
+
+/**
+ * One guest `log` entry, already redacted by the host.
+ */
+data class GuestLogSummary (
+    /**
+     * `debug` | `info` | `warn` | `error`.
+     */
+    var `level`: kotlin.String
+    , 
+    /**
+     * Redacted message text.
+     */
+    var `message`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeGuestLogSummary: FfiConverterRustBuffer<GuestLogSummary> {
+    override fun read(buf: ByteBuffer): GuestLogSummary {
+        return GuestLogSummary(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: GuestLogSummary) = (
+            FfiConverterString.allocationSize(value.`level`) +
+            FfiConverterString.allocationSize(value.`message`)
+    )
+
+    override fun write(value: GuestLogSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`level`, buf)
+            FfiConverterString.write(value.`message`, buf)
     }
 }
 
@@ -1670,6 +1832,12 @@ data class HostConfig (
      * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
      */
     var `potProviderUrl`: kotlin.String?
+    , 
+    /**
+     * Path of the on-disk KV store the native shell supplies;
+     * `None` keeps plugin state volatile.
+     */
+    var `statePath`: kotlin.String?
     
 ){
     
@@ -1689,19 +1857,95 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: HostConfig) = (
             FfiConverterULong.allocationSize(value.`fuelPerEntry`) +
             FfiConverterULong.allocationSize(value.`fuelTotal`) +
-            FfiConverterOptionalString.allocationSize(value.`potProviderUrl`)
+            FfiConverterOptionalString.allocationSize(value.`potProviderUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`statePath`)
     )
 
     override fun write(value: HostConfig, buf: ByteBuffer) {
             FfiConverterULong.write(value.`fuelPerEntry`, buf)
             FfiConverterULong.write(value.`fuelTotal`, buf)
             FfiConverterOptionalString.write(value.`potProviderUrl`, buf)
+            FfiConverterOptionalString.write(value.`statePath`, buf)
+    }
+}
+
+
+
+/**
+ * One HTTP call from the attempt trace. `url` is already stripped of
+ * query and fragment by the host — the signed parameters never cross
+ * this boundary.
+ */
+data class HttpTraceSummary (
+    /**
+     * HTTP method.
+     */
+    var `method`: kotlin.String
+    , 
+    /**
+     * URL without query or fragment.
+     */
+    var `url`: kotlin.String
+    , 
+    /**
+     * Response status when one was received.
+     */
+    var `status`: kotlin.UShort?
+    , 
+    /**
+     * Body bytes received.
+     */
+    var `bytes`: kotlin.ULong
+    , 
+    /**
+     * Round-trip milliseconds.
+     */
+    var `elapsedMs`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHttpTraceSummary: FfiConverterRustBuffer<HttpTraceSummary> {
+    override fun read(buf: ByteBuffer): HttpTraceSummary {
+        return HttpTraceSummary(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalUShort.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HttpTraceSummary) = (
+            FfiConverterString.allocationSize(value.`method`) +
+            FfiConverterString.allocationSize(value.`url`) +
+            FfiConverterOptionalUShort.allocationSize(value.`status`) +
+            FfiConverterULong.allocationSize(value.`bytes`) +
+            FfiConverterULong.allocationSize(value.`elapsedMs`)
+    )
+
+    override fun write(value: HttpTraceSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`method`, buf)
+            FfiConverterString.write(value.`url`, buf)
+            FfiConverterOptionalUShort.write(value.`status`, buf)
+            FfiConverterULong.write(value.`bytes`, buf)
+            FfiConverterULong.write(value.`elapsedMs`, buf)
     }
 }
 
@@ -1970,6 +2214,126 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
 
 
 /**
+ * Terminal outcome of one `start_request` invocation. The result is
+ * raw JSON — the typed [`ResolveOutcome`] remains for resolve callers.
+ */
+sealed class RequestOutcome {
+    
+    /**
+     * The invocation produced a `done` result.
+     */
+    data class Succeeded(
+        /**
+         * `done.result` serialized to JSON.
+         */
+        val `resultJson`: kotlin.String, 
+        /**
+         * Invocation accounting.
+         */
+        val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : RequestOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * The invocation failed; `kind` is the ABI error taxonomy.
+     */
+    data class Failed(
+        /**
+         * Taxonomy kind.
+         */
+        val `kind`: kotlin.String, 
+        /**
+         * Human-readable detail (never contains signed URLs).
+         */
+        val `message`: kotlin.String, 
+        /**
+         * Invocation accounting.
+         */
+        val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : RequestOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRequestOutcome : FfiConverterRustBuffer<RequestOutcome>{
+    override fun read(buf: ByteBuffer): RequestOutcome {
+        return when(buf.getInt()) {
+            1 -> RequestOutcome.Succeeded(
+                FfiConverterString.read(buf),
+                FfiConverterTypeAttemptSummary.read(buf),
+                )
+            2 -> RequestOutcome.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterTypeAttemptSummary.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: RequestOutcome): ULong = when(value) {
+        is RequestOutcome.Succeeded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`resultJson`)
+                + FfiConverterTypeAttemptSummary.allocationSize(value.`attempt`)
+            )
+        }
+        is RequestOutcome.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`kind`)
+                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterTypeAttemptSummary.allocationSize(value.`attempt`)
+            )
+        }
+    }
+
+    override fun write(value: RequestOutcome, buf: ByteBuffer) {
+        when(value) {
+            is RequestOutcome.Succeeded -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`resultJson`, buf)
+                FfiConverterTypeAttemptSummary.write(value.`attempt`, buf)
+                Unit
+            }
+            is RequestOutcome.Failed -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`kind`, buf)
+                FfiConverterString.write(value.`message`, buf)
+                FfiConverterTypeAttemptSummary.write(value.`attempt`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * Terminal outcome of one `start_resolve` invocation.
  */
 sealed class ResolveOutcome {
@@ -2092,6 +2456,74 @@ public object FfiConverterTypeResolveOutcome : FfiConverterRustBuffer<ResolveOut
 
 /**
  * Receives the terminal outcome of an invocation started with
+ * [`PluginHost::start_request`].
+ */
+public interface RequestListener {
+    
+    /**
+     * Called exactly once per request, on a runtime worker thread.
+     */
+    fun `onOutcome`(`requestId`: kotlin.String, `outcome`: RequestOutcome)
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceRequestListener {
+    internal object `onOutcome`: UniffiCallbackInterfaceRequestListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeRequestListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onOutcome`(
+                    FfiConverterString.lift(`requestId`),
+                    FfiConverterTypeRequestOutcome.lift(`outcome`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeRequestListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeRequestListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceRequestListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onOutcome`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_auqw_mobile_bindings_fn_init_callback_vtable_requestlistener(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeRequestListener: FfiConverterCallbackInterface<RequestListener>()
+
+
+
+
+
+/**
+ * Receives the terminal outcome of an invocation started with
  * [`PluginHost::start_resolve`].
  */
 public interface ResolveListener {
@@ -2153,6 +2585,38 @@ internal object uniffiCallbackInterfaceResolveListener {
  * @suppress
  */
 public object FfiConverterTypeResolveListener: FfiConverterCallbackInterface<ResolveListener>()
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUShort: FfiConverterRustBuffer<kotlin.UShort?> {
+    override fun read(buf: ByteBuffer): kotlin.UShort? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUShort.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UShort?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUShort.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UShort?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUShort.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -2246,6 +2710,62 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeGuestLogSummary: FfiConverterRustBuffer<List<GuestLogSummary>> {
+    override fun read(buf: ByteBuffer): List<GuestLogSummary> {
+        val len = buf.getInt()
+        return List<GuestLogSummary>(len) {
+            FfiConverterTypeGuestLogSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<GuestLogSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeGuestLogSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<GuestLogSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeGuestLogSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeHttpTraceSummary: FfiConverterRustBuffer<List<HttpTraceSummary>> {
+    override fun read(buf: ByteBuffer): List<HttpTraceSummary> {
+        val len = buf.getInt()
+        return List<HttpTraceSummary>(len) {
+            FfiConverterTypeHttpTraceSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<HttpTraceSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeHttpTraceSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<HttpTraceSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeHttpTraceSummary.write(it, buf)
         }
     }
 }

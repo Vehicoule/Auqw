@@ -3,6 +3,7 @@ import OSLog
 
 private let logger = Logger(subsystem: "com.vehicoule.auqw", category: "PluginHostExpo")
 private let eventOutcome = "onResolveOutcome"
+private let eventRequestOutcome = "onRequestOutcome"
 
 struct HostConfigInput: Record {
   @Field var fuelPerEntry: Double = 0
@@ -35,20 +36,44 @@ final class OutcomeRelay: ResolveListener, @unchecked Sendable {
   }
 }
 
+/// Relays generic-request outcomes into the `onRequestOutcome` event.
+final class RequestRelay: RequestListener, @unchecked Sendable {
+  private let emit: (String, RequestOutcome) -> Void
+
+  init(emit: @escaping (String, RequestOutcome) -> Void) {
+    self.emit = emit
+  }
+
+  func onOutcome(requestId: String, outcome: RequestOutcome) {
+    switch outcome {
+    case let .succeeded(_, attempt):
+      logger.info(
+        "request \(requestId, privacy: .public) succeeded steps=\(attempt.steps) elapsed=\(attempt.elapsedMs)ms"
+      )
+    case let .failed(kind, message, _):
+      logger.info(
+        "request \(requestId, privacy: .public) failed kind=\(kind, privacy: .public) message=\(message, privacy: .public)"
+      )
+    }
+    emit(requestId, outcome)
+  }
+}
+
 public class PluginHostExpoModule: Module {
   private var host: PluginHost?
 
   public func definition() -> ModuleDefinition {
     Name("PluginHostExpo")
 
-    Events(eventOutcome)
+    Events(eventOutcome, eventRequestOutcome)
 
     AsyncFunction("createHost") { (config: HostConfigInput) in
       let h = try PluginHost(
         config: HostConfig(
           fuelPerEntry: Self.clampedU64(config.fuelPerEntry),
           fuelTotal: Self.clampedU64(config.fuelTotal),
-          potProviderUrl: config.potProviderUrl
+          potProviderUrl: config.potProviderUrl,
+          statePath: try Self.statePath()
         )
       )
       self.host = h
@@ -72,6 +97,17 @@ public class PluginHostExpoModule: Module {
         ])
       }
       return try h.startResolve(pluginId: pluginId, sourceRef: sourceRef, listener: relay)
+    }
+
+    AsyncFunction("startRequest") { (pluginId: String, capability: String, payloadJson: String) -> String in
+      let h = try self.requireHost()
+      let relay = RequestRelay { requestId, outcome in
+        self.sendEvent(eventRequestOutcome, [
+          "requestId": requestId,
+          "outcome": Self.requestOutcomeDict(outcome),
+        ])
+      }
+      return try h.startRequest(pluginId: pluginId, capability: capability, payloadJson: payloadJson, listener: relay)
     }
 
     Function("cancel") { (requestId: String) in
@@ -110,6 +146,23 @@ public class PluginHostExpoModule: Module {
     UInt64(exactly: value.rounded(.towardZero)) ?? (value > 0 ? UInt64.max : 0)
   }
 
+  /// The KV store lives under Application Support so plugin state
+  /// survives launches. A missing/blocked directory is a typed error —
+  /// silently falling back to volatile memory would lose state.
+  private static func statePath() throws -> String {
+    let fm = FileManager.default
+    guard let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+      throw Exception(name: "ERR_RUNTIME", description: "no Application Support directory")
+    }
+    let dir = support.appendingPathComponent("Auqw", isDirectory: true)
+    do {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    } catch {
+      throw Exception(name: "ERR_RUNTIME", description: "state path: \(error.localizedDescription)")
+    }
+    return dir.appendingPathComponent("plugin-kv.json").path
+  }
+
   private static func attemptDict(_ a: AttemptSummary) -> [String: Any] {
     [
       "requestId": a.requestId,
@@ -118,7 +171,41 @@ public class PluginHostExpoModule: Module {
       "bytes": Double(a.bytes),
       "fuelUsed": Double(a.fuelUsed),
       "elapsedMs": Double(a.elapsedMs),
+      "httpTrace": a.httpTrace.map { e in
+        var d: [String: Any] = [
+          "method": e.method,
+          "url": e.url,
+          "bytes": Double(e.bytes),
+          "elapsedMs": Double(e.elapsedMs),
+        ]
+        if let s = e.status { d["status"] = Double(s) }
+        return d
+      },
+      "guestLog": a.guestLog.map { e in
+        [
+          "level": e.level,
+          "message": e.message,
+        ]
+      },
     ]
+  }
+
+  private static func requestOutcomeDict(_ outcome: RequestOutcome) -> [String: Any] {
+    switch outcome {
+    case let .succeeded(resultJson, attempt):
+      return [
+        "type": "succeeded",
+        "resultJson": resultJson,
+        "attempt": attemptDict(attempt),
+      ]
+    case let .failed(kind, message, attempt):
+      return [
+        "type": "failed",
+        "kind": kind,
+        "message": message,
+        "attempt": attemptDict(attempt),
+      ]
+    }
   }
 
   private static func outcomeDict(_ outcome: ResolveOutcome) -> [String: Any] {

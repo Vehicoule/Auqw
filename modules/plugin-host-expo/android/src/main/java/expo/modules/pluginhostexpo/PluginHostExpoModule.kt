@@ -12,12 +12,15 @@ import uniffi.auqw_mobile_bindings.AttemptSummary
 import uniffi.auqw_mobile_bindings.HostConfig
 import uniffi.auqw_mobile_bindings.HostException
 import uniffi.auqw_mobile_bindings.PluginHost
+import uniffi.auqw_mobile_bindings.RequestListener
+import uniffi.auqw_mobile_bindings.RequestOutcome
 import uniffi.auqw_mobile_bindings.ResolveListener
 import uniffi.auqw_mobile_bindings.ResolveOutcome
 import uniffi.auqw_mobile_bindings.SpinReport
 
 private const val TAG = "PluginHostExpo"
 private const val EVENT_OUTCOME = "onResolveOutcome"
+private const val EVENT_REQUEST_OUTCOME = "onRequestOutcome"
 
 class HostConfigInput : Record {
   @Field
@@ -36,15 +39,23 @@ class PluginHostExpoModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("PluginHostExpo")
 
-    Events(EVENT_OUTCOME)
+    Events(EVENT_OUTCOME, EVENT_REQUEST_OUTCOME)
 
     AsyncFunction("createHost") { config: HostConfigInput ->
+      val statePath = try {
+        val dir = appContext.reactContext?.filesDir
+          ?: throw IllegalStateException("no react context")
+        dir.resolve("plugin-kv.json").absolutePath
+      } catch (e: Exception) {
+        throw CodedException("ERR_RUNTIME", "state path: ${e.message}", e)
+      }
       val h = try {
         PluginHost(
           HostConfig(
             fuelPerEntry = config.fuelPerEntry.toULong(),
             fuelTotal = config.fuelTotal.toULong(),
-            potProviderUrl = config.potProviderUrl
+            potProviderUrl = config.potProviderUrl,
+            statePath = statePath
           )
         )
       } catch (e: HostException) {
@@ -102,6 +113,42 @@ class PluginHostExpoModule : Module() {
       }
     }
 
+    AsyncFunction("startRequest") { pluginId: String, capability: String, payloadJson: String ->
+      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val listener = object : RequestListener {
+        override fun onOutcome(requestId: String, outcome: RequestOutcome) {
+          when (outcome) {
+            is RequestOutcome.Succeeded -> {
+              Log.i(
+                TAG,
+                "request $requestId succeeded steps=${outcome.attempt.steps} " +
+                  "elapsed=${outcome.attempt.elapsedMs}ms"
+              )
+            }
+            is RequestOutcome.Failed -> {
+              Log.i(
+                TAG,
+                "request $requestId failed kind=${outcome.kind} " +
+                  "message=${outcome.message}"
+              )
+            }
+          }
+          sendEvent(
+            EVENT_REQUEST_OUTCOME,
+            Bundle().apply {
+              putString("requestId", requestId)
+              putBundle("outcome", requestOutcomeBundle(outcome))
+            }
+          )
+        }
+      }
+      try {
+        h.startRequest(pluginId, capability, payloadJson, listener)
+      } catch (e: HostException) {
+        throw coded(e)
+      }
+    }
+
     Function("cancel") { requestId: String ->
       host?.cancel(requestId)
       Log.i(TAG, "cancel requested: $requestId")
@@ -132,6 +179,31 @@ class PluginHostExpoModule : Module() {
     putDouble("bytes", a.bytes.toDouble())
     putDouble("fuelUsed", a.fuelUsed.toDouble())
     putDouble("elapsedMs", a.elapsedMs.toDouble())
+    putParcelableArrayList(
+      "httpTrace",
+      ArrayList(
+        a.httpTrace.map { e ->
+          Bundle().apply {
+            putString("method", e.method)
+            putString("url", e.url)
+            e.status?.let { putDouble("status", it.toDouble()) }
+            putDouble("bytes", e.bytes.toDouble())
+            putDouble("elapsedMs", e.elapsedMs.toDouble())
+          }
+        }
+      )
+    )
+    putParcelableArrayList(
+      "guestLog",
+      ArrayList(
+        a.guestLog.map { e ->
+          Bundle().apply {
+            putString("level", e.level)
+            putString("message", e.message)
+          }
+        }
+      )
+    )
   }
 
   private fun outcomeBundle(outcome: ResolveOutcome): Bundle = when (outcome) {
@@ -151,6 +223,20 @@ class PluginHostExpoModule : Module() {
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
     is ResolveOutcome.Failed -> Bundle().apply {
+      putString("type", "failed")
+      putString("kind", outcome.kind)
+      putString("message", outcome.message)
+      putBundle("attempt", attemptBundle(outcome.attempt))
+    }
+  }
+
+  private fun requestOutcomeBundle(outcome: RequestOutcome): Bundle = when (outcome) {
+    is RequestOutcome.Succeeded -> Bundle().apply {
+      putString("type", "succeeded")
+      putString("resultJson", outcome.resultJson)
+      putBundle("attempt", attemptBundle(outcome.attempt))
+    }
+    is RequestOutcome.Failed -> Bundle().apply {
       putString("type", "failed")
       putString("kind", outcome.kind)
       putString("message", outcome.message)

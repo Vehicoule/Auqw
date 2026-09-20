@@ -8,7 +8,9 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use auqw_plugin_host::{invoke, load, Budgets, Manifest, ReqwestClient};
+use auqw_plugin_host::{
+    invoke, load, Budgets, HostServices, Manifest, MemoryKeyValueStore, ReqwestClient, SystemClock,
+};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -43,14 +45,20 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let kv = MemoryKeyValueStore::new();
+    let clock = SystemClock;
     let outcome = invoke(
         &plugin,
         "playback.resolve",
         serde_json::json!({ "source_ref": video_id }),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        HostServices {
+            http: &http,
+            kv: &kv,
+            clock: &clock,
+            pot_provider: None,
+        },
     )
     .await;
     let (result, _) = outcome.into_parts();

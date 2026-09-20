@@ -1,8 +1,10 @@
 //! Artifact loading and the per-invocation step loop.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -12,16 +14,25 @@ use wasmi::{
     TypedFunc, ValType, WasmParams, WasmResults,
 };
 
-use crate::attempt::{Attempt, HttpTraceEntry};
+use crate::attempt::{Attempt, GuestLogEntry, HttpTraceEntry};
 use crate::budgets::{BudgetDimension, Budgets};
 use crate::error::{HttpErrorKind, InvokeError, LoadError, GUEST_FAIL_KINDS};
-use crate::http::{HttpClient, HttpRequest};
+use crate::http::HttpRequest;
+use crate::kv::{MAX_KV_KEY_BYTES, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES};
 use crate::manifest::Manifest;
 use crate::redact::{redact_text, redact_url};
-use crate::ABI_VERSION;
+use crate::services::HostServices;
+use crate::{ABI_VERSION, SUPPORTED_ABI_VERSIONS};
 
 /// Largest guest→host step message accepted (1 MiB).
 const MAX_GUEST_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Guest `log` message cap, in UTF-8 bytes.
+const MAX_LOG_MESSAGE_BYTES: usize = 4096;
+/// Guest `log` entries stored per invocation.
+const MAX_GUEST_LOG_ENTRIES: usize = 128;
+/// Levels a guest `log` request may use.
+const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -78,7 +89,7 @@ pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<Loaded
             actual: wasm.len(),
         });
     }
-    if manifest.abi != ABI_VERSION {
+    if !SUPPORTED_ABI_VERSIONS.contains(&manifest.abi.as_str()) {
         return Err(LoadError::AbiMismatch {
             manifest: manifest.abi.clone(),
             host: ABI_VERSION,
@@ -185,8 +196,7 @@ struct StepCtx<'a> {
     plugin: &'a LoadedPlugin,
     budgets: &'a Budgets,
     cancel: &'a CancellationToken,
-    http: &'a dyn HttpClient,
-    pot_provider: Option<&'a str>,
+    services: HostServices<'a>,
     started: Instant,
 }
 
@@ -194,9 +204,9 @@ struct StepCtx<'a> {
 ///
 /// A fresh Wasmi instance is created per invocation; guest state lives
 /// only in that instance's linear memory for the duration of the call.
-/// `pot_provider` is the base URL of a bgutil-compatible PO-token
-/// service (`POST {provider}/get_pot`); `None` makes `pot_token` host
-/// requests answer `unsupported`. Empty or whitespace-only values
+/// `services.pot_provider` is the base URL of a bgutil-compatible
+/// PO-token service (`POST {provider}/get_pot`); `None` makes `pot_token`
+/// host requests answer `unsupported`. Empty or whitespace-only values
 /// normalize to `None` here so every shell boundary behaves the same.
 pub async fn invoke(
     plugin: &LoadedPlugin,
@@ -204,11 +214,13 @@ pub async fn invoke(
     payload: Value,
     budgets: &Budgets,
     cancel: CancellationToken,
-    http: &dyn HttpClient,
-    pot_provider: Option<&str>,
+    services: HostServices<'_>,
 ) -> Invocation {
     let started = Instant::now();
-    let pot_provider = pot_provider.map(str::trim).filter(|s| !s.is_empty());
+    let pot_provider = services
+        .pot_provider
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let mut attempt = Attempt {
         request_id: format!("invoke-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)),
         steps: 0,
@@ -217,13 +229,16 @@ pub async fn invoke(
         fuel_used: 0,
         elapsed: std::time::Duration::ZERO,
         http_trace: Vec::new(),
+        guest_log: Vec::new(),
     };
     let ctx = StepCtx {
         plugin,
         budgets,
         cancel: &cancel,
-        http,
-        pot_provider,
+        services: HostServices {
+            pot_provider,
+            ..services
+        },
         started,
     };
     let result = run(&ctx, capability, payload, &mut attempt).await;
@@ -246,6 +261,17 @@ async fn run(
     {
         return Err(InvokeError::CapabilityNotDeclared(capability.to_string()));
     }
+    // The namespace snapshot is staged for the whole invocation; on a
+    // valid `done` only the staged patch commits — every other
+    // terminal path drops it.
+    let mut staged_kv = StagedKv::new(if ctx.plugin.manifest.allows_kv() {
+        ctx.services
+            .kv
+            .snapshot(&ctx.plugin.manifest.id)
+            .map_err(|e| InvokeError::HostService(e.to_string()))?
+    } else {
+        BTreeMap::new()
+    });
     let limits = StoreLimitsBuilder::new()
         .memory_size(ctx.budgets.max_memory_bytes)
         .table_elements(ctx.budgets.max_table_elements)
@@ -346,6 +372,14 @@ async fn run(
                         ));
                     }
                 }
+                // The result survived every check — only now does the
+                // staged patch apply against the committed namespace.
+                if ctx.plugin.manifest.allows_kv() && staged_kv.has_writes() {
+                    ctx.services
+                        .kv
+                        .commit(&ctx.plugin.manifest.id, staged_kv.writes())
+                        .map_err(|e| InvokeError::HostService(e.to_string()))?;
+                }
                 return Ok(result);
             }
             Some("fail") => {
@@ -376,7 +410,7 @@ async fn run(
                 });
             }
             Some("host_request") => {
-                input = host_request_step(&msg, ctx, attempt).await?;
+                input = host_request_step(&msg, ctx, attempt, &mut staged_kv).await?;
             }
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
@@ -461,12 +495,12 @@ where
     }
 }
 
-/// Handle one `host_request` step and produce the next `handle` input
-/// (either `http_response` or `host_error`).
+/// Handle one `host_request` step and produce the next `handle` input.
 async fn host_request_step(
     msg: &Value,
     ctx: &StepCtx<'_>,
     attempt: &mut Attempt,
+    staged_kv: &mut StagedKv,
 ) -> Result<Vec<u8>, InvokeError> {
     check_keys(msg, &["type", "id", "kind", "payload"], "host_request")?;
     let id = msg
@@ -474,6 +508,28 @@ async fn host_request_step(
         .and_then(Value::as_u64)
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| InvokeError::InvalidMessage("host_request.id missing".into()))?;
+    // Host-local kinds never reach the HTTP counters; they still cost
+    // the step that carried them. A 0.1 manifest predates the 0.2
+    // service kinds — emitting one is a protocol violation, not a
+    // permission question.
+    match msg.get("kind").and_then(Value::as_str) {
+        Some(kind)
+            if ctx.plugin.manifest.abi == "0.1.0"
+                && matches!(kind, "kv_get" | "kv_set" | "log" | "now_ms") =>
+        {
+            return Err(InvokeError::InvalidMessage(format!(
+                "host_request kind {kind:?} requires ABI 0.2.0"
+            )));
+        }
+        _ => {}
+    }
+    match msg.get("kind").and_then(Value::as_str) {
+        Some("kv_get") => return kv_get_step(&msg["payload"], id, ctx, staged_kv),
+        Some("kv_set") => return kv_set_step(&msg["payload"], id, ctx, staged_kv),
+        Some("log") => return log_step(&msg["payload"], id, attempt),
+        Some("now_ms") => return now_ms_step(&msg["payload"], id, ctx),
+        _ => {}
+    }
     let authorized = match msg.get("kind").and_then(Value::as_str) {
         Some("http_request") => authorize_http_request(&msg["payload"], id, ctx)?,
         Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx)?,
@@ -533,7 +589,7 @@ fn authorize_pot_token(
         return host_error(id, "permission-denied", "pot-provider not permitted")
             .map(Authorized::Denied);
     }
-    let Some(provider) = ctx.pot_provider else {
+    let Some(provider) = ctx.services.pot_provider else {
         return host_error(id, "unsupported", "no pot provider configured").map(Authorized::Denied);
     };
     let body = serde_json::to_vec(&json!({ "content_binding": binding }))
@@ -579,7 +635,7 @@ async fn perform_call(
         .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
     let method = req.method.clone();
     let traced_url = redact_url(&req.url);
-    let call = ctx.http.send(
+    let call = ctx.services.http.send(
         HttpRequest {
             method: req.method,
             url: req.url,
@@ -746,6 +802,190 @@ fn host_error(id: u32, kind: &str, message: &str) -> Result<Vec<u8>, InvokeError
         "type": "host_error",
         "id": id,
         "error": { "kind": kind, "message": message },
+    }))
+    .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
+}
+
+/// Serialize a `host_ok` ack for the guest.
+fn host_ok(id: u32) -> Result<Vec<u8>, InvokeError> {
+    serde_json::to_vec(&json!({ "type": "host_ok", "id": id }))
+        .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
+}
+
+/// Per-invocation staged KV state: the committed snapshot plus pending
+/// writes (`None` is a delete tombstone, so read-your-writes sees the
+/// deletion). The patch commits only on a valid `done`.
+struct StagedKv {
+    base: BTreeMap<String, Vec<u8>>,
+    staged: BTreeMap<String, Option<Vec<u8>>>,
+    /// Effective namespace size (keys + values) after staged ops.
+    total: usize,
+}
+
+impl StagedKv {
+    fn new(base: BTreeMap<String, Vec<u8>>) -> Self {
+        let total = base.iter().map(|(k, v)| k.len() + v.len()).sum();
+        Self {
+            base,
+            staged: BTreeMap::new(),
+            total,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&Vec<u8>> {
+        match self.staged.get(key) {
+            Some(v) => v.as_ref(),
+            None => self.base.get(key),
+        }
+    }
+
+    /// The namespace size `stage(key, value)` would leave behind.
+    fn effective_total(&self, key: &str, value: Option<&Vec<u8>>) -> usize {
+        let mut total = self.total;
+        if let Some(old) = self.get(key) {
+            total -= key.len() + old.len();
+        }
+        if let Some(v) = value {
+            total += key.len() + v.len();
+        }
+        total
+    }
+
+    fn stage(&mut self, key: String, value: Option<Vec<u8>>) {
+        if let Some(old) = self.get(&key) {
+            self.total -= key.len() + old.len();
+        }
+        if let Some(v) = &value {
+            self.total += key.len() + v.len();
+        }
+        self.staged.insert(key, value);
+    }
+
+    /// Whether anything was staged — an empty patch never reaches the
+    /// store.
+    fn has_writes(&self) -> bool {
+        !self.staged.is_empty()
+    }
+
+    /// The staged patch for the store: `Some` sets, `None` deletes.
+    fn writes(self) -> BTreeMap<String, Option<Vec<u8>>> {
+        self.staged
+    }
+}
+
+/// The `key` field shared by `kv_get`/`kv_set` payloads. Shape
+/// violations (missing, wrong type, empty, overlong) end the
+/// invocation like any malformed step message.
+fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
+    let invalid = |m: &str| InvokeError::InvalidMessage(format!("{what}.{m}"));
+    let key = payload
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("key missing or not a string"))?;
+    if key.is_empty() {
+        return Err(invalid("key is empty"));
+    }
+    if key.len() > MAX_KV_KEY_BYTES {
+        return Err(invalid("key exceeds 128 bytes"));
+    }
+    Ok(key.to_string())
+}
+
+/// Handle a `kv_get` payload: permission, then a staged read.
+fn kv_get_step(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+    staged: &StagedKv,
+) -> Result<Vec<u8>, InvokeError> {
+    if !ctx.plugin.manifest.allows_kv() {
+        return host_error(id, "permission-denied", "kv not permitted");
+    }
+    check_keys(payload, &["key"], "kv_get.payload")?;
+    let key = parse_kv_key(payload, "kv_get")?;
+    let value = staged
+        .get(&key)
+        .map_or(Value::Null, |v| Value::String(B64.encode(v)));
+    serde_json::to_vec(&json!({ "type": "kv_response", "id": id, "value": value }))
+        .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
+}
+
+/// Handle a `kv_set` payload: permission, decode, caps, then stage.
+/// `null` stages a delete. A refused write mutates nothing.
+fn kv_set_step(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+    staged: &mut StagedKv,
+) -> Result<Vec<u8>, InvokeError> {
+    if !ctx.plugin.manifest.allows_kv() {
+        return host_error(id, "permission-denied", "kv not permitted");
+    }
+    check_keys(payload, &["key", "value"], "kv_set.payload")?;
+    let key = parse_kv_key(payload, "kv_set")?;
+    let value = match payload.get("value") {
+        None => {
+            return Err(InvokeError::InvalidMessage("kv_set.value missing".into()));
+        }
+        Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(
+            B64.decode(s)
+                .map_err(|_| InvokeError::InvalidMessage("kv_set.value is not base64".into()))?,
+        ),
+        _ => {
+            return Err(InvokeError::InvalidMessage(
+                "kv_set.value must be base64 or null".into(),
+            ));
+        }
+    };
+    if value.as_ref().is_some_and(|v| v.len() > MAX_KV_VALUE_BYTES) {
+        return host_error(id, "invalid-response", "kv value exceeds 64 KiB");
+    }
+    if staged.effective_total(&key, value.as_ref()) > MAX_KV_NAMESPACE_BYTES {
+        return host_error(id, "invalid-response", "kv namespace exceeds 256 KiB");
+    }
+    staged.stage(key, value);
+    host_ok(id)
+}
+
+/// Handle a `log` payload: append a redacted entry to the attempt.
+fn log_step(payload: &Value, id: u32, attempt: &mut Attempt) -> Result<Vec<u8>, InvokeError> {
+    check_keys(payload, &["level", "message"], "log.payload")?;
+    let level = payload
+        .get("level")
+        .and_then(Value::as_str)
+        .filter(|l| LOG_LEVELS.contains(l))
+        .ok_or_else(|| InvokeError::InvalidMessage("log.level missing or unknown".into()))?;
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| InvokeError::InvalidMessage("log.message missing".into()))?;
+    if message.len() > MAX_LOG_MESSAGE_BYTES {
+        return Err(InvokeError::InvalidMessage(
+            "log.message exceeds 4096 bytes".into(),
+        ));
+    }
+    if attempt.guest_log.len() >= MAX_GUEST_LOG_ENTRIES {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::GuestLog,
+        });
+    }
+    // Guest text can quote a signed URL it legitimately saw; redact
+    // before it can reach diagnostics.
+    attempt.guest_log.push(GuestLogEntry {
+        level: level.to_string(),
+        message: redact_text(message),
+    });
+    host_ok(id)
+}
+
+/// Handle a `now_ms` payload: the host clock's epoch milliseconds.
+fn now_ms_step(payload: &Value, id: u32, ctx: &StepCtx<'_>) -> Result<Vec<u8>, InvokeError> {
+    check_keys(payload, &[], "now_ms.payload")?;
+    serde_json::to_vec(&json!({
+        "type": "now_response",
+        "id": id,
+        "now_ms": ctx.services.clock.now_ms(),
     }))
     .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
 }

@@ -128,6 +128,23 @@ pub struct HttpError {
     pub bytes_received: u64,
 }
 
+/// A failure of the KV backend. No raw `std::io::Error` detail crosses
+/// the public boundary.
+#[derive(Debug, Error)]
+pub enum KvError {
+    /// Storage I/O failed (read, write, sync, or rename).
+    #[error("kv io: {0}")]
+    Io(String),
+    /// The on-disk store is malformed or violates the size caps. It is
+    /// never silently reset.
+    #[error("kv store corrupt: {0}")]
+    Corrupt(String),
+    /// A commit would push the namespace past its size caps; nothing
+    /// was written.
+    #[error("kv limit: {0}")]
+    TooLarge(String),
+}
+
 /// Errors produced while running an invocation.
 #[derive(Debug, Error)]
 pub enum InvokeError {
@@ -149,6 +166,9 @@ pub enum InvokeError {
     /// The guest produced bytes that violate the ABI contract.
     #[error("invalid guest message: {0}")]
     InvalidMessage(String),
+    /// A host-side service (the KV store) failed mid-invocation.
+    #[error("host service: {0}")]
+    HostService(String),
     /// The guest completed with a `fail` message.
     #[error("guest failure ({kind}): {message}")]
     GuestFail {
@@ -169,6 +189,7 @@ impl InvokeError {
             Self::BudgetExceeded { .. } => "budget-exceeded",
             Self::GuestTrap(_) => "guest-trap",
             Self::InvalidMessage(_) => "invalid-message",
+            Self::HostService(_) => "transient",
             Self::GuestFail { kind, .. } => kind.as_str(),
         }
     }

@@ -9,12 +9,32 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use auqw_plugin_host::{
-    invoke, load, BudgetDimension, Budgets, HttpClient, HttpError, HttpErrorKind, HttpRequest,
-    HttpResponse, Invocation, InvokeError, LoadError, Manifest, ManifestError,
+    invoke, load, BudgetDimension, Budgets, HostServices, HttpClient, HttpError, HttpErrorKind,
+    HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest, ManifestError,
+    MemoryKeyValueStore, SystemClock,
 };
 use serde_json::Value;
 use sha2::Digest;
 use tokio_util::sync::CancellationToken;
+
+/// Host services for tests that exercise only HTTP/PO behavior: a
+/// shared volatile KV (never touched by these guests) and the system
+/// clock.
+fn svc<'a>(http: &'a dyn HttpClient, pot_provider: Option<&'a str>) -> HostServices<'a> {
+    HostServices {
+        http,
+        kv: test_kv(),
+        clock: &CLOCK,
+        pot_provider,
+    }
+}
+
+static CLOCK: SystemClock = SystemClock;
+
+fn test_kv() -> &'static MemoryKeyValueStore {
+    static KV: std::sync::OnceLock<MemoryKeyValueStore> = std::sync::OnceLock::new();
+    KV.get_or_init(MemoryKeyValueStore::new)
+}
 
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
@@ -37,16 +57,23 @@ fn read_wasm(path: &str) -> Vec<u8> {
     }
 }
 
-fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
+fn manifest_text(wasm: &[u8], abi: &str, permissions: &[&str]) -> String {
     let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
     let perms: Vec<String> = permissions.iter().map(|p| format!("\"{p}\"")).collect();
-    let text = format!(
-        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
+    format!(
+        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"{abi}\",\
          \"capabilities\":[\"playback.resolve\"],\"permissions\":[{}],\
          \"artifact\":{{\"path\":\"test.wasm\",\"digest\":\"{digest}\"}}}}",
         perms.join(",")
-    );
-    ok(Manifest::from_json(&text))
+    )
+}
+
+fn manifest_for_abi(wasm: &[u8], abi: &str, permissions: &[&str]) -> Manifest {
+    ok(Manifest::from_json(&manifest_text(wasm, abi, permissions)))
+}
+
+fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
+    manifest_for_abi(wasm, "0.1.0", permissions)
 }
 
 fn default_budgets() -> Budgets {
@@ -341,6 +368,56 @@ fn load_rejects_digest_mismatch() {
     assert!(matches!(e, LoadError::DigestMismatch { .. }), "{e:?}");
 }
 
+// ---------- ABI version isolation ----------
+
+/// Only `0.1.0`/`0.2.0` exist; an unknown ABI is a manifest rejection,
+/// not an implicit member of the newest capability set.
+#[test]
+fn manifest_rejects_unknown_abi() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let e = err(Manifest::from_json(&manifest_text(&wasm, "0.9.9", &[])));
+    assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
+}
+
+/// `kv` is a 0.2 permission; a 0.1 manifest is a strict immutable
+/// subset and cannot grow it.
+#[test]
+fn manifest_0_1_rejects_kv_permission() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let e = err(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &["kv"])));
+    assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
+}
+
+/// Under a 0.1 manifest the 0.2 service kinds are a protocol
+/// violation — `invalid-message`, never `permission-denied`.
+#[tokio::test]
+async fn abi_0_1_rejects_0_2_host_request_kinds() {
+    let messages = [
+        r#"{"type":"host_request","id":1,"kind":"kv_get","payload":{"key":"k"}}"#,
+        r#"{"type":"host_request","id":1,"kind":"kv_set","payload":{"key":"k","value":null}}"#,
+        r#"{"type":"host_request","id":1,"kind":"log","payload":{"level":"info","message":"m"}}"#,
+        r#"{"type":"host_request","id":1,"kind":"now_ms","payload":{}}"#,
+    ];
+    for msg in messages {
+        let wasm = ok(wat::parse_str(raw_wat(msg)));
+        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "{msg}"
+        );
+    }
+}
+
 // ---------- happy path ----------
 
 #[tokio::test]
@@ -354,8 +431,7 @@ async fn done_result_round_trips() {
         serde_json::json!({"source_ref": "x"}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert_eq!(ok(result), serde_json::json!({"ok": true}));
@@ -387,8 +463,7 @@ async fn fuel_traps_infinite_loop() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     let elapsed = t0.elapsed();
@@ -427,8 +502,7 @@ async fn step_limit_stops_requester() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(
@@ -460,8 +534,7 @@ async fn http_call_limit_stops_requester() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(
@@ -496,8 +569,7 @@ async fn destination_denied_consumes_no_http() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(
@@ -556,8 +628,7 @@ async fn cancel_aborts_inflight_http() {
         serde_json::json!({}),
         &budgets,
         cancel.clone(),
-        &SleepHttp,
-        None,
+        svc(&SleepHttp, None),
     );
     tokio::pin!(fut);
     // Drive the invocation until it is parked inside the HTTP send
@@ -604,8 +675,7 @@ async fn byte_cap_on_response_body() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &BigBodyHttp { size: 4096 },
-        None,
+        svc(&BigBodyHttp { size: 4096 }, None),
     )
     .await;
     assert!(
@@ -642,8 +712,7 @@ async fn pot_token_reaches_configured_provider() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        Some("http://pot.local:4416"),
+        svc(&http, Some("http://pot.local:4416")),
     )
     .await;
     assert!(matches!(
@@ -677,8 +746,7 @@ async fn pot_token_denied_without_permission() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        Some("http://pot.local:4416"),
+        svc(&http, Some("http://pot.local:4416")),
     )
     .await;
     assert!(matches!(
@@ -712,8 +780,7 @@ async fn pot_token_unsupported_without_provider() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(matches!(
@@ -745,8 +812,7 @@ async fn pot_token_without_binding_is_invalid_message() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        Some("http://pot.local:4416"),
+        svc(&http, Some("http://pot.local:4416")),
     )
     .await;
     assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
@@ -780,8 +846,7 @@ async fn done_url_outside_allowlist_is_rejected() {
             serde_json::json!({}),
             &default_budgets(),
             CancellationToken::new(),
-            &http,
-            None,
+            svc(&http, None),
         )
         .await;
         assert!(
@@ -808,8 +873,7 @@ async fn done_url_within_allowlist_passes() {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert_eq!(ok(result)["url"], "https://cdn.example.net/stream");
@@ -890,8 +954,7 @@ async fn host_http_never_follows_redirects() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        Some(&provider),
+        svc(&http, Some(&provider)),
     )
     .await;
     assert!(matches!(
@@ -986,8 +1049,7 @@ async fn echo_guest_returns_step_input() {
         serde_json::json!({"source_ref": "dQw4w9WgXcQ"}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     let result: Value = ok(result);
@@ -1012,8 +1074,7 @@ async fn done_without_result_is_invalid_message() {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
@@ -1033,8 +1094,7 @@ async fn done_with_null_result_is_ok() {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert_eq!(ok(result), Value::Null);
@@ -1055,8 +1115,7 @@ async fn fail_with_unknown_kind_is_invalid_message() {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
@@ -1078,8 +1137,7 @@ async fn fail_message_is_redacted() {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     let e = err(result);
@@ -1115,8 +1173,7 @@ async fn cancel_during_alloc_is_observed() {
         serde_json::json!({}),
         &budgets,
         cancel,
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(matches!(err(result), InvokeError::Cancelled));
@@ -1143,8 +1200,7 @@ async fn cancel_during_handle_outranks_done() {
         serde_json::json!({}),
         &budgets,
         cancel,
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(matches!(err(result), InvokeError::Cancelled));
@@ -1166,8 +1222,7 @@ async fn deadline_crossed_during_entry_wins() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     assert!(
@@ -1221,8 +1276,7 @@ async fn partial_response_bytes_count_toward_budget() {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &PartialThenFailHttp,
-        None,
+        svc(&PartialThenFailHttp, None),
     )
     .await;
     assert!(
@@ -1257,8 +1311,7 @@ async fn raw_step_outcome(raw: &str, permissions: &[&str]) -> InvokeError {
         serde_json::json!({}),
         &default_budgets(),
         CancellationToken::new(),
-        &http,
-        None,
+        svc(&http, None),
     )
     .await;
     err(result)
@@ -1343,4 +1396,47 @@ async fn pot_payload_with_unknown_key_is_invalid_message() {
     )
     .await;
     assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+// ---------- guest log budget ----------
+
+/// Guest that emits a `log` host_request on every step, forever.
+fn logger_wat() -> String {
+    raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"log\",\
+         \"payload\":{\"level\":\"info\",\"message\":\"m\"}}",
+    )
+}
+
+/// The 129th log entry of one invocation is a typed budget failure,
+/// not silent allocation growth.
+#[tokio::test]
+async fn guest_log_cap_stops_logger() {
+    let wasm = ok(wat::parse_str(logger_wat()));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &[]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::GuestLog
+            }
+        ),
+        "expected guest-log budget error"
+    );
+    assert_eq!(attempt.guest_log.len(), 128);
+    assert_eq!(attempt.http_calls, 0);
 }

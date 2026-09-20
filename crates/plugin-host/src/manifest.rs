@@ -12,12 +12,13 @@ pub struct Manifest {
     pub id: String,
     /// Plugin semver version.
     pub version: String,
-    /// ABI version the artifact was built against (`0.1.0`).
+    /// ABI version the artifact was built against (`0.1.0` or `0.2.0`).
     pub abi: String,
     /// Capabilities the plugin declares.
     pub capabilities: Vec<String>,
-    /// `network:` / `pot-provider` permissions; see the ABI contract for
-    /// the grammar. Required by the schema — an explicit empty array.
+    /// `network:` / `pot-provider` / `kv` permissions; see the ABI
+    /// contract for the grammar. Required by the schema — an explicit
+    /// empty array.
     pub permissions: Vec<String>,
     /// Artifact reference (path + pinned digest).
     pub artifact: ArtifactRef,
@@ -74,12 +75,38 @@ impl Manifest {
                 "capabilities must not be empty".into(),
             ));
         }
-        // The v0 schema enumerates the only capability the host serves.
-        if self.capabilities.iter().any(|c| c != "playback.resolve") {
-            return Err(bad("capabilities must be a subset of [playback.resolve]"));
+        // The schema enumerates the capabilities the host serves;
+        // `0.1.0` manifests may only declare `playback.resolve`.
+        const CAPS_0_1: &[&str] = &["playback.resolve"];
+        const CAPS_0_2: &[&str] = &[
+            "catalog.search",
+            "catalog.metadata",
+            "catalog.artwork",
+            "playback.resolve",
+            "playback.candidates",
+        ];
+        let allowed = match self.abi.as_str() {
+            "0.1.0" => CAPS_0_1,
+            "0.2.0" => CAPS_0_2,
+            _ => return Err(bad("abi must be \"0.1.0\" or \"0.2.0\"")),
+        };
+        if self
+            .capabilities
+            .iter()
+            .any(|c| !allowed.contains(&c.as_str()))
+        {
+            return Err(bad("capabilities outside the set this ABI serves"));
         }
         for p in &self.permissions {
             if p == "pot-provider" {
+                continue;
+            }
+            if p == "kv" {
+                // `kv` is a 0.2 permission — a 0.1 manifest is a strict
+                // immutable subset and cannot grow permissions.
+                if self.abi == "0.1.0" {
+                    return Err(bad("permission \"kv\" requires abi \"0.2.0\""));
+                }
                 continue;
             }
             let rest = p
@@ -133,6 +160,13 @@ impl Manifest {
     #[must_use]
     pub fn allows_pot_provider(&self) -> bool {
         self.permissions.iter().any(|p| p == "pot-provider")
+    }
+
+    /// Whether the manifest declares the `kv` permission, allowing
+    /// `kv_get`/`kv_set` host requests against this plugin's namespace.
+    #[must_use]
+    pub fn allows_kv(&self) -> bool {
+        self.permissions.iter().any(|p| p == "kv")
     }
 }
 

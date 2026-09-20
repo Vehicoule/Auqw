@@ -126,8 +126,118 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "kind", "payload"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "kv_get" },
+            "payload": {
+              "type": "object",
+              "required": ["key"],
+              "additionalProperties": false,
+              "properties": {
+                "key": { "type": "string", "minLength": 1, "maxLength": 128 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "kind", "payload"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "kv_set" },
+            "payload": {
+              "type": "object",
+              "required": ["key", "value"],
+              "additionalProperties": false,
+              "properties": {
+                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "value": {
+                  "type": ["string", "null"],
+                  "contentEncoding": "base64",
+                  "maxLength": 87384
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "kind", "payload"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "log" },
+            "payload": {
+              "type": "object",
+              "required": ["level", "message"],
+              "additionalProperties": false,
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": ["debug", "info", "warn", "error"]
+                },
+                "message": { "type": "string", "maxLength": 4096 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "kind", "payload"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "host_request" },
+            "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "kind": { "const": "now_ms" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {}
+            }
+          }
         }
       ]
+    },
+    "kvResponse": {
+      "type": "object",
+      "required": ["type", "id", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "kv_response" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "value": {
+          "type": ["string", "null"],
+          "contentEncoding": "base64"
+        }
+      }
+    },
+    "hostOk": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "host_ok" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "nowResponse": {
+      "type": "object",
+      "required": ["type", "id", "now_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "now_response" },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "now_ms": { "type": "integer", "minimum": 0 }
+      }
     },
     "resolveResult": {
       "type": "object",
@@ -139,7 +249,8 @@
         "bitrate_kbps": { "type": ["integer", "null"], "minimum": 0 },
         "expires_at_ms": { "type": ["integer", "null"], "minimum": 0 },
         "content_length": { "type": ["integer", "null"], "minimum": 1 },
-        "client": { "type": "string" }
+        "client": { "type": "string" },
+        "itag": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "done": {
@@ -173,6 +284,9 @@
     { "$ref": "#/$defs/invoke" },
     { "$ref": "#/$defs/httpResponse" },
     { "$ref": "#/$defs/hostError" },
+    { "$ref": "#/$defs/kvResponse" },
+    { "$ref": "#/$defs/hostOk" },
+    { "$ref": "#/$defs/nowResponse" },
     { "$ref": "#/$defs/hostRequest" },
     { "$ref": "#/$defs/done" },
     { "$ref": "#/$defs/fail" }

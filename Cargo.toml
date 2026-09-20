@@ -4,7 +4,9 @@ members = [
     "crates/mobile-bindings",
     "crates/plugin-host",
     "sdk/conformance/echo",
+    "sdk/conformance/scenario",
     "sdk/conformance/spin",
+    "sdk/rust",
 ]
 
 [workspace.lints.clippy]

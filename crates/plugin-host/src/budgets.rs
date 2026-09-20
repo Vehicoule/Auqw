@@ -67,6 +67,8 @@ pub enum BudgetDimension {
     Bytes,
     /// Wall-clock deadline.
     Deadline,
+    /// Guest `log` entries appended to the attempt.
+    GuestLog,
 }
 
 impl std::fmt::Display for BudgetDimension {
@@ -77,6 +79,7 @@ impl std::fmt::Display for BudgetDimension {
             Self::HttpCalls => "http-calls",
             Self::Bytes => "bytes",
             Self::Deadline => "deadline",
+            Self::GuestLog => "guest-log",
         };
         f.write_str(s)
     }

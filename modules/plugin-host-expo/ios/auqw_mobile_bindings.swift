@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -594,6 +610,16 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::Load`] if the artifact fails validation.
      */
     func runSpin(wasm: Data, manifestJson: String) throws  -> SpinReport
+    
+    /**
+     * Start any declared capability with a JSON object payload. The
+     * outcome carries the raw `done.result` JSON.
+     *
+     * # Errors
+     * [`HostError::Runtime`] when `payload_json` is not a JSON object;
+     * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
+     */
+    func startRequest(pluginId: String, capability: String, payloadJson: String, listener: RequestListener) throws  -> String
     
     /**
      * Start a `playback.resolve` invocation on the runtime. The
@@ -725,6 +751,27 @@ open func runSpin(wasm: Data, manifestJson: String)throws  -> SpinReport  {
 }
     
     /**
+     * Start any declared capability with a JSON object payload. The
+     * outcome carries the raw `done.result` JSON.
+     *
+     * # Errors
+     * [`HostError::Runtime`] when `payload_json` is not a JSON object;
+     * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
+     */
+open func startRequest(pluginId: String, capability: String, payloadJson: String, listener: RequestListener)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHostError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(pluginId),
+        FfiConverterString.lower(capability),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterCallbackInterfaceRequestListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
      *
@@ -792,8 +839,7 @@ public func FfiConverterTypePluginHost_lower(_ value: PluginHost) -> UInt64 {
 
 
 /**
- * Per-invocation accounting, minus the HTTP trace (kept host-side —
- * its URLs are signed).
+ * Per-invocation accounting for diagnostics.
  */
 public struct AttemptSummary: Equatable, Hashable {
     /**
@@ -820,6 +866,14 @@ public struct AttemptSummary: Equatable, Hashable {
      * Wall-clock elapsed.
      */
     public var elapsedMs: UInt64
+    /**
+     * Sanitized HTTP trace entries.
+     */
+    public var httpTrace: [HttpTraceSummary]
+    /**
+     * Guest log entries.
+     */
+    public var guestLog: [GuestLogSummary]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -841,13 +895,21 @@ public struct AttemptSummary: Equatable, Hashable {
          */fuelUsed: UInt64, 
         /**
          * Wall-clock elapsed.
-         */elapsedMs: UInt64) {
+         */elapsedMs: UInt64, 
+        /**
+         * Sanitized HTTP trace entries.
+         */httpTrace: [HttpTraceSummary], 
+        /**
+         * Guest log entries.
+         */guestLog: [GuestLogSummary]) {
         self.requestId = requestId
         self.steps = steps
         self.httpCalls = httpCalls
         self.bytes = bytes
         self.fuelUsed = fuelUsed
         self.elapsedMs = elapsedMs
+        self.httpTrace = httpTrace
+        self.guestLog = guestLog
     }
 
     
@@ -871,7 +933,9 @@ public struct FfiConverterTypeAttemptSummary: FfiConverterRustBuffer {
                 httpCalls: FfiConverterUInt32.read(from: &buf), 
                 bytes: FfiConverterUInt64.read(from: &buf), 
                 fuelUsed: FfiConverterUInt64.read(from: &buf), 
-                elapsedMs: FfiConverterUInt64.read(from: &buf)
+                elapsedMs: FfiConverterUInt64.read(from: &buf), 
+                httpTrace: FfiConverterSequenceTypeHttpTraceSummary.read(from: &buf), 
+                guestLog: FfiConverterSequenceTypeGuestLogSummary.read(from: &buf)
         )
     }
 
@@ -882,6 +946,8 @@ public struct FfiConverterTypeAttemptSummary: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.bytes, into: &buf)
         FfiConverterUInt64.write(value.fuelUsed, into: &buf)
         FfiConverterUInt64.write(value.elapsedMs, into: &buf)
+        FfiConverterSequenceTypeHttpTraceSummary.write(value.httpTrace, into: &buf)
+        FfiConverterSequenceTypeGuestLogSummary.write(value.guestLog, into: &buf)
     }
 }
 
@@ -898,6 +964,75 @@ public func FfiConverterTypeAttemptSummary_lift(_ buf: RustBuffer) throws -> Att
 #endif
 public func FfiConverterTypeAttemptSummary_lower(_ value: AttemptSummary) -> RustBuffer {
     return FfiConverterTypeAttemptSummary.lower(value)
+}
+
+
+/**
+ * One guest `log` entry, already redacted by the host.
+ */
+public struct GuestLogSummary: Equatable, Hashable {
+    /**
+     * `debug` | `info` | `warn` | `error`.
+     */
+    public var level: String
+    /**
+     * Redacted message text.
+     */
+    public var message: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `debug` | `info` | `warn` | `error`.
+         */level: String, 
+        /**
+         * Redacted message text.
+         */message: String) {
+        self.level = level
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GuestLogSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGuestLogSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GuestLogSummary {
+        return
+            try GuestLogSummary(
+                level: FfiConverterString.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GuestLogSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.level, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGuestLogSummary_lift(_ buf: RustBuffer) throws -> GuestLogSummary {
+    return try FfiConverterTypeGuestLogSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGuestLogSummary_lower(_ value: GuestLogSummary) -> RustBuffer {
+    return FfiConverterTypeGuestLogSummary.lower(value)
 }
 
 
@@ -919,6 +1054,11 @@ public struct HostConfig: Equatable, Hashable {
      * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
      */
     public var potProviderUrl: String?
+    /**
+     * Path of the on-disk KV store the native shell supplies;
+     * `None` keeps plugin state volatile.
+     */
+    public var statePath: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -932,10 +1072,15 @@ public struct HostConfig: Equatable, Hashable {
         /**
          * Base URL of a bgutil-compatible PO-token service
          * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
-         */potProviderUrl: String?) {
+         */potProviderUrl: String?, 
+        /**
+         * Path of the on-disk KV store the native shell supplies;
+         * `None` keeps plugin state volatile.
+         */statePath: String?) {
         self.fuelPerEntry = fuelPerEntry
         self.fuelTotal = fuelTotal
         self.potProviderUrl = potProviderUrl
+        self.statePath = statePath
     }
 
     
@@ -956,7 +1101,8 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
             try HostConfig(
                 fuelPerEntry: FfiConverterUInt64.read(from: &buf), 
                 fuelTotal: FfiConverterUInt64.read(from: &buf), 
-                potProviderUrl: FfiConverterOptionString.read(from: &buf)
+                potProviderUrl: FfiConverterOptionString.read(from: &buf), 
+                statePath: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -964,6 +1110,7 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.fuelPerEntry, into: &buf)
         FfiConverterUInt64.write(value.fuelTotal, into: &buf)
         FfiConverterOptionString.write(value.potProviderUrl, into: &buf)
+        FfiConverterOptionString.write(value.statePath, into: &buf)
     }
 }
 
@@ -980,6 +1127,107 @@ public func FfiConverterTypeHostConfig_lift(_ buf: RustBuffer) throws -> HostCon
 #endif
 public func FfiConverterTypeHostConfig_lower(_ value: HostConfig) -> RustBuffer {
     return FfiConverterTypeHostConfig.lower(value)
+}
+
+
+/**
+ * One HTTP call from the attempt trace. `url` is already stripped of
+ * query and fragment by the host — the signed parameters never cross
+ * this boundary.
+ */
+public struct HttpTraceSummary: Equatable, Hashable {
+    /**
+     * HTTP method.
+     */
+    public var method: String
+    /**
+     * URL without query or fragment.
+     */
+    public var url: String
+    /**
+     * Response status when one was received.
+     */
+    public var status: UInt16?
+    /**
+     * Body bytes received.
+     */
+    public var bytes: UInt64
+    /**
+     * Round-trip milliseconds.
+     */
+    public var elapsedMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * HTTP method.
+         */method: String, 
+        /**
+         * URL without query or fragment.
+         */url: String, 
+        /**
+         * Response status when one was received.
+         */status: UInt16?, 
+        /**
+         * Body bytes received.
+         */bytes: UInt64, 
+        /**
+         * Round-trip milliseconds.
+         */elapsedMs: UInt64) {
+        self.method = method
+        self.url = url
+        self.status = status
+        self.bytes = bytes
+        self.elapsedMs = elapsedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HttpTraceSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHttpTraceSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HttpTraceSummary {
+        return
+            try HttpTraceSummary(
+                method: FfiConverterString.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                status: FfiConverterOptionUInt16.read(from: &buf), 
+                bytes: FfiConverterUInt64.read(from: &buf), 
+                elapsedMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HttpTraceSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.method, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterOptionUInt16.write(value.status, into: &buf)
+        FfiConverterUInt64.write(value.bytes, into: &buf)
+        FfiConverterUInt64.write(value.elapsedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHttpTraceSummary_lift(_ buf: RustBuffer) throws -> HttpTraceSummary {
+    return try FfiConverterTypeHttpTraceSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHttpTraceSummary_lower(_ value: HttpTraceSummary) -> RustBuffer {
+    return FfiConverterTypeHttpTraceSummary.lower(value)
 }
 
 
@@ -1291,6 +1539,106 @@ public func FfiConverterTypeHostError_lower(_ value: HostError) -> RustBuffer {
 
 
 /**
+ * Terminal outcome of one `start_request` invocation. The result is
+ * raw JSON — the typed [`ResolveOutcome`] remains for resolve callers.
+ */
+
+public enum RequestOutcome: Equatable, Hashable {
+    
+    /**
+     * The invocation produced a `done` result.
+     */
+    case succeeded(
+        /**
+         * `done.result` serialized to JSON.
+         */resultJson: String, 
+        /**
+         * Invocation accounting.
+         */attempt: AttemptSummary
+    )
+    /**
+     * The invocation failed; `kind` is the ABI error taxonomy.
+     */
+    case failed(
+        /**
+         * Taxonomy kind.
+         */kind: String, 
+        /**
+         * Human-readable detail (never contains signed URLs).
+         */message: String, 
+        /**
+         * Invocation accounting.
+         */attempt: AttemptSummary
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RequestOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = RequestOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .succeeded(resultJson: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
+        )
+        
+        case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RequestOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .succeeded(resultJson,attempt):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(resultJson, into: &buf)
+            FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
+            
+        
+        case let .failed(kind,message,attempt):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(kind, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestOutcome_lift(_ buf: RustBuffer) throws -> RequestOutcome {
+    return try FfiConverterTypeRequestOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestOutcome_lower(_ value: RequestOutcome) -> RustBuffer {
+    return FfiConverterTypeRequestOutcome.lower(value)
+}
+
+
+
+/**
  * Terminal outcome of one `start_resolve` invocation.
  */
 
@@ -1387,6 +1735,150 @@ public func FfiConverterTypeResolveOutcome_lower(_ value: ResolveOutcome) -> Rus
     return FfiConverterTypeResolveOutcome.lower(value)
 }
 
+
+
+
+
+/**
+ * Receives the terminal outcome of an invocation started with
+ * [`PluginHost::start_request`].
+ */
+public protocol RequestListener: AnyObject, Sendable {
+    
+    /**
+     * Called exactly once per request, on a runtime worker thread.
+     */
+    func onOutcome(requestId: String, outcome: RequestOutcome) 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceRequestListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceRequestListener = UniffiVTableCallbackInterfaceRequestListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceRequestListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface RequestListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceRequestListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface RequestListener: handle missing in uniffiClone")
+            }
+        },
+        onOutcome: { (
+            uniffiHandle: UInt64,
+            requestId: RustBuffer,
+            outcome: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceRequestListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onOutcome(
+                     requestId: try FfiConverterString.lift(requestId),
+                     outcome: try FfiConverterTypeRequestOutcome_lift(outcome)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceRequestListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceRequestListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitRequestListener() {
+    uniffi_auqw_mobile_bindings_fn_init_callback_vtable_requestlistener(UniffiCallbackInterfaceRequestListener.vtablePtr)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceRequestListener {
+    fileprivate static let handleMap = UniffiHandleMap<RequestListener>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceRequestListener : FfiConverter {
+    typealias SwiftType = RequestListener
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceRequestListener_lift(_ handle: UInt64) throws -> RequestListener {
+    return try FfiConverterCallbackInterfaceRequestListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceRequestListener_lower(_ v: RequestListener) -> UInt64 {
+    return FfiConverterCallbackInterfaceRequestListener.lower(v)
+}
 
 
 
@@ -1535,6 +2027,30 @@ public func FfiConverterCallbackInterfaceResolveListener_lower(_ v: ResolveListe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
     typealias SwiftType = UInt32?
 
@@ -1604,6 +2120,56 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGuestLogSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [GuestLogSummary]
+
+    public static func write(_ value: [GuestLogSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGuestLogSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GuestLogSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GuestLogSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGuestLogSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHttpTraceSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [HttpTraceSummary]
+
+    public static func write(_ value: [HttpTraceSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHttpTraceSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HttpTraceSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HttpTraceSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHttpTraceSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -1628,16 +2194,23 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() != 34269) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() != 7187) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() != 51654) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new() != 45559) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_auqw_mobile_bindings_checksum_method_requestlistener_on_outcome() != 46008) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome() != 25209) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitRequestListener()
     uniffiCallbackInitResolveListener()
     return InitializationResult.ok
 }()

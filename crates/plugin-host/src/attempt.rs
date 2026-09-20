@@ -19,6 +19,8 @@ pub struct Attempt {
     pub elapsed: Duration,
     /// One entry per HTTP request, with the URL's query string stripped.
     pub http_trace: Vec<HttpTraceEntry>,
+    /// Guest `log` entries, newest last; messages are already redacted.
+    pub guest_log: Vec<GuestLogEntry>,
 }
 
 /// One HTTP request performed for the guest.
@@ -34,4 +36,13 @@ pub struct HttpTraceEntry {
     pub bytes: u64,
     /// Round-trip time.
     pub elapsed: Duration,
+}
+
+/// A guest `log` host-request entry stored on the attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestLogEntry {
+    /// `debug` | `info` | `warn` | `error`.
+    pub level: String,
+    /// Message text with embedded URLs stripped of query and fragment.
+    pub message: String,
 }

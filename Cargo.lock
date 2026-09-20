@@ -78,8 +78,25 @@ name = "auqw-conformance-echo"
 version = "0.1.0"
 
 [[package]]
+name = "auqw-conformance-scenario"
+version = "0.1.0"
+dependencies = [
+ "auqw-guest-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "auqw-conformance-spin"
 version = "0.1.0"
+
+[[package]]
+name = "auqw-guest-sdk"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde_json",
+]
 
 [[package]]
 name = "auqw-mobile-bindings"

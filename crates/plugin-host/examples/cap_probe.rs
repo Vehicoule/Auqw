@@ -10,7 +10,10 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use auqw_plugin_host::{invoke, load, redact_url, Budgets, Manifest, ReqwestClient};
+use auqw_plugin_host::{
+    invoke, load, redact_url, Budgets, HostServices, Manifest, MemoryKeyValueStore, ReqwestClient,
+    SystemClock,
+};
 use tokio_util::sync::CancellationToken;
 
 const CAP_OFFSET: u64 = 2 * 1024 * 1024; // probe past the ~1 MiB cap
@@ -89,14 +92,20 @@ async fn mint(
     http: &ReqwestClient,
     video_id: &str,
 ) -> Option<(String, String)> {
+    let kv = MemoryKeyValueStore::new();
+    let clock = SystemClock;
     let outcome = invoke(
         plugin,
         "playback.resolve",
         serde_json::json!({ "source_ref": video_id }),
         budgets,
         CancellationToken::new(),
-        http,
-        None,
+        HostServices {
+            http,
+            kv: &kv,
+            clock: &clock,
+            pot_provider: None,
+        },
     )
     .await;
     let (result, _attempt) = outcome.into_parts();

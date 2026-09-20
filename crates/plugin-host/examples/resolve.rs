@@ -9,7 +9,10 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use auqw_plugin_host::{invoke, load, redact_url, Budgets, Manifest, ReqwestClient};
+use auqw_plugin_host::{
+    invoke, load, redact_url, Budgets, HostServices, Manifest, MemoryKeyValueStore, ReqwestClient,
+    SystemClock,
+};
 use tokio_util::sync::CancellationToken;
 
 fn main() -> ExitCode {
@@ -105,14 +108,20 @@ async fn run(args: &[String]) -> ExitCode {
     let cancel = CancellationToken::new();
     let payload = serde_json::json!({ "source_ref": video_id });
 
+    let kv = MemoryKeyValueStore::new();
+    let clock = SystemClock;
     let fut = invoke(
         &plugin,
         "playback.resolve",
         payload,
         &budgets,
         cancel.clone(),
-        &http,
-        pot_provider.as_deref(),
+        HostServices {
+            http: &http,
+            kv: &kv,
+            clock: &clock,
+            pot_provider: pot_provider.as_deref(),
+        },
     );
     tokio::pin!(fut);
     let outcome = if let Some(ms) = cancel_after {
@@ -193,6 +202,8 @@ async fn run_spin(path: &str) -> ExitCode {
         eprintln!("http client init failed");
         return ExitCode::FAILURE;
     };
+    let kv = MemoryKeyValueStore::new();
+    let clock = SystemClock;
     let t0 = Instant::now();
     let outcome = invoke(
         &plugin,
@@ -200,8 +211,12 @@ async fn run_spin(path: &str) -> ExitCode {
         serde_json::json!({}),
         &budgets,
         CancellationToken::new(),
-        &http,
-        None,
+        HostServices {
+            http: &http,
+            kv: &kv,
+            clock: &clock,
+            pot_provider: None,
+        },
     )
     .await;
     let (result, attempt) = outcome.into_parts();
