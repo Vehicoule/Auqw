@@ -906,14 +906,18 @@ async fn malformed_content_range_never_echoes_server_text() {
     let mut pages = HashMap::new();
     // The server answers a 206 whose Content-Range embeds the signed
     // request — the error must carry structure, never the raw value.
-    pages.insert(
-        0u64,
-        VecDeque::from([Step::Reply(FetchResponse {
+    // Two replies are scripted: a demand read may preempt the in-flight
+    // speculative fetch, whose already-issued reply is then discarded —
+    // the fetch-through re-issues and must get the same malformed
+    // answer, or the outcome depends on the decide order.
+    let malformed = || {
+        Step::Reply(FetchResponse {
             status: 206,
             content_range: Some("bytes sig=SECRET-echo/9".into()),
             body: vec![1u8],
-        })]),
-    );
+        })
+    };
+    pages.insert(0u64, VecDeque::from([malformed(), malformed()]));
     let reg = StreamRegistry::with_fetch(
         config(&d),
         tokio::runtime::Handle::current(),
