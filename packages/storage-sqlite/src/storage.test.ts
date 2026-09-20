@@ -796,6 +796,20 @@ async function migrationV1toV2(): Promise<void> {
   assertEqual(state.settings.storefront, 'US', 'settings preserved');
   assertDeepEqual(state.entities, []);
   assertDeepEqual(state.playlists, []);
+  // The optional provider/cache columns ALTER in during the migration;
+  // a write through the v2 column list must round-trip on a v1-origin DB.
+  const widened: Settings = {
+    ...SETTINGS,
+    lyricsProvider: 'lyrics-lrclib',
+    artworkCacheBytes: 268435456,
+  };
+  assert(
+    (await storage.commit({ settings: widened }, ctx().context)).ok,
+    'optional settings columns writable post-migration',
+  );
+  const reread = await loadOk(storage);
+  assertEqual(reread.settings.lyricsProvider, 'lyrics-lrclib');
+  assertEqual(reread.settings.artworkCacheBytes, 268435456);
   const versions = await driver.transaction(async (conn) =>
     conn.query('SELECT version FROM schema_version WHERE id = 1'),
   );

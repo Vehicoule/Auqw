@@ -69,10 +69,7 @@ const MIGRATION_1: readonly string[] = [
   storefront TEXT,
   quality_kbps INTEGER NOT NULL CHECK (quality_kbps BETWEEN 1 AND 512),
   theme TEXT NOT NULL CHECK (theme IN ('dark','light','oled','system')),
-  prefetch INTEGER NOT NULL CHECK (prefetch IN (0,1)),
-  lyrics_provider TEXT,
-  radio_provider TEXT,
-  artwork_cache_bytes INTEGER CHECK (artwork_cache_bytes BETWEEN 16777216 AND 1073741824)
+  prefetch INTEGER NOT NULL CHECK (prefetch IN (0,1))
 )`,
   `CREATE TABLE attempt_traces (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +87,7 @@ const MIGRATION_1: readonly string[] = [
  * `recordings.id` while 'album'/'artist' targets name
  * `entities.entity_id`; the polymorphic reference is enforced by the
  * application's persisted-document validation, not the schema.
+ * `settings` widens by ALTER (all three columns are optional).
  */
 const MIGRATION_2: readonly string[] = [
   `CREATE TABLE entities (
@@ -158,6 +156,9 @@ const MIGRATION_2: readonly string[] = [
   last_accessed_ms INTEGER NOT NULL CHECK (last_accessed_ms >= 0)
 )`,
   `CREATE INDEX artwork_cache_accessed_idx ON artwork_cache(last_accessed_ms)`,
+  `ALTER TABLE settings ADD COLUMN lyrics_provider TEXT`,
+  `ALTER TABLE settings ADD COLUMN radio_provider TEXT`,
+  `ALTER TABLE settings ADD COLUMN artwork_cache_bytes INTEGER CHECK (artwork_cache_bytes BETWEEN 16777216 AND 1073741824)`,
   `CREATE TABLE likes_new (
   entity_kind TEXT NOT NULL CHECK (entity_kind IN ('track','album','artist')),
   target_id TEXT NOT NULL,
