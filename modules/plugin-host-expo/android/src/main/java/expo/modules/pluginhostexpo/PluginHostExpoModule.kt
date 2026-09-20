@@ -218,6 +218,7 @@ class PluginHostExpoModule : Module() {
           outcome.resource.expiresAtMs?.let { putDouble("expiresAtMs", it.toDouble()) }
           putString("client", outcome.resource.client)
           outcome.resource.contentLength?.let { putDouble("contentLength", it.toDouble()) }
+          outcome.resource.itag?.let { putDouble("itag", it.toDouble()) }
         }
       )
       putBundle("attempt", attemptBundle(outcome.attempt))

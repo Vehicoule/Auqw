@@ -219,6 +219,7 @@ public class PluginHostExpoModule: Module {
       if let v = resource.bitrateKbps { r["bitrateKbps"] = Double(v) }
       if let v = resource.expiresAtMs { r["expiresAtMs"] = Double(v) }
       if let v = resource.contentLength { r["contentLength"] = Double(v) }
+      if let v = resource.itag { r["itag"] = Double(v) }
       return [
         "type": "resolved",
         "resource": r,

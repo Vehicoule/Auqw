@@ -199,12 +199,13 @@ macro_rules! export_plugin {
 #[doc(hidden)]
 #[must_use]
 pub fn __alloc(len: u32) -> u32 {
-    let Ok(layout) = Layout::from_size_align(len as usize, 1) else {
+    // `alloc` with a zero-sized layout is UB; a 0 request gets a
+    // 1-byte buffer it never writes through.
+    let Ok(layout) = Layout::from_size_align((len as usize).max(1), 1) else {
         return 0;
     };
-    // SAFETY: `layout` has nonzero size per the caller contract (the
-    // host only requests nonempty step messages); the returned pointer
-    // is a valid guest-owned buffer of `len` bytes.
+    // SAFETY: `layout` has nonzero size by construction; the returned
+    // pointer is a valid guest-owned buffer of `len` bytes.
     unsafe { std::alloc::alloc(layout) as u32 }
 }
 
@@ -481,10 +482,14 @@ fn drive() -> Value {
 }
 
 fn error_kind(e: &GuestError) -> &str {
-    match e {
-        GuestError::Host { kind, .. } => kind.as_str(),
-        GuestError::Failed { kind, .. } if ERROR_KINDS.contains(&kind.as_str()) => kind.as_str(),
-        _ => "invalid-response",
+    let kind = match e {
+        GuestError::Host { kind, .. } | GuestError::Failed { kind, .. } => kind.as_str(),
+        _ => return "invalid-response",
+    };
+    if ERROR_KINDS.contains(&kind) {
+        kind
+    } else {
+        "invalid-response"
     }
 }
 
@@ -999,6 +1004,30 @@ mod tests {
     fn invalid_failure_kind_becomes_invalid_response() {
         reset();
         dispatch_register(bad_kind_dispatch);
+        let out = step_json(&json!({
+            "type": "invoke", "request_id": "r", "capability": "x", "payload": {},
+        }));
+        assert_eq!(out["type"], "fail");
+        assert_eq!(out["error"]["kind"], "invalid-response");
+        reset();
+    }
+
+    fn bad_host_kind_dispatch(_inv: Invocation) -> GuestFuture {
+        Box::pin(async move {
+            Err(GuestError::Host {
+                kind: "budget-exceeded".into(),
+                message: "not my word".into(),
+            })
+        })
+    }
+
+    /// A guest-constructed `Host` error gets the same taxonomy clamp as
+    /// `Failed` — a kind outside the guest vocabulary collapses to
+    /// `invalid-response`.
+    #[test]
+    fn guest_host_kind_becomes_invalid_response() {
+        reset();
+        dispatch_register(bad_host_kind_dispatch);
         let out = step_json(&json!({
             "type": "invoke", "request_id": "r", "capability": "x", "payload": {},
         }));

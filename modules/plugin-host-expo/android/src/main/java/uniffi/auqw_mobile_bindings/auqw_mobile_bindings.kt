@@ -1984,6 +1984,11 @@ data class ResolvedResource (
      * Reported `contentLength` of the picked format in bytes.
      */
     var `contentLength`: kotlin.ULong?
+    , 
+    /**
+     * The picked format's itag — re-mints pin it across cap recovery.
+     */
+    var `itag`: kotlin.UInt?
     
 ){
     
@@ -2006,6 +2011,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
         )
     }
 
@@ -2015,7 +2021,8 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalUInt.allocationSize(value.`bitrateKbps`) +
             FfiConverterOptionalULong.allocationSize(value.`expiresAtMs`) +
             FfiConverterString.allocationSize(value.`client`) +
-            FfiConverterOptionalULong.allocationSize(value.`contentLength`)
+            FfiConverterOptionalULong.allocationSize(value.`contentLength`) +
+            FfiConverterOptionalUInt.allocationSize(value.`itag`)
     )
 
     override fun write(value: ResolvedResource, buf: ByteBuffer) {
@@ -2025,6 +2032,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalULong.write(value.`expiresAtMs`, buf)
             FfiConverterString.write(value.`client`, buf)
             FfiConverterOptionalULong.write(value.`contentLength`, buf)
+            FfiConverterOptionalUInt.write(value.`itag`, buf)
     }
 }
 

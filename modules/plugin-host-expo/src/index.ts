@@ -40,6 +40,7 @@ export type ResolvedResource = {
   expiresAtMs?: number;
   client: string;
   contentLength?: number;
+  itag?: number;
 };
 
 export type ResolveOutcome =

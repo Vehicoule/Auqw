@@ -891,18 +891,18 @@ fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
     Ok(key.to_string())
 }
 
-/// Handle a `kv_get` payload: permission, then a staged read.
+/// Handle a `kv_get` payload: shape, permission, then a staged read.
 fn kv_get_step(
     payload: &Value,
     id: u32,
     ctx: &StepCtx<'_>,
     staged: &StagedKv,
 ) -> Result<Vec<u8>, InvokeError> {
+    check_keys(payload, &["key"], "kv_get.payload")?;
+    let key = parse_kv_key(payload, "kv_get")?;
     if !ctx.plugin.manifest.allows_kv() {
         return host_error(id, "permission-denied", "kv not permitted");
     }
-    check_keys(payload, &["key"], "kv_get.payload")?;
-    let key = parse_kv_key(payload, "kv_get")?;
     let value = staged
         .get(&key)
         .map_or(Value::Null, |v| Value::String(B64.encode(v)));
@@ -910,7 +910,7 @@ fn kv_get_step(
         .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
 }
 
-/// Handle a `kv_set` payload: permission, decode, caps, then stage.
+/// Handle a `kv_set` payload: shape, permission, caps, then stage.
 /// `null` stages a delete. A refused write mutates nothing.
 fn kv_set_step(
     payload: &Value,
@@ -918,9 +918,6 @@ fn kv_set_step(
     ctx: &StepCtx<'_>,
     staged: &mut StagedKv,
 ) -> Result<Vec<u8>, InvokeError> {
-    if !ctx.plugin.manifest.allows_kv() {
-        return host_error(id, "permission-denied", "kv not permitted");
-    }
     check_keys(payload, &["key", "value"], "kv_set.payload")?;
     let key = parse_kv_key(payload, "kv_set")?;
     let value = match payload.get("value") {
@@ -938,6 +935,9 @@ fn kv_set_step(
             ));
         }
     };
+    if !ctx.plugin.manifest.allows_kv() {
+        return host_error(id, "permission-denied", "kv not permitted");
+    }
     if value.as_ref().is_some_and(|v| v.len() > MAX_KV_VALUE_BYTES) {
         return host_error(id, "invalid-response", "kv value exceeds 64 KiB");
     }

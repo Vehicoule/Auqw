@@ -1259,6 +1259,10 @@ public struct ResolvedResource: Equatable, Hashable {
      * Reported `contentLength` of the picked format in bytes.
      */
     public var contentLength: UInt64?
+    /**
+     * The picked format's itag — re-mints pin it across cap recovery.
+     */
+    public var itag: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1280,13 +1284,17 @@ public struct ResolvedResource: Equatable, Hashable {
          */client: String, 
         /**
          * Reported `contentLength` of the picked format in bytes.
-         */contentLength: UInt64?) {
+         */contentLength: UInt64?, 
+        /**
+         * The picked format's itag — re-mints pin it across cap recovery.
+         */itag: UInt32?) {
         self.url = url
         self.mime = mime
         self.bitrateKbps = bitrateKbps
         self.expiresAtMs = expiresAtMs
         self.client = client
         self.contentLength = contentLength
+        self.itag = itag
     }
 
     
@@ -1310,7 +1318,8 @@ public struct FfiConverterTypeResolvedResource: FfiConverterRustBuffer {
                 bitrateKbps: FfiConverterOptionUInt32.read(from: &buf), 
                 expiresAtMs: FfiConverterOptionUInt64.read(from: &buf), 
                 client: FfiConverterString.read(from: &buf), 
-                contentLength: FfiConverterOptionUInt64.read(from: &buf)
+                contentLength: FfiConverterOptionUInt64.read(from: &buf), 
+                itag: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -1321,6 +1330,7 @@ public struct FfiConverterTypeResolvedResource: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.expiresAtMs, into: &buf)
         FfiConverterString.write(value.client, into: &buf)
         FfiConverterOptionUInt64.write(value.contentLength, into: &buf)
+        FfiConverterOptionUInt32.write(value.itag, into: &buf)
     }
 }
 

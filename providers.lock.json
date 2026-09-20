@@ -1,11 +1,18 @@
 {
-  "abi": "0.1.0",
+  "abi": "0.2.0",
   "plugins": [
     {
-      "id": "youtube-music",
+      "id": "itunes",
       "version": "0.1.0",
-      "abi": "0.1.0",
-      "digest": "sha256:1326de5d2f3efc33935737f3ace2567840e2e20ae0c099342b2dfbba3b6b5ae3",
+      "abi": "0.2.0",
+      "digest": "sha256:1dbc351b5a52cebffb6e5e0705616ec9c6491770da0763e9ea6dca27f605cda8",
+      "source": "local-build:../auqw-plugins/plugins/itunes/dist/itunes.wasm"
+    },
+    {
+      "id": "youtube-music",
+      "version": "0.2.0",
+      "abi": "0.2.0",
+      "digest": "sha256:1819d85525aa0278cbe2a921c6e2c36543dbca037a6b408a4bc27d805806e099",
       "source": "local-build:../auqw-plugins/plugins/youtube-music/dist/youtube-music.wasm"
     }
   ]

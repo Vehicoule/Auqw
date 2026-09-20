@@ -134,6 +134,8 @@ pub struct ResolvedResource {
     pub client: String,
     /// Reported `contentLength` of the picked format in bytes.
     pub content_length: Option<u64>,
+    /// The picked format's itag — re-mints pin it across cap recovery.
+    pub itag: Option<u32>,
 }
 
 /// Terminal outcome of one `start_resolve` invocation.
@@ -531,6 +533,10 @@ fn resource_from(value: &Value) -> ResolvedResource {
         expires_at_ms: value.get("expires_at_ms").and_then(Value::as_u64),
         client: get("client"),
         content_length: value.get("content_length").and_then(Value::as_u64),
+        itag: value
+            .get("itag")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
 
@@ -593,7 +599,7 @@ mod tests {
         let wasm = match wat::parse_str(done_wat(
             "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
              \"bitrate_kbps\":129,\"expires_at_ms\":42,\"client\":\"IOS\",\
-             \"content_length\":1234}",
+             \"content_length\":1234,\"itag\":140}",
         )) {
             Ok(w) => w,
             Err(e) => panic!("wat: {e}"),
@@ -626,6 +632,7 @@ mod tests {
                 assert_eq!(resource.mime, "audio/mp4");
                 assert_eq!(resource.client, "IOS");
                 assert_eq!(resource.content_length, Some(1234));
+                assert_eq!(resource.itag, Some(140));
                 assert!(attempt.steps >= 1);
             }
             ResolveOutcome::Failed { kind, message, .. } => {
