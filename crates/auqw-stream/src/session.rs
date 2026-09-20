@@ -3,14 +3,16 @@
 //! bridge deadlock-free.
 //!
 //! Lock order (the only nestings allowed): the registry's `sessions`
-//! map is outermost, then `shared` → `store` or `shared` → `core`.
-//! `store` and `core` guards are never held while taking another lock.
+//! map is outermost, then `shared` → `core` → `store`. `store` is
+//! always innermost: nothing takes another lock while holding it, and
+//! `shared` is never taken while holding `core`.
 //! Readers wait on `readers` with the `shared` guard; producers commit
 //! store writes first, then take `shared` to record marks and notify —
 //! so a reader either sees the extent or is already parked when the
 //! notify lands.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,35 @@ pub(crate) struct Shared {
     pub committed: u64,
     /// Lifecycle marks.
     pub marks: PhaseMarks,
+    /// Bumped each time an attached consumer detaches (`close`) —
+    /// a reader parked across a detach wakes `Cancelled` instead of
+    /// waiting out its deadline.
+    pub detach_epoch: u64,
+    /// This session's contribution to `PoolSignals::demand` — kept so
+    /// every `fetch_through` mutation can apply just the delta.
+    pub demand_published: usize,
+}
+
+/// Fetch-through backpressure shared across one registry's sessions:
+/// `demand` is the total queued demand-read positions. An attached
+/// session's fetch-through outranks *speculative* fill — an unattached
+/// pump parks while `demand` is non-zero and is woken through
+/// `drained` when it returns to zero.
+pub(crate) struct PoolSignals {
+    /// Sum of `fetch_through` lengths across all sessions.
+    pub demand: AtomicIsize,
+    /// Signalled when `demand` transitions to zero.
+    pub drained: Notify,
+}
+
+impl PoolSignals {
+    /// A pool with no pending demand.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            demand: AtomicIsize::new(0),
+            drained: Notify::new(),
+        })
+    }
 }
 
 /// Mint bookkeeping: the current source plus the budgets that bound
@@ -111,6 +142,9 @@ pub(crate) struct SessionInner {
     pub task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Creation instant for the prepare TTL.
     pub created: Instant,
+    /// Cross-session demand accounting — attached fetch-through
+    /// outranks this session's speculative fill.
+    pub pool: Arc<PoolSignals>,
 }
 
 impl SessionInner {
@@ -121,6 +155,7 @@ impl SessionInner {
         source: PreparedSource,
         remint: Arc<dyn Remint>,
         config: StreamConfig,
+        pool: Arc<PoolSignals>,
     ) -> Result<Arc<Self>, StreamError> {
         let paths = SessionPaths::new(&config.cache_dir, &handle);
         let mut store = SparseStore::create(&paths, source.content_length)?;
@@ -144,6 +179,8 @@ impl SessionInner {
                 fetch_through: BTreeSet::new(),
                 eof_below: None,
                 committed: 0,
+                detach_epoch: 0,
+                demand_published: 0,
                 marks: PhaseMarks {
                     prepare_started_ms: now_ms(),
                     ..PhaseMarks::default()
@@ -163,6 +200,7 @@ impl SessionInner {
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
             created: Instant::now(),
+            pool,
         }))
     }
 
@@ -185,14 +223,25 @@ impl SessionInner {
     /// it, in-flight work is aborted, and the partial file is evicted
     /// (v1 pins nothing offline).
     pub(crate) fn terminate(&self, e: StreamError) {
+        self.terminate_if(e, |_| true);
+    }
+
+    /// [`Self::terminate`] only when `cond` holds under `shared` — the
+    /// supersede scan's "still unattached" check and the terminal
+    /// transition stay atomic, so an attach landing between them wins.
+    pub(crate) fn terminate_if(&self, e: StreamError, cond: impl FnOnce(&Shared) -> bool) {
         {
             let Ok(mut sh) = lock(&self.shared) else {
                 return;
             };
-            if sh.terminal.is_some() {
+            if sh.terminal.is_some() || !cond(&sh) {
                 return;
             }
             sh.terminal = Some(e);
+            // Drain this session's demand contribution — a dead session
+            // must not hold back other sessions' speculative fill.
+            sh.fetch_through.clear();
+            self.publish_demand(&mut sh);
         }
         self.cancel.cancel();
         self.readers.notify_all();
@@ -292,54 +341,81 @@ impl SessionInner {
         if let Some(len) = source.content_length {
             lock(&self.store)?.set_hint(len);
         }
-        let url = source.url;
-        core.source.url = url;
+        core.source.url = source.url;
         core.source.expires_at_ms = source.expires_at_ms;
         core.source.content_length = source.content_length;
+        core.source.itag = source.itag;
+        core.source.bitrate_kbps = source.bitrate_kbps;
         sh.marks.mint_ms = Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         Ok(())
     }
 
-    /// Commit fetched bytes: extent merge, marks, sidecar flush at
-    /// milestones, then wake parked readers. Store work happens before
-    /// the `shared` guard is taken (see module lock order).
-    pub(crate) fn commit(
+    /// Commit fetched bytes: extent merge, marks, then wake parked
+    /// readers *before* the sidecar flush — parked readers are never
+    /// stalled on the durability chain. The fsync+rename chain itself
+    /// runs on `spawn_blocking` off a snapshot, so neither a runtime
+    /// worker nor covered `try_serve` reads sit behind an fsync. Store
+    /// work happens before the `shared` guard is taken (see module
+    /// lock order). A commit landing after a terminal transition is a
+    /// no-op past the data write — never a post-evict sidecar
+    /// resurrection.
+    pub(crate) async fn commit(
         &self,
         offset: u64,
         bytes: &[u8],
         through: Option<u64>,
     ) -> Result<(), StreamError> {
-        let head_covered = {
+        let (head_covered, due) = {
             let mut store = lock(&self.store)?;
             store.insert(offset, bytes)?;
-            store.head_covered(self.config.head_bytes)
+            (
+                store.head_covered(self.config.head_bytes),
+                store.persist_due(),
+            )
         };
-        let mut sh = lock(&self.shared)?;
-        if let Some(p) = through {
-            sh.fetch_through.remove(&p);
-        }
-        sh.committed += bytes.len() as u64;
-        if sh.marks.first_byte_ms.is_none() {
-            sh.marks.first_byte_ms = Some(now_ms());
-        }
-        let became_ready = head_covered && sh.marks.head_ready_ms.is_none();
-        if became_ready {
-            sh.marks.head_ready_ms = Some(now_ms());
-        }
-        let due = lock(&self.store)?.persist_due();
-        if became_ready || due {
-            lock(&self.store)?.persist(&self.paths, &self.meta)?;
-        }
-        drop(sh);
+        let became_ready = {
+            let mut sh = lock(&self.shared)?;
+            if sh.terminal.is_some() {
+                return Ok(());
+            }
+            if let Some(p) = through {
+                sh.fetch_through.remove(&p);
+                self.publish_demand(&mut sh);
+            }
+            sh.committed += bytes.len() as u64;
+            if sh.marks.first_byte_ms.is_none() {
+                sh.marks.first_byte_ms = Some(now_ms());
+            }
+            let became_ready = head_covered && sh.marks.head_ready_ms.is_none();
+            if became_ready {
+                sh.marks.head_ready_ms = Some(now_ms());
+            }
+            became_ready
+        };
         self.readers.notify_all();
+        if became_ready || due {
+            let job = lock(&self.store)?.persist_job(&self.meta)?;
+            let paths = self.paths.clone();
+            tokio::task::spawn_blocking(move || job.run(&paths))
+                .await
+                .map_err(|_| StreamError::Internal {
+                    message: "persist worker failed".into(),
+                })??;
+        }
         Ok(())
     }
 
-    /// Note a confirmed end-of-stream ceiling (`416` evidence) and wake
-    /// readers parked at or above it.
+    /// Note a confirmed end-of-stream ceiling (`416` evidence): wake
+    /// readers parked at or above it *and* drop queued demand positions
+    /// at/past the ceiling — refetching them would spin the re-mint
+    /// loop until the budget killed the whole session.
     pub(crate) fn mark_eof_below(&self, at: u64) {
         if let Ok(mut sh) = lock(&self.shared) {
             sh.eof_below = Some(sh.eof_below.map_or(at, |b| b.min(at)));
+            if let Some(b) = sh.eof_below {
+                sh.fetch_through.retain(|&p| p < b);
+                self.publish_demand(&mut sh);
+            }
         }
         self.readers.notify_all();
         self.pump_notify.notify_one();
@@ -355,14 +431,34 @@ impl SessionInner {
         let store = lock(&self.store)?;
         let total = store.effective_total();
         if total.is_some_and(|t| store.first_gap(0, t).is_none()) {
+            // A fully-covered file satisfies the head-fill goal even
+            // when it is shorter than `head_bytes` — the mark means
+            // "everything the prepare policy wanted", not the bound.
+            if !sh.attached && sh.marks.head_ready_ms.is_none() {
+                sh.marks.head_ready_ms = Some(now_ms());
+            }
             return Ok(Action::Stop);
         }
+        // Drop demand positions already covered by an overlapping
+        // commit or past a confirmed EOF ceiling — refetching either
+        // wastes a range request (and re-mints into the budget).
+        let eof = sh.eof_below;
+        sh.fetch_through
+            .retain(|&p| !store.covers(p) && eof.is_none_or(|b| p < b));
+        self.publish_demand(&mut sh);
         if let Some(&pos) = sh.fetch_through.iter().next() {
             return Ok(Action::Fetch {
                 offset: pos,
                 len: self.config.chunk_bytes,
                 through: true,
             });
+        }
+        // Speculative fill yields to demand reads anywhere on the
+        // shared pool: an attached session's fetch-through outranks
+        // this unattached head-fill (Slice-1.5 priority rule). The
+        // parked pump wakes on `pool.drained` when demand empties.
+        if !sh.attached && self.pool.demand.load(Ordering::Relaxed) > 0 {
+            return Ok(Action::Park);
         }
         let (lo, mut bound) = if sh.attached {
             (
@@ -403,21 +499,28 @@ impl SessionInner {
                 return Err(e.clone());
             }
             let core = lock(&self.core)?;
-            if let Some(exp) = core.source.expires_at_ms {
-                let margin =
-                    u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
-                if now_ms().saturating_add(margin) >= exp {
+            // Expiry and the prepare TTL gate the *first* attach — a
+            // stale speculative prepare ends `Expired`. A re-attach on
+            // an already-attached session (DataSource reopen) is not a
+            // fresh intent: the session is live and the pump's re-mint
+            // path owns staleness from here on.
+            if !sh.attached {
+                if let Some(exp) = core.source.expires_at_ms {
+                    let margin =
+                        u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
+                    if now_ms().saturating_add(margin) >= exp {
+                        drop(core);
+                        drop(sh);
+                        self.terminate(StreamError::Expired);
+                        return Err(StreamError::Expired);
+                    }
+                }
+                if self.created.elapsed() >= self.config.prepare_ttl {
                     drop(core);
                     drop(sh);
                     self.terminate(StreamError::Expired);
                     return Err(StreamError::Expired);
                 }
-            }
-            if self.created.elapsed() >= self.config.prepare_ttl {
-                drop(core);
-                drop(sh);
-                self.terminate(StreamError::Expired);
-                return Err(StreamError::Expired);
             }
             sh.attached = true;
             sh.read_pos = position;
@@ -431,10 +534,24 @@ impl SessionInner {
     }
 
     /// `close` detaches the consumer; the session stays live for
-    /// re-attach and becomes supersedable again. Idempotent.
+    /// re-attach and becomes supersedable again. Idempotent — a close
+    /// on an already-detached session is a no-op, and a real detach
+    /// bumps `detach_epoch` so readers parked across it wake
+    /// `Cancelled` instead of waiting out the deadline.
     pub(crate) fn close(&self) {
-        if let Ok(mut sh) = lock(&self.shared) {
-            sh.attached = false;
+        let detached = if let Ok(mut sh) = lock(&self.shared) {
+            if sh.attached {
+                sh.attached = false;
+                sh.detach_epoch += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if detached {
+            self.readers.notify_all();
         }
     }
 
@@ -443,16 +560,22 @@ impl SessionInner {
     /// must never run on a runtime worker. Empty `Vec` means EOF
     /// (`position` at or past the known end, or a confirmed `416`
     /// ceiling). Every terminal transition wakes into its typed error;
-    /// `read_deadline` bounds the whole call into `Transient`.
+    /// `read_deadline` bounds the whole call into `Transient`. A
+    /// `close` landing mid-read wakes `Cancelled` — the DataSource
+    /// that owned the read is gone.
     pub(crate) fn read(&self, position: u64, max_len: u64) -> Result<Vec<u8>, StreamError> {
         if max_len == 0 {
             return Ok(Vec::new());
         }
         let deadline = Instant::now() + self.config.read_deadline;
         let mut sh = lock(&self.shared)?;
+        let epoch = sh.detach_epoch;
         loop {
             if let Some(e) = &sh.terminal {
                 return Err(e.clone());
+            }
+            if sh.detach_epoch != epoch {
+                return Err(StreamError::Cancelled);
             }
             if let Some(served) = self.try_serve(&mut sh, position, max_len)? {
                 return Ok(served);
@@ -460,6 +583,11 @@ impl SessionInner {
             self.queue_through(&mut sh, position);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                // The dead read must not keep its demand position
+                // queued — a stale entry would head-of-line block newer
+                // demand reads and hold back speculative fill.
+                sh.fetch_through.remove(&position);
+                self.publish_demand(&mut sh);
                 return Err(StreamError::Transient {
                     message: format!(
                         "read deadline {}ms exceeded at offset {position}",
@@ -506,9 +634,25 @@ impl SessionInner {
     /// Register a demand read at `position` and wake the pump.
     fn queue_through(&self, sh: &mut Shared, position: u64) {
         if sh.fetch_through.insert(position) {
+            self.publish_demand(sh);
             self.ft_notify.notify_one();
             self.pump_notify.notify_one();
         }
         sh.read_pos = sh.read_pos.max(position);
+    }
+
+    /// Apply this session's `fetch_through` delta to the shared demand
+    /// counter; a transition to zero wakes speculative pumps parked on
+    /// `PoolSignals::drained`. Caller must hold `shared`.
+    fn publish_demand(&self, sh: &mut Shared) {
+        let len = sh.fetch_through.len();
+        let delta = len as isize - sh.demand_published as isize;
+        if delta == 0 {
+            return;
+        }
+        sh.demand_published = len;
+        if self.pool.demand.fetch_add(delta, Ordering::Relaxed) + delta <= 0 {
+            self.pool.drained.notify_waiters();
+        }
     }
 }

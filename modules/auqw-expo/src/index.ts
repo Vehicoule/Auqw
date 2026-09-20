@@ -10,6 +10,10 @@ export type HostConfig = {
   fuelTotal: number;
   /** Base URL of a bgutil-compatible PO-token service; omit for anonymous resolves. */
   potProviderUrl?: string | undefined;
+  /** Plugin KV file; defaults to the app-private files dir. */
+  statePath?: string | undefined;
+  /** Stream-seam sparse cache dir; defaults to the app-private cache dir. */
+  streamPath?: string | undefined;
 };
 
 export type HttpTraceSummary = {
@@ -44,6 +48,7 @@ export type ResolvedResource = {
   expiresAtMs?: number;
   client: string;
   contentLength?: number;
+  itag?: number;
 };
 
 export type ResolveOutcome =
@@ -90,12 +95,14 @@ export type ErrorKind =
   | 'no-result'
   | 'not-applicable'
   | 'not-found'
+  | 'unavailable'
   | 'internal';
 
 /** A stream whose head bytes are staged for attach. Opaque: prepared → attached → released. */
 export type PreparedStream = {
   handle: string;
   mime: string;
+  itag?: number;
   contentLength?: number;
   expiresAtMs?: number;
   bitrateKbps?: number;
@@ -108,6 +115,7 @@ export type PrepareOutcome =
 export type PrepareOutcomeEvent = {
   requestId: string;
   attemptId: string;
+  queueRev: number;
   outcome: PrepareOutcome;
 };
 
@@ -123,6 +131,7 @@ export type PlaybackState =
 export type PlaybackStatusEvent = {
   handle: string;
   attemptId: string;
+  queueRev: number;
   state: PlaybackState;
   positionMs: number;
   durationMs?: number;
@@ -137,7 +146,26 @@ export type PhaseMark = {
   sinceStartMs: number;
 };
 
-export type PhaseMarkEvent = PhaseMark & { handle: string };
+export type PhaseMarkEvent = PhaseMark & {
+  handle: string;
+  attemptId: string;
+  queueRev: number;
+};
+
+/**
+ * The seam's flat lifecycle record for one handle — epochs in ms
+ * (`prepareStartedMs`, `firstByteMs`, `headReadyMs`, `attachMs`) plus
+ * durations (`resolveMs` of the minting resolve, `remintMs` of the
+ * last re-mint). Diagnostics; available after terminal states.
+ */
+export type StreamPhaseMarks = {
+  prepareStartedMs: number;
+  resolveMs?: number;
+  remintMs?: number;
+  firstByteMs?: number;
+  headReadyMs?: number;
+  attachMs?: number;
+};
 
 type AuqwExpoEvents = {
   onResolveOutcome: (event: OutcomeEvent) => void;
@@ -161,7 +189,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   stop(): Promise<void>;
   cancelPrepare(requestId: string): Promise<void>;
   releaseStream(handle: string): Promise<void>;
-  phaseMarks(handle: string): Promise<PhaseMark[]>;
+  phaseMarks(handle: string): Promise<StreamPhaseMarks>;
   devAttachFile(path: string): Promise<string>;
 }
 
@@ -242,8 +270,8 @@ export function releaseStream(handle: string): Promise<void> {
   return native.releaseStream(handle);
 }
 
-/** Rust-side seam marks for a handle (durations + epoch joins). */
-export function phaseMarks(handle: string): Promise<PhaseMark[]> {
+/** Rust-side seam marks for a handle (flat record: epochs + durations). */
+export function phaseMarks(handle: string): Promise<StreamPhaseMarks> {
   return native.phaseMarks(handle);
 }
 

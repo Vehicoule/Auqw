@@ -74,9 +74,19 @@ pub struct StreamConfig {
     /// Total bound on one blocking `read` call — the named deadline of
     /// the seam (resolve + mint + head-fetch budget).
     pub read_deadline: Duration,
+    /// Bound on one re-mint (`playback.resolve`) — a hung resolve ends
+    /// the attempt `Transient` instead of zombieing the session.
+    pub mint_deadline: Duration,
+    /// Bound on one whole range request (headers + body). `stall`
+    /// bounds progress gaps inside the request; this caps the total so
+    /// a dribbling body cannot outlive it.
+    pub request_deadline: Duration,
     /// How long a prepared session may sit before `attach` fails it
-    /// `Expired`.
+    /// `Expired` and the reaper evicts it.
     pub prepare_ttl: Duration,
+    /// How often the reaper scans for abandoned (unattached past TTL)
+    /// sessions.
+    pub reap_interval: Duration,
     /// `attach` refuses URLs expiring within this margin (~60 s).
     pub expiry_margin: Duration,
 }
@@ -94,7 +104,10 @@ impl StreamConfig {
             mint_budget: 4,
             max_zero_progress_mints: 2,
             read_deadline: Duration::from_secs(15),
+            mint_deadline: Duration::from_secs(20),
+            request_deadline: Duration::from_secs(60),
             prepare_ttl: Duration::from_secs(120),
+            reap_interval: Duration::from_secs(15),
             expiry_margin: Duration::from_secs(60),
         }
     }
@@ -104,7 +117,7 @@ impl StreamConfig {
 ///
 /// `url` is signed: it must never be logged, returned in errors, or
 /// written to disk — the sidecar persists only the non-secret fields.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreparedSource {
     /// Signed stream URL (secret — see invariant).
     pub url: String,
@@ -122,6 +135,23 @@ pub struct PreparedSource {
     /// Provider source reference (not a secret) — carried for sidecar
     /// metadata and diagnostics.
     pub source_ref: String,
+}
+
+// `Debug` prints every field but `url` — one `{:?}` anywhere must not
+// leak the signed URL into logs, the same reason `Fetch` errors are
+// `without_url()`.
+impl std::fmt::Debug for PreparedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedSource")
+            .field("url", &"<redacted>")
+            .field("mime", &self.mime)
+            .field("itag", &self.itag)
+            .field("bitrate_kbps", &self.bitrate_kbps)
+            .field("content_length", &self.content_length)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("source_ref", &self.source_ref)
+            .finish()
+    }
 }
 
 /// Re-resolves a session's `source_ref` after cap death (`403`/`416`).

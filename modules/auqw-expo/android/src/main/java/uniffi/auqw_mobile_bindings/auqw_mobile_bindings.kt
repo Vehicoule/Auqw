@@ -656,6 +656,9 @@ internal interface UniffiCallbackInterfaceRequestListenerMethod0 : com.sun.jna.C
 internal interface UniffiCallbackInterfaceResolveListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfacePrepareListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onOutcome")
 internal open class UniffiVTableCallbackInterfaceRequestListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -688,6 +691,25 @@ internal open class UniffiVTableCallbackInterfaceResolveListener(
     ): UniffiVTableCallbackInterfaceResolveListener(`uniffiFree`,`uniffiClone`,`onOutcome`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceResolveListener) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onOutcome` = other.`onOutcome`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onOutcome")
+internal open class UniffiVTableCallbackInterfacePrepareListener(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onOutcome`: UniffiCallbackInterfacePrepareListenerMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onOutcome`: UniffiCallbackInterfacePrepareListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfacePrepareListener(`uniffiFree`,`uniffiClone`,`onOutcome`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePrepareListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onOutcome` = other.`onOutcome`
@@ -727,11 +749,25 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_close(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_open(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_read(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_release(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_requestlistener_on_outcome(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_preparelistener_on_outcome(
     ): Int
     external fun ffi_auqw_mobile_bindings_uniffi_contract_version(
     ): Int
@@ -749,6 +785,7 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "auqw_mobile_bindings"))
+        uniffiCallbackInterfacePrepareListener.register(this)
         uniffiCallbackInterfaceRequestListener.register(this)
         uniffiCallbackInterfaceResolveListener.register(this)
         
@@ -769,9 +806,23 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_requestlistener(`vtable`: UniffiVTableCallbackInterfaceRequestListener,
     ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_resolvelistener(`vtable`: UniffiVTableCallbackInterfaceResolveListener,
+    ): Unit
+    external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_preparelistener(`vtable`: UniffiVTableCallbackInterfacePrepareListener,
     ): Unit
     external fun ffi_auqw_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -892,7 +943,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() and 0xFFFF) != 44608) {
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() and 0xFFFF) != 26661) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin() and 0xFFFF) != 41359) {
@@ -907,6 +958,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() and 0xFFFF) != 51654) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() and 0xFFFF) != 57130) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_close() and 0xFFFF) != 22132) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_open() and 0xFFFF) != 39188) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks() and 0xFFFF) != 17009) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_read() and 0xFFFF) != 33146) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_release() and 0xFFFF) != 34455) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new() and 0xFFFF) != 45559) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -914,6 +983,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome() and 0xFFFF) != 25209) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_preparelistener_on_outcome() and 0xFFFF) != 64282) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1356,7 +1428,10 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 public interface PluginHostInterface {
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op.
+     * Cancel an in-flight request; unknown ids are a no-op. A
+     * `cancelPrepare` landing after `prepared` also abandons the
+     * produced session — but only while it is still unattached: a
+     * playing consumer is never cancelled out from under playback.
      */
     fun `cancel`(`requestId`: kotlin.String)
     
@@ -1395,6 +1470,68 @@ public interface PluginHostInterface {
      * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded.
      */
     fun `startResolve`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: ResolveListener): kotlin.String
+    
+    /**
+     * Resolve `source_ref` and register the result as a prepared
+     * stream session (bounded speculative head fill). The outcome —
+     * including the opaque stream handle — arrives on `listener`.
+     *
+     * # Errors
+     * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded;
+     * [`HostError::Runtime`] when the seam is not configured.
+     */
+    fun `startPrepare`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: PrepareListener): kotlin.String
+    
+    /**
+     * DataSource close: detaches the consumer; the session stays live
+     * for re-attach.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    fun `streamClose`(`handle`: kotlin.String)
+    
+    /**
+     * Attach a consumer at `position` (DataSource open). Returns
+     * `content_length - position` when the stream total is known.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    fun `streamOpen`(`handle`: kotlin.String, `position`: kotlin.ULong): kotlin.ULong?
+    
+    /**
+     * The session's lifecycle marks — available even after terminal
+     * states.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    fun `streamPhaseMarks`(`handle`: kotlin.String): StreamPhaseMarks
+    
+    /**
+     * Blocking read — **foreign (JNI/DataSource) threads only**;
+     * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
+     * the seam's read deadline; terminal transitions wake into their
+     * typed error.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    fun `streamRead`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong): kotlin.ByteArray
+    
+    /**
+     * Terminal release: parked readers unwind `released`, in-flight
+     * work aborts, the partial file is evicted. Idempotent.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured.
+     */
+    fun `streamRelease`(`handle`: kotlin.String)
     
     companion object
 }
@@ -1521,7 +1658,10 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
 
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op.
+     * Cancel an in-flight request; unknown ids are a no-op. A
+     * `cancelPrepare` landing after `prepared` also abandons the
+     * produced session — but only while it is still unattached: a
+     * playing consumer is never cancelled out from under playback.
      */override fun `cancel`(`requestId`: kotlin.String)
         = 
     callWithHandle {
@@ -1628,6 +1768,149 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Resolve `source_ref` and register the result as a prepared
+     * stream session (bounded speculative head fill). The outcome —
+     * including the opaque stream handle — arrives on `listener`.
+     *
+     * # Errors
+     * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded;
+     * [`HostError::Runtime`] when the seam is not configured.
+     */
+    @Throws(HostException::class)override fun `startPrepare`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: PrepareListener): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(HostException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(
+        it,
+        
+        FfiConverterString.lower(`pluginId`),
+        FfiConverterString.lower(`sourceRef`),
+        FfiConverterTypePrepareListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * DataSource close: detaches the consumer; the session stays live
+     * for re-attach.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    @Throws(StreamException::class)override fun `streamClose`(`handle`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(
+        it,
+        
+        FfiConverterString.lower(`handle`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Attach a consumer at `position` (DataSource open). Returns
+     * `content_length - position` when the stream total is known.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    @Throws(StreamException::class)override fun `streamOpen`(`handle`: kotlin.String, `position`: kotlin.ULong): kotlin.ULong? {
+            return FfiConverterOptionalULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(
+        it,
+        
+        FfiConverterString.lower(`handle`),
+        FfiConverterULong.lower(`position`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The session's lifecycle marks — available even after terminal
+     * states.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    @Throws(StreamException::class)override fun `streamPhaseMarks`(`handle`: kotlin.String): StreamPhaseMarks {
+            return FfiConverterTypeStreamPhaseMarks.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(
+        it,
+        
+        FfiConverterString.lower(`handle`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Blocking read — **foreign (JNI/DataSource) threads only**;
+     * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
+     * the seam's read deadline; terminal transitions wake into their
+     * typed error.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    @Throws(StreamException::class)override fun `streamRead`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(
+        it,
+        
+        FfiConverterString.lower(`handle`),
+        FfiConverterULong.lower(`position`),
+        FfiConverterULong.lower(`maxLen`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Terminal release: parked readers unwind `released`, in-flight
+     * work aborts, the partial file is evicted. Idempotent.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured.
+     */
+    @Throws(StreamException::class)override fun `streamRelease`(`handle`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(
+        it,
+        
+        FfiConverterString.lower(`handle`),_status)
+}
+    }
+    
     
 
     
@@ -1838,6 +2121,14 @@ data class HostConfig (
      * `None` keeps plugin state volatile.
      */
     var `statePath`: kotlin.String?
+    , 
+    /**
+     * Directory for the sparse stream cache; `None` disables the
+     * streaming seam — every `stream_*` call then fails
+     * [`StreamError::Unavailable`] and `start_prepare` fails
+     * synchronously.
+     */
+    var `streamPath`: kotlin.String?
     
 ){
     
@@ -1858,6 +2149,7 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -1865,7 +2157,8 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterULong.allocationSize(value.`fuelPerEntry`) +
             FfiConverterULong.allocationSize(value.`fuelTotal`) +
             FfiConverterOptionalString.allocationSize(value.`potProviderUrl`) +
-            FfiConverterOptionalString.allocationSize(value.`statePath`)
+            FfiConverterOptionalString.allocationSize(value.`statePath`) +
+            FfiConverterOptionalString.allocationSize(value.`streamPath`)
     )
 
     override fun write(value: HostConfig, buf: ByteBuffer) {
@@ -1873,6 +2166,7 @@ public object FfiConverterTypeHostConfig: FfiConverterRustBuffer<HostConfig> {
             FfiConverterULong.write(value.`fuelTotal`, buf)
             FfiConverterOptionalString.write(value.`potProviderUrl`, buf)
             FfiConverterOptionalString.write(value.`statePath`, buf)
+            FfiConverterOptionalString.write(value.`streamPath`, buf)
     }
 }
 
@@ -1952,6 +2246,86 @@ public object FfiConverterTypeHttpTraceSummary: FfiConverterRustBuffer<HttpTrace
 
 
 /**
+ * A prepared stream session as reported to the player: the opaque
+ * handle plus metadata. The signed URL never crosses this boundary.
+ */
+data class PreparedStream (
+    /**
+     * Opaque session handle for `stream_open`/`stream_read`/...
+     */
+    var `handle`: kotlin.String
+    , 
+    /**
+     * MIME type; pinned across re-mints.
+     */
+    var `mime`: kotlin.String
+    , 
+    /**
+     * Format itag when reported.
+     */
+    var `itag`: kotlin.UInt?
+    , 
+    /**
+     * Bitrate hint in kbps.
+     */
+    var `bitrateKbps`: kotlin.UInt?
+    , 
+    /**
+     * Reported length in bytes, when known.
+     */
+    var `contentLength`: kotlin.ULong?
+    , 
+    /**
+     * URL expiry, epoch ms.
+     */
+    var `expiresAtMs`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePreparedStream: FfiConverterRustBuffer<PreparedStream> {
+    override fun read(buf: ByteBuffer): PreparedStream {
+        return PreparedStream(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PreparedStream) = (
+            FfiConverterString.allocationSize(value.`handle`) +
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterOptionalUInt.allocationSize(value.`itag`) +
+            FfiConverterOptionalUInt.allocationSize(value.`bitrateKbps`) +
+            FfiConverterOptionalULong.allocationSize(value.`contentLength`) +
+            FfiConverterOptionalULong.allocationSize(value.`expiresAtMs`)
+    )
+
+    override fun write(value: PreparedStream, buf: ByteBuffer) {
+            FfiConverterString.write(value.`handle`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterOptionalUInt.write(value.`itag`, buf)
+            FfiConverterOptionalUInt.write(value.`bitrateKbps`, buf)
+            FfiConverterOptionalULong.write(value.`contentLength`, buf)
+            FfiConverterOptionalULong.write(value.`expiresAtMs`, buf)
+    }
+}
+
+
+
+/**
  * A resolved stream. `url` is signed — never log it.
  */
 data class ResolvedResource (
@@ -1984,6 +2358,11 @@ data class ResolvedResource (
      * Reported `contentLength` of the picked format in bytes.
      */
     var `contentLength`: kotlin.ULong?
+    , 
+    /**
+     * Provider format itag when the guest reported one.
+     */
+    var `itag`: kotlin.UInt?
     
 ){
     
@@ -2006,6 +2385,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
         )
     }
 
@@ -2015,7 +2395,8 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalUInt.allocationSize(value.`bitrateKbps`) +
             FfiConverterOptionalULong.allocationSize(value.`expiresAtMs`) +
             FfiConverterString.allocationSize(value.`client`) +
-            FfiConverterOptionalULong.allocationSize(value.`contentLength`)
+            FfiConverterOptionalULong.allocationSize(value.`contentLength`) +
+            FfiConverterOptionalUInt.allocationSize(value.`itag`)
     )
 
     override fun write(value: ResolvedResource, buf: ByteBuffer) {
@@ -2025,6 +2406,7 @@ public object FfiConverterTypeResolvedResource: FfiConverterRustBuffer<ResolvedR
             FfiConverterOptionalULong.write(value.`expiresAtMs`, buf)
             FfiConverterString.write(value.`client`, buf)
             FfiConverterOptionalULong.write(value.`contentLength`, buf)
+            FfiConverterOptionalUInt.write(value.`itag`, buf)
     }
 }
 
@@ -2080,6 +2462,86 @@ public object FfiConverterTypeSpinReport: FfiConverterRustBuffer<SpinReport> {
             FfiConverterULong.write(value.`elapsedMs`, buf)
             FfiConverterULong.write(value.`fuelUsed`, buf)
             FfiConverterString.write(value.`kind`, buf)
+    }
+}
+
+
+
+/**
+ * Lifecycle marks for one stream session: epoch-ms timestamps plus
+ * durations, for joining intent → prepared → attached → rendered.
+ */
+data class StreamPhaseMarks (
+    /**
+     * Epoch ms when `prepare` registered the session.
+     */
+    var `prepareStartedMs`: kotlin.ULong
+    , 
+    /**
+     * Duration of the minting `playback.resolve`, when known.
+     */
+    var `resolveMs`: kotlin.ULong?
+    , 
+    /**
+     * Duration of the most recent re-mint, when one ran.
+     */
+    var `mintMs`: kotlin.ULong?
+    , 
+    /**
+     * Epoch ms when the first byte landed.
+     */
+    var `firstByteMs`: kotlin.ULong?
+    , 
+    /**
+     * Epoch ms when the head-fill bound was covered.
+     */
+    var `headReadyMs`: kotlin.ULong?
+    , 
+    /**
+     * Epoch ms of the first attach.
+     */
+    var `attachMs`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeStreamPhaseMarks: FfiConverterRustBuffer<StreamPhaseMarks> {
+    override fun read(buf: ByteBuffer): StreamPhaseMarks {
+        return StreamPhaseMarks(
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: StreamPhaseMarks) = (
+            FfiConverterULong.allocationSize(value.`prepareStartedMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`resolveMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`mintMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`firstByteMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`headReadyMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`attachMs`)
+    )
+
+    override fun write(value: StreamPhaseMarks, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`prepareStartedMs`, buf)
+            FfiConverterOptionalULong.write(value.`resolveMs`, buf)
+            FfiConverterOptionalULong.write(value.`mintMs`, buf)
+            FfiConverterOptionalULong.write(value.`firstByteMs`, buf)
+            FfiConverterOptionalULong.write(value.`headReadyMs`, buf)
+            FfiConverterOptionalULong.write(value.`attachMs`, buf)
     }
 }
 
@@ -2210,6 +2672,125 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
     }
 
 }
+
+
+
+/**
+ * Terminal outcome of one `start_prepare` invocation.
+ */
+sealed class PrepareOutcome {
+    
+    /**
+     * The resolve produced a source and the seam registered it.
+     */
+    data class Prepared(
+        /**
+         * The prepared session handle + metadata.
+         */
+        val `stream`: uniffi.auqw_mobile_bindings.PreparedStream, 
+        /**
+         * Invocation accounting for the resolve.
+         */
+        val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : PrepareOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * The resolve or the seam registration failed.
+     */
+    data class Failed(
+        /**
+         * Taxonomy kind (`no-result`, `cancelled`, ...).
+         */
+        val `kind`: kotlin.String, 
+        /**
+         * Human-readable detail (never contains the URL).
+         */
+        val `message`: kotlin.String, 
+        /**
+         * Invocation accounting for the resolve.
+         */
+        val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : PrepareOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePrepareOutcome : FfiConverterRustBuffer<PrepareOutcome>{
+    override fun read(buf: ByteBuffer): PrepareOutcome {
+        return when(buf.getInt()) {
+            1 -> PrepareOutcome.Prepared(
+                FfiConverterTypePreparedStream.read(buf),
+                FfiConverterTypeAttemptSummary.read(buf),
+                )
+            2 -> PrepareOutcome.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterTypeAttemptSummary.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: PrepareOutcome): ULong = when(value) {
+        is PrepareOutcome.Prepared -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypePreparedStream.allocationSize(value.`stream`)
+                + FfiConverterTypeAttemptSummary.allocationSize(value.`attempt`)
+            )
+        }
+        is PrepareOutcome.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`kind`)
+                + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterTypeAttemptSummary.allocationSize(value.`attempt`)
+            )
+        }
+    }
+
+    override fun write(value: PrepareOutcome, buf: ByteBuffer) {
+        when(value) {
+            is PrepareOutcome.Prepared -> {
+                buf.putInt(1)
+                FfiConverterTypePreparedStream.write(value.`stream`, buf)
+                FfiConverterTypeAttemptSummary.write(value.`attempt`, buf)
+                Unit
+            }
+            is PrepareOutcome.Failed -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`kind`, buf)
+                FfiConverterString.write(value.`message`, buf)
+                FfiConverterTypeAttemptSummary.write(value.`attempt`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
 
 
 
@@ -2449,6 +3030,172 @@ public object FfiConverterTypeResolveOutcome : FfiConverterRustBuffer<ResolveOut
 }
 
 
+
+
+
+
+
+/**
+ * Errors raised synchronously by the `stream_*` calls.
+ *
+ * Field names avoid `message` for the same reason as [`HostError`].
+ */
+sealed class StreamException: kotlin.Exception() {
+    
+    /**
+     * `HostConfig.stream_path` was unset — the seam is not running.
+     */
+    class Unavailable(
+        ) : StreamException() {
+        override val message
+            get() = ""
+    }
+    
+    /**
+     * The session operation failed; `kind` is the ABI taxonomy.
+     */
+    class Failed(
+        
+        /**
+         * Kebab-case error kind.
+         */
+        val `kind`: kotlin.String, 
+        
+        /**
+         * Failure detail (never contains the signed URL).
+         */
+        val `detail`: kotlin.String
+        ) : StreamException() {
+        override val message
+            get() = "kind=${ `kind` }, detail=${ `detail` }"
+    }
+    
+
+    
+
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<StreamException> {
+        override fun lift(error_buf: RustBuffer.ByValue): StreamException = FfiConverterTypeStreamError.lift(error_buf)
+    }
+
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeStreamError : FfiConverterRustBuffer<StreamException> {
+    override fun read(buf: ByteBuffer): StreamException {
+        
+
+        return when(buf.getInt()) {
+            1 -> StreamException.Unavailable()
+            2 -> StreamException.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: StreamException): ULong {
+        return when(value) {
+            is StreamException.Unavailable -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is StreamException.Failed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`kind`)
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
+    }
+
+    override fun write(value: StreamException, buf: ByteBuffer) {
+        when(value) {
+            is StreamException.Unavailable -> {
+                buf.putInt(1)
+                Unit
+            }
+            is StreamException.Failed -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`kind`, buf)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
+}
+
+
+
+
+
+/**
+ * Receives the terminal outcome of [`PluginHost::start_prepare`].
+ */
+public interface PrepareListener {
+    
+    /**
+     * Called exactly once per request, on a runtime worker thread.
+     */
+    fun `onOutcome`(`requestId`: kotlin.String, `outcome`: PrepareOutcome)
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfacePrepareListener {
+    internal object `onOutcome`: UniffiCallbackInterfacePrepareListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypePrepareListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onOutcome`(
+                    FfiConverterString.lift(`requestId`),
+                    FfiConverterTypePrepareOutcome.lift(`outcome`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypePrepareListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypePrepareListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfacePrepareListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onOutcome`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_auqw_mobile_bindings_fn_init_callback_vtable_preparelistener(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypePrepareListener: FfiConverterCallbackInterface<PrepareListener>()
 
 
 

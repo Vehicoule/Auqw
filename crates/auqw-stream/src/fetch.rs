@@ -27,9 +27,10 @@ pub struct FetchResponse {
 /// Performs `GET` range requests on behalf of one session's pump.
 ///
 /// Contract: implementations must honor `stall` as a no-progress bound
-/// (headers wait, or any gap between body chunks) and `cancel` as a
-/// cooperative abort. Error messages must never contain `url` — it is
-/// signed. Dropping the returned future must abort the request.
+/// (headers wait, or any gap between body chunks), `deadline` as a
+/// bound on the whole request, and `cancel` as a cooperative abort.
+/// Error messages must never contain `url` — it is signed. Dropping
+/// the returned future must abort the request.
 pub trait Fetch: Send + Sync {
     /// `GET url` with `Range: bytes=offset..offset+max_len-1`.
     ///
@@ -41,6 +42,7 @@ pub trait Fetch: Send + Sync {
         offset: u64,
         max_len: u64,
         stall: Duration,
+        deadline: Duration,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>>;
 }
@@ -119,6 +121,7 @@ impl Fetch for ReqwestFetch {
         offset: u64,
         max_len: u64,
         stall: Duration,
+        deadline: Duration,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         Box::pin(async move {
@@ -151,7 +154,14 @@ impl Fetch for ReqwestFetch {
             };
             tokio::select! {
                 () = cancel.cancelled() => Err(StreamError::Cancelled),
-                r = work => r,
+                // The per-gap `stall` bound alone lets a dribbling body
+                // outlive any budget — the whole request is capped.
+                r = tokio::time::timeout(deadline, work) => match r {
+                    Ok(r) => r,
+                    Err(_) => Err(StreamError::Transient {
+                        message: format!("request exceeded deadline {deadline:?}"),
+                    }),
+                },
             }
         })
     }

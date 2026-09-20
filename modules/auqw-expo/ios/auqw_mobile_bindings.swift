@@ -590,7 +590,10 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol PluginHostProtocol: AnyObject, Sendable {
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op.
+     * Cancel an in-flight request; unknown ids are a no-op. A
+     * `cancelPrepare` landing after `prepared` also abandons the
+     * produced session — but only while it is still unattached: a
+     * playing consumer is never cancelled out from under playback.
      */
     func cancel(requestId: String) 
     
@@ -629,6 +632,68 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded.
      */
     func startResolve(pluginId: String, sourceRef: String, listener: ResolveListener) throws  -> String
+    
+    /**
+     * Resolve `source_ref` and register the result as a prepared
+     * stream session (bounded speculative head fill). The outcome —
+     * including the opaque stream handle — arrives on `listener`.
+     *
+     * # Errors
+     * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded;
+     * [`HostError::Runtime`] when the seam is not configured.
+     */
+    func startPrepare(pluginId: String, sourceRef: String, listener: PrepareListener) throws  -> String
+    
+    /**
+     * DataSource close: detaches the consumer; the session stays live
+     * for re-attach.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    func streamClose(handle: String) throws 
+    
+    /**
+     * Attach a consumer at `position` (DataSource open). Returns
+     * `content_length - position` when the stream total is known.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    func streamOpen(handle: String, position: UInt64) throws  -> UInt64?
+    
+    /**
+     * The session's lifecycle marks — available even after terminal
+     * states.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+    func streamPhaseMarks(handle: String) throws  -> StreamPhaseMarks
+    
+    /**
+     * Blocking read — **foreign (JNI/DataSource) threads only**;
+     * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
+     * the seam's read deadline; terminal transitions wake into their
+     * typed error.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    func streamRead(handle: String, position: UInt64, maxLen: UInt64) throws  -> Data
+    
+    /**
+     * Terminal release: parked readers unwind `released`, in-flight
+     * work aborts, the partial file is evicted. Idempotent.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured.
+     */
+    func streamRelease(handle: String) throws 
     
 }
 /**
@@ -704,7 +769,10 @@ public convenience init(config: HostConfig)throws  {
 
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op.
+     * Cancel an in-flight request; unknown ids are a no-op. A
+     * `cancelPrepare` landing after `prepared` also abandons the
+     * produced session — but only while it is still unattached: a
+     * playing consumer is never cancelled out from under playback.
      */
 open func cancel(requestId: String)  {try! rustCall() {
         uniffiCallStatus in
@@ -788,6 +856,119 @@ open func startResolve(pluginId: String, sourceRef: String, listener: ResolveLis
         FfiConverterCallbackInterfaceResolveListener_lower(listener),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Resolve `source_ref` and register the result as a prepared
+     * stream session (bounded speculative head fill). The outcome —
+     * including the opaque stream handle — arrives on `listener`.
+     *
+     * # Errors
+     * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded;
+     * [`HostError::Runtime`] when the seam is not configured.
+     */
+open func startPrepare(pluginId: String, sourceRef: String, listener: PrepareListener)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHostError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(pluginId),
+        FfiConverterString.lower(sourceRef),
+        FfiConverterCallbackInterfacePrepareListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * DataSource close: detaches the consumer; the session stays live
+     * for re-attach.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+open func streamClose(handle: String)throws   {try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Attach a consumer at `position` (DataSource open). Returns
+     * `content_length - position` when the stream total is known.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+open func streamOpen(handle: String, position: UInt64)throws  -> UInt64?  {
+    return try  FfiConverterOptionUInt64.lift(try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),
+        FfiConverterUInt64.lower(position),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The session's lifecycle marks — available even after terminal
+     * states.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] for an unknown handle.
+     */
+open func streamPhaseMarks(handle: String)throws  -> StreamPhaseMarks  {
+    return try  FfiConverterTypeStreamPhaseMarks_lift(try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Blocking read — **foreign (JNI/DataSource) threads only**;
+     * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
+     * the seam's read deadline; terminal transitions wake into their
+     * typed error.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+open func streamRead(handle: String, position: UInt64, maxLen: UInt64)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),
+        FfiConverterUInt64.lower(position),
+        FfiConverterUInt64.lower(maxLen),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Terminal release: parked readers unwind `released`, in-flight
+     * work aborts, the partial file is evicted. Idempotent.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured.
+     */
+open func streamRelease(handle: String)throws   {try rustCallWithError(FfiConverterTypeStreamError_lift) {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),uniffiCallStatus
+    )
+}
 }
     
 
@@ -1059,6 +1240,13 @@ public struct HostConfig: Equatable, Hashable {
      * `None` keeps plugin state volatile.
      */
     public var statePath: String?
+    /**
+     * Directory for the sparse stream cache; `None` disables the
+     * streaming seam — every `stream_*` call then fails
+     * [`StreamError::Unavailable`] and `start_prepare` fails
+     * synchronously.
+     */
+    public var streamPath: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1076,11 +1264,18 @@ public struct HostConfig: Equatable, Hashable {
         /**
          * Path of the on-disk KV store the native shell supplies;
          * `None` keeps plugin state volatile.
-         */statePath: String?) {
+         */statePath: String?, 
+        /**
+         * Directory for the sparse stream cache; `None` disables the
+         * streaming seam — every `stream_*` call then fails
+         * [`StreamError::Unavailable`] and `start_prepare` fails
+         * synchronously.
+         */streamPath: String?) {
         self.fuelPerEntry = fuelPerEntry
         self.fuelTotal = fuelTotal
         self.potProviderUrl = potProviderUrl
         self.statePath = statePath
+        self.streamPath = streamPath
     }
 
     
@@ -1102,7 +1297,8 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
                 fuelPerEntry: FfiConverterUInt64.read(from: &buf), 
                 fuelTotal: FfiConverterUInt64.read(from: &buf), 
                 potProviderUrl: FfiConverterOptionString.read(from: &buf), 
-                statePath: FfiConverterOptionString.read(from: &buf)
+                statePath: FfiConverterOptionString.read(from: &buf), 
+                streamPath: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1111,6 +1307,7 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.fuelTotal, into: &buf)
         FfiConverterOptionString.write(value.potProviderUrl, into: &buf)
         FfiConverterOptionString.write(value.statePath, into: &buf)
+        FfiConverterOptionString.write(value.streamPath, into: &buf)
     }
 }
 
@@ -1232,6 +1429,116 @@ public func FfiConverterTypeHttpTraceSummary_lower(_ value: HttpTraceSummary) ->
 
 
 /**
+ * A prepared stream session as reported to the player: the opaque
+ * handle plus metadata. The signed URL never crosses this boundary.
+ */
+public struct PreparedStream: Equatable, Hashable {
+    /**
+     * Opaque session handle for `stream_open`/`stream_read`/...
+     */
+    public var handle: String
+    /**
+     * MIME type; pinned across re-mints.
+     */
+    public var mime: String
+    /**
+     * Format itag when reported.
+     */
+    public var itag: UInt32?
+    /**
+     * Bitrate hint in kbps.
+     */
+    public var bitrateKbps: UInt32?
+    /**
+     * Reported length in bytes, when known.
+     */
+    public var contentLength: UInt64?
+    /**
+     * URL expiry, epoch ms.
+     */
+    public var expiresAtMs: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Opaque session handle for `stream_open`/`stream_read`/...
+         */handle: String, 
+        /**
+         * MIME type; pinned across re-mints.
+         */mime: String, 
+        /**
+         * Format itag when reported.
+         */itag: UInt32?, 
+        /**
+         * Bitrate hint in kbps.
+         */bitrateKbps: UInt32?, 
+        /**
+         * Reported length in bytes, when known.
+         */contentLength: UInt64?, 
+        /**
+         * URL expiry, epoch ms.
+         */expiresAtMs: UInt64?) {
+        self.handle = handle
+        self.mime = mime
+        self.itag = itag
+        self.bitrateKbps = bitrateKbps
+        self.contentLength = contentLength
+        self.expiresAtMs = expiresAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PreparedStream: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePreparedStream: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreparedStream {
+        return
+            try PreparedStream(
+                handle: FfiConverterString.read(from: &buf), 
+                mime: FfiConverterString.read(from: &buf), 
+                itag: FfiConverterOptionUInt32.read(from: &buf), 
+                bitrateKbps: FfiConverterOptionUInt32.read(from: &buf), 
+                contentLength: FfiConverterOptionUInt64.read(from: &buf), 
+                expiresAtMs: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PreparedStream, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.handle, into: &buf)
+        FfiConverterString.write(value.mime, into: &buf)
+        FfiConverterOptionUInt32.write(value.itag, into: &buf)
+        FfiConverterOptionUInt32.write(value.bitrateKbps, into: &buf)
+        FfiConverterOptionUInt64.write(value.contentLength, into: &buf)
+        FfiConverterOptionUInt64.write(value.expiresAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreparedStream_lift(_ buf: RustBuffer) throws -> PreparedStream {
+    return try FfiConverterTypePreparedStream.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreparedStream_lower(_ value: PreparedStream) -> RustBuffer {
+    return FfiConverterTypePreparedStream.lower(value)
+}
+
+
+/**
  * A resolved stream. `url` is signed — never log it.
  */
 public struct ResolvedResource: Equatable, Hashable {
@@ -1259,6 +1566,10 @@ public struct ResolvedResource: Equatable, Hashable {
      * Reported `contentLength` of the picked format in bytes.
      */
     public var contentLength: UInt64?
+    /**
+     * Provider format itag when the guest reported one.
+     */
+    public var itag: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1280,13 +1591,17 @@ public struct ResolvedResource: Equatable, Hashable {
          */client: String, 
         /**
          * Reported `contentLength` of the picked format in bytes.
-         */contentLength: UInt64?) {
+         */contentLength: UInt64?, 
+        /**
+         * Provider format itag when the guest reported one.
+         */itag: UInt32?) {
         self.url = url
         self.mime = mime
         self.bitrateKbps = bitrateKbps
         self.expiresAtMs = expiresAtMs
         self.client = client
         self.contentLength = contentLength
+        self.itag = itag
     }
 
     
@@ -1310,7 +1625,8 @@ public struct FfiConverterTypeResolvedResource: FfiConverterRustBuffer {
                 bitrateKbps: FfiConverterOptionUInt32.read(from: &buf), 
                 expiresAtMs: FfiConverterOptionUInt64.read(from: &buf), 
                 client: FfiConverterString.read(from: &buf), 
-                contentLength: FfiConverterOptionUInt64.read(from: &buf)
+                contentLength: FfiConverterOptionUInt64.read(from: &buf), 
+                itag: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -1321,6 +1637,7 @@ public struct FfiConverterTypeResolvedResource: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.expiresAtMs, into: &buf)
         FfiConverterString.write(value.client, into: &buf)
         FfiConverterOptionUInt64.write(value.contentLength, into: &buf)
+        FfiConverterOptionUInt32.write(value.itag, into: &buf)
     }
 }
 
@@ -1416,6 +1733,116 @@ public func FfiConverterTypeSpinReport_lift(_ buf: RustBuffer) throws -> SpinRep
 #endif
 public func FfiConverterTypeSpinReport_lower(_ value: SpinReport) -> RustBuffer {
     return FfiConverterTypeSpinReport.lower(value)
+}
+
+
+/**
+ * Lifecycle marks for one stream session: epoch-ms timestamps plus
+ * durations, for joining intent → prepared → attached → rendered.
+ */
+public struct StreamPhaseMarks: Equatable, Hashable {
+    /**
+     * Epoch ms when `prepare` registered the session.
+     */
+    public var prepareStartedMs: UInt64
+    /**
+     * Duration of the minting `playback.resolve`, when known.
+     */
+    public var resolveMs: UInt64?
+    /**
+     * Duration of the most recent re-mint, when one ran.
+     */
+    public var mintMs: UInt64?
+    /**
+     * Epoch ms when the first byte landed.
+     */
+    public var firstByteMs: UInt64?
+    /**
+     * Epoch ms when the head-fill bound was covered.
+     */
+    public var headReadyMs: UInt64?
+    /**
+     * Epoch ms of the first attach.
+     */
+    public var attachMs: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Epoch ms when `prepare` registered the session.
+         */prepareStartedMs: UInt64, 
+        /**
+         * Duration of the minting `playback.resolve`, when known.
+         */resolveMs: UInt64?, 
+        /**
+         * Duration of the most recent re-mint, when one ran.
+         */mintMs: UInt64?, 
+        /**
+         * Epoch ms when the first byte landed.
+         */firstByteMs: UInt64?, 
+        /**
+         * Epoch ms when the head-fill bound was covered.
+         */headReadyMs: UInt64?, 
+        /**
+         * Epoch ms of the first attach.
+         */attachMs: UInt64?) {
+        self.prepareStartedMs = prepareStartedMs
+        self.resolveMs = resolveMs
+        self.mintMs = mintMs
+        self.firstByteMs = firstByteMs
+        self.headReadyMs = headReadyMs
+        self.attachMs = attachMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StreamPhaseMarks: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamPhaseMarks: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamPhaseMarks {
+        return
+            try StreamPhaseMarks(
+                prepareStartedMs: FfiConverterUInt64.read(from: &buf), 
+                resolveMs: FfiConverterOptionUInt64.read(from: &buf), 
+                mintMs: FfiConverterOptionUInt64.read(from: &buf), 
+                firstByteMs: FfiConverterOptionUInt64.read(from: &buf), 
+                headReadyMs: FfiConverterOptionUInt64.read(from: &buf), 
+                attachMs: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamPhaseMarks, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.prepareStartedMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.resolveMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.mintMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.firstByteMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.headReadyMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.attachMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamPhaseMarks_lift(_ buf: RustBuffer) throws -> StreamPhaseMarks {
+    return try FfiConverterTypeStreamPhaseMarks.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamPhaseMarks_lower(_ value: StreamPhaseMarks) -> RustBuffer {
+    return FfiConverterTypeStreamPhaseMarks.lower(value)
 }
 
 
@@ -1536,6 +1963,105 @@ public func FfiConverterTypeHostError_lift(_ buf: RustBuffer) throws -> HostErro
 public func FfiConverterTypeHostError_lower(_ value: HostError) -> RustBuffer {
     return FfiConverterTypeHostError.lower(value)
 }
+
+
+/**
+ * Terminal outcome of one `start_prepare` invocation.
+ */
+
+public enum PrepareOutcome: Equatable, Hashable {
+    
+    /**
+     * The resolve produced a source and the seam registered it.
+     */
+    case prepared(
+        /**
+         * The prepared session handle + metadata.
+         */stream: PreparedStream, 
+        /**
+         * Invocation accounting for the resolve.
+         */attempt: AttemptSummary
+    )
+    /**
+     * The resolve or the seam registration failed.
+     */
+    case failed(
+        /**
+         * Taxonomy kind (`no-result`, `cancelled`, ...).
+         */kind: String, 
+        /**
+         * Human-readable detail (never contains the URL).
+         */message: String, 
+        /**
+         * Invocation accounting for the resolve.
+         */attempt: AttemptSummary
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrepareOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrepareOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = PrepareOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrepareOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .prepared(stream: try FfiConverterTypePreparedStream.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
+        )
+        
+        case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrepareOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .prepared(stream,attempt):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypePreparedStream.write(stream, into: &buf)
+            FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
+            
+        
+        case let .failed(kind,message,attempt):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(kind, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrepareOutcome_lift(_ buf: RustBuffer) throws -> PrepareOutcome {
+    return try FfiConverterTypePrepareOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrepareOutcome_lower(_ value: PrepareOutcome) -> RustBuffer {
+    return FfiConverterTypePrepareOutcome.lower(value)
+}
+
 
 
 /**
@@ -1735,6 +2261,249 @@ public func FfiConverterTypeResolveOutcome_lower(_ value: ResolveOutcome) -> Rus
     return FfiConverterTypeResolveOutcome.lower(value)
 }
 
+
+
+/**
+ * Errors raised synchronously by the `stream_*` calls.
+ *
+ * Field names avoid `message` for the same reason as [`HostError`].
+ */
+public 
+enum StreamError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * `HostConfig.stream_path` was unset — the seam is not running.
+     */
+    case Unavailable
+    /**
+     * The session operation failed; `kind` is the ABI taxonomy.
+     */
+    case Failed(
+        /**
+         * Kebab-case error kind.
+         */kind: String, 
+        /**
+         * Failure detail (never contains the signed URL).
+         */detail: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension StreamError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamError: FfiConverterRustBuffer {
+    typealias SwiftType = StreamError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Unavailable
+        case 2: return .Failed(
+            kind: try FfiConverterString.read(from: &buf), 
+            detail: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StreamError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .Unavailable:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .Failed(kind,detail):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(kind, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamError_lift(_ buf: RustBuffer) throws -> StreamError {
+    return try FfiConverterTypeStreamError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamError_lower(_ value: StreamError) -> RustBuffer {
+    return FfiConverterTypeStreamError.lower(value)
+}
+
+
+
+
+/**
+ * Receives the terminal outcome of [`PluginHost::start_prepare`].
+ */
+public protocol PrepareListener: AnyObject, Sendable {
+    
+    /**
+     * Called exactly once per request, on a runtime worker thread.
+     */
+    func onOutcome(requestId: String, outcome: PrepareOutcome) 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfacePrepareListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfacePrepareListener = UniffiVTableCallbackInterfacePrepareListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfacePrepareListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface PrepareListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfacePrepareListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface PrepareListener: handle missing in uniffiClone")
+            }
+        },
+        onOutcome: { (
+            uniffiHandle: UInt64,
+            requestId: RustBuffer,
+            outcome: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfacePrepareListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onOutcome(
+                     requestId: try FfiConverterString.lift(requestId),
+                     outcome: try FfiConverterTypePrepareOutcome_lift(outcome)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfacePrepareListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfacePrepareListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitPrepareListener() {
+    uniffi_auqw_mobile_bindings_fn_init_callback_vtable_preparelistener(UniffiCallbackInterfacePrepareListener.vtablePtr)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfacePrepareListener {
+    fileprivate static let handleMap = UniffiHandleMap<PrepareListener>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfacePrepareListener : FfiConverter {
+    typealias SwiftType = PrepareListener
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfacePrepareListener_lift(_ handle: UInt64) throws -> PrepareListener {
+    return try FfiConverterCallbackInterfacePrepareListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfacePrepareListener_lower(_ v: PrepareListener) -> UInt64 {
+    return FfiConverterCallbackInterfacePrepareListener.lower(v)
+}
 
 
 
@@ -2185,7 +2954,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 44608) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 26661) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin() != 41359) {
@@ -2200,6 +2969,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve() != 51654) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_prepare() != 57130) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_close() != 22132) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_open() != 39188) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks() != 17009) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_read() != 33146) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_release() != 34455) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_auqw_mobile_bindings_checksum_constructor_pluginhost_new() != 45559) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2209,7 +2996,11 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_resolvelistener_on_outcome() != 25209) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_auqw_mobile_bindings_checksum_method_preparelistener_on_outcome() != 64282) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitPrepareListener()
     uniffiCallbackInitRequestListener()
     uniffiCallbackInitResolveListener()
     return InitializationResult.ok

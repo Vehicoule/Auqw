@@ -1,12 +1,14 @@
 // ── Slice 1.5 seam dev instrumentation ─────────────────────────────
 // Driven ONLY by the auqw://seam-* deep links dispatched from App.tsx:
 //   auqw://seam-file?path=…        gate-0 file leg (same warm player)
+//   auqw://seam-audio?path=…       gate-0 expo-audio file:// leg
 //   auqw://seam-prepare?provider=…&ref=…   stream prepare
 //   auqw://seam-attach?handle=…    attach last/provided prepared handle
 //   auqw://seam-metrics            dump Rust-side phase marks
 // Self-contained (own logger + listeners) so App.tsx stays a one-block
 // diff for the s1 merge. Dev-gate only — no shipped semantics.
 import { Asset } from 'expo-asset';
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { File, FileMode, Paths } from 'expo-file-system';
 import {
   addPhaseMarkListener,
@@ -50,6 +52,7 @@ let hostReady = false;
 let pluginId: string | null = null;
 let lastHandle: string | null = null;
 let lastRequestId: string | null = null;
+let audioLeg: AudioPlayer | null = null;
 
 function arm(): void {
   if (armed) {
@@ -111,7 +114,7 @@ function describe(error: unknown): string {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-prepare|seam-attach|seam-metrics)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -125,6 +128,29 @@ export async function runSeamLink(url: string): Promise<void> {
       }
       lastHandle = await devAttachFile(path);
       slog(`seam-file attached handle=${lastHandle} t=${Date.now()}`);
+    } else if (match[1] === 'seam-audio') {
+      // The spec's comparison leg: expo-audio on the same file — its
+      // own player stack, so the number isolates our Media3 floor.
+      const path = param(query, 'path');
+      if (!path) {
+        return;
+      }
+      const uri = path.startsWith('file://') ? path : `file://${path}`;
+      const t0 = Date.now();
+      audioLeg?.remove();
+      audioLeg = createAudioPlayer({ uri });
+      const player = audioLeg;
+      const sub = player.addListener('playbackStatusUpdate', (status) => {
+        if (status.playing) {
+          slog(`seam-audio playing +${Date.now() - t0}ms`);
+          sub.remove();
+        } else if (status.error) {
+          slog(`seam-audio error ${status.error}`);
+          sub.remove();
+        }
+      });
+      player.play();
+      slog(`seam-audio sent uri=${uri} t=${t0}`);
     } else if (match[1] === 'seam-prepare') {
       const ref = param(query, 'ref');
       if (!ref) {

@@ -9,6 +9,11 @@ struct HostConfigInput: Record {
   @Field var fuelPerEntry: Double = 0
   @Field var fuelTotal: Double = 0
   @Field var potProviderUrl: String? = nil
+  @Field var statePath: String? = nil
+  // iOS exposes the host surface only — the player surface is
+  // Android-first, so streamPath stays unset (seam unavailable)
+  // unless a caller deliberately overrides it.
+  @Field var streamPath: String? = nil
 }
 
 /// Relays the UniFFI callback into the Expo event channel. The outcome
@@ -77,7 +82,8 @@ public class AuqwExpoModule: Module {
           fuelPerEntry: Self.clampedU64(config.fuelPerEntry),
           fuelTotal: Self.clampedU64(config.fuelTotal),
           potProviderUrl: config.potProviderUrl,
-          statePath: try Self.statePath()
+          statePath: try config.statePath ?? Self.statePath(),
+          streamPath: config.streamPath
         )
       )
       self.host = h
@@ -223,6 +229,7 @@ public class AuqwExpoModule: Module {
       if let v = resource.bitrateKbps { r["bitrateKbps"] = Double(v) }
       if let v = resource.expiresAtMs { r["expiresAtMs"] = Double(v) }
       if let v = resource.contentLength { r["contentLength"] = Double(v) }
+      if let v = resource.itag { r["itag"] = Double(v) }
       return [
         "type": "resolved",
         "resource": r,

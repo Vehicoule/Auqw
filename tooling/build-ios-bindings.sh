@@ -36,6 +36,7 @@ cp "$IOS_DIR/auqw_mobile_bindingsFFI.h" "$HEADERS/"
 cp "$IOS_DIR/auqw_mobile_bindingsFFI.modulemap" "$HEADERS/module.modulemap"
 rm -f "$IOS_DIR/auqw_mobile_bindingsFFI.h" "$IOS_DIR/auqw_mobile_bindingsFFI.modulemap"
 
+rm -rf "$IOS_DIR/AuqwMobileBindingsFFI.xcframework"
 xcodebuild -create-xcframework \
   -library target/aarch64-apple-ios/release/libauqw_mobile_bindings.a -headers "$HEADERS" \
   -library target/aarch64-apple-ios-sim/release/libauqw_mobile_bindings.a -headers "$HEADERS" \

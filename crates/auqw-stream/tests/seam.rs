@@ -85,6 +85,19 @@ impl Remint for NeverRemint {
     }
 }
 
+/// A re-mint that counts calls and yields a fresh source — the
+/// registry-level counterpart of the pump tests' `CountingRemint`.
+struct OkRemint {
+    calls: AtomicU32,
+}
+
+impl Remint for OkRemint {
+    fn remint(&self) -> Pin<Box<dyn Future<Output = Result<PreparedSource, StreamError>> + Send>> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Ok(source(1024)) })
+    }
+}
+
 /// What the fake answers for one request.
 enum Step {
     Reply(FetchResponse),
@@ -117,6 +130,13 @@ impl MapFetch {
             .map(|r| r.iter().any(|(o, _)| *o == offset))
             .unwrap_or(false)
     }
+
+    fn count_at(&self, offset: u64) -> usize {
+        self.requests
+            .lock()
+            .map(|r| r.iter().filter(|(o, _)| *o == offset).count())
+            .unwrap_or(0)
+    }
 }
 
 impl Fetch for MapFetch {
@@ -126,6 +146,7 @@ impl Fetch for MapFetch {
         offset: u64,
         max_len: u64,
         _stall: Duration,
+        _deadline: Duration,
         _cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         if let Ok(mut r) = self.requests.lock() {
@@ -294,8 +315,10 @@ async fn new_prepare_supersedes_unattached_reader() {
     std::thread::scope(|s| {
         let t = s.spawn(|| reg.read(&a, 0, 64));
         wait_until_blocking(|| fetch.issued(0));
+        let mut sb = source(1024);
+        sb.source_ref = "b".into(); // same-ref prepares coalesce instead
         let b = reg
-            .prepare(source(1024), Arc::new(NeverRemint))
+            .prepare(sb, Arc::new(NeverRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
         let e = err_of(t.join().unwrap_or_else(|e| panic!("join: {e:?}")));
         assert_eq!(e.kind(), "superseded", "{e}");
@@ -326,8 +349,10 @@ async fn attached_session_is_exempt_from_supersede() {
     std::thread::scope(|s| {
         let t = s.spawn(|| reg.read(&a, 0, 64));
         wait_until_blocking(|| fetch.issued(0));
+        let mut sb = source(1024);
+        sb.source_ref = "b".into();
         let _b = reg
-            .prepare(source(1024), Arc::new(NeverRemint))
+            .prepare(sb, Arc::new(NeverRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
         // Attached A survives; release wakes its parked reader.
         reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
@@ -486,9 +511,12 @@ async fn close_detaches_and_prepare_supersedes() {
         .handle;
     reg.attach(&a, 0).unwrap_or_else(|e| panic!("attach: {e}"));
     reg.close(&a).unwrap_or_else(|e| panic!("close: {e}"));
-    // Closed sessions are unattached again — a new prepare supersedes.
+    // Closed sessions are unattached again — a different-source prepare
+    // supersedes (a same-source one would coalesce onto the live handle).
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
     let _b = reg
-        .prepare(source(1024), Arc::new(NeverRemint))
+        .prepare(sb, Arc::new(NeverRemint))
         .unwrap_or_else(|e| panic!("prepare: {e}"));
     assert!(reg.attach(&a, 0).is_err());
     assert_eq!(err_of(reg.read("missing", 0, 1)).kind(), "not-found");
@@ -618,4 +646,370 @@ async fn reqwest_fetch_round_trip_through_registry() {
     assert!(marks.first_byte_ms.is_some());
     assert!(marks.head_ready_ms.is_some());
     assert!(marks.attach_ms.is_some());
+}
+
+// ---------- prepare policy, lifecycle, and pool priority ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_prepare_coalesces_to_the_live_handle() {
+    let d = TestDir::new("coalesce");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"));
+    let b = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"));
+    assert_eq!(a.handle, b.handle, "same source_ref must coalesce");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn racing_prepares_leave_one_unattached_session() {
+    let d = TestDir::new("racing");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut sa = source(1024);
+    sa.source_ref = "a".into();
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    let (ha, hb) = std::thread::scope(|s| {
+        let ta = s.spawn(|| {
+            reg.prepare(sa, Arc::new(NeverRemint))
+                .unwrap_or_else(|e| panic!("prepare a: {e}"))
+                .handle
+        });
+        let tb = s.spawn(|| {
+            reg.prepare(sb, Arc::new(NeverRemint))
+                .unwrap_or_else(|e| panic!("prepare b: {e}"))
+                .handle
+        });
+        (
+            ta.join().unwrap_or_else(|e| panic!("join a: {e:?}")),
+            tb.join().unwrap_or_else(|e| panic!("join b: {e:?}")),
+        )
+    });
+    // The serialized supersede means exactly one of the two handles is
+    // already dead — never two live unattached sessions.
+    let outcomes: Vec<Result<Option<u64>, StreamError>> =
+        [ha, hb].iter().map(|h| reg.attach(h, 0)).collect();
+    let superseded = outcomes
+        .iter()
+        .filter(|r| matches!(r, Err(e) if e.kind() == "superseded"))
+        .count();
+    let live = outcomes.iter().filter(|r| r.is_ok()).count();
+    assert_eq!((superseded, live), (1, 1), "{outcomes:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_prepare_is_evicted_by_the_reaper() {
+    let d = TestDir::new("ttl");
+    let mut c = config(&d);
+    c.prepare_ttl = Duration::from_millis(10);
+    c.reap_interval = Duration::from_millis(10);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let e = err_of(reg.read(&h, 0, 1));
+    assert_eq!(e.kind(), "evicted", "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attached_session_is_exempt_from_the_reaper() {
+    let d = TestDir::new("ttlattached");
+    let mut c = config(&d);
+    c.prepare_ttl = Duration::from_millis(10);
+    c.reap_interval = Duration::from_millis(10);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    reg.attach(&h, 0)
+        .unwrap_or_else(|e| panic!("attached session reaped: {e}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_cancels_sessions_and_blocks_prepare() {
+    let d = TestDir::new("shutdown");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.shutdown();
+    let e = err_of(reg.read(&h, 0, 1));
+    assert_eq!(e.kind(), "cancelled", "{e}");
+    let e = err_of(reg.prepare(source(1024), Arc::new(NeverRemint)));
+    assert_eq!(e.kind(), "cancelled", "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_wakes_a_parked_reader() {
+    let d = TestDir::new("closewake");
+    let fetch = Arc::new(MapFetch::new(HashMap::new())); // fetches hang
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    std::thread::scope(|s| {
+        // Offset 900 is outside the attached fill window — only the
+        // reader's demand queues it, so `issued(900)` proves the read
+        // is in flight.
+        let t = s.spawn(|| reg.read(&h, 900, 64));
+        wait_until_blocking(|| fetch.issued(900));
+        // The owning DataSource closed: the in-flight read must not
+        // wait out its deadline.
+        reg.close(&h).unwrap_or_else(|e| panic!("close: {e}"));
+        let e = err_of(t.join().unwrap_or_else(|e| panic!("join: {e:?}")));
+        assert_eq!(e.kind(), "cancelled", "{e}");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_if_unattached_leaves_attached_sessions_alone() {
+    let d = TestDir::new("cancelif");
+    let fetch = Arc::new(MapFetch::new(HashMap::new()));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    // The intent-flip path must not kill a playing consumer.
+    reg.cancel_if_unattached(&h)
+        .unwrap_or_else(|e| panic!("cancel_if_unattached: {e}"));
+    reg.attach(&h, 0)
+        .unwrap_or_else(|e| panic!("attached session was cancelled: {e}"));
+    reg.release(&h).unwrap_or_else(|e| panic!("release: {e}"));
+
+    let h2 = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare2: {e}"))
+        .handle;
+    reg.cancel_if_unattached(&h2)
+        .unwrap_or_else(|e| panic!("cancel_if_unattached2: {e}"));
+    let e = err_of(reg.read(&h2, 0, 1));
+    assert_eq!(e.kind(), "cancelled", "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hung_remint_terminates_inside_mint_deadline() {
+    let d = TestDir::new("mintdeadline");
+    let mut c = config(&d);
+    c.mint_deadline = Duration::from_millis(50);
+    let mut pages = HashMap::new();
+    pages.insert(
+        0u64,
+        VecDeque::from([Step::Reply(FetchResponse {
+            status: 403,
+            content_range: None,
+            body: vec![],
+        })]),
+    );
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(pages)),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    let e = err_of(
+        std::thread::scope(|s| s.spawn(|| reg.read(&h, 0, 64)).join())
+            .unwrap_or_else(|e| panic!("join: {e:?}")),
+    );
+    assert_eq!(e.kind(), "transient", "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_mime_fails_prepare() {
+    let d = TestDir::new("badmime");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    for bad in ["", "not-a-mime", "audio/", "/mp4", "audio/ mp4"] {
+        let mut src = source(1024);
+        src.mime = bad.into();
+        let e = err_of(reg.prepare(src, Arc::new(NeverRemint)));
+        assert_eq!(e.kind(), "invalid-response", "mime {bad:?}: {e}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_content_range_never_echoes_server_text() {
+    let d = TestDir::new("crredact");
+    let mut pages = HashMap::new();
+    // The server answers a 206 whose Content-Range embeds the signed
+    // request — the error must carry structure, never the raw value.
+    pages.insert(
+        0u64,
+        VecDeque::from([Step::Reply(FetchResponse {
+            status: 206,
+            content_range: Some("bytes sig=SECRET-echo/9".into()),
+            body: vec![1u8],
+        })]),
+    );
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(pages)),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    let e = err_of(
+        std::thread::scope(|s| s.spawn(|| reg.read(&h, 0, 64)).join())
+            .unwrap_or_else(|e| panic!("join: {e:?}")),
+    );
+    assert_eq!(e.kind(), "invalid-response", "{e}");
+    assert!(!e.to_string().contains("SECRET"), "{e}");
+}
+
+/// A double-`416` confirms the resource ends below the demand offset:
+/// the reader gets EOF, later reads above the ceiling are EOF too,
+/// and the pruned demand position is never refetched (the remint-storm
+/// regression at seam level).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eof_ceiling_serves_reads_and_prunes_demand() {
+    let d = TestDir::new("eofdemand");
+    let mut pages = HashMap::new();
+    pages.insert(
+        900u64,
+        VecDeque::from([
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: vec![],
+            }),
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: vec![],
+            }),
+        ]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut src = source(4096); // the hint lies: real length is 1024
+    src.content_length = None;
+    let h = reg
+        .prepare(
+            src,
+            Arc::new(OkRemint {
+                calls: AtomicU32::new(0),
+            }),
+        )
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 900, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert!(got.is_empty(), "expected EOF, got {} bytes", got.len());
+    // Reads above the ceiling are EOF without another fetch.
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 950, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert!(got.is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        fetch.count_at(900),
+        2,
+        "demand position refetched past the EOF ceiling"
+    );
+    assert_eq!(fetch.count_at(950), 0);
+}
+
+/// Cross-session priority: while an attached session's demand read is
+/// in flight, another session's speculative head-fill must not issue
+/// requests — it parks on the shared pool until demand drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn speculative_fill_yields_to_demand_across_sessions() {
+    let d = TestDir::new("poolyield");
+    let fetch = Arc::new(MapFetch::new(HashMap::new())); // fetches hang
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut sa = source(1024);
+    sa.source_ref = "a".into();
+    let a = reg
+        .prepare(sa, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare a: {e}"))
+        .handle;
+    reg.attach(&a, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    std::thread::scope(|s| {
+        let _reader = s.spawn(|| reg.read(&a, 900, 64));
+        wait_until_blocking(|| fetch.issued(900));
+        // Demand at 900 is in flight (hung). A second prepare's
+        // head-fill must not issue its offset-0 request.
+        let mut sb = source(1024);
+        sb.source_ref = "b".into();
+        let _b = reg
+            .prepare(sb, Arc::new(NeverRemint))
+            .unwrap_or_else(|e| panic!("prepare b: {e}"));
+        std::thread::sleep(Duration::from_millis(150));
+        // A's own speculative head-fill fired once at prepare time
+        // (demand was empty then); B's must never fire.
+        assert_eq!(
+            fetch.count_at(0),
+            1,
+            "a second head-fill ran while demand was queued"
+        );
+        reg.cancel(&a).unwrap_or_else(|e| panic!("cancel: {e}"));
+    });
 }

@@ -88,6 +88,22 @@ impl StreamError {
             Self::NotFound => "not-found",
         }
     }
+
+    /// The failure detail without the kind prefix — the variant's own
+    /// message, or the kind itself for fieldless variants. Boundaries
+    /// render `{kind}: {detail}`; using `Display` there would double
+    /// the kind (`"transient: transient: msg"`).
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Transient { message }
+            | Self::RateLimited { message }
+            | Self::StreamsCapped { message }
+            | Self::InvalidResponse { message }
+            | Self::Internal { message } => message.clone(),
+            _ => self.kind().to_string(),
+        }
+    }
 }
 
 /// Lock a mutex, mapping poisoning to [`StreamError::Internal`].

@@ -131,7 +131,7 @@ impl From<PhaseMarks> for StreamPhaseMarks {
 fn seam_err(e: auqw_stream::StreamError) -> StreamError {
     StreamError::Failed {
         kind: e.kind().to_string(),
-        detail: e.to_string(),
+        detail: e.detail(),
     }
 }
 
@@ -141,11 +141,12 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
     use auqw_stream::StreamError as E;
     match kind {
         "cancelled" => E::Cancelled,
-        "expired" => E::Expired,
+        "expired" | "expired-resource" | "auth-expired" => E::Expired,
         "rate-limit" => E::RateLimited { message },
         "streams-capped" => E::StreamsCapped { message },
-        "transient" => E::Transient { message },
+        "transient" | "timeout" => E::Transient { message },
         "invalid-response" | "no-result" | "not-applicable" => E::InvalidResponse { message },
+        "not-found" => E::NotFound,
         _ => E::Internal { message },
     }
 }
@@ -294,20 +295,42 @@ impl PluginHost {
             kv: Arc::clone(&self.kv),
             pot_provider: self.pot_provider_url.clone(),
         };
+        let prepared_handles = Arc::clone(&self.prepared_handles);
         self.start_typed(
             plugin_id,
             "playback.resolve".to_string(),
             json!({ "source_ref": source_ref }),
-            move |request_id, invocation| {
+            move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
+                let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
-                    Ok(value) => prepare_outcome(&value, &stream, remint, &attempt, source_ref),
+                    Ok(value) => {
+                        // Session creation does file I/O — run it on the
+                        // blocking pool, not a runtime worker shared
+                        // with guest wasm.
+                        let work = tokio::task::spawn_blocking(move || {
+                            prepare_outcome(&value, &stream, remint, &attempt, source_ref)
+                        });
+                        match work.await {
+                            Ok(o) => o,
+                            Err(_) => PrepareOutcome::Failed {
+                                kind: "internal".to_string(),
+                                message: "prepare worker panicked".to_string(),
+                                attempt: summary,
+                            },
+                        }
+                    }
                     Err(e) => PrepareOutcome::Failed {
                         kind: e.kind().to_string(),
                         message: e.to_string(),
-                        attempt: AttemptSummary::from(&attempt),
+                        attempt: summary,
                     },
                 };
+                if let PrepareOutcome::Prepared { stream, .. } = &outcome {
+                    if let Ok(mut m) = prepared_handles.lock() {
+                        m.insert(request_id.clone(), stream.handle.clone());
+                    }
+                }
                 listener.on_outcome(request_id, outcome);
             },
         )
@@ -360,7 +383,11 @@ impl PluginHost {
     /// # Errors
     /// [`StreamError::Unavailable`] when the seam is not configured.
     pub fn stream_release(&self, handle: String) -> Result<(), StreamError> {
-        self.stream_registry()?.release(&handle).map_err(seam_err)
+        self.stream_registry()?.release(&handle).map_err(seam_err)?;
+        if let Ok(mut m) = self.prepared_handles.lock() {
+            m.retain(|_, h| *h != handle);
+        }
+        Ok(())
     }
 
     /// The session's lifecycle marks — available even after terminal

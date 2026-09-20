@@ -47,9 +47,7 @@ impl SessionPaths {
     /// Remove all three files; missing files are fine.
     pub(crate) fn evict(&self) {
         for p in [&self.data, &self.sidecar, &self.tmp] {
-            match std::fs::remove_file(p) {
-                Ok(()) | Err(_) => {}
-            }
+            let _ = std::fs::remove_file(p);
         }
     }
 }
@@ -68,9 +66,15 @@ pub(crate) struct Sidecar {
     /// Bitrate hint when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
-    /// Authoritative total length once the wire reported it.
+    /// Authoritative total length — only ever the wire-reported
+    /// `Content-Range` total, never the resolve-time hint (a stale or
+    /// approximate hint must not be mistaken for authoritative by a
+    /// future resume path; the hint rides along as `hint_total`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// Resolve-time `content_length` hint — metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_total: Option<u64>,
     /// URL expiry hint, epoch ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
@@ -97,7 +101,11 @@ impl Sidecar {
             }
             prev_end = *e;
         }
-        if sidecar.total.is_some_and(|t| prev_end > t) {
+        if sidecar
+            .total
+            .or(sidecar.hint_total)
+            .is_some_and(|t| prev_end > t)
+        {
             return Err("extents exceed declared total".into());
         }
         Ok(sidecar)
@@ -105,7 +113,7 @@ impl Sidecar {
 
     /// Persist via sibling temp file + `sync_all` + atomic rename +
     /// parent-dir sync — the same durability chain as the plugin KV.
-    fn persist(&self, path: &Path, tmp: &Path) -> std::io::Result<()> {
+    pub(crate) fn persist(&self, path: &Path, tmp: &Path) -> std::io::Result<()> {
         let json = serde_json::to_vec(self)?;
         {
             let mut f = File::create(tmp)?;
@@ -290,25 +298,30 @@ impl SparseStore {
         paths: &SessionPaths,
         meta: &SidecarMeta,
     ) -> Result<(), StreamError> {
-        self.file.sync_data().map_err(|e| StreamError::Internal {
-            message: format!("sync: {e}"),
+        self.persist_job(meta)?.run(paths)
+    }
+
+    /// Snapshot the durability inputs under the store lock — a
+    /// `try_clone`'d fd and the extent map as it stands — so the
+    /// fsync+rename chain can run off the store mutex (and off the
+    /// runtime worker) without stalling covered reads. Extents in the
+    /// snapshot may under-report later inserts, the safe direction.
+    pub(crate) fn persist_job(&mut self, meta: &SidecarMeta) -> Result<PersistJob, StreamError> {
+        let file = self.file.try_clone().map_err(|e| StreamError::Internal {
+            message: format!("sync fd: {e}"),
         })?;
         let sidecar = Sidecar {
             source_ref: meta.source_ref.clone(),
             mime: meta.mime.clone(),
             itag: meta.itag,
             bitrate_kbps: meta.bitrate_kbps,
-            total: self.total.or(self.hint_total),
+            total: self.total,
+            hint_total: self.hint_total,
             expires_at_ms: meta.expires_at_ms,
             extents: self.extents.iter().map(|(s, e)| (*s, *e)).collect(),
         };
-        sidecar
-            .persist(&paths.sidecar, &paths.tmp)
-            .map_err(|e| StreamError::Internal {
-                message: format!("sidecar: {e}"),
-            })?;
         self.dirty = 0;
-        Ok(())
+        Ok(PersistJob { file, sidecar })
     }
 
     /// Whether a flush is due by chunk count.
@@ -330,6 +343,33 @@ pub(crate) struct SidecarMeta {
     pub bitrate_kbps: Option<u32>,
     /// URL expiry hint.
     pub expires_at_ms: Option<u64>,
+}
+
+/// An owned durability job snapshotted under the store lock —
+/// `Send`, so `commit` can run the fsync+rename chain on
+/// `tokio::task::spawn_blocking` instead of a runtime worker.
+pub(crate) struct PersistJob {
+    /// `try_clone`'d fd of the data file — `sync_data` on it flushes
+    /// the same inode, so the ordering invariant holds.
+    file: File,
+    /// Extents + metadata as of the snapshot (under-report only).
+    sidecar: Sidecar,
+}
+
+impl PersistJob {
+    /// `sync_data` the file first, then write the sidecar that claims
+    /// its extents — the module's crash-honesty ordering.
+    pub(crate) fn run(self, paths: &SessionPaths) -> Result<(), StreamError> {
+        self.file.sync_data().map_err(|e| StreamError::Internal {
+            message: format!("sync: {e}"),
+        })?;
+        self.sidecar
+            .persist(&paths.sidecar, &paths.tmp)
+            .map_err(|e| StreamError::Internal {
+                message: format!("sidecar: {e}"),
+            })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -434,7 +474,10 @@ mod tests {
         let loaded = Sidecar::load(&paths.sidecar).unwrap_or_else(|e| panic!("load: {e}"));
         assert_eq!(loaded.extents, vec![(0, 64), (128, 160)]);
         assert_eq!(loaded.itag, Some(140));
-        assert_eq!(loaded.total, Some(1000));
+        // The resolve hint rides as `hint_total`; `total` stays
+        // wire-authoritative (None until a Content-Range lands).
+        assert_eq!(loaded.total, None);
+        assert_eq!(loaded.hint_total, Some(1000));
         // Corrupt JSON is an error, never a silent reset.
         std::fs::write(&paths.sidecar, b"{not json").unwrap_or_else(|e| panic!("w: {e}"));
         assert!(Sidecar::load(&paths.sidecar).is_err());

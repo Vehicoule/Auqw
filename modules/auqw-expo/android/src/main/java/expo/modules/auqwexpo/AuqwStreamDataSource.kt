@@ -27,29 +27,13 @@ class AuqwStreamException(
 ) : IOException(detail ?: kind, cause)
 
 /**
- * Maps a UniFFI [StreamException] to its ABI kind string. The generated
- * error is a sealed class whose variant names are the taxonomy in
- * PascalCase (RateLimit → rate-limit); a flat generated error carrying
- * a `kind` accessor is honoured first so either codegen shape works.
+ * Maps a UniFFI [StreamException] to its ABI kind string — the
+ * generated error is a sealed class: `Failed` carries the seam's kind
+ * verbatim; `Unavailable` is the seam-not-configured path.
  */
-internal fun streamKind(e: StreamException): String {
-  try {
-    val accessor = e.javaClass.methods.firstOrNull {
-      it.name == "getKind" && it.parameterCount == 0 && it.returnType == String::class.java
-    }
-    val viaAccessor = accessor?.invoke(e) as? String
-    if (viaAccessor != null) {
-      return viaAccessor
-    }
-  } catch (ignored: ReflectiveOperationException) {
-    // Fall through to the variant-name mapping.
-  }
-  val name = e.javaClass.simpleName
-  return if (name.isBlank() || name == "StreamException") {
-    "internal"
-  } else {
-    name.replace(Regex("([a-z0-9])([A-Z])"), "$1-$2").lowercase()
-  }
+internal fun streamKind(e: StreamException): String = when (e) {
+  is StreamException.Failed -> e.kind
+  is StreamException.Unavailable -> "unavailable"
 }
 
 /**
@@ -87,10 +71,20 @@ class AuqwStreamDataSource(
   private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
 
   override fun open(dataSpec: DataSpec): Long {
+    if (opened) {
+      throw AuqwStreamException("internal", "data source already open", null)
+    }
     // authority, not host: Uri.getHost() lowercases and stream handles
     // are case-sensitive.
     val streamHandle = dataSpec.uri.takeIf { it.scheme == STREAM_SCHEME }?.authority
+      ?.takeUnless { it.isBlank() }
       ?: throw AuqwStreamException("internal", "stream uri missing handle", null)
+    if (dataSpec.position < 0) {
+      throw AuqwStreamException("internal", "negative position ${dataSpec.position}", null)
+    }
+    if (dataSpec.length < C.LENGTH_UNSET.toLong()) {
+      throw AuqwStreamException("internal", "invalid length ${dataSpec.length}", null)
+    }
     val streamHost = registry.hostFor(streamHandle)
       ?: throw AuqwStreamException("internal", "unknown stream handle", null)
 
@@ -127,8 +121,15 @@ class AuqwStreamDataSource(
     }
     val currentHost = host
     val currentHandle = handle
-    if (currentHost == null || currentHandle == null) {
+    if (!opened || currentHost == null || currentHandle == null) {
       throw AuqwStreamException("internal", "read on a closed stream", null)
+    }
+    if (offset < 0 || offset + readLength > buffer.size) {
+      throw AuqwStreamException(
+        "internal",
+        "read bounds off=$offset len=$readLength buf=${buffer.size}",
+        null
+      )
     }
     val wanted = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
       readLength.toLong()
@@ -143,6 +144,13 @@ class AuqwStreamDataSource(
     if (bytes.isEmpty()) {
       bytesRemaining = 0
       return C.RESULT_END_OF_INPUT
+    }
+    if (bytes.size.toLong() > wanted || bytes.size > buffer.size - offset) {
+      throw AuqwStreamException(
+        "invalid-response",
+        "seam over-served ${bytes.size} bytes at $position",
+        null
+      )
     }
     System.arraycopy(bytes, 0, buffer, offset, bytes.size)
     position += bytes.size

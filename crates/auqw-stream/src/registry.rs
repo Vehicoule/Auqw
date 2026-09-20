@@ -12,18 +12,19 @@
 //! corrupt map is distinguished from a clean partial in the report;
 //! both are dropped honestly, never trusted.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use tokio::runtime::Handle;
 
 use crate::error::{lock, StreamError};
 use crate::fetch::{Fetch, ReqwestFetch};
-use crate::marks::PhaseMarks;
+use crate::marks::{now_ms, PhaseMarks};
 use crate::pump::pump_loop;
-use crate::session::SessionInner;
+use crate::session::{PoolSignals, SessionInner};
 use crate::store::Sidecar;
 use crate::{PreparedSource, Remint, StreamConfig};
 
@@ -61,9 +62,26 @@ pub struct StreamRegistry {
     config: StreamConfig,
     fetch: Arc<dyn Fetch>,
     runtime: Handle,
-    sessions: Mutex<HashMap<String, Arc<SessionInner>>>,
+    sessions: Arc<Mutex<HashMap<String, Arc<SessionInner>>>>,
+    /// Serializes the supersede-scan + session-creation + insert inside
+    /// `prepare` — without it two concurrent prepares can interleave
+    /// into two live unattached sessions.
+    prepare_lock: Mutex<()>,
+    /// Cross-session demand accounting (attached fetch-through
+    /// outranks speculative fill).
+    pool: Arc<PoolSignals>,
     counter: AtomicU64,
+    /// Per-registry instance id — keeps handles unique across two live
+    /// registries in one process (a second host must not mint `st-0`
+    /// again and resolve against the wrong owner).
+    instance: u64,
     sweep: SweepReport,
+    /// Abandoned-prepare reaper task (TTL → `Evicted`), aborted on
+    /// shutdown/drop.
+    reaper: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set by `shutdown` (or drop): later `prepare` calls fail
+    /// `Cancelled` instead of resurrecting sessions on a dead registry.
+    shutdown: AtomicBool,
 }
 
 impl StreamRegistry {
@@ -92,14 +110,41 @@ impl StreamRegistry {
         std::fs::create_dir_all(&config.cache_dir).map_err(|e| StreamError::Internal {
             message: format!("cache dir: {e}"),
         })?;
-        let sweep = sweep_dir(&config.cache_dir);
+        // The sweep settles *crash* leftovers — files of a previous
+        // process instance. A second live registry on the same dir
+        // must not evict the first's sessions, so each dir is swept at
+        // most once per process (the first sweep already settled it).
+        let key = config
+            .cache_dir
+            .canonicalize()
+            .unwrap_or_else(|_| config.cache_dir.clone());
+        let first = SWEPT_DIRS
+            .lock()
+            .map(|mut dirs| dirs.insert(key))
+            .unwrap_or(false);
+        let sweep = if first {
+            sweep_dir(&config.cache_dir)
+        } else {
+            SweepReport::default()
+        };
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+        let reaper = runtime.spawn(reap_loop(
+            Arc::clone(&sessions),
+            config.prepare_ttl,
+            config.reap_interval,
+        ));
         Ok(Self {
             config,
             fetch,
             runtime,
-            sessions: Mutex::new(HashMap::new()),
+            sessions,
+            prepare_lock: Mutex::new(()),
+            pool: PoolSignals::new(),
             counter: AtomicU64::new(0),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             sweep,
+            reaper: Mutex::new(Some(reaper)),
+            shutdown: AtomicBool::new(false),
         })
     }
 
@@ -135,6 +180,12 @@ impl StreamRegistry {
     /// the session's [`PhaseMarks::resolve_ms`] for the port's
     /// intent→prepared join.
     ///
+    /// Per-sourceRef coalescing (the prepare policy's debounce): a
+    /// live, still-fresh *unattached* session for the same
+    /// `source_ref` is returned as-is — repeated intent on the same
+    /// source finishes the in-flight prepare rather than cancelling
+    /// and restarting it. A stale candidate is superseded normally.
+    ///
     /// # Errors
     /// As [`Self::prepare`].
     pub fn prepare_timed(
@@ -143,15 +194,39 @@ impl StreamRegistry {
         remint: Arc<dyn Remint>,
         resolve_elapsed: Option<Duration>,
     ) -> Result<PrepareInfo, StreamError> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Err(StreamError::Cancelled);
+        }
         if source.url.is_empty() {
             return Err(StreamError::InvalidResponse {
                 message: "prepare source has no url".into(),
             });
         }
+        if !valid_mime(&source.mime) {
+            return Err(StreamError::InvalidResponse {
+                message: "prepare source mime is not `type/subtype`".into(),
+            });
+        }
+        // Serialized: scan, coalesce-check, supersede, create, and
+        // insert must be atomic against other prepares or two
+        // concurrent prepares could both leave unattached sessions.
+        let _guard = lock(&self.prepare_lock)?;
+        if let Some(info) = self.reusable(&source.source_ref)? {
+            return Ok(info);
+        }
         self.supersede_unattached()?;
-        let handle = format!("st-{}", self.counter.fetch_add(1, Ordering::Relaxed));
-        let session =
-            SessionInner::new(handle.clone(), source.clone(), remint, self.config.clone())?;
+        let handle = format!(
+            "st-{}-{}",
+            self.instance,
+            self.counter.fetch_add(1, Ordering::Relaxed)
+        );
+        let session = SessionInner::new(
+            handle.clone(),
+            source.clone(),
+            remint,
+            self.config.clone(),
+            Arc::clone(&self.pool),
+        )?;
         if let Some(d) = resolve_elapsed {
             if let Ok(mut sh) = lock(&session.shared) {
                 sh.marks.resolve_ms = Some(u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
@@ -236,6 +311,40 @@ impl StreamRegistry {
         Ok(())
     }
 
+    /// Cancel only if the session is still unattached — the intent-flip
+    /// path (`cancelPrepare` landing after `prepared`): an attached,
+    /// playing consumer is untouched; a still-speculative session is
+    /// cancelled and its partial file evicted. No-op on unknown handles.
+    ///
+    /// # Errors
+    /// [`StreamError::Internal`] on lock poisoning.
+    pub fn cancel_if_unattached(&self, handle: &str) -> Result<(), StreamError> {
+        if let Some(s) = self.lookup(handle)? {
+            s.terminate_if(StreamError::Cancelled, |sh| !sh.attached);
+        }
+        Ok(())
+    }
+
+    /// End every session `Cancelled` (pumps aborted, readers woken,
+    /// files evicted) and stop the reaper — for host teardown. Also
+    /// runs on drop. Later `prepare` calls fail `Cancelled`.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Ok(mut r) = self.reaper.lock() {
+            if let Some(h) = r.take() {
+                h.abort();
+            }
+        }
+        let sessions: Vec<Arc<SessionInner>> = self
+            .sessions
+            .lock()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        for s in sessions {
+            s.terminate(StreamError::Cancelled);
+        }
+    }
+
     /// The session's lifecycle marks — returned even after terminal
     /// states (they are diagnostics, not capabilities).
     ///
@@ -254,8 +363,46 @@ impl StreamRegistry {
         Ok(lock(&self.sessions)?.get(handle).cloned())
     }
 
+    /// A live, unattached, still-fresh session for `source_ref`, if one
+    /// exists — the coalescing candidate for a repeated prepare on the
+    /// same source. A stale candidate (TTL or expiry margin breached)
+    /// is left for the supersede scan instead.
+    fn reusable(&self, source_ref: &str) -> Result<Option<PrepareInfo>, StreamError> {
+        let sessions = lock(&self.sessions)?;
+        let margin = u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
+        for (handle, s) in sessions.iter() {
+            if s.is_terminal() || s.is_attached() {
+                continue;
+            }
+            if s.created.elapsed() >= self.config.prepare_ttl {
+                continue;
+            }
+            let core = lock(&s.core)?;
+            if core.source.source_ref != source_ref {
+                continue;
+            }
+            if let Some(exp) = core.source.expires_at_ms {
+                if now_ms().saturating_add(margin) >= exp {
+                    continue;
+                }
+            }
+            return Ok(Some(PrepareInfo {
+                handle: handle.clone(),
+                mime: core.source.mime.clone(),
+                itag: core.source.itag,
+                bitrate_kbps: core.source.bitrate_kbps,
+                content_length: core.source.content_length,
+                expires_at_ms: core.source.expires_at_ms,
+            }));
+        }
+        Ok(None)
+    }
+
     /// Terminate every unattached non-terminal session with
-    /// `Superseded` and drop terminal handles from the map.
+    /// `Superseded` and drop terminal handles from the map. The
+    /// still-unattached check is re-done inside the terminal
+    /// transition — an attach that lands after the scan wins, so a
+    /// playing consumer is never superseded by accident.
     fn supersede_unattached(&self) -> Result<(), StreamError> {
         let doomed: Vec<Arc<SessionInner>> = {
             let mut sessions = lock(&self.sessions)?;
@@ -268,10 +415,64 @@ impl StreamRegistry {
             doomed
         };
         for s in doomed {
-            s.terminate(StreamError::Superseded);
+            s.terminate_if(StreamError::Superseded, |sh| !sh.attached);
         }
         Ok(())
     }
+}
+
+impl Drop for StreamRegistry {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// The abandoned-prepare reaper: every `interval`, unattached sessions
+/// older than `ttl` end `Evicted` (readers woken, partial files
+/// dropped) — an intent that never became a play does not pin cache
+/// space or a parked pump forever.
+async fn reap_loop(
+    sessions: Arc<Mutex<HashMap<String, Arc<SessionInner>>>>,
+    ttl: Duration,
+    interval: Duration,
+) {
+    let interval = interval.max(Duration::from_millis(50));
+    loop {
+        tokio::time::sleep(interval).await;
+        let doomed: Vec<Arc<SessionInner>> = sessions
+            .lock()
+            .map(|m| {
+                m.values()
+                    .filter(|s| !s.is_terminal() && !s.is_attached() && s.created.elapsed() >= ttl)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for s in doomed {
+            s.terminate_if(StreamError::Evicted, |sh| !sh.attached);
+        }
+    }
+}
+
+/// Cache dirs already swept this process — see [`StreamRegistry::with_fetch`].
+static SWEPT_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Monotonic registry instance id for `st-{instance}-{n}` handles.
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
+/// `type/subtype` shape only — the seam does not second-guess the
+/// container family (Media3 owns that), but a malformed mime at
+/// prepare is an `InvalidResponse` now, not a player failure later.
+fn valid_mime(mime: &str) -> bool {
+    let Some((t, s)) = mime.split_once('/') else {
+        return false;
+    };
+    !t.is_empty()
+        && !s.is_empty()
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
 }
 
 /// Settle `cache_dir` leftovers: evict every `{stem}.bin`/`.json`/`.tmp`

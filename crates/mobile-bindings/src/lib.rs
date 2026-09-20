@@ -252,6 +252,10 @@ pub struct PluginHost {
     stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// `prepare` request id → produced stream handle, so a
+    /// `cancelPrepare` landing after `prepared` can abandon the session
+    /// (only while still unattached — see `cancel`).
+    prepared_handles: Arc<Mutex<HashMap<String, String>>>,
     counter: AtomicU64,
 }
 
@@ -331,6 +335,7 @@ impl PluginHost {
             stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            prepared_handles: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
         }))
     }
@@ -361,7 +366,7 @@ impl PluginHost {
             plugin_id,
             "playback.resolve".to_string(),
             json!({ "source_ref": source_ref }),
-            move |request_id, invocation| {
+            move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
@@ -419,7 +424,7 @@ impl PluginHost {
             plugin_id,
             capability,
             payload,
-            move |request_id, invocation| {
+            move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
@@ -438,12 +443,23 @@ impl PluginHost {
         )
     }
 
-    /// Cancel an in-flight request; unknown ids are a no-op.
+    /// Cancel an in-flight request; unknown ids are a no-op. A
+    /// `cancelPrepare` landing after `prepared` also abandons the
+    /// produced session — but only while it is still unattached: a
+    /// playing consumer is never cancelled out from under playback.
     pub fn cancel(&self, request_id: String) {
         if let Ok(m) = self.cancels.lock() {
             if let Some(token) = m.get(&request_id) {
                 token.cancel();
             }
+        }
+        let handle = self
+            .prepared_handles
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(&request_id));
+        if let (Some(stream), Some(handle)) = (&self.stream, handle) {
+            let _ = stream.cancel_if_unattached(&handle);
         }
     }
 
@@ -483,8 +499,10 @@ impl PluginHost {
 
 impl PluginHost {
     /// Spawn one invocation on the runtime and deliver it to `deliver`
-    /// on a worker thread.
-    fn start_typed<F>(
+    /// on a worker thread — `deliver` returns a future so callers can
+    /// offload blocking work with `spawn_blocking` instead of stalling
+    /// a runtime worker.
+    fn start_typed<F, Fut>(
         &self,
         plugin_id: String,
         capability: String,
@@ -492,7 +510,8 @@ impl PluginHost {
         deliver: F,
     ) -> Result<String, HostError>
     where
-        F: FnOnce(String, auqw_plugin_host::Invocation) + Send + 'static,
+        F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let plugin = {
             let plugins = lock(&self.plugins)?;
@@ -526,7 +545,7 @@ impl PluginHost {
                 },
             )
             .await;
-            deliver(rid.clone(), invocation);
+            deliver(rid.clone(), invocation).await;
             if let Ok(mut m) = cancels.lock() {
                 m.remove(&rid);
             }

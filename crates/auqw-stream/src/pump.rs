@@ -37,6 +37,7 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
             Ok(Action::Park) => {
                 tokio::select! {
                     () = session.pump_notify.notified() => {}
+                    () = session.pool.drained.notified() => {}
                     () = session.cancel.cancelled() => {}
                 }
             }
@@ -46,7 +47,10 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
                 through,
             }) => match fetch_chunk(&session, &*fetch, offset, len, through).await {
                 Outcome::Bytes(body) => {
-                    if let Err(e) = session.commit(offset, &body, through.then_some(offset)) {
+                    if let Err(e) = session
+                        .commit(offset, &body, through.then_some(offset))
+                        .await
+                    {
                         session.terminate(e);
                         return;
                     }
@@ -99,6 +103,7 @@ async fn await_fetch(
         offset,
         len,
         session.config.stall,
+        session.config.request_deadline,
         session.cancel.clone(),
     );
     tokio::pin!(fut);
@@ -174,13 +179,21 @@ fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> boo
 }
 
 /// Re-resolve the source through the host's [`Remint`]; budgets and
-/// the mime pin are enforced by the session. Cancel-safe.
+/// the mime pin are enforced by the session. Cancel-safe and bounded
+/// by `mint_deadline` — a hung resolve must not zombie the session.
 async fn remint(session: &Arc<SessionInner>) -> Result<(), StreamError> {
     session.begin_mint()?;
     let remint: Arc<dyn Remint> = session.remint_fn()?;
     let t0 = Instant::now();
     let source = tokio::select! {
-        r = remint.remint() => r?,
+        r = tokio::time::timeout(session.config.mint_deadline, remint.remint()) => match r {
+            Ok(r) => r?,
+            Err(_) => {
+                return Err(StreamError::Transient {
+                    message: format!("re-mint stalled for {:?}", session.config.mint_deadline),
+                });
+            }
+        },
         () = session.cancel.cancelled() => return Err(StreamError::Cancelled),
     };
     session.finish_mint(source, t0.elapsed())
@@ -209,6 +222,11 @@ fn validate_206(
         return Err(invalid(format!("Content-Range {start}-{end} inverted")));
     }
     if let Some(t) = total {
+        if end >= t {
+            return Err(invalid(format!(
+                "Content-Range end {end} at/past declared total {t}"
+            )));
+        }
         session.check_total(t)?;
     }
     if resp.body.is_empty() {
@@ -220,30 +238,39 @@ fn validate_206(
             resp.body.len()
         )));
     }
-    if resp.body.len() as u64 > end - start + 1 {
+    if resp.body.len() as u64 != end - start + 1 {
         return Err(invalid(format!(
-            "body {} bytes exceeds declared {start}-{end} at {offset}",
+            "body {} bytes != declared {start}-{end} at {offset}",
             resp.body.len()
         )));
     }
     Ok(())
 }
 
-/// Parse `bytes START-END/TOTAL` (TOTAL may be `*`).
+/// Parse `bytes START-END/TOTAL` (TOTAL may be `*`). The header value
+/// is server-controlled text — error messages never embed it (the
+/// redact invariant: a server could echo the signed request URL).
 fn parse_content_range(cr: &str) -> Result<(u64, u64, Option<u64>), String> {
+    // RFC 9110 range units are case-insensitive.
     let body = cr
-        .strip_prefix("bytes ")
-        .ok_or_else(|| format!("Content-Range {cr:?} is not a byte range"))?;
+        .get(..6)
+        .filter(|unit| unit.eq_ignore_ascii_case("bytes "))
+        .map(|_| &cr[6..])
+        .ok_or_else(|| "Content-Range is not a byte range".to_string())?;
     let (range, total_s) = body
         .split_once('/')
-        .ok_or_else(|| format!("Content-Range {cr:?} missing '/'"))?;
+        .ok_or_else(|| "Content-Range missing '/'".to_string())?;
     let (start_s, end_s) = range
         .split_once('-')
-        .ok_or_else(|| format!("Content-Range {cr:?} missing '-'"))?;
+        .ok_or_else(|| "Content-Range missing '-'".to_string())?;
+    // `str::parse::<u64>` accepts a leading `+` — digits only.
     let parse = |s: &str| {
-        s.trim()
-            .parse::<u64>()
-            .map_err(|_| format!("bad number in {cr:?}"))
+        let t = s.trim();
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("bad Content-Range number".to_string());
+        }
+        t.parse::<u64>()
+            .map_err(|_| "bad Content-Range number".to_string())
     };
     let start = parse(start_s)?;
     let end = parse(end_s)?;
@@ -273,6 +300,7 @@ mod tests {
     use super::*;
     use crate::error::lock;
     use crate::fetch::Fetch;
+    use crate::session::PoolSignals;
     use crate::testkit::*;
     use crate::{PreparedSource, StreamConfig};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -317,6 +345,7 @@ mod tests {
             offset: u64,
             max_len: u64,
             _stall: Duration,
+            _deadline: Duration,
             _cancel: tokio_util::sync::CancellationToken,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>,
@@ -387,7 +416,8 @@ mod tests {
 
     fn session(cfg: StreamConfig, remint: Arc<dyn Remint>) -> Arc<SessionInner> {
         let handle = format!("t-{}", unique());
-        SessionInner::new(handle, source(), remint, cfg).unwrap_or_else(|e| panic!("session: {e}"))
+        SessionInner::new(handle, source(), remint, cfg, PoolSignals::new())
+            .unwrap_or_else(|e| panic!("session: {e}"))
     }
 
     fn config(dir: &TestDir) -> StreamConfig {
@@ -669,13 +699,23 @@ mod tests {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
             sh.fetch_through.insert(900);
         }
-        let task = spawn_pump(&s, fetch);
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
         wait_until(|| eof_below(&s).is_some() || s.is_terminal()).await;
-        let (eof, still_live) = lock(&s.shared)
-            .map(|sh| (sh.eof_below, sh.terminal.is_none()))
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(eof, Some(900));
-        assert!(still_live);
+        // The EOF ceiling must prune the demand position — otherwise
+        // the pump refetches it, burns a remint per cycle, and the mint
+        // budget kills the whole session (regression: remint storm).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let reqs = fetch
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            reqs.iter().filter(|(o, _)| *o == 900).count(),
+            2,
+            "demand position refetched past the EOF ceiling: {reqs:?}"
+        );
+        assert!(!s.is_terminal(), "session died on a localized EOF");
         stop_pump(&s, task).await;
         assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
     }
@@ -703,6 +743,72 @@ mod tests {
             );
             stop_pump(&s, task).await;
         }
+    }
+
+    /// A file shorter than `head_bytes` still marks head-ready: the
+    /// mark means "everything the prepare policy wanted is covered",
+    /// not the bound itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn head_ready_marks_when_file_shorter_than_bound() {
+        let d = TestDir::new("shortready");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(resp(
+            206, 0, 100, 100,
+        ))]));
+        let task = spawn_pump(&s, fetch);
+        wait_until(|| head_ready(&s) || s.is_terminal()).await;
+        assert!(head_ready(&s), "short file never marked head-ready");
+        stop_pump(&s, task).await;
+    }
+
+    /// A demand-read position covered by an overlapping chunk commit is
+    /// pruned, not refetched — each stale entry would otherwise cost a
+    /// redundant range request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn covered_fetch_through_is_not_refetched() {
+        let d = TestDir::new("ftskip");
+        let s = session(config(&d), remint_ok());
+        {
+            let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
+            // 64 becomes covered when the fetch at 0 commits; 500 stays
+            // a real hole. Scripted replies are consumed in pump order.
+            sh.fetch_through.insert(0);
+            sh.fetch_through.insert(64);
+            sh.fetch_through.insert(500);
+        }
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Reply(resp(206, 0, 128, 1024)),
+            Step::Reply(resp(206, 500, 128, 1024)),
+            Step::Reply(resp(206, 128, 128, 1024)),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| {
+            s.is_terminal() || fetch.requests.lock().map(|r| r.len() >= 3).unwrap_or(false)
+        })
+        .await;
+        stop_pump(&s, task).await;
+        let reqs = fetch
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(reqs[1].0, 500, "{reqs:?}");
+        assert!(reqs.iter().all(|(o, _)| *o != 64), "{reqs:?}");
+    }
+
+    /// The supersede scan re-checks `attached` inside the terminal
+    /// transition — an attach that lands after the scan wins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attached_session_wins_the_supersede_race() {
+        let d = TestDir::new("supersederace");
+        let s = session(config(&d), remint_ok());
+        s.terminate_if(StreamError::Superseded, |sh| !sh.attached);
+        assert!(s.is_terminal(), "unattached session must supersede");
+        let s = session(config(&d), remint_ok());
+        s.attach(0).unwrap_or_else(|e| panic!("attach: {e}"));
+        s.terminate_if(StreamError::Superseded, |sh| !sh.attached);
+        assert!(!s.is_terminal(), "attached session superseded anyway");
+        s.terminate(StreamError::Cancelled);
     }
 
     /// A remint failure propagates its own kind.
@@ -743,5 +849,73 @@ mod tests {
             Some(StreamError::Transient { .. })
         ));
         stop_pump(&s, task).await;
+    }
+
+    /// A hung `playback.resolve` must not zombie the session — the
+    /// re-mint is bounded by `mint_deadline` and ends `Transient`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hung_remint_times_out() {
+        struct HangingRemint;
+        impl Remint for HangingRemint {
+            fn remint(
+                &self,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>,
+            > {
+                Box::pin(std::future::pending())
+            }
+        }
+        let d = TestDir::new("hangremint");
+        let mut cfg = config(&d);
+        cfg.mint_deadline = Duration::from_millis(100);
+        let s = session(cfg, Arc::new(HangingRemint));
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 403,
+            content_range: None,
+            body: vec![],
+        })]));
+        let task = spawn_pump(&s, fetch);
+        wait_until(|| s.is_terminal()).await;
+        assert!(matches!(
+            s.terminal_err(),
+            Some(StreamError::Transient { .. })
+        ));
+        stop_pump(&s, task).await;
+    }
+
+    /// A commit landing after a terminal transition is a data write
+    /// only — it must not resurrect the evicted sidecar.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_after_terminal_does_not_resurrect_sidecar() {
+        let d = TestDir::new("latecommit");
+        let s = session(config(&d), remint_ok());
+        s.terminate(StreamError::Released);
+        let _ = s.commit(0, &[7u8; 64], None).await;
+        assert!(!s.paths.sidecar.exists(), "sidecar resurrected post-evict");
+    }
+
+    #[test]
+    fn content_range_parsing_is_strict() {
+        assert_eq!(
+            parse_content_range("bytes 0-127/1024"),
+            Ok((0, 127, Some(1024)))
+        );
+        // RFC 9110: the range unit is case-insensitive.
+        assert_eq!(
+            parse_content_range("Bytes 0-127/1024"),
+            Ok((0, 127, Some(1024)))
+        );
+        assert_eq!(parse_content_range("bytes 0-127/*"), Ok((0, 127, None)));
+        for bad in [
+            "items 0-127/1024",
+            "bytes 0-127",
+            "bytes 0/1024",
+            "bytes +0-127/1024",
+            "bytes 0-+127/1024",
+            "bytes 0--127/1024",
+            "bytes -/1024",
+        ] {
+            assert!(parse_content_range(bad).is_err(), "{bad}");
+        }
     }
 }

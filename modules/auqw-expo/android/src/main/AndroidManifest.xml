@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <!-- setWakeMode(WAKE_MODE_LOCAL) on the warm player. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
   <application>
     <!-- Single warm player lives in the service so it survives the JS
          UI being torn down; module manifests merge into the app. -->

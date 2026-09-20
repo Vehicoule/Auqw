@@ -62,6 +62,13 @@ class HostConfigInput : Record {
 
   @Field
   var potProviderUrl: String? = null
+
+  /** Optional overrides — both default to app-private dirs below. */
+  @Field
+  var statePath: String? = null
+
+  @Field
+  var streamPath: String? = null
 }
 
 /**
@@ -88,8 +95,10 @@ class AuqwExpoModule : Module() {
 
   // Warm singleton player, owned by AuqwMediaSessionService and reached
   // via an in-process binder — bound at module create so the bind never
-  // sits on the play path.
-  private val playerReady = CompletableDeferred<ExoPlayer>()
+  // sits on the play path. `playerReady` is replaced on disconnect so a
+  // rebind completes a fresh deferred (never resolves a dead player).
+  @Volatile
+  private var playerReady = CompletableDeferred<ExoPlayer>()
   @Volatile
   private var player: ExoPlayer? = null
   @Volatile
@@ -126,20 +135,22 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("createHost") { config: HostConfigInput ->
-      val statePath = try {
-        val dir = appContext.reactContext?.filesDir
-          ?: throw IllegalStateException("no react context")
-        dir.resolve("plugin-kv.json").absolutePath
-      } catch (e: Exception) {
-        throw CodedException("ERR_RUNTIME", "state path: ${e.message}", e)
-      }
+      val ctx = appContext.reactContext
+        ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+      val statePath = config.statePath
+        ?: ctx.filesDir.resolve("plugin-kv.json").absolutePath
+      // The stream seam's sparse cache — app-private, cacheDir so the
+      // system can reclaim it; the registry sweeps it at host start.
+      val streamPath = config.streamPath
+        ?: ctx.cacheDir.resolve("auqw-stream").absolutePath
       val h = try {
         PluginHost(
           HostConfig(
             fuelPerEntry = config.fuelPerEntry.toULong(),
             fuelTotal = config.fuelTotal.toULong(),
             potProviderUrl = config.potProviderUrl,
-            statePath = statePath
+            statePath = statePath,
+            streamPath = streamPath
           )
         )
       } catch (e: HostException) {
@@ -283,6 +294,7 @@ class AuqwExpoModule : Module() {
             Bundle().apply {
               putString("requestId", requestId)
               putString("attemptId", attemptId)
+              putDouble("queueRev", queueRev)
               putBundle("outcome", prepareOutcomeBundle(outcome))
             }
           )
@@ -336,13 +348,15 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("releaseStream") Coroutine { handle: String ->
-      streamRegistry.unregister(handle)
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       try {
         h.streamRelease(handle)
       } catch (e: StreamException) {
         throw CodedException("ERR_STREAM", "${streamKind(e)}: ${e.message}", e)
       }
+      // Released — unmap only on success so a failed release keeps the
+      // handle routable (the session is still alive).
+      streamRegistry.unregister(handle)
       // Releasing the attached stream stops its playback; the status
       // join is cleared first so a released handle emits nothing stale.
       val a = attached
@@ -364,12 +378,15 @@ class AuqwExpoModule : Module() {
       } catch (e: StreamException) {
         throw CodedException("ERR_STREAM", "${streamKind(e)}: ${e.message}", e)
       }
-      marks.marks.map { m ->
-        mapOf(
-          "name" to m.name,
-          "atMs" to m.atMs.toDouble(),
-          "sinceStartMs" to m.sinceStartMs.toDouble()
-        )
+      // The generated record is flat — epoch fields pass through
+      // verbatim and durations keep their names (no invented epochs).
+      buildMap {
+        put("prepareStartedMs", marks.prepareStartedMs.toDouble())
+        marks.resolveMs?.let { put("resolveMs", it.toDouble()) }
+        marks.mintMs?.let { put("remintMs", it.toDouble()) }
+        marks.firstByteMs?.let { put("firstByteMs", it.toDouble()) }
+        marks.headReadyMs?.let { put("headReadyMs", it.toDouble()) }
+        marks.attachMs?.let { put("attachMs", it.toDouble()) }
       }
     }
 
@@ -389,19 +406,25 @@ class AuqwExpoModule : Module() {
   private val serviceConnection = object : ServiceConnection {
     override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
       val p = (binder as? AuqwMediaSessionService.LocalBinder)?.player() ?: return
-      // Listeners register once, on the player's own looper.
+      // Listeners register once, on the player's own looper. Remove
+      // first: a rebind of the same service instance must not stack a
+      // second listener set and emit every event twice.
       Handler(p.applicationLooper).post {
+        p.removeListener(playerListener)
+        p.removeAnalyticsListener(analyticsListener)
         p.addListener(playerListener)
         p.addAnalyticsListener(analyticsListener)
       }
       player = p
-      if (!playerReady.isCompleted) {
-        playerReady.complete(p)
-      }
+      playerReady.complete(p)
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
+      // The bound player is dead — reset so the next awaitPlayer
+      // rebinds instead of resolving a stale deferred.
       player = null
+      bound = false
+      playerReady = CompletableDeferred()
     }
   }
 
@@ -490,6 +513,7 @@ class AuqwExpoModule : Module() {
       Bundle().apply {
         putString("handle", a.handle)
         putString("attemptId", a.attemptId)
+        putDouble("queueRev", a.queueRev)
         putString("state", state)
         putDouble("positionMs", p.currentPosition.coerceAtLeast(0).toDouble())
         if (p.duration != C.TIME_UNSET) {
@@ -507,6 +531,8 @@ class AuqwExpoModule : Module() {
       EVENT_PHASE_MARK,
       Bundle().apply {
         putString("handle", a.handle)
+        putString("attemptId", a.attemptId)
+        putDouble("queueRev", a.queueRev)
         putString("name", name)
         putDouble("atMs", System.currentTimeMillis().toDouble())
         putDouble("sinceStartMs", (SystemClock.elapsedRealtime() - a.attachElapsedMs).toDouble())
@@ -646,6 +672,7 @@ class AuqwExpoModule : Module() {
           outcome.resource.expiresAtMs?.let { putDouble("expiresAtMs", it.toDouble()) }
           putString("client", outcome.resource.client)
           outcome.resource.contentLength?.let { putDouble("contentLength", it.toDouble()) }
+          outcome.resource.itag?.let { putDouble("itag", it.toDouble()) }
         }
       )
       putBundle("attempt", attemptBundle(outcome.attempt))
@@ -673,8 +700,8 @@ class AuqwExpoModule : Module() {
   }
 
   // onPrepareOutcome stream payload: the JS contract shape —
-  // {handle, mime, contentLength?, expiresAtMs?, bitrateKbps?} —
-  // deliberately omits itag and never carries the signed URL.
+  // {handle, mime, itag?, contentLength?, expiresAtMs?, bitrateKbps?} —
+  // never carries the signed URL.
   private fun prepareOutcomeBundle(outcome: PrepareOutcome): Bundle = when (outcome) {
     is PrepareOutcome.Prepared -> Bundle().apply {
       putString("type", "prepared")
@@ -683,6 +710,7 @@ class AuqwExpoModule : Module() {
         Bundle().apply {
           putString("handle", outcome.stream.handle)
           putString("mime", outcome.stream.mime)
+          outcome.stream.itag?.let { putDouble("itag", it.toDouble()) }
           outcome.stream.contentLength?.let { putDouble("contentLength", it.toDouble()) }
           outcome.stream.expiresAtMs?.let { putDouble("expiresAtMs", it.toDouble()) }
           outcome.stream.bitrateKbps?.let { putDouble("bitrateKbps", it.toDouble()) }
@@ -708,6 +736,5 @@ class AuqwExpoModule : Module() {
     is HostException.Load -> CodedException("ERR_LOAD", e.message, e)
     is HostException.UnknownPlugin -> CodedException("ERR_UNKNOWN_PLUGIN", e.message, e)
     is HostException.Runtime -> CodedException("ERR_RUNTIME", e.message, e)
-    else -> CodedException("ERR_HOST", e.message, e)
   }
 }

@@ -3,6 +3,7 @@ package expo.modules.auqwexpo
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.os.Process
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
@@ -46,7 +47,14 @@ class AuqwMediaSessionService : MediaSessionService() {
   private val localBinder = LocalBinder()
 
   inner class LocalBinder : Binder() {
-    fun player(): ExoPlayer? = this@AuqwMediaSessionService.player
+    // The service is exported (MediaSession controllers bind from
+    // SystemUI); the raw player handle is same-UID only.
+    fun player(): ExoPlayer? =
+      if (Binder.getCallingUid() == Process.myUid()) {
+        this@AuqwMediaSessionService.player
+      } else {
+        null
+      }
   }
 
   override fun onCreate() {
