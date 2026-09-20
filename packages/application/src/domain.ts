@@ -90,6 +90,14 @@ export type QueueOccurrence = {
   selectedRef: SourceRef | null;
 };
 
+/**
+ * Bounds for the optional artwork-cache budget setting, per
+ * docs/specs/data.md (artwork ~200 MB, bounded, managed in settings).
+ */
+export const ARTWORK_CACHE_BUDGET_MIN_BYTES = 16 * 1024 * 1024;
+export const ARTWORK_CACHE_BUDGET_MAX_BYTES = 1024 * 1024 * 1024;
+export const ARTWORK_CACHE_BUDGET_DEFAULT_BYTES = 200 * 1024 * 1024;
+
 export type Settings = {
   catalogProvider: string;
   playbackProvider: string;
@@ -97,6 +105,12 @@ export type Settings = {
   qualityKbps: number;
   theme: 'dark' | 'light' | 'oled' | 'system';
   prefetch: boolean;
+  /**
+   * Optional artwork-cache byte budget. Absent resolves to
+   * ARTWORK_CACHE_BUDGET_DEFAULT_BYTES; when present it must stay
+   * inside [ARTWORK_CACHE_BUDGET_MIN_BYTES, ARTWORK_CACHE_BUDGET_MAX_BYTES].
+   */
+  artworkCacheBytes?: number;
 };
 
 const VERSION_LABELS: ReadonlySet<string> = new Set([
@@ -353,17 +367,20 @@ export function isRecording(value: unknown): value is Recording {
   );
 }
 
+const SETTINGS_KEYS = [
+  'catalogProvider',
+  'playbackProvider',
+  'storefront',
+  'qualityKbps',
+  'theme',
+  'prefetch',
+];
+
 export function isSettings(value: unknown): value is Settings {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      'catalogProvider',
-      'playbackProvider',
-      'storefront',
-      'qualityKbps',
-      'theme',
-      'prefetch',
-    ]) &&
+    (hasExactKeys(value, SETTINGS_KEYS) ||
+      hasExactKeys(value, [...SETTINGS_KEYS, 'artworkCacheBytes'])) &&
     isString(value['catalogProvider'], 64) &&
     isString(value['playbackProvider'], 64) &&
     isStorefront(value['storefront']) &&
@@ -375,7 +392,12 @@ export function isSettings(value: unknown): value is Settings {
       value['theme'] === 'light' ||
       value['theme'] === 'oled' ||
       value['theme'] === 'system') &&
-    typeof value['prefetch'] === 'boolean'
+    typeof value['prefetch'] === 'boolean' &&
+    (value['artworkCacheBytes'] === undefined ||
+      (typeof value['artworkCacheBytes'] === 'number' &&
+        Number.isSafeInteger(value['artworkCacheBytes']) &&
+        value['artworkCacheBytes'] >= ARTWORK_CACHE_BUDGET_MIN_BYTES &&
+        value['artworkCacheBytes'] <= ARTWORK_CACHE_BUDGET_MAX_BYTES))
   );
 }
 

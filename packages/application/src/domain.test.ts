@@ -1,18 +1,28 @@
 import {
   isEntityRef,
   isRecording,
+  isSettings,
   isSourceRef,
   isTrackMetadata,
   isTrackRef,
   recordingFromMetadata,
 } from './domain.ts';
-import type { SourceRef, TrackMetadata } from './domain.ts';
+import type { Settings, SourceRef, TrackMetadata } from './domain.ts';
 import { assert, assertEqual } from './testing/assert.ts';
 
 const REF: SourceRef = {
   provider: 'youtube-music',
   kind: 'track',
   id: 'dQw4w9WgXcQ',
+};
+
+const SETTINGS: Settings = {
+  catalogProvider: 'itunes',
+  playbackProvider: 'youtube-music',
+  storefront: 'US',
+  qualityKbps: 256,
+  theme: 'system',
+  prefetch: true,
 };
 
 const META: TrackMetadata = {
@@ -81,6 +91,28 @@ export function run(): void {
   assert(!isTrackMetadata({ ...META, storefront: 'us' }));
   assert(!isTrackMetadata({ ...META, storefront: 'USA' }));
   assert(!isTrackMetadata({ ...META, storefront: 'U1' }));
+
+  // Settings: artworkCacheBytes is optional but bounded when present.
+  assert(isSettings(SETTINGS));
+  assert(
+    isSettings({ ...SETTINGS, artworkCacheBytes: 200 * 1024 * 1024 }),
+  );
+  assert(
+    !isSettings({ ...SETTINGS, artworkCacheBytes: 8 * 1024 * 1024 }),
+    'below the 16 MB floor',
+  );
+  assert(
+    !isSettings({
+      ...SETTINGS,
+      artworkCacheBytes: 2 * 1024 * 1024 * 1024,
+    }),
+    'above the 1 GB cap',
+  );
+  assert(
+    !isSettings({ ...SETTINGS, artworkCacheBytes: 1.5 }),
+    'non-integer rejected',
+  );
+  assert(!isSettings({ ...SETTINGS, stray: true }));
 
   const recording = recordingFromMetadata(META, 'rec-1');
   assert(isRecording(recording));
