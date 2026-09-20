@@ -13,6 +13,9 @@
 //!   a staged write parked behind HTTP survives neither cancel nor
 //!   failure.
 //! - `http`: one GET of `payload.url` through `http_request`.
+//! - `resume`: one ranged continuation of `payload.url` at
+//!   `payload.offset`/`payload.length` through the 0.3.0 `resume`
+//!   step; a `host_error` surfaces as `{"host_error": kind}`.
 //!
 //! Rebuild: `cargo build --target wasm32-unknown-unknown --release -p
 //! auqw-conformance-scenario`, then copy `target/wasm32-unknown-unknown/
@@ -38,6 +41,10 @@ struct ScenarioPayload {
     message: Option<String>,
     #[serde(default)]
     echo: Option<Value>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    length: Option<u64>,
 }
 
 fn missing(field: &str) -> GuestError {
@@ -63,6 +70,7 @@ async fn run(inv: Invocation) -> Result<Value, GuestError> {
         "kv_fail" => kv_fail(p).await,
         "kv_http" => kv_http(p).await,
         "http" => http(p).await,
+        "resume" => resume(p).await,
         other => Err(GuestError::Failed {
             kind: "not-applicable".into(),
             message: format!("unknown scenario {other}"),
@@ -128,4 +136,19 @@ async fn http(p: ScenarioPayload) -> Result<Value, GuestError> {
         "status": resp.status,
         "body_len": resp.body.len(),
     }))
+}
+
+/// One `resume` continuation at `payload.offset`/`payload.length`.
+/// A `host_error` surfaces as `{"host_error": kind}` so tests can
+/// assert both the pass-through and the denial paths.
+async fn resume(p: ScenarioPayload) -> Result<Value, GuestError> {
+    let url = p.url.ok_or_else(|| missing("url"))?;
+    match auqw_guest_sdk::resume(&url, p.offset.unwrap_or(0), p.length).await {
+        Ok(resp) => Ok(json!({
+            "status": resp.status,
+            "body_len": resp.body.len(),
+        })),
+        Err(GuestError::Host { kind, .. }) => Ok(json!({ "host_error": kind })),
+        Err(e) => Err(e),
+    }
 }

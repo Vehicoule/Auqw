@@ -670,6 +670,29 @@ pub async fn pot_token(content_binding: &str) -> Result<HttpResponse, GuestError
     parse_http_response(resp)
 }
 
+/// Continue a fetch at a byte offset through the host's `resume` step
+/// (ABI 0.3.0): the host issues `GET url` with a `Range` header it
+/// builds itself and verifies a `206` response's `Content-Range`
+/// against the request. Any other status passes through as the
+/// upstream's real answer (`200` = range ignored, `416` = past EOF).
+///
+/// # Errors
+/// [`GuestError::Host`] on `host_error` (`permission-denied` for an
+/// unlisted destination, `invalid-response` for a `Content-Range`
+/// mismatch); [`GuestError::InvalidResponse`] on a protocol violation.
+pub async fn resume(
+    url: &str,
+    offset: u64,
+    length: Option<u64>,
+) -> Result<HttpResponse, GuestError> {
+    let payload = match length {
+        Some(l) => json!({ "url": url, "offset": offset, "length": l }),
+        None => json!({ "url": url, "offset": offset }),
+    };
+    let resp = host_call("resume", payload).await?;
+    parse_http_response(resp)
+}
+
 /// Read `key` from this plugin's KV namespace; `None` when absent.
 ///
 /// # Errors
