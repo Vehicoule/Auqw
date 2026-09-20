@@ -211,6 +211,12 @@ impl StreamRegistry {
         // insert must be atomic against other prepares or two
         // concurrent prepares could both leave unattached sessions.
         let _guard = lock(&self.prepare_lock)?;
+        // `shutdown` also takes this lock, so the flag check inside it
+        // is decisive — a prepare can never insert a session after the
+        // shutdown sweep has already run.
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Err(StreamError::Cancelled);
+        }
         if let Some(info) = self.reusable(&source.source_ref)? {
             return Ok(info);
         }
@@ -325,10 +331,25 @@ impl StreamRegistry {
         Ok(())
     }
 
+    /// Whether `handle` names a live (non-terminal) session — callers
+    /// pruning stale handle bookkeeping (the bindings' prepare map)
+    /// need the live answer, not just presence in the map.
+    #[must_use]
+    pub fn is_live(&self, handle: &str) -> bool {
+        self.lookup(handle)
+            .map(|o| o.is_some_and(|s| !s.is_terminal()))
+            .unwrap_or(false)
+    }
+
     /// End every session `Cancelled` (pumps aborted, readers woken,
     /// files evicted) and stop the reaper — for host teardown. Also
     /// runs on drop. Later `prepare` calls fail `Cancelled`.
     pub fn shutdown(&self) {
+        // Serialize against `prepare`: it re-checks the flag under this
+        // lock, so whichever runs second sees the other's outcome — a
+        // racing prepare can never leave a live session behind the
+        // sweep. Poison must not block teardown, hence `.ok()`.
+        let _guard = self.prepare_lock.lock().ok();
         self.shutdown.store(true, Ordering::Relaxed);
         if let Ok(mut r) = self.reaper.lock() {
             if let Some(h) = r.take() {

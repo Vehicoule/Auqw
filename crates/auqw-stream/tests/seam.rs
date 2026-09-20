@@ -52,7 +52,10 @@ fn config(dir: &TestDir) -> StreamConfig {
     c.head_bytes = 256;
     c.read_ahead = 512;
     c.stall = Duration::from_millis(300);
-    c.read_deadline = Duration::from_millis(400);
+    // Backstop, not the mechanism under test: tests that assert a woken
+    // outcome must never lose to the deadline on a slow CI — the tests
+    // that exercise the deadline itself set it explicitly.
+    c.read_deadline = Duration::from_secs(5);
     c.prepare_ttl = Duration::from_secs(60);
     c
 }
@@ -108,10 +111,13 @@ enum Step {
 /// Offset-keyed fetch: `pages` maps a requested offset to a queue of
 /// replies (queue length covers re-mint retry sequences); anything
 /// unscripted hangs. `in_flight` counts requests actually issued so
-/// tests can wait for the pump to be inside a fetch.
+/// tests can wait for the pump to be inside a fetch. `urls` parallels
+/// `requests` — cross-session tests cannot tell two sessions apart by
+/// offset alone.
 struct MapFetch {
     pages: Mutex<HashMap<u64, VecDeque<Step>>>,
     requests: Mutex<Vec<(u64, u64)>>,
+    urls: Mutex<Vec<String>>,
     in_flight: AtomicU32,
 }
 
@@ -120,6 +126,7 @@ impl MapFetch {
         Self {
             pages: Mutex::new(pages),
             requests: Mutex::new(Vec::new()),
+            urls: Mutex::new(Vec::new()),
             in_flight: AtomicU32::new(0),
         }
     }
@@ -137,12 +144,19 @@ impl MapFetch {
             .map(|r| r.iter().filter(|(o, _)| *o == offset).count())
             .unwrap_or(0)
     }
+
+    fn count_url(&self, url: &str) -> usize {
+        self.urls
+            .lock()
+            .map(|u| u.iter().filter(|s| s.as_str() == url).count())
+            .unwrap_or(0)
+    }
 }
 
 impl Fetch for MapFetch {
     fn get_range<'a>(
         &'a self,
-        _url: &'a str,
+        url: &'a str,
         offset: u64,
         max_len: u64,
         _stall: Duration,
@@ -151,6 +165,9 @@ impl Fetch for MapFetch {
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         if let Ok(mut r) = self.requests.lock() {
             r.push((offset, max_len));
+        }
+        if let Ok(mut u) = self.urls.lock() {
+            u.push(url.to_string());
         }
         let step = self
             .pages
@@ -384,8 +401,10 @@ async fn expired_source_fails_attach() {
 async fn read_deadline_is_a_named_bound() {
     let d = TestDir::new("deadline");
     let fetch = Arc::new(MapFetch::new(HashMap::new()));
+    let mut c = config(&d);
+    c.read_deadline = Duration::from_millis(400);
     let reg = StreamRegistry::with_fetch(
-        config(&d),
+        c,
         tokio::runtime::Handle::current(),
         Arc::clone(&fetch) as Arc<dyn Fetch>,
     )
@@ -977,16 +996,23 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
 /// requests — it parks on the shared pool until demand drains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn speculative_fill_yields_to_demand_across_sessions() {
+    const A_URL: &str = "https://a.example/s";
+    const B_URL: &str = "https://b.example/s";
     let d = TestDir::new("poolyield");
     let fetch = Arc::new(MapFetch::new(HashMap::new())); // fetches hang
+                                                         // A's demand must outlive the whole yield window — a read deadline
+                                                         // expiring mid-test would dequeue it legitimately.
+    let mut c = config(&d);
+    c.read_deadline = Duration::from_secs(30);
     let reg = StreamRegistry::with_fetch(
-        config(&d),
+        c,
         tokio::runtime::Handle::current(),
         Arc::clone(&fetch) as Arc<dyn Fetch>,
     )
     .unwrap_or_else(|e| panic!("registry: {e}"));
     let mut sa = source(1024);
     sa.source_ref = "a".into();
+    sa.url = A_URL.into();
     let a = reg
         .prepare(sa, Arc::new(NeverRemint))
         .unwrap_or_else(|e| panic!("prepare a: {e}"))
@@ -995,21 +1021,95 @@ async fn speculative_fill_yields_to_demand_across_sessions() {
     std::thread::scope(|s| {
         let _reader = s.spawn(|| reg.read(&a, 900, 64));
         wait_until_blocking(|| fetch.issued(900));
-        // Demand at 900 is in flight (hung). A second prepare's
-        // head-fill must not issue its offset-0 request.
+        // The demand position stays queued for the whole window: the
+        // hung fetch never commits, so nothing dequeues it before the
+        // cancel below. Offsets alone cannot separate A's requests
+        // from B's — B carries its own url, so a policy violation is
+        // observable as a request issued with B's url, nothing else.
         let mut sb = source(1024);
         sb.source_ref = "b".into();
-        let _b = reg
+        sb.url = B_URL.into();
+        let b = reg
             .prepare(sb, Arc::new(NeverRemint))
             .unwrap_or_else(|e| panic!("prepare b: {e}"));
+        // Give B's pump ample time to run its decide. Whether it parked
+        // on the queued demand or has not been scheduled yet, it must
+        // not have issued a request.
         std::thread::sleep(Duration::from_millis(150));
-        // A's own speculative head-fill fired once at prepare time
-        // (demand was empty then); B's must never fire.
         assert_eq!(
-            fetch.count_at(0),
-            1,
-            "a second head-fill ran while demand was queued"
+            fetch.count_url(B_URL),
+            0,
+            "B's speculative fill ran while demand was queued"
         );
-        reg.cancel(&a).unwrap_or_else(|e| panic!("cancel: {e}"));
+        // A's session ending drains the demand: B's parked fill must
+        // resume — this leg exercises the `drained` wakeup path.
+        reg.cancel(&a).unwrap_or_else(|e| panic!("cancel a: {e}"));
+        wait_until_blocking(|| fetch.count_url(B_URL) > 0);
+        reg.cancel(&b.handle)
+            .unwrap_or_else(|e| panic!("cancel b: {e}"));
+    });
+}
+
+/// Two readers parked on the same hole share one refcounted demand
+/// entry: when the first read's deadline drops its hold, the position
+/// must stay queued — the surviving reader's demand is still real, and
+/// another session's speculative fill must not slip into the gap.
+/// Only the last departing holder dequeues it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_reader_keeps_siblings_demand_visible() {
+    const B_URL: &str = "https://b.example/s";
+    let d = TestDir::new("tworeader");
+    let mut pages: HashMap<u64, VecDeque<Step>> = HashMap::new();
+    pages.insert(900, VecDeque::from(vec![Step::Hang]));
+    let fetch = Arc::new(MapFetch::new(pages));
+    // Reader 1's deadline lands 600ms in; reader 2's ~300ms later —
+    // the window between them is where the refcount is proven.
+    let mut c = config(&d);
+    c.read_deadline = Duration::from_millis(600);
+    let reg = StreamRegistry::with_fetch(
+        c,
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    std::thread::scope(|s| {
+        let r1 = s.spawn(|| reg.read(&h, 900, 64));
+        wait_until_blocking(|| fetch.issued(900));
+        // Reader 2 joins the same hole while the through-fetch is hung;
+        // the shared entry's count becomes two.
+        std::thread::sleep(Duration::from_millis(300));
+        let r2 = s.spawn(|| reg.read(&h, 900, 64));
+        // Session B's speculative fill must yield while *any* demand
+        // holds position 900 — reader 1's deadline drops one count but
+        // reader 2's keeps the position queued.
+        let mut sb = source(1024);
+        sb.source_ref = "b".into();
+        sb.url = B_URL.into();
+        let b = reg
+            .prepare(sb, Arc::new(NeverRemint))
+            .unwrap_or_else(|e| panic!("prepare b: {e}"));
+        // Reader 1 hits its deadline: its hold drops, reader 2's holds.
+        let e = err_of(r1.join().unwrap_or_else(|e| panic!("join r1: {e:?}")));
+        assert_eq!(e.kind(), "transient", "{e}");
+        // Inside the ~300ms before reader 2's own deadline, B's fill
+        // must still be parked — the demand is not drained.
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            fetch.count_url(B_URL),
+            0,
+            "B's fill ran while reader 2 still held the demand position"
+        );
+        // The last holder's deadline dequeues the position — demand
+        // drains for real and B's fill resumes.
+        let e = err_of(r2.join().unwrap_or_else(|e| panic!("join r2: {e:?}")));
+        assert_eq!(e.kind(), "transient", "{e}");
+        wait_until_blocking(|| fetch.count_url(B_URL) > 0);
+        reg.cancel(&b.handle)
+            .unwrap_or_else(|e| panic!("cancel b: {e}"));
     });
 }

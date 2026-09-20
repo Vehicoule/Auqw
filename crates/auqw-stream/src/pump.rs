@@ -20,6 +20,7 @@
 //! in-flight fill request is aborted on `ft_notify` and re-picked
 //! later; a fetch-through request is itself never preempted.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,11 +35,29 @@ pub(crate) async fn pump_loop(session: Arc<SessionInner>, fetch: Arc<dyn Fetch>)
     loop {
         match session.next_action() {
             Err(_) | Ok(Action::Stop) => return,
-            Ok(Action::Park) => {
-                tokio::select! {
-                    () = session.pump_notify.notified() => {}
-                    () = session.pool.drained.notified() => {}
-                    () = session.cancel.cancelled() => {}
+            Ok(Action::Park { on_demand }) => {
+                if on_demand {
+                    // `drained` fires `notify_waiters`, which wakes only
+                    // already-registered waiters and stores no permit —
+                    // register interest first, then re-check demand so a
+                    // drain landing between the decide and this
+                    // registration is observed, not missed.
+                    let drained = session.pool.drained.notified();
+                    tokio::pin!(drained);
+                    let _ = drained.as_mut().enable();
+                    if session.pool.demand.load(Ordering::Relaxed) == 0 {
+                        continue;
+                    }
+                    tokio::select! {
+                        () = session.pump_notify.notified() => {}
+                        () = &mut drained => {}
+                        () = session.cancel.cancelled() => {}
+                    }
+                } else {
+                    tokio::select! {
+                        () = session.pump_notify.notified() => {}
+                        () = session.cancel.cancelled() => {}
+                    }
                 }
             }
             Ok(Action::Fetch {
@@ -697,7 +716,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(status_steps(416, 2)));
         {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
-            sh.fetch_through.insert(900);
+            sh.fetch_through.insert(900, 1);
         }
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
         wait_until(|| eof_below(&s).is_some() || s.is_terminal()).await;
@@ -772,9 +791,9 @@ mod tests {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
             // 64 becomes covered when the fetch at 0 commits; 500 stays
             // a real hole. Scripted replies are consumed in pump order.
-            sh.fetch_through.insert(0);
-            sh.fetch_through.insert(64);
-            sh.fetch_through.insert(500);
+            sh.fetch_through.insert(0, 1);
+            sh.fetch_through.insert(64, 1);
+            sh.fetch_through.insert(500, 1);
         }
         let fetch = Arc::new(ScriptedFetch::new(vec![
             Step::Reply(resp(206, 0, 128, 1024)),

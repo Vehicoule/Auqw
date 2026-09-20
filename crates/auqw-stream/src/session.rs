@@ -11,7 +11,7 @@
 //! so a reader either sees the extent or is already parked when the
 //! notify lands.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -33,9 +33,11 @@ pub(crate) struct Shared {
     pub attached: bool,
     /// Consumer read frontier — drives the read-ahead window.
     pub read_pos: u64,
-    /// Demand-read positions awaiting fetch-through (deduped set;
-    /// removed when the fetch commits, kept while in flight).
-    pub fetch_through: BTreeSet<u64>,
+    /// Demand-read positions awaiting fetch-through, refcounted: each
+    /// parked reader holds one count, so a position stays queued until
+    /// its *last* demander departs (one reader's deadline cannot hide
+    /// a still-parked sibling's demand from the pool).
+    pub fetch_through: BTreeMap<u64, usize>,
     /// Confirmed end-of-stream ceiling: `416` evidence that nothing
     /// exists at or above this offset when the total length is unknown.
     pub eof_below: Option<u64>,
@@ -99,8 +101,16 @@ pub(crate) struct PumpCore {
 pub(crate) enum Action {
     /// Terminal state or fully covered file — the pump exits.
     Stop,
-    /// Nothing to fetch right now; park until notified.
-    Park,
+    /// Nothing to fetch right now; park until notified. `on_demand`
+    /// marks the demand-yield park — an unattached pump paused while
+    /// another session's fetch-through is queued: it also wakes on
+    /// `pool.drained`, which the pump must register on *before*
+    /// waiting (`notify_waiters` stores no permit, so a drain landing
+    /// between this decide and the wait is missed without that).
+    Park {
+        /// Yielded to cross-session demand vs simply nothing to do.
+        on_demand: bool,
+    },
     /// Fetch `len` bytes at `offset`. `through` marks demand reads
     /// (fetch-through): they outrank speculative fill and are never
     /// preempted by newer demand reads.
@@ -176,7 +186,7 @@ impl SessionInner {
                 terminal: None,
                 attached: false,
                 read_pos: 0,
-                fetch_through: BTreeSet::new(),
+                fetch_through: BTreeMap::new(),
                 eof_below: None,
                 committed: 0,
                 detach_epoch: 0,
@@ -413,7 +423,7 @@ impl SessionInner {
         if let Ok(mut sh) = lock(&self.shared) {
             sh.eof_below = Some(sh.eof_below.map_or(at, |b| b.min(at)));
             if let Some(b) = sh.eof_below {
-                sh.fetch_through.retain(|&p| p < b);
+                sh.fetch_through.retain(|&p, _| p < b);
                 self.publish_demand(&mut sh);
             }
         }
@@ -444,9 +454,9 @@ impl SessionInner {
         // wastes a range request (and re-mints into the budget).
         let eof = sh.eof_below;
         sh.fetch_through
-            .retain(|&p| !store.covers(p) && eof.is_none_or(|b| p < b));
+            .retain(|&p, _| !store.covers(p) && eof.is_none_or(|b| p < b));
         self.publish_demand(&mut sh);
-        if let Some(&pos) = sh.fetch_through.iter().next() {
+        if let Some(&pos) = sh.fetch_through.keys().next() {
             return Ok(Action::Fetch {
                 offset: pos,
                 len: self.config.chunk_bytes,
@@ -458,7 +468,7 @@ impl SessionInner {
         // this unattached head-fill (Slice-1.5 priority rule). The
         // parked pump wakes on `pool.drained` when demand empties.
         if !sh.attached && self.pool.demand.load(Ordering::Relaxed) > 0 {
-            return Ok(Action::Park);
+            return Ok(Action::Park { on_demand: true });
         }
         let (lo, mut bound) = if sh.attached {
             (
@@ -484,7 +494,7 @@ impl SessionInner {
                 if !sh.attached && sh.marks.head_ready_ms.is_none() {
                     sh.marks.head_ready_ms = Some(now_ms());
                 }
-                Ok(Action::Park)
+                Ok(Action::Park { on_demand: false })
             }
         }
     }
@@ -570,39 +580,51 @@ impl SessionInner {
         let deadline = Instant::now() + self.config.read_deadline;
         let mut sh = lock(&self.shared)?;
         let epoch = sh.detach_epoch;
-        loop {
+        // `holding` tracks this reader's count on the shared demand
+        // entry — every exit path must release it so a departing read
+        // never leaves a stale position queued, while a surviving
+        // sibling's count keeps it alive.
+        let mut holding = false;
+        let out = loop {
             if let Some(e) = &sh.terminal {
-                return Err(e.clone());
+                break Err(e.clone());
             }
             if sh.detach_epoch != epoch {
-                return Err(StreamError::Cancelled);
+                break Err(StreamError::Cancelled);
             }
-            if let Some(served) = self.try_serve(&mut sh, position, max_len)? {
-                return Ok(served);
+            match self.try_serve(&mut sh, position, max_len) {
+                Ok(Some(served)) => break Ok(served),
+                Ok(None) => {}
+                Err(e) => break Err(e),
             }
-            self.queue_through(&mut sh, position);
+            if !holding {
+                self.queue_through(&mut sh, position);
+                holding = true;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                // The dead read must not keep its demand position
-                // queued — a stale entry would head-of-line block newer
-                // demand reads and hold back speculative fill.
-                sh.fetch_through.remove(&position);
-                self.publish_demand(&mut sh);
-                return Err(StreamError::Transient {
+                break Err(StreamError::Transient {
                     message: format!(
                         "read deadline {}ms exceeded at offset {position}",
                         self.config.read_deadline.as_millis()
                     ),
                 });
             }
-            let (guard, _) =
-                self.readers
-                    .wait_timeout(sh, remaining)
-                    .map_err(|_| StreamError::Internal {
+            match self.readers.wait_timeout(sh, remaining) {
+                Ok((guard, _)) => sh = guard,
+                // Recover the guard so the hold release below can run.
+                Err(poisoned) => {
+                    sh = poisoned.into_inner().0;
+                    break Err(StreamError::Internal {
                         message: "lock poisoned".into(),
-                    })?;
-            sh = guard;
+                    });
+                }
+            }
+        };
+        if holding {
+            self.drop_through(&mut sh, position);
         }
+        out
     }
 
     /// Serve `position` from the store under `shared` (store is the
@@ -631,14 +653,37 @@ impl SessionInner {
         Ok(None)
     }
 
-    /// Register a demand read at `position` and wake the pump.
+    /// Register a demand read at `position` and wake the pump — the
+    /// refcount only signals on 0→1 (the position was not queued).
     fn queue_through(&self, sh: &mut Shared, position: u64) {
-        if sh.fetch_through.insert(position) {
+        let fresh = {
+            let n = sh.fetch_through.entry(position).or_insert(0);
+            *n += 1;
+            *n == 1
+        };
+        sh.read_pos = sh.read_pos.max(position);
+        if fresh {
             self.publish_demand(sh);
             self.ft_notify.notify_one();
             self.pump_notify.notify_one();
         }
-        sh.read_pos = sh.read_pos.max(position);
+    }
+
+    /// Release one reader's hold on `position`: only the last departing
+    /// holder dequeues it and republishes demand — a dead read cannot
+    /// hide a still-parked sibling's demand from the shared pool.
+    fn drop_through(&self, sh: &mut Shared, position: u64) {
+        let last = match sh.fetch_through.get_mut(&position) {
+            Some(n) => {
+                *n = n.saturating_sub(1);
+                *n == 0
+            }
+            None => false,
+        };
+        if last {
+            sh.fetch_through.remove(&position);
+            self.publish_demand(sh);
+        }
     }
 
     /// Apply this session's `fetch_through` delta to the shared demand

@@ -303,6 +303,9 @@ impl PluginHost {
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let summary = AttemptSummary::from(&attempt);
+                // `stream` is moved into the blocking closure below —
+                // keep a clone for the bookkeeping prune.
+                let registry = Arc::clone(&stream);
                 let outcome = match result {
                     Ok(value) => {
                         // Session creation does file I/O — run it on the
@@ -326,9 +329,16 @@ impl PluginHost {
                         attempt: summary,
                     },
                 };
-                if let PrepareOutcome::Prepared { stream, .. } = &outcome {
+                if let PrepareOutcome::Prepared {
+                    stream: prepared, ..
+                } = &outcome
+                {
                     if let Ok(mut m) = prepared_handles.lock() {
-                        m.insert(request_id.clone(), stream.handle.clone());
+                        // Sessions ended by supersede/evict/expiry saw
+                        // neither cancel nor release — drop their stale
+                        // mappings so the map tracks live handles only.
+                        m.retain(|_, h| *h == prepared.handle || registry.is_live(h));
+                        m.insert(request_id.clone(), prepared.handle.clone());
                     }
                 }
                 listener.on_outcome(request_id, outcome);

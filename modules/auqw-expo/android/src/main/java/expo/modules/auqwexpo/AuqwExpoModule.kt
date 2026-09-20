@@ -349,19 +349,28 @@ class AuqwExpoModule : Module() {
 
     AsyncFunction("releaseStream") Coroutine { handle: String ->
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      // Clear the status join before terminating the session: an
+      // in-flight read unwinding Released must not emit a stale
+      // "failed" status for a handle the caller just ended.
+      val a = attached
+      if (a?.handle == handle) {
+        attached = null
+      }
       try {
         h.streamRelease(handle)
       } catch (e: StreamException) {
+        // Release failed — the session is still alive, so restore the
+        // join unless something else attached in the gap.
+        if (a?.handle == handle && attached == null) {
+          attached = a
+        }
         throw CodedException("ERR_STREAM", "${streamKind(e)}: ${e.message}", e)
       }
       // Released — unmap only on success so a failed release keeps the
       // handle routable (the session is still alive).
       streamRegistry.unregister(handle)
-      // Releasing the attached stream stops its playback; the status
-      // join is cleared first so a released handle emits nothing stale.
-      val a = attached
+      // Releasing the attached stream stops its playback.
       if (a?.handle == handle) {
-        attached = null
         val p = awaitPlayer()
         onPlayerThread(p) {
           p.stop()
