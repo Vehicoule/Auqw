@@ -1617,6 +1617,10 @@ function Main({
             })();
           } else if (params.has('apply-import')) {
             onApplyImport();
+          } else if (params.has('export')) {
+            importText.current = null;
+            setTransfer(IDLE_TRANSFER);
+            onExport();
           } else {
             importText.current = null;
             setTransfer(IDLE_TRANSFER);
