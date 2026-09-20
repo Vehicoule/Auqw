@@ -2,6 +2,9 @@ packages:
   - "apps/*"
   - "modules/*"
   - "packages/*"
+# Expo/React Native resolves packages from a flat node_modules layout;
+# pnpm's isolated linker breaks Gradle autolinking without this.
+nodeLinker: hoisted
 # Refuse packages published in the last 7 days — supply-chain floor.
 # The excludes below are the exact lockfile pins that were younger than
 # the window when pinned (Expo SDK + evergreen data packages); any future
