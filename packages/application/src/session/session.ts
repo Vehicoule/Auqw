@@ -16,6 +16,15 @@ import {
   recordingFromMetadata,
 } from '../domain.ts';
 import { isPersistedState } from '../library/library.ts';
+import {
+  applyImport,
+  exportLibrary,
+  previewImport,
+} from '../library/export-import.ts';
+import type {
+  ExportResult,
+  ImportPreview,
+} from '../library/export-import.ts';
 import { toggleTrackLike } from '../library/likes.ts';
 import {
   extractVersionLabels,
@@ -653,6 +662,81 @@ export class Session {
       this.#own(this.#startAttempt(snap.currentOccurrenceId));
     }
     return ok(undefined);
+  }
+
+  // ---- export / import ------------------------------------------------
+
+  /** Serialize the owned library to export-document JSON text. */
+  async exportLibrary(): Promise<Result<ExportResult>> {
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      const deadlineMs = this.#deadline();
+      const context = this.#newContext('export', deadlineMs, source.signal);
+      return await this.#withDeadline(
+        () => exportLibrary(this.#storage, this.#clock, context),
+        deadlineMs,
+        source,
+      );
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
+  /**
+   * Replace the owned library with a validated import document.
+   * The document validates before anything changes; the commit is a
+   * single all-or-nothing transaction; then the session rehydrates
+   * from the replaced rows. Returns the confirm-screen summary.
+   */
+  async importLibrary(text: string): Promise<Result<ImportPreview>> {
+    const preview = previewImport(text);
+    if (!preview.ok) {
+      return preview;
+    }
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      // Release active playback first: its recording rows are about
+      // to be replaced. A clean release — the recording did not fail.
+      const active = this.#active;
+      if (active !== null) {
+        active.source.cancel();
+        active.timer?.cancel();
+        if (active.handle !== undefined) {
+          await this.#releaseHandle(active.handle, active.identity);
+        }
+        this.#active = null;
+        const r = this.#ready;
+        if (r !== null) {
+          r.playback = { type: 'idle' };
+        }
+      }
+      // Successor mapping may be resolving against the old rows.
+      this.#mappingSource?.cancel();
+      this.#mappingSource = null;
+      const deadlineMs = this.#deadline();
+      const context = this.#newContext('import', deadlineMs, source.signal);
+      const applied = await this.#withDeadline(
+        () => applyImport(this.#storage, preview.value.doc, context),
+        deadlineMs,
+        source,
+      );
+      if (!applied.ok) {
+        return applied;
+      }
+      // Rehydrate from the replaced document: restore() performs the
+      // load path whenever #ready is null.
+      this.#ready = null;
+      this.#state = { type: 'unhydrated' };
+      const restored = await this.restore();
+      if (!restored.ok) {
+        return restored;
+      }
+      return ok(preview.value);
+    } finally {
+      this.#opSources.delete(source);
+    }
   }
 
   // ---- transport ----------------------------------------------------
