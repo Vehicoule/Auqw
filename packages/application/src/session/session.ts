@@ -7,6 +7,7 @@ import type { AppError, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
   EntityKind,
+  EntityRef,
   Like,
   Recording,
   Settings,
@@ -15,6 +16,7 @@ import type {
   TrackMetadata,
 } from '../domain.ts';
 import {
+  isEntityRef,
   isSettings,
   isSourceRef,
   isString,
@@ -27,6 +29,7 @@ import { countsAsPlay, recordPlay } from '../library/history.ts';
 import { isPersistedState } from '../library/library.ts';
 import type {
   Entity,
+  EntitySourceRef,
   LyricsCacheEntry,
   MatchReview,
   PlayCount,
@@ -81,6 +84,7 @@ import type {
   QueueProjectionItem,
 } from '../ports/player.ts';
 import type {
+  EntityPage,
   LyricsQuery,
   ProviderPort,
   RadioPage,
@@ -139,6 +143,7 @@ export type ReadySession = {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
   readonly entities: readonly Entity[];
+  readonly entitySourceRefs: readonly EntitySourceRef[];
   readonly playlists: readonly Playlist[];
   readonly playlistEntries: readonly PlaylistEntry[];
   readonly playHistory: readonly PlayEvent[];
@@ -241,6 +246,7 @@ type Ready = {
   recordings: Recording[];
   likes: Like[];
   entities: Entity[];
+  entitySourceRefs: EntitySourceRef[];
   playlists: Playlist[];
   playlistEntries: PlaylistEntry[];
   playHistory: PlayEvent[];
@@ -297,6 +303,7 @@ export class Session {
   #reviewTail: Promise<void> = Promise.resolve();
   readonly #corrections: Corrections;
   #radioTail: Promise<void> = Promise.resolve();
+  #entityTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -365,6 +372,7 @@ export class Session {
         recordings: Object.freeze([...ready.recordings]),
         likes: Object.freeze([...ready.likes]),
         entities: Object.freeze([...ready.entities]),
+        entitySourceRefs: Object.freeze([...ready.entitySourceRefs]),
         playlists: Object.freeze([...ready.playlists]),
         playlistEntries: Object.freeze([...ready.playlistEntries]),
         playHistory: Object.freeze([...ready.playHistory]),
@@ -599,6 +607,7 @@ export class Session {
       recordings: [...data.recordings],
       likes: [...data.likes],
       entities: [...data.entities],
+      entitySourceRefs: [...data.entitySourceRefs],
       playlists: [...data.playlists],
       playlistEntries: [...data.playlistEntries],
       playHistory: [...data.playHistory],
@@ -622,6 +631,38 @@ export class Session {
 
   // ---- library ----------------------------------------------------
 
+  /**
+   * Find-or-create the recording a provider result describes: an
+   * existing recording carrying the same source ref is refreshed in
+   * place, otherwise a new row is appended. In-memory only — the
+   * caller owns the persist.
+   */
+  #upsertRecording(r: Ready, metadata: TrackMetadata): Recording {
+    const ref = metadata.sourceRef;
+    const existing = r.recordings.find((rec) =>
+      rec.sourceRefs.some((s) => sameRef(s, ref)),
+    );
+    if (existing === undefined) {
+      const recording = recordingFromMetadata(
+        metadata,
+        this.#ids.next('rec'),
+      );
+      r.recordings = [...r.recordings, recording];
+      return recording;
+    }
+    const hasRef = existing.sourceRefs.some((s) => sameRef(s, ref));
+    const updated: Recording = {
+      ...mergeRecordingMetadata(existing, metadata),
+      sourceRefs: hasRef
+        ? existing.sourceRefs
+        : [...existing.sourceRefs, ref],
+    };
+    r.recordings = r.recordings.map((rec) =>
+      rec.id === updated.id ? updated : rec,
+    );
+    return updated;
+  }
+
   async enqueueMetadata(metadata: TrackMetadata): Promise<Result<string>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -632,25 +673,7 @@ export class Session {
     }
     const r = ready.value;
     const ref = metadata.sourceRef;
-    let recording = r.recordings.find((rec) =>
-      rec.sourceRefs.some((s) => sameRef(s, ref)),
-    );
-    if (recording !== undefined) {
-      const hasRef = recording.sourceRefs.some((s) => sameRef(s, ref));
-      const updated: Recording = {
-        ...mergeRecordingMetadata(recording, metadata),
-        sourceRefs: hasRef
-          ? recording.sourceRefs
-          : [...recording.sourceRefs, ref],
-      };
-      r.recordings = r.recordings.map((rec) =>
-        rec.id === updated.id ? updated : rec,
-      );
-      recording = updated;
-    } else {
-      recording = recordingFromMetadata(metadata, this.#ids.next('rec'));
-      r.recordings = [...r.recordings, recording];
-    }
+    const recording = this.#upsertRecording(r, metadata);
     const occurrenceId = this.#ids.next('occ');
     r.queue.enqueue({
       occurrenceId,
@@ -701,6 +724,89 @@ export class Session {
       return enqueued;
     }
     return this.playOccurrence(enqueued.value);
+  }
+
+  /**
+   * Materialize the recording a provider result describes without
+   * touching the queue — the add-to-playlist path needs a recordingId
+   * for `addPlaylistEntry`.
+   */
+  async ensureRecording(
+    metadata: TrackMetadata,
+  ): Promise<Result<string>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    if (!isTrackMetadata(metadata)) {
+      return err(appError('invalid-response', 'metadata failed validation'));
+    }
+    const r = ready.value;
+    const recording = this.#upsertRecording(r, metadata);
+    this.#publish();
+    const persisted = await this.#persist({ recordings: r.recordings });
+    this.#derived();
+    if (!persisted.ok) {
+      return err(persisted.error);
+    }
+    return ok(recording.id);
+  }
+
+  /**
+   * Play a list in order: every item is enqueued under its own
+   * occurrence (duplicates keep row identity, entries may pin a
+   * selectedRef), one commit covers the batch, then the first new
+   * occurrence plays. Validates the whole list before any enqueue.
+   */
+  async playRecordings(
+    items: readonly {
+      recordingId: string;
+      selectedRef: SourceRef | null;
+    }[],
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (items.length === 0) {
+      return err(appError('invalid-response', 'empty play list'));
+    }
+    const resolved: { recordingId: string; ref: SourceRef | null }[] = [];
+    for (const item of items) {
+      const recording = r.recordings.find(
+        (rec) => rec.id === item.recordingId,
+      );
+      if (recording === undefined) {
+        return err(appError('not-found', 'unknown recording'));
+      }
+      if (item.selectedRef !== null && !isTrackRef(item.selectedRef)) {
+        return err(appError('invalid-response', 'invalid selected ref'));
+      }
+      // The pin rides on the occurrence verbatim — `#pickRef` applies
+      // it at attempt time, so a pin for a different playback provider
+      // falls back to mappings exactly like a playlist-entry pin.
+      resolved.push({ recordingId: recording.id, ref: item.selectedRef });
+    }
+    let first = '';
+    for (const item of resolved) {
+      const occurrenceId = this.#ids.next('occ');
+      if (first === '') {
+        first = occurrenceId;
+      }
+      r.queue.enqueue({
+        occurrenceId,
+        recordingId: item.recordingId,
+        selectedRef: item.ref,
+      });
+    }
+    this.#publish();
+    const persisted = await this.#persist({ queue: r.queue.snapshot() });
+    this.#derived();
+    if (!persisted.ok) {
+      return err(persisted.error);
+    }
+    return this.playOccurrence(first);
   }
 
   toggleLike(recordingId: string): Promise<Result<void>> {
@@ -773,6 +879,96 @@ export class Session {
     r.likes = [...next];
     this.#publish();
     return ok(undefined);
+  }
+
+  /**
+   * `catalog.entity` pages route by provenance — the ref's minting
+   * provider serves it (router `providerForRef`). Serialized on the
+   * entity tail so concurrent page loads can't double-materialize an
+   * entity. On success the provider-independent `Entity` and its
+   * minted ref are attached (find-or-create) so entity likes have a
+   * referential target — the entity row is identity, not page cache,
+   * so a `complete:false` page still materializes it.
+   */
+  getEntityPage(ref: EntityRef): Promise<Result<EntityPage>> {
+    const work = this.#entityTail.then(() => this.#getEntityPage(ref));
+    this.#entityTail = work.then(() => undefined, () => undefined);
+    this.#own(work);
+    return work;
+  }
+
+  async #getEntityPage(ref: EntityRef): Promise<Result<EntityPage>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    if (!isEntityRef(ref)) {
+      return err(appError('invalid-response', 'invalid entity ref'));
+    }
+    const r = ready.value;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    let page: Result<EntityPage>;
+    try {
+      const deadlineMs = this.#deadline();
+      const context = this.#newContext('entity', deadlineMs, source.signal);
+      page = await this.#withDeadline(
+        () => this.#router.getEntity(ref, context),
+        deadlineMs,
+        source,
+      );
+    } finally {
+      this.#opSources.delete(source);
+    }
+    if (!page.ok) {
+      return page;
+    }
+    // Attach by the page's own descriptor — a continuation call may
+    // carry an opaque request ref while `entity.source_ref` always
+    // names the real entity.
+    const descriptor = page.value.entity.sourceRef;
+    if (
+      isEntityRef(descriptor) &&
+      !r.entitySourceRefs.some(
+        (s) =>
+          s.provider === descriptor.provider &&
+          s.ref.kind === descriptor.kind &&
+          s.ref.id === descriptor.id,
+      )
+    ) {
+      const now = this.#safeNow();
+      if (now === null) {
+        return err(internalError());
+      }
+      const entity = page.value.entity;
+      const entityId = this.#ids.next('entity');
+      const nextEntities: readonly Entity[] = [
+        ...r.entities,
+        {
+          entityId,
+          kind: entity.kind,
+          title: entity.title,
+          artistName: entity.kind === 'album' ? entity.subtitle : null,
+          artwork: entity.artwork,
+          createdMs: now,
+        },
+      ];
+      const nextRefs: readonly EntitySourceRef[] = [
+        ...r.entitySourceRefs,
+        { entityId, provider: descriptor.provider, ref: descriptor },
+      ];
+      const persisted = await this.#persist({
+        entities: nextEntities,
+        entitySourceRefs: nextRefs,
+      });
+      if (!persisted.ok) {
+        return err(persisted.error);
+      }
+      r.entities = [...nextEntities];
+      r.entitySourceRefs = [...nextRefs];
+      this.#publish();
+    }
+    return page;
   }
 
   /** Commits both playlist sections atomically, then mirrors them. */

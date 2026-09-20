@@ -17,6 +17,8 @@ import { CancellationSource, SearchSession } from '@auqw/application';
 import type {
   AppError,
   AttemptTrace,
+  EntityPage,
+  EntityRef,
   OperationContext,
   ReadySession,
   SearchState,
@@ -24,28 +26,38 @@ import type {
   TrackMetadata,
 } from '@auqw/application';
 import {
+  AddToPlaylistSheet,
   AppNavbar,
+  CollectionScreen,
   EmptyState,
+  EntityScreen,
   ErrorState,
   GalleryScreen,
   HomeScreen,
   LibraryScreen,
   LoadingState,
   MiniPlayer,
+  PlaylistScreen,
+  RowActionsSheet,
   SearchScreen,
   SettingsScreen,
   StageSheet,
   ThemeProvider,
+  entityIdForRef,
   formatClock,
+  toCollectionModel,
+  toEntityModel,
   toLibraryModel,
   toHomeModel,
   toPlayerModel,
+  toPlaylistModel,
   toQueueModel,
   toSearchRowModel,
   toSettingsModel,
   useTheme,
 } from '@auqw/ui-native';
 import type {
+  CollectionRowModel,
   DiagnosticsModel,
   NavItemModel,
   SearchStateModel,
@@ -309,6 +321,23 @@ function attemptLabel(trace: AttemptTrace): string {
   return `${trace.requestId} · ${trace.steps} steps · ${trace.httpCalls} http · ${formatClock(trace.elapsedMs)}`;
 }
 
+type Overlay =
+  | { readonly type: 'collection'; readonly key: 'liked' | 'top50' | 'history' }
+  | { readonly type: 'playlist'; readonly playlistId: string }
+  | { readonly type: 'entity'; readonly ref: EntityRef };
+
+type EntityFetch = {
+  readonly ref: EntityRef;
+  readonly page: EntityPage | null;
+  readonly error: AppError | null;
+  readonly loading: boolean;
+  readonly loadingMore: boolean;
+};
+
+type ActionTarget =
+  | { readonly kind: 'recording'; readonly recordingId: string }
+  | { readonly kind: 'metadata'; readonly meta: TrackMetadata };
+
 function Main({
   controller,
   state,
@@ -327,6 +356,13 @@ function Main({
   const [query, setQuery] = useState('');
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
+  // Library-world overlay stack: one route deep — collection list,
+  // playlist editor, or provider entity page above the tab screen.
+  const [overlay, setOverlay] = useState<Overlay | null>(null);
+  const [entityFetch, setEntityFetch] = useState<EntityFetch | null>(null);
+  const entityMeta = useRef(new Map<string, TrackMetadata>());
+  const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
+  const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
 
   const catalogProvider =
     controller.providers.find(
@@ -411,19 +447,104 @@ function Main({
     const model = toLibraryModel({
       recordings: state.recordings,
       likes: state.likes,
+      playlists: state.playlists,
+      playlistEntries: state.playlistEntries,
+      playHistory: state.playHistory,
+      playCounts: state.playCounts,
+      entities: state.entities,
+      entitySourceRefs: state.entitySourceRefs,
     });
     const playingId =
       state.playback.type === 'idle' ? null : state.playback.recordingId;
     if (playingId === null) {
       return model;
     }
+    const mark = (row: CollectionRowModel): CollectionRowModel =>
+      row.recordingId === playingId
+        ? { ...row, row: { ...row.row, playing: true } }
+        : row;
     return {
       ...model,
       items: model.items.map((row) =>
         row.key === playingId ? { ...row, playing: true } : row,
       ),
+      recentlyAdded: model.recentlyAdded.map((row) =>
+        row.key === playingId ? { ...row, playing: true } : row,
+      ),
+      collectionRows: {
+        liked: model.collectionRows.liked.map(mark),
+        top50: model.collectionRows.top50.map(mark),
+        history: model.collectionRows.history.map(mark),
+      },
     };
   }, [state]);
+  const collectionModel = useMemo(
+    () =>
+      overlay?.type === 'collection'
+        ? toCollectionModel(libraryModel, overlay.key)
+        : null,
+    [libraryModel, overlay],
+  );
+  const playlistModel = useMemo(() => {
+    if (overlay?.type !== 'playlist') {
+      return null;
+    }
+    const model = toPlaylistModel({
+      playlistId: overlay.playlistId,
+      playlists: state.playlists,
+      playlistEntries: state.playlistEntries,
+      recordings: state.recordings,
+      likes: state.likes,
+    });
+    const playingId =
+      state.playback.type === 'idle' ? null : state.playback.recordingId;
+    if (model === null || playingId === null) {
+      return model;
+    }
+    return {
+      ...model,
+      entries: model.entries.map((entry) =>
+        entry.recordingId === playingId
+          ? { ...entry, row: { ...entry.row, playing: true } }
+          : entry,
+      ),
+    };
+  }, [overlay, state]);
+  const entityModel = useMemo(
+    () =>
+      toEntityModel({
+        page: entityFetch?.page ?? null,
+        error: entityFetch?.error ?? null,
+        likes: state.likes,
+        entitySourceRefs: state.entitySourceRefs,
+        loadingMore: entityFetch?.loadingMore ?? false,
+      }),
+    [entityFetch, state.likes, state.entitySourceRefs],
+  );
+  // Row-key → TrackMetadata map for entity items, same contract as
+  // resultMeta for search results.
+  useEffect(() => {
+    const map = entityMeta.current;
+    map.clear();
+    entityFetch?.page?.items.forEach((meta, index) => {
+      map.set(toSearchRowModel(meta, index).key, meta);
+    });
+  }, [entityFetch?.page]);
+  const pickerItems = useMemo(
+    () =>
+      libraryModel.cards
+        .filter(
+          (card): card is typeof card & { playlistId: string } =>
+            card.playlistId !== null,
+        )
+        .map((card) => ({
+          playlistId: card.playlistId,
+          name: card.title,
+          count: card.count ?? 0,
+          artworkUrl: card.artworkUrl,
+        })),
+    [libraryModel],
+  );
   const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
   const homeModel = useMemo(() => {
     return toHomeModel({
@@ -529,9 +650,221 @@ function Main({
     [session, state.queue],
   );
 
+  // ---- library world: overlay routes + entity fetch --------------
+
+  const closeOverlay = useCallback(() => {
+    setOverlay(null);
+    setEntityFetch(null);
+  }, []);
+
+  const openEntity = useCallback(
+    (ref: EntityRef) => {
+      setOverlay({ type: 'entity', ref });
+      setEntityFetch({
+        ref,
+        page: null,
+        error: null,
+        loading: true,
+        loadingMore: false,
+      });
+      void session.getEntityPage(ref).then((result) => {
+        setEntityFetch((prev) =>
+          prev === null || prev.ref !== ref
+            ? prev
+            : result.ok
+              ? { ...prev, page: result.value, error: null, loading: false }
+              : { ...prev, page: null, error: result.error, loading: false },
+        );
+      });
+    },
+    [session],
+  );
+
+  const onLoadMore = useCallback(() => {
+    const cur = entityFetch;
+    const continuation = cur?.page?.continuation;
+    if (
+      cur === null ||
+      cur.page === null ||
+      continuation == null ||
+      cur.loadingMore
+    ) {
+      return;
+    }
+    /*
+     * The port's only entity request is an EntityRef — there is no
+     * continuation payload on the catalog.entity wire (ABI 0.3.0),
+     * and shipped providers never mint one. The token is carried
+     * back as the ref id: ref-scoped routing returns it to the
+     * provider that minted it, which is the only honest
+     * interpretation the port supports.
+     */
+    const more: EntityRef = {
+      provider: cur.ref.provider,
+      kind: cur.ref.kind,
+      id: continuation,
+    };
+    setEntityFetch({ ...cur, loadingMore: true });
+    void session.getEntityPage(more).then((result) => {
+      setEntityFetch((latest) => {
+        if (latest === null || latest.ref !== cur.ref || latest.page === null) {
+          return latest;
+        }
+        if (!result.ok) {
+          return { ...latest, error: result.error, loadingMore: false };
+        }
+        const seen = new Set(
+          latest.page.items.map(
+            (m) =>
+              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
+          ),
+        );
+        const fresh = result.value.items.filter(
+          (m) =>
+            !seen.has(
+              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
+            ),
+        );
+        return {
+          ...latest,
+          page: {
+            ...result.value,
+            items: [...latest.page.items, ...fresh],
+          },
+          error: null,
+          loadingMore: false,
+        };
+      });
+    });
+  }, [session, entityFetch]);
+
+  const playCollectionRows = useCallback(
+    (rows: readonly { recordingId: string }[]) => {
+      void session.playRecordings(
+        rows.map((row) => ({
+          recordingId: row.recordingId,
+          selectedRef: null,
+        })),
+      );
+    },
+    [session],
+  );
+
+  const playPlaylist = useCallback(() => {
+    if (playlistModel === null) {
+      return;
+    }
+    void session.playRecordings(
+      playlistModel.entries.map((entry) => ({
+        recordingId: entry.recordingId,
+        selectedRef: entry.selectedRef,
+      })),
+    );
+  }, [session, playlistModel]);
+
+  const addToPlaylist = useCallback(
+    async (playlistId: string, target: ActionTarget) => {
+      const recordingId =
+        target.kind === 'recording'
+          ? target.recordingId
+          : await session
+            .ensureRecording(target.meta)
+            .then((r) => (r.ok ? r.value : null));
+      if (recordingId === null) {
+        return;
+      }
+      await session.addPlaylistEntry(
+        playlistId,
+        recordingId,
+        target.kind === 'metadata' ? target.meta.sourceRef : null,
+      );
+    },
+    [session],
+  );
+
+  const onPickPlaylist = useCallback(
+    (playlistId: string) => {
+      const target = pickerFor;
+      setPickerFor(null);
+      if (target !== null) {
+        void addToPlaylist(playlistId, target);
+      }
+    },
+    [pickerFor, addToPlaylist],
+  );
+
+  const onCreateAndPick = useCallback(
+    (name: string) => {
+      const target = pickerFor;
+      void session.createPlaylist(name).then((created) => {
+        if (created.ok && target !== null) {
+          void addToPlaylist(created.value, target);
+        }
+      });
+      setPickerFor(null);
+    },
+    [session, pickerFor, addToPlaylist],
+  );
+
+  const onRowAction = useCallback(
+    (key: string) => {
+      const target = actionsFor;
+      setActionsFor(null);
+      if (target === null) {
+        return;
+      }
+      switch (key) {
+        case 'enqueue':
+          void (target.kind === 'recording'
+            ? session.enqueueRecording(target.recordingId)
+            : session.enqueueMetadata(target.meta));
+          break;
+        case 'add':
+          setPickerFor(target);
+          break;
+        case 'album':
+          if (target.kind === 'metadata' && target.meta.albumRef) {
+            openEntity(target.meta.albumRef);
+          }
+          break;
+        case 'artist':
+          if (target.kind === 'metadata' && target.meta.artistRef) {
+            openEntity(target.meta.artistRef);
+          }
+          break;
+        default:
+          break;
+      }
+    },
+    [actionsFor, session, openEntity],
+  );
+
+  const onOpenCard = useCallback(
+    (card: { playlistId: string | null; entityRef: EntityRef | null }) => {
+      if (card.playlistId !== null) {
+        setOverlay({ type: 'playlist', playlistId: card.playlistId });
+      } else if (card.entityRef !== null) {
+        openEntity(card.entityRef);
+      }
+    },
+    [openEntity],
+  );
+
+  const onCreatePlaylist = useCallback(
+    (name: string) => {
+      void session.createPlaylist(name).then((created) => {
+        if (created.ok) {
+          setOverlay({ type: 'playlist', playlistId: created.value });
+        }
+      });
+    },
+    [session],
+  );
+
   // __DEV__-only gate instrumentation: `auqw://` links drive the real
   // session methods so emulator/simulator journeys are scriptable.
-  // Verbs: search?q=, play-result?i=N, next, previous, pause, resume,
+  // Verbs: open?tab=&playlist=&collection=, entity?provider=&kind=&id=,
+  // search?q=, play-result?i=N, next, previous, pause, resume,
   // like-current, seek?ms=. Never ships in release bundles.
   const journeyDeps = useRef({ session, search, state });
   journeyDeps.current = { session, search, state };
@@ -569,6 +902,62 @@ function Main({
             setExpanded(true);
           } else {
             setTab(target === 'search' ? 'explore' : target);
+          }
+          const playlistId = params.get('playlist');
+          const collection = params.get('collection');
+          if (playlistId !== null) {
+            setOverlay({ type: 'playlist', playlistId });
+          } else if (
+            collection === 'liked' ||
+            collection === 'top50' ||
+            collection === 'history'
+          ) {
+            setOverlay({ type: 'collection', key: collection });
+          } else {
+            setOverlay(null);
+            setEntityFetch(null);
+          }
+          break;
+        }
+        case 'entity': {
+          // auqw://entity?provider=<p>&kind=<album|artist>&id=<id>
+          const provider = params.get('provider');
+          const kind = params.get('kind');
+          const id = params.get('id');
+          if (
+            provider !== null &&
+            id !== null &&
+            (kind === 'album' || kind === 'artist')
+          ) {
+            const ref: EntityRef = { provider, kind, id };
+            setTab('library');
+            setOverlay({ type: 'entity', ref });
+            setEntityFetch({
+              ref,
+              page: null,
+              error: null,
+              loading: true,
+              loadingMore: false,
+            });
+            void s.getEntityPage(ref).then((result) => {
+              setEntityFetch((prev) =>
+                prev === null || prev.ref !== ref
+                  ? prev
+                  : result.ok
+                    ? {
+                      ...prev,
+                      page: result.value,
+                      error: null,
+                      loading: false,
+                    }
+                    : {
+                      ...prev,
+                      page: null,
+                      error: result.error,
+                      loading: false,
+                    },
+              );
+            });
           }
           break;
         }
@@ -673,6 +1062,12 @@ function Main({
               })
             }
             onResultPress={onResultPress}
+            onContext={(row) => {
+              const meta = resultMeta.current.get(row.key);
+              if (meta !== undefined) {
+                setActionsFor({ kind: 'metadata', meta });
+              }
+            }}
           />
         );
       case 'library':
@@ -680,8 +1075,24 @@ function Main({
           <LibraryScreen
             model={libraryModel}
             topInset={topInset}
-            onPressItem={(row) => void playRecording(row.key)}
-            onToggleLike={(row) => void session.toggleLike(row.key)}
+            onPressItem={(id) => void playRecording(id)}
+            onToggleLike={(id) => void session.toggleLike(id)}
+            onContext={(id) =>
+              setActionsFor({ kind: 'recording', recordingId: id })
+            }
+            onOpenCollection={(key) =>
+              setOverlay({ type: 'collection', key })
+            }
+            onPlayCollection={(key) =>
+              playCollectionRows(libraryModel.collectionRows[key])
+            }
+            onOpenCard={onOpenCard}
+            onOpenArtist={(artist) => {
+              if (artist.entityRef !== null) {
+                openEntity(artist.entityRef);
+              }
+            }}
+            onCreatePlaylist={onCreatePlaylist}
           />
         );
       case 'settings':
@@ -704,10 +1115,120 @@ function Main({
     }
   })();
 
+  const overlayScreen = (() => {
+    if (overlay === null) {
+      return null;
+    }
+    switch (overlay.type) {
+      case 'collection':
+        return collectionModel === null ? null : (
+          <CollectionScreen
+            model={collectionModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onPlayAll={() => playCollectionRows(collectionModel.rows)}
+            onPressItem={(row) => void playRecording(row.recordingId)}
+            onToggleLike={(row) => void session.toggleLike(row.recordingId)}
+            onContext={(row) =>
+              setActionsFor({ kind: 'recording', recordingId: row.recordingId })
+            }
+          />
+        );
+      case 'playlist':
+        return (
+          <PlaylistScreen
+            model={playlistModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onPlayAll={playPlaylist}
+            onRename={(name) => {
+              if (overlay.type === 'playlist') {
+                void session.renamePlaylist(overlay.playlistId, name);
+              }
+            }}
+            onDelete={() => {
+              if (overlay.type === 'playlist') {
+                void session.deletePlaylist(overlay.playlistId);
+                closeOverlay();
+              }
+            }}
+            onPressEntry={(entry) =>
+              void session.playRecordings([
+                {
+                  recordingId: entry.recordingId,
+                  selectedRef: entry.selectedRef,
+                },
+              ])
+            }
+            onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
+            onContext={(entry) =>
+              setActionsFor({
+                kind: 'recording',
+                recordingId: entry.recordingId,
+              })
+            }
+            onRemoveEntry={(entry) =>
+              void session.removePlaylistEntry(entry.entryId)
+            }
+            onMoveEntry={(entry, direction) => {
+              if (playlistModel === null) {
+                return;
+              }
+              const index = playlistModel.entries.findIndex(
+                (e) => e.entryId === entry.entryId,
+              );
+              const sibling = playlistModel.entries[index + direction];
+              if (sibling === undefined) {
+                return;
+              }
+              void session.reorderPlaylistEntry(
+                entry.entryId,
+                direction === -1
+                  ? { before: sibling.entryId }
+                  : { after: sibling.entryId },
+              );
+            }}
+          />
+        );
+      case 'entity': {
+        const entityId = entityIdForRef(state.entitySourceRefs, overlay.ref);
+        return (
+          <EntityScreen
+            model={entityModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onToggleLike={
+              entityId === null
+                ? undefined
+                : () =>
+                  void session.toggleEntityLike(overlay.ref.kind, entityId)
+            }
+            onPressItem={(row) => {
+              const meta = entityMeta.current.get(row.key);
+              if (meta !== undefined) {
+                void session.addAndPlay(meta);
+              }
+            }}
+            onContext={(row) => {
+              const meta = entityMeta.current.get(row.key);
+              if (meta !== undefined) {
+                setActionsFor({ kind: 'metadata', meta });
+              }
+            }}
+            onLoadMore={onLoadMore}
+            onRetry={() => openEntity(overlay.ref)}
+          />
+        );
+      }
+      default:
+        return null;
+    }
+  })();
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-      <View style={{ flex: 1 }}>{screen}</View>
+      <View style={{ flex: 1 }}>{overlayScreen ?? screen}</View>
       {player !== null && !expanded ? (
         <MiniPlayer
           player={player}
@@ -721,7 +1242,10 @@ function Main({
       <AppNavbar
         items={NAV_ITEMS}
         activeKey={tab}
-        onSelect={setTab}
+        onSelect={(key) => {
+          setTab(key);
+          closeOverlay();
+        }}
         gestureHandle={Platform.OS === 'android'}
       />
       {player !== null ? (
@@ -745,6 +1269,59 @@ function Main({
           onMoveQueueItem={onMoveQueueItem}
         />
       ) : null}
+      {actionsFor !== null && (
+        <RowActionsSheet
+          title={
+            actionsFor.kind === 'recording'
+              ? (state.recordings.find(
+                (r) => r.id === actionsFor.recordingId,
+              )?.title ?? 'track')
+              : actionsFor.meta.title
+          }
+          actions={[
+            {
+              key: 'enqueue',
+              label: 'add to queue',
+              icon: 'queue' as const,
+            },
+            {
+              key: 'add',
+              label: 'add to playlist',
+              icon: 'list-plus' as const,
+            },
+            ...(actionsFor.kind === 'metadata' &&
+              actionsFor.meta.albumRef != null
+              ? [
+                {
+                  key: 'album',
+                  label: 'open album',
+                  icon: 'note' as const,
+                },
+              ]
+              : []),
+            ...(actionsFor.kind === 'metadata' &&
+              actionsFor.meta.artistRef != null
+              ? [
+                {
+                  key: 'artist',
+                  label: 'open artist',
+                  icon: 'library' as const,
+                },
+              ]
+              : []),
+          ]}
+          onAction={onRowAction}
+          onDismiss={() => setActionsFor(null)}
+        />
+      )}
+      {pickerFor !== null && (
+        <AddToPlaylistSheet
+          playlists={pickerItems}
+          onPick={onPickPlaylist}
+          onCreate={onCreateAndPick}
+          onDismiss={() => setPickerFor(null)}
+        />
+      )}
     </View>
   );
 }

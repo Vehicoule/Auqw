@@ -1,4 +1,5 @@
 import type {
+  EntityRef,
   QueueOccurrence,
   Recording,
   Settings,
@@ -2694,6 +2695,168 @@ async function historyFlow(): Promise<void> {
   await r.session.dispose();
 }
 
+const ALBUM_PAGE = {
+  entity: {
+    sourceRef: { provider: 'deezer', kind: 'album', id: 'a1' } as EntityRef,
+    kind: 'album' as const,
+    title: 'Deadbeat',
+    subtitle: 'Tame Impala',
+    artwork: [],
+  },
+  items: [],
+  continuation: null,
+  complete: true,
+};
+
+async function entityPageFlow(): Promise<void> {
+  const deezer = new FakeProvider('deezer');
+  const r = rig(persisted(), [deezer]);
+  await restoreOk(r);
+  const refAlbum: EntityRef = { provider: 'deezer', kind: 'album', id: 'a1' };
+  const call = r.session.getEntityPage(refAlbum);
+  await pump();
+  assertEqual(
+    deezer.pendingCount('entity'),
+    1,
+    'entity routed to the minting provider',
+  );
+  deezer.settleEntity(ok(ALBUM_PAGE));
+  const page = await call;
+  assert(page.ok, 'entity page failed');
+  const snap = readyOf(r);
+  assertEqual(snap.entities.length, 1, 'entity materialized');
+  assertEqual(snap.entities[0]?.title, 'Deadbeat');
+  assertEqual(snap.entities[0]?.artistName, 'Tame Impala');
+  assertEqual(snap.entitySourceRefs.length, 1);
+  assertEqual(snap.entitySourceRefs[0]?.ref.id, 'a1');
+  assertEqual(
+    snap.entitySourceRefs[0]?.entityId,
+    snap.entities[0]?.entityId,
+    'source ref binds the materialized entity',
+  );
+  assert(
+    r.storage.commits.some(
+      (c) =>
+        c.batch.entities !== undefined &&
+        c.batch.entitySourceRefs !== undefined,
+    ),
+    'entity + ref attach commits atomically',
+  );
+  // Refetching the same descriptor reuses the entity — no dup row.
+  const again = r.session.getEntityPage(refAlbum);
+  await pump();
+  deezer.settleEntity(ok(ALBUM_PAGE));
+  assert((await again).ok);
+  assertEqual(
+    readyOf(r).entities.length,
+    1,
+    'same descriptor reuses the entity',
+  );
+  // An unregistered provider's ref surfaces the router's typed error.
+  const ghost = await r.session.getEntityPage({
+    provider: 'tidal',
+    kind: 'album',
+    id: 't1',
+  });
+  assert(!ghost.ok && ghost.error.kind === 'unsupported');
+  assertEqual(
+    readyOf(r).entities.length,
+    1,
+    'failed page attaches nothing',
+  );
+  // The materialized entity is now a referential like target.
+  const entityId = snap.entities[0]?.entityId;
+  assert(entityId !== undefined, 'entityId missing');
+  assert((await r.session.toggleEntityLike('album', entityId)).ok);
+  assert(
+    readyOf(r).likes.some(
+      (l) => l.entityKind === 'album' && l.targetId === entityId,
+    ),
+    'entity like bound to the materialized entity',
+  );
+}
+
+async function ensureRecordingFlow(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const created = await r.session.ensureRecording(
+    meta('itunes', 'it-9', 'Roads', 'Portishead', 300_000),
+  );
+  assert(created.ok, 'ensureRecording failed');
+  assertEqual(readyOf(r).recordings.length, 1, 'recording materialized');
+  assert(
+    r.storage.commits.some((c) => c.batch.recordings !== undefined),
+    'recording committed',
+  );
+  const again = await r.session.ensureRecording(
+    meta('itunes', 'it-9', 'Roads', 'Portishead', 300_000),
+  );
+  assert(again.ok);
+  assertEqual(
+    again.value,
+    created.value,
+    'same source ref dedupes to one recording',
+  );
+  assertEqual(readyOf(r).recordings.length, 1);
+  const bad = await r.session.ensureRecording({
+    ...meta('itunes', 'it-10', 'Roads', 'Portishead', 300_000),
+    title: '',
+  });
+  assert(!bad.ok && bad.error.kind === 'invalid-response');
+}
+
+async function playRecordingsFlow(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [ref('youtube-music', 'y1')]),
+        recording('r2', [ref('youtube-music', 'y2')]),
+      ],
+    }),
+  );
+  await restoreOk(r);
+  const res = r.session.playRecordings([
+    { recordingId: 'r1', selectedRef: null },
+    { recordingId: 'r1', selectedRef: null },
+    { recordingId: 'r2', selectedRef: ref('youtube-music', 'y2') },
+  ]);
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 3, 'one occurrence per item');
+  assertEqual(
+    snap.queue.occurrences.filter((o) => o.recordingId === 'r1').length,
+    2,
+    'a duplicate keeps its own occurrence',
+  );
+  const pinned = snap.queue.occurrences[2];
+  assertEqual(
+    pinned?.selectedRef?.id,
+    'y2',
+    'selectedRef pinned on the occurrence',
+  );
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[0]?.occurrenceId,
+    'the first item is selected to play',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-batch'));
+  r.player.settlePrepare(ok('req-batch'));
+  assert((await res).ok, 'playRecordings failed');
+  await pump();
+  const empty = await r.session.playRecordings([]);
+  assert(!empty.ok && empty.error.kind === 'invalid-response');
+  const ghost = await r.session.playRecordings([
+    { recordingId: 'nope', selectedRef: null },
+  ]);
+  assert(!ghost.ok && ghost.error.kind === 'not-found');
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    3,
+    'failed validation never enqueues',
+  );
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentLikes', concurrentLikes],
   ['libraryFlow', libraryFlow],
@@ -2732,6 +2895,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['phaseLogFixed', phaseLogFixed],
   ['disposeCleanup', disposeCleanup],
   ['rapidSequenceProperty', rapidSequenceProperty],
+  ['entityPageFlow', entityPageFlow],
+  ['ensureRecordingFlow', ensureRecordingFlow],
+  ['playRecordingsFlow', playRecordingsFlow],
 ] as const;
 
 export async function run(): Promise<void> {
