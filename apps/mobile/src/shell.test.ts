@@ -20,6 +20,14 @@ assertEqual(
 );
 assertEqual(devRoute('auqw://corrections'), 'journey');
 assertEqual(devRoute('auqw://transfer'), 'journey');
+assertEqual(
+  devRoute('auqw://transfer?import=/tmp/lib.json'),
+  'journey',
+);
+assertEqual(
+  devRoute('auqw://provider?catalog=deezer&lyrics=auto'),
+  'journey',
+);
 assertEqual(devRoute('auqw://stop-radio'), 'journey');
 assertEqual(devRoute('https://example.test'), null);
 

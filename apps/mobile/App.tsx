@@ -1502,19 +1502,92 @@ function Main({
           }
           break;
         }
+        case 'provider': {
+          // auqw://provider?catalog=<id>&playback=<id>&lyrics=<id|auto>
+          //   &radio=<id|auto> — provider-parity journeys switch slots
+          //   without driving the picker sheet.
+          if (st.type !== 'ready') {
+            break;
+          }
+          const next = { ...st.settings };
+          const catalog = params.get('catalog');
+          const playbackP = params.get('playback');
+          const lyricsP = params.get('lyrics');
+          const radioP = params.get('radio');
+          if (catalog !== null) {
+            next.catalogProvider = catalog;
+          }
+          if (playbackP !== null) {
+            next.playbackProvider = playbackP;
+          }
+          if (lyricsP !== null) {
+            next.lyricsProvider = lyricsP === 'auto' ? null : lyricsP;
+          }
+          if (radioP !== null) {
+            next.radioProvider = radioP === 'auto' ? null : radioP;
+          }
+          void s.updateSettings(next);
+          break;
+        }
         case 'corrections':
           // auqw://corrections — the review queue rides the settings
           // tab's overlay stack like a pushed settings detail.
           setTab('settings');
           setOverlay({ type: 'corrections' });
           break;
-        case 'transfer':
+        case 'transfer': {
           // auqw://transfer — export/import surface, import state reset.
+          // ?import=<path> reads the file directly (no picker) into the
+          // preview stage; ?apply-import applies the staged document —
+          // the two legs mirror the interactive preview→confirm flow.
           setTab('settings');
-          importText.current = null;
-          setTransfer(IDLE_TRANSFER);
           setOverlay({ type: 'transfer' });
+          const importPath = params.get('import');
+          if (importPath !== null) {
+            importText.current = null;
+            setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
+            void (async () => {
+              try {
+                const text = await new File(importPath).text();
+                const preview = previewImport(text);
+                if (!preview.ok) {
+                  setTransfer((prev) => ({
+                    ...prev,
+                    importPhase: 'error',
+                    importDetail: preview.error.message,
+                    preview: null,
+                  }));
+                  return;
+                }
+                importText.current = text;
+                setTransfer((prev) => ({
+                  ...prev,
+                  importPhase: 'preview',
+                  preview: toImportPreviewModel(
+                    preview.value,
+                    importPath.split('/').pop() ?? importPath,
+                  ),
+                }));
+              } catch (thrown) {
+                setTransfer((prev) => ({
+                  ...prev,
+                  importPhase: 'error',
+                  importDetail:
+                    thrown instanceof Error
+                      ? thrown.message
+                      : 'could not read the import file',
+                  preview: null,
+                }));
+              }
+            })();
+          } else if (params.has('apply-import')) {
+            onApplyImport();
+          } else {
+            importText.current = null;
+            setTransfer(IDLE_TRANSFER);
+          }
           break;
+        }
         case 'stop-radio':
           void s.stopRadio();
           break;
