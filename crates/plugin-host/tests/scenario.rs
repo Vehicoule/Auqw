@@ -35,18 +35,23 @@ fn err<T: std::fmt::Debug, E>(r: Result<T, E>) -> E {
     }
 }
 
-/// ABI 0.2 manifest; capabilities stay on `playback.resolve` — the
-/// scenario payload selects the behavior.
-fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
+/// ABI-parameterized manifest; capabilities stay on `playback.resolve`
+/// — the scenario payload selects the behavior.
+fn manifest_for_abi(wasm: &[u8], abi: &str, permissions: &[&str]) -> Manifest {
     let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
     let perms: Vec<String> = permissions.iter().map(|p| format!("\"{p}\"")).collect();
     let text = format!(
-        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"0.2.0\",\
+        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"{abi}\",\
          \"capabilities\":[\"playback.resolve\"],\"permissions\":[{}],\
          \"artifact\":{{\"path\":\"scenario.wasm\",\"digest\":\"{digest}\"}}}}",
         perms.join(",")
     );
     ok(Manifest::from_json(&text))
+}
+
+/// ABI 0.2 manifest.
+fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
+    manifest_for_abi(wasm, "0.2.0", permissions)
 }
 
 struct CannedHttp {
@@ -361,6 +366,155 @@ async fn http_scenario_relays_response() {
     assert_eq!(result["status"], 503);
     assert_eq!(result["body_len"], 5);
     assert_eq!(attempt.http_calls, 1);
+}
+
+/// A canned ranged response for `resume` tests.
+struct RangeHttp {
+    status: u16,
+    content_range: Option<&'static str>,
+    body: Vec<u8>,
+}
+
+impl HttpClient for RangeHttp {
+    fn send(
+        &self,
+        _req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let status = self.status;
+        let body = self.body.clone();
+        let headers = self
+            .content_range
+            .map(|v| vec![("content-range".to_string(), v.to_string())])
+            .unwrap_or_default();
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status,
+                headers,
+                body,
+            })
+        })
+    }
+}
+
+/// A `resume` continuation relays the ranged body when `Content-Range`
+/// agrees with the request.
+#[tokio::test]
+async fn resume_relays_206_body() {
+    let kv = MemoryKeyValueStore::new();
+    let http = RangeHttp {
+        status: 206,
+        content_range: Some("bytes 5-9/20"),
+        body: b"hello".to_vec(),
+    };
+    let clock = FixedClock(0);
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        &Budgets::default(),
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5, "length": 5}),
+        &Budgets::default(),
+        CancellationToken::new(),
+        services(&http, &kv, &clock),
+    )
+    .await;
+    let result = ok(result);
+    assert_eq!(result["status"], 206);
+    assert_eq!(result["body_len"], 5);
+    assert_eq!(attempt.http_calls, 1);
+}
+
+/// A `206` whose `Content-Range` doesn't start at the requested offset
+/// is a failed host request — the guest sees `invalid-response`, never
+/// a misaligned body.
+#[tokio::test]
+async fn resume_rejects_mismatched_range() {
+    let kv = MemoryKeyValueStore::new();
+    let http = RangeHttp {
+        status: 206,
+        content_range: Some("bytes 4-9/20"),
+        body: b"hello".to_vec(),
+    };
+    let clock = FixedClock(0);
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        &Budgets::default(),
+    ));
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5, "length": 5}),
+        &Budgets::default(),
+        CancellationToken::new(),
+        services(&http, &kv, &clock),
+    )
+    .await;
+    let result = ok(result);
+    assert_eq!(result["host_error"], "invalid-response");
+}
+
+/// `resume` uses the same destination allowlist as `http_request`.
+#[tokio::test]
+async fn resume_denied_without_permission() {
+    let kv = MemoryKeyValueStore::new();
+    let http = RangeHttp {
+        status: 206,
+        content_range: Some("bytes 5-9/20"),
+        body: vec![],
+    };
+    let clock = FixedClock(0);
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for_abi(SCENARIO_WASM, "0.3.0", &[]),
+        &Budgets::default(),
+    ));
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5}),
+        &Budgets::default(),
+        CancellationToken::new(),
+        services(&http, &kv, &clock),
+    )
+    .await;
+    let result = ok(result);
+    assert_eq!(result["host_error"], "permission-denied");
+}
+
+/// A non-`206` answer is the upstream's real answer — it passes
+/// through instead of being range-checked.
+#[tokio::test]
+async fn resume_passes_non_206_through() {
+    let kv = MemoryKeyValueStore::new();
+    let http = RangeHttp {
+        status: 200,
+        content_range: None,
+        body: b"full".to_vec(),
+    };
+    let clock = FixedClock(0);
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        &Budgets::default(),
+    ));
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5}),
+        &Budgets::default(),
+        CancellationToken::new(),
+        services(&http, &kv, &clock),
+    )
+    .await;
+    let result = ok(result);
+    assert_eq!(result["status"], 200);
+    assert_eq!(result["body_len"], 4);
 }
 
 /// The `echo` scenario passes the payload through unchanged.

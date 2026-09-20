@@ -418,6 +418,92 @@ async fn abi_0_1_rejects_0_2_host_request_kinds() {
     }
 }
 
+fn manifest_text_caps(wasm: &[u8], abi: &str, caps: &[&str], permissions: &[&str]) -> String {
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
+    let caps: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
+    let perms: Vec<String> = permissions.iter().map(|p| format!("\"{p}\"")).collect();
+    format!(
+        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"{abi}\",\
+         \"capabilities\":[{}],\"permissions\":[{}],\
+         \"artifact\":{{\"path\":\"test.wasm\",\"digest\":\"{digest}\"}}}}",
+        caps.join(","),
+        perms.join(",")
+    )
+}
+
+/// `0.3.0` accepts the full 0.2 set plus the new capabilities.
+#[test]
+fn manifest_accepts_0_3_capabilities() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let m = ok(Manifest::from_json(&manifest_text_caps(
+        &wasm,
+        "0.3.0",
+        &[
+            "catalog.search",
+            "catalog.metadata",
+            "catalog.artwork",
+            "catalog.entity",
+            "playback.resolve",
+            "playback.candidates",
+            "lyrics.plain",
+            "lyrics.synced",
+            "radio.seed",
+        ],
+        &["network:allowed.test"],
+    )));
+    assert_eq!(m.capabilities.len(), 9);
+}
+
+/// A `0.2.0` manifest is immutable — the 0.3 capabilities are a
+/// rejection under it, not a forward-compatible surprise.
+#[test]
+fn manifest_0_2_rejects_0_3_capabilities() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    for cap in [
+        "catalog.entity",
+        "lyrics.plain",
+        "lyrics.synced",
+        "radio.seed",
+    ] {
+        let e = err(Manifest::from_json(&manifest_text_caps(
+            &wasm,
+            "0.2.0",
+            &[cap],
+            &[],
+        )));
+        assert!(matches!(e, ManifestError::InvalidField(_)), "{cap}");
+    }
+}
+
+/// Under a pre-0.3 manifest the `resume` service kind is a protocol
+/// violation — `invalid-message`, never `permission-denied`.
+#[tokio::test]
+async fn abi_pre_0_3_rejects_resume_kind() {
+    let msg = r#"{"type":"host_request","id":1,"kind":"resume","payload":{"url":"https://allowed.test/x","offset":5}}"#;
+    for abi in ["0.1.0", "0.2.0"] {
+        let wasm = ok(wat::parse_str(raw_wat(msg)));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for_abi(&wasm, abi, &["network:allowed.test"]),
+            &default_budgets(),
+        ));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "{abi}"
+        );
+    }
+}
+
 // ---------- happy path ----------
 
 #[tokio::test]

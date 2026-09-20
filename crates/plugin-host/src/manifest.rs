@@ -76,7 +76,10 @@ impl Manifest {
             ));
         }
         // The schema enumerates the capabilities the host serves;
-        // `0.1.0` manifests may only declare `playback.resolve`.
+        // `0.1.0` manifests may only declare `playback.resolve`, and
+        // `0.2.0` may not declare the 0.3 additions — revisions are
+        // immutable, a newer capability under an older ABI is a
+        // rejection, not a forward-compatible surprise.
         const CAPS_0_1: &[&str] = &["playback.resolve"];
         const CAPS_0_2: &[&str] = &[
             "catalog.search",
@@ -85,10 +88,22 @@ impl Manifest {
             "playback.resolve",
             "playback.candidates",
         ];
+        const CAPS_0_3: &[&str] = &[
+            "catalog.search",
+            "catalog.metadata",
+            "catalog.artwork",
+            "catalog.entity",
+            "playback.resolve",
+            "playback.candidates",
+            "lyrics.plain",
+            "lyrics.synced",
+            "radio.seed",
+        ];
         let allowed = match self.abi.as_str() {
             "0.1.0" => CAPS_0_1,
             "0.2.0" => CAPS_0_2,
-            _ => return Err(bad("abi must be \"0.1.0\" or \"0.2.0\"")),
+            "0.3.0" => CAPS_0_3,
+            _ => return Err(bad("abi must be \"0.1.0\", \"0.2.0\", or \"0.3.0\"")),
         };
         if self
             .capabilities

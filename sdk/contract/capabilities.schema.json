@@ -1,22 +1,71 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://auqw.dev/contract/capabilities.schema.json",
-  "title": "Auqw plugin capability payloads and results (ABI 0.2.0)",
+  "title": "Auqw plugin capability payloads and results (ABI 0.3.0)",
   "description": "Wire types for the declared manifest capabilities. The top-level oneOf validates a named {capability, payload} or {capability, result} envelope so fixtures can pin a capability and direction without guessing.",
   "$defs": {
     "sourceRef": {
       "type": "object",
-      "required": ["provider", "kind", "id"],
+      "required": [
+        "provider",
+        "kind",
+        "id"
+      ],
       "additionalProperties": false,
       "properties": {
-        "provider": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "kind": { "const": "track" },
-        "id": { "type": "string", "minLength": 1, "maxLength": 512 }
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "track",
+            "album",
+            "artist"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "entityRef": {
+      "type": "object",
+      "required": [
+        "provider",
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "album",
+            "artist"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
       }
     },
     "artworkRef": {
       "type": "object",
-      "required": ["url", "width", "height"],
+      "required": [
+        "url",
+        "width",
+        "height"
+      ],
       "additionalProperties": false,
       "properties": {
         "url": {
@@ -24,8 +73,20 @@
           "pattern": "^https://",
           "maxLength": 2048
         },
-        "width": { "type": ["integer", "null"], "minimum": 1 },
-        "height": { "type": ["integer", "null"], "minimum": 1 }
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
       }
     },
     "trackMetadata": {
@@ -44,244 +105,1035 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "source_ref": { "$ref": "#/$defs/sourceRef" },
-        "title": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "artist": { "type": ["string", "null"], "minLength": 1 },
-        "album": { "type": ["string", "null"], "minLength": 1 },
-        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "release_year": { "type": ["integer", "null"], "minimum": 0 },
+        "source_ref": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "release_year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
         "artwork": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artworkRef" },
+          "items": {
+            "$ref": "#/$defs/artworkRef"
+          },
           "maxItems": 8
         },
-        "explicit": { "type": ["boolean", "null"] },
-        "genre": { "type": ["string", "null"], "minLength": 1 },
-        "storefront": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" }
+        "explicit": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "genre": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "storefront": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Z]{2}$"
+        },
+        "artist_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/entityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "album_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/entityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isrc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 16
+        }
+      }
+    },
+    "entityMetadata": {
+      "type": "object",
+      "required": [
+        "source_ref",
+        "kind",
+        "title",
+        "artwork"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/entityRef"
+        },
+        "kind": {
+          "enum": [
+            "album",
+            "artist"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "subtitle": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "artwork": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artworkRef"
+          },
+          "maxItems": 8
+        }
       }
     },
     "recordingQuery": {
       "type": "object",
-      "required": ["title", "artist", "album", "duration_ms", "version_labels", "isrc"],
+      "required": [
+        "title",
+        "artist",
+        "album",
+        "duration_ms",
+        "version_labels",
+        "isrc"
+      ],
       "additionalProperties": false,
       "properties": {
-        "title": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "artist": { "type": ["string", "null"], "minLength": 1 },
-        "album": { "type": ["string", "null"], "minLength": 1 },
-        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
         "version_labels": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
           "maxItems": 16,
           "uniqueItems": true
         },
-        "isrc": { "type": ["string", "null"], "minLength": 1 }
+        "isrc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
       }
     },
     "catalogSearchPayload": {
       "type": "object",
-      "required": ["query", "limit", "storefront"],
+      "required": [
+        "query",
+        "limit",
+        "storefront"
+      ],
       "additionalProperties": false,
       "properties": {
-        "query": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-        "storefront": { "type": ["string", "null"], "pattern": "^[A-Za-z]{2}$" }
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "storefront": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z]{2}$"
+        }
       }
     },
     "catalogSearchResult": {
       "type": "object",
-      "required": ["items", "storefront"],
+      "required": [
+        "items",
+        "storefront"
+      ],
       "additionalProperties": false,
       "properties": {
-        "items": { "type": "array", "items": { "$ref": "#/$defs/trackMetadata" } },
-        "storefront": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" }
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trackMetadata"
+          }
+        },
+        "storefront": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Z]{2}$"
+        }
       }
     },
     "catalogMetadataPayload": {
       "type": "object",
-      "required": ["refs"],
+      "required": [
+        "refs"
+      ],
       "additionalProperties": false,
       "properties": {
         "refs": {
           "type": "array",
-          "items": { "$ref": "#/$defs/sourceRef" },
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          },
           "maxItems": 200
         }
       }
     },
     "catalogMetadataResult": {
       "type": "object",
-      "required": ["items"],
-      "additionalProperties":false,
+      "required": [
+        "items"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "items": { "type": "array", "items": { "$ref": "#/$defs/trackMetadata" } }
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trackMetadata"
+          }
+        }
       }
     },
     "catalogArtworkPayload": {
       "type": "object",
-      "required": ["ref", "size"],
+      "required": [
+        "ref",
+        "size"
+      ],
       "additionalProperties": false,
       "properties": {
-        "ref": { "$ref": "#/$defs/sourceRef" },
-        "size": { "enum": [600, 1200] }
+        "ref": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "size": {
+          "enum": [
+            600,
+            1200
+          ]
+        }
       }
     },
     "catalogArtworkResult": {
       "type": "object",
-      "required": ["source_ref", "items"],
+      "required": [
+        "source_ref",
+        "items"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source_ref": { "$ref": "#/$defs/sourceRef" },
+        "source_ref": {
+          "$ref": "#/$defs/sourceRef"
+        },
         "items": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artworkRef" },
+          "items": {
+            "$ref": "#/$defs/artworkRef"
+          },
           "maxItems": 8
+        }
+      }
+    },
+    "catalogEntityPayload": {
+      "type": "object",
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/entityRef"
+        }
+      }
+    },
+    "catalogEntityResult": {
+      "type": "object",
+      "required": [
+        "entity",
+        "items",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/entityMetadata"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trackMetadata"
+          }
+        },
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "complete": {
+          "type": "boolean"
         }
       }
     },
     "playbackCandidatesPayload": {
       "type": "object",
-      "required": ["query", "limit"],
+      "required": [
+        "query",
+        "limit"
+      ],
       "additionalProperties": false,
       "properties": {
-        "query": { "$ref": "#/$defs/recordingQuery" },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+        "query": {
+          "$ref": "#/$defs/recordingQuery"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
       }
     },
     "playbackCandidatesResult": {
       "type": "object",
-      "required": ["items"],
+      "required": [
+        "items"
+      ],
       "additionalProperties": false,
       "properties": {
-        "items": { "type": "array", "items": { "$ref": "#/$defs/trackMetadata" } }
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trackMetadata"
+          }
+        }
       }
     },
     "playbackResolvePayload": {
       "type": "object",
-      "required": ["source_ref"],
+      "required": [
+        "source_ref"
+      ],
       "additionalProperties": false,
       "properties": {
         "source_ref": {
           "oneOf": [
-            { "$ref": "#/$defs/sourceRef" },
-            { "type": "string", "minLength": 1 }
+            {
+              "$ref": "#/$defs/sourceRef"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
           ]
         },
-        "target_bitrate_kbps": { "type": "integer", "minimum": 1 },
+        "target_bitrate_kbps": {
+          "type": "integer",
+          "minimum": 1
+        },
         "prefer": {
           "type": "array",
-          "items": { "enum": ["audio/webm", "audio/mp4"] },
+          "items": {
+            "enum": [
+              "audio/webm",
+              "audio/mp4"
+            ]
+          },
           "maxItems": 2,
           "uniqueItems": true
         },
-        "pin_itag": { "type": ["integer", "null"], "minimum": 0 },
-        "resume_offset": { "type": ["integer", "null"], "minimum": 0 }
+        "pin_itag": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "resume_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
       }
     },
     "playbackResolveResult": {
       "type": "object",
-      "required": ["url", "mime", "bitrate_kbps", "expires_at_ms", "client"],
+      "required": [
+        "url",
+        "mime",
+        "bitrate_kbps",
+        "expires_at_ms",
+        "client"
+      ],
       "additionalProperties": false,
       "properties": {
-        "url": { "type": "string", "minLength": 1 },
-        "mime": { "type": "string", "minLength": 1 },
-        "bitrate_kbps": { "type": ["integer", "null"], "minimum": 0 },
-        "expires_at_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "content_length": { "type": ["integer", "null"], "minimum": 1 },
-        "client": { "type": "string", "minLength": 1 },
-        "itag": { "type": ["integer", "null"], "minimum": 0 }
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bitrate_kbps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "expires_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "content_length": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "client": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itag": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "lyricsQuery": {
+      "type": "object",
+      "required": [
+        "title",
+        "artist",
+        "album",
+        "duration_ms",
+        "isrc"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "isrc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "lyricsMatched": {
+      "type": "object",
+      "required": [
+        "title",
+        "artist",
+        "album",
+        "duration_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "lyricsLine": {
+      "type": "object",
+      "required": [
+        "t_ms",
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "t_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      }
+    },
+    "lyricsPlainPayload": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "$ref": "#/$defs/lyricsQuery"
+        }
+      }
+    },
+    "lyricsPlainResult": {
+      "type": "object",
+      "required": [
+        "state",
+        "matched"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "plain",
+            "instrumental",
+            "absent"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "matched": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/lyricsMatched"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "lyricsSyncedPayload": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "$ref": "#/$defs/lyricsQuery"
+        }
+      }
+    },
+    "lyricsSyncedResult": {
+      "type": "object",
+      "required": [
+        "state",
+        "matched"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "synced",
+            "instrumental",
+            "absent"
+          ]
+        },
+        "lines": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/lyricsLine"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "matched": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/lyricsMatched"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "radioSeedPayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "source_ref"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "source_ref": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "continuation"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "continuation": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "radioSeedResult": {
+      "type": "object",
+      "required": [
+        "items",
+        "continuation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trackMetadata"
+          }
+        },
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
       }
     }
   },
   "oneOf": [
     {
       "type": "object",
-      "required": ["capability", "payload"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.search" },
-        "payload": { "$ref": "#/$defs/catalogSearchPayload" }
+        "capability": {
+          "const": "catalog.search"
+        },
+        "payload": {
+          "$ref": "#/$defs/catalogSearchPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "payload"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.metadata" },
-        "payload": { "$ref": "#/$defs/catalogMetadataPayload" }
+        "capability": {
+          "const": "catalog.metadata"
+        },
+        "payload": {
+          "$ref": "#/$defs/catalogMetadataPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "payload"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.artwork" },
-        "payload": { "$ref": "#/$defs/catalogArtworkPayload" }
+        "capability": {
+          "const": "catalog.artwork"
+        },
+        "payload": {
+          "$ref": "#/$defs/catalogArtworkPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "payload"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "playback.candidates" },
-        "payload": { "$ref": "#/$defs/playbackCandidatesPayload" }
+        "capability": {
+          "const": "catalog.entity"
+        },
+        "payload": {
+          "$ref": "#/$defs/catalogEntityPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "payload"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "playback.resolve" },
-        "payload": { "$ref": "#/$defs/playbackResolvePayload" }
+        "capability": {
+          "const": "playback.candidates"
+        },
+        "payload": {
+          "$ref": "#/$defs/playbackCandidatesPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "result"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.search" },
-        "result": { "$ref": "#/$defs/catalogSearchResult" }
+        "capability": {
+          "const": "playback.resolve"
+        },
+        "payload": {
+          "$ref": "#/$defs/playbackResolvePayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "result"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.metadata" },
-        "result": { "$ref": "#/$defs/catalogMetadataResult" }
+        "capability": {
+          "const": "lyrics.plain"
+        },
+        "payload": {
+          "$ref": "#/$defs/lyricsPlainPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "result"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "catalog.artwork" },
-        "result": { "$ref": "#/$defs/catalogArtworkResult" }
+        "capability": {
+          "const": "lyrics.synced"
+        },
+        "payload": {
+          "$ref": "#/$defs/lyricsSyncedPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "result"],
+      "required": [
+        "capability",
+        "payload"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "playback.candidates" },
-        "result": { "$ref": "#/$defs/playbackCandidatesResult" }
+        "capability": {
+          "const": "radio.seed"
+        },
+        "payload": {
+          "$ref": "#/$defs/radioSeedPayload"
+        }
       }
     },
     {
       "type": "object",
-      "required": ["capability", "result"],
+      "required": [
+        "capability",
+        "result"
+      ],
       "additionalProperties": false,
       "properties": {
-        "capability": { "const": "playback.resolve" },
-        "result": { "$ref": "#/$defs/playbackResolveResult" }
+        "capability": {
+          "const": "catalog.search"
+        },
+        "result": {
+          "$ref": "#/$defs/catalogSearchResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "catalog.metadata"
+        },
+        "result": {
+          "$ref": "#/$defs/catalogMetadataResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "catalog.artwork"
+        },
+        "result": {
+          "$ref": "#/$defs/catalogArtworkResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "catalog.entity"
+        },
+        "result": {
+          "$ref": "#/$defs/catalogEntityResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "playback.candidates"
+        },
+        "result": {
+          "$ref": "#/$defs/playbackCandidatesResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "playback.resolve"
+        },
+        "result": {
+          "$ref": "#/$defs/playbackResolveResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "lyrics.plain"
+        },
+        "result": {
+          "$ref": "#/$defs/lyricsPlainResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "lyrics.synced"
+        },
+        "result": {
+          "$ref": "#/$defs/lyricsSyncedResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "radio.seed"
+        },
+        "result": {
+          "$ref": "#/$defs/radioSeedResult"
+        }
       }
     }
   ]

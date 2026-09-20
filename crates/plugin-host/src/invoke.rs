@@ -521,6 +521,13 @@ async fn host_request_step(
                 "host_request kind {kind:?} requires ABI 0.2.0"
             )));
         }
+        // `resume` is the 0.3.0 service kind — an older manifest is an
+        // immutable contract and cannot grow host services either.
+        Some("resume") if ctx.plugin.manifest.abi != "0.3.0" => {
+            return Err(InvokeError::InvalidMessage(
+                "host_request kind \"resume\" requires ABI 0.3.0".into(),
+            ));
+        }
         _ => {}
     }
     match msg.get("kind").and_then(Value::as_str) {
@@ -533,6 +540,7 @@ async fn host_request_step(
     let authorized = match msg.get("kind").and_then(Value::as_str) {
         Some("http_request") => authorize_http_request(&msg["payload"], id, ctx)?,
         Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx)?,
+        Some("resume") => authorize_resume(&msg["payload"], id, ctx)?,
         _ => {
             return Err(InvokeError::InvalidMessage(
                 "unsupported host_request kind".into(),
@@ -550,6 +558,96 @@ async fn host_request_step(
 enum Authorized {
     Call(ParsedHttpRequest),
     Denied(Vec<u8>),
+}
+
+/// Authorize a `resume` host request: a ranged continuation of a prior
+/// fetch. The payload carries no arbitrary headers — the host builds
+/// the `Range` header itself and verifies the `206`/`Content-Range`
+/// pair in `perform_call`. Same destination allowlist as
+/// `http_request`; same budget counters.
+fn authorize_resume(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+) -> Result<Authorized, InvokeError> {
+    let invalid = |m: &str| InvokeError::InvalidMessage(m.to_string());
+    check_keys(payload, &["url", "offset", "length"], "resume.payload")?;
+    let url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("resume.url missing"))?;
+    if !url.starts_with("https://") {
+        return Err(invalid("resume.url must be https"));
+    }
+    let offset = payload
+        .get("offset")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("resume.offset missing"))?;
+    let length = match payload.get("length") {
+        None => None,
+        Some(v) => match v.as_u64().filter(|l| *l >= 1) {
+            Some(l) => Some(l),
+            None => return Err(invalid("resume.length must be a positive integer")),
+        },
+    };
+    if !ctx.plugin.manifest.allows_destination(url) {
+        return host_error(id, "permission-denied", "destination not permitted")
+            .map(Authorized::Denied);
+    }
+    let end = length.map(|l| offset.saturating_add(l).saturating_sub(1));
+    let range = match end {
+        Some(e) => format!("bytes={offset}-{e}"),
+        None => format!("bytes={offset}-"),
+    };
+    Ok(Authorized::Call(ParsedHttpRequest {
+        method: "GET".to_string(),
+        url: url.to_string(),
+        headers: vec![("Range".to_string(), range)],
+        body: None,
+        expected_range: Some((offset, length)),
+    }))
+}
+
+/// Whether a `206` response's `Content-Range` agrees with the range a
+/// `resume` request asked for: the start must equal `offset`, and when
+/// `length` was given the end must either span the request or be the
+/// last byte of the resource — an early EOF is a valid shorter range,
+/// a misaligned start is the upstream lying.
+fn content_range_matches(headers: &[(String, String)], offset: u64, length: Option<u64>) -> bool {
+    let Some(range) = headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("content-range"))
+        .map(|(_, v)| v.trim())
+    else {
+        return false;
+    };
+    let Some(body) = range.strip_prefix("bytes ") else {
+        return false;
+    };
+    let Some((span, total)) = body.split_once('/') else {
+        return false;
+    };
+    let Some((start, end)) = span.split_once('-') else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+        return false;
+    };
+    if start != offset {
+        return false;
+    }
+    match length {
+        None => true,
+        Some(len) => {
+            let want = offset.saturating_add(len).saturating_sub(1);
+            if end == want {
+                return true;
+            }
+            total
+                .parse::<u64>()
+                .is_ok_and(|t| t > 0 && end == t - 1 && end < want)
+        }
+    }
 }
 
 /// Validate and authorize an `http_request` payload against the
@@ -599,6 +697,7 @@ fn authorize_pot_token(
         url: format!("{}/get_pot", provider.trim_end_matches('/')),
         headers: vec![("Content-Type".into(), "application/json".into())],
         body: Some(body),
+        expected_range: None,
     }))
 }
 
@@ -633,6 +732,7 @@ async fn perform_call(
         .budgets
         .http_timeout
         .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
+    let expected_range = req.expected_range;
     let method = req.method.clone();
     let traced_url = redact_url(&req.url);
     let call = ctx.services.http.send(
@@ -678,6 +778,14 @@ async fn perform_call(
                 bytes: resp.body.len() as u64,
                 elapsed,
             });
+            // A `resume` call that lands a `206` must agree with the
+            // range it asked for — a lying `Content-Range` is a failed
+            // host request, not a body the guest has to re-verify.
+            if let Some((offset, length)) = expected_range {
+                if resp.status == 206 && !content_range_matches(&resp.headers, offset, length) {
+                    return host_error(id, "invalid-response", "content-range mismatch");
+                }
+            }
             let headers: Vec<Value> = resp.headers.iter().map(|(k, v)| json!([k, v])).collect();
             serde_json::to_vec(&json!({
                 "type": "http_response",
@@ -786,6 +894,7 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         url: url.to_string(),
         headers,
         body,
+        expected_range: None,
     })
 }
 
@@ -794,6 +903,10 @@ struct ParsedHttpRequest {
     url: String,
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
+    /// Set for `resume` calls: the `(offset, length)` the `Range`
+    /// header was built from, verified against a `206`'s
+    /// `Content-Range`.
+    expected_range: Option<(u64, Option<u64>)>,
 }
 
 /// Serialize a `host_error` step message for the guest.
