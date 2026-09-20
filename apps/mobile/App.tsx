@@ -38,9 +38,9 @@ import {
   ThemeProvider,
   formatClock,
   toLibraryModel,
+  toHomeModel,
   toPlayerModel,
   toQueueModel,
-  toRailCard,
   toSearchRowModel,
   toSettingsModel,
   useTheme,
@@ -426,23 +426,18 @@ function Main({
   }, [state]);
   const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
   const homeModel = useMemo(() => {
-    const byId = new Map(state.recordings.map((r) => [r.id, r]));
-    const recents = [...state.likes]
-      .sort((a, b) => b.likedAtMs - a.likedAtMs)
-      .map((like) => byId.get(like.recordingId))
-      .filter((r) => r !== undefined)
-      .slice(0, 12)
-      .map(toRailCard);
-    return {
+    return toHomeModel({
+      recordings: state.recordings,
+      likes: state.likes,
+      suggestions:
+        searchState.type === 'content' ? searchState.page.items : [],
       greeting: greeting(new Date()),
       subline:
         state.likes.length === 0
           ? 'search to start your library'
           : `${state.likes.length} liked`,
-      recents,
-      suggestions: [],
-    };
-  }, [state]);
+    });
+  }, [state, searchState]);
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
       providerIds: controller.providers.map((p) => p.id),

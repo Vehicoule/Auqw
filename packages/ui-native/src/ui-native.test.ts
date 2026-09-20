@@ -1,6 +1,7 @@
 import {
   formatClock,
   formatRemaining,
+  toHomeModel,
   pickArtworkUrl,
   toLibraryModel,
   toPlayerModel,
@@ -360,6 +361,41 @@ function testQueueMapper(): void {
 
 function testLibraryAndSettings(): void {
   assertEqual(fixtureLibraryModel.likedCount, fixtureLikes.length);
+  assertEqual(
+    fixtureLibraryModel.collections.map((c) => c.key).join(','),
+    'liked,downloads,top50,history',
+    'library must keep the approved 2×2 collection anatomy',
+  );
+  assert(
+    fixtureLibraryModel.collections.every(
+      (c) => c.label.length > 0 && c.count >= 0,
+    ),
+    'every collection needs a label and honest count',
+  );
+  assertEqual(
+    fixtureLibraryModel.collections[0]?.enabled,
+    true,
+    'liked collection is active now',
+  );
+  assert(
+    fixtureLibraryModel.collections
+      .slice(1)
+      .every((c) => !c.enabled && c.note !== null),
+    'future collections must explain their disabled state',
+  );
+  assertEqual(
+    fixtureLibraryModel.canCreatePlaylist,
+    false,
+    'playlist creation is not implemented in Slice 1',
+  );
+  assert(
+    fixtureLibraryModel.artists.length >= 2,
+    'library artists rail needs multiple artists',
+  );
+  assert(
+    fixtureLibraryModel.recentlyAdded.length >= 2,
+    'library needs recent rows',
+  );
   const keys = new Set(fixtureLibraryModel.items.map((i) => i.key));
   assert(keys.size === fixtureLibraryModel.items.length, 'dup library keys');
   for (const item of fixtureLibraryModel.items) {
@@ -367,6 +403,8 @@ function testLibraryAndSettings(): void {
   }
   const lib = toLibraryModel({ recordings: [], likes: [] });
   assertEqual(lib.likedCount, 0);
+  assertEqual(lib.items.length, 0);
+  assertEqual(lib.artists.length, 0);
   assertEqual(fixtureSettingsModel.theme, fixtureSettings.theme);
   assert(fixtureSettingsModel.rows.length >= 5, 'settings rows missing');
   const keys2 = new Set(fixtureSettingsModel.rows.map((r) => r.key));
@@ -397,6 +435,25 @@ function testHomeAndNav(): void {
   assert(first !== undefined);
   const card = toRailCard(first);
   assertEqual(card.title, first.title);
+  const home = toHomeModel({
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    suggestions: fixtureSearchResults,
+    greeting: 'good evening',
+    subline: '3 liked',
+  });
+  assertEqual(home.greeting, 'good evening');
+  assertEqual(home.subline, '3 liked');
+  assertEqual(
+    home.suggestions.length,
+    fixtureSearchResults.length,
+    'home should turn real provider results into suggestion cards',
+  );
+  assertEqual(
+    home.suggestions[0]?.title,
+    fixtureSearchResults[0]?.title,
+    'suggestion card title must survive mapping',
+  );
   assertEqual(fixtureNavItems.length, 4, 'nav must have 4 destinations');
   assertEqual(
     fixtureNavItems.map((i) => i.key).join(','),
