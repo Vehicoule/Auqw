@@ -256,8 +256,12 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   }
   const byId = indexById(recordings);
   const liked = likedIds(likes);
+  // Transport enablement anchors on what's on the player — during a
+  // transition the playing occurrence can legitimately differ from
+  // the queue's current until the reconcile lands.
+  const activeId = playback.occurrenceId ?? queue.currentOccurrenceId;
   const currentIndex = queue.occurrences.findIndex(
-    (o) => o.occurrenceId === queue.currentOccurrenceId,
+    (o) => o.occurrenceId === activeId,
   );
   const canPrevious = currentIndex > 0;
   const canNext =

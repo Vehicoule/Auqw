@@ -322,6 +322,7 @@ function Main({
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
+  const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
@@ -631,6 +632,7 @@ function Main({
         return (
           <SearchScreen
             state={searchModel}
+            query={query}
             topInset={topInset}
             onQueryChange={setQuery}
             onSubmit={() =>
@@ -668,7 +670,9 @@ function Main({
           <QueueScreen
             queue={queueModel}
             player={player}
+            reordering={reordering}
             topInset={topInset}
+            onToggleReorder={() => setReordering((v) => !v)}
             onPressItem={(id) => void session.playOccurrence(id)}
             onRemoveItem={(id) => void session.removeOccurrence(id)}
             onMoveItem={onMoveQueueItem}
@@ -725,7 +729,6 @@ function Main({
           onSeek={(ms) => void session.seekTo(ms)}
           onPressQueueItem={(id) => void session.playOccurrence(id)}
           onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
-          onMoveQueueItem={onMoveQueueItem}
         />
       ) : null}
     </View>

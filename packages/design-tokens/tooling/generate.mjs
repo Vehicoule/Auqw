@@ -146,7 +146,7 @@ export function renderTokens(source) {
     css += `  --font-${kebab(styleName)}-line: ${px(leaf(style['lineHeight']))};\n`;
     css += `  --font-${kebab(styleName)}-family: ${family};\n`;
     if (style['letterSpacing'] !== undefined) {
-      css += `  --font-${kebab(styleName)}-tracking: ${leaf(style['letterSpacing'])};\n`;
+      css += `  --font-${kebab(styleName)}-tracking: ${px(leaf(style['letterSpacing']))};\n`;
     }
   }
   for (const [name, node] of Object.entries(source['motion'])) {

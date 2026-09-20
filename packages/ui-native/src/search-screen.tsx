@@ -12,6 +12,13 @@ import type { SearchStateModel, TrackRowModel } from './view-models.ts';
 
 export type SearchScreenProps = {
   readonly state: SearchStateModel;
+  /**
+   * The live editing text for the input — `state.query` is the
+   * *submitted* query (what the hints quote), which can never carry
+   * keystrokes back to the box. Falls back to `state.query` so static
+   * fixtures still render filled.
+   */
+  readonly query?: string | undefined;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onQueryChange?: ((query: string) => void) | undefined;
@@ -25,6 +32,7 @@ export type SearchScreenProps = {
 
 export function SearchScreen({
   state,
+  query,
   topInset = 0,
   scrollEnabled = true,
   onQueryChange,
@@ -61,7 +69,7 @@ export function SearchScreen({
       >
         <Icon name="search" size={14} color={theme.colors.textSecondary} />
         <TextInput
-          value={state.query}
+          value={query ?? state.query}
           onChangeText={onQueryChange}
           onSubmitEditing={onSubmit}
           placeholder="search"

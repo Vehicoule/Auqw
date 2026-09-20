@@ -393,9 +393,9 @@ function GalleryBody({
       </Section>
 
       <Section title="navbars" note="m3e bar · liquid glass capsule">
-        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
+        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
         <View style={{ height: theme.spacing.md }} />
-        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
+        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
       </Section>
 
       <Section title="transport" note="m3e squircle · ios glass">
@@ -414,7 +414,6 @@ function GalleryBody({
               onPrevious={noop}
               onNext={noop}
               onToggleLike={noop}
-              onToggleRepeat={noop}
             />
           </View>
         ))}
@@ -451,6 +450,7 @@ function GalleryBody({
                 items={fixtureNavItems}
                 activeKey={nav}
                 onSelect={setNav}
+                gestureHandle
               />
             </Frame>
           </View>
@@ -493,7 +493,6 @@ function GalleryBody({
                 onNext={noop}
                 onPrevious={noop}
                 onToggleLike={noop}
-                onToggleRepeat={noop}
                 onSeek={noop}
               />
             </Frame>

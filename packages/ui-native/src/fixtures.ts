@@ -28,8 +28,30 @@ import type {
   TrackRowModel,
 } from './view-models.ts';
 
+// Embedded solid-color tiles: the gallery must render artwork without a
+// network fetch — remote fixture URLs make previews environment-dependent
+// and leak requests to a third-party service.
+const FIXTURE_ART: readonly string[] = [
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OMQ0AAAgDsOlHD+I4cUE4mlRAUz2vREhISEhISEhISEhISEhISEhISEhISEhISEjozgKnRuce5WwdswAAAABJRU5ErkJggg==',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OMQ0AAAgDsGnnxS0KcEE4mlRAM12vREhISEhISEhISEhISEhISEhISEhISEhISEjozgIDaPgAaWZTuAAAAABJRU5ErkJggg==',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOUlEQVR42u3OQQkAAAgEsOtqZ9sIthAfgwVYpuuVCAkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQndWe/N5x5HaL7OAAAAAElFTkSuQmCC',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OQQ0AAAgEoKtuCEPZyhbOBxsBSE2/EiEhISEhISEhISEhISEhISEhISEhISEhISGhOwt5qdfxCeKZnAAAAABJRU5ErkJggg==',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OMQ0AAAgDsOnHF6L4cEE4mlRA0zWvREhISEhISEhISEhISEhISEhISEhISEhISEjozgJieYktqP5RtwAAAABJRU5ErkJggg==',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OQQ0AAAgEoIttVTsYwhbOBxsBSPW8EiEhISEhISEhISEhISEhISEhISEhISEhISGhOwsLfSYttHwdlwAAAABJRU5ErkJggg==',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAO0lEQVR42u3OMQ0AAAgDsPlXghM8ceGCcDSpgKZ6XomQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ0J0FmQSyPMwe2B4AAAAASUVORK5CYII=',
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OQQkAAAgEsOufVAQ72EJ8DBZgqZ5XIiQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCR0ZwFG1bhpEAPfAAAAAABJRU5ErkJggg==',
+];
+
 function art(seed: string): string {
-  return `https://picsum.photos/seed/${seed}/300/300`;
+  let hash = 0;
+  for (const ch of seed) {
+    hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  }
+  const tile = FIXTURE_ART[Math.abs(hash) % FIXTURE_ART.length];
+  if (tile === undefined) {
+    throw new Error('fixture art palette is empty');
+  }
+  return tile;
 }
 
 function recording(partial: {
@@ -459,10 +481,13 @@ export const fixtureHomeModel: HomeModel = {
     .map(toRailCard),
 };
 
+// Mirrors NAV_ITEMS in apps/mobile/App.tsx — the gallery must preview the
+// destinations the app actually shows, not a stale model.
 export const fixtureNavItems: readonly NavItemModel[] = [
   { key: 'home', label: 'home' },
-  { key: 'explore', label: 'explore' },
+  { key: 'search', label: 'search' },
   { key: 'library', label: 'library' },
+  { key: 'queue', label: 'queue' },
   { key: 'settings', label: 'settings' },
 ];
 

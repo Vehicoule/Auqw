@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Text } from './primitives.tsx';
@@ -17,7 +16,6 @@ export type QueueListProps = {
   readonly onMoveItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
   | undefined;
-  readonly header?: ReactNode | undefined;
 };
 
 export function QueueList({
@@ -27,7 +25,6 @@ export function QueueList({
   onPressItem,
   onRemoveItem,
   onMoveItem,
-  header,
 }: QueueListProps) {
   const theme = useTheme();
   if (queue.items.length === 0) {
@@ -83,8 +80,7 @@ export function QueueList({
       keyExtractor={(item) => item.occurrenceId}
       renderItem={renderItem}
       scrollEnabled={scrollEnabled}
-      ListHeaderComponent={header === undefined ? null : () => <>{header}</>}
-      initialNumToRender={queue.items.length}
+      initialNumToRender={15}
     />
   );
 }

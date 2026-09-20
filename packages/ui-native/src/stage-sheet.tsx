@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Platform, ScrollView, View } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -38,12 +38,10 @@ export type TransportProps = {
   readonly liked: boolean;
   readonly canPrevious: boolean;
   readonly canNext: boolean;
-  readonly repeatActive?: boolean | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  readonly onToggleRepeat?: (() => void) | undefined;
 };
 
 function transportVariant(
@@ -94,12 +92,10 @@ export function TransportControls({
   liked,
   canPrevious,
   canNext,
-  repeatActive = false,
   onPlayPause,
   onPrevious,
   onNext,
   onToggleLike,
-  onToggleRepeat,
 }: TransportProps) {
   const theme = useTheme();
   const v = transportVariant(theme, variant);
@@ -170,16 +166,6 @@ export function TransportControls({
         disabled={!canNext}
         onPress={onNext}
         style={v.main}
-      />
-      <IconButton
-        icon="repeat"
-        size={32}
-        iconSize={14}
-        color={repeatActive ? theme.colors.accent : theme.colors.textSecondary}
-        accessibilityLabel="repeat"
-        active={repeatActive}
-        onPress={onToggleRepeat}
-        style={v.side}
       />
     </View>
   );
@@ -262,19 +248,14 @@ export type StageSheetProps = {
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
   readonly topInset?: number | undefined;
-  readonly repeatActive?: boolean | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  readonly onToggleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onMoveQueueItem?:
-  | ((occurrenceId: string, direction: -1 | 1) => void)
-  | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -287,17 +268,14 @@ export function StageSheet({
   queue,
   lyrics,
   topInset = 0,
-  repeatActive = false,
   onPlayPause,
   onNext,
   onPrevious,
   onToggleLike,
-  onToggleRepeat,
   onSeek,
   onModeChange,
   onPressQueueItem,
   onRemoveQueueItem,
-  onMoveQueueItem,
   style,
 }: StageSheetProps) {
   const theme = useTheme();
@@ -320,40 +298,53 @@ export function StageSheet({
     }
   }, [expanded, height, theme.reducedMotion, theme.motion, translateY, opacity]);
 
-  const collapse = () => {
-    if (onExpandChange !== undefined) {
-      onExpandChange(false);
-    }
-  };
+  const collapse = useCallback(() => {
+    onExpandChange?.(false);
+  }, [onExpandChange]);
 
-  const pan = Gesture.Pan()
-    .activeOffsetY(8)
-    .failOffsetX([-16, 16])
-    .onBegin(() => {
-      dragStart.value = translateY.value;
-    })
-    .onUpdate((e) => {
-      translateY.value = Math.max(0, dragStart.value + e.translationY);
-    })
-    .onEnd((e) => {
-      const shouldClose = e.translationY > 120 || e.velocityY > 700;
-      if (shouldClose) {
-        translateY.value = theme.reducedMotion
-          ? height
-          : withTiming(height, { duration: theme.motion.sheet });
-        opacity.value = theme.reducedMotion
-          ? 0
-          : withTiming(0, { duration: theme.motion.sheet });
-        runOnJS(collapse)();
-      } else {
-        translateY.value = theme.reducedMotion
-          ? 0
-          : withTiming(0, { duration: theme.motion.gesture.duration });
-        opacity.value = theme.reducedMotion
-          ? 1
-          : withTiming(1, { duration: theme.motion.gesture.duration });
-      }
-    });
+  // The gesture object is stable across renders — a fresh Pan() per
+  // render would cancel an in-flight sheet drag on the next tick.
+  const pan = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY(8)
+        .failOffsetX([-16, 16])
+        .onBegin(() => {
+          dragStart.value = translateY.value;
+        })
+        .onUpdate((e) => {
+          translateY.value = Math.max(0, dragStart.value + e.translationY);
+        })
+        .onEnd((e) => {
+          const shouldClose = e.translationY > 120 || e.velocityY > 700;
+          if (shouldClose) {
+            translateY.value = theme.reducedMotion
+              ? height
+              : withTiming(height, { duration: theme.motion.sheet });
+            opacity.value = theme.reducedMotion
+              ? 0
+              : withTiming(0, { duration: theme.motion.sheet });
+            runOnJS(collapse)();
+          } else {
+            translateY.value = theme.reducedMotion
+              ? 0
+              : withTiming(0, { duration: theme.motion.gesture.duration });
+            opacity.value = theme.reducedMotion
+              ? 1
+              : withTiming(1, { duration: theme.motion.gesture.duration });
+          }
+        }),
+    [
+      height,
+      theme.reducedMotion,
+      theme.motion.sheet,
+      theme.motion.gesture.duration,
+      collapse,
+      dragStart,
+      translateY,
+      opacity,
+    ],
+  );
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: translateY.value }],
@@ -445,20 +436,6 @@ export function StageSheet({
                 </Text>
               )}
             </View>
-            <View style={{ flexDirection: 'row', gap: 2 }}>
-              <IconButton
-                icon="download"
-                size={28}
-                iconSize={14}
-                accessibilityLabel="download"
-              />
-              <IconButton
-                icon="list-plus"
-                size={28}
-                iconSize={14}
-                accessibilityLabel="add to playlist"
-              />
-            </View>
           </View>
           <View style={{ flex: 1 }} />
           <WaveformSeek
@@ -473,12 +450,10 @@ export function StageSheet({
               liked={player.liked}
               canPrevious={player.canPrevious}
               canNext={player.canNext}
-              repeatActive={repeatActive}
               onPlayPause={onPlayPause}
               onPrevious={onPrevious}
               onNext={onNext}
               onToggleLike={onToggleLike}
-              onToggleRepeat={onToggleRepeat}
             />
           </View>
         </>
@@ -535,7 +510,6 @@ export function StageSheet({
               queue={queue}
               onPressItem={onPressQueueItem}
               onRemoveItem={onRemoveQueueItem}
-              onMoveItem={onMoveQueueItem}
             />
           )}
         </View>

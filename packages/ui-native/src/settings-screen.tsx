@@ -11,23 +11,13 @@ export type SettingsScreenProps = {
   readonly onToggleRow?: ((key: string) => void) | undefined;
 };
 
-function Toggle({
-  enabled,
-  onPress,
-  label,
-}: {
-  readonly enabled: boolean;
-  readonly onPress?: (() => void) | undefined;
-  readonly label: string;
-}) {
+// Visual-only track+thumb — the row itself is the `switch` element;
+// a nested switch inside it duplicates (and on iOS hides) the control.
+function Toggle({ enabled }: { readonly enabled: boolean }) {
   const theme = useTheme();
   return (
-    <Pressable
-      compact
-      onPress={onPress}
-      accessibilityRole="switch"
-      accessibilityLabel={label}
-      accessibilityState={{ selected: enabled }}
+    <View
+      accessible={false}
       style={{
         width: 36,
         height: 20,
@@ -46,7 +36,7 @@ function Toggle({
           alignSelf: enabled ? 'flex-end' : 'flex-start',
         }}
       />
-    </Pressable>
+    </View>
   );
 }
 
@@ -76,7 +66,7 @@ function SettingsRow({
       disabled={!interactive}
       accessibilityLabel={`${row.label}${row.value === null ? '' : `, ${row.value}`}`}
       accessibilityRole={row.kind === 'toggle' ? 'switch' : 'button'}
-      accessibilityState={row.kind === 'toggle' ? { selected: row.enabled } : undefined}
+      accessibilityState={row.kind === 'toggle' ? { checked: row.enabled } : undefined}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
@@ -89,11 +79,7 @@ function SettingsRow({
         {row.label}
       </Text>
       {row.kind === 'toggle' ? (
-        <Toggle
-          enabled={row.enabled}
-          label={row.label}
-          onPress={onToggleRow === undefined ? undefined : () => onToggleRow(row.key)}
-        />
+        <Toggle enabled={row.enabled} />
       ) : (
         <>
           {row.value !== null && (

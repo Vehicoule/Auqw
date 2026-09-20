@@ -9,6 +9,8 @@ import {
 } from 'react-native';
 import type {
   AccessibilityRole,
+  AccessibilityState,
+  Insets,
   StyleProp,
   TextStyle,
   ViewStyle,
@@ -123,7 +125,7 @@ export type PressableProps = {
   readonly onLongPress?: (() => void) | undefined;
   readonly accessibilityLabel: string;
   readonly accessibilityRole?: AccessibilityRole | undefined;
-  readonly accessibilityState?: { selected?: boolean | undefined; disabled?: boolean | undefined } | undefined;
+  readonly accessibilityState?: AccessibilityState | undefined;
   readonly disabled?: boolean | undefined;
   readonly compact?: boolean | undefined;
   readonly style?:
@@ -145,22 +147,26 @@ export function Pressable({
 }: PressableProps) {
   const theme = useTheme();
   const slop = Math.max(0, (theme.sizes.touch - 28) / 2);
+  // A pressable with no handler is inert — same rule as IconButton:
+  // it must look and announce as disabled, not ship as a live
+  // control that silently does nothing.
+  const off = disabled || (onPress === undefined && onLongPress === undefined);
   return (
     <RNPressable
       onPress={onPress}
       onLongPress={onLongPress}
-      disabled={disabled}
+      disabled={off}
       accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
-      accessibilityState={accessibilityState}
+      accessibilityState={{ ...accessibilityState, disabled: off }}
       hitSlop={compact ? slop : undefined}
       style={({ pressed }) => [
         !compact && {
           minWidth: theme.sizes.touch,
           minHeight: theme.sizes.touch,
         },
-        pressed && !disabled && { backgroundColor: theme.colors.fg08 },
-        disabled && { opacity: 0.4 },
+        pressed && !off && { backgroundColor: theme.colors.fg08 },
+        off && { opacity: 0.4 },
         typeof style === 'function' ? style({ pressed }) : style,
       ]}
     >
@@ -179,6 +185,7 @@ export type IconButtonProps = {
   readonly disabled?: boolean | undefined;
   readonly active?: boolean | undefined;
   readonly filled?: boolean | undefined;
+  readonly hitSlop?: number | Insets | undefined;
   readonly style?: StyleProp<ViewStyle>;
 };
 
@@ -192,17 +199,23 @@ export function IconButton({
   disabled = false,
   active = false,
   filled = false,
+  hitSlop,
   style,
 }: IconButtonProps) {
   const theme = useTheme();
-  const slop = Math.max(0, (theme.sizes.touch - size) / 2);
+  // Adjacent small buttons (queue chevrons) clamp the slop so their
+  // hit regions can't bleed into each other.
+  const slop = hitSlop ?? Math.max(0, (theme.sizes.touch - size) / 2);
+  // A button with no handler is inert — it must look and announce as
+  // disabled, not ship as a live control that silently does nothing.
+  const off = disabled || onPress === undefined;
   return (
     <RNPressable
       onPress={onPress}
-      disabled={disabled || onPress === undefined}
+      disabled={off}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
-      accessibilityState={{ selected: active, disabled }}
+      accessibilityState={{ selected: active, disabled: off }}
       hitSlop={slop}
       style={({ pressed }) => [
         {
@@ -211,9 +224,9 @@ export function IconButton({
           alignItems: 'center',
           justifyContent: 'center',
           borderRadius: theme.radius.control,
-          opacity: disabled ? 0.4 : 1,
+          opacity: off ? 0.4 : 1,
         },
-        pressed && !disabled && { backgroundColor: theme.colors.fg08 },
+        pressed && !off && { backgroundColor: theme.colors.fg08 },
         style,
       ]}
     >
@@ -639,7 +652,9 @@ function EqBar({
   const progress = useSharedValue(scale);
   useEffect(() => {
     if (!run) {
-      progress.value = 0.6;
+      // Static fallback keeps each bar's own height — a uniform value
+      // would render three identical stubs, not an EQ.
+      progress.value = scale;
       return undefined;
     }
     const id = setTimeout(() => {
@@ -656,7 +671,7 @@ function EqBar({
       clearTimeout(id);
       cancelAnimation(progress);
     };
-  }, [progress, run, delay]);
+  }, [progress, run, delay, scale]);
   const animatedStyle = useAnimatedStyle(() => ({
     height: Math.max(2, progress.value * height),
   }));

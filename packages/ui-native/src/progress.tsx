@@ -1,6 +1,11 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Platform, View } from 'react-native';
-import type { LayoutChangeEvent, StyleProp, ViewStyle } from 'react-native';
+import type {
+  AccessibilityActionEvent,
+  LayoutChangeEvent,
+  StyleProp,
+  ViewStyle,
+} from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
 import Svg, { Path } from 'react-native-svg';
@@ -171,14 +176,16 @@ export function ArtworkRing({
           stroke={theme.colors.fg18}
           strokeWidth={trackStroke}
         />
-        <Path
-          d={path}
-          fill="none"
-          stroke={theme.colors.accent}
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={`${clamped * pathLength} ${pathLength}`}
-        />
+        {clamped > 0 && (
+          <Path
+            d={path}
+            fill="none"
+            stroke={theme.colors.accent}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            strokeDasharray={`${clamped * pathLength} ${pathLength}`}
+          />
+        )}
       </Svg>
     </View>
   );
@@ -208,16 +215,52 @@ function useSeekGesture(
     },
     [durationMs, onSeek, width],
   );
-  const gesture = Gesture.Pan()
-    .minDistance(0)
-    .enabled(durationMs !== null && onSeek !== undefined)
-    .onBegin((e) => {
-      runOnJS(seek)(e.x);
-    })
-    .onUpdate((e) => {
-      runOnJS(seek)(e.x);
-    });
+  const enabled =
+    durationMs !== null && durationMs > 0 && onSeek !== undefined;
+  // Stable gesture object — a fresh Pan() per render would cancel a
+  // scrub in progress when the position tick re-renders the control.
+  const gesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .minDistance(0)
+        .enabled(enabled)
+        .onBegin((e) => {
+          runOnJS(seek)(e.x);
+        })
+        .onUpdate((e) => {
+          runOnJS(seek)(e.x);
+        }),
+    [enabled, seek],
+  );
   return { gesture, onLayout };
+}
+
+const SEEK_STEP_MS = 10_000;
+
+function useSeekA11y(
+  positionMs: number,
+  durationMs: number | null,
+  onSeek: ((ms: number) => void) | undefined,
+): {
+  readonly onAccessibilityAction: (e: AccessibilityActionEvent) => void;
+} {
+  // `adjustable` promises increment/decrement to AT — the ±10s step is
+  // the VoiceOver seek path the pan gesture can't provide.
+  const onAccessibilityAction = useCallback(
+    (e: AccessibilityActionEvent) => {
+      if (durationMs === null || durationMs <= 0 || onSeek === undefined) {
+        return;
+      }
+      const name = e.nativeEvent.actionName;
+      if (name === 'increment') {
+        onSeek(Math.min(durationMs, positionMs + SEEK_STEP_MS));
+      } else if (name === 'decrement') {
+        onSeek(Math.max(0, positionMs - SEEK_STEP_MS));
+      }
+    },
+    [durationMs, onSeek, positionMs],
+  );
+  return { onAccessibilityAction };
 }
 
 function progressOf(positionMs: number, durationMs: number | null): number {
@@ -242,6 +285,7 @@ export function LinearScrubber({
 }: LinearScrubberProps) {
   const theme = useTheme();
   const { gesture, onLayout } = useSeekGesture(durationMs, onSeek);
+  const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
   const p = progressOf(positionMs, durationMs);
   return (
     <GestureDetector gesture={gesture}>
@@ -255,6 +299,11 @@ export function LinearScrubber({
           now: Math.round(positionMs),
           text: `${formatClock(positionMs)} of ${formatClock(durationMs)}`,
         }}
+        accessibilityActions={[
+          { name: 'increment' },
+          { name: 'decrement' },
+        ]}
+        onAccessibilityAction={onAccessibilityAction}
         style={[
           {
             minHeight: theme.sizes.touch,
@@ -309,6 +358,7 @@ export function WaveformSeek({
 }: WaveformSeekProps) {
   const theme = useTheme();
   const { gesture, onLayout } = useSeekGesture(durationMs, onSeek);
+  const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
   const p = progressOf(positionMs, durationMs);
   return (
     <View style={style}>
@@ -323,6 +373,11 @@ export function WaveformSeek({
             now: Math.round(positionMs),
             text: `${formatClock(positionMs)} of ${formatClock(durationMs)}`,
           }}
+          accessibilityActions={[
+            { name: 'increment' },
+            { name: 'decrement' },
+          ]}
+          onAccessibilityAction={onAccessibilityAction}
           style={{
             height: 46,
             minHeight: theme.sizes.touch,

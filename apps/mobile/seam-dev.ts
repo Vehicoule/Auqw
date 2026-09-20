@@ -8,6 +8,9 @@
 //   auqw://seam-metrics            dump Rust-side phase marks
 //   auqw://seam-url?url=…&mime=…   dev seam leg — real prepared session
 //                                  for a bare URL (no guest resolve)
+//   auqw://seam-queue?url=…&title=…  projection leg — installs a 2-item
+//                                  projection then attaches: exercises the
+//                                  CURSOR occurrence bind + MediaMetadata
 // Self-contained (own logger + listeners) so App.tsx stays a one-block
 // diff for the s1 merge. Dev-gate only — no shipped semantics.
 import { Asset } from 'expo-asset';
@@ -24,6 +27,7 @@ import {
   phaseMarks,
   play,
   prepare,
+  setQueueProjection,
   type PrepareOutcomeEvent,
 } from 'auqw-expo';
 
@@ -114,7 +118,9 @@ async function ensureSeam(): Promise<string> {
 }
 
 function param(query: string, key: string): string | null {
-  for (const pair of query.split('&')) {
+  // `am start -d` on Android truncates the intent URI at the first
+  // literal `&` — dev links may use `;` as the separator instead.
+  for (const pair of query.split(/[&;]/)) {
     const eq = pair.indexOf('=');
     if (eq > 0 && pair.slice(0, eq) === key) {
       return decodeURIComponent(pair.slice(eq + 1));
@@ -124,11 +130,17 @@ function param(query: string, key: string): string | null {
 }
 
 function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    // Expo coded errors carry the taxonomy kind as `code` — surface it
+    // so leg logs show the kind that crossed the boundary, not just text.
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' ? `${code}: ${error.message}` : error.message;
+  }
+  return String(error);
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -218,6 +230,53 @@ export async function runSeamLink(url: string): Promise<void> {
       const ta = Date.now();
       await play(lastHandle, `dev-${Date.now()}`, 0, pos ? Number(pos) : undefined);
       slog(`seam-url attach-sent handle=${lastHandle} pos=${pos ?? 0} +${Date.now() - ta}ms total+${Date.now() - t0}ms`);
+    } else if (match[1] === 'seam-queue') {
+      // Projection leg: install a 2-item identified revision whose
+      // cursor carries title/artist, then attach a prepared dev URL —
+      // the CURSOR bind resolves the cursor item so the attach stamps
+      // MediaMetadata onto the MediaItem (the lock-screen source).
+      const streamUrl = param(query, 'url');
+      if (!streamUrl) {
+        return;
+      }
+      const mime = param(query, 'mime') ?? 'audio/mp4';
+      const bytes = param(query, 'bytes');
+      const title = param(query, 'title') ?? 'dev title';
+      const artist = param(query, 'artist');
+      await ensureHost();
+      lastHandle = await devPrepareUrl(
+        streamUrl,
+        mime,
+        bytes ? Number(bytes) : undefined,
+      );
+      slog(`seam-queue prepared handle=${lastHandle} t=${Date.now()}`);
+      await setQueueProjection({
+        projectionId: `dev-proj-${Date.now()}`,
+        queueRev: 1,
+        currentOccurrenceId: 'occ-a',
+        positionMs: 0,
+        mode: 'playing',
+        items: [
+          {
+            occurrenceId: 'occ-a',
+            provider: null,
+            sourceRef: null,
+            title,
+            artist,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-b',
+            provider: null,
+            sourceRef: null,
+            title: 'dev next',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      });
+      await play(lastHandle, `dev-${Date.now()}`, 1);
+      slog(`seam-queue attached handle=${lastHandle} t=${Date.now()}`);
     } else if (match[1] === 'seam-attach') {
       const handle = param(query, 'handle') ?? lastHandle;
       if (!handle) {

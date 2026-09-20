@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -17,6 +18,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -60,6 +62,7 @@ private const val EVENT_PHASE_MARK = "onPhaseMark"
 private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
+private const val POSITION_TICK_MS = 1_000L
 
 /** Cap on the released-handle marks — they only matter across the
  * queued-attach window, so a few hundred is far past any real case. */
@@ -186,6 +189,25 @@ class AuqwExpoModule : Module() {
   private var attached: Attachment? = null
   private val devAttachSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
+  // ~1 Hz position ticks while `isPlaying`: statuses between state
+  // transitions would otherwise carry a frozen position, leaving
+  // progress UI and persisted position stuck at the attach offset.
+  // The runnable self-terminates (no reschedule when not playing or
+  // no attach) and is confined to the player looper.
+  private var tickerPosted = false
+  private val positionTicker = object : Runnable {
+    override fun run() {
+      tickerPosted = false
+      val p = player ?: return
+      if (attached == null || !p.isPlaying) {
+        return
+      }
+      emitStatus(stateOf(p))
+      tickerPosted = true
+      Handler(p.applicationLooper).postDelayed(this, POSITION_TICK_MS)
+    }
+  }
+
   // Handles `releaseStream` was invoked for. The mark is set before the
   // session's terminal transition, so an attach still queued on the
   // player looper sees it and skips instead of resurrecting an ended
@@ -223,6 +245,38 @@ class AuqwExpoModule : Module() {
   private var svcSeq = 0
   @Volatile
   private var notificationsRequested = false
+
+  /** Arm the tick loop — idempotent; it reschedules itself only while
+   * the attach is live and playing. */
+  private fun kickPositionTicker() {
+    val p = player ?: return
+    if (tickerPosted || attached == null || !p.isPlaying) {
+      return
+    }
+    tickerPosted = true
+    Handler(p.applicationLooper).post(positionTicker)
+  }
+
+  /** Thrown seam errors carry the ABI taxonomy verbatim as the code —
+   * the JS surface maps `error.code` onto the ErrorKind union, so a
+   * generic `ERR_STREAM` would erase `released`/`expired`/… to
+   * `internal`. */
+  private fun streamErrCode(e: StreamException): String = when (e) {
+    is StreamException.Failed -> e.kind
+    is StreamException.Unavailable -> "unavailable"
+  }
+
+  /** Dev-only legs must not exist in a release binary — file/URL
+   * attach primitives are instrumentation, gated on the app itself
+   * being debuggable. */
+  private fun requireDebuggable() {
+    val ctx = appContext.reactContext
+    val debuggable = ctx != null &&
+      (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!debuggable) {
+      throw CodedException("ERR_DEV_ONLY", "dev instrumentation is debug-build only", null)
+    }
+  }
 
   /** Which occurrence an attach binds the stream to. */
   private enum class OccurrenceBind {
@@ -472,7 +526,7 @@ class AuqwExpoModule : Module() {
         throw CodedException("ERR_INVALID_ARGUMENT", "bad play arguments", null)
       }
       if (streamRegistry.hostFor(handle) == null) {
-        throw CodedException("ERR_HANDLE_UNKNOWN", "unknown stream handle", null)
+        throw CodedException("not-found", "unknown stream handle", null)
       }
       attachNow(
         handle, attemptId, queueRev, positionMs,
@@ -544,8 +598,9 @@ class AuqwExpoModule : Module() {
           releasedHandles.remove(handle)
         }
         // The UniFFI message already formats "{kind}: {detail}" — do
-        // not prefix the kind a second time.
-        throw CodedException("ERR_STREAM", e.message, e)
+        // not prefix the kind a second time; the code carries the
+        // ABI kind so the JS taxonomy survives the boundary.
+        throw CodedException(streamErrCode(e), e.message, e)
       }
       // Released — unmap only on success so a failed release keeps the
       // handle routable (the session is still alive).
@@ -571,7 +626,7 @@ class AuqwExpoModule : Module() {
       val marks = try {
         h.streamPhaseMarks(handle)
       } catch (e: StreamException) {
-        throw CodedException("ERR_STREAM", e.message, e)
+        throw CodedException(streamErrCode(e), e.message, e)
       }
       // The generated record is flat — epoch fields pass through
       // verbatim and durations keep their names (no invented epochs).
@@ -589,6 +644,7 @@ class AuqwExpoModule : Module() {
     // ProgressiveMediaSource over a pushed file — measures the player
     // floor independent of the seam. Dev instrumentation only.
     AsyncFunction("devAttachFile") Coroutine { path: String ->
+      requireDebuggable()
       val handle = "dev-file-${devAttachSeq.incrementAndGet()}"
       val uri = Uri.parse(if (path.contains("://")) path else "file://$path")
       attachNow(
@@ -603,11 +659,12 @@ class AuqwExpoModule : Module() {
     // prepare→attach→render still runs through the sparse store, pump,
     // fetch-through, and phase marks. Dev instrumentation only.
     AsyncFunction("devPrepareUrl") Coroutine { url: String, mime: String, contentLength: Double? ->
+      requireDebuggable()
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       val prepared = try {
         h.devPrepareUrl(url, mime, contentLength?.toULong())
       } catch (e: StreamException) {
-        throw CodedException("ERR_STREAM", e.message, e)
+        throw CodedException(streamErrCode(e), e.message, e)
       }
       streamRegistry.register(prepared.handle, h)
       prepared.handle
@@ -657,9 +714,39 @@ class AuqwExpoModule : Module() {
     override fun onServiceDisconnected(name: ComponentName?) {
       boundService?.remoteDispatcher = null
       boundService = null
-      // The bound player is dead — the join must not survive into the
-      // next service instance: a stale attach would emit statuses for
-      // a stream no player owns.
+      // The bound player is dead — the attach dies with it. Emit
+      // `failed` under the dying identity BEFORE clearing the join:
+      // a silent clear would leave the application showing a zombie
+      // `playing` for a stream no player owns.
+      val a = attached
+      val p = player
+      if (a != null && p != null) {
+        sendEvent(
+          EVENT_PLAYBACK_STATUS,
+          Bundle().apply {
+            putString("handle", a.handle)
+            putString("attemptId", a.attemptId)
+            putDouble("queueRev", a.queueRev)
+            putString("state", "failed")
+            putDouble(
+              "positionMs",
+              runCatching { p.currentPosition }
+                .getOrDefault(0L)
+                .coerceAtLeast(0)
+                .toDouble()
+            )
+            putBundle(
+              "error",
+              Bundle().apply {
+                // transient — the session convention for player-side
+                // death (retryable); the stream itself may be fine.
+                putString("kind", "transient")
+                putString("message", "media service disconnected")
+              }
+            )
+          }
+        )
+      }
       attached = null
       attachedForOccurrence = null
       attachedByService = false
@@ -768,11 +855,37 @@ class AuqwExpoModule : Module() {
       )
       return
     }
+    // The occurrence this attach serves decides both the occurrence
+    // bind and the lock-screen metadata source — resolve it once.
+    val occId = when (bind) {
+      OccurrenceBind.FIXED -> occurrenceId
+      OccurrenceBind.CURSOR -> installedProjection?.currentOccurrenceId
+      OccurrenceBind.NONE -> null
+    }
+    // Lock-screen/notification metadata comes from the projected item
+    // — a bare fromUri MediaItem leaves title/artist/artwork dead.
+    val projected = installedProjection?.items?.firstOrNull {
+      it.occurrenceId == occId
+    }
+    val mediaItem = MediaItem.Builder()
+      .setUri(uri)
+      .setMediaMetadata(
+        MediaMetadata.Builder()
+          .setTitle(projected?.title)
+          .setArtist(projected?.artist)
+          .setArtworkUri(
+            projected?.artworkUrl?.let {
+              runCatching { Uri.parse(it) }.getOrNull()
+            }
+          )
+          .build()
+      )
+      .build()
     val source = (if (dataSourceFactory === streamDataSourceFactory) {
       streamMediaSourceFactory
     } else {
       ProgressiveMediaSource.Factory(dataSourceFactory)
-    }).createMediaSource(MediaItem.fromUri(uri))
+    }).createMediaSource(mediaItem)
     p.setMediaSource(source, positionMs?.toLong() ?: 0L)
     p.prepare()
     p.play()
@@ -785,11 +898,7 @@ class AuqwExpoModule : Module() {
     // for a stream that never played.
     attached = a
     attachedByService = bind == OccurrenceBind.FIXED
-    attachedForOccurrence = when (bind) {
-      OccurrenceBind.FIXED -> occurrenceId
-      OccurrenceBind.CURSOR -> installedProjection?.currentOccurrenceId
-      OccurrenceBind.NONE -> null
-    }
+    attachedForOccurrence = occId
   }
 
   private fun stateOf(p: ExoPlayer): String = when (p.playbackState) {
@@ -1224,6 +1333,9 @@ class AuqwExpoModule : Module() {
       if (a != null) {
         emitStatus(stateOf(p))
       }
+      if (p.isPlaying) {
+        kickPositionTicker()
+      }
       // The cursor item ran out inside an installed projection: the
       // service owns the advance, JS defers to the queue-transition.
       if (playbackState == Player.STATE_ENDED) {
@@ -1237,6 +1349,9 @@ class AuqwExpoModule : Module() {
         return
       }
       emitStatus(stateOf(p))
+      if (isPlaying) {
+        kickPositionTicker()
+      }
     }
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {

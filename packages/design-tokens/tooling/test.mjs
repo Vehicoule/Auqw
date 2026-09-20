@@ -228,6 +228,18 @@ if (motion === undefined || typeof motion !== 'object') {
   }
 }
 
+// ---------- CSS value shapes ----------
+// Dimension-typed leaves render as `<n>px`; the only legitimately
+// unitless numeric emission is *-damping-ratio ($type: number).
+// A bare number anywhere else is invalid CSS and fails closed.
+const BARE_NUMBER_VAR = /--([\w-]+):\s*-?\d+(?:\.\d+)?\s*;/;
+for (const line of css.split('\n')) {
+  const match = line.match(BARE_NUMBER_VAR);
+  if (match !== null && !match[1].endsWith('damping-ratio')) {
+    fail(`css dimension emitted without a unit: ${line.trim()}`);
+  }
+}
+
 // ---------- no shadow tokens anywhere ----------
 const scanShadows = (node, path) => {
   if (node === null || typeof node !== 'object') {

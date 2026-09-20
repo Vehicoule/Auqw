@@ -48,7 +48,7 @@ function assertEqual<T>(actual: T, expected: T, message?: string): void {
   if (!Object.is(actual, expected)) {
     throw new Error(
       message ??
-        `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+      `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
   }
 }
@@ -73,8 +73,10 @@ function checkTrackRowModel(row: TrackRowModel, label: string): void {
     `${label}: bad durationMs`,
   );
   assert(
-    row.artworkUrl === null || row.artworkUrl.startsWith('https://'),
-    `${label}: artwork not https`,
+    row.artworkUrl === null ||
+    row.artworkUrl.startsWith('https://') ||
+    row.artworkUrl.startsWith('data:image/'),
+    `${label}: artwork must be https or an embedded data URI`,
   );
   if (row.state !== 'available') {
     assert(row.note !== null, `${label}: ${row.state} row must carry a note`);
@@ -149,7 +151,10 @@ function testFixtureRecordings(): void {
     );
     assert(refKeys.size === r.sourceRefs.length, `${r.id}: dup sourceRefs`);
     for (const a of r.artwork) {
-      assert(a.url.startsWith('https://'), `${r.id}: artwork not https`);
+      assert(
+        a.url.startsWith('https://') || a.url.startsWith('data:image/'),
+        `${r.id}: artwork must be https or an embedded data URI`,
+      );
     }
   }
   assert(
@@ -325,15 +330,19 @@ function testHomeAndNav(): void {
   );
   assert(
     cardKeys.size ===
-      fixtureHomeModel.recents.length + fixtureHomeModel.suggestions.length,
+    fixtureHomeModel.recents.length + fixtureHomeModel.suggestions.length,
     'dup rail card keys',
   );
   const first = fixtureRecordings[0];
   assert(first !== undefined);
   const card = toRailCard(first);
   assertEqual(card.title, first.title);
-  assertEqual(fixtureNavItems.length, 4, 'nav must have 4 destinations');
-  assertEqual(fixtureNavItems[3]?.key, 'settings', 'settings is 4th tab');
+  assertEqual(fixtureNavItems.length, 5, 'nav must have 5 destinations');
+  assertEqual(
+    fixtureNavItems.map((i) => i.key).join(','),
+    'home,search,library,queue,settings',
+    'nav fixture must mirror the app destinations',
+  );
 }
 
 function testSearchStates(): void {
@@ -362,7 +371,7 @@ function testCoverageMatrix(): void {
   assertEqual(galleryCoverage.reducedMotion.length, 2, 'need both motion modes');
   assert(
     galleryCoverage.reducedMotion.includes(true) &&
-      galleryCoverage.reducedMotion.includes(false),
+    galleryCoverage.reducedMotion.includes(false),
     'motion modes must cover on+off',
   );
   const phases = new Set(galleryCoverage.searchPhases);

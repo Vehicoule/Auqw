@@ -8,7 +8,9 @@ import type { NavItemModel, PlatformVariant } from './view-models.ts';
 const NAV_ICONS: Record<string, IconName> = {
   home: 'home',
   explore: 'compass',
+  search: 'search',
   library: 'library',
+  queue: 'queue',
   settings: 'settings',
 };
 
@@ -27,7 +29,7 @@ export function AndroidNavbar({
   items,
   activeKey,
   onSelect,
-  gestureHandle = true,
+  gestureHandle = false,
 }: NavbarProps) {
   const theme = useTheme();
   return (
@@ -102,7 +104,7 @@ export function IosGlassNavbar({
   items,
   activeKey,
   onSelect,
-  gestureHandle = true,
+  gestureHandle = false,
 }: NavbarProps) {
   const theme = useTheme();
   return (

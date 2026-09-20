@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { Platform, View } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -39,18 +40,24 @@ export function MiniPlayer({
       ? 0
       : Math.min(1, Math.max(0, player.positionMs / player.durationMs));
   const busy = player.status === 'preparing' || player.status === 'buffering';
-  const swipe = Gesture.Pan()
-    .activeOffsetX([-12, 12])
-    .activeOffsetY([-24, 24])
-    .onEnd((e) => {
-      if (e.translationX < -40 && onNext !== undefined) {
-        runOnJS(onNext)();
-      } else if (e.translationX > 40 && onPrevious !== undefined) {
-        runOnJS(onPrevious)();
-      } else if (e.translationY < -40 && onPress !== undefined) {
-        runOnJS(onPress)();
-      }
-    });
+  // Stable gesture object — a fresh Pan() per render would cancel an
+  // in-flight swipe when the position tick re-renders the row.
+  const swipe = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetX([-12, 12])
+        .activeOffsetY([-24, 24])
+        .onEnd((e) => {
+          if (e.translationX < -40 && onNext !== undefined) {
+            runOnJS(onNext)();
+          } else if (e.translationX > 40 && onPrevious !== undefined) {
+            runOnJS(onPrevious)();
+          } else if (e.translationY < -40 && onPress !== undefined) {
+            runOnJS(onPress)();
+          }
+        }),
+    [onNext, onPrevious, onPress],
+  );
   return (
     <GestureDetector gesture={swipe}>
       <View
@@ -77,12 +84,12 @@ export function MiniPlayer({
             }}
           />
         )}
-        <Pressable
-          compact
-          onPress={onPress}
-          accessibilityLabel={`now playing, ${player.title}${
-            player.artist === null ? '' : `, ${player.artist}`
-          }, open player`}
+        {/*
+         * Action buttons are siblings of the open-player pressable,
+         * not children: a labelled pressable groups its descendants
+         * into one VoiceOver element on iOS, hiding the controls.
+         */}
+        <View
           style={{
             flexDirection: 'row',
             alignItems: 'center',
@@ -91,29 +98,43 @@ export function MiniPlayer({
             paddingHorizontal: 7,
           }}
         >
-          <ArtworkRing
-            artworkUrl={player.artworkUrl}
-            progress={progress}
-            platform={platform}
-          />
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text
-              variant="body"
-              color="bright"
-              numberOfLines={1}
-              style={{ fontSize: 11.5, fontFamily: theme.fontFamilies.medium }}
-            >
-              {player.title}
-            </Text>
-            <Text
-              variant="metadata"
-              color="secondary"
-              numberOfLines={1}
-              style={{ fontSize: 9 }}
-            >
-              {player.artist ?? '—'}
-            </Text>
-          </View>
+          <Pressable
+            compact
+            onPress={onPress}
+            accessibilityLabel={`now playing, ${player.title}${player.artist === null ? '' : `, ${player.artist}`
+              }, ${player.status}, open player`}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <ArtworkRing
+              artworkUrl={player.artworkUrl}
+              progress={progress}
+              platform={platform}
+            />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                variant="body"
+                color="bright"
+                numberOfLines={1}
+                style={{ fontSize: 11.5, fontFamily: theme.fontFamilies.medium }}
+              >
+                {player.title}
+              </Text>
+              <Text
+                variant="metadata"
+                color="secondary"
+                numberOfLines={1}
+                style={{ fontSize: 9 }}
+              >
+                {player.artist ?? '—'}
+              </Text>
+            </View>
+          </Pressable>
           {onToggleLike !== undefined && (
             <IconButton
               icon={player.liked ? 'heart-filled' : 'heart'}
@@ -163,7 +184,7 @@ export function MiniPlayer({
               onPress={onNext}
             />
           )}
-        </Pressable>
+        </View>
         <View
           accessible={false}
           style={{
