@@ -169,6 +169,16 @@ export type AuqwExpoLike = AuqwExpoHostLike &
   };
 
 /**
+ * The host half plus lifecycle — satisfied by both the seam
+ * `auqw-expo` module and the slice-0 `auqw-plugin-host-expo` module,
+ * so providers can run before the seam lands.
+ */
+export type AuqwExpoHostModuleLike = AuqwExpoHostLike & {
+  createHost(config: AuqwExpoHostConfig): Promise<void>;
+  loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
+};
+
+/**
  * Seam/ABI `kind` strings → the application taxonomy. Every seam kind
  * is already a legal application kind (the 24-kind set is the ABI
  * superset: guest kinds plus host kinds plus the seam's terminal

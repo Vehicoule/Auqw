@@ -19,6 +19,7 @@
   "dependencies": {
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
+    "@auqw/ui-native": "workspace:*",
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
     "auqw-plugin-host-expo": "workspace:*",
     "expo": "~57.0.24",

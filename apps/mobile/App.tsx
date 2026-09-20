@@ -1,823 +1,631 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Asset } from 'expo-asset';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
-  createAudioPlayer,
-  setAudioModeAsync,
-  type AudioPlayer,
-  type AudioStatus,
-} from 'expo-audio';
-import { File, FileMode, Paths } from 'expo-file-system';
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import type { EventSubscription } from 'expo-modules-core';
 import {
-  addResolveOutcomeListener,
-  cancel,
-  createHost,
-  loadPlugin,
-  runSpin,
-  startResolve,
-  type ResolvedResource,
-  type ResolveOutcome,
-} from 'auqw-plugin-host-expo';
-
-const VIDEO_IDS = ['dQw4w9WgXcQ', 'kJQP7kiw5Fk'] as const;
+  useFonts,
+  JetBrainsMono_400Regular,
+  JetBrainsMono_500Medium,
+  JetBrainsMono_700Bold,
+} from '@expo-google-fonts/jetbrains-mono';
+import * as PluginHostExpo from 'auqw-plugin-host-expo';
+import { CancellationSource, SearchSession } from '@auqw/application';
+import type {
+  AppError,
+  AttemptTrace,
+  OperationContext,
+  ReadySession,
+  SearchState,
+  SessionState,
+  TrackMetadata,
+} from '@auqw/application';
+import {
+  AppNavbar,
+  EmptyState,
+  ErrorState,
+  HomeScreen,
+  LibraryScreen,
+  LoadingState,
+  MiniPlayer,
+  QueueScreen,
+  SearchScreen,
+  SettingsScreen,
+  StageSheet,
+  ThemeProvider,
+  formatClock,
+  toLibraryModel,
+  toPlayerModel,
+  toQueueModel,
+  toRailCard,
+  toSearchRowModel,
+  toSettingsModel,
+  useTheme,
+} from '@auqw/ui-native';
+import type {
+  DiagnosticsModel,
+  NavItemModel,
+  SearchStateModel,
+  StageMode,
+  TrackRowModel,
+} from '@auqw/ui-native';
+import { createSessionController } from './src/session/controller.ts';
+import type { SessionController } from './src/session/controller.ts';
+import { createClock, createIds } from './src/adapters/runtime.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
 // set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
 // emulator, http://10.0.2.2:4416 reaches a provider on the host
-// machine). Unset: the resolve stays on the anonymous ladder.
+// machine). Unset: resolves stay on the anonymous ladder.
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
-const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
-const SPIN_WASM = require('./assets/plugins/spin.wasm');
-const PLUGIN_MANIFEST = require('./assets/plugins/youtube-music.manifest.json');
-const SPIN_MANIFEST = require('./assets/plugins/spin.manifest.json');
+const SEARCH_LIMIT = 25;
+const DIAGNOSTICS_LIMIT = 20;
 
-// Slice-0 gate evidence: every [slice0] line also lands in the app
-// container so `adb run-as` / `simctl get_app_container` can read it
-// while the screen is off and metro may not be watched. File writes
-// are dev-only — release bundles keep the console line only.
-let logHandle: ReturnType<File['open']> | null = null;
-function slog(line: string): void {
-  console.log(`[slice0] ${line}`);
-  if (!__DEV__) {
-    return;
-  }
-  try {
-    if (!logHandle) {
-      const f = new File(Paths.cache, 'auqw-slice0.log');
-      if (f.exists) {
-        f.delete();
-      }
-      f.create();
-      logHandle = f.open(FileMode.Append);
-    }
-    logHandle.writeBytes(new TextEncoder().encode(`${line}\n`));
-  } catch {
-    // logging must never break the gate path
-  }
-}
+const NAV_ITEMS: readonly NavItemModel[] = [
+  { key: 'home', label: 'home' },
+  { key: 'search', label: 'search' },
+  { key: 'library', label: 'library' },
+  { key: 'queue', label: 'queue' },
+  { key: 'settings', label: 'settings' },
+];
 
-type Phase =
-  | { kind: 'idle' }
-  | { kind: 'loading-plugin' }
-  | { kind: 'resolving'; note?: string }
-  | {
-      kind: 'playing';
-      positionS: number;
-      durationS: number;
-      client: string;
-      mime: string;
-    }
-  | { kind: 'failed'; errorKind: string; message: string }
-  | { kind: 'ended' }
-  | { kind: 'cancelled' };
+const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
 
-function statusText(phase: Phase): string {
-  switch (phase.kind) {
-    case 'idle':
-      return 'idle';
-    case 'loading-plugin':
-      return 'loading-plugin';
-    case 'resolving':
-      return phase.note ? `resolving — ${phase.note}` : 'resolving';
-    case 'playing':
-      return `playing(${phase.positionS}s / ${phase.durationS}s, ${phase.client}, ${phase.mime})`;
-    case 'failed':
-      return `failed(${phase.errorKind}, ${phase.message})`;
-    case 'ended':
-      return 'ended';
-    case 'cancelled':
-      return 'cancelled';
-  }
-}
-
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function wasmAssetBase64(moduleRef: number): Promise<string> {
-  const asset = Asset.fromModule(moduleRef);
-  await asset.downloadAsync();
-  if (!asset.localUri) {
-    throw new Error('asset has no localUri after download');
-  }
-  return new File(asset.localUri).base64();
-}
-
-// Minted googlevideo URLs may stop serving mid-download (GVS caps are
-// stochastic per-mint). On a 403 the downloader re-resolves for a fresh
-// mint and resumes at the written offset — the predecessor's mint
-// loop — but a mint that serves no new bytes counts as zero progress:
-// after two in a row the cap is reported as `expired-resource` rather
-// than hammering /player or playing a truncated file. Playback starts
-// once PLAYBACK_MIN_BYTES are on disk (m4a is moov-first; the old app
-// used 128 KiB, ExoPlayer gets a margin). A re-mint that returns a
-// different encoding (mime/length changed) restarts the file — splicing
-// bytes across encodings would corrupt the stream.
-const CHUNK = 1_048_576;
-const PLAYBACK_MIN_BYTES = 256 * 1024;
-const MINT_BUDGET = 8;
-const ZERO_PROGRESS_MINT_LIMIT = 2;
-// One stalled chunk fetch cannot park the gate run forever: the
-// timeout covers headers AND the body read (1 MiB stays under it even
-// at GVS's ~33 KB/s throttle). `signal` carries Cancel into the loop.
-const CHUNK_TIMEOUT_MS = 60_000;
-
-// `bytes start-end/total` — the only Content-Range shape a 206 may
-// carry here. `*` totals and missing headers are rejected by the caller.
-function parseContentRange(header: string | null): { start: number; total: number } | null {
-  const m = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(header ?? '');
-  if (!m) {
-    return null;
-  }
-  return { start: Number(m[1]), total: Number(m[3]) };
-}
-
-class StreamCapped extends Error {
-  constructor() {
-    super('stream capped by provider');
-  }
-}
-
-type Chunk = {
-  status: number;
-  contentRange: string | null;
-  bytes: Uint8Array;
-};
-
-async function fetchChunk(
-  url: string,
-  start: number,
-  end: number,
-  signal: AbortSignal,
-): Promise<Chunk> {
-  // The host already validates the resolved url against the manifest
-  // allowlist; this is the app's own belt at the actual fetch site.
-  if (!url.startsWith('https://')) {
-    throw new Error('refusing non-https stream url');
-  }
-  const ctl = new AbortController();
-  const onAbort = () => ctl.abort();
-  signal.addEventListener('abort', onAbort);
-  if (signal.aborted) {
-    ctl.abort();
-  }
-  const timer = setTimeout(() => ctl.abort(), CHUNK_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      headers: { Range: `bytes=${start}-${end}` },
-      signal: ctl.signal,
-    });
-    // Only a 206 carries bytes we want. Buffering the body before the
-    // status check would read a whole-file 200 — or an unbounded error
-    // body — into memory for nothing.
-    const bytes =
-      resp.status === 206 ? new Uint8Array(await resp.arrayBuffer()) : new Uint8Array(0);
-    return {
-      status: resp.status,
-      contentRange: resp.headers.get('content-range'),
-      bytes,
-    };
-  } catch (error) {
-    if (!signal.aborted && (error as Error).name === 'AbortError') {
-      throw new Error(`chunk ${start}-${end}: timed out`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', onAbort);
-  }
-}
-
-async function downloadStream(
-  first: ResolvedResource,
-  remint: () => Promise<ResolvedResource>,
-  signal: AbortSignal,
-  onEnoughData: (file: File, resource: ResolvedResource) => void,
-): Promise<void> {
-  const fileFor = (mime: string) =>
-    new File(Paths.cache, `auqw-slice0.${mime === 'audio/mp4' ? 'm4a' : 'webm'}`);
-  // Clear both possible names: a stale file from a previous run (or an
-  // encoding flip earlier in this download) must never be appended to.
-  for (const ext of ['m4a', 'webm']) {
-    const stale = new File(Paths.cache, `auqw-slice0.${ext}`);
-    if (stale.exists) {
-      stale.delete();
-    }
-  }
-  let file = fileFor(first.mime);
-  file.create();
-  let handle = file.open(FileMode.Append);
-  // The stream whose bytes are on disk right now — the only valid
-  // baseline for resume-vs-restart. Comparing a fresh mint against
-  // `first` splices bytes across encodings after a flip-flop (A -> B ->
-  // A resumes A into a file holding B's bytes). mime+length+bitrate
-  // together approximate itag identity.
-  let current = first;
-  let url = first.url;
-  let start = 0;
-  let total = first.contentLength ?? -1;
-  let playbackStarted = false;
-  let mints = 0;
-  let zeroProgress = 0;
-  let mintStart = 0;
-  const restart = (next: ResolvedResource) => {
-    handle.close();
-    file.delete();
-    file = fileFor(next.mime);
-    if (file.exists) {
-      file.delete();
-    }
-    file.create();
-    handle = file.open(FileMode.Append);
-    current = next;
-    url = next.url;
-    total = next.contentLength ?? -1;
-    start = 0;
-    mintStart = 0;
-    playbackStarted = false;
-  };
-  try {
-    while (total < 0 || start < total) {
-      const end = total < 0 ? start + CHUNK - 1 : Math.min(start + CHUNK - 1, total - 1);
-      const chunk = await fetchChunk(url, start, end, signal);
-      // 403 is the known cap signal; 416 on an in-range request means the
-      // mint no longer serves the byte window we know exists — same
-      // treatment: re-mint and resume, bounded by the progress budget.
-      if (chunk.status === 403 || chunk.status === 416) {
-        zeroProgress = start === mintStart ? zeroProgress + 1 : 0;
-        if (zeroProgress >= ZERO_PROGRESS_MINT_LIMIT || mints >= MINT_BUDGET) {
-          throw new StreamCapped();
-        }
-        mints += 1;
-        const fresh = await remint();
-        if (
-          fresh.mime === current.mime &&
-          fresh.contentLength === current.contentLength &&
-          fresh.bitrateKbps === current.bitrateKbps
-        ) {
-          mintStart = start;
-          url = fresh.url;
-        } else {
-          restart(fresh);
-        }
-        continue;
-      }
-      // Every request sends a Range, so anything but 206 is a serving
-      // violation — a mid-stream 200 would append the whole file at the
-      // resume offset and corrupt the download.
-      if (chunk.status !== 206) {
-        throw new Error(`chunk ${start}-${end}: HTTP ${chunk.status}`);
-      }
-      // The served window must start where we asked — a 206 lying
-      // about its offset (or its total) splices foreign bytes into the
-      // file. Reject; do not resume against a lying mint.
-      const range = parseContentRange(chunk.contentRange);
-      if (!range || range.start !== start || range.total <= 0) {
-        throw new Error(`chunk ${start}-${end}: bad Content-Range ${chunk.contentRange}`);
-      }
-      if (total < 0) {
-        total = range.total;
-      } else if (range.total !== total) {
-        throw new Error(`chunk ${start}-${end}: Content-Range total changed mid-stream`);
-      }
-      // An empty partial body makes no progress — without this check
-      // the loop re-requests the same window forever.
-      if (chunk.bytes.length === 0) {
-        throw new Error(`chunk ${start}-${end}: empty body`);
-      }
-      // A 206 that over-serves would corrupt the file by overlapping
-      // the next range fetch.
-      if (chunk.bytes.length > end - start + 1) {
-        throw new Error(`chunk ${start}-${end}: oversized body`);
-      }
-      handle.writeBytes(chunk.bytes);
-      start += chunk.bytes.length;
-      if (!playbackStarted && start >= PLAYBACK_MIN_BYTES) {
-        playbackStarted = true;
-        onEnoughData(file, current);
-      }
-    }
-    // A resource smaller than PLAYBACK_MIN_BYTES completes in a single
-    // fetch — a finished file is "enough data" by definition.
-    if (!playbackStarted) {
-      playbackStarted = true;
-      onEnoughData(file, current);
-    }
-  } finally {
-    handle.close();
-  }
-}
+type Boot =
+  | { readonly type: 'loading' }
+  | { readonly type: 'failed'; readonly message: string }
+  | { readonly type: 'ready'; readonly controller: SessionController };
 
 export function App() {
-  const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
-  const [fuelLine, setFuelLine] = useState<string>('');
-  const [videoId, setVideoId] = useState<string>(VIDEO_IDS[0]);
-
-  const hostReady = useRef(false);
-  const pluginId = useRef<string | null>(null);
-  const player = useRef<AudioPlayer | null>(null);
-  const statusSub = useRef<EventSubscription | null>(null);
-  const requestId = useRef<string | null>(null);
-  const downloadAbort = useRef<AbortController | null>(null);
-  // `phase` is stale within a tick — two `play` commands delivered in one
-  // auqw-cmd poll would both see 'idle' and spawn parallel resolve+download
-  // chains writing the same cache file. The ref is the synchronous guard.
-  const playBusy = useRef(false);
-  // Generation counter: bumped by onCancel so an in-flight play chain
-  // abandons at the next await even when no requestId exists yet (the
-  // ensureHost/loadPlugin/startResolve window).
-  const playSeq = useRef(0);
-  // Set by onCancel; a resolveOnce whose request id arrives after the
-  // cancel still forwards it to the host.
-  const cancelRequested = useRef(false);
-  const pendingResolves = useRef(
-    new Map<
-      string,
-      {
-        resolve: (resource: ResolvedResource) => void;
-        reject: (error: Error & { kind?: string }) => void;
-      }
-    >(),
-  );
-  // Outcome events that arrived before their pending entry existed —
-  // the native invoke runs on a worker thread and can emit before the
-  // startResolve promise hands JS the request id.
-  const earlyOutcomes = useRef(new Map<string, ResolveOutcome>());
-
-  const ensureHost = useCallback(async () => {
-    if (!hostReady.current) {
-      await createHost({
-        fuelPerEntry: 200_000_000,
-        fuelTotal: 2_000_000_000,
-        potProviderUrl: POT_PROVIDER_URL,
-      });
-      hostReady.current = true;
-    }
-  }, []);
-
-  const ensurePlugin = useCallback(async () => {
-    if (!pluginId.current) {
-      const wasmBase64 = await wasmAssetBase64(PLUGIN_WASM);
-      pluginId.current = await loadPlugin(wasmBase64, JSON.stringify(PLUGIN_MANIFEST));
-    }
-    return pluginId.current;
-  }, []);
-
-  // Terminal outcome for a request id: settles the registered deferred,
-  // or — when the event outraced startResolve's promise — stashes it for
-  // resolveOnce to drain on registration.
-  const settleOutcome = useCallback((reqId: string, outcome: ResolveOutcome) => {
-    const pending = pendingResolves.current.get(reqId);
-    if (!pending) {
-      earlyOutcomes.current.set(reqId, outcome);
-      return;
-    }
-    pendingResolves.current.delete(reqId);
-    if (requestId.current === reqId) {
-      requestId.current = null;
-    }
-    slog(
-      `outcome ${reqId} type=${outcome.type}` +
-        `${outcome.type === 'failed' ? ` kind=${outcome.kind}` : ''} t=${Date.now()}`,
-    );
-    if (outcome.type === 'resolved') {
-      pending.resolve(outcome.resource);
-    } else {
-      pending.reject(
-        Object.assign(new Error(outcome.message), { kind: outcome.kind }),
-      );
-    }
-  }, []);
-
-  // Promise-shaped resolve: the outcome event settles the deferred
-  // recorded under the request id. `requestId.current` still tracks
-  // the in-flight id so Cancel aborts it at the host.
-  const resolveOnce = useCallback(
-    async (sourceRef: string): Promise<ResolvedResource> => {
-      const id = await ensurePlugin();
-      const reqId = await startResolve(id, sourceRef);
-      requestId.current = reqId;
-      return new Promise<ResolvedResource>((resolve, reject) => {
-        pendingResolves.current.set(reqId, { resolve, reject });
-        const early = earlyOutcomes.current.get(reqId);
-        if (early) {
-          earlyOutcomes.current.delete(reqId);
-          settleOutcome(reqId, early);
-        } else if (cancelRequested.current) {
-          // The user cancelled while startResolve was in flight — no
-          // request id existed to cancel; forward it now that it does.
-          slog(`cancel-sent ${reqId} (late) t=${Date.now()}`);
-          cancel(reqId);
-        }
-      });
-    },
-    [ensurePlugin, settleOutcome],
-  );
-
-  const startPlayback = useCallback(
-    async (
-      resource: ResolvedResource,
-      remint: () => Promise<ResolvedResource>,
-    ) => {
-      const ctl = new AbortController();
-      downloadAbort.current = ctl;
-      try {
-        await setAudioModeAsync({
-          playsInSilentMode: true,
-          shouldPlayInBackground: true,
-          interruptionMode: 'doNotMix',
-        });
-        await downloadStream(resource, remint, ctl.signal, (file, served) => {
-          // The abort may land between the last write and this callback —
-          // don't start a player the user already cancelled.
-          if (ctl.signal.aborted) {
-            return;
-          }
-          statusSub.current?.remove();
-          player.current?.remove();
-          const next = createAudioPlayer({ uri: file.uri });
-          player.current = next;
-          next.setActiveForLockScreen(true, {
-            title: 'Auqw Slice 0',
-            artist: `resolved via ${served.client}`,
-          });
-          statusSub.current = next.addListener(
-            'playbackStatusUpdate',
-            (status: AudioStatus) => {
-              const positionS = Math.floor(status.currentTime);
-              const durationS = Math.floor(status.duration);
-              slog(`pos=${positionS}s/${durationS}s t=${Date.now()}`);
-              // A player event is not always "playing": a mid-play
-              // error is terminal for this chain and `didJustFinish`
-              // means the track ended — collapsing either into
-              // `playing` would report false success.
-              if (status.error || status.didJustFinish) {
-                statusSub.current?.remove();
-                statusSub.current = null;
-                player.current?.remove();
-                player.current = null;
-                if (status.error) {
-                  setPhase({
-                    kind: 'failed',
-                    errorKind: 'audio',
-                    message: status.error,
-                  });
-                } else {
-                  setPhase({ kind: 'ended' });
-                }
-                return;
-              }
-              setPhase({
-                kind: 'playing',
-                positionS,
-                durationS,
-                client: served.client,
-                mime: served.mime,
-              });
-            },
-          );
-          next.play();
-        });
-      } catch (error) {
-        // A superseded download (a newer Play owns downloadAbort now)
-        // must not write its outcome over the new chain's phase.
-        if (downloadAbort.current !== ctl) {
-          return;
-        }
-        // A failed download stops whatever the prefix already started:
-        // a trailing tick would write `playing` over the failure and
-        // the player would keep serving a truncated file.
-        statusSub.current?.remove();
-        statusSub.current = null;
-        player.current?.remove();
-        player.current = null;
-        const kind = (error as { kind?: string }).kind;
-        if (ctl.signal.aborted || kind === 'cancelled') {
-          setPhase({ kind: 'cancelled' });
-        } else if (error instanceof StreamCapped) {
-          setPhase({
-            kind: 'failed',
-            errorKind: 'expired-resource',
-            message: 'stream capped by provider',
-          });
-        } else {
-          setPhase({
-            kind: 'failed',
-            errorKind: kind ?? 'audio',
-            message: describe(error),
-          });
-        }
-      } finally {
-        if (downloadAbort.current === ctl) {
-          downloadAbort.current = null;
-        }
-      }
-    },
-    [],
-  );
+  const [fontsLoaded] = useFonts({
+    JetBrainsMono_400Regular,
+    JetBrainsMono_500Medium,
+    JetBrainsMono_700Bold,
+  });
+  const [attempt, setAttempt] = useState(0);
+  const [boot, setBoot] = useState<Boot>({ type: 'loading' });
 
   useEffect(() => {
-    const subscription = addResolveOutcomeListener((event) => {
-      settleOutcome(event.requestId, event.outcome);
-    });
-    return () => {
-      subscription.remove();
-      statusSub.current?.remove();
-      player.current?.remove();
-    };
-  }, [settleOutcome]);
-
-  const onPlay = useCallback(
-    async (targetId?: string) => {
-      if (
-        playBusy.current ||
-        phase.kind === 'resolving' ||
-        phase.kind === 'loading-plugin'
-      ) {
-        return;
-      }
-      playBusy.current = true;
-      const seq = ++playSeq.current;
-      // A fresh chain clears the stale cancel intent and any outcome
-      // events orphaned by dead chains (their pending entries are gone).
-      cancelRequested.current = false;
-      earlyOutcomes.current.clear();
-      const vid = targetId ?? videoId;
+    let disposed = false;
+    let controller: SessionController | null = null;
+    setBoot({ type: 'loading' });
+    void (async () => {
       try {
-        // Detach the previous player first: its status listener would keep
-        // writing `playing` over the resolving/failed phases while the new
-        // resolve is in flight. The previous download is aborted too —
-        // an orphaned loop would keep fetching into the deleted file and
-        // clobber downloadAbort.current when it finished.
-        statusSub.current?.remove();
-        statusSub.current = null;
-        player.current?.remove();
-        player.current = null;
-        downloadAbort.current?.abort();
-        downloadAbort.current = null;
-        setPhase({ kind: 'loading-plugin' });
-        await ensureHost();
-        if (seq !== playSeq.current) {
+        const created = await createSessionController(PluginHostExpo, {
+          potProviderUrl: POT_PROVIDER_URL,
+        });
+        if (disposed) {
+          await created.dispose();
           return;
         }
-        setPhase({ kind: 'resolving' });
-        const resource = await resolveOnce(vid);
-        if (seq !== playSeq.current) {
+        controller = created;
+        // restore() never throws — its Result surfaces through
+        // session state as 'restore-failed'.
+        await created.session.restore();
+        if (disposed) {
+          await created.dispose();
           return;
         }
-        setPhase({ kind: 'resolving', note: `downloading — ${resource.client}` });
-        await startPlayback(resource, () => resolveOnce(vid));
-      } catch (error) {
-        if (seq !== playSeq.current) {
-          // A cancel (or newer play) already owns the phase.
-          return;
-        }
-        const kind = (error as { kind?: string }).kind;
-        if (kind === 'cancelled') {
-          setPhase({ kind: 'cancelled' });
-        } else if (kind) {
-          setPhase({
-            kind: 'failed',
-            errorKind: kind,
-            message: describe(error),
+        setBoot({ type: 'ready', controller: created });
+      } catch (thrown) {
+        if (!disposed) {
+          setBoot({
+            type: 'failed',
+            message:
+              thrown instanceof Error ? thrown.message : 'boot failed',
           });
-        } else {
-          setPhase({ kind: 'failed', errorKind: 'runtime', message: describe(error) });
         }
-      } finally {
-        playBusy.current = false;
       }
-    },
-    [phase.kind, videoId, ensureHost, resolveOnce, startPlayback],
-  );
-
-  const onCancel = useCallback(() => {
-    // Invalidate any in-flight play chain first — covers the window
-    // between loadPlugin and startResolve where no requestId exists yet.
-    playSeq.current += 1;
-    // The request id may not exist yet; resolveOnce forwards the
-    // cancel to the host when startResolve returns it.
-    cancelRequested.current = true;
-    if (requestId.current) {
-      slog(`cancel-sent ${requestId.current} t=${Date.now()}`);
-      cancel(requestId.current);
-    }
-    // A returned resolve leaves no request id — aborting the range
-    // loop is what stops an in-flight download.
-    downloadAbort.current?.abort();
-    // Detach the status listener before pausing: a trailing tick from
-    // the just-paused player would write `playing` over `cancelled`.
-    statusSub.current?.remove();
-    statusSub.current = null;
-    if (player.current?.playing) {
-      player.current.pause();
-    }
-    if (playBusy.current || player.current) {
-      setPhase({ kind: 'cancelled' });
-    }
-  }, []);
-
-  const onFuelTrap = useCallback(async () => {
-    try {
-      setFuelLine('fuel trap: running…');
-      await ensureHost();
-      const wasmBase64 = await wasmAssetBase64(SPIN_WASM);
-      const report = await runSpin(wasmBase64, JSON.stringify(SPIN_MANIFEST));
-      const line = `fuel trap: kind=${report.kind} elapsed=${report.elapsedMs}ms fuel=${report.fuelUsed}`;
-      slog(line);
-      setFuelLine(line);
-    } catch (error) {
-      setFuelLine(`fuel trap: failed(${describe(error)})`);
-    }
-  }, [ensureHost]);
-
-  // auqw://play/<videoId> | auqw://spin | auqw://cancel — the Slice-0
-  // gate runner's handle on the app (adb am start / simctl openurl).
-  // iOS puts a "Open in …?" sheet on every openurl into a running app,
-  // so a headless gate run also accepts the same verbs written one per
-  // line into <cache>/auqw-cmd (simctl container / adb run-as). Both
-  // channels are dev-gate instrumentation — `__DEV__` keeps them out
-  // of release bundles.
-  useEffect(() => {
-    if (!__DEV__) {
-      return;
-    }
-    const runCommand = (verb: string, arg: string | undefined) => {
-      slog(`cmd ${verb} ${arg ?? ''} t=${Date.now()}`);
-      if (verb === 'play') {
-        void onPlay(arg || undefined);
-      } else if (verb === 'spin') {
-        void onFuelTrap();
-      } else {
-        onCancel();
-      }
-    };
-    const onUrl = ({ url }: { url: string }) => {
-      const match = url.match(/^auqw:\/\/(play|spin|cancel)\/?([^\s/]*)$/);
-      if (match?.[1]) {
-        runCommand(match[1], match[2]);
-      }
-    };
-    const sub = Linking.addEventListener('url', onUrl);
-    void Linking.getInitialURL().then((initial) => {
-      if (initial) {
-        onUrl({ url: initial });
-      }
-    });
-    const cmdFile = new File(Paths.cache, 'auqw-cmd');
-    const poll = setInterval(() => {
-      try {
-        if (!cmdFile.exists) {
-          return;
-        }
-        const text = cmdFile.textSync();
-        cmdFile.delete();
-        for (const line of text.split('\n')) {
-          const match = line.trim().match(/^(play|spin|cancel)(?:\s+(\S+))?$/);
-          if (match?.[1]) {
-            runCommand(match[1], match[2]);
-          }
-        }
-      } catch {
-        // command channel must never break the gate path
-      }
-    }, 500);
+    })();
     return () => {
-      sub.remove();
-      clearInterval(poll);
+      disposed = true;
+      const c = controller;
+      controller = null;
+      if (c !== null) {
+        void c.dispose();
+      }
     };
-  }, [onPlay, onFuelTrap, onCancel]);
-
-  const busy = phase.kind === 'resolving' || phase.kind === 'loading-plugin';
+  }, [attempt]);
 
   return (
-    <View style={styles.container}>
-      <StatusBar style="auto" />
-      <Text style={styles.title}>Auqw — Slice 0</Text>
-      <Text style={styles.status} accessibilityLiveRegion="polite">
-        {statusText(phase)}
-      </Text>
-      {fuelLine !== '' && <Text style={styles.fuel}>{fuelLine}</Text>}
-      <View style={styles.idRow}>
-        {VIDEO_IDS.map((id) => (
-          <Pressable
-            key={id}
-            accessibilityRole="button"
-            accessibilityLabel={`Video ${id}`}
-            accessibilityState={{ disabled: busy, selected: id === videoId }}
-            disabled={busy}
-            onPress={() => setVideoId(id)}
-            style={({ pressed }) => [
-              styles.idButton,
-              id === videoId && styles.idButtonSelected,
-              (busy || pressed) && styles.buttonDim,
-            ]}
-          >
-            <Text style={[styles.idText, id === videoId && styles.idTextSelected]}>{id}</Text>
-          </Pressable>
-        ))}
-      </View>
-      <View style={styles.buttons}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Play"
-          accessibilityState={{ disabled: busy }}
-          disabled={busy}
-          onPress={() => void onPlay()}
-          style={({ pressed }) => [styles.button, (busy || pressed) && styles.buttonDim]}
-        >
-          <Text style={styles.buttonText}>Play</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Cancel"
-          onPress={onCancel}
-          style={({ pressed }) => [styles.button, pressed && styles.buttonDim]}
-        >
-          <Text style={styles.buttonText}>Cancel</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Measure fuel trap"
-          onPress={() => void onFuelTrap()}
-          style={({ pressed }) => [styles.button, pressed && styles.buttonDim]}
-        >
-          <Text style={styles.buttonText}>Measure fuel trap</Text>
-        </Pressable>
-      </View>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        {boot.type === 'ready' ? (
+          <Shell controller={boot.controller} />
+        ) : (
+          <ThemeProvider theme="system">
+            <BootGate
+              boot={boot}
+              fontsLoaded={fontsLoaded}
+              onRetry={() => setAttempt((n) => n + 1)}
+            />
+          </ThemeProvider>
+        )}
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
+}
+
+function BootGate({
+  boot,
+  fontsLoaded,
+  onRetry,
+}: {
+  readonly boot: Boot;
+  readonly fontsLoaded: boolean;
+  readonly onRetry: () => void;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: theme.colors.canvas,
+        justifyContent: 'center',
+      }}
+    >
+      <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      {boot.type === 'failed' ? (
+        <ErrorState
+          title="couldn't start"
+          hint={boot.message}
+          onRetry={onRetry}
+        />
+      ) : (
+        <LoadingState
+          title={fontsLoaded ? 'loading plugins' : 'loading'}
+        />
+      )}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-    backgroundColor: '#fff',
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 16,
-  },
-  status: {
-    fontSize: 14,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  fuel: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    marginBottom: 12,
-    color: '#444',
-  },
-  idRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  idButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#0a7ea4',
-  },
-  idButtonSelected: {
-    backgroundColor: '#0a7ea4',
-  },
-  idText: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#0a7ea4',
-  },
-  idTextSelected: {
-    color: '#fff',
-  },
-  buttons: {
-    flexDirection: 'column',
-    gap: 12,
-    alignSelf: 'stretch',
-  },
-  button: {
-    backgroundColor: '#0a7ea4',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  buttonDim: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-});
+function Shell({ controller }: { readonly controller: SessionController }) {
+  const [state, setState] = useState<SessionState>(() =>
+    controller.session.snapshot(),
+  );
+  useEffect(
+    () => controller.session.subscribe(setState),
+    [controller],
+  );
+  const theme = state.type === 'ready' ? state.settings.theme : 'system';
+  return (
+    <ThemeProvider theme={theme}>
+      {state.type === 'ready' ? (
+        <Main controller={controller} state={state} />
+      ) : (
+        <SessionGate state={state} controller={controller} />
+      )}
+    </ThemeProvider>
+  );
+}
+
+function SessionGate({
+  state,
+  controller,
+}: {
+  readonly state: SessionState;
+  readonly controller: SessionController;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: theme.colors.canvas,
+        justifyContent: 'center',
+      }}
+    >
+      <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      {state.type === 'restore-failed' ? (
+        <ErrorState
+          title="couldn't restore your library"
+          hint={state.error.message}
+          onRetry={() => void controller.session.restore()}
+        />
+      ) : (
+        <LoadingState title="restoring" />
+      )}
+    </View>
+  );
+}
+
+function toSearchModel(state: SearchState): SearchStateModel {
+  switch (state.type) {
+    case 'idle':
+      return {
+        phase: 'idle',
+        query: '',
+        results: [],
+        providerId: null,
+        message: null,
+        retryable: false,
+      };
+    case 'loading':
+      return {
+        phase: 'loading',
+        query: state.query,
+        results: [],
+        providerId: null,
+        message: null,
+        retryable: false,
+      };
+    case 'empty':
+      return {
+        phase: 'empty',
+        query: state.query,
+        results: [],
+        providerId: null,
+        message: null,
+        retryable: false,
+      };
+    case 'content':
+      return {
+        phase: state.page.items.length === 0 ? 'empty' : 'ready',
+        query: state.query,
+        results: state.page.items.map(toSearchRowModel),
+        providerId: null,
+        message: state.refreshError?.message ?? null,
+        retryable: false,
+      };
+    case 'error': {
+      const unavailable =
+        state.error.kind === 'unavailable' ||
+        state.error.kind === 'auth-required';
+      return {
+        phase: unavailable ? 'unavailable' : 'error',
+        query: state.query,
+        results: [],
+        providerId: null,
+        message: state.error.message,
+        retryable: true,
+      };
+    }
+  }
+}
+
+function greeting(now: Date): string {
+  const h = now.getHours();
+  if (h < 5) return 'night';
+  if (h < 12) return 'morning';
+  if (h < 18) return 'afternoon';
+  return 'evening';
+}
+
+function attemptLabel(trace: AttemptTrace): string {
+  return `${trace.requestId} · ${trace.steps} steps · ${trace.httpCalls} http · ${formatClock(trace.elapsedMs)}`;
+}
+
+function Main({
+  controller,
+  state,
+}: {
+  readonly controller: SessionController;
+  readonly state: ReadySession;
+}) {
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  const { session } = controller;
+  const [tab, setTab] = useState('home');
+  const [expanded, setExpanded] = useState(false);
+  const [stageMode, setStageMode] = useState<StageMode>('player');
+  const [query, setQuery] = useState('');
+  const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
+  const resultMeta = useRef(new Map<string, TrackMetadata>());
+
+  const catalogProvider =
+    controller.providers.find(
+      (p) => p.id === state.settings.catalogProvider,
+    ) ?? controller.providers[0];
+
+  const search = useMemo(
+    () =>
+      catalogProvider === undefined
+        ? null
+        : new SearchSession(catalogProvider, createClock(), createIds()),
+    [catalogProvider],
+  );
+  const [searchState, setSearchState] = useState<SearchState>(() =>
+    search === null
+      ? { type: 'idle', revision: 0 }
+      : search.snapshot(),
+  );
+  useEffect(() => {
+    if (search === null) {
+      setSearchState({ type: 'idle', revision: 0 });
+      return undefined;
+    }
+    setSearchState(search.snapshot());
+    return search.subscribe(setSearchState);
+  }, [search]);
+
+  // Keep the row→metadata map in sync so a tap can recover the
+  // TrackMetadata the session needs for addAndPlay.
+  useEffect(() => {
+    const map = resultMeta.current;
+    map.clear();
+    if (searchState.type === 'content') {
+      searchState.page.items.forEach((meta, index) => {
+        map.set(toSearchRowModel(meta, index).key, meta);
+      });
+    }
+  }, [searchState]);
+
+  // Diagnostics: attempt traces are persisted by the session; load a
+  // page whenever the settings tab becomes active.
+  useEffect(() => {
+    if (tab !== 'settings') {
+      return;
+    }
+    const source = new CancellationSource();
+    const context: OperationContext = {
+      requestId: createIds().next('diag'),
+      deadlineMs: Date.now() + 15_000,
+      signal: source.signal,
+    };
+    void controller.storage.loadAttempts(DIAGNOSTICS_LIMIT, context).then(
+      (result) => {
+        if (!source.signal.cancelled && result.ok) {
+          setAttempts(result.value);
+        }
+      },
+    );
+    return () => source.cancel();
+  }, [tab, controller]);
+
+  const player = useMemo(
+    () =>
+      toPlayerModel({
+        playback: state.playback,
+        queue: state.queue,
+        recordings: state.recordings,
+        likes: state.likes,
+      }),
+    [state],
+  );
+  const queueModel = useMemo(
+    () =>
+      toQueueModel({
+        queue: state.queue,
+        recordings: state.recordings,
+        likes: state.likes,
+      }),
+    [state],
+  );
+  const libraryModel = useMemo(() => {
+    const model = toLibraryModel({
+      recordings: state.recordings,
+      likes: state.likes,
+    });
+    const playingId =
+      state.playback.type === 'idle' ? null : state.playback.recordingId;
+    if (playingId === null) {
+      return model;
+    }
+    return {
+      ...model,
+      items: model.items.map((row) =>
+        row.key === playingId ? { ...row, playing: true } : row,
+      ),
+    };
+  }, [state]);
+  const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
+  const homeModel = useMemo(() => {
+    const byId = new Map(state.recordings.map((r) => [r.id, r]));
+    const recents = [...state.likes]
+      .sort((a, b) => b.likedAtMs - a.likedAtMs)
+      .map((like) => byId.get(like.recordingId))
+      .filter((r) => r !== undefined)
+      .slice(0, 12)
+      .map(toRailCard);
+    return {
+      greeting: greeting(new Date()),
+      subline:
+        state.likes.length === 0
+          ? 'search to start your library'
+          : `${state.likes.length} liked`,
+      recents,
+      suggestions: [],
+    };
+  }, [state]);
+  const diagnostics: DiagnosticsModel = useMemo(
+    () => ({
+      providerIds: controller.providers.map((p) => p.id),
+      attemptCount: attempts.length,
+      lastAttemptLabel:
+        attempts[0] === undefined ? null : attemptLabel(attempts[0]),
+      persistence:
+        state.persistenceError === undefined
+          ? 'ok'
+          : state.persistenceError.kind === 'internal'
+            ? 'failed'
+            : 'degraded',
+      persistenceDetail: state.persistenceError?.message ?? null,
+    }),
+    [state, controller, attempts],
+  );
+  const settingsModel = useMemo(
+    () => toSettingsModel(state.settings, diagnostics),
+    [state, diagnostics],
+  );
+
+  const playRecording = useCallback(
+    async (recordingId: string) => {
+      const enqueued = await session.enqueueRecording(recordingId);
+      if (enqueued.ok) {
+        await session.playOccurrence(enqueued.value);
+      }
+    },
+    [session],
+  );
+
+  const onResultPress = useCallback(
+    (row: TrackRowModel) => {
+      const meta = resultMeta.current.get(row.key);
+      if (meta !== undefined) {
+        void session.addAndPlay(meta);
+      }
+    },
+    [session],
+  );
+
+  const onSettingsSelect = useCallback(
+    (key: string) => {
+      if (key === 'theme') {
+        const i = THEME_ORDER.indexOf(state.settings.theme);
+        const theme = THEME_ORDER[(i + 1) % THEME_ORDER.length] ?? 'system';
+        void session.updateSettings({ ...state.settings, theme });
+      }
+      // catalog/playback provider, storefront, and quality rows are
+      // display-only until a second provider exists.
+    },
+    [session, state.settings],
+  );
+
+  const onSettingsToggle = useCallback(
+    (key: string) => {
+      if (key === 'prefetch') {
+        void session.updateSettings({
+          ...state.settings,
+          prefetch: !state.settings.prefetch,
+        });
+      }
+    },
+    [session, state.settings],
+  );
+
+  const playback = state.playback;
+  const playing = playback.type === 'playing';
+  const currentRecordingId =
+    playback.type === 'idle' ? null : playback.recordingId;
+  const onPlayPause = useCallback(() => {
+    void (playing ? session.pause() : session.resume());
+  }, [session, playing]);
+  const onToggleLike = useCallback(() => {
+    if (currentRecordingId !== null) {
+      void session.toggleLike(currentRecordingId);
+    }
+  }, [session, currentRecordingId]);
+  const onMoveQueueItem = useCallback(
+    (occurrenceId: string, direction: -1 | 1) => {
+      const index = state.queue.occurrences.findIndex(
+        (o) => o.occurrenceId === occurrenceId,
+      );
+      if (index >= 0) {
+        void session.moveOccurrence(occurrenceId, index + direction);
+      }
+    },
+    [session, state.queue],
+  );
+
+  const topInset = insets.top;
+  const screen = (() => {
+    switch (tab) {
+      case 'search':
+        return (
+          <SearchScreen
+            state={searchModel}
+            topInset={topInset}
+            onQueryChange={setQuery}
+            onSubmit={() =>
+              void search?.search({
+                query,
+                limit: SEARCH_LIMIT,
+                storefront: state.settings.storefront,
+              })
+            }
+            onCancel={() => {
+              setQuery('');
+              search?.cancel();
+            }}
+            onRetry={() =>
+              void search?.search({
+                query: searchModel.query,
+                limit: SEARCH_LIMIT,
+                storefront: state.settings.storefront,
+              })
+            }
+            onResultPress={onResultPress}
+          />
+        );
+      case 'library':
+        return (
+          <LibraryScreen
+            model={libraryModel}
+            topInset={topInset}
+            onPressItem={(row) => void playRecording(row.key)}
+            onToggleLike={(row) => void session.toggleLike(row.key)}
+          />
+        );
+      case 'queue':
+        return (
+          <QueueScreen
+            queue={queueModel}
+            player={player}
+            topInset={topInset}
+            onPressItem={(id) => void session.playOccurrence(id)}
+            onRemoveItem={(id) => void session.removeOccurrence(id)}
+            onMoveItem={onMoveQueueItem}
+          />
+        );
+      case 'settings':
+        return (
+          <SettingsScreen
+            model={settingsModel}
+            topInset={topInset}
+            onSelectRow={onSettingsSelect}
+            onToggleRow={onSettingsToggle}
+          />
+        );
+      default:
+        return (
+          <HomeScreen
+            model={homeModel}
+            topInset={topInset}
+            onPressCard={(card) => void playRecording(card.key)}
+          />
+        );
+    }
+  })();
+
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+      <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      <View style={{ flex: 1 }}>{screen}</View>
+      {player !== null && !expanded ? (
+        <MiniPlayer
+          player={player}
+          onPress={() => setExpanded(true)}
+          onPlayPause={onPlayPause}
+          onNext={() => void session.next()}
+          onPrevious={() => void session.previous()}
+          onToggleLike={onToggleLike}
+        />
+      ) : null}
+      <AppNavbar items={NAV_ITEMS} activeKey={tab} onSelect={setTab} />
+      {player !== null ? (
+        <StageSheet
+          player={player}
+          expanded={expanded}
+          onExpandChange={setExpanded}
+          mode={stageMode}
+          onModeChange={setStageMode}
+          queue={queueModel}
+          topInset={topInset}
+          onPlayPause={onPlayPause}
+          onNext={() => void session.next()}
+          onPrevious={() => void session.previous()}
+          onToggleLike={onToggleLike}
+          onSeek={(ms) => void session.seekTo(ms)}
+          onPressQueueItem={(id) => void session.playOccurrence(id)}
+          onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+          onMoveQueueItem={onMoveQueueItem}
+        />
+      ) : null}
+    </View>
+  );
+}

@@ -7,8 +7,8 @@ import type {
   Settings,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
-import type { AuqwExpoLike } from '../adapters/auqw-expo-surface.ts';
-import { createAuqwExpoPlayer } from '../adapters/auqw-expo-player.ts';
+import type { AuqwExpoHostModuleLike } from '../adapters/auqw-expo-surface.ts';
+import { createExpoAudioPlayer } from '../adapters/expo-audio-player.ts';
 import type { PluginProvider } from '../adapters/plugin-provider.ts';
 import { createPluginProvider } from '../adapters/plugin-provider.ts';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
@@ -56,46 +56,67 @@ async function wasmAssetBase64(moduleRef: number): Promise<string> {
 }
 
 async function loadBundledPlugin(
-  module: AuqwExpoLike,
+  host: AuqwExpoHostModuleLike,
   wasmRef: number,
   manifest: unknown,
 ): Promise<string> {
   const wasmBase64 = await wasmAssetBase64(wasmRef);
-  return module.loadPlugin(wasmBase64, JSON.stringify(manifest));
+  return host.loadPlugin(wasmBase64, JSON.stringify(manifest));
 }
 
+export type SessionControllerOptions = {
+  readonly potProviderUrl?: string | undefined;
+  readonly databasePath?: string;
+  /**
+   * Player factory over the built providers. Defaults to the
+   * provisional expo-audio download path (works on both platforms);
+   * Android swaps to `createAuqwExpoPlayer(auqwExpo)` when the seam
+   * module lands.
+   */
+  readonly player?: (
+    providers: ReadonlyMap<string, ProviderPort>,
+  ) => PlayerPort;
+};
+
 /**
- * Wires the auqw-expo native module to an application `Session`:
- * host config, both bundled plugins, the two ProviderPorts,
- * expo-sqlite storage, and the seam player. `module` is injected —
- * this file never imports 'auqw-expo'.
+ * Wires a plugin-host module to an application `Session`: host
+ * config, both bundled plugins, the two ProviderPorts, expo-sqlite
+ * storage, and the chosen player. `host` is injected — satisfied by
+ * `auqw-plugin-host-expo` today and `auqw-expo` at the seam merge.
  *
  * The caller still drives `session.restore()` and subscribes for
  * state; construction only assembles the dependency graph.
  */
 export async function createSessionController(
-  module: AuqwExpoLike,
-  options: { potProviderUrl?: string; databasePath?: string } = {},
+  host: AuqwExpoHostModuleLike,
+  options: SessionControllerOptions = {},
 ): Promise<SessionController> {
-  // Fuel config matches the Slice-0 gate values in App.tsx.
-  await module.createHost({
+  // Fuel config matches the Slice-0 gate values.
+  await host.createHost({
     fuelPerEntry: 200_000_000,
     fuelTotal: 2_000_000_000,
     potProviderUrl: options.potProviderUrl,
   });
   const [itunesPluginId, youtubeMusicPluginId] = await Promise.all([
-    loadBundledPlugin(module, ITUNES_WASM, ITUNES_MANIFEST),
-    loadBundledPlugin(module, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
+    loadBundledPlugin(host, ITUNES_WASM, ITUNES_MANIFEST),
+    loadBundledPlugin(host, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
   ]);
   const providers: PluginProvider[] = [
-    createPluginProvider(module, itunesPluginId, 'itunes'),
-    createPluginProvider(module, youtubeMusicPluginId, 'youtube-music'),
+    createPluginProvider(host, itunesPluginId, 'itunes'),
+    createPluginProvider(host, youtubeMusicPluginId, 'youtube-music'),
   ];
   const storage = new SqliteStorage(
     await createExpoSqliteDriver(options.databasePath),
     DEFAULT_SETTINGS,
   );
-  const player = createAuqwExpoPlayer(module);
+  const providerMap = new Map(providers.map((p) => [p.id, p]));
+  const player = (options.player ?? ((map) => {
+    return createExpoAudioPlayer({
+      providers: map,
+      ids: createIds(),
+      qualityKbps: DEFAULT_SETTINGS.qualityKbps,
+    });
+  }))(providerMap);
   const session = new Session({
     storage,
     player,
