@@ -4,8 +4,27 @@
 // copies `<id>.wasm` + `<id>.manifest.json` into
 // apps/mobile/assets/plugins/. Also syncs the spin conformance guest
 // for the on-device fuel gate.
-import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+//
+// Source kinds:
+//   local-build:<path-to-wasm>   dev loop — digest + manifest checks only
+//   release:<path-to-release-dir>  signed release — digest, manifest,
+//     provenance, and the ed25519 signature are all verified against
+//     the lock's pinned keyId/publicKey before anything is copied.
+//
+// The canonical payload and key_id derivation mirror
+// auqw-plugins/tooling/sign.mjs — keep them in lockstep.
+import {
+  createHash,
+  createPublicKey,
+  verify as edVerify,
+} from 'node:crypto';
+import {
+  copyFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,19 +37,100 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
 
+const keyIdOf = (publicPem) =>
+  createHash('sha256')
+    .update(createPublicKey(publicPem).export({ format: 'der', type: 'spki' }))
+    .digest('hex')
+    .slice(0, 16);
+
+const canonicalPayload = ({ plugin, version, abi, wasmSha, manifestSha, keyId }) =>
+  `auqw-release-v1\n${plugin}\n${version}\n${abi}\n${wasmSha}\n${manifestSha}\n${keyId}\n`;
+
+// Verify a signed release dir end to end: digests, manifest/provenance
+// identity agreement, then the ed25519 signature over the canonical
+// payload against the key the lock pins.
+const verifyRelease = (plugin, dir) => {
+  const bad = (msg) => {
+    throw new Error(`${plugin.id}: ${msg}`);
+  };
+  const need = (name) => {
+    const p = join(dir, name);
+    try {
+      return readFileSync(p);
+    } catch {
+      bad(`release dir is missing ${name}`);
+    }
+  };
+  if (readdirSync(dir).filter((f) => f.endsWith('.wasm')).length !== 1) {
+    bad('release dir must hold exactly one .wasm artifact');
+  }
+  const wasm = need(`${plugin.id}-${plugin.version}.wasm`);
+  const manifestBuf = need('plugin.manifest.json');
+  const provenance = JSON.parse(need('provenance.json').toString('utf8'));
+  const signature = need('signature');
+
+  const wasmSha = sha256(wasm);
+  if (wasmSha !== plugin.digest) {
+    bad(`wasm digest drift: ${wasmSha} != lock ${plugin.digest}`);
+  }
+  if (provenance.wasm_sha256 !== wasmSha) {
+    bad(`wasm digest ${wasmSha} != provenance ${provenance.wasm_sha256}`);
+  }
+  const manifestSha = sha256(manifestBuf);
+  if (manifestSha !== provenance.manifest_sha256) {
+    bad(`manifest digest ${manifestSha} != provenance ${provenance.manifest_sha256}`);
+  }
+  if (
+    provenance.plugin !== plugin.id ||
+    provenance.version !== plugin.version ||
+    provenance.abi_version !== plugin.abi
+  ) {
+    bad('provenance id/version/abi disagree with the lock entry');
+  }
+  if (provenance.key_id !== lock.keyId) {
+    bad(`signed by key ${provenance.key_id}; lock pins ${lock.keyId}`);
+  }
+  if (keyIdOf(lock.publicKey) !== lock.keyId) {
+    bad(`lock publicKey derives key ${keyIdOf(lock.publicKey)} != lock keyId ${lock.keyId}`);
+  }
+  const payload = canonicalPayload({
+    plugin: plugin.id,
+    version: plugin.version,
+    abi: plugin.abi,
+    wasmSha,
+    manifestSha,
+    keyId: lock.keyId,
+  });
+  const ok = edVerify(
+    null,
+    Buffer.from(payload, 'utf8'),
+    lock.publicKey,
+    Buffer.from(signature.toString('utf8').trim(), 'base64'),
+  );
+  if (!ok) bad('ed25519 signature does not verify');
+  return { wasm, manifest: JSON.parse(manifestBuf.toString('utf8')) };
+};
+
 for (const plugin of lock.plugins) {
   const source = plugin.source;
-  if (!source.startsWith('local-build:')) {
+  let wasm;
+  let manifest;
+  let wasmPath;
+  if (source.startsWith('local-build:')) {
+    wasmPath = resolve(ROOT, source.slice('local-build:'.length));
+    wasm = readFileSync(wasmPath);
+    if (sha256(wasm) !== plugin.digest) {
+      throw new Error(`${plugin.id}: digest mismatch lock=${plugin.digest} actual=${sha256(wasm)}`);
+    }
+    manifest = JSON.parse(readFileSync(join(dirname(wasmPath), '../manifest.json'), 'utf8'));
+  } else if (source.startsWith('release:')) {
+    if (!lock.keyId || !lock.publicKey) {
+      throw new Error('release sources need keyId + publicKey in providers.lock.json');
+    }
+    ({ wasm, manifest } = verifyRelease(plugin, resolve(ROOT, source.slice('release:'.length))));
+  } else {
     throw new Error(`${plugin.id}: unsupported source ${source}`);
   }
-  const wasmPath = resolve(ROOT, source.slice('local-build:'.length));
-  const wasm = readFileSync(wasmPath);
-  const digest = sha256(wasm);
-  if (digest !== plugin.digest) {
-    throw new Error(`${plugin.id}: digest mismatch lock=${plugin.digest} actual=${digest}`);
-  }
-  const manifestPath = join(dirname(wasmPath), '../manifest.json');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   // The lock pins identity as well as bytes: a manifest whose id,
   // version, or ABI disagrees with the lock entry is not the artifact
   // the lock claims, even when the digest matches.
@@ -47,9 +147,12 @@ for (const plugin of lock.plugins) {
   if (manifest.artifact.digest !== plugin.digest) {
     throw new Error(`${plugin.id}: manifest digest ${manifest.artifact.digest} != lock ${plugin.digest}`);
   }
-  copyFileSync(wasmPath, join(OUT, `${plugin.id}.wasm`));
+  copyFileSync(
+    wasmPath ?? join(resolve(ROOT, source.slice('release:'.length)), `${plugin.id}-${plugin.version}.wasm`),
+    join(OUT, `${plugin.id}.wasm`),
+  );
   writeFileSync(join(OUT, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
-  console.log(`synced ${plugin.id} ${plugin.version} ${digest.slice(0, 19)}…`);
+  console.log(`synced ${plugin.id} ${plugin.version} ${plugin.digest.slice(0, 19)}…`);
 }
 
 // Spin conformance guest (fuel gate).

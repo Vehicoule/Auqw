@@ -1,19 +1,35 @@
 {
-  "abi": "0.2.0",
+  "abi": "0.3.0",
+  "keyId": "e6023b53aa9bfb3c",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAf/5wVc9Z77RIV9L8sawzrgJGMKX6L/HRBB+12tqpBuQ=\n-----END PUBLIC KEY-----\n",
   "plugins": [
     {
       "id": "itunes",
-      "version": "0.1.0",
-      "abi": "0.2.0",
-      "digest": "sha256:971c9ca5579f67a59b50520e42acc8d81fb8922c38506600f074265e1a66a737",
-      "source": "local-build:../auqw-plugins/plugins/itunes/dist/itunes.wasm"
+      "version": "0.2.0",
+      "abi": "0.3.0",
+      "digest": "sha256:103bf9bcac4d02943fd42d86d5e9ce12f86e74d720fd1200c32be2c7a7061dc5",
+      "source": "release:../auqw-plugins/releases/itunes/0.2.0"
     },
     {
       "id": "youtube-music",
-      "version": "0.2.0",
-      "abi": "0.2.0",
-      "digest": "sha256:4cdf573d1804a1a1df64e6260293d97e7c92741799e44367ce7b10240abd00f5",
-      "source": "local-build:../auqw-plugins/plugins/youtube-music/dist/youtube-music.wasm"
+      "version": "0.3.0",
+      "abi": "0.3.0",
+      "digest": "sha256:0b1ab4c5aa7f43d2daa00fc9a18987be19a415eef9eb094ed576f3d23b9ff7b4",
+      "source": "release:../auqw-plugins/releases/youtube-music/0.3.0"
+    },
+    {
+      "id": "deezer",
+      "version": "0.1.0",
+      "abi": "0.3.0",
+      "digest": "sha256:69a81e72bbe0f0d7ae1fe88787f8b6f4aae0ff19524c29c0b7fc2a92e4f05864",
+      "source": "release:../auqw-plugins/releases/deezer/0.1.0"
+    },
+    {
+      "id": "lyrics-lrclib",
+      "version": "0.1.0",
+      "abi": "0.3.0",
+      "digest": "sha256:7f14dc0505ceaad54722dd14c95059a3baa7700d5616c5d38a6b987d8726a86d",
+      "source": "release:../auqw-plugins/releases/lyrics-lrclib/0.1.0"
     }
   ]
 }
