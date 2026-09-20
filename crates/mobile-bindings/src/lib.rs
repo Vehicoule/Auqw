@@ -13,6 +13,7 @@ use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
     KeyValueStore, LoadedPlugin, Manifest, MemoryKeyValueStore, ReqwestClient, SystemClock,
 };
+use auqw_stream::{StreamConfig, StreamRegistry};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::runtime::Runtime;
@@ -34,6 +35,11 @@ pub struct HostConfig {
     /// Path of the on-disk KV store the native shell supplies;
     /// `None` keeps plugin state volatile.
     pub state_path: Option<String>,
+    /// Directory for the sparse stream cache; `None` disables the
+    /// streaming seam — every `stream_*` call then fails
+    /// [`StreamError::Unavailable`] and `start_prepare` fails
+    /// synchronously.
+    pub stream_path: Option<String>,
 }
 
 /// One HTTP call from the attempt trace. `url` is already stripped of
@@ -134,6 +140,8 @@ pub struct ResolvedResource {
     pub client: String,
     /// Reported `contentLength` of the picked format in bytes.
     pub content_length: Option<u64>,
+    /// Provider format itag when the guest reported one.
+    pub itag: Option<u32>,
 }
 
 /// Terminal outcome of one `start_resolve` invocation.
@@ -241,6 +249,7 @@ pub struct PluginHost {
     kv: Arc<dyn KeyValueStore>,
     budgets: Budgets,
     pot_provider_url: Option<String>,
+    stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
     counter: AtomicU64,
@@ -301,12 +310,25 @@ impl PluginHost {
             fuel_total: config.fuel_total,
             ..Budgets::default()
         };
+        // A configured stream path must yield a working cache dir;
+        // silently degrading to "unavailable" would hide a broken
+        // shell config, so a failure here fails the host.
+        let stream = match &config.stream_path {
+            Some(path) => Some(Arc::new(
+                StreamRegistry::new(StreamConfig::new(path.into()), runtime.handle().clone())
+                    .map_err(|e| HostError::Runtime {
+                        detail: format!("stream: {e}"),
+                    })?,
+            )),
+            None => None,
+        };
         Ok(Arc::new(Self {
             runtime,
             http: Arc::new(http),
             kv,
             budgets,
             pot_provider_url: config.pot_provider_url,
+            stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
@@ -531,8 +553,15 @@ fn resource_from(value: &Value) -> ResolvedResource {
         expires_at_ms: value.get("expires_at_ms").and_then(Value::as_u64),
         client: get("client"),
         content_length: value.get("content_length").and_then(Value::as_u64),
+        itag: value
+            .get("itag")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
+
+mod stream;
+pub use stream::*;
 
 #[cfg(test)]
 mod tests {
@@ -558,6 +587,7 @@ mod tests {
             fuel_total: 2_000_000_000,
             pot_provider_url: None,
             state_path: None,
+            stream_path: None,
         }
     }
 
@@ -727,6 +757,143 @@ mod tests {
                 );
             }
             ResolveOutcome::Resolved { .. } => panic!("spin resolved?"),
+        }
+    }
+
+    struct PrepareChannelListener {
+        tx: mpsc::Sender<(String, PrepareOutcome)>,
+    }
+
+    impl PrepareListener for PrepareChannelListener {
+        fn on_outcome(&self, request_id: String, outcome: PrepareOutcome) {
+            let _ = self.tx.send((request_id, outcome));
+        }
+    }
+
+    #[test]
+    fn itag_reaches_the_resource() {
+        let wasm = match wat::parse_str(done_wat(
+            "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
+             \"itag\":140,\"client\":\"IOS\"}",
+        )) {
+            Ok(w) => w,
+            Err(e) => panic!("wat: {e}"),
+        };
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(
+            wasm.clone(),
+            manifest_json("done", &wasm, "[\"network:example.com\"]"),
+        ) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let _ = match host.start_resolve(id, "vid12345678".into(), Box::new(ChannelListener { tx }))
+        {
+            Ok(r) => r,
+            Err(e) => panic!("start: {e}"),
+        };
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        match outcome {
+            ResolveOutcome::Resolved { resource, .. } => {
+                assert_eq!(resource.itag, Some(140));
+            }
+            ResolveOutcome::Failed { kind, message, .. } => {
+                panic!("expected Resolved, got Failed {kind}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn stream_calls_fail_unavailable_without_stream_path() {
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        for result in [
+            host.stream_open("st-0".into(), 0).map(|_| ()),
+            host.stream_read("st-0".into(), 0, 64).map(|_| ()),
+            host.stream_close("st-0".into()),
+            host.stream_release("st-0".into()),
+            host.stream_phase_marks("st-0".into()).map(|_| ()),
+        ] {
+            match result {
+                Err(StreamError::Unavailable) => {}
+                other => panic!("expected Unavailable, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_fails_synchronously_without_stream_path() {
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let (tx, _rx) = mpsc::channel();
+        match host.start_prepare(
+            "any".into(),
+            "x".into(),
+            Box::new(PrepareChannelListener { tx }),
+        ) {
+            Err(HostError::Runtime { detail }) => {
+                assert!(detail.contains("stream"), "{detail}");
+            }
+            other => panic!("expected Runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_with_urlless_result_reports_failed() {
+        // The echo guest resolves to a url-less result; the seam is
+        // configured, so the outcome must be Failed invalid-response —
+        // and no session (or pump, or network) is ever started.
+        let dir = std::env::temp_dir().join(format!(
+            "auqw-mb-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut cfg = config();
+        cfg.stream_path = Some(dir.to_string_lossy().into_owned());
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let request_id = match host.start_prepare(
+            id,
+            "vid12345678".into(),
+            Box::new(PrepareChannelListener { tx }),
+        ) {
+            Ok(r) => r,
+            Err(e) => panic!("start_prepare: {e}"),
+        };
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        assert_eq!(rid, request_id);
+        match outcome {
+            PrepareOutcome::Failed { kind, .. } => {
+                assert_eq!(kind, "invalid-response");
+            }
+            PrepareOutcome::Prepared { .. } => {
+                panic!("echo result has no url — expected Failed");
+            }
         }
     }
 }
