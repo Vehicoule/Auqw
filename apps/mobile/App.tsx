@@ -151,6 +151,12 @@ export function App() {
         // restore() never throws — its Result surfaces through
         // session state as 'restore-failed'.
         await created.session.restore();
+        if (disposed) {
+          // Unmounted mid-restore — init/stop must not run after
+          // dispose.
+          await created.dispose();
+          return;
+        }
         // Slice-3 bring-up: local index + download ledger. Ran after
         // restore so its storage reads can't interleave. The source
         // is retained so unmount cancels a still-running start —
@@ -1107,8 +1113,17 @@ function Main({
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
   const onPlayPause = useCallback(() => {
+    // Pause is always allowed; resuming an unowned remote track while
+    // offline would start a prepare that cannot finish.
+    if (
+      !playing &&
+      currentRecordingId !== null &&
+      !canPlay(currentRecordingId)
+    ) {
+      return;
+    }
     void (playing ? session.pause() : session.resume());
-  }, [session, playing]);
+  }, [session, playing, currentRecordingId, canPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void session.toggleLike(currentRecordingId);
@@ -1389,28 +1404,29 @@ function Main({
       return;
     }
     setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
-    // session.importLibrary revalidates and commits atomically; the
+    // replaceLibrary drains the download manager (live runners and
+    // finalized files) before session.importLibrary swaps sections,
+    // then rehydrates the media owners off the new snapshot. The
     // returned preview doubles as the applied-summary counts.
-    void session.importLibrary(text).then((result) => {
-      if (!result.ok) {
+    void controller
+      .replaceLibrary(text, new CancellationSource().signal)
+      .then((result) => {
+        if (!result.ok) {
+          setTransfer((prev) => ({
+            ...prev,
+            importPhase: 'error',
+            importDetail: result.error.message,
+          }));
+          return;
+        }
+        importText.current = null;
+        const counts = result.value.counts;
         setTransfer((prev) => ({
           ...prev,
-          importPhase: 'error',
-          importDetail: result.error.message,
+          importPhase: 'done',
+          importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
         }));
-        return;
-      }
-      importText.current = null;
-      // The persisted sections were swapped — media owners rehydrate
-      // before the UI reads downloads/local rows again.
-      void controller.rehydrateMedia(new CancellationSource().signal);
-      const counts = result.value.counts;
-      setTransfer((prev) => ({
-        ...prev,
-        importPhase: 'done',
-        importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
-      }));
-    });
+      });
   }, [session, controller]);
 
   const onResetImport = useCallback(() => {

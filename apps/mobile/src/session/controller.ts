@@ -12,9 +12,11 @@ import type {
   ArtworkCache,
   CancellationSignal,
   ConnectivityPort,
+  ImportPreview,
   PlayerPort,
   ProviderPort,
   QueueSnapshot,
+  Result,
   Settings,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
@@ -107,6 +109,17 @@ export type SessionController = {
    * re-inits the download ledger so their rows can't go stale.
    */
   rehydrateMedia(signal: CancellationSignal): Promise<void>;
+  /**
+   * Whole-library replace with the ordering the media owners need:
+   * the download manager stops and clears its files BEFORE the
+   * section swap commits — a live runner or a finalized file must
+   * not outlive the ledger. Then the import runs and the owners
+   * rehydrate off the new snapshot.
+   */
+  replaceLibrary(
+    text: string,
+    signal: CancellationSignal,
+  ): Promise<Result<ImportPreview>>;
   dispose(): Promise<void>;
 };
 
@@ -329,6 +342,51 @@ export async function createSessionController(
     deadlineMs: clock.nowMs() + 60_000,
     signal: new CancellationSource().signal,
   });
+  // Media-owner subscriptions made in start() — dispose() detaches
+  // them so a second boot or an unmounted app can't double-fire.
+  const mediaUnsubs: Array<() => void> = [];
+  /**
+   * A whole-library replace (import) swaps the persisted sections
+   * out from under the media owners — re-init the download ledger
+   * and rebuild the local source from the post-import snapshot
+   * before the UI calls back in.
+   */
+  const rehydrateMedia = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    const loaded = await storage.load({
+      requestId: ids.next('media-rehydrate'),
+      deadlineMs: clock.nowMs() + 30_000,
+      signal,
+    });
+    if (!loaded.ok || signal.cancelled) {
+      void log.write({
+        level: 'warn',
+        message: 'media rehydrate skipped: storage load failed',
+        atMs: clock.nowMs(),
+      });
+      return;
+    }
+    localSource = new LocalFileSource(
+      { storage, tagReader: createExpoTagReader(host), ids, clock, log },
+      {
+        localSources: loaded.value.localSources,
+        localFiles: loaded.value.localFiles,
+        recordings: loaded.value.recordings,
+      },
+    );
+    const inited = await downloads.init(loaded.value.downloads, signal);
+    if (!inited.ok) {
+      void log.write({
+        level: 'warn',
+        message: `download re-init failed: ${inited.error.kind}`,
+        atMs: clock.nowMs(),
+      });
+    }
+    // Imported recordings replace prior local rows — the session
+    // re-merges provenance-local rows through this hook.
+    session.syncLocalRecordings(localSource.recordings());
+  };
   return {
     session,
     storage,
@@ -378,82 +436,79 @@ export async function createSessionController(
       // Re-band pending downloads when the queue moves: a track that
       // becomes now-playing jumps the line.
       let queueRevision = readyOr((s) => s.queue.revision, 0);
-      session.subscribe((next) => {
-        if (next.type !== 'ready' || next.queue.revision === queueRevision) {
-          return;
-        }
-        queueRevision = next.queue.revision;
-        void downloads.updatePriorities(new CancellationSource().signal);
-      });
+      mediaUnsubs.push(
+        session.subscribe((next) => {
+          if (
+            next.type !== 'ready' ||
+            next.queue.revision === queueRevision
+          ) {
+            return;
+          }
+          queueRevision = next.queue.revision;
+          void downloads.updatePriorities(new CancellationSource().signal);
+        }),
+      );
       // dataSync FGS keep-alive: drive the service off the ledger —
       // 'transferring' rows only (queued/metered-waiting rows hold no
       // network and must not keep a foreground service posted). The
       // native surface is Android-only; iOS lacks the method — its
       // absence resolves to a warn, not a crash.
       let lastActive = -1;
-      downloads.subscribe(() => {
-        const active = downloads
-          .list()
-          .filter((d) => d.state === 'transferring').length;
-        if (active === lastActive) {
-          return;
-        }
-        lastActive = active;
-        try {
-          void host.downloadsActiveChanged(active).catch((thrown) => {
-            void log.write({
-              level: 'warn',
-              message: `fgs update failed: ${nativeMessage(thrown)}`,
-              atMs: clock.nowMs(),
+      mediaUnsubs.push(
+        downloads.subscribe(() => {
+          const active = downloads
+            .list()
+            .filter((d) => d.state === 'transferring').length;
+          if (active === lastActive) {
+            return;
+          }
+          lastActive = active;
+          try {
+            void host.downloadsActiveChanged(active).catch((thrown) => {
+              void log.write({
+                level: 'warn',
+                message: `fgs update failed: ${nativeMessage(thrown)}`,
+                atMs: clock.nowMs(),
+              });
             });
-          });
-        } catch {
-          // Method absent on this platform — downloads still work;
-          // only Doze-protected long transfers are degraded.
-        }
-      });
-    },
-    /**
-     * A whole-library replace (import) swaps the persisted sections
-     * out from under the media owners — re-init the download ledger
-     * and rebuild the local source from the post-import snapshot
-     * before the UI calls back in.
-     */
-    async rehydrateMedia(signal: CancellationSignal) {
-      const loaded = await storage.load({
-        requestId: ids.next('media-rehydrate'),
-        deadlineMs: clock.nowMs() + 30_000,
-        signal,
-      });
-      if (!loaded.ok || signal.cancelled) {
-        void log.write({
-          level: 'warn',
-          message: 'media rehydrate skipped: storage load failed',
-          atMs: clock.nowMs(),
-        });
-        return;
-      }
-      localSource = new LocalFileSource(
-        { storage, tagReader: createExpoTagReader(host), ids, clock, log },
-        {
-          localSources: loaded.value.localSources,
-          localFiles: loaded.value.localFiles,
-          recordings: loaded.value.recordings,
-        },
+          } catch {
+            // Method absent on this platform — downloads still work;
+            // only Doze-protected long transfers are degraded.
+          }
+        }),
       );
-      const inited = await downloads.init(loaded.value.downloads, signal);
-      if (!inited.ok) {
+    },
+    rehydrateMedia,
+    async replaceLibrary(text, signal) {
+      // Drain first: importOwned swaps the persisted sections while
+      // leaving bytes on disk, so a live runner could repersist a
+      // deleted row and every finalized file would orphan.
+      const stopped = await downloads.stop(signal);
+      if (!stopped.ok) {
         void log.write({
           level: 'warn',
-          message: `download re-init failed: ${inited.error.kind}`,
+          message: `pre-import stop failed: ${stopped.error.kind}`,
           atMs: clock.nowMs(),
         });
       }
-      // Imported recordings replace prior local rows — the session
-      // re-merges provenance-local rows through this hook.
-      session.syncLocalRecordings(localSource.recordings());
+      const cleared = await downloads.removeAll(signal);
+      if (!cleared.ok) {
+        void log.write({
+          level: 'warn',
+          message: `pre-import clear failed: ${cleared.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+      }
+      const result = await session.importLibrary(text);
+      if (result.ok) {
+        await rehydrateMedia(signal);
+      }
+      return result;
     },
     async dispose() {
+      for (const unsub of mediaUnsubs.splice(0)) {
+        unsub();
+      }
       await downloads.stop(new CancellationSource().signal);
       await session.dispose();
       for (const provider of providers) {
