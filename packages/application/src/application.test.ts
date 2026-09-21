@@ -16,6 +16,7 @@ import { run as runSearch } from './search/search-session.test.ts';
 import { run as runFakes } from './testing/fakes.test.ts';
 import { run as runSession } from './session/session.test.ts';
 import { run as runProviderRouter } from './providers/provider-router.test.ts';
+import { run as runTransferPolicy } from './downloads/transfer-policy.test.ts';
 
 runErrors();
 runCancellation();
@@ -35,3 +36,4 @@ await runSearch();
 await runFakes();
 await runSession();
 await runProviderRouter();
+await runTransferPolicy();

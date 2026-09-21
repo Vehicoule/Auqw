@@ -8,6 +8,7 @@ export * from './ports/media-transfer.ts';
 export * from './ports/tag-reader.ts';
 export * from './ports/connectivity.ts';
 export * from './downloads/transfer-policy.ts';
+export * from './downloads/sha256.ts';
 export * from './ports/runtime.ts';
 export * from './ports/clock.ts';
 export * from './ports/log.ts';

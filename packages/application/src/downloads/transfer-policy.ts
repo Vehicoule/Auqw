@@ -60,6 +60,11 @@ export function asAppError(thrown: unknown): AppError {
   ) {
     return appError('cancelled', 'cancelled');
   }
+  // fetch rejects with TypeError on transport failure (DNS, reset) —
+  // a retryable blip, not a terminal fault.
+  if (thrown instanceof TypeError) {
+    return appError('transient', 'download network error');
+  }
   return appError('internal', 'download failed');
 }
 
@@ -139,6 +144,9 @@ async function fetchChunk(
       resp.status === 206
         ? new Uint8Array(await resp.arrayBuffer())
         : new Uint8Array(0);
+    // Response and body are in — release the timeout sleeper early
+    // so it doesn't linger a full timeout per chunk.
+    child.cancel();
     return {
       status: resp.status,
       contentRange: resp.headers.get('content-range'),
