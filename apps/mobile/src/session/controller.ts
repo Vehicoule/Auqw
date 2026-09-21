@@ -208,7 +208,7 @@ export async function createSessionController(
   const ids = createIds();
   const clock = createClock();
   const connectivity = createExpoConnectivity(host);
-  const { transfer } = createExpoTransfer();
+  const { transfer, uriFor: downloadUriFor } = createExpoTransfer();
   // `local` is constructed in start(); the playback hook reads the
   // box so a URI resolves the moment a source exists.
   let localSource: LocalFileSource | null = null;
@@ -221,15 +221,24 @@ export async function createSessionController(
     ids,
     log,
     defaults: DEFAULT_SETTINGS,
-    localPlaybackFor: (recordingId) => {
-      // Owned bytes first: a stored download wins; a local file whose
-      // download was removed still plays from its document URI.
-      const file = downloads.fileFor(recordingId);
-      if (file !== null) {
-        return file;
-      }
-      return localSource?.uriFor(recordingId) ?? null;
-    },
+    // Android-only: the auqw-expo player attaches local files; the
+    // iOS provisional player has no local-provider path, so owned
+    // bytes there fall back to remote playback instead of failing.
+    ...(Platform.OS === 'android'
+      ? {
+          localPlaybackFor: (recordingId: string) => {
+            // Owned bytes first: a stored download wins; a local
+            // file whose download was removed still plays from its
+            // document URI. fileFor returns a bare ledger name —
+            // resolve it to the transfer directory's file URI.
+            const file = downloads.fileFor(recordingId);
+            if (file !== null) {
+              return downloadUriFor(file);
+            }
+            return localSource?.uriFor(recordingId) ?? null;
+          },
+        }
+      : {}),
   });
   type ReadyState = Extract<
     ReturnType<Session['snapshot']>,
@@ -331,6 +340,10 @@ export async function createSessionController(
         });
         return;
       }
+      if (signal.cancelled) {
+        // Cleanup raced the load — do not un-stop the manager.
+        return;
+      }
       const tagReader = createExpoTagReader(host);
       localSource = new LocalFileSource(
         { storage, tagReader, ids, clock, log },
@@ -340,7 +353,24 @@ export async function createSessionController(
           recordings: loaded.value.recordings,
         },
       );
-      await downloads.init(loaded.value.downloads, signal);
+      const inited = await downloads.init(loaded.value.downloads, signal);
+      if (!inited.ok) {
+        log.write({
+          level: 'warn',
+          message: `download init failed: ${inited.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+      }
+      // Re-band pending downloads when the queue moves: a track that
+      // becomes now-playing jumps the line.
+      let queueRevision = readyOr((s) => s.queue.revision, 0);
+      session.subscribe((next) => {
+        if (next.type !== 'ready' || next.queue.revision === queueRevision) {
+          return;
+        }
+        queueRevision = next.queue.revision;
+        void downloads.updatePriorities(new CancellationSource().signal);
+      });
       // dataSync FGS keep-alive: drive the service off the ledger —
       // 'transferring' rows only (queued/metered-waiting rows hold no
       // network and must not keep a foreground service posted). The

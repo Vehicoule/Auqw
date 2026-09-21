@@ -16,8 +16,9 @@ import {
 import * as AuqwExpo from 'auqw-expo';
 import {
   CancellationSource,
-  LOCAL_PROVIDER,
   SearchSession,
+  effectiveMapping,
+  isRefRejected,
   previewImport,
 } from '@auqw/application';
 import type {
@@ -128,6 +129,7 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let controller: SessionController | null = null;
+    let startSource: CancellationSource | null = null;
     setBoot({ type: 'loading' });
     void (async () => {
       try {
@@ -150,8 +152,11 @@ export function App() {
         // session state as 'restore-failed'.
         await created.session.restore();
         // Slice-3 bring-up: local index + download ledger. Ran after
-        // restore so its storage reads can't interleave.
-        await created.start(new CancellationSource().signal);
+        // restore so its storage reads can't interleave. The source
+        // is retained so unmount cancels a still-running start —
+        // DownloadManager.init must never run after dispose.
+        startSource = new CancellationSource();
+        await created.start(startSource.signal);
         if (disposed) {
           await created.dispose();
           return;
@@ -169,6 +174,7 @@ export function App() {
     })();
     return () => {
       disposed = true;
+      startSource?.cancel();
       const c = controller;
       controller = null;
       if (c !== null) {
@@ -416,7 +422,9 @@ function formatBytes(bytes: number, free: number): string {
       ? `${(n / 1e9).toFixed(1)} gb`
       : n >= 1e6
         ? `${(n / 1e6).toFixed(0)} mb`
-        : `${Math.max(1, Math.round(n / 1e3))} kb`;
+        : n === 0
+          ? '0 kb'
+          : `${Math.max(1, Math.round(n / 1e3))} kb`;
   return `${gb(bytes)} used · ${gb(free)} free`;
 }
 
@@ -526,17 +534,34 @@ function Main({
       if (recording === undefined) {
         return null;
       }
+      // Mirrors Session.#pickRef's provider path — a download is
+      // resolved by the active playback provider, so only a mapping
+      // verdict or a non-rejected ref it owns can produce a stream.
+      // Other providers' refs would fail resolvePlayback: hide them.
+      const provider = state.settings.playbackProvider;
+      const mapped = effectiveMapping(recording, provider);
+      if (mapped !== null) {
+        return mapped.ref;
+      }
       return (
         recording.sourceRefs.find(
-          (r) => r.provider === state.settings.playbackProvider && r.kind === 'track',
-        ) ??
-        recording.sourceRefs.find(
-          (r) => r.kind === 'track' && r.provider !== LOCAL_PROVIDER,
-        ) ??
-        null
+          (r) =>
+            r.provider === provider &&
+            r.kind === 'track' &&
+            !isRefRejected(recording.mappings, r),
+        ) ?? null
       );
     },
     [state.recordings, state.settings.playbackProvider],
+  );
+
+  // Bytes on disk — a stored download or a scanned local file. Used
+  // to drop provider pins (owned wins) and to roll download state up.
+  const isOwned = useCallback(
+    (recordingId: string): boolean =>
+      controller.downloads.fileFor(recordingId) !== null ||
+      (controller.local()?.uriFor(recordingId) ?? null) !== null,
+    [controller],
   );
 
   // Single download affordance: absent → request; queued/downloading
@@ -876,7 +901,7 @@ function Main({
         storageText,
         localFolderCount: controller.local()?.list().length,
       }),
-    [state, diagnostics],
+    [state, diagnostics, storageText, localTick, controller],
   );
 
   const playRecording = useCallback(
@@ -931,6 +956,7 @@ function Main({
           .addFolder(new CancellationSource().signal)
           .then((added) => {
             if (added.ok) {
+              session.syncLocalRecordings(local.recordings());
               refreshLocal();
             }
           });
@@ -945,6 +971,7 @@ function Main({
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
             if (scanned.ok) {
+              session.syncLocalRecordings(local.recordings());
               refreshLocal();
             }
           });
@@ -965,14 +992,18 @@ function Main({
       }
       if (key === 'downloadMetered') {
         const next = state.settings.downloadMetered !== true;
-        void session.updateSettings({
-          ...state.settings,
-          downloadMetered: next,
-        });
-        // Wake the scheduler so a metered wait resolves immediately.
-        if (next) {
-          controller.downloads.kick();
-        }
+        void session
+          .updateSettings({
+            ...state.settings,
+            downloadMetered: next,
+          })
+          .then((updated) => {
+            // Wake the scheduler only after the setting commits — a
+            // kick that lands first reads the old metered flag.
+            if (updated.ok && next) {
+              controller.downloads.kick();
+            }
+          });
       }
     },
     [session, state.settings, controller],
@@ -1456,10 +1487,12 @@ function Main({
     void session.playRecordings(
       playlistModel.entries.map((entry) => ({
         recordingId: entry.recordingId,
-        selectedRef: entry.selectedRef,
+        // A provider pin beats owned bytes in #pickRef — drop it
+        // when bytes exist so downloads actually get played.
+        selectedRef: isOwned(entry.recordingId) ? null : entry.selectedRef,
       })),
     );
-  }, [session, playlistModel]);
+  }, [session, playlistModel, isOwned]);
 
   const playlistDownload = useMemo(() => {
     if (playlistModel === null) {
@@ -1471,15 +1504,15 @@ function Main({
         ? []
         : [{ recordingId: entry.recordingId, sourceRef }];
     });
+    // 'all' means every entry is owned — a stored download or a
+    // local file both count; only-downloadable entries gate it.
     const allStored =
       playlistModel.entries.length > 0 &&
-      playlistModel.entries.every(
-        (entry) =>
-          controller.downloads.recordFor(entry.recordingId)?.state ===
-          'available',
-      );
+      playlistModel.entries.every((entry) => isOwned(entry.recordingId));
     const anyTracked = playlistModel.entries.some(
-      (entry) => controller.downloads.recordFor(entry.recordingId) !== null,
+      (entry) =>
+        controller.downloads.recordFor(entry.recordingId) !== null ||
+        isOwned(entry.recordingId),
     );
     return {
       state: allStored
@@ -1489,7 +1522,7 @@ function Main({
           : ('none' as const),
       requests,
     };
-  }, [playlistModel, downloads, controller, downloadRefFor]);
+  }, [playlistModel, downloads, controller, downloadRefFor, isOwned]);
 
   const onPlaylistDownloadAll = useCallback(() => {
     if (playlistDownload.requests.length === 0) {
@@ -1915,13 +1948,16 @@ function Main({
           }
           void local
             .addFolder(new CancellationSource().signal)
-            .then((added) =>
+            .then((added) => {
+              if (added.ok) {
+                s.syncLocalRecordings(local.recordings());
+              }
               console.log(
                 added.ok
                   ? `[journey] local-add source=${added.value.sourceId}`
                   : `[journey] local-add failed: ${added.error.kind}`,
-              ),
-            );
+              );
+            });
           break;
         }
         case 'local-rescan': {
@@ -1939,6 +1975,7 @@ function Main({
                 );
                 return;
               }
+              s.syncLocalRecordings(local.recordings());
               for (const report of scanned.value) {
                 console.log(
                   `[journey] rescan ${report.sourceId}: +${report.added}` +
@@ -2198,7 +2235,9 @@ function Main({
               void session.playRecordings([
                 {
                   recordingId: entry.recordingId,
-                  selectedRef: entry.selectedRef,
+                  selectedRef: isOwned(entry.recordingId)
+                    ? null
+                    : entry.selectedRef,
                 },
               ])
             }
