@@ -142,12 +142,12 @@ async fn drive_fetch(
         .await?;
     if resp.status != 206 {
         // `416` carries `Content-Range: bytes */N` — keep the total;
-        // it confirms EOF without spending a re-mint.
+        // it confirms EOF without spending a re-mint. Range units are
+        // case-insensitive (RFC 9110 §14.1.1).
         let range_total = if resp.status == 416 {
             resp.content_range
                 .as_deref()
-                .and_then(|cr| cr.strip_prefix("bytes */"))
-                .and_then(|n| n.trim().parse::<u64>().ok())
+                .and_then(unsatisfied_range_total)
         } else {
             None
         };
@@ -495,6 +495,22 @@ fn validate_206_head(
         session.check_total(t)?;
     }
     Ok(declared)
+}
+
+/// Parse the total from a `416`'s `Content-Range: <unit> */N` —
+/// the range unit is case-insensitive; the `*/` unsatisfied form is
+/// required (a satisfiable span on a 416 is a lie and is ignored).
+fn unsatisfied_range_total(cr: &str) -> Option<u64> {
+    let (unit, range) = cr.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    // `str::parse::<u64>` accepts a leading `+` — digits only.
+    let n = range.strip_prefix("*/")?.trim();
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<u64>().ok()
 }
 
 /// Parse `bytes START-END/TOTAL` (TOTAL may be `*`). The header value

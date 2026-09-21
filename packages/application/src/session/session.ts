@@ -573,8 +573,18 @@ export class Session {
     }
     // Concurrent restore callers share the in-flight load — a
     // second parallel restore would double the storage round-trip
-    // for nothing.
-    this.#restorePromise ??= this.#doRestore();
+    // for nothing. The memo only holds while a load is in flight:
+    // a settled failure must NOT stick — retry has to reload.
+    if (this.#restorePromise === null) {
+      const p = this.#doRestore().finally(() => {
+        // Only clear the promise this closure belongs to — a rehydrate
+        // may have already replaced it with a newer in-flight restore.
+        if (this.#ready === null && this.#restorePromise === p) {
+          this.#restorePromise = null;
+        }
+      });
+      this.#restorePromise = p;
+    }
     return this.#restorePromise;
   }
 

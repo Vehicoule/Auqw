@@ -223,6 +223,34 @@ function describe(error: unknown): string {
   return String(error);
 }
 
+/** Deep-link file reads are fenced to the app's own document/cache
+ * roots — anywhere else is a file-read primitive reachable by any
+ * intent sender. Returns the dot-segment-normalized path when inside,
+ * else null. Android's canonical root is /data/user/0/<pkg>/;
+ * /data/data/<pkg>/ is the same directory by alias, so allow both. */
+export function appFilePath(rawPath: string): string | null {
+  const roots = [Paths.document.uri, Paths.cache.uri].flatMap((root) => {
+    const plain = root.replace(/^file:\/\//, '');
+    const variants = [plain];
+    if (plain.startsWith('/data/user/0/')) {
+      variants.push(plain.replace('/data/user/0/', '/data/data/'));
+    }
+    return variants;
+  });
+  let normalized: string;
+  try {
+    normalized = new URL(`file://${rawPath}`).pathname;
+  } catch {
+    normalized = rawPath;
+  }
+  // The boundary must end on a path separator — `files-evil/x` is a
+  // sibling, not "inside files/".
+  const inside = roots.some((root) =>
+    normalized.startsWith(root.endsWith('/') ? root : `${root}/`),
+  );
+  return inside ? normalized : null;
+}
+
 export async function runSeamLink(url: string): Promise<void> {
   const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam-auth-start|seam-auth-poll|seam-auth-refresh|seam-auth-clear|seam-auth|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
@@ -350,7 +378,13 @@ export async function runSeamLink(url: string): Promise<void> {
       await stop();
       slog(`seam-stop done t=${Date.now()}`);
     } else if (match[1] === 'seam-auth') {
-      const tokenFile = param(query, 'file');
+      const tokenFileParam = param(query, 'file');
+      const tokenFile =
+        tokenFileParam !== null ? appFilePath(tokenFileParam) : null;
+      if (tokenFileParam !== null && tokenFile === null) {
+        slog('seam-auth refused: file outside app dirs');
+        return;
+      }
       const token =
         tokenFile !== null
           ? (await new File(tokenFile).text()).trim()
@@ -362,7 +396,13 @@ export async function runSeamLink(url: string): Promise<void> {
       setAuthToken(token);
       slog(`seam-auth token set t=${Date.now()}`);
     } else if (match[1] === 'seam-auth-start') {
-      const credsFile = param(query, 'creds');
+      const credsParam = param(query, 'creds');
+      const credsFile =
+        credsParam !== null ? appFilePath(credsParam) : null;
+      if (credsParam !== null && credsFile === null) {
+        slog('seam-auth-start refused: creds outside app dirs');
+        return;
+      }
       let id = param(query, 'client_id');
       let secret = param(query, 'client_secret');
       if (credsFile !== null) {

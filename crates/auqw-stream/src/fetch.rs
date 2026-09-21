@@ -125,16 +125,32 @@ fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> 
         return None;
     }
     let target = location?;
-    let target_host = https_host(target)?;
-    let mint_host = https_host(mint_url)?;
-    if !target_host.eq_ignore_ascii_case(mint_host)
-        && !target_host
-            .to_ascii_lowercase()
-            .ends_with(&format!(".{}", mint_host.to_ascii_lowercase()))
-    {
-        return None;
+    let target_host = https_host(target)?.to_ascii_lowercase();
+    let mint_host = https_host(mint_url)?.to_ascii_lowercase();
+    if redirect_in_scope(&target_host, &mint_host) {
+        Some(target)
+    } else {
+        None
     }
-    Some(target)
+}
+
+/// Is `target_host` inside the mint's trust scope: the mint host
+/// itself, one of its subdomains, or a sibling under the parent domain
+/// (CDN edges re-issue across siblings: `rr1` → `rr2---sn-x`). The
+/// parent rule applies only when the parent's leading label is a real
+/// registrable name (≥3 chars) — mints like `example.co.uk` must not
+/// widen the scope to every `*.co.uk` site.
+fn redirect_in_scope(target_host: &str, mint_host: &str) -> bool {
+    if target_host == mint_host || target_host.ends_with(&format!(".{mint_host}")) {
+        return true;
+    }
+    match mint_host.split_once('.') {
+        Some((_, parent)) => match parent.split('.').next() {
+            Some(first) if first.len() >= 3 => target_host.ends_with(&format!(".{parent}")),
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 impl Fetch for ReqwestFetch {
@@ -368,6 +384,15 @@ mod tests {
             follow_target(302, Some("https://cdn.rr1---sn-x.googlevideo.com/x"), MINT),
             Some("https://cdn.rr1---sn-x.googlevideo.com/x")
         );
+        // Sibling edge under the same parent domain (rr1 -> rr2).
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://rr2---sn-x.googlevideo.com/videoplayback"),
+                MINT
+            ),
+            Some("https://rr2---sn-x.googlevideo.com/videoplayback")
+        );
     }
 
     #[test]
@@ -376,9 +401,19 @@ mod tests {
             follow_target(302, Some("https://attacker.example.com/x"), MINT),
             None
         );
-        // A suffix lookalike is not a subdomain.
+        // A lookalike name under the mint's parent is still inside the
+        // provider's trust zone — the parent domain owns the policy.
         assert_eq!(
             follow_target(302, Some("https://evil-rr1---sn-x.googlevideo.com/x"), MINT),
+            Some("https://evil-rr1---sn-x.googlevideo.com/x")
+        );
+        // A lookalike on the full mint host (no dot boundary) is not.
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://evil-rr1---sn-x.googlevideo.com.evil.com/x"),
+                MINT
+            ),
             None
         );
         assert_eq!(
@@ -399,6 +434,23 @@ mod tests {
         assert_eq!(
             follow_target(302, Some("HTTPS://rr1---sn-x.googlevideo.com/x"), MINT),
             Some("HTTPS://rr1---sn-x.googlevideo.com/x")
+        );
+        // A mint on a shared-suffix shape does not widen to it.
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://other.co.uk/x"),
+                "https://example.co.uk/a"
+            ),
+            None
+        );
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://edge2.example.co.uk/x"),
+                "https://media.example.co.uk/a"
+            ),
+            Some("https://edge2.example.co.uk/x")
         );
     }
 }

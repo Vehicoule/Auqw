@@ -102,7 +102,7 @@ import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
 import { devRoute } from './src/dev-routes.ts';
-import { runSeamLink } from './seam-dev.ts';
+import { appFilePath, runSeamLink } from './seam-dev.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
 // set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
@@ -1804,30 +1804,10 @@ function Main({
             importText.current = null;
             // A deep link must not read outside the app's own
             // document/cache roots — anywhere else is a file-read
-            // primitive reachable by any intent sender. Android's
-            // canonical root is /data/user/0/<pkg>/; /data/data/<pkg>/
-            // is the same directory by alias, so allow both forms.
-            const roots = [Paths.document.uri, Paths.cache.uri].flatMap(
-              (root) => {
-                const plain = root.replace(/^file:\/\//, '');
-                const roots = [plain];
-                if (plain.startsWith('/data/user/0/')) {
-                  roots.push(plain.replace('/data/user/0/', '/data/data/'));
-                }
-                return roots;
-              },
-            );
-            // Dot-segments resolve before the prefix check —
-            // files/../siblings is not "inside" the root.
-            let normalized: string;
-            try {
-              normalized = new URL(`file://${importPath}`).pathname;
-            } catch {
-              normalized = importPath;
-            }
-            const allowed = roots.some((root) =>
-              normalized.startsWith(root),
-            );
+            // primitive reachable by any intent sender. The fence
+            // (alias roots, dot-segment normalization, separator
+            // boundary) lives in seam-dev.ts.
+            const allowed = appFilePath(importPath) !== null;
             if (!allowed) {
               console.log('[journey] transfer import refused: outside app dirs');
               break;

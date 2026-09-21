@@ -519,6 +519,22 @@ fn check_preemption(ctx: &StepCtx<'_>) -> Result<(), InvokeError> {
     Ok(())
 }
 
+/// Global bound on concurrently-executing guest entries. Wasmi cannot
+/// preempt a running `call`, so a deadline/cancel expiry leaves a
+/// detached `spawn_blocking` task burning its fuel grant. Without a
+/// bound, repeated timeouts would pile detached CPU work onto the
+/// shared blocking pool; permits sized to `available_parallelism` keep
+/// the zombie count at the CPU budget.
+fn entry_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        tokio::sync::Semaphore::new(n.max(2))
+    })
+}
+
 /// Enter a guest export with fuel accounting and a wall-clock cap.
 /// Per-entry fuel is the smaller of `fuel_per_entry` and the remaining
 /// total; an out-of-fuel trap maps to `BudgetExceeded { Fuel }`.
@@ -554,7 +570,21 @@ where
     store
         .set_fuel(allowance)
         .map_err(|e| InvokeError::GuestTrap(e.to_string()))?;
+    // A deadline/cancel expiry detaches the spawn_blocking task — wasmi
+    // has no mid-call interrupt, so the guest keeps burning its fuel
+    // grant in the background. A global permit pool bounds that
+    // detached burn: acquire blocks (inside the deadline) when
+    // `available_parallelism` calls are already running.
+    let permit = tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
+        p = entry_permits().acquire() => {
+            p.map_err(|_| InvokeError::GuestTrap("entry permits closed".to_string()))?
+        }
+    };
     let join = tokio::task::spawn_blocking(move || {
+        // Held until the call returns — a detached task still counts.
+        let _permit = permit;
         let result = func.call(&mut store, params);
         (store, result)
     });

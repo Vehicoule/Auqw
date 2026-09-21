@@ -499,10 +499,13 @@ impl PluginHost {
         )
     }
 
-    /// Cancel an in-flight request; unknown ids are a no-op. A
-    /// `cancelPrepare` landing after `prepared` also abandons the
-    /// produced session — but only while it is still unattached: a
-    /// playing consumer is never cancelled out from under playback.
+    /// Cancel an in-flight request. Unknown ids are a no-op except
+    /// that a plausible issued-id (`req-N`) is tombstoned briefly so a
+    /// cancel that outran the bookkeeping still abandons the session
+    /// it was about to receive. A `cancelPrepare` landing after
+    /// `prepared` also abandons the produced session — but only while
+    /// it is still unattached: a playing consumer is never cancelled
+    /// out from under playback.
     pub fn cancel(&self, request_id: String) {
         let mut known = false;
         if let Ok(m) = self.cancels.lock() {
@@ -529,10 +532,19 @@ impl PluginHost {
             // The cancel outran the bookkeeping: the request is past
             // its token but the handle isn't registered yet. Leave a
             // tombstone — the outcome path consumes it and abandons
-            // the session it was about to hand out. Bounded by cap.
-            if let Ok(mut m) = self.cancelled_requests.lock() {
-                if m.len() < 64 {
-                    m.insert(request_id);
+            // the session it was about to hand out. The set is capped
+            // and only ids shaped like an issued `req-N` (N no higher
+            // than the counter) land in it — arbitrary strings can
+            // never fill the cap and starve a real cancel race.
+            let plausible = request_id
+                .strip_prefix("req-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| n <= self.counter.load(Ordering::Relaxed));
+            if plausible {
+                if let Ok(mut m) = self.cancelled_requests.lock() {
+                    if m.len() < 64 {
+                        m.insert(request_id);
+                    }
                 }
             }
         }
