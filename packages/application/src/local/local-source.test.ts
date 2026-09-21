@@ -302,17 +302,55 @@ async function runRemoveSource(): Promise<void> {
   assert(source.uriFor(rec.id) === null, 'no playable uri');
   const persistedRec = source.recordings().find((r) => r.id === rec.id);
   assert(persistedRec !== undefined, 'recording persists');
-  // Local-only row: its stale fingerprint ref stays — inert (uriFor
-  // already returned null above) but the ≥1-ref invariant holds, so
-  // sqlite's commit validation accepts the batch. FakeStorage now
-  // validates the merged document the same way, so a regression to
-  // zero refs would fail `removed.ok` above, not this line.
+  // Local-only row: its dead ref stays as an `fp:` tombstone — inert
+  // (uriFor already returned null above) so the ≥1-ref invariant
+  // holds and sqlite's commit validation accepts the batch, while the
+  // fingerprint key re-links the same content if it ever returns.
+  // FakeStorage now validates the merged document the same way, so a
+  // regression to zero refs would fail `removed.ok` above, not this line.
   assertEqual(persistedRec!.sourceRefs.length, 1, 'inert ref kept');
   assertEqual(
     persistedRec!.sourceRefs[0]!.provider,
     'local',
     'kept ref is the dead local fingerprint',
   );
+  assert(
+    persistedRec!.sourceRefs[0]!.id === 'fp:fpa',
+    'tombstone keyed by fingerprint',
+  );
+}
+
+async function runReaddRelinksRecording(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  const rec = source.recordings()[0]!;
+
+  must(await source.removeSource(added.sourceId, signal()));
+
+  // Re-adding the same folder mints a new sourceId — the tombstone's
+  // fingerprint still re-links to the original recording, so likes
+  // and playlist entries survive remove→add.
+  const readded = must(await source.addFolder(signal()));
+  assert(readded.sourceId !== added.sourceId, 'fresh sourceId');
+  const relinked = source.recordings()[0]!;
+  assertEqual(
+    source.recordings().length,
+    1,
+    'no duplicate recording allocated',
+  );
+  assertEqual(relinked.id, rec.id, 'recording identity re-linked');
+  assert(
+    relinked.sourceRefs.some(
+      (s) =>
+        s.provider === 'local' &&
+        s.id === source.filesFor(readded.sourceId)[0]!.fileId,
+    ),
+    'live local ref restored',
+  );
+  assert(source.uriFor(rec.id) !== null, 'playable uri again');
 }
 
 async function runPickCancelled(): Promise<void> {
@@ -406,6 +444,7 @@ export async function run(): Promise<void> {
   await runRescanRemovesMissing();
   await runUnreadableKeepsRow();
   await runRemoveSource();
+  await runReaddRelinksRecording();
   await runPickCancelled();
   await runRescanMergesFreshRecordings();
 }

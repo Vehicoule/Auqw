@@ -5,6 +5,7 @@ import {
   type LocalFile,
   type LocalSource,
   type Recording,
+  type SourceRef,
 } from '../domain.ts';
 import { appError, err, ok, type Result } from '../errors.ts';
 import { createSha256 } from '../downloads/sha256.ts';
@@ -424,6 +425,21 @@ export class LocalFileSource {
         recordingByFp.set(f.fingerprint, f.recordingId);
       }
     }
+    // `fp:` tombstone refs kept on recordings whose file rows vanished:
+    // the same content returning — same source or a re-added folder —
+    // re-links to its old recording (likes/playlists survive) instead
+    // of allocating a fresh identity.
+    const recordingByRetainedFp = new Map<string, string>();
+    for (const r of this.#recordings) {
+      for (const s of r.sourceRefs) {
+        if (s.provider === LOCAL_PROVIDER && s.id.startsWith('fp:')) {
+          const fp = s.id.slice(3);
+          if (!recordingByRetainedFp.has(fp)) {
+            recordingByRetainedFp.set(fp, r.id);
+          }
+        }
+      }
+    }
 
     // Recording upserts are deferred into the commit's fresh-read
     // merge — a recording created or edited by the session since boot
@@ -446,7 +462,10 @@ export class LocalFileSource {
       // Same docId, new bytes → keep the recording identity; same
       // fingerprint in another folder → join that recording; else new.
       const known = byDocId.get(row.docId);
-      const existing = known?.recordingId ?? recordingByFp.get(row.fingerprint);
+      const existing =
+        known?.recordingId ??
+        recordingByFp.get(row.fingerprint) ??
+        recordingByRetainedFp.get(row.fingerprint);
       const recordingId = existing ?? this.#ids.next('rec');
       recordingByFp.set(row.fingerprint, recordingId);
       nextFiles.push({
@@ -575,6 +594,7 @@ function stripLocalRefs(
     return [...recordings];
   }
   const dead = new Set(removed.map((f) => f.fileId));
+  const fpByFileId = new Map(removed.map((f) => [f.fileId, f.fingerprint]));
   return recordings.map((r) => {
     if (
       !r.sourceRefs.some(
@@ -586,6 +606,21 @@ function stripLocalRefs(
     const kept = r.sourceRefs.filter(
       (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
     );
-    return kept.length === 0 ? r : { ...r, sourceRefs: kept };
+    if (kept.length > 0) {
+      return { ...r, sourceRefs: kept };
+    }
+    // Stripping to zero refs would fail persisted-state validation —
+    // and the recording must persist as owned data. Retain the dead
+    // refs as `fp:` tombstones instead: inert to uriFor, keyed by
+    // fingerprint so a returning file re-links to this recording even
+    // under a new sourceId (re-added folder).
+    const tombstones = new Map<string, SourceRef>();
+    for (const s of r.sourceRefs) {
+      const fp = s.provider === LOCAL_PROVIDER ? fpByFileId.get(s.id) : null;
+      if (fp !== undefined && fp !== null) {
+        tombstones.set(fp, { ...s, id: `fp:${fp}` });
+      }
+    }
+    return tombstones.size === 0 ? r : { ...r, sourceRefs: [...tombstones.values()] };
   });
 }
