@@ -64,6 +64,10 @@ class FakePlayerModule implements AuqwExpoPlayerLike {
     );
   }
 
+  prepareLocal(path: string, mime?: string | null): Promise<string> {
+    return this.#call('prepareLocal', [path, mime ?? null], 'lf-1');
+  }
+
   play(
     handle: string,
     attemptId: string,
@@ -586,6 +590,96 @@ async function subscribeLifecycle(): Promise<void> {
   assertEqual(module.removals, 4);
 }
 
+// 10. provider:'local' prepares bypass the plugin host: prepareLocal
+// mints the handle, the synthesized prepared outcome carries it, and
+// cancelPrepare on the local request id never reaches the module.
+async function localPreparePath(): Promise<void> {
+  const module = new FakePlayerModule();
+  const player = createAuqwExpoPlayer(module);
+  const { events } = collect(player);
+  const requestId = await player.prepare({
+    provider: 'local',
+    sourceRef: 'file:///data/dl-1',
+    identity: IDENTITY,
+  });
+  assert(requestId.ok, 'local prepare resolves');
+  assertDeepEqual(module.calls[0]?.method, 'prepareLocal');
+  assertDeepEqual(module.calls[0]?.args, ['file:///data/dl-1', null]);
+  const prepared = events[0];
+  assert(
+    prepared !== undefined &&
+      prepared.type === 'prepare' &&
+      prepared.outcome.type === 'prepared' &&
+      prepared.outcome.stream.handle === 'lf-1',
+    'synthesized prepared outcome carries lf handle',
+  );
+  assert(
+    (
+      await player.play({
+        handle: 'lf-1',
+        identity: IDENTITY,
+        positionMs: 0,
+      })
+    ).ok,
+  );
+  assert(
+    (
+      await player.cancelPrepare({
+        requestId: requestId.value,
+        identity: IDENTITY,
+      })
+    ).ok,
+    'local cancelPrepare is a no-op',
+  );
+  assert(
+    module.calls.every((c) => c.method !== 'cancelPrepare'),
+    'cancelPrepare never reached the module',
+  );
+}
+
+// 11. A bad local sourceRef emits a failed outcome, never throws.
+async function localPrepareBadRef(): Promise<void> {
+  const module = new FakePlayerModule();
+  const player = createAuqwExpoPlayer(module);
+  const { events } = collect(player);
+  const requestId = await player.prepare({
+    provider: 'local',
+    sourceRef: '',
+    identity: IDENTITY,
+  });
+  assert(requestId.ok, 'prepare still resolves a request id');
+  const failed = events[0];
+  assert(
+    failed !== undefined &&
+      failed.type === 'prepare' &&
+      failed.outcome.type === 'failed' &&
+      failed.outcome.error.kind === 'invalid-response',
+    'bad local ref reports failed outcome',
+  );
+  assert(module.calls.length === 0, 'no native call for bad ref');
+}
+
+// 12. prepareLocal rejection emits a failed outcome, typed error.
+async function localPrepareFailure(): Promise<void> {
+  const module = new FakePlayerModule();
+  module.failures.set('prepareLocal', new Error('ENOENT'));
+  const player = createAuqwExpoPlayer(module);
+  const { events } = collect(player);
+  const requestId = await player.prepare({
+    provider: 'local',
+    sourceRef: 'file:///gone.mp3',
+    identity: IDENTITY,
+  });
+  assert(requestId.ok, 'prepare still resolves a request id');
+  const failed = events[0];
+  assert(
+    failed !== undefined &&
+      failed.type === 'prepare' &&
+      failed.outcome.type === 'failed',
+    'prepareLocal rejection reports failed outcome',
+  );
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['methodForwarding', methodForwarding],
   ['rejectionWrapping', rejectionWrapping],
@@ -596,6 +690,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['transitionEvents', transitionEvents],
   ['malformedEventsDropped', malformedEventsDropped],
   ['subscribeLifecycle', subscribeLifecycle],
+  ['localPreparePath', localPreparePath],
+  ['localPrepareBadRef', localPrepareBadRef],
+  ['localPrepareFailure', localPrepareFailure],
 ];
 
 export async function run(): Promise<void> {

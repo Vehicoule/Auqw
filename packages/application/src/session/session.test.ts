@@ -149,7 +149,11 @@ type Rig = {
   states: SessionState[];
 };
 
-function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
+function rig(
+  state: PersistedState,
+  extraProviders: ProviderPort[] = [],
+  localPlayback?: Map<string, string>,
+): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
   const itunes = new FakeProvider('itunes');
@@ -167,6 +171,7 @@ function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
     ids: new SequenceIds(),
     log,
     defaults: SETTINGS,
+    localPlaybackFor: (recordingId) => localPlayback?.get(recordingId) ?? null,
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -3217,7 +3222,104 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['foreignPinResolves', foreignPinResolves],
   ['successorPinSkipsMapping', successorPinSkipsMapping],
   ['reviewReloadPreservesMemory', reviewReloadPreservesMemory],
+  ['localPlaybackPreferred', localPlaybackPreferred],
+  ['localPlaybackPinnedForeign', localPlaybackPinnedForeign],
 ] as const;
+
+// Owned bytes beat an auto-pick: a recording with local playback
+// prepares through provider:'local' and projects the URI to the
+// service — airplane-mode playback never touches the network.
+async function localPlaybackPreferred(): Promise<void> {
+  const localMap = new Map([['r1', 'file:///data/dl-1']]);
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    localMap,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'local playback never asks candidates',
+  );
+  const prep = calls(r, 'prepare').at(-1);
+  const input = prep?.input as
+    | { provider: string; sourceRef: string }
+    | undefined;
+  assertEqual(input?.provider, 'local', 'local attach wins the pick');
+  assertEqual(
+    input?.sourceRef,
+    'file:///data/dl-1',
+    'the ref id IS the uri',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'lf-1'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-lf-1')));
+  assert((await started).ok, 'playOccurrence failed');
+  await pump();
+  const projection = r.player.projections.at(-1);
+  assertEqual(
+    projection?.items[0]?.provider,
+    'local',
+    'projection carries provider:local',
+  );
+  assertEqual(
+    projection?.items[0]?.sourceRef,
+    'file:///data/dl-1',
+    'projection ref is the uri',
+  );
+}
+
+// A pin for a foreign provider can't play under the active playback
+// provider — owned local bytes still win (same mapping ignored).
+async function localPlaybackPinnedForeign(): Promise<void> {
+  const localMap = new Map([['r1', 'file:///data/dl-2']]);
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [
+          ref('youtube-music', 'y1'),
+          ref('spotify', 's9'),
+        ]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('spotify', 's9'))],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    localMap,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  const input = prep?.input as
+    | { provider: string; sourceRef: string }
+    | undefined;
+  assertEqual(input?.provider, 'local', 'foreign pin loses to local');
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'lf-2'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-lf-2')));
+  assert((await started).ok, 'playOccurrence failed');
+  await pump();
+}
 
 export async function run(): Promise<void> {
   for (const [name, fn] of TESTS) {

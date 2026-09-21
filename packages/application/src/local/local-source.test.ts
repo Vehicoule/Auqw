@@ -1,0 +1,328 @@
+import { CancellationSource } from '../cancellation.ts';
+import {
+  isLocalFile,
+  isLocalSource,
+  type Settings,
+} from '../domain.ts';
+import { ok, type Result } from '../errors.ts';
+import type { PersistedState } from '../ports/storage.ts';
+import type { QueueSnapshot } from '../queue/queue-engine.ts';
+import type {
+  FileFingerprint,
+  LocalEntry,
+  LocalTags,
+  PickedFolder,
+} from '../ports/tag-reader.ts';
+import {
+  FakeClock,
+  FakeLog,
+  FakeStorage,
+  FakeTagReader,
+  SequenceIds,
+} from '../testing/fakes.ts';
+import { assert, assertEqual } from '../testing/assert.ts';
+import { LocalFileSource } from './local-source.ts';
+
+const SETTINGS: Settings = {
+  catalogProvider: 'itunes',
+  playbackProvider: 'youtube-music',
+  storefront: 'US',
+  qualityKbps: 256,
+  theme: 'system',
+  prefetch: true,
+};
+
+function emptyQueue(): QueueSnapshot {
+  return {
+    revision: 0,
+    occurrences: [],
+    currentOccurrenceId: null,
+    positionMs: 0,
+    mode: 'stopped',
+  };
+}
+
+function persisted(partial: Partial<PersistedState> = {}): PersistedState {
+  return {
+    recordings: partial.recordings ?? [],
+    likes: partial.likes ?? [],
+    entities: partial.entities ?? [],
+    entitySourceRefs: partial.entitySourceRefs ?? [],
+    playlists: partial.playlists ?? [],
+    playlistEntries: partial.playlistEntries ?? [],
+    playHistory: partial.playHistory ?? [],
+    playCounts: partial.playCounts ?? [],
+    matchReviews: partial.matchReviews ?? [],
+    lyricsCache: partial.lyricsCache ?? [],
+    artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
+    queue: partial.queue ?? emptyQueue(),
+    settings: partial.settings ?? SETTINGS,
+  };
+}
+
+const TREE = 'content://com.android.externalstorage.documents/tree/music';
+const docUri = (docId: string) => `${TREE}/document/${docId}`;
+
+function entry(docId: string, size: number, name = `${docId}.mp3`): LocalEntry {
+  return { docId, name, size, mime: 'audio/mpeg' };
+}
+
+function fp(docId: string, fingerprint: string): FileFingerprint {
+  return { docId, fingerprint };
+}
+
+function tags(
+  docId: string,
+  title: string | null,
+  extra: Partial<LocalTags> = {},
+): LocalTags {
+  return {
+    docId,
+    title,
+    artist: null,
+    album: null,
+    durationMs: null,
+    genre: null,
+    ...extra,
+  };
+}
+
+function rig(initial: Partial<PersistedState> = {}) {
+  const storage = new FakeStorage(persisted(initial));
+  const tagReader = new FakeTagReader();
+  const ids = new SequenceIds();
+  const clock = new FakeClock(1000);
+  const log = new FakeLog();
+  const source = new LocalFileSource(
+    { storage, tagReader, ids, clock, log },
+    {
+      localSources: initial.localSources ?? [],
+      localFiles: initial.localFiles ?? [],
+      recordings: initial.recordings ?? [],
+    },
+  );
+  return { storage, tagReader, ids, clock, log, source };
+}
+
+const signal = () => new CancellationSource().signal;
+
+function must<T>(res: Result<T>, what = 'result'): T {
+  if (!res.ok) {
+    throw new Error(`${what} failed: ${res.error.kind}`);
+  }
+  return res.value;
+}
+
+function pick(tagReader: FakeTagReader, label = 'Music'): void {
+  tagReader.pickResult = ok<PickedFolder>({ treeUri: TREE, label });
+}
+
+async function runAddFolderScan(): Promise<void> {
+  const { storage, tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100, 'alpha.mp3')]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha', { artist: 'A', durationMs: 9000 }));
+
+  const added = must(await source.addFolder(signal()));
+  assert(source.list().length === 1, 'one source listed');
+  const files = source.filesFor(added.sourceId);
+  assert(files.length === 1, 'one file row');
+  assert(files[0]!.title === 'Alpha', 'tag title stored');
+  assert(
+    isLocalFile(files[0]) && isLocalSource(source.list()[0]),
+    'rows satisfy validators',
+  );
+  const recs = source.recordings();
+  assert(recs.length === 1, 'one recording materialized');
+  assert(recs[0]!.provenance === 'local', 'provenance local');
+  assert(recs[0]!.title === 'Alpha', 'recording title');
+  assert(
+    recs[0]!.sourceRefs.some(
+      (s) => s.provider === 'local' && s.id === files[0]!.fileId,
+    ),
+    'recording carries the local ref',
+  );
+  // uriFor resolves through the treeUri + docId — the session hook.
+  const uri = source.uriFor(recs[0]!.id);
+  assert(uri === docUri('d1'), `uriFor resolves, got ${uri}`);
+  // Persisted sections carry the full arrays.
+  const last = storage.commits.at(-1)!.batch;
+  assert((last.localFiles?.length ?? 0) === 1, 'commit carries localFiles');
+  assert((last.recordings?.length ?? 0) === 1, 'commit carries recordings');
+  assert(source.list()[0]!.lastScanMs !== null, 'lastScanMs set');
+}
+
+async function runUntaggedTitleFromName(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d9', 50, 'My Song File.ogg')]);
+  tagReader.fingerprints.set('d9', fp('d9', 'fp9'));
+  // No tag entry → null.
+  const added = must(await source.addFolder(signal()));
+  const recs = source.recordings();
+  assert(recs.length === 1, 'recording created');
+  assert(recs[0]!.title === 'My Song File', 'title falls back to filename');
+  assert(recs[0]!.durationMs === null, 'duration stays null');
+}
+
+async function runRescanIncremental(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  assert(tagReader.fingerprintCalls.length === 1, 'one fp batch');
+  const again = must(await source.rescan(undefined, signal()));
+  assert(tagReader.fingerprintCalls.length === 1, 'unchanged → no refingerprint');
+  const report = again[0]!;
+  assert(
+    report.added === 0 && report.removed === 0 && report.updated === 0,
+    'clean rescan',
+  );
+}
+
+async function runMovedFileKeepsIdentity(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  const before = source.filesFor(added.sourceId)[0]!;
+
+  // Same content under a new docId (user moved the file).
+  tagReader.entries.set(TREE, [entry('d2', 100, 'alpha.mp3')]);
+  tagReader.fingerprints.set('d2', fp('d2', 'fpa'));
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assert(res[0]!.updated === 1, 'locator refresh counts as updated');
+  const after = source.filesFor(added.sourceId);
+  assert(after.length === 1, 'still one row');
+  assert(after[0]!.fileId === before.fileId, 'fileId survives the move');
+  assert(after[0]!.docId === 'd2', 'docId refreshed');
+  assert(after[0]!.recordingId === before.recordingId, 'recording kept');
+}
+
+async function runChangedContentNewFileId(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  const before = source.filesFor(added.sourceId)[0]!;
+
+  // New bytes at the same path: size changed → new fingerprint.
+  tagReader.entries.set(TREE, [entry('d1', 140)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpb'));
+  const res = must(await source.rescan(added.sourceId, signal()));
+  const after = source.filesFor(added.sourceId);
+  assert(after.length === 1, 'one row');
+  assert(after[0]!.fileId !== before.fileId, 'new fingerprint → new fileId');
+  assert(
+    after[0]!.recordingId === before.recordingId,
+    'same docId keeps the recording',
+  );
+  const rec = source.recordings()[0]!;
+  assert(
+    rec.sourceRefs.length === 1 && rec.sourceRefs[0]!.id === after[0]!.fileId,
+    'dead local ref stripped, new ref present',
+  );
+}
+
+async function runTwoFoldersTwoRows(): Promise<void> {
+  const { tagReader, source } = rig();
+  // Folder 1.
+  tagReader.pickResult = ok<PickedFolder>({ treeUri: TREE, label: 'A' });
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'samefp'));
+  const a = must(await source.addFolder(signal()));
+  // Folder 2 with the same content.
+  const TREE2 = 'content://x/tree/other';
+  tagReader.pickResult = ok<PickedFolder>({ treeUri: TREE2, label: 'B' });
+  tagReader.entries.set(TREE2, [entry('e1', 100)]);
+  tagReader.fingerprints.set('e1', fp('e1', 'samefp'));
+  const b = must(await source.addFolder(signal()));
+
+  const fa = source.filesFor(a.sourceId);
+  const fb = source.filesFor(b.sourceId);
+  assert(fa.length === 1 && fb.length === 1, 'one row per folder');
+  assert(fa[0]!.fileId !== fb[0]!.fileId, 'two rows get distinct fileIds');
+  assert(
+    fa[0]!.recordingId === fb[0]!.recordingId,
+    'same content shares the recording',
+  );
+  const rec = source.recordings()[0]!;
+  assert(rec.sourceRefs.length === 2, 'recording carries both local refs');
+}
+
+async function runRescanRemovesMissing(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100), entry('d2', 200)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.fingerprints.set('d2', fp('d2', 'fpb'));
+  const added = must(await source.addFolder(signal()));
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assert(res[0]!.removed === 1, 'one removed');
+  const files = source.filesFor(added.sourceId);
+  assert(files.length === 1 && files[0]!.docId === 'd1', 'gone row dropped');
+  const rec = source.recordings().find((r) => r.sourceRefs.length === 0);
+  assert(rec !== undefined, 'orphaned recording persists, ref stripped');
+}
+
+async function runUnreadableKeepsRow(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  // File grew but the fingerprint read fails → prior row survives.
+  tagReader.entries.set(TREE, [entry('d1', 140)]);
+  tagReader.fingerprints.delete('d1');
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assert(res[0]!.unreadable === 1, 'unreadable counted');
+  const files = source.filesFor(added.sourceId);
+  assert(files.length === 1 && files[0]!.size === 100, 'prior row kept');
+}
+
+async function runRemoveSource(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  const rec = source.recordings()[0]!;
+  const removed = await source.removeSource(added.sourceId, signal());
+  assert(removed.ok, 'remove ok');
+  assert(source.list().length === 0, 'source gone');
+  assert(source.filesFor(added.sourceId).length === 0, 'rows gone');
+  assert(source.uriFor(rec.id) === null, 'no playable uri');
+  const persistedRec = source.recordings().find((r) => r.id === rec.id);
+  assert(persistedRec !== undefined, 'recording persists');
+  assert(persistedRec!.sourceRefs.length === 0, 'dead ref stripped');
+}
+
+async function runPickCancelled(): Promise<void> {
+  const { tagReader, storage, source } = rig();
+  // FakeTagReader default pickResult is a no-result err — as a user cancel.
+  const res = await source.addFolder(signal());
+  assert(!res.ok && res.error.kind === 'no-result', 'cancel surfaces honestly');
+  assert(storage.commits.length === 0, 'nothing persisted');
+  assert(source.list().length === 0, 'no source row');
+}
+
+export async function run(): Promise<void> {
+  await runAddFolderScan();
+  await runUntaggedTitleFromName();
+  await runRescanIncremental();
+  await runMovedFileKeepsIdentity();
+  await runChangedContentNewFileId();
+  await runTwoFoldersTwoRows();
+  await runRescanRemovesMissing();
+  await runUnreadableKeepsRow();
+  await runRemoveSource();
+  await runPickCancelled();
+}

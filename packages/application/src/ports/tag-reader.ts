@@ -81,4 +81,10 @@ export interface TagReaderPort {
     docIds: readonly string[],
     signal: CancellationSignal,
   ): Promise<Result<readonly (LocalTags | null)[]>>;
+  /**
+   * The playable document URI for one entry — platform URI math
+   * (`DocumentsContract.buildDocumentUriUsingTree` on Android) stays
+   * behind the port; domain records carry only the `fileId`.
+   */
+  docUri(treeUri: string, docId: string): string;
 }
