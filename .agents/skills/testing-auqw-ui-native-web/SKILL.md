@@ -33,9 +33,9 @@ Open `http://localhost:8087/` in Chrome. Export bundles in ~2s; re-export after 
 ## What the gallery can and cannot prove
 
 - Gallery is one long scroll of `Section`s with chip-driven state switching (theme, search phase, stage-sheet drag state). Phase/state changes only happen via the chips — fixtures are static, callbacks are `noop`.
-- Platform-split code (`*.native.tsx` vs `*.tsx`) resolves to the shared/web variant on web: e.g. queue reorder shows chevron up/down buttons, not drag handles; `PlatformTabs` shows the app navbar fallback.
+- Platform-split code (`*.native.tsx` vs `*.tsx`, where present) resolves to the shared/web variant on web: queue reorder shows chevron up/down buttons instead of drag handles, `PlatformTabs` shows the app navbar fallback.
 - `GestureHandlerRootView` Pan gestures (mini-player swipe-down dismiss, stage-sheet drag) do NOT track mouse drags on web — verify via the `rest`/`mid-drag`/`dismissed` chips instead and call this out when reporting.
-- App-level wiring (App.tsx) — tab bar, native stack sheets/overlays, the theme picker opened from settings — is not reachable via the gallery; only the shared components are. A pinned `ProviderPickerSheet` under a `ThemeProvider` can be added to `web-gallery.tsx` as a temporary strip to preview app-side sheets.
+- App-level wiring (App.tsx) — tab bar, native stack sheets/overlays, the theme picker opened from settings — is not reachable via the gallery; only the shared components are. The sheets section already renders a `ProviderPickerSheet` fixture — for app-side variants (e.g. the 4-option theme picker), pin one temporarily in `web-gallery.tsx`; don't add a permanent fixture.
 - Token/colour assertions: use `getComputedStyle` in the browser console (e.g. secondary text = `rgb(143, 153, 194)` for `#8f99c2`).
 
 ## Devin secrets needed
