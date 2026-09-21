@@ -875,7 +875,10 @@ export type FakeSinkScript = {
 };
 
 export class FakeTransferSink implements TransferSink {
-  #script: Required<FakeSinkScript>;
+  #script: Omit<Required<FakeSinkScript>, 'commitError' | 'finalizeError'> & {
+    commitError: AppError | null;
+    finalizeError: AppError | null;
+  };
   #bytes = 0;
   #writes = 0;
   #committed = 0;
@@ -892,14 +895,10 @@ export class FakeTransferSink implements TransferSink {
       failWritesAfter: script.failWritesAfter ?? Number.MAX_SAFE_INTEGER,
       writeError:
         script.writeError ?? appError('transient', 'write failed'),
-      commitError:
-        script.commitError ?? appError('transient', 'commit failed'),
-      finalizeError:
-        script.finalizeError ??
-        appError('invalid-response', 'checksum mismatch'),
-      digest:
-        script.digest ??
-        'f'.repeat(64),
+      // Errors default to null — a plain script succeeds end to end.
+      commitError: script.commitError ?? null,
+      finalizeError: script.finalizeError ?? null,
+      digest: script.digest ?? 'f'.repeat(64),
     };
     this.#bytes = partial;
     this.#committed = partial;
@@ -932,7 +931,7 @@ export class FakeTransferSink implements TransferSink {
     }
     if (this.#script.commitError !== null) {
       const error = this.#script.commitError;
-      this.#script.commitError = appError('transient', 'spent');
+      this.#script.commitError = null;
       return err(error);
     }
     this.#committed = this.#bytes;
@@ -946,7 +945,7 @@ export class FakeTransferSink implements TransferSink {
     }
     if (this.#script.finalizeError !== null) {
       const error = this.#script.finalizeError;
-      this.#script.finalizeError = appError('transient', 'spent');
+      this.#script.finalizeError = null;
       return err(error);
     }
     this.finalizedWith = expected;
