@@ -43,6 +43,24 @@ pub trait KeyValueStore: Send + Sync {
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<(), KvError> {
+        self.commit_admitting(plugin_id, writes, &|| true)
+    }
+
+    /// `commit` gated by `admit`, evaluated inside the store's write
+    /// serialization immediately before publication — admission and
+    /// publish are one critical section, so a precondition that flips
+    /// concurrently (e.g. an invocation cancel) cannot lose to a
+    /// commit that already left the gate.
+    ///
+    /// # Errors
+    /// [`KvError::Rejected`] when `admit` declines — nothing is
+    /// committed. Otherwise as [`commit`](KeyValueStore::commit).
+    fn commit_admitting(
+        &self,
+        plugin_id: &str,
+        writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError>;
 }
 
@@ -122,10 +140,11 @@ impl KeyValueStore for MemoryKeyValueStore {
         Ok(self.lock()?.get(plugin_id).cloned().unwrap_or_default())
     }
 
-    fn commit(
+    fn commit_admitting(
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -135,6 +154,11 @@ impl KeyValueStore for MemoryKeyValueStore {
         apply_patch(&mut ns, writes);
         if let Some(msg) = caps_violation(&ns) {
             return Err(KvError::TooLarge(msg));
+        }
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
         }
         if ns.is_empty() {
             maps.remove(plugin_id);
@@ -267,10 +291,11 @@ impl KeyValueStore for FileKeyValueStore {
         Ok(self.read_all()?.get(plugin_id).cloned().unwrap_or_default())
     }
 
-    fn commit(
+    fn commit_admitting(
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -281,6 +306,14 @@ impl KeyValueStore for FileKeyValueStore {
         apply_patch(&mut ns, writes);
         if let Some(msg) = caps_violation(&ns) {
             return Err(KvError::TooLarge(msg));
+        }
+        // The gate runs under the write lock on the doorstep of the
+        // rename — a cancel that lands after this point has already
+        // won or lost atomically, never mid-publication.
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
         }
         if ns.is_empty() {
             all.remove(plugin_id);

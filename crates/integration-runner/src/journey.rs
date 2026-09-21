@@ -182,10 +182,11 @@ impl KeyValueStore for NullKv {
     ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, auqw_plugin_host::KvError> {
         Ok(std::collections::BTreeMap::new())
     }
-    fn commit(
+    fn commit_admitting(
         &self,
         _plugin_id: &str,
         _writes: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), auqw_plugin_host::KvError> {
         Ok(())
     }

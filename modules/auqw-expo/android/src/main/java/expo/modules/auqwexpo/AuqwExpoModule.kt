@@ -1122,9 +1122,10 @@ class AuqwExpoModule : Module() {
       attachedForOccurrence != proj.currentOccurrenceId -> {
         // The attached stream serves an occurrence the new revision
         // no longer has as cursor — a service move the app superseded,
-        // or an app attach bound under the previous cursor. Either way
-        // the app never owned this handle: stop it and free the
-        // session, or it leaks until expiry.
+        // or an app attach bound under the previous cursor. Its media
+        // belongs to the old occurrence either way: stop it and free
+        // the session, or a stale attach leaks until expiry while
+        // claiming the new cursor.
         attached = null
         attachedForOccurrence = null
         attachedByService = false

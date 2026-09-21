@@ -2458,6 +2458,14 @@ export class Session {
           queueRev: after.revision,
         };
         active.identity = identity;
+        // Publish the re-keyed identity before the transport call: if
+        // a supersede lands during the await the post-call publish is
+        // skipped, and an unpublished identity must never reach the
+        // player.
+        this.#setPlaybackFromStatus(
+          active,
+          r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing',
+        );
         const result = await this.#bounded(() =>
           this.#player.seekTo({ positionMs: 0, identity }),
         );
@@ -2471,13 +2479,31 @@ export class Session {
     }
     const moved = await this.#persistQueue(r, before);
     if (!moved.ok) {
+      // A rolled-back move must not leave playback on a cursor the
+      // store no longer holds — converge onto the durable tip (this
+      // command's own `before`, or whatever a later commit landed).
+      const durable = r.queue.snapshot();
+      if (
+        durable.revision === r.queueCommittedRev &&
+        durable.mode === 'playing' &&
+        durable.currentOccurrenceId !== null &&
+        durable.currentOccurrenceId !== this.#active?.occurrenceId
+      ) {
+        this.#own(this.#startAttempt(durable.currentOccurrenceId));
+      }
       return moved;
     }
     this.#derived();
     // Transport ops are not serialized — a concurrent next/previous
     // may have moved the cursor again while the persist was in
-    // flight. Serve the CURRENT cursor, never the pre-await snapshot.
+    // flight. Serve the DURABLE cursor: when the live snapshot carries
+    // a newer mutation whose own commit is still in flight, defer to
+    // that command's continuation — starting an uncommitted cursor now
+    // would keep playing it if its commit later rolls back.
     const latest = r.queue.snapshot();
+    if (latest.revision !== r.queueCommittedRev) {
+      return ok(undefined);
+    }
     if (latest.mode === 'playing' && latest.currentOccurrenceId !== null) {
       return this.#startAttempt(latest.currentOccurrenceId);
     }
@@ -2529,6 +2555,9 @@ export class Session {
       queueRev: r.queue.snapshot().revision,
     };
     active.identity = identity;
+    // Same ordering rule as play/seek: the re-keyed identity must be
+    // published before the transport call carries it.
+    this.#setPlaybackFromStatus(active, 'paused');
     const result = await this.#bounded(() => this.#player.pause(identity));
     if (!result.ok) {
       await this.#failAttempt(active, result.error);
@@ -2578,6 +2607,10 @@ export class Session {
         queueRev: r.queue.snapshot().revision,
       };
       active.identity = identity;
+      // Same ordering rule: the identity the transport call carries
+      // must already be observable in the published record, in case a
+      // supersede during the await skips the post-call publish.
+      this.#setPlaybackFromStatus(active, 'paused');
       const result = await this.#bounded(() =>
         this.#player.play({
           handle: active.handle ?? '',
@@ -2640,6 +2673,13 @@ export class Session {
       queueRev: r.queue.snapshot().revision,
     };
     active.identity = identity;
+    // Publish the re-keyed identity before the transport call so a
+    // supersede during the await can't leave a play/seek carrying an
+    // identity no snapshot ever showed.
+    this.#setPlaybackFromStatus(
+      active,
+      r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing',
+    );
     const result = await this.#bounded(() =>
       this.#player.seekTo({ positionMs, identity }),
     );
@@ -3255,14 +3295,15 @@ export class Session {
     // Listened time accumulates real deltas between playing ticks —
     // a seek forward must not mint a play for a span that never
     // played, and a position regression must not subtract. Anything
-    // above the cap is a jump, not playback.
+    // above the cap is a jump, not playback: no credit, just a new
+    // baseline.
     if (event.state === 'playing') {
       const lastPos = active.lastStatusPositionMs;
       if (lastPos !== undefined && event.positionMs > lastPos) {
-        active.listenedMsAccum += Math.min(
-          event.positionMs - lastPos,
-          MAX_TICK_DELTA_MS,
-        );
+        const delta = event.positionMs - lastPos;
+        if (delta <= MAX_TICK_DELTA_MS) {
+          active.listenedMsAccum += delta;
+        }
       }
       active.lastStatusPositionMs = event.positionMs;
     }

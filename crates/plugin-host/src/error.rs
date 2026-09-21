@@ -147,6 +147,12 @@ pub enum KvError {
     /// was written.
     #[error("kv limit: {0}")]
     TooLarge(String),
+    /// The commit's admission gate declined — the staged patch was
+    /// discarded and committed state is unchanged. Invocation
+    /// cancellation uses this path: a cancel that reaches the store
+    /// before publication prevents the write entirely.
+    #[error("kv commit rejected: {0}")]
+    Rejected(String),
 }
 
 /// Errors produced while running an invocation.

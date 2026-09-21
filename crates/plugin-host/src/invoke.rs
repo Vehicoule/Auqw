@@ -17,7 +17,7 @@ use wasmi::{
 
 use crate::attempt::{Attempt, GuestLogEntry, HttpTraceEntry};
 use crate::budgets::{BudgetDimension, Budgets};
-use crate::error::{HttpErrorKind, InvokeError, LoadError, GUEST_FAIL_KINDS};
+use crate::error::{HttpErrorKind, InvokeError, KvError, LoadError, GUEST_FAIL_KINDS};
 use crate::http::HttpRequest;
 use crate::kv::{MAX_KV_KEY_BYTES, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES};
 use crate::manifest::Manifest;
@@ -473,15 +473,24 @@ async fn run(
                     let kv = Arc::clone(&ctx.services.kv);
                     let plugin_id = ctx.plugin.manifest.id.clone();
                     let writes = staged_kv.writes();
-                    tokio::task::spawn_blocking(move || kv.commit(&plugin_id, writes))
-                        .await
-                        .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
-                        .map_err(|e| InvokeError::HostService(e.to_string()))?;
-                    // A cancel that landed mid-fsync couldn't stop the
-                    // write — blocking fs I/O isn't abortable — but the
-                    // invocation's RESULT is still honest: the caller
-                    // sees cancelled, not a silent success.
-                    check_preemption(ctx)?;
+                    let token = ctx.cancel.clone();
+                    // The cancel token is the commit's admission gate:
+                    // the store evaluates it under its write lock on
+                    // the doorstep of publication, so a cancel can
+                    // never be beaten by a commit it should have
+                    // stopped — the two are one critical section.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        kv.commit_admitting(&plugin_id, writes, &move || !token.is_cancelled())
+                    })
+                    .await
+                    .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?;
+                    match outcome {
+                        // Admission declined = the cancel won before
+                        // publication — report cancelled, not a host error.
+                        Err(KvError::Rejected(_)) => return Err(InvokeError::Cancelled),
+                        Err(e) => return Err(InvokeError::HostService(e.to_string())),
+                        Ok(()) => check_preemption(ctx)?,
+                    }
                 }
                 return Ok(result);
             }

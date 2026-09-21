@@ -36,10 +36,12 @@ const OUT = join(ROOT, 'apps/mobile/assets/plugins');
 // Resolve a lock-relative source path. On a case-sensitive filesystem a
 // sibling checkout may carry different casing than the lock expects
 // (e.g. `../auqw-plugins` vs an `Auqw-plugins` clone), so after the
-// exact path fails each segment is matched case-insensitively — the
-// first sorted match wins, keeping the fallback deterministic. If any
-// segment is unresolvable the original path is returned so the error
-// still names what the lock asked for.
+// exact path fails each segment is matched case-insensitively — but a
+// segment only falls back when EXACTLY ONE entry matches: multiple
+// lookalikes means the lock's intent is ambiguous, and picking one
+// could let a stray checkout become the artifact source. If a segment
+// is unresolvable the original path is returned so the error still
+// names what the lock asked for.
 const resolveSourcePath = (rel) => {
   const abs = resolve(ROOT, rel);
   if (existsSync(abs)) return abs;
@@ -52,12 +54,21 @@ const resolveSourcePath = (rel) => {
     } catch {
       return abs;
     }
-    const match = entries.includes(part)
-      ? part
-      : entries
-          .filter((e) => e.toLowerCase() === part.toLowerCase())
-          .sort()[0];
-    if (match === undefined) return abs;
+    let match = part;
+    if (!entries.includes(part)) {
+      const lookalikes = entries.filter(
+        (e) => e.toLowerCase() === part.toLowerCase(),
+      );
+      if (lookalikes.length !== 1) {
+        if (lookalikes.length > 1) {
+          console.error(
+            `sync-plugins: ambiguous case-insensitive match for '${part}' in ${cur}: ${lookalikes.join(', ')}`,
+          );
+        }
+        return abs;
+      }
+      [match] = lookalikes;
+    }
     cur = join(cur, match);
   }
   return cur;

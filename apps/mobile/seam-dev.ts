@@ -86,19 +86,18 @@ let pluginId: string | null = null;
 let lastHandle: string | null = null;
 let lastRequestId: string | null = null;
 let audioLeg: AudioPlayer | null = null;
-// Single pending outcome for the one-shot `seam` leg — the harness is
-// sequential, so one slot suffices. It resolves ONLY on the outcome
-// matching its requestId: an interleaved app-side or second dev
-// prepare must never resolve this leg with a handle it didn't mint.
-let pendingPrepare: {
-  requestId: string;
-  resolve: (e: PrepareOutcomeEvent) => void;
-} | null = null;
-// Outcomes arriving before the leg knows its requestId (a cached or
-// instantly-failing prepare can answer synchronously) are buffered —
-// dropping them would hang the leg's promise.
+// Prepare waiters keyed by request id — a seam leg resolves ONLY the
+// outcome carrying the id it itself was issued, so overlapping seam
+// links can never cross resolvers.
+const prepareWaiters = new Map<string, (e: PrepareOutcomeEvent) => void>();
+// Legs between `prepare()` and receiving their request id: an instant
+// answer can arrive before the id is known, so its outcome is buffered
+// — but only while a registration window is open (an outcome with no
+// leg to claim it is ordinary app traffic and must not accumulate),
+// and bounded so a window left open can't grow without limit.
+let awaitingPrepareId = 0;
 let unmatchedOutcomes: PrepareOutcomeEvent[] = [];
-let pendingResolve: (e: PrepareOutcomeEvent) => void = () => {};
+const UNMATCHED_OUTCOME_CAP = 32;
 
 // ── Session-trust (OAuth device flow) ───────────────────────────────
 // The app side owns credentials + refresh — the guest only ever sees
@@ -147,11 +146,14 @@ function arm(): void {
     } else {
       slog(`prepare-failed req=${e.requestId} kind=${e.outcome.kind} t=${Date.now()}`);
     }
-    const pending = pendingPrepare;
-    if (pending !== null && e.requestId === pending.requestId) {
-      pendingPrepare = null;
-      pending.resolve(e);
-    } else {
+    const waiter = prepareWaiters.get(e.requestId);
+    if (waiter !== undefined) {
+      prepareWaiters.delete(e.requestId);
+      waiter(e);
+    } else if (
+      awaitingPrepareId > 0 &&
+      unmatchedOutcomes.length < UNMATCHED_OUTCOME_CAP
+    ) {
       unmatchedOutcomes.push(e);
     }
   });
@@ -216,7 +218,9 @@ function finiteParam(raw: string | null): number | null | undefined {
     return undefined;
   }
   const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  // Kotlin receives these as `toULong()` bounds — negatives, fractions,
+  // and unsafe integers all coerce wrongly there.
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 function describe(error: unknown): string {
@@ -356,24 +360,30 @@ export async function runSeamLink(url: string): Promise<void> {
       }
       const id = await ensureSeam();
       const provider = param(query, 'provider') ?? id;
+      let resolveOutcome!: (e: PrepareOutcomeEvent) => void;
       const outcomeP = new Promise<PrepareOutcomeEvent>((resolve) => {
-        pendingResolve = resolve;
+        resolveOutcome = resolve;
       });
-      lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
-      pendingPrepare = {
-        requestId: lastRequestId,
-        resolve: pendingResolve,
-      };
-      // A buffered outcome may already carry this requestId — an
-      // immediate prepare answer outruns the assignment above.
-      const buffered = unmatchedOutcomes.findIndex(
-        (o) => o.requestId === lastRequestId,
-      );
-      const hit =
-        buffered >= 0 ? unmatchedOutcomes.splice(buffered, 1)[0] : undefined;
-      if (hit !== undefined) {
-        pendingPrepare = null;
-        pendingResolve(hit);
+      awaitingPrepareId += 1;
+      try {
+        lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
+        // A buffered outcome may already carry this requestId — an
+        // immediate prepare answer outruns the await above.
+        const buffered = unmatchedOutcomes.findIndex(
+          (o) => o.requestId === lastRequestId,
+        );
+        const hit =
+          buffered >= 0 ? unmatchedOutcomes.splice(buffered, 1)[0] : undefined;
+        if (hit !== undefined) {
+          resolveOutcome(hit);
+        } else {
+          prepareWaiters.set(lastRequestId, resolveOutcome);
+        }
+      } finally {
+        awaitingPrepareId -= 1;
+        if (awaitingPrepareId === 0) {
+          unmatchedOutcomes = [];
+        }
       }
       const e = await outcomeP;
       if (e.outcome.type !== 'prepared') {

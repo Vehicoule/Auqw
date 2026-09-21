@@ -137,10 +137,13 @@ fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> 
 /// Parent zones whose sibling hosts form one operator trust zone —
 /// CDN edges re-issue across siblings (`rr1` → `rr2---sn-x`), so a
 /// redirect between them is a load-balance, not a boundary hop. Only
-/// parents the providers actually mint under qualify: widening to a
-/// sibling of an arbitrary `media.example.com` mint would follow to
-/// `evil.example.com`, an escape past the reviewed mint destination.
-const EDGE_PARENT_ZONES: &[&str] = &["googlevideo.com", "googleusercontent.com", "dzcdn.net"];
+/// zones wholly operated by the provider's CDN qualify:
+/// `googleusercontent.com` is excluded because user-uploaded content
+/// lives under it (`lh3.googleusercontent.com` et al.) — a sibling
+/// there could be attacker data wearing the mint's signature, while
+/// every `*.googlevideo.com`/`*.dzcdn.net` sibling is provider edge
+/// infrastructure.
+const EDGE_PARENT_ZONES: &[&str] = &["googlevideo.com", "dzcdn.net"];
 
 /// Is `target_host` inside the mint's trust scope: the mint host
 /// itself, one of its subdomains, or — when the mint sits under a
