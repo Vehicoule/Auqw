@@ -778,6 +778,38 @@ async function pauseResumeSeek(): Promise<void> {
   assertEqual(seekCall.identity.queueRev, rev0 + 3);
 }
 
+// A failed queue commit rolls the engine back: the caller gets the
+// error, the published queue stays on storage's truth, and the
+// native transport call is never issued (commit precedes transport).
+async function queueCommitRollback(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const paused = await r.session.pause();
+  assert(!paused.ok, 'pause must report the failed commit');
+  assertEqual(paused.error.kind, 'transient');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'queue rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assert(snap.persistenceError !== undefined, 'persistenceError published');
+  assertEqual(calls(r, 'pause').length, 0, 'no native pause issued');
+}
+
 async function previousSemantics(): Promise<void> {
   const r = rig(
     persisted({
@@ -3272,6 +3304,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['naturalEnded', naturalEnded],
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
+  ['queueCommitRollback', queueCommitRollback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],
   ['restartRestore', restartRestore],

@@ -591,6 +591,28 @@ async function entityMalformed(): Promise<void> {
   assert(!r2.ok && r2.error.kind === 'invalid-response', 'bad complete');
 }
 
+// 11b. A structurally valid artwork answer for a *different* source
+// ref is rejected — the wire ref correlates the response with the
+// requested provider item, not just the shape.
+async function artworkRefMismatch(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const call = p.artwork(
+    ref('itunes', '123'),
+    { size: 1200 },
+    ctx().context,
+  );
+  await flush();
+  host.succeed('req-1', {
+    source_ref: { provider: 'itunes', kind: 'track', id: '456' },
+    items: [
+      { url: 'https://art.example/wrong.png', width: 1200, height: 1200 },
+    ],
+  });
+  const result = await call;
+  assert(!result.ok && result.error.kind === 'invalid-response');
+}
+
 // 12. Lyrics payloads: prefer picks the wire capability; synced
 // degrades to lyrics.plain when the provider declares only that.
 async function lyricsOps(): Promise<void> {
@@ -829,6 +851,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['startFailure', startFailure],
   ['entityOp', entityOp],
   ['entityMalformed', entityMalformed],
+  ['artworkRefMismatch', artworkRefMismatch],
   ['lyricsOps', lyricsOps],
   ['lyricsHonesty', lyricsHonesty],
   ['radioOps', radioOps],

@@ -684,6 +684,40 @@ export class Session {
     }
   }
 
+  /**
+   * `#persist` with a caller-visible failure contract: on a failed
+   * commit `rollback` restores the in-memory mutations the batch
+   * covered, so the published mirror matches storage and the returned
+   * error is honest — a failed command claims nothing it did not land.
+   */
+  async #commitChecked(
+    batch: () => StorageBatch,
+    rollback: () => void,
+  ): Promise<Result<void>> {
+    const persisted = await this.#persist(batch);
+    if (!persisted.ok) {
+      rollback();
+      this.#derived();
+      this.#publish();
+    }
+    return persisted;
+  }
+
+  /**
+   * Queue-only `#commitChecked`: `before` is the pre-mutation
+   * snapshot; a failed commit swaps the live engine back to it. The
+   * mutation itself must stay synchronous — a pending 'prepared'
+   * outcome reads `r.queue` directly, outside the storage tail.
+   */
+  #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
+    return this.#commitChecked(
+      () => ({ queue: r.queue.snapshot() }),
+      () => {
+        r.queue = new QueueEngine(before);
+      },
+    );
+  }
+
   /** Bounded, nonfatal, sanitized internal logging. */
   #logWarn(message: string): void {
     const atMs = this.#safeNow();
@@ -2185,11 +2219,8 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    if (
-      !r.queue
-        .snapshot()
-        .occurrences.some((o) => o.occurrenceId === occurrenceId)
-    ) {
+    const before = r.queue.snapshot();
+    if (!before.occurrences.some((o) => o.occurrenceId === occurrenceId)) {
       return err(appError('not-found', 'unknown occurrence'));
     }
     try {
@@ -2197,7 +2228,10 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     this.#derived();
     return this.#startAttempt(occurrenceId);
   }
@@ -2225,7 +2259,8 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    if (r.queue.snapshot().currentOccurrenceId === null) {
+    const before = r.queue.snapshot();
+    if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
     try {
@@ -2235,7 +2270,10 @@ export class Session {
     }
     await this.#supersede();
     r.playback = { type: 'idle' };
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     this.#derived();
     this.#publish();
     return ok(undefined);
@@ -2270,7 +2308,10 @@ export class Session {
       after.currentOccurrenceId === before.currentOccurrenceId
     ) {
       // Restart the same item: seek natively, keep the attempt.
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      const restarted = await this.#persistQueue(r, before);
+      if (!restarted.ok) {
+        return restarted;
+      }
       this.#derived();
       const active = this.#active;
       if (
@@ -2294,7 +2335,10 @@ export class Session {
       this.#publish();
       return ok(undefined);
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const moved = await this.#persistQueue(r, before);
+    if (!moved.ok) {
+      return moved;
+    }
     this.#derived();
     if (after.mode === 'playing' && after.currentOccurrenceId !== null) {
       return this.#startAttempt(after.currentOccurrenceId);
@@ -2318,16 +2362,27 @@ export class Session {
     if (active === null) {
       return err(appError('unavailable', 'no active playback to pause'));
     }
+    const before = r.queue.snapshot();
     try {
       r.queue.pause();
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    // Commit the intent before touching transport: a failed commit
+    // rolls the engine back and the native pause is never issued.
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    this.#derived();
     if (active.handle === undefined) {
-      // Prepare still in flight: pause intent lands on the queue and
-      // the pending 'prepared' outcome must not autostart it.
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
-      this.#derived();
+      // Prepare still in flight: pause intent landed on the queue and
+      // the pending 'prepared' outcome will not autostart it.
+      this.#publish();
+      return ok(undefined);
+    }
+    if (this.#isStale(active)) {
+      // Superseded while committing — the pause intent landed anyway.
       this.#publish();
       return ok(undefined);
     }
@@ -2343,9 +2398,8 @@ export class Session {
     }
     if (!this.#isStale(active)) {
       this.#setPlaybackFromStatus(active, 'paused');
+      this.#publish();
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
-    this.#derived();
     return ok(undefined);
   }
 
@@ -2355,8 +2409,8 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const snap = r.queue.snapshot();
-    if (snap.currentOccurrenceId === null) {
+    const before = r.queue.snapshot();
+    if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
     try {
@@ -2364,16 +2418,23 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    this.#derived();
     const active = this.#active;
     if (active !== null && active.handle === undefined) {
       // A prepare is already in flight: the ticked 'playing' intent
       // means the pending 'prepared' outcome autostarts it.
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
-      this.#derived();
       this.#publish();
       return ok(undefined);
     }
     if (active !== null && active.handle !== undefined) {
+      if (this.#isStale(active)) {
+        this.#publish();
+        return ok(undefined);
+      }
       const identity = {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
@@ -2392,15 +2453,12 @@ export class Session {
       }
       if (!this.#isStale(active)) {
         this.#setPlaybackFromStatus(active, 'playing');
+        this.#publish();
       }
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
-      this.#derived();
       return ok(undefined);
     }
     // No live handle (e.g. after restore): prepare fresh.
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
-    this.#derived();
-    return this.#startAttempt(snap.currentOccurrenceId);
+    return this.#startAttempt(before.currentOccurrenceId);
   }
 
   async seekTo(positionMs: number): Promise<Result<void>> {
@@ -2418,16 +2476,24 @@ export class Session {
     if (active === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
+    const before = r.queue.snapshot();
     try {
       r.queue.seekTo(positionMs);
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    this.#derived();
     if (active.handle === undefined) {
       // Seek intent rides on the queue snapshot; the pending
       // 'prepared' outcome plays from it.
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
-      this.#derived();
+      this.#publish();
+      return ok(undefined);
+    }
+    if (this.#isStale(active)) {
       this.#publish();
       return ok(undefined);
     }
@@ -2446,9 +2512,8 @@ export class Session {
     if (!this.#isStale(active)) {
       const mode = r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing';
       this.#setPlaybackFromStatus(active, mode);
+      this.#publish();
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
-    this.#derived();
     return ok(undefined);
   }
 
@@ -2458,7 +2523,8 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const current = r.queue.snapshot().currentOccurrenceId;
+    const before = r.queue.snapshot();
+    const current = before.currentOccurrenceId;
     if (current === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -2467,7 +2533,10 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     this.#derived();
     return this.#startAttempt(current);
   }
@@ -2478,7 +2547,8 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const wasCurrent = r.queue.snapshot().currentOccurrenceId === id;
+    const before = r.queue.snapshot();
+    const wasCurrent = before.currentOccurrenceId === id;
     try {
       r.queue.remove(id);
     } catch {
@@ -2491,7 +2561,10 @@ export class Session {
         ready2.playback = { type: 'idle' };
       }
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     this.#derived();
     const snap = r.queue.snapshot();
     if (
@@ -2511,6 +2584,7 @@ export class Session {
       return ready;
     }
     const r = ready.value;
+    const before = r.queue.snapshot();
     try {
       r.queue.move(id, toIndex);
     } catch (thrown) {
@@ -2520,7 +2594,10 @@ export class Session {
           : fromUnknown(thrown),
       );
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     this.#derived();
     this.#publish();
     return ok(undefined);
@@ -2770,6 +2847,8 @@ export class Session {
         ? recording.sourceRefs
         : [...recording.sourceRefs, ref],
     };
+    const recordingsBefore = r.recordings;
+    const before = r.queue.snapshot();
     r.recordings = r.recordings.map((rec) =>
       rec.id === updated.id ? updated : rec,
     );
@@ -2779,11 +2858,23 @@ export class Session {
       return err(fromUnknown(thrown));
     }
     this.#publish();
-    await this.#persist(() => ({
-      recordings: r.recordings,
-      queue: r.queue.snapshot(),
-    }));
+    const persisted = await this.#commitChecked(
+      () => ({
+        recordings: r.recordings,
+        queue: r.queue.snapshot(),
+      }),
+      () => {
+        r.recordings = recordingsBefore;
+        r.queue = new QueueEngine(before);
+      },
+    );
     this.#derived();
+    if (!persisted.ok) {
+      // The adoption never committed — memory is back on storage's
+      // truth, but the ref resolved fine: the resolve contract is
+      // met and playback proceeds unpinned.
+      this.#logWarn('mapping adoption commit failed');
+    }
     return ok(ref);
   }
 
@@ -2917,7 +3008,8 @@ export class Session {
     if (r === null) {
       return;
     }
-    if (r.queue.snapshot().currentOccurrenceId === attempt.occurrenceId) {
+    const before = r.queue.snapshot();
+    if (before.currentOccurrenceId === attempt.occurrenceId) {
       try {
         r.queue.markUnplayable(error);
       } catch {
@@ -2932,7 +3024,7 @@ export class Session {
       error,
     };
     this.#publish();
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    await this.#persistQueue(r, before);
     this.#derived();
   }
 
@@ -3048,49 +3140,67 @@ export class Session {
       active.source.cancel();
       active.timer?.cancel();
       this.#active = null;
+      const before = r.queue.snapshot();
       try {
         r.queue.next();
       } catch {
         return;
       }
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      const advanced = await this.#persistQueue(r, before);
       this.#derived();
       const snap = r.queue.snapshot();
-      if (snap.currentOccurrenceId !== null && snap.mode === 'playing') {
-        await this.#startAttempt(snap.currentOccurrenceId);
-      } else {
+      // A failed advance rolls the queue back onto the ended item —
+      // never replay it; go idle instead.
+      if (
+        !advanced.ok ||
+        snap.currentOccurrenceId === null ||
+        snap.mode !== 'playing'
+      ) {
         r.playback = { type: 'idle' };
         this.#publish();
+        return;
       }
+      await this.#startAttempt(snap.currentOccurrenceId);
       return;
     }
     // Remote pause/play reconciles queue intent with the service.
     if (event.state === 'paused' && r.queue.snapshot().mode === 'playing') {
+      const before = r.queue.snapshot();
       try {
         r.queue.pause();
       } catch {
         return;
       }
+      const priorIdentity = active.identity;
       active.identity = {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      const synced = await this.#persistQueue(r, before);
+      if (!synced.ok && this.#active === active) {
+        // Rolled back — the live engine is at `before`'s revision.
+        active.identity = priorIdentity;
+      }
       this.#derived();
     } else if (
       event.state === 'playing' &&
       r.queue.snapshot().mode === 'paused'
     ) {
+      const before = r.queue.snapshot();
       try {
         r.queue.play();
       } catch {
         return;
       }
+      const priorIdentity = active.identity;
       active.identity = {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      const synced = await this.#persistQueue(r, before);
+      if (!synced.ok && this.#active === active) {
+        active.identity = priorIdentity;
+      }
       this.#derived();
     }
     if (this.#isStale(active)) {
@@ -3593,6 +3703,8 @@ export class Session {
       ) {
         return;
       }
+      const recordingsBefore = ready2.recordings;
+      const before = ready2.queue.snapshot();
       ready2.recordings = ready2.recordings.map((x) =>
         x.id === updated.id ? updated : x,
       );
@@ -3602,10 +3714,19 @@ export class Session {
         return;
       }
       this.#publish();
-      await this.#persist(() => ({
-        recordings: ready2.recordings,
-        queue: ready2.queue.snapshot(),
-      }));
+      const persisted = await this.#commitChecked(
+        () => ({
+          recordings: ready2.recordings,
+          queue: ready2.queue.snapshot(),
+        }),
+        () => {
+          ready2.recordings = recordingsBefore;
+          ready2.queue = new QueueEngine(before);
+        },
+      );
+      if (!persisted.ok) {
+        return;
+      }
       this.#own(this.#projectQueue());
     })();
     this.#own(work);

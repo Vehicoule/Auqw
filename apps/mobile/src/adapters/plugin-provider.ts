@@ -489,11 +489,24 @@ function toRadioPage(value: unknown): RadioPage | null {
 }
 
 /** Wire `catalogArtworkResult` → domain `ArtworkRef` list. */
-function toArtworkItems(value: unknown): readonly ArtworkRef[] | null {
+function toArtworkItems(
+  value: unknown,
+  ref: SourceRef,
+): readonly ArtworkRef[] | null {
   if (!isRecord(value) || !hasExactKeys(value, ['source_ref', 'items'])) {
     return null;
   }
-  if (!isSourceRef(value['source_ref'])) {
+  const sourceRef = value['source_ref'];
+  if (!isSourceRef(sourceRef)) {
+    return null;
+  }
+  // The wire ref is the plugin's own correlation answer: artwork for a
+  // different provider item is valid JSON that belongs to another track.
+  if (
+    sourceRef.provider !== ref.provider ||
+    sourceRef.kind !== ref.kind ||
+    sourceRef.id !== ref.id
+  ) {
     return null;
   }
   const items = value['items'];
@@ -793,7 +806,7 @@ export function createPluginProvider(
         'catalog.artwork',
         { ref: wireSourceRef(ref), size: input.size },
         context,
-        toArtworkItems,
+        (value) => toArtworkItems(value, ref),
       );
     },
     getLyrics(input, context) {
