@@ -26,6 +26,7 @@ export type ErrorKind =
   | 'expired'
   | 'not-found'
   | 'unavailable'
+  | 'storage-full'
   | 'internal';
 
 export type AppError = {

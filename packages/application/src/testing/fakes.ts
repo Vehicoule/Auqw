@@ -888,8 +888,8 @@ export class FakeTransferSink implements TransferSink {
   finalizedWith: string | null = null;
   abortedKeep: boolean | null = null;
 
-  constructor(script: FakeSinkScript = {}) {
-    const partial = script.partialBytes ?? 0;
+  constructor(script: FakeSinkScript = {}, resumeAtBytes = 0) {
+    const partial = script.partialBytes ?? resumeAtBytes;
     this.#script = {
       partialBytes: partial,
       failWritesAfter: script.failWritesAfter ?? Number.MAX_SAFE_INTEGER,
@@ -1002,7 +1002,10 @@ export class FakeTransfer implements MediaTransferPort {
       this.#beginError = null;
       return err(error);
     }
-    const sink = new FakeTransferSink(this.#scripts.shift() ?? {});
+    const sink = new FakeTransferSink(
+      this.#scripts.shift() ?? {},
+      input.resumeAtBytes,
+    );
     this.sinks.push(sink);
     return ok(sink);
   }
