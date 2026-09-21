@@ -1385,10 +1385,12 @@ async function entityKindCrossCheck(): Promise<void> {
   driver.close();
 }
 
-// 22. A database with stray tables but no schema_version row is a
-// partial schema, not corruption: initialize tolerates it (idempotent
-// DDL) instead of failing transient-forever on plain CREATE TABLE.
-async function partialSchemaInitialize(): Promise<void> {
+// 22. A database holding application-named tables but no
+// schema_version row is a foreign file, not a partial schema —
+// migrations are single transactions, so a legit partial can never
+// persist. initialize rejects it instead of silently merging into
+// tables whose constraints were never ours.
+async function foreignSchemaRejected(): Promise<void> {
   const driver = new NodeSqliteDriver();
   driver.execScript(`
     CREATE TABLE recordings (
@@ -1396,20 +1398,30 @@ async function partialSchemaInitialize(): Promise<void> {
       duration_ms INTEGER, release_year INTEGER, artwork_json TEXT NOT NULL,
       explicit INTEGER, genre TEXT, isrc TEXT, version_labels_json TEXT NOT NULL
     );
-    CREATE TABLE source_refs (
-      recording_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
-      provider TEXT NOT NULL, kind TEXT NOT NULL, source_id TEXT NOT NULL
-    );
     INSERT INTO recordings VALUES
       ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]');
-    INSERT INTO source_refs VALUES ('r1', 0, 'itunes', 'track', 'i1');
   `);
   const storage = new SqliteStorage(driver, SETTINGS);
   const init = await storage.initialize(ctx().context);
-  assert(init.ok, 'partial-schema database initializes');
-  const state = await loadOk(storage);
-  assertEqual(state.recordings.length, 1, 'pre-existing row survives');
-  assertEqual(state.recordings[0]?.id, 'r1');
+  assert(
+    !init.ok && init.error.kind === 'invalid-response',
+    'foreign database rejected at initialize',
+  );
+  driver.close();
+}
+
+// 23. Unrelated user tables outside the schema's names are
+// tolerated: only a collision with a table this schema owns is
+// rejected.
+async function unrelatedTablesTolerated(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`
+    CREATE TABLE scratchpad (note TEXT);
+    INSERT INTO scratchpad VALUES ('keep me');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  const init = await storage.initialize(ctx().context);
+  assert(init.ok, 'unrelated tables do not block initialize');
   driver.close();
 }
 
@@ -1524,7 +1536,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['sharedDriverTransactions', sharedDriverTransactions],
   ['exportOwnedUnsafeTimestamp', exportOwnedUnsafeTimestamp],
   ['entityKindCrossCheck', entityKindCrossCheck],
-  ['partialSchemaInitialize', partialSchemaInitialize],
+  ['foreignSchemaRejected', foreignSchemaRejected],
+  ['unrelatedTablesTolerated', unrelatedTablesTolerated],
 ];
 
 for (const [name, fn] of TESTS) {

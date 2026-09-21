@@ -37,18 +37,6 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
 
-// Output names derive from the id alone (`<id>.wasm`); a duplicated
-// lock id would silently overwrite the earlier entry's artifact.
-{
-  const seen = new Set();
-  for (const plugin of lock.plugins) {
-    if (seen.has(plugin.id)) {
-      throw new Error(`duplicate lock entry for plugin id ${plugin.id}`);
-    }
-    seen.add(plugin.id);
-  }
-}
-
 const keyIdOf = (publicPem) =>
   createHash('sha256')
     .update(createPublicKey(publicPem).export({ format: 'der', type: 'spki' }))

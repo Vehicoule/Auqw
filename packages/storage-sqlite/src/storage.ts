@@ -41,7 +41,11 @@ import type {
   SqlRow,
   SqlValue,
 } from './driver.ts';
-import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
+import {
+  CURRENT_SCHEMA_VERSION,
+  KNOWN_TABLES,
+  MIGRATIONS,
+} from './migrations.ts';
 
 const ATTEMPT_CAP = 500;
 
@@ -192,6 +196,22 @@ export class SqliteStorage implements StoragePort {
           signal,
         );
         if (found.length === 0) {
+          // Version zero claims an empty database. One that already
+          // holds application-named tables is a foreign file being
+          // adopted — reject it rather than merge into it. Partial
+          // migrations cannot get here: each migration is one
+          // transaction and rolls back whole.
+          const foreign = await conn.query<SqlRow>(
+            `SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN (${KNOWN_TABLES.map(() => '?').join(',')})
+             LIMIT 1`,
+            [...KNOWN_TABLES],
+            signal,
+          );
+          if (foreign.length > 0) {
+            return err(invalidSchema());
+          }
           return ok(0);
         }
         const rows = await conn.query<SqlRow>(

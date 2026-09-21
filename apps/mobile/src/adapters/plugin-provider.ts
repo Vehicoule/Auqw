@@ -150,21 +150,34 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
  * `source_ref.kind` permissive and providers legitimately emit
  * album/artist rows (deezer catalog.entity/metadata), so a well-formed
  * non-track item is dropped rather than poisoning the whole page. An
- * item that fails track decoding for any other reason still rejects
- * the batch.
+ * item that fails the full metadata decode — including a non-track
+ * row missing required fields — still rejects the batch.
  */
 function toTrackItems(items: readonly unknown[]): TrackMetadata[] | null {
   const out: TrackMetadata[] = [];
   for (const item of items) {
-    const sourceRef = isRecord(item) ? item['source_ref'] : undefined;
-    if (isSourceRef(sourceRef) && sourceRef.kind !== 'track') {
+    const track = toTrackMetadata(item);
+    if (track !== null) {
+      out.push(track);
       continue;
     }
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
+    // "Well-formed non-track" = every field validates with only the
+    // kind constraint relaxed — decode again with the ref re-keyed
+    // as 'track'; a row that still fails is malformed, not non-track.
+    if (isRecord(item)) {
+      const sourceRef = item['source_ref'];
+      if (
+        isSourceRef(sourceRef) &&
+        sourceRef.kind !== 'track' &&
+        toTrackMetadata({
+          ...item,
+          source_ref: { ...sourceRef, kind: 'track' },
+        }) !== null
+      ) {
+        continue;
+      }
     }
-    out.push(track);
+    return null;
   }
   return out;
 }

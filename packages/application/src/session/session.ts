@@ -453,11 +453,13 @@ export class Session {
         settings: { ...ready.settings },
         playback: ready.playback,
         radio: publishRadio(ready.radio),
+        // The published error is a clone sealed by the same freeze —
+        // a subscriber must never mutate the mirror's own error.
+        ...(ready.persistenceError === undefined
+          ? {}
+          : { persistenceError: { ...ready.persistenceError } }),
       });
-      this.#state =
-        ready.persistenceError === undefined
-          ? base
-          : { ...base, persistenceError: ready.persistenceError };
+      this.#state = base;
     }
     const state = this.#state;
     for (const listener of [...this.#listeners]) {
@@ -1575,21 +1577,41 @@ export class Session {
     // verdict can never be clobbered by an interleaved recordings
     // write (and vice versa).
     const work = this.#enqueueStorage(async () => {
+      // Queued behind an import's ready-swap, a staged review would
+      // otherwise apply an old-generation verdict to the imported
+      // database — same guard as #persist/#commitStaged.
+      if (this.#ready !== r) {
+        return err(
+          appError('superseded', 'session state was replaced'),
+        );
+      }
       const result = await op(context?.signal);
       if (!result.ok) {
         return result;
       }
-      // The reload runs through #bounded like every storage call —
-      // a hanging load fails the segment instead of wedging the tail.
-      const reloaded = await this.#bounded(() =>
-        this.#storage.load(
-          this.#newContext(
-            'reload',
-            this.#deadline(),
-            context?.signal ?? new CancellationSource().signal,
-          ),
-        ),
-      );
+      // The reload is bounded like every storage call — a hanging
+      // load fails the segment instead of wedging the tail — and the
+      // bound and the operation context share a single deadline.
+      const reloadSource = new CancellationSource();
+      this.#opSources.add(reloadSource);
+      let reloaded: Result<PersistedState>;
+      try {
+        const deadlineMs = this.#deadline();
+        reloaded = await this.#withDeadline(
+          () =>
+            this.#storage.load(
+              this.#newContext(
+                'reload',
+                deadlineMs,
+                context?.signal ?? reloadSource.signal,
+              ),
+            ),
+          deadlineMs,
+          reloadSource,
+        );
+      } finally {
+        this.#opSources.delete(reloadSource);
+      }
       if (reloaded.ok && isPersistedState(reloaded.value)) {
         // Merge, never replace: a concurrent recording mutation on
         // another tail may sit between its in-memory mirror and its
