@@ -696,6 +696,13 @@ export type LocalFile = {
   docId: string;
   size: number;
   fingerprint: string;
+  /**
+   * The provider's last-modified stamp at scan time — the cheap
+   * change token for same-size in-place replacements. `null` for
+   * providers that don't report one; those entries re-fingerprint
+   * on every scan instead of trusting size alone.
+   */
+  modifiedMs: number | null;
   title: string | null;
   artist: string | null;
   album: string | null;
@@ -827,6 +834,7 @@ export function isLocalFile(value: unknown): value is LocalFile {
     docId,
     size,
     fingerprint,
+    modifiedMs,
     title,
     artist,
     album,
@@ -841,6 +849,7 @@ export function isLocalFile(value: unknown): value is LocalFile {
       'docId',
       'size',
       'fingerprint',
+      'modifiedMs',
       'title',
       'artist',
       'album',
@@ -853,6 +862,7 @@ export function isLocalFile(value: unknown): value is LocalFile {
     isString(docId, 2048) &&
     isSafeNonNegative(size) &&
     isString(fingerprint, 128) &&
+    isOptSafeNonNegative(modifiedMs) &&
     isOptString(title, 512) &&
     isOptString(artist, 512) &&
     isOptString(album, 512) &&

@@ -54,6 +54,17 @@ export type PersistedState = {
  */
 export type StorageBatch = {
   readonly recordings?: readonly Recording[];
+  /**
+   * Read-modify-write for `recordings`: the implementation applies
+   * this to the rows it just read INSIDE the commit transaction, so
+   * a session write landing between a caller's own load and this
+   * commit is preserved instead of clobbered by a stale array.
+   * Mutually exclusive with `recordings` — passing both is an
+   * 'internal' error.
+   */
+  readonly recordingsMerge?: (
+    current: readonly Recording[],
+  ) => readonly Recording[];
   readonly likes?: readonly Like[];
   readonly entities?: readonly Entity[];
   readonly entitySourceRefs?: readonly EntitySourceRef[];

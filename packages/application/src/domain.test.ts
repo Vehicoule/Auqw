@@ -301,6 +301,7 @@ export function run(): void {
     docId: 'doc-9',
     size: 4_194_304,
     fingerprint: 'fp-abc',
+    modifiedMs: 1_700_000_000_000,
     title: 'Song',
     artist: null,
     album: null,

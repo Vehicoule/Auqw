@@ -232,6 +232,11 @@ export type TagReaderEntry = {
   name: string;
   size: number;
   mime: string;
+  /**
+   * DocumentsContract COLUMN_LAST_MODIFIED (ms); null when the
+   * provider reports none. Older native builds may omit the key.
+   */
+  modifiedMs?: number | null;
 };
 
 export type TagReaderFingerprint = {
@@ -540,4 +545,19 @@ export function tagRead(
 
 export function docUri(treeUri: string, docId: string): string {
   return native.docUri(treeUri, docId);
+}
+
+/**
+ * Whether the platform's native module actually exposes the tag
+ * reader — the SAF picker/enumerate surface is Android-only today
+ * (iOS carries the host surface), so UI must not offer local-folder
+ * actions where they'd fail silently.
+ */
+export function hasTagReader(): boolean {
+  return (
+    typeof (native as { tagPickFolder?: unknown }).tagPickFolder ===
+      'function' &&
+    typeof (native as { tagEnumerate?: unknown }).tagEnumerate ===
+      'function'
+  );
 }

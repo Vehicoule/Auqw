@@ -1403,6 +1403,7 @@ async function downloadLocalRoundtrip(): Promise<void> {
       docId: 'doc-42',
       size: 4_194_304,
       fingerprint: 'fp-abc',
+      modifiedMs: 1_700_000_000_000,
       title: 'Local Song',
       artist: null,
       album: null,
@@ -1473,6 +1474,77 @@ async function downloadLocalRoundtrip(): Promise<void> {
   driver.close();
 }
 
+// 17. v3 -> v4: local_files gains modified_ms; pre-existing rows
+// read back with a null stamp.
+async function migrationV3toV4(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[1]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[2]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 3);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered)
+      VALUES (1, 'a', 'b', NULL, 256, 'dark', 1, NULL, NULL, NULL, 0);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Local Song', 'A', NULL, 9000, NULL, '[]', NULL, NULL, NULL, '[]', 'local');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'local', 'track', 'lf-1');
+    INSERT INTO local_sources (source_id, tree_uri, label, added_ms, last_scan_ms)
+      VALUES ('src-1', 'content://tree/music', 'Music', 10, NULL);
+    INSERT INTO local_files (file_id, source_id, doc_id, size, fingerprint, title, artist, album, duration_ms, genre, recording_id)
+      VALUES ('lf-1', 'src-1', 'doc-42', 4096, 'fp-abc', 'Local Song', NULL, NULL, 9000, NULL, 'r1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v3 -> v4 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.localFiles.length, 1, 'row migrated');
+  assertEqual(
+    state.localFiles[0]?.modifiedMs,
+    null,
+    'pre-v4 rows carry no stamp',
+  );
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
+// 18. `recordingsMerge` applies to the transaction's fresh read —
+// rows written between a caller's snapshot and its commit survive.
+async function recordingsMergeCommit(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  const r2 = recording('r2', [ref('local', 'lf-1')], [], {
+    provenance: 'local',
+  });
+  assert((await storage.commit({ recordings: [r1] }, ctx().context)).ok);
+  const committed = await storage.commit(
+    { recordingsMerge: (current) => [...current, r2] },
+    ctx().context,
+  );
+  assert(committed.ok, 'merge commit ok');
+  const state = await loadOk(storage);
+  assertEqual(state.recordings.length, 2, 'merge appended over fresh');
+  assert(
+    state.recordings.some((r) => r.id === 'r2'),
+    'merged row present',
+  );
+  // Both forms in one batch is a caller bug — rejected, not
+  // silently resolved.
+  const both = await storage.commit(
+    { recordings: [r1], recordingsMerge: (current) => current },
+    ctx().context,
+  );
+  assert(
+    !both.ok && both.error.kind === 'internal',
+    'recordings + recordingsMerge rejected',
+  );
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -1492,7 +1564,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationV1toV2', migrationV1toV2],
   ['migrationBackupFile', migrationBackupFile],
   ['migrationV2toV3', migrationV2toV3],
+  ['migrationV3toV4', migrationV3toV4],
   ['downloadLocalRoundtrip', downloadLocalRoundtrip],
+  ['recordingsMergeCommit', recordingsMergeCommit],
   ['ownedRoundtrip', ownedRoundtrip],
   ['exportImportRoundtrip', exportImportRoundtrip],
   ['importAtomicity', importAtomicity],

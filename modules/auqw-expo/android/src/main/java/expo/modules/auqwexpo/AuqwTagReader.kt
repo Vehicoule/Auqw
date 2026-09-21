@@ -72,7 +72,8 @@ object AuqwTagReader {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_SIZE,
-            DocumentsContract.Document.COLUMN_MIME_TYPE
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
           ),
           null, null, null
         )
@@ -85,6 +86,9 @@ object AuqwTagReader {
           val name = it.getString(1) ?: continue
           val size = if (it.isNull(2)) 0L else it.getLong(2)
           val mime = it.getString(3) ?: ""
+          // Providers can legally report no stamp — null keeps the
+          // scan's fingerprint fallback honest for them.
+          val modifiedMs = if (it.isNull(4)) null else it.getLong(4)
           if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
             stack.add(docId)
           } else if (mime.startsWith("audio/") || looksAudio(name)) {
@@ -93,7 +97,8 @@ object AuqwTagReader {
                 "docId" to docId,
                 "name" to name,
                 "size" to size.toDouble(),
-                "mime" to mime
+                "mime" to mime,
+                "modifiedMs" to modifiedMs?.toDouble()
               )
             )
           }

@@ -420,6 +420,7 @@ async function exportRoundtripLocalRows(): Promise<void> {
         docId: 'doc-9',
         size: 4096,
         fingerprint: 'fp-deadbeef',
+        modifiedMs: 1_700_000_000_000,
         title: 'Local Song',
         artist: 'Local Artist',
         album: null,

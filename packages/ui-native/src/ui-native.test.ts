@@ -478,6 +478,28 @@ function testLibraryAndSettings(): void {
   const model = toSettingsModel(fixtureSettings, fixtureDiagnostics);
   const prefetch = model.rows.find((r) => r.key === 'prefetch');
   assert(prefetch !== undefined && prefetch.kind === 'toggle');
+  // Platforms without a tag-reader surface (iOS) disable the
+  // local-folder actions — they stay visible, never dead-tappable.
+  const unsupported = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    localSupported: false,
+    localFolderCount: 2,
+    localSources: [{ sourceId: 's1', label: 'Music' }],
+  });
+  for (const key of ['addLocalFolder', 'rescanLocal', 'localSourceRemove:s1']) {
+    const row = unsupported.rows.find((r) => r.key === key);
+    assert(row !== undefined && row.enabled === false, `${key} disabled`);
+  }
+  assertEqual(
+    unsupported.rows.find((r) => r.key === 'localSources')?.value,
+    'unsupported',
+  );
+  const supported = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    localSupported: true,
+  });
+  assert(
+    supported.rows.find((r) => r.key === 'addLocalFolder')?.enabled === true,
+    'supported platform keeps actions live',
+  );
 }
 
 function testLibraryCards(): void {

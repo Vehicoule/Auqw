@@ -16,6 +16,14 @@ export type LocalEntry = {
   name: string;
   size: number;
   mime: string;
+  /**
+   * Provider modification stamp (ms) when the source reports one —
+   * SAF's `COLUMN_LAST_MODIFIED` on Android. `null` where the
+   * provider can't supply one: a same-size in-place replacement is
+   * then only detectable by fingerprint, which the scan falls back
+   * to.
+   */
+  modifiedMs: number | null;
 };
 
 /**

@@ -1013,6 +1013,9 @@ function Main({
     () =>
       toSettingsModel(state.settings, diagnostics, {
         storageText,
+        // The tag-reader surface is Android-only — iOS's auqw-expo
+        // build has no tag* functions, so those rows must not act live.
+        localSupported: AuqwExpo.hasTagReader?.() === true,
         localFolderCount: controller.local()?.list().length,
         localSources: controller
           .local()

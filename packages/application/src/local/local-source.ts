@@ -302,10 +302,11 @@ export class LocalFileSource {
   }
 
   /**
-   * The `recordings` section is shared with the session — commit it
-   * by merging our delta over a fresh storage read, never the boot
-   * snapshot: session mutations between scans (provider refreshes,
-   * added catalog rows, mapping edits) must survive a rescan.
+   * The `recordings` section is shared with the session, so its
+   * delta travels as `recordingsMerge` — the storage implementation
+   * applies it to the rows read inside the commit's own transaction.
+   * A session write queued between our merge and the commit survives
+   * because the merge never saw (and never replaces) a stale array.
    * `localSources`/`localFiles` are owned exclusively by this class —
    * every write runs on the write tail and computes its next arrays
    * from the live state, so overlapping ops (scans of different
@@ -329,18 +330,15 @@ export class LocalFileSource {
       if (next === null) {
         return ok(undefined);
       }
-      const fresh = await this.#storage.load(
-        ctx(this.#ids, this.#clock, signal),
-      );
-      if (!fresh.ok) {
-        return err(fresh.error);
-      }
-      const merged = next.recordings(fresh.value.recordings);
+      // `applied` captures exactly what the commit wrote — the merge
+      // ran over the transaction's freshest rows, which may include
+      // session writes our own snapshot never saw.
+      let applied: Recording[] | null = null;
       const committed = await this.#storage.commit(
         {
           localSources: next.sources,
           localFiles: next.files,
-          recordings: merged,
+          recordingsMerge: (current) => (applied = next.recordings(current)),
         },
         ctx(this.#ids, this.#clock, signal),
       );
@@ -349,7 +347,9 @@ export class LocalFileSource {
       }
       this.#sources = next.sources;
       this.#files = next.files;
-      this.#recordings = merged;
+      if (applied !== null) {
+        this.#recordings = applied;
+      }
       return ok(undefined);
     };
     // A throwing op must not poison the tail — the next queued write
@@ -414,10 +414,19 @@ export class LocalFileSource {
     const prior = this.#files.filter((f) => f.sourceId === sourceId);
     const byDocId = new Map(prior.map((f) => [f.docId, f] as const));
 
-    // Fingerprint only entries whose (docId, size) isn't already known.
+    // Fingerprint only entries a prior row can't account for. Size
+    // alone can't detect an in-place replacement of identical length
+    // — the provider's modified stamp is the cheap change token; when
+    // either side lacks it the fingerprint is the honest answer.
     const needFp = entries.filter((e) => {
       const row = byDocId.get(e.docId);
-      return row === undefined || row.size !== e.size;
+      return (
+        row === undefined ||
+        row.size !== e.size ||
+        row.modifiedMs === null ||
+        e.modifiedMs === null ||
+        row.modifiedMs !== e.modifiedMs
+      );
     });
     const fp =
       needFp.length === 0
@@ -491,7 +500,13 @@ export class LocalFileSource {
 
     for (const entry of entries) {
       const known = byDocId.get(entry.docId);
-      if (known !== undefined && known.size === entry.size) {
+      if (
+        known !== undefined &&
+        known.size === entry.size &&
+        known.modifiedMs !== null &&
+        entry.modifiedMs !== null &&
+        known.modifiedMs === entry.modifiedMs
+      ) {
         // Unchanged — keep the row untouched and consume its queue
         // slot so a same-fingerprint entry can't re-claim it.
         scanned.push(known);
@@ -516,10 +531,15 @@ export class LocalFileSource {
           ...moved,
           docId: entry.docId,
           size: entry.size,
+          modifiedMs: entry.modifiedMs,
         };
         scanned.push(refreshed);
         claimed.add(refreshed.fileId);
-        if (moved.docId !== entry.docId || moved.size !== entry.size) {
+        if (
+          moved.docId !== entry.docId ||
+          moved.size !== entry.size ||
+          moved.modifiedMs !== entry.modifiedMs
+        ) {
           updated += 1;
         }
         continue;
@@ -533,6 +553,7 @@ export class LocalFileSource {
         docId: entry.docId,
         size: entry.size,
         fingerprint,
+        modifiedMs: entry.modifiedMs,
         title: null,
         artist: null,
         album: null,

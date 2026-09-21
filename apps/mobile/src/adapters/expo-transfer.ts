@@ -20,8 +20,12 @@ import type {
  * on writeBytes — there is no fsync primitive to defer them to);
  * `finalize` verifies the caller's sha-256 by hashing the finished
  * file back, then renames atomically; `abort(keep)` keeps or drops
- * the partial. `usage`/`freeBytes`/`sweepPartials`/`stat`/`removeFile`
- * cover the settings and startup-integrity surfaces.
+ * the partial. Resume strictness: `begin` requires the `.part` to
+ * hold at least the committed prefix and reconciles an over-long
+ * file down to it — bytes written past the last ledger checkpoint
+ * are discarded, never trusted. `usage`/`freeBytes`/`sweepPartials`/
+ * `stat`/`removeFile` cover the settings and startup-integrity
+ * surfaces.
  */
 
 export type ExpoTransferDeps = {
@@ -212,16 +216,73 @@ export function createExpoTransfer(
         }
         const part = partFor(input.destPath);
         if (input.resumeAtBytes > 0) {
-          // Resume: the .part must already hold exactly the committed
-          // prefix — any other size means the ledger lied.
+          // Resume: the .part may hold MORE than the committed offset
+          // — writes land on writeBytes while the ledger only
+          // checkpoints every OFFSET_CHECKPOINT_BYTES, so a process
+          // death leaves up-to-4MiB of unjournaled tail. Truncate back
+          // to the durable prefix (a byte we can't prove journaled is
+          // not resumable). A missing or SHORTER partial means the
+          // ledger claims bytes that don't exist — still rejected.
           const size = part.exists ? (part.info().size ?? null) : null;
-          if (size === null || size !== input.resumeAtBytes) {
+          if (size === null || size < input.resumeAtBytes) {
             return err(
               appError(
                 'invalid-response',
                 `resume offset ${input.resumeAtBytes} != .part size ${size ?? 'missing'}`,
               ),
             );
+          }
+          if (size > input.resumeAtBytes) {
+            // FileHandle exposes no truncate: copy the kept prefix
+            // into a sibling and move it over — the temp name ends in
+            // `.part` so a crash mid-copy is swept like any partial.
+            const tmp = partFor(`${input.destPath}.reconcile`);
+            if (tmp.exists) {
+              tmp.delete();
+            }
+            tmp.create({ intermediates: true });
+            const src = part.open(FileMode.ReadOnly);
+            const dst = tmp.open(FileMode.WriteOnly);
+            try {
+              let left = input.resumeAtBytes;
+              while (left > 0) {
+                const chunk = src.readBytes(Math.min(1024 * 1024, left));
+                if (chunk.length === 0) {
+                  // The .part shrank under us — the caller's restart
+                  // path rebuilds it from scratch.
+                  return err(
+                    appError(
+                      'invalid-response',
+                      `.part shrank during reconcile (${input.resumeAtBytes - left}/${input.resumeAtBytes})`,
+                    ),
+                  );
+                }
+                dst.writeBytes(chunk);
+                left -= chunk.length;
+              }
+            } finally {
+              try {
+                src.close();
+              } catch {
+                // Best-effort close — a failed one leaves nothing
+                // else to recover here.
+              }
+              try {
+                dst.close();
+              } catch {
+                // Same.
+              }
+            }
+            tmp.moveSync(part, { overwrite: true });
+            const reconciled = part.info().size ?? null;
+            if (reconciled !== input.resumeAtBytes) {
+              return err(
+                appError(
+                  'invalid-response',
+                  `.part reconcile left ${reconciled ?? 'missing'} != ${input.resumeAtBytes}`,
+                ),
+              );
+            }
           }
         } else if (part.exists) {
           part.delete();

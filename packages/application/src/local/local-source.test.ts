@@ -66,8 +66,13 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
 const TREE = 'content://com.android.externalstorage.documents/tree/music';
 const docUri = (docId: string) => `${TREE}/document/${docId}`;
 
-function entry(docId: string, size: number, name = `${docId}.mp3`): LocalEntry {
-  return { docId, name, size, mime: 'audio/mpeg' };
+function entry(
+  docId: string,
+  size: number,
+  name = `${docId}.mp3`,
+  modifiedMs: number | null = 1_700_000_000_000,
+): LocalEntry {
+  return { docId, name, size, mime: 'audio/mpeg', modifiedMs };
 }
 
 function fp(docId: string, fingerprint: string): FileFingerprint {
@@ -149,10 +154,20 @@ async function runAddFolderScan(): Promise<void> {
   // uriFor resolves through the treeUri + docId — the session hook.
   const uri = source.uriFor(recs[0]!.id);
   assert(uri === docUri('d1'), `uriFor resolves, got ${uri}`);
-  // Persisted sections carry the full arrays.
+  // Persisted sections carry the full arrays — `recordings` travels
+  // as an in-transaction merge, so it proves out through a read-back
+  // rather than the batch fields.
   const last = storage.commits.at(-1)!.batch;
   assert((last.localFiles?.length ?? 0) === 1, 'commit carries localFiles');
-  assert((last.recordings?.length ?? 0) === 1, 'commit carries recordings');
+  const persisted = must(
+    await storage.load({
+      requestId: 't-readback',
+      deadlineMs: 60_000,
+      signal: signal(),
+    }),
+    'read-back load',
+  );
+  assert(persisted.recordings.length === 1, 'commit wrote recordings');
   assert(source.list()[0]!.lastScanMs !== null, 'lastScanMs set');
 }
 
@@ -469,7 +484,17 @@ async function runRescanMergesFreshRecordings(): Promise<void> {
   tagReader.tags.set('d2', tags('d2', 'Beta'));
   must(await source.rescan(undefined, signal()));
 
-  const committed = storage.commits.at(-1)!.batch.recordings!;
+  // `recordings` now travels as an in-transaction merge — assert on
+  // the post-commit state, which is exactly what the merge produced
+  // over the freshest rows.
+  const reloaded = must(
+    await storage.load({
+      requestId: 't',
+      deadlineMs: 0,
+      signal: signal(),
+    }),
+  );
+  const committed = reloaded.recordings;
   const byId = new Map(committed.map((r) => [r.id, r]));
   assert(byId.has('rec-catalog'), 'catalog row survives the rescan');
   assert(
@@ -480,14 +505,6 @@ async function runRescanMergesFreshRecordings(): Promise<void> {
     committed.some((r) => r.title === 'Beta'),
     'new local recording upserted',
   );
-  const reloaded = must(
-    await storage.load({
-      requestId: 't',
-      deadlineMs: 0,
-      signal: signal(),
-    }),
-  );
-  assert(reloaded.recordings.length === committed.length, 'commit landed');
 }
 
 /**
@@ -634,6 +651,68 @@ async function runRescanRelinksImported(): Promise<void> {
 }
 
 /**
+ * Same docId + same size but a different provider mtime is an
+ * in-place content replace — the cheap skip can't trust size alone.
+ */
+async function runSameSizeReplaceRefingerprints(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  const added = must(await source.addFolder(signal()));
+  const before = source.filesFor(added.sourceId)[0]!;
+  const fpCallsAfterAdd = tagReader.fingerprintCalls.length;
+
+  tagReader.entries.set(TREE, [entry('d1', 100, 'd1.mp3', 1_700_000_100_000)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpb'));
+  tagReader.tags.set('d1', tags('d1', 'Beta'));
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(
+    tagReader.fingerprintCalls.length,
+    fpCallsAfterAdd + 1,
+    'mtime change re-fingerprints',
+  );
+  assert(res[0]!.added === 1 && res[0]!.removed === 1, 'row replaced');
+  const after = source.filesFor(added.sourceId);
+  assert(after.length === 1, 'one row');
+  assert(after[0]!.fileId !== before.fileId, 'new content → new fileId');
+  assert(
+    after[0]!.modifiedMs === 1_700_000_100_000,
+    'new stamp persisted',
+  );
+  assert(
+    after[0]!.recordingId === before.recordingId,
+    'same docId keeps the recording',
+  );
+}
+
+/**
+ * A provider that cannot report a modified stamp gets no cheap skip:
+ * every rescan verifies same-size rows by fingerprint. Equal bytes
+ * reclaim the same row — nothing churns.
+ */
+async function runNoMtimeAlwaysFingerprints(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100, 'd1.mp3', null)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  const added = must(await source.addFolder(signal()));
+  const before = source.filesFor(added.sourceId)[0]!;
+
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(tagReader.fingerprintCalls.length, 2, 'fingerprinted again');
+  const report = res[0]!;
+  assert(
+    report.added === 0 && report.removed === 0 && report.updated === 0,
+    'identical bytes → clean report',
+  );
+  const after = source.filesFor(added.sourceId);
+  assertEqual(after[0]!.fileId, before.fileId, 'same fp → same row');
+}
+
+/**
  * SAF doc ids may carry non-ASCII: 'i' and 'é' share low 7 bits —
  * a masked hash would collide the disambiguated fileIds.
  */
@@ -675,6 +754,8 @@ export async function run(): Promise<void> {
   await runMixedRemoveRelinksRecording();
   await runPickCancelled();
   await runRescanMergesFreshRecordings();
+  await runSameSizeReplaceRefingerprints();
+  await runNoMtimeAlwaysFingerprints();
   await runConcurrentScansKeepBoth();
   await runDuplicateFilesOneFolder();
   await runRescanRelinksImported();

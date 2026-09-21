@@ -298,8 +298,25 @@ export class SqliteStorage implements StoragePort {
         if (!current.ok) {
           return current;
         }
+        if (
+          batch.recordings !== undefined &&
+          batch.recordingsMerge !== undefined
+        ) {
+          return err(
+            appError(
+              'internal',
+              'commit: recordings and recordingsMerge are exclusive',
+            ),
+          );
+        }
+        // `recordingsMerge` applies to the rows just read inside THIS
+        // transaction — a read-modify-write that cannot drop a
+        // session write queued between a caller's own load and commit.
         const merged: PersistedState = {
-          recordings: batch.recordings ?? current.value.recordings,
+          recordings:
+            batch.recordingsMerge !== undefined
+              ? batch.recordingsMerge(current.value.recordings)
+              : (batch.recordings ?? current.value.recordings),
           likes: batch.likes ?? current.value.likes,
           entities: batch.entities ?? current.value.entities,
           entitySourceRefs:
@@ -333,37 +350,40 @@ export class SqliteStorage implements StoragePort {
         // foreign-key into a rewritten parent ride along (SQLite FKs
         // are immediate, so dependents must be deleted first and
         // reinserted from the merged document).
+        const recordingsTouched =
+          batch.recordings !== undefined ||
+          batch.recordingsMerge !== undefined;
         const rewrite = {
           queueState: batch.queue !== undefined,
           queueOccurrences:
-            batch.queue !== undefined || batch.recordings !== undefined,
+            batch.queue !== undefined || recordingsTouched,
           playlistEntries:
             batch.playlistEntries !== undefined ||
             batch.playlists !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           playlists: batch.playlists !== undefined,
           playHistory:
             batch.playHistory !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           playCounts:
             batch.playCounts !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           matchReviews:
             batch.matchReviews !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           lyricsCache:
             batch.lyricsCache !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           entitySourceRefs:
             batch.entitySourceRefs !== undefined ||
             batch.entities !== undefined,
           entities: batch.entities !== undefined,
           likes: batch.likes !== undefined,
-          recordings: batch.recordings !== undefined,
+          recordings: recordingsTouched,
           artworkCache: batch.artworkCache !== undefined,
           downloads:
             batch.downloads !== undefined ||
-            batch.recordings !== undefined,
+            recordingsTouched,
           localFiles:
             batch.localFiles !== undefined ||
             batch.localSources !== undefined ||
@@ -647,14 +667,15 @@ export class SqliteStorage implements StoragePort {
         if (rewrite.localFiles) {
           for (const file of merged.localFiles) {
             await conn.execute(
-              `INSERT INTO local_files (file_id, source_id, doc_id, size, fingerprint, title, artist, album, duration_ms, genre, recording_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO local_files (file_id, source_id, doc_id, size, fingerprint, modified_ms, title, artist, album, duration_ms, genre, recording_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 file.fileId,
                 file.sourceId,
                 file.docId,
                 file.size,
                 file.fingerprint,
+                file.modifiedMs,
                 file.title,
                 file.artist,
                 file.album,
@@ -1647,6 +1668,7 @@ function decodeState(rows: TableRows): PersistedState | null {
       docId: reqStr(row['doc_id']),
       size: reqNonNegInt(row['size']),
       fingerprint: reqStr(row['fingerprint']),
+      modifiedMs: optInt(row['modified_ms']),
       title: optStr(row['title']),
       artist: optStr(row['artist']),
       album: optStr(row['album']),

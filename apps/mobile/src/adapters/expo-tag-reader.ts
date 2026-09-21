@@ -27,6 +27,13 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
       if (signal.cancelled) {
         return err(appCancelled());
       }
+      // Platforms without the tag-reader surface (iOS) fail honestly
+      // rather than throwing a TypeError through the module wrapper.
+      if (typeof native.tagPickFolder !== 'function') {
+        return err(
+          appError('unsupported', 'no local-files surface on this platform'),
+        );
+      }
       try {
         const picked = await native.tagPickFolder();
         return ok<PickedFolder>({
@@ -53,6 +60,9 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
             name: e.name,
             size: e.size,
             mime: e.mime,
+            // Absent on older native builds — the scan's fallback is
+            // a fingerprint, not a false "unchanged".
+            modifiedMs: e.modifiedMs ?? null,
           })),
         );
       } catch (thrown) {

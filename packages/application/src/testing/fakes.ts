@@ -694,11 +694,29 @@ export class FakeStorage implements StoragePort {
       this.#failWith = null;
       return Promise.resolve({ ok: false, error });
     }
+    if (
+      batch.recordings !== undefined &&
+      batch.recordingsMerge !== undefined
+    ) {
+      return Promise.resolve(
+        err(
+          appError(
+            'internal',
+            'commit: recordings and recordingsMerge are exclusive',
+          ),
+        ),
+      );
+    }
+    // The recorded batch is JSON-cloned; a function field survives
+    // only as its applied result, so the merge runs on live state.
     this.commits.push({ batch: this.#clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
     const staged = this.#clone(batch);
     const merged: PersistedState = {
-      recordings: staged.recordings ?? this.#state.recordings,
+      recordings:
+        batch.recordingsMerge !== undefined
+          ? batch.recordingsMerge(this.#state.recordings)
+          : (staged.recordings ?? this.#state.recordings),
       likes: staged.likes ?? this.#state.likes,
       entities: staged.entities ?? this.#state.entities,
       entitySourceRefs:

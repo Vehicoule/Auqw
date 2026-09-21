@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 const MIGRATION_1: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS schema_version (
@@ -228,9 +228,21 @@ const MIGRATION_3: readonly string[] = [
   `ALTER TABLE settings ADD COLUMN download_metered INTEGER NOT NULL DEFAULT 0 CHECK (download_metered IN (0,1))`,
 ];
 
+/**
+ * v3 -> v4: `local_files.modified_ms` — the provider's last-modified
+ * stamp persisted per scanned row so a same-size in-place
+ * replacement still registers as changed (size alone can't detect
+ * one). Nullable: rows predating the column re-fingerprint once on
+ * their next scan, and providers without a stamp stay null.
+ */
+const MIGRATION_4: readonly string[] = [
+  `ALTER TABLE local_files ADD COLUMN modified_ms INTEGER CHECK (modified_ms >= 0 OR modified_ms IS NULL)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
   Object.freeze([...MIGRATION_2]),
   Object.freeze([...MIGRATION_3]),
+  Object.freeze([...MIGRATION_4]),
 ]);

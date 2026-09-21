@@ -1302,6 +1302,12 @@ export function toSettingsModel(
       | readonly { sourceId: string; label: string }[]
       | undefined;
     readonly downloadCount?: number | undefined;
+    /**
+     * False where the platform has no tag-reader surface (iOS today)
+     * — the local-folder actions stay visible but disabled, never
+     * silently dead.
+     */
+    readonly localSupported?: boolean;
   } = {},
 ): SettingsModel {
   return {
@@ -1391,9 +1397,11 @@ export function toSettingsModel(
         key: 'localSources',
         label: 'local folders',
         value:
-          media.localFolderCount === undefined
-            ? '—'
-            : `${media.localFolderCount}`,
+          media.localSupported === false
+            ? 'unsupported'
+            : media.localFolderCount === undefined
+              ? '—'
+              : `${media.localFolderCount}`,
         kind: 'value',
         enabled: true,
       },
@@ -1404,21 +1412,21 @@ export function toSettingsModel(
         label: `remove “${source.label}”`,
         value: null,
         kind: 'navigation' as const,
-        enabled: true,
+        enabled: media.localSupported !== false,
       })),
       {
         key: 'addLocalFolder',
         label: 'add local folder',
         value: null,
         kind: 'navigation',
-        enabled: true,
+        enabled: media.localSupported !== false,
       },
       {
         key: 'rescanLocal',
         label: 'rescan local folders',
         value: null,
         kind: 'navigation',
-        enabled: true,
+        enabled: media.localSupported !== false,
       },
       {
         key: 'exportLibrary',

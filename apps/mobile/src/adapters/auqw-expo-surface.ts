@@ -285,6 +285,11 @@ export type AuqwTagEntryNative = {
   name: string;
   size: number;
   mime: string;
+  /**
+   * DocumentsContract COLUMN_LAST_MODIFIED; null when the provider
+   * reports none. Older native builds may omit the key entirely.
+   */
+  modifiedMs?: number | null;
 };
 
 export type AuqwTagFingerprintNative = {
