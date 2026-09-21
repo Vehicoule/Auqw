@@ -26,22 +26,31 @@ export function createExpoConnectivity(
       return;
     }
     watching = true;
-    // Listener BEFORE watch: the native monitor emits its baseline
-    // edge inside connectivityWatch — registering after would drop it.
-    subscription = native.addConnectivityChangedListener((event) => {
-      const snapshot: ConnectivitySnapshot = {
-        online: event.online,
-        metered: event.metered,
-      };
-      for (const listener of listeners) {
-        try {
-          listener(snapshot);
-        } catch {
-          // A throwing listener must not break fan-out.
+    try {
+      // Listener BEFORE watch: the native monitor emits its baseline
+      // edge inside connectivityWatch — registering after would drop it.
+      subscription = native.addConnectivityChangedListener((event) => {
+        const snapshot: ConnectivitySnapshot = {
+          online: event.online,
+          metered: event.metered,
+        };
+        for (const listener of listeners) {
+          try {
+            listener(snapshot);
+          } catch {
+            // A throwing listener must not break fan-out.
+          }
         }
-      }
-    });
-    native.connectivityWatch();
+      });
+      native.connectivityWatch();
+    } catch (error) {
+      // Roll back so a later subscribe() retries cleanly instead of
+      // wedging a dead monitor.
+      subscription?.remove();
+      subscription = null;
+      watching = false;
+      throw error;
+    }
   };
 
   const dropWatch = (): void => {

@@ -20,7 +20,12 @@ class FakeConnectivityNative implements AuqwConnectivityNative {
     return Promise.resolve({ online: true, metered: false });
   }
 
+  failWatch = false;
+
   connectivityWatch(): void {
+    if (this.failWatch) {
+      throw new Error('callback quota exceeded');
+    }
     this.watchers += 1;
     // Native emits a baseline edge on watch.
     this.emit({ online: true, metered: false });
@@ -85,6 +90,28 @@ export async function run(): Promise<void> {
     native.emit({ online: false, metered: false });
     assertEqual(seen.length, 2); // baseline + the real edge
     assertEqual(seen[1]?.online, false);
+  }
+
+  // Watch failure rolls back watching + listener so retry succeeds.
+  {
+    const native = new FakeConnectivityNative();
+    const port = createExpoConnectivity(native);
+    native.failWatch = true;
+    let threw = false;
+    try {
+      port.subscribe(() => {});
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'watch failure should propagate to subscribe');
+    assertEqual(native.watchers, 0);
+    native.failWatch = false;
+    const off = port.subscribe(() => {});
+    assertEqual(native.watchers, 1); // clean retry after rollback
+    off();
+    // The abandoned first listener still holds the watch open — it is
+    // a live subscriber that never got an unsub handle.
+    assertEqual(native.watchers, 1);
   }
 
   // Snapshot plumbing failure degrades to honest offline, never a throw.
