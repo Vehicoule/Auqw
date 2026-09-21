@@ -109,9 +109,8 @@ export async function run(): Promise<void> {
     const off = port.subscribe(() => {});
     assertEqual(native.watchers, 1); // clean retry after rollback
     off();
-    // The abandoned first listener still holds the watch open — it is
-    // a live subscriber that never got an unsub handle.
-    assertEqual(native.watchers, 1);
+    // The failed subscribe's listener was removed — last unsub stops watch.
+    assertEqual(native.watchers, 0);
   }
 
   // Snapshot plumbing failure degrades to honest offline, never a throw.

@@ -77,7 +77,14 @@ export function createExpoConnectivity(
 
     subscribe(listener) {
       listeners.add(listener);
-      ensureWatch();
+      try {
+        ensureWatch();
+      } catch (error) {
+        // Watch failed and threw — the caller treats subscribe() as
+        // failed, so the listener must not stay subscribed.
+        listeners.delete(listener);
+        throw error;
+      }
       let active = true;
       return () => {
         if (!active) {
