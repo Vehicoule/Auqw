@@ -609,6 +609,15 @@ function Main({
   // only a `local` ref are already owned bytes; the action hides.
   const downloadRefFor = useCallback(
     (recordingId: string): SourceRef | null => {
+      // The session resolves owned bytes through `localPlaybackFor`
+      // only where the player can attach them — the iOS provisional
+      // player has no local path, so a downloaded file there could
+      // never play. Hide every creation affordance rather than
+      // promise unplayable bytes; existing rows still surface in
+      // Settings (removal works).
+      if (Platform.OS === 'ios') {
+        return null;
+      }
       const recording = state.recordings.find((r) => r.id === recordingId);
       if (recording === undefined) {
         return null;

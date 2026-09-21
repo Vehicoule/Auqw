@@ -453,10 +453,15 @@ export class LocalFileSource {
 
     // Move detection matches prior rows by fingerprint; a queue per
     // fingerprint so identical-bytes duplicates each claim their own
-    // row instead of racing one. A row kept via docId is consumed
-    // here too — it must not also satisfy a later same-fp entry.
+    // row instead of racing one. Only rows whose docId vanished are
+    // claimable: a still-enumerated docId's row is owned by that
+    // entry's own keep/replace path — letting a moved duplicate take
+    // it would push the same fileId twice and fail the commit.
     const rowsByFp = new Map<string, LocalFile[]>();
     for (const f of prior) {
+      if (entryByDoc.has(f.docId)) {
+        continue;
+      }
       const queue = rowsByFp.get(f.fingerprint);
       if (queue === undefined) {
         rowsByFp.set(f.fingerprint, [f]);
@@ -464,19 +469,6 @@ export class LocalFileSource {
         queue.push(f);
       }
     }
-    const consumeFp = (row: LocalFile): void => {
-      const queue = rowsByFp.get(row.fingerprint);
-      if (queue === undefined) {
-        return;
-      }
-      const idx = queue.indexOf(row);
-      if (idx >= 0) {
-        queue.splice(idx, 1);
-      }
-      if (queue.length === 0) {
-        rowsByFp.delete(row.fingerprint);
-      }
-    };
     const takeByFp = (fingerprint: string): LocalFile | undefined => {
       const queue = rowsByFp.get(fingerprint);
       const row = queue?.shift();
@@ -507,11 +499,11 @@ export class LocalFileSource {
         entry.modifiedMs !== null &&
         known.modifiedMs === entry.modifiedMs
       ) {
-        // Unchanged — keep the row untouched and consume its queue
-        // slot so a same-fingerprint entry can't re-claim it.
+        // Unchanged — keep the row untouched. It never entered
+        // rowsByFp (still-enumerated docIds aren't claimable), so no
+        // moved entry can take it.
         scanned.push(known);
         claimed.add(known.fileId);
-        consumeFp(known);
         continue;
       }
       const fingerprint = fpByDoc.get(entry.docId);
@@ -521,7 +513,25 @@ export class LocalFileSource {
         if (known !== undefined) {
           scanned.push(known);
           claimed.add(known.fileId);
-          consumeFp(known);
+        }
+        continue;
+      }
+      if (known !== undefined && known.fingerprint === fingerprint) {
+        // Still-enumerated docIds resolve by docId first: the cheap
+        // stamp changed or was missing, but the fingerprint proves the
+        // row is this document's own — refresh the stamps, keep the id.
+        const refreshed: LocalFile = {
+          ...known,
+          size: entry.size,
+          modifiedMs: entry.modifiedMs,
+        };
+        scanned.push(refreshed);
+        claimed.add(refreshed.fileId);
+        if (
+          known.size !== entry.size ||
+          known.modifiedMs !== entry.modifiedMs
+        ) {
+          updated += 1;
         }
         continue;
       }

@@ -589,6 +589,51 @@ async function runDuplicateFilesOneFolder(): Promise<void> {
 }
 
 /**
+ * Enumeration order isn't guaranteed: a moved duplicate can list
+ * BEFORE an unchanged copy of the same bytes. Move matching must
+ * only draw on rows whose docId vanished — claiming a
+ * still-enumerated row would push the same fileId twice.
+ */
+async function runMovedDuplicateKeepsPresentRows(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100), entry('d2', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpdup'));
+  tagReader.fingerprints.set('d2', fp('d2', 'fpdup'));
+  const added = must(await source.addFolder(signal()));
+  const byDoc = new Map(
+    source.filesFor(added.sourceId).map((f) => [f.docId, f]),
+  );
+
+  // d2 vanished, d3 is its bytes relocated — but the moved entry
+  // arrives BEFORE unchanged d1. The only claimable row is d2's.
+  tagReader.entries.set(TREE, [
+    entry('d3', 100, 'moved.mp3'),
+    entry('d1', 100),
+  ]);
+  tagReader.fingerprints.set('d3', fp('d3', 'fpdup'));
+  tagReader.tags.set('d3', tags('d3', 'Alpha'));
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(res[0]!.updated, 1, 'move refresh counts as updated');
+  const after = source.filesFor(added.sourceId);
+  assertEqual(after.length, 2, 'kept row + moved row');
+  assert(
+    new Set(after.map((f) => f.fileId)).size === 2,
+    'no duplicate fileIds',
+  );
+  const d1 = after.find((f) => f.docId === 'd1');
+  const d3 = after.find((f) => f.docId === 'd3');
+  assert(
+    d1 !== undefined && d1.fileId === byDoc.get('d1')!.fileId,
+    'the still-present row keeps its fileId',
+  );
+  assert(
+    d3 !== undefined && d3.fileId === byDoc.get('d2')!.fileId,
+    'the moved entry claims the vanished row',
+  );
+}
+
+/**
  * Import clears file rows but keeps recordings with live `local`
  * refs. A rescan recomputes the same fileId — it must rejoin the
  * imported recording, not mint a duplicate.
@@ -758,6 +803,7 @@ export async function run(): Promise<void> {
   await runNoMtimeAlwaysFingerprints();
   await runConcurrentScansKeepBoth();
   await runDuplicateFilesOneFolder();
+  await runMovedDuplicateKeepsPresentRows();
   await runRescanRelinksImported();
   await runUnicodeDocIdsNoCollision();
 }
