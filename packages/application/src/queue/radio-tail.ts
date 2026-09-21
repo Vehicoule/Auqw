@@ -175,26 +175,31 @@ function winningMapping(
 
 /**
  * Records the provider's own assertion that `ref` serves `recording`
- * as an `automatic` mapping, with the real scored evidence. An
- * automatic mapping never replaces a same-ref user-confirmed or
- * rejected winner, and no mapping is written when the item's own
- * metadata would hard-reject the recording.
+ * as an `automatic` mapping, with the real scored evidence. A
+ * user-confirmed same-ref winner settles the pairing and returns the
+ * recording as-is; a rejected winner or a hard-rejecting evidence
+ * score returns null — the item is then not this recording and the
+ * caller must not merge it in or enqueue under it.
  */
 function withProviderMapping(
   recording: Recording,
   item: TrackMetadata,
   matchedAtMs: number,
-): Recording {
-  const scored = MatchingEngine.evidence(recording, item);
-  if (scored === null) {
-    return recording;
-  }
+): Recording | null {
   const ref = item.sourceRef;
   const winner = winningMapping(
     recording.mappings.filter((m) => sameRef(m.ref, ref)),
   );
-  if (winner !== undefined && winner.status !== 'automatic') {
+  // A settled verdict decides the pairing without scoring.
+  if (winner?.status === 'user-confirmed') {
     return recording;
+  }
+  if (winner?.status === 'rejected') {
+    return null;
+  }
+  const scored = MatchingEngine.evidence(recording, item);
+  if (scored === null) {
+    return null;
   }
   const evidence: MatchEvidence = scored.evidence;
   const mapping: SourceMapping = {
@@ -282,18 +287,24 @@ export function planRadioPage(
     if (found !== undefined) {
       const current = working.get(found.id) ?? found;
       // Evidence scores against the pre-merge recording — scoring the
-      // post-merge copy is tautologically perfect, so a mismatched
-      // item's hard-reject must fire before the metadata is folded in.
-      rec = mergeRecordingMetadata(
-        withProviderMapping(current, item, matchedAtMs),
-        item,
-      );
+      // post-merge copy is tautologically perfect — and a hard-reject
+      // skips the item entirely: its metadata must not overwrite the
+      // stored recording nor enqueue an occurrence under it.
+      const mapped = withProviderMapping(current, item, matchedAtMs);
+      if (mapped === null) {
+        continue;
+      }
+      rec = mergeRecordingMetadata(mapped, item);
     } else {
-      rec = withProviderMapping(
+      const minted = withProviderMapping(
         recordingFromMetadata(item, ids.next('rec')),
         item,
         matchedAtMs,
       );
+      if (minted === null) {
+        continue;
+      }
+      rec = minted;
     }
     working.set(rec.id, rec);
     recByRef.set(key, rec);
