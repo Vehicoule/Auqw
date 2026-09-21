@@ -106,6 +106,9 @@ export function Text({
       };
   return (
     <RNText
+      // Theme textScale already carries the OS font scale — disabling
+      // native font scaling keeps it from being applied a second time.
+      allowFontScaling={false}
       numberOfLines={numberOfLines}
       adjustsFontSizeToFit={adjustsFontSizeToFit}
       minimumFontScale={minimumFontScale}
@@ -339,6 +342,8 @@ export function Artwork({
       ) : url === null ? (
         monogram !== null && monogram !== undefined && monogram !== '' ? (
           <RNText
+            // Monogram size is pure geometry — never font-scale it.
+            allowFontScaling={false}
             style={[
               theme.typography.heading,
               {

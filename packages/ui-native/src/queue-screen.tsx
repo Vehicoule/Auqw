@@ -6,7 +6,7 @@ import {
   IconButton,
   Text,
 } from './primitives.tsx';
-import { QueueList } from './queue-list.tsx';
+import { QueueList } from './queue-list';
 import type {
   PlayerModel,
   QueueModel,
