@@ -14,6 +14,7 @@ import {
 } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
+import { NavigationBar } from 'expo-navigation-bar';
 import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
@@ -1850,6 +1851,9 @@ function Main({
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
         <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <NavigationBar
+          style={theme.scheme === 'light' ? 'light' : 'dark'}
+        />
         <GalleryScreen />
       </View>
     );
@@ -2101,6 +2105,10 @@ function Main({
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      {/* Android button nav: keep system buttons readable on any
+          canvas — the config plugin's style is a startup default,
+          not a runtime value (no-op off Android). */}
+      <NavigationBar style={theme.scheme === 'light' ? 'light' : 'dark'} />
       <AppStack>
         <StackItem stackKey="root">
           <PlatformTabs
