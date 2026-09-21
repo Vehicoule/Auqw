@@ -359,6 +359,7 @@ impl PluginHost {
         };
         let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);
+        let cancelled_requests = Arc::clone(&self.cancelled_requests);
         // `prefer` is a key, not a value: absent means "guest default",
         // never a null that fails payload validation. `access_token`
         // rides via the `start_typed` merge.
@@ -373,7 +374,10 @@ impl PluginHost {
             Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 // `stream` is moved into the blocking closure below —
                 // keep a clone for the bookkeeping prune.
                 let registry = Arc::clone(&stream);
@@ -390,20 +394,40 @@ impl PluginHost {
                             Err(_) => PrepareOutcome::Failed {
                                 kind: "internal".to_string(),
                                 message: "prepare worker panicked".to_string(),
-                                attempt: summary,
+                                attempt: summary.clone(),
                             },
                         }
                     }
                     Err(e) => PrepareOutcome::Failed {
                         kind: e.kind().to_string(),
                         message: e.to_string(),
-                        attempt: summary,
+                        attempt: summary.clone(),
                     },
                 };
+                // A cancel that outran both `cancels` and the handle
+                // map left a tombstone: the session just produced is
+                // orphaned-on-arrival — abandon it instead of handing
+                // out a live handle nobody will ever release.
                 if let PrepareOutcome::Prepared {
                     stream: prepared, ..
                 } = &outcome
                 {
+                    let tombstoned = cancelled_requests
+                        .lock()
+                        .map(|mut m| m.remove(&request_id))
+                        .unwrap_or(false);
+                    if tombstoned {
+                        let _ = registry.cancel_if_unattached(&prepared.handle);
+                        listener.on_outcome(
+                            request_id,
+                            PrepareOutcome::Failed {
+                                kind: "cancelled".to_string(),
+                                message: "prepare cancelled".to_string(),
+                                attempt: summary.clone(),
+                            },
+                        );
+                        return;
+                    }
                     if let Ok(mut m) = prepared_handles.lock() {
                         // Sessions ended by supersede/evict/expiry saw
                         // neither cancel nor release — drop their stale
@@ -411,6 +435,11 @@ impl PluginHost {
                         m.retain(|_, h| *h == prepared.handle || registry.is_live(h));
                         m.insert(request_id.clone(), prepared.handle.clone());
                     }
+                } else if let Ok(mut m) = cancelled_requests.lock() {
+                    // A tombstone for a request that failed on its own
+                    // is spent — don't let it poison a future request
+                    // that happens to reuse the id space.
+                    m.remove(&request_id);
                 }
                 listener.on_outcome(request_id, outcome);
             },
@@ -510,8 +539,17 @@ impl PluginHost {
             .ok()
             .and_then(|d| u64::try_from(d.as_millis()).ok())
             .map(|now| now + 3_600_000);
+        // `source_ref` persists into the `{handle}.json` sidecar and
+        // shows in `{:?}` — a raw URL (possibly signed) can't be it.
+        // Hash the URL so coalescing still dedupes the same fixture.
+        let ref_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            url.hash(&mut h);
+            format!("dev-url:{:016x}", h.finish())
+        };
         let source = PreparedSource {
-            source_ref: url.clone(),
+            source_ref: ref_hash,
             provider: "dev-url".to_string(),
             url,
             mime,

@@ -5,7 +5,7 @@
 //! [`ResolvedResource`] is a real signed stream URL — it must never be
 //! logged at any layer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
@@ -60,7 +60,7 @@ const SESSION_TRUST_CAPABILITIES: &[&str] =
 /// One HTTP call from the attempt trace. `url` is already stripped of
 /// query and fragment by the host — the signed parameters never cross
 /// this boundary.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct HttpTraceSummary {
     /// HTTP method.
     pub method: String,
@@ -75,7 +75,7 @@ pub struct HttpTraceSummary {
 }
 
 /// One guest `log` entry, already redacted by the host.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct GuestLogSummary {
     /// `debug` | `info` | `warn` | `error`.
     pub level: String,
@@ -84,7 +84,7 @@ pub struct GuestLogSummary {
 }
 
 /// Per-invocation accounting for diagnostics.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct AttemptSummary {
     /// Host-generated request id.
     pub request_id: String,
@@ -278,6 +278,11 @@ pub struct PluginHost {
     /// `cancelPrepare` landing after `prepared` can abandon the session
     /// (only while still unattached — see `cancel`).
     prepared_handles: Arc<Mutex<HashMap<String, String>>>,
+    /// `cancel` ids that arrived while the prepare was still inside
+    /// its window — neither `cancels` nor `prepared_handles` knew it
+    /// yet. The outcome path checks the tombstone before registering
+    /// the handle so a late cancel can't orphan a live session.
+    cancelled_requests: Arc<Mutex<HashSet<String>>>,
     counter: AtomicU64,
 }
 
@@ -360,6 +365,7 @@ impl PluginHost {
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             prepared_handles: Arc::new(Mutex::new(HashMap::new())),
+            cancelled_requests: Arc::new(Mutex::new(HashSet::new())),
             counter: AtomicU64::new(0),
         }))
     }
@@ -412,7 +418,10 @@ impl PluginHost {
             Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 let outcome = match result {
                     // `done.result` is untyped past the boundary — a result
                     // without a url is an invalid response, never Resolved.
@@ -470,7 +479,10 @@ impl PluginHost {
             payload,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 let outcome = match result {
                     Ok(value) => RequestOutcome::Succeeded {
                         result_json: value.to_string(),
@@ -492,9 +504,11 @@ impl PluginHost {
     /// produced session — but only while it is still unattached: a
     /// playing consumer is never cancelled out from under playback.
     pub fn cancel(&self, request_id: String) {
+        let mut known = false;
         if let Ok(m) = self.cancels.lock() {
             if let Some(token) = m.get(&request_id) {
                 token.cancel();
+                known = true;
             }
         }
         // Coalesced prepares hand one session handle to several
@@ -502,11 +516,25 @@ impl PluginHost {
         // request was its last owner, or a surviving request's
         // `stream_open` would hit `cancelled`.
         let handle = self.prepared_handles.lock().ok().and_then(|mut m| {
+            if m.contains_key(&request_id) {
+                known = true;
+            }
             m.remove(&request_id)
                 .filter(|h| !m.values().any(|v| v == h))
         });
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
+        }
+        if !known {
+            // The cancel outran the bookkeeping: the request is past
+            // its token but the handle isn't registered yet. Leave a
+            // tombstone — the outcome path consumes it and abandons
+            // the session it was about to hand out. Bounded by cap.
+            if let Ok(mut m) = self.cancelled_requests.lock() {
+                if m.len() < 64 {
+                    m.insert(request_id);
+                }
+            }
         }
     }
 

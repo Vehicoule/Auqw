@@ -408,6 +408,14 @@ impl SessionInner {
     ) -> Result<(), StreamError> {
         let mut sh = lock(&self.shared)?;
         let mut core = lock(&self.core)?;
+        // The re-mint must resolve THE SAME source — a remint that
+        // returns a different track ref or provider would splice
+        // foreign content into the extents.
+        if source.source_ref != core.source.source_ref || source.provider != core.source.provider {
+            return Err(StreamError::InvalidResponse {
+                message: "re-mint changed source identity".to_string(),
+            });
+        }
         if source.mime != core.pinned_mime {
             return Err(StreamError::InvalidResponse {
                 message: format!(
@@ -416,7 +424,9 @@ impl SessionInner {
                 ),
             });
         }
-        if source.itag != core.source.itag {
+        // itag pins the encode only when the first mint carried one —
+        // None -> Some is metadata arriving late, not drift.
+        if core.source.itag.is_some() && source.itag != core.source.itag {
             return Err(StreamError::InvalidResponse {
                 message: format!(
                     "re-mint changed itag {:?} -> {:?}",
@@ -842,7 +852,7 @@ impl SessionInner {
         let mut store = lock(&self.store)?;
         if store.covers(position) {
             let bytes = store.read_at(position, max_len)?;
-            sh.read_pos = sh.read_pos.max(position + bytes.len() as u64);
+            sh.read_pos = sh.read_pos.max(position.saturating_add(bytes.len() as u64));
             drop(store);
             self.pump_notify.notify_one();
             return Ok(Some(bytes));

@@ -242,7 +242,10 @@ impl SparseStore {
                 message: format!("write {start}: {e}"),
             })?;
         let mut new_start = start;
-        let mut new_end = start + bytes.len() as u64;
+        // `start` is a validated in-file offset but the extent end
+        // still needs checked math — a commit at u64::MAX must not
+        // wrap into a bogus extent.
+        let mut new_end = start.saturating_add(bytes.len() as u64);
         let absorbed: Vec<u64> = self
             .extents
             .range(..=new_end)

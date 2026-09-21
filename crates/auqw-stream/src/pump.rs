@@ -112,8 +112,10 @@ enum FetchOutcome {
     /// A validated `206` — its body streamed into piecewise commits.
     Committed,
     /// Any other status for the caller's dispatch (403/416/…); the
-    /// body stream was dropped unread.
-    Status(u16),
+    /// body stream was dropped unread. On a `416`, the parsed
+    /// `bytes */N` total rides along — the wire's authoritative EOF
+    /// evidence.
+    Status(u16, Option<u64>),
 }
 
 /// Drive one range request end to end: await headers, and on a `206`
@@ -139,7 +141,17 @@ async fn drive_fetch(
         )
         .await?;
     if resp.status != 206 {
-        return Ok(FetchOutcome::Status(resp.status));
+        // `416` carries `Content-Range: bytes */N` — keep the total;
+        // it confirms EOF without spending a re-mint.
+        let range_total = if resp.status == 416 {
+            resp.content_range
+                .as_deref()
+                .and_then(|cr| cr.strip_prefix("bytes */"))
+                .and_then(|n| n.trim().parse::<u64>().ok())
+        } else {
+            None
+        };
+        return Ok(FetchOutcome::Status(resp.status, range_total));
     }
     let declared = validate_206_head(session, resp.content_range.as_deref(), offset, len)?;
     let mut body = resp.body;
@@ -151,7 +163,7 @@ async fn drive_fetch(
         // the store.
         let take = usize::try_from((declared - got).min(piece.len() as u64)).unwrap_or(usize::MAX);
         if take > 0 {
-            session.commit(offset + got, &piece[..take])?;
+            session.commit(offset.saturating_add(got), &piece[..take])?;
             got += take as u64;
         }
         if take < piece.len() {
@@ -276,10 +288,24 @@ async fn fetch_chunk(
         match outcome {
             // Pieces already committed as the body streamed.
             FetchOutcome::Committed => return Outcome::Bytes,
-            FetchOutcome::Status(status) => match status {
-                416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
-                403 | 416 => {
-                    retried_416 = status == 416;
+            FetchOutcome::Status(status, range_total) => match status {
+                416 => {
+                    // Adopt the wire total before any mint spend: when
+                    // it is already authoritative, this 416 confirms
+                    // EOF at its real ceiling.
+                    if let Some(total) = range_total {
+                        match session.check_total(total) {
+                            Ok(()) => session.mark_eof_below(total),
+                            Err(e) => return Outcome::Failed(e),
+                        }
+                        if offset >= total {
+                            return Outcome::Eof(offset);
+                        }
+                    }
+                    if eof_confirmed(session, offset, retried_416) {
+                        return Outcome::Eof(offset);
+                    }
+                    retried_416 = true;
                     match remint(session).await {
                         Err(e) => {
                             return if stallable(&e) {
@@ -293,6 +319,16 @@ async fn fetch_chunk(
                         Ok(()) => transient_left = session.config.fetch_retries,
                     }
                 }
+                403 => match remint(session).await {
+                    Err(e) => {
+                        return if stallable(&e) {
+                            Outcome::Stalled(e)
+                        } else {
+                            Outcome::Failed(e)
+                        };
+                    }
+                    Ok(()) => transient_left = session.config.fetch_retries,
+                },
                 s => {
                     let e = classify_status(s, offset);
                     match retry_or_stall(session, through, e, &mut transient_left).await {
@@ -437,7 +473,14 @@ fn validate_206_head(
     if end < start {
         return Err(invalid(format!("Content-Range {start}-{end} inverted")));
     }
-    let declared = end - start + 1;
+    let declared = end
+        .checked_sub(start)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| {
+            invalid(format!(
+                "Content-Range {start}-{end} overflows declared length"
+            ))
+        })?;
     if declared > max_len {
         return Err(invalid(format!(
             "declared {start}-{end} exceeds requested {max_len} at {offset}"
