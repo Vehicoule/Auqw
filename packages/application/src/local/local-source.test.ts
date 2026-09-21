@@ -270,7 +270,7 @@ async function runRescanRemovesMissing(): Promise<void> {
   const files = source.filesFor(added.sourceId);
   assert(files.length === 1 && files[0]!.docId === 'd1', 'gone row dropped');
   const rec = source.recordings().find((r) => r.sourceRefs.length === 0);
-  assert(rec !== undefined, 'orphaned recording persists, ref stripped');
+  assert(rec === undefined, 'a local-only row keeps its inert ref');
 }
 
 async function runUnreadableKeepsRow(): Promise<void> {
@@ -302,7 +302,17 @@ async function runRemoveSource(): Promise<void> {
   assert(source.uriFor(rec.id) === null, 'no playable uri');
   const persistedRec = source.recordings().find((r) => r.id === rec.id);
   assert(persistedRec !== undefined, 'recording persists');
-  assert(persistedRec!.sourceRefs.length === 0, 'dead ref stripped');
+  // Local-only row: its stale fingerprint ref stays — inert (uriFor
+  // already returned null above) but the ≥1-ref invariant holds, so
+  // sqlite's commit validation accepts the batch. FakeStorage now
+  // validates the merged document the same way, so a regression to
+  // zero refs would fail `removed.ok` above, not this line.
+  assertEqual(persistedRec!.sourceRefs.length, 1, 'inert ref kept');
+  assertEqual(
+    persistedRec!.sourceRefs[0]!.provider,
+    'local',
+    'kept ref is the dead local fingerprint',
+  );
 }
 
 async function runPickCancelled(): Promise<void> {

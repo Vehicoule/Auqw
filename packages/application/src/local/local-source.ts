@@ -486,7 +486,10 @@ export class LocalFileSource {
     );
 
     const mergeRecordings = (current: readonly Recording[]): Recording[] => {
-      const merged = stripLocalRefs(vanished, current);
+      // Upserts first, strip second: a changed-content file replaces
+      // its own dead ref, and the strip's ≥1-ref guard only applies
+      // to recordings that gained no replacement.
+      const merged = [...current];
       const byId = new Map(merged.map((r, i) => [r.id, i] as const));
       const upsert = (r: Recording): void => {
         const idx = byId.get(r.id);
@@ -529,7 +532,7 @@ export class LocalFileSource {
           upsert({ ...existing, sourceRefs: [...existing.sourceRefs, ref] });
         }
       }
-      return merged;
+      return stripLocalRefs(vanished, merged);
     };
 
     const committed = await this.#commitSections(
@@ -559,6 +562,10 @@ export class LocalFileSource {
 /**
  * Drop `provider:'local'` refs whose fileId is gone from `recordings`
  * — the recording row persists; dead refs must not survive export.
+ * A local-only recording would strip to zero refs, which violates
+ * the ≥1-ref record invariant (sqlite's commit rejects the batch):
+ * its stale fingerprint ref stays — inert (no file row, so uriFor
+ * never resolves it) and re-links if the same file is re-added.
  */
 function stripLocalRefs(
   removed: readonly LocalFile[],
@@ -568,14 +575,17 @@ function stripLocalRefs(
     return [...recordings];
   }
   const dead = new Set(removed.map((f) => f.fileId));
-  return recordings.map((r) =>
-    r.sourceRefs.some((s) => s.provider === LOCAL_PROVIDER && dead.has(s.id))
-      ? {
-          ...r,
-          sourceRefs: r.sourceRefs.filter(
-            (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
-          ),
-        }
-      : r,
-  );
+  return recordings.map((r) => {
+    if (
+      !r.sourceRefs.some(
+        (s) => s.provider === LOCAL_PROVIDER && dead.has(s.id),
+      )
+    ) {
+      return r;
+    }
+    const kept = r.sourceRefs.filter(
+      (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
+    );
+    return kept.length === 0 ? r : { ...r, sourceRefs: kept };
+  });
 }
