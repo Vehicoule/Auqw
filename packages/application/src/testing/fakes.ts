@@ -1086,6 +1086,10 @@ export class FakeTagReader implements TagReaderPort {
     this.readTagsCalls.push([...docIds]);
     return ok(docIds.map((id) => this.tags.get(id) ?? null));
   }
+
+  docUri(treeUri: string, docId: string): string {
+    return `${treeUri}/document/${docId}`;
+  }
 }
 
 export class FakeConnectivity implements ConnectivityPort {
