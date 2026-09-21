@@ -103,6 +103,9 @@ export class DownloadManager {
   #pumping = false;
   /** stop() latches this so a settling runner can't re-pump a demoted row. */
   #stopped = false;
+  /** recordingId → in-flight removal — a concurrent request waits on it
+   * so two same-recording rows never land in one commit. */
+  readonly #removals = new Map<string, Promise<unknown>>();
   /** Serializes ledger writes — commits carry the full section. */
   #persistTail: Promise<Result<void>> = Promise.resolve(ok(undefined));
   #unsubConnectivity: (() => void) | null = null;
@@ -127,15 +130,24 @@ export class DownloadManager {
   ): Promise<Result<void>> {
     this.#unsubConnectivity?.();
     this.#stopped = false;
+    // A second init loads a fresh ledger — rows absent from the new
+    // snapshot must not survive into later commits.
+    this.#rows.clear();
+    this.#persistedOffset.clear();
     for (const row of downloads) {
       this.#rows.set(row.downloadId, row);
       this.#persistedOffset.set(row.downloadId, row.committedOffset);
     }
 
-    // Keep .part files only for rows that expect one.
+    // Keep .part files for rows that own resumable bytes — including
+    // failed_with_retry, whose explicit retry resumes the prefix.
     const keep = new Set<string>();
     for (const row of this.#rows.values()) {
-      if (row.state === 'requested' || row.state === 'transferring') {
+      if (
+        row.state === 'requested' ||
+        row.state === 'transferring' ||
+        row.state === 'failed_with_retry'
+      ) {
         keep.add(`${row.filePath}.part`);
       }
     }
@@ -157,15 +169,27 @@ export class DownloadManager {
         if (!st.ok) {
           return st;
         }
-        if (!st.value.exists) {
-          // Owned bytes vanished under us (user-side file manager).
-          // Degrade to streaming — drop the row honestly.
+        // Vanished file — or a size the ledger never recorded
+        // (truncated/replaced media must not play as offline content).
+        // bytes:null means the adapter can't read the size — keep the
+        // row: existence is the only honest signal there.
+        if (
+          !st.value.exists ||
+          (st.value.bytes !== null && st.value.bytes !== row.bytes)
+        ) {
+          const removed = await this.#deps.transfer.removeFile(
+            row.filePath,
+            signal,
+          );
+          if (!removed.ok) {
+            return removed;
+          }
           this.#rows.delete(row.downloadId);
           this.#persistedOffset.delete(row.downloadId);
           dirty = true;
           this.#log(
             'warn',
-            `downloads: ${row.downloadId} file vanished — degrading to streaming`,
+            `downloads: ${row.downloadId} file ${st.value.exists ? 'size-mismatch' : 'vanished'} — degrading to streaming`,
           );
         }
       } else if (row.state === 'removing') {
@@ -295,6 +319,17 @@ export class DownloadManager {
         return removed;
       }
     }
+    // Wait out an in-flight removal for this recording — otherwise a
+    // [removing + new-requested] commit pair trips UNIQUE(recording_id).
+    const pending = this.#removals.get(input.recordingId);
+    if (pending !== undefined) {
+      await pending;
+      const afterRemove = this.recordFor(input.recordingId);
+      if (afterRemove !== null) {
+        // A row materialized while we waited — fall back to dedupe.
+        return ok(afterRemove);
+      }
+    }
     const downloadId = this.#deps.ids.next('dl');
     const record: DownloadRecord = {
       downloadId,
@@ -392,6 +427,7 @@ export class DownloadManager {
     this.#rows.set(downloadId, next);
     const persisted = await this.#persist();
     if (!persisted.ok) {
+      this.#rows.set(downloadId, row); // restore — no false 'requested'
       return persisted;
     }
     this.#emit(next);
@@ -595,6 +631,28 @@ export class DownloadManager {
     row: DownloadRecord,
     signal: CancellationSignal,
   ): Promise<Result<void>> {
+    // Serialize per recording: a concurrent request() awaits this
+    // promise instead of colliding on UNIQUE(recording_id).
+    const key = row.recordingId;
+    const pending = this.#removals.get(key);
+    if (pending !== undefined) {
+      await pending;
+    }
+    const operation = this.#removeRowInner(row, signal);
+    this.#removals.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.#removals.get(key) === operation) {
+        this.#removals.delete(key);
+      }
+    }
+  }
+
+  async #removeRowInner(
+    row: DownloadRecord,
+    signal: CancellationSignal,
+  ): Promise<Result<void>> {
     const running = this.#active.get(row.downloadId);
     const marked = await this.#setRow(row, { state: 'removing' }, signal);
     if (!marked.ok) {
@@ -725,8 +783,20 @@ export class DownloadManager {
     }
     const first = minted.value;
 
+    // A stop() that landed during the mint demoted the row —
+    // re-reading guards against resurrecting 'transferring' over it
+    // (the live `row` handle is stale by construction).
+    const fresh = this.#rows.get(row.downloadId);
+    if (
+      fresh === undefined ||
+      fresh.state === 'removing' ||
+      (fresh.state === 'requested' && this.#stopped)
+    ) {
+      return;
+    }
+
     const mintedRow = await this.#setRow(
-      live,
+      fresh,
       {
         expiresAtMs: first.expiresAtMs,
         itag: first.itag ?? live.itag,
@@ -812,7 +882,7 @@ export class DownloadManager {
         );
         return;
       }
-      await this.#setRow(
+      const finalized = await this.#setRow(
         after,
         {
           state: 'available',
@@ -827,6 +897,20 @@ export class DownloadManager {
         },
         signal,
       );
+      if (!finalized.ok) {
+        // The bytes landed (finalize renamed the .part) but the ledger
+        // write failed — surface the failure honestly instead of
+        // logging success over a stranded 'transferring' row. The row
+        // stays resumable at its last durable offset; next init's
+        // begin-mismatch path restarts it from 0.
+        await this.#fail(
+          after,
+          finalized.error.kind,
+          finalized.error.message,
+          signal,
+        );
+        return;
+      }
       this.#persistedOffset.set(live.downloadId, outcome.value.bytes);
       this.#log(
         'info',
