@@ -1163,6 +1163,7 @@ async function portThrows(): Promise<void> {
       ) as Promise<Result<never>> as never,
     getDetails: () => Promise.resolve(ok([])),
     getEntity: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    artwork: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };

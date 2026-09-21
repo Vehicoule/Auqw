@@ -206,6 +206,16 @@ export interface ProviderPort {
     ref: EntityRef,
     context: OperationContext,
   ): Promise<Result<EntityPage>>;
+  /**
+   * `catalog.artwork`: sized artwork candidates for a track ref the
+   * provider minted. `size` is the wire enum — providers render at
+   * fixed tiers, not arbitrary px.
+   */
+  artwork(
+    ref: SourceRef,
+    input: { size: 600 | 1200 },
+    context: OperationContext,
+  ): Promise<Result<readonly ArtworkRef[]>>;
   getLyrics(
     input: { query: LyricsQuery; prefer: LyricsPreference },
     context: OperationContext,

@@ -1,5 +1,6 @@
 import type {
   AppError,
+  ArtworkRef,
   EntityMetadata,
   EntityPage,
   EntityRef,
@@ -474,6 +475,25 @@ function toRadioPage(value: unknown): RadioPage | null {
   return { candidates, continuation };
 }
 
+/** Wire `catalogArtworkResult` → domain `ArtworkRef` list. */
+function toArtworkItems(value: unknown): readonly ArtworkRef[] | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['source_ref', 'items'])) {
+    return null;
+  }
+  if (!isSourceRef(value['source_ref'])) {
+    return null;
+  }
+  const items = value['items'];
+  if (
+    !Array.isArray(items) ||
+    items.length > 8 ||
+    !items.every(isArtworkRef)
+  ) {
+    return null;
+  }
+  return items;
+}
+
 function wireRecordingQuery(query: RecordingQuery): Record<string, unknown> {
   return {
     title: query.title,
@@ -749,6 +769,18 @@ export function createPluginProvider(
         { ref: wireSourceRef(ref) },
         context,
         toEntityPage,
+      );
+    },
+    artwork(ref, input, context) {
+      const blocked = guard('catalog.artwork');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'catalog.artwork',
+        { ref: wireSourceRef(ref), size: input.size },
+        context,
+        toArtworkItems,
       );
     },
     getLyrics(input, context) {
