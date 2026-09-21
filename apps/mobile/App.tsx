@@ -1914,7 +1914,6 @@ function Main({
           setTab(key);
           closeOverlay();
         }}
-        gestureHandle={Platform.OS === 'android'}
       />
       {player !== null ? (
         <StageSheet

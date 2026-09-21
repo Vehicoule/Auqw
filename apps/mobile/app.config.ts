@@ -22,7 +22,8 @@ const config: ExpoConfig = {
       backgroundImage: './assets/android-icon-background.png',
       monochromeImage: './assets/android-icon-monochrome.png',
     },
-    predictiveBackGestureEnabled: false,
+    predictiveBackGestureEnabled: true,
+    edgeToEdgeEnabled: true,
   },
   plugins: [
     [
@@ -35,6 +36,17 @@ const config: ExpoConfig = {
       },
     ],
     'expo-sqlite',
+    [
+      'expo-navigation-bar',
+      {
+        // Edge-to-edge content draws under the gesture nav bar; keep the
+        // bar itself transparent and its buttons readable on the canvas.
+        backgroundColor: '#00000000',
+        barStyle: 'light',
+        borderColor: '#00000000',
+        position: 'absolute',
+      },
+    ],
   ],
 };
 
