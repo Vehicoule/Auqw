@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{lock, resource_from, AttemptSummary, HostError, PluginHost};
+use crate::{lock, resolve_resource_from, AttemptSummary, HostError, PluginHost};
 
 /// A prepared stream session as reported to the player: the opaque
 /// handle plus metadata. The signed URL never crosses this boundary.
@@ -223,12 +223,11 @@ impl Remint for PluginRemint {
             .await;
             let (result, _attempt) = invocation.into_parts();
             let value = result.map_err(|e| invoke_err_as_seam(e.kind(), e.to_string()))?;
-            let resource = resource_from(&value);
-            if let Some(field) = resource.missing_required() {
-                return Err(auqw_stream::StreamError::InvalidResponse {
-                    message: format!("remint resolve missing {field}"),
-                });
-            }
+            let resource = resolve_resource_from(&value).map_err(|field| {
+                auqw_stream::StreamError::InvalidResponse {
+                    message: format!("remint resolve missing or invalid {field}"),
+                }
+            })?;
             Ok(PreparedSource {
                 url: resource.url,
                 mime: resource.mime,
@@ -280,15 +279,17 @@ fn prepare_outcome(
     source_ref: String,
     provider: String,
 ) -> PrepareOutcome {
-    let resource = resource_from(value);
     let summary = AttemptSummary::from(attempt);
-    if let Some(field) = resource.missing_required() {
-        return PrepareOutcome::Failed {
-            kind: "invalid-response".to_string(),
-            message: format!("resolve result missing {field}"),
-            attempt: summary,
-        };
-    }
+    let resource = match resolve_resource_from(value) {
+        Err(field) => {
+            return PrepareOutcome::Failed {
+                kind: "invalid-response".to_string(),
+                message: format!("resolve result missing or invalid {field}"),
+                attempt: summary,
+            };
+        }
+        Ok(resource) => resource,
+    };
     remint.pin_itag = resource.itag;
     let source = PreparedSource {
         url: resource.url,

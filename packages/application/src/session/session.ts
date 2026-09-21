@@ -1857,20 +1857,26 @@ export class Session {
       // writer that staged against the old Ready and commits behind
       // the swap is superseded by the generation check in #persist —
       // never stale-applied over the imported sections.
-      const applied = await this.#enqueueStorage(() =>
-        this.#withDeadline(
+      const applied = await this.#enqueueStorage(async () => {
+        const result = await this.#withDeadline(
           () => applyImport(this.#storage, preview.value.doc, context),
           deadlineMs,
           source,
-        ),
-      );
+        );
+        // The generation flips inside the segment: the next queued
+        // writer observes #ready === null and supersedes instead of
+        // committing old-generation sections over the imported rows.
+        if (result.ok) {
+          this.#ready = null;
+          this.#state = { type: 'unhydrated' };
+        }
+        return result;
+      });
       if (!applied.ok) {
         return applied;
       }
       // Rehydrate from the replaced document: restore() performs the
       // load path whenever #ready is null.
-      this.#ready = null;
-      this.#state = { type: 'unhydrated' };
       const restored = await this.restore();
       if (!restored.ok) {
         return restored;
