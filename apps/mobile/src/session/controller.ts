@@ -482,11 +482,17 @@ export async function createSessionController(
       // monitor's baseline edge can't be missed.
       try {
         const seeded = await connectivity.snapshot();
-        if (seeded.ok) {
-          lastOnline = seeded.value.online;
+        const online = seeded.ok ? seeded.value.online : false;
+        if (online !== lastOnline) {
+          // Seeding flipped the optimistic default — if restore
+          // already projected remote refs, re-derive them now; the
+          // monitor's identical baseline edge gets deduped below.
+          lastOnline = online;
+          session.connectivityChanged();
         }
       } catch {
         lastOnline = false;
+        session.connectivityChanged();
       }
       try {
         mediaUnsubs.push(
