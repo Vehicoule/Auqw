@@ -21,7 +21,7 @@ import {
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
-import { QueueList } from './queue-list.tsx';
+import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   LyricsModel,
@@ -236,6 +236,11 @@ export function ModeSegment({
     >
       {MODES.map((m) => {
         const active = m.key === mode;
+        // M3E segmented-button: the selected segment reads as a tonal
+        // (secondary-container) pill; iOS keeps the raised slab.
+        const m3e = Platform.OS === 'android';
+        const activeBg = m3e ? theme.colors.accentSoft : theme.colors.raised;
+        const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
         return (
           <Pressable
             key={m.key}
@@ -251,18 +256,18 @@ export function ModeSegment({
               justifyContent: 'center',
               gap: 7,
               minHeight: theme.sizes.touch,
-              borderRadius: 4,
-              backgroundColor: active ? theme.colors.raised : 'transparent',
+              borderRadius: m3e ? theme.radius.pill : 4,
+              backgroundColor: active ? activeBg : 'transparent',
             }}
           >
             <Icon
               name={m.icon}
               size={12}
-              color={active ? theme.colors.textBright : theme.colors.textSecondary}
+              color={active ? activeColor : theme.colors.textSecondary}
             />
             <Text
               variant="metadata"
-              color={active ? 'bright' : 'secondary'}
+              color={active ? (m3e ? 'accent' : 'bright') : 'secondary'}
               style={[
                 active && { fontFamily: theme.fontFamilies.bold },
               ]}
@@ -306,6 +311,9 @@ export type StageSheetProps = {
   readonly onMoveQueueItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
   | undefined;
+  readonly onMoveQueueItemTo?:
+  | ((occurrenceId: string, toIndex: number) => void)
+  | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -337,6 +345,7 @@ export function StageSheet({
   onRemoveQueueItem,
   onToggleQueueReorder,
   onMoveQueueItem,
+  onMoveQueueItemTo,
   style,
 }: StageSheetProps) {
   const theme = useTheme();
@@ -709,6 +718,7 @@ export function StageSheet({
                 onPressItem={onPressQueueItem}
                 onRemoveItem={onRemoveQueueItem}
                 onMoveItem={onMoveQueueItem}
+                onMoveItemTo={onMoveQueueItemTo}
               />
             </>
           )}

@@ -808,6 +808,77 @@ async function rebandsOnQueueChange(): Promise<void> {
   assertEqual(rec?.priority, 0, 'rebands to now-playing');
 }
 
+/**
+ * A metered edge mid-transfer must stop the ACTIVE runner too — the
+ * opt-out protects the whole remaining transfer, not just the next
+ * selection. The row demotes to resumable `requested` and resumes at
+ * its durable offset once the network is eligible again.
+ */
+async function meteredEdgePausesActive(): Promise<void> {
+  const content = bytes(3 * 1024 * 1024);
+  let calls = 0;
+  let abortedOnce = false;
+  const stallingFetch: RangeFetch = (_url, init, signal) => {
+    const header = init.headers['Range'] ?? '';
+    const m = /^bytes=(\d+)-(\d+)$/.exec(header);
+    if (m === null) {
+      return Promise.resolve(resp(400, new Uint8Array(0), null));
+    }
+    const start = Number(m[1]);
+    const end = Math.min(Number(m[2]), content.length - 1);
+    calls += 1;
+    if (calls === 1 || abortedOnce) {
+      const slice = content.slice(start, end + 1);
+      return Promise.resolve(
+        resp(206, slice, `bytes ${start}-${end}/${content.length}`, slice.slice().buffer),
+      );
+    }
+    return new Promise((_res, rej) => {
+      signal.subscribe(() => {
+        abortedOnce = true;
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        rej(error);
+      });
+    });
+  };
+  const r = rig({ content, wireFetch: stallingFetch });
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(100);
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'transferring',
+    'in flight',
+  );
+  r.connectivity.set({ online: true, metered: true });
+  await drain(100);
+  const paused = r.manager.recordFor('rec-1');
+  assertEqual(paused?.state, 'requested', 'metered edge demotes');
+  assertEqual(
+    paused?.committedOffset,
+    1024 * 1024,
+    'committed offset kept across the pause',
+  );
+  assertEqual(calls, 2, 'the in-flight fetch was cancelled');
+  r.connectivity.set({ online: true, metered: false });
+  await drain(100);
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'available',
+    'eligible edge resumes the row',
+  );
+  assertEqual(
+    r.mints[1]?.resumeOffset,
+    1024 * 1024,
+    'resume re-mints at the durable offset',
+  );
+}
+
 export async function run(): Promise<void> {
   await happyPath();
   await dedupeSameMapping();
@@ -829,4 +900,5 @@ export async function run(): Promise<void> {
   await mintFailureTyped();
   await usageReports();
   await rebandsOnQueueChange();
+  await meteredEdgePausesActive();
 }

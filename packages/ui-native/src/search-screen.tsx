@@ -28,6 +28,9 @@ export type SearchScreenProps = {
   readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
   readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
   readonly onContext?: ((row: TrackRowModel) => void) | undefined;
+  /** Submitted queries, newest first — rendered on the idle phase. */
+  readonly recents?: readonly string[] | undefined;
+  readonly onRecentPress?: ((query: string) => void) | undefined;
 };
 
 export function SearchScreen({
@@ -42,9 +45,12 @@ export function SearchScreen({
   onResultPress,
   onToggleLike,
   onContext,
+  recents = [],
+  onRecentPress,
 }: SearchScreenProps) {
   const theme = useTheme();
   const loading = state.phase === 'loading';
+  const editing = query ?? state.query;
   return (
     <View
       style={{
@@ -104,6 +110,16 @@ export function SearchScreen({
             )}
           </>
         )}
+        {!loading && editing !== '' && onQueryChange !== undefined && (
+          <Pressable
+            compact
+            onPress={() => onQueryChange('')}
+            accessibilityLabel="clear search"
+            style={{ padding: theme.spacing.xs }}
+          >
+            <Icon name="close" size={12} color={theme.colors.textSecondary} />
+          </Pressable>
+        )}
       </View>
       {state.phase === 'ready' && (
         <View
@@ -126,13 +142,60 @@ export function SearchScreen({
           </Text>
         </View>
       )}
-      {state.phase === 'idle' && (
-        <EmptyState
-          title="search the catalog"
-          hint="results show up here"
-          icon="search"
-        />
-      )}
+      {state.phase === 'idle' &&
+        (recents.length > 0 ? (
+          <View>
+            <Text
+              variant="label"
+              color="secondary"
+              uppercase
+              style={{
+                paddingHorizontal: theme.spacing.screen,
+                marginBottom: theme.spacing.xs,
+              }}
+            >
+              recent searches
+            </Text>
+            {recents.map((recent) => (
+              <Pressable
+                key={recent}
+                compact
+                onPress={
+                  onRecentPress === undefined
+                    ? undefined
+                    : () => onRecentPress(recent)
+                }
+                accessibilityLabel={`search again for ${recent}`}
+                style={({ pressed }) => [
+                  {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: theme.spacing.md,
+                    minHeight: theme.sizes.touch,
+                    paddingHorizontal: theme.spacing.screen,
+                    borderRadius: theme.radius.control,
+                  },
+                  pressed && { backgroundColor: theme.colors.fg08 },
+                ]}
+              >
+                <Icon
+                  name="clock"
+                  size={14}
+                  color={theme.colors.textSecondary}
+                />
+                <Text variant="body" color="primary" numberOfLines={1}>
+                  {recent}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : (
+          <EmptyState
+            title="search the catalog"
+            hint="results show up here"
+            icon="search"
+          />
+        ))}
       {state.phase === 'loading' && state.results.length === 0 && (
         <LoadingState title="searching" hint={state.query} />
       )}

@@ -22,14 +22,12 @@ export type NavbarProps = {
   readonly items: readonly NavItemModel[];
   readonly activeKey: string;
   readonly onSelect: (key: string) => void;
-  readonly gestureHandle?: boolean;
 };
 
 export function AndroidNavbar({
   items,
   activeKey,
   onSelect,
-  gestureHandle = false,
 }: NavbarProps) {
   const theme = useTheme();
   return (
@@ -97,7 +95,6 @@ export function AndroidNavbar({
           );
         })}
       </View>
-      {gestureHandle && <GestureHandle background={theme.colors.deep} />}
     </View>
   );
 }
@@ -106,7 +103,6 @@ export function IosGlassNavbar({
   items,
   activeKey,
   onSelect,
-  gestureHandle = false,
 }: NavbarProps) {
   const theme = useTheme();
   return (
@@ -191,31 +187,6 @@ export function IosGlassNavbar({
           })}
         </View>
       </View>
-      {gestureHandle && <GestureHandle background="transparent" />}
-    </View>
-  );
-}
-
-function GestureHandle({ background }: { readonly background: string }) {
-  const theme = useTheme();
-  return (
-    <View
-      style={{
-        height: 14,
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: background,
-      }}
-      accessible={false}
-    >
-      <View
-        style={{
-          width: 96,
-          height: 4,
-          borderRadius: 2,
-          backgroundColor: theme.colors.fg25,
-        }}
-      />
     </View>
   );
 }

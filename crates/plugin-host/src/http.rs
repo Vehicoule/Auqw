@@ -72,7 +72,12 @@ impl ReqwestClient {
     pub fn new() -> Result<Self, HttpError> {
         let builder = reqwest::Client::builder()
             .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::none());
+            .redirect(reqwest::redirect::Policy::none())
+            // Guests reach allow-listed hosts directly — ambient
+            // HTTP(S)_PROXY/ALL_PROXY env in the host process must not
+            // reroute plugin traffic through a middlebox that sees
+            // every destination and answers routing for it.
+            .no_proxy();
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let builder = {
             // rustls-platform-verifier needs an Android Context over JNI

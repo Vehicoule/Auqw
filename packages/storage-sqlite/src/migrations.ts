@@ -1,7 +1,35 @@
 export const CURRENT_SCHEMA_VERSION = 4;
 
+/**
+ * Every table this schema owns, all versions. A database opened at
+ * version zero must hold none of them — a partial migration cannot
+ * exist because each migration is a single transaction — so one of
+ * these names in sqlite_master means a foreign file being adopted
+ * silently, and initialize rejects it instead of merging into it.
+ */
+export const KNOWN_TABLES: readonly string[] = Object.freeze([
+  'schema_version',
+  'recordings',
+  'source_refs',
+  'mappings',
+  'likes',
+  'queue_state',
+  'queue_occurrences',
+  'settings',
+  'attempt_traces',
+  'entities',
+  'entity_source_refs',
+  'playlists',
+  'playlist_entries',
+  'play_history',
+  'play_counts',
+  'match_reviews',
+  'lyrics_cache',
+  'artwork_cache',
+]);
+
 const MIGRATION_1: readonly string[] = [
-  `CREATE TABLE IF NOT EXISTS schema_version (
+  `CREATE TABLE schema_version (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   version INTEGER NOT NULL CHECK (version >= 0)
 )`,

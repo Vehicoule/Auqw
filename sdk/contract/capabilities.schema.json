@@ -580,21 +580,24 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 4294967295
         },
         "expires_at_ms": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 18446744073709551615
         },
         "content_length": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 18446744073709551615
         },
         "client": {
           "type": "string",
@@ -605,7 +608,8 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 4294967295
         }
       }
     },

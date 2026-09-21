@@ -38,6 +38,14 @@ pub enum StreamError {
         /// Failure detail.
         message: String,
     },
+    /// The provider demands authentication before it can mint — the
+    /// guest's `auth-required` carried through the seam so the app can
+    /// prompt for credentials instead of seeing a generic failure.
+    #[error("auth-required: {message}")]
+    AuthRequired {
+        /// Failure detail.
+        message: String,
+    },
     /// The upstream rate-limited the request (HTTP 429).
     #[error("rate-limit: {message}")]
     RateLimited {
@@ -80,6 +88,7 @@ impl StreamError {
             Self::Superseded => "superseded",
             Self::Evicted => "evicted",
             Self::Expired => "expired",
+            Self::AuthRequired { .. } => "auth-required",
             Self::Transient { .. } => "transient",
             Self::RateLimited { .. } => "rate-limit",
             Self::StreamsCapped { .. } => "streams-capped",
@@ -96,7 +105,8 @@ impl StreamError {
     #[must_use]
     pub fn detail(&self) -> String {
         match self {
-            Self::Transient { message }
+            Self::AuthRequired { message }
+            | Self::Transient { message }
             | Self::RateLimited { message }
             | Self::StreamsCapped { message }
             | Self::InvalidResponse { message }
@@ -127,6 +137,12 @@ mod tests {
             (StreamError::Superseded, "superseded"),
             (StreamError::Evicted, "evicted"),
             (StreamError::Expired, "expired"),
+            (
+                StreamError::AuthRequired {
+                    message: "x".into(),
+                },
+                "auth-required",
+            ),
             (
                 StreamError::Transient {
                     message: "x".into(),

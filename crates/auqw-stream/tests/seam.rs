@@ -761,8 +761,13 @@ async fn abandoned_prepare_is_evicted_by_the_reaper() {
         .unwrap_or_else(|e| panic!("prepare: {e}"))
         .handle;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // An evicted session leaves the map entirely — callers routing by
+    // handle drop the dead entry on this `not-found` instead of it
+    // lingering forever.
     let e = err_of(reg.read(&h, 0, 1));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
+    let e = err_of(reg.phase_marks(&h));
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -955,7 +960,8 @@ async fn malformed_content_range_never_echoes_server_text() {
 /// A double-`416` confirms the resource ends below the demand offset:
 /// the reader gets EOF, later reads above the ceiling are EOF too,
 /// and the pruned demand position is never refetched (the remint-storm
-/// regression at seam level).
+/// regression at seam level). Bare 416s — no declared total — so the
+/// retried-refusal rule is what confirms EOF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eof_ceiling_serves_reads_and_prunes_demand() {
     let d = TestDir::new("eofdemand");
@@ -965,12 +971,12 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
         VecDeque::from([
             Step::Reply(FetchResponse {
                 status: 416,
-                content_range: Some("bytes */1024".into()),
+                content_range: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
-                content_range: Some("bytes */1024".into()),
+                content_range: None,
                 body: stream_body(vec![]),
             }),
         ]),
@@ -1009,6 +1015,58 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
         "demand position refetched past the EOF ceiling"
     );
     assert_eq!(fetch.count_at(950), 0);
+}
+
+/// A `416` that declares `bytes */N` with `N` above the requested
+/// offset contradicts itself — the range was satisfiable on the
+/// server's own accounting. The pump must fail `invalid-response`,
+/// never confirm EOF below a wire-declared ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contradictory_416_total_fails_instead_of_eof() {
+    let d = TestDir::new("eofcontradict");
+    let mut pages = HashMap::new();
+    pages.insert(
+        900u64,
+        VecDeque::from([
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: stream_body(vec![]),
+            }),
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: stream_body(vec![]),
+            }),
+        ]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut src = source(4096);
+    src.content_length = None;
+    let h = reg
+        .prepare(
+            src,
+            Arc::new(OkRemint {
+                calls: AtomicU32::new(0),
+            }),
+        )
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    let err = std::thread::scope(|s| s.spawn(|| reg.read(&h, 900, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"));
+    let err = match err {
+        Ok(bytes) => panic!("expected failure, got {} bytes", bytes.len()),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), "invalid-response", "{err}");
+    // The first contradictory 416 already fails — no re-mint, no retry.
+    assert_eq!(fetch.count_at(900), 1);
 }
 
 /// Cross-session priority: while an attached session's demand read is
@@ -1185,6 +1243,52 @@ async fn prepare_coalescing_requires_same_provider() {
     assert_eq!(err_of(reg.attach(&first.handle, 0)).kind(), "superseded");
 }
 
+/// A coalesced prepare returns the live survivor without creating a
+/// session — but it must still run the supersede scan, or an
+/// attached-then-detached sibling stays live and two unattached
+/// sessions coexist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coalesced_prepare_still_supersedes_detached_sibling() {
+    let d = TestDir::new("coalsup");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    // A attaches (exempt from supersede), then B prepares — both live.
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare a: {e}"));
+    reg.attach(&a.handle, 0)
+        .unwrap_or_else(|e| panic!("attach a: {e}"));
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    let b = reg
+        .prepare(sb.clone(), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert!(b.superseded.is_empty(), "{:?}", b.superseded);
+    // DataSource close: A is unattached again but still live.
+    reg.close(&a.handle)
+        .unwrap_or_else(|e| panic!("close a: {e}"));
+    // The repeat prepare coalesces onto B — A must not survive it.
+    let again = reg
+        .prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("reprepare: {e}"));
+    assert_eq!(again.handle, b.handle, "same provider+ref coalesces");
+    assert!(
+        again.superseded.contains(&a.handle),
+        "the coalesced prepare must still name the detached sibling: {:?}",
+        again.superseded
+    );
+    assert!(
+        !again.superseded.contains(&b.handle),
+        "the survivor must never be on its own supersede list: {:?}",
+        again.superseded
+    );
+    assert_eq!(err_of(reg.attach(&a.handle, 0)).kind(), "superseded");
+}
+
 /// The named read bound must outlive the recovery path a parked read
 /// waits on: one re-mint plus one bounded fetch attempt. A shorter
 /// deadline would surface cap death to the player as `transient`.
@@ -1340,10 +1444,10 @@ async fn detached_session_evicted_by_detached_age() {
     tokio::time::sleep(Duration::from_millis(70)).await;
     assert!(reg.is_live(&h), "reaped on session age, not detached age");
     // Once the detached window itself reaches the TTL the reaper ends
-    // it — Evicted, the abandon verdict.
+    // it and drops the handle — a stale handle answers not-found.
     wait_until(|| !reg.is_live(&h)).await;
     let e = err_of(reg.attach(&h, 0));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 /// A body that yields its first piece and then hangs must still serve

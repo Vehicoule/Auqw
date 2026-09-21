@@ -6,7 +6,7 @@ import {
   IconButton,
   Text,
 } from './primitives.tsx';
-import { QueueList } from './queue-list.tsx';
+import { QueueList } from './queue-list';
 import type {
   PlayerModel,
   QueueModel,
@@ -25,6 +25,9 @@ export type QueueScreenProps = {
   readonly onMoveItem?:
     | ((occurrenceId: string, direction: -1 | 1) => void)
     | undefined;
+  readonly onMoveItemTo?:
+    | ((occurrenceId: string, toIndex: number) => void)
+    | undefined;
 };
 
 export function QueueScreen({
@@ -37,6 +40,7 @@ export function QueueScreen({
   onPressItem,
   onRemoveItem,
   onMoveItem,
+  onMoveItemTo,
 }: QueueScreenProps) {
   const theme = useTheme();
   return (
@@ -134,6 +138,7 @@ export function QueueScreen({
         onPressItem={onPressItem}
         onRemoveItem={onRemoveItem}
         onMoveItem={onMoveItem}
+        onMoveItemTo={onMoveItemTo}
       />
     </View>
   );

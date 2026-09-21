@@ -223,10 +223,10 @@ function testPlayPauseMorph(): void {
 function testProgressPathState(): void {
   const state = progressPathState(0.25, 200);
   assertEqual(state.dashLength, 200, 'the complete ring stays in the dash pattern');
-  assertEqual(state.dashOffset, -150, 'offset reveals the first quarter clockwise');
+  assertEqual(state.dashOffset, 150, 'offset reveals the first quarter of the path');
   assertEqual(state.opacity, 1, 'positive progress is visible');
   assertEqual(progressPathState(0, 200).opacity, 0, 'zero progress hides the arc');
-  assertEqual(progressPathState(-1, 200).dashOffset, -200, 'progress is clamped low');
+  assertEqual(progressPathState(-1, 200).dashOffset, 200, 'progress is clamped low');
   assertEqual(progressPathState(2, 200).dashOffset, 0, 'progress is clamped high');
 }
 
@@ -787,6 +787,7 @@ function testHomeAndNav(): void {
   const home = toHomeModel({
     recordings: fixtureRecordings,
     likes: fixtureLikes,
+    playback: { type: 'idle' },
     suggestions: fixtureSearchResults,
     greeting: 'good evening',
     subline: '3 liked',

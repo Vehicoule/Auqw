@@ -486,9 +486,9 @@ function GalleryBody({
       </Section>
 
       <Section title="navbars" note="m3e bar · liquid glass capsule">
-        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
+        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
         <View style={{ height: theme.spacing.md }} />
-        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
+        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
       </Section>
 
       <Section title="transport" note="m3e squircle · ios glass">
@@ -543,7 +543,6 @@ function GalleryBody({
                 items={fixtureNavItems}
                 activeKey={nav}
                 onSelect={setNav}
-                gestureHandle
               />
             </Frame>
           </View>
@@ -697,6 +696,8 @@ function GalleryBody({
               onRetry={noop}
               onResultPress={noop}
               onContext={noop}
+              recents={['radiohead ok computer', 'boards of canada']}
+              onRecentPress={noop}
               scrollEnabled={false}
             />
           </Frame>
@@ -823,7 +824,7 @@ function GalleryBody({
 
       <Section title="sheets" note="row actions · add to playlist">
         <Frame height={420}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <RowActionsSheet
               title="Dracula"
               actions={[
@@ -838,7 +839,7 @@ function GalleryBody({
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={460}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <AddToPlaylistSheet
               playlists={fixtureLibraryModel.cards
                 .filter((c) => c.kind === 'playlist' && c.playlistId !== null)
@@ -856,7 +857,7 @@ function GalleryBody({
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={360}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <ProviderPickerSheet
               title="lyrics provider"
               options={[

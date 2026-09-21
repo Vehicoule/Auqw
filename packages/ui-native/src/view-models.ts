@@ -113,9 +113,17 @@ export type RailCardModel = {
   readonly artworkUrl: string | null;
 };
 
+export type ResumeModel = {
+  readonly card: RailCardModel;
+  readonly positionMs: number;
+  readonly durationMs: number | null;
+};
+
 export type HomeModel = {
   readonly greeting: string;
   readonly subline: string | null;
+  /** Present when playback is paused mid-track — the resume card. */
+  readonly resume: ResumeModel | null;
   readonly recents: readonly RailCardModel[];
   readonly suggestions: readonly RailCardModel[];
 };
@@ -1266,6 +1274,7 @@ export function toHomeModel(input: {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
   readonly suggestions: readonly TrackMetadata[];
+  readonly playback: SessionPlayback;
   readonly greeting: string;
   readonly subline: string;
 }): HomeModel {
@@ -1284,9 +1293,22 @@ export function toHomeModel(input: {
     subtitle: metadata.artist,
     artworkUrl: pickArtworkUrl(metadata.artwork),
   }));
+  const paused =
+    input.playback.type === 'paused' ? input.playback : null;
+  const resumeRecording =
+    paused === null ? undefined : byId.get(paused.recordingId);
+  const resume: ResumeModel | null =
+    paused === null || resumeRecording === undefined
+      ? null
+      : {
+          card: toRailCard(resumeRecording),
+          positionMs: paused.positionMs,
+          durationMs: paused.durationMs ?? null,
+        };
   return {
     greeting: input.greeting,
     subline: input.subline,
+    resume,
     recents,
     suggestions,
   };

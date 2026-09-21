@@ -234,8 +234,24 @@ export class DownloadManager {
     }
 
     // Connectivity edges re-run the scheduler (offline → online, or
-    // metered → unmetered unblocks waiting rows).
-    this.#unsubConnectivity = this.#deps.connectivity.subscribe(() => {
+    // metered → unmetered unblocks waiting rows). An edge that makes
+    // the network ineligible pauses the ACTIVE transfer too — the
+    // metered opt-out must protect the whole remaining transfer, not
+    // just the next row selection.
+    this.#unsubConnectivity = this.#deps.connectivity.subscribe((snap) => {
+      const meteredAllowed =
+        this.#deps.settings().downloadMetered ?? false;
+      if (!snap.online || (snap.metered && !meteredAllowed)) {
+        void this.#demoteActive().then((demoted) => {
+          if (!demoted.ok) {
+            this.#log(
+              'warn',
+              `downloads: connectivity-edge pause failed: ${demoted.error.kind}`,
+            );
+          }
+        });
+        return;
+      }
       void this.#pump();
     });
     void this.#pump();
@@ -243,14 +259,14 @@ export class DownloadManager {
   }
 
   /**
-   * Orderly stop: in-flight transfers demote to `requested` (persisted)
-   * BEFORE their cancel edge lands, so the settle path leaves them
-   * resumable instead of writing `failed_with_retry`.
+   * Demote every in-flight transfer to `requested` (persisted) BEFORE
+   * its cancel edge lands, so the settle path leaves the row resumable
+   * at its committed offset instead of writing `failed_with_retry`.
+   * Shared by stop() and the connectivity-ineligible pause.
    */
-  async stop(signal: CancellationSignal): Promise<Result<void>> {
-    this.#stopped = true;
-    this.#unsubConnectivity?.();
-    this.#unsubConnectivity = null;
+  async #demoteActive(
+    signal: CancellationSignal = new CancellationSource().signal,
+  ): Promise<Result<void>> {
     for (const [id, source] of this.#active) {
       const row = this.#rows.get(id);
       if (row !== undefined && row.state === 'transferring') {
@@ -264,6 +280,22 @@ export class DownloadManager {
         }
       }
       source.cancel();
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * Orderly stop: in-flight transfers demote to `requested` (persisted)
+   * BEFORE their cancel edge lands, so the settle path leaves them
+   * resumable instead of writing `failed_with_retry`.
+   */
+  async stop(signal: CancellationSignal): Promise<Result<void>> {
+    this.#stopped = true;
+    this.#unsubConnectivity?.();
+    this.#unsubConnectivity = null;
+    const demoted = await this.#demoteActive(signal);
+    if (!demoted.ok) {
+      return demoted;
     }
     // Wait for real teardown — the runner owns its sink until settle,
     // so a caller that deletes the files right after stop (library
@@ -811,11 +843,13 @@ export class DownloadManager {
       if (
         latest === undefined ||
         latest.state === 'removing' ||
-        (latest.state === 'requested' && this.#stopped)
+        latest.state === 'requested'
       ) {
-        // Removed mid-mint, or an orderly stop demoted the row —
+        // Removed mid-mint, or an orderly demotion (stop / ineligible
+        // connectivity edge) already returned the row to 'requested' —
         // don't overwrite the intent. A user cancel() on a row still
-        // 'requested' (pre-claim window) DOES write the cancelled fail.
+        // 'requested' (pre-claim window) writes the cancelled fail on
+        // the cancel path itself, not here.
         return;
       }
       await this.#fail(
@@ -835,8 +869,10 @@ export class DownloadManager {
     if (
       fresh === undefined ||
       fresh.state === 'removing' ||
-      (fresh.state === 'requested' && this.#stopped)
+      fresh.state === 'requested'
     ) {
+      // A demotion that landed during the mint (stop / connectivity
+      // edge) is honoured — never resurrect 'transferring' over it.
       return;
     }
 
@@ -897,8 +933,10 @@ export class DownloadManager {
       if (after === undefined || after.state === 'removing') {
         return; // the remove path owns the file now
       }
-      if (after.state === 'requested' && this.#stopped) {
-        return; // orderly stop demoted us — leave resumable
+      if (after.state === 'requested') {
+        // An orderly demotion (stop / ineligible connectivity edge)
+        // already reset the row — leave it resumable at its offset.
+        return;
       }
       if (!outcome.ok) {
         // A begin-time resume mismatch (ledger offset > .part size —

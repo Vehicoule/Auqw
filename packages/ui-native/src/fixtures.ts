@@ -863,6 +863,11 @@ export const fixtureSettingsModelDegraded = toSettingsModel(
 export const fixtureHomeModel: HomeModel = {
   greeting: 'good evening',
   subline: 'wednesday · 3 new releases in your library',
+  resume: {
+    card: toRailCard(fixtureRecordings[0]!),
+    positionMs: 83_000,
+    durationMs: 214_000,
+  },
   recents: [
     fixtureRecordings[0],
     fixtureRecordings[1],

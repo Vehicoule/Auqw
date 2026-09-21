@@ -182,10 +182,11 @@ impl KeyValueStore for NullKv {
     ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, auqw_plugin_host::KvError> {
         Ok(std::collections::BTreeMap::new())
     }
-    fn commit(
+    fn commit_admitting(
         &self,
         _plugin_id: &str,
         _writes: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), auqw_plugin_host::KvError> {
         Ok(())
     }
@@ -241,7 +242,7 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
             }
         }
     };
-    let kv = NullKv;
+    let kv = std::sync::Arc::new(NullKv);
     let clock = SystemClock;
     let Invocation { result, attempt } = auqw_plugin_host::invoke(
         plugin,
@@ -251,7 +252,7 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
         CancellationToken::new(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: None,
         },
@@ -278,11 +279,11 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
             false
         }
         (expected_kind, Err(e)) => {
-            let actual = format!("{e:?}");
-            if actual.contains(expected_kind) {
+            let actual = e.kind();
+            if actual == *expected_kind {
                 true
             } else {
-                detail = format!("expected error kind {expected_kind}, got {actual}");
+                detail = format!("expected error kind {expected_kind}, got {actual} ({e:?})");
                 false
             }
         }

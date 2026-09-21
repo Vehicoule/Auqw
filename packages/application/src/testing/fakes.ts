@@ -3,6 +3,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
 import type {
+  ArtworkRef,
   EntityRef,
   SourceRef,
   TrackMetadata,
@@ -202,6 +203,7 @@ type ProviderMethod =
   | 'resolve'
   | 'details'
   | 'entity'
+  | 'artwork'
   | 'lyrics'
   | 'radio';
 
@@ -238,6 +240,7 @@ export class FakeProvider implements ProviderPort {
     resolve: [],
     details: [],
     entity: [],
+    artwork: [],
     lyrics: [],
     radio: [],
   };
@@ -381,6 +384,29 @@ export class FakeProvider implements ProviderPort {
 
   settleEntityAt(index: number, result: Result<EntityPage>): boolean {
     return this.#settle('entity', index, result);
+  }
+
+  artwork(
+    ref: SourceRef,
+    input: { size: 600 | 1200 },
+    context: OperationContext,
+  ): Promise<Result<readonly ArtworkRef[]>> {
+    this.calls.push({ method: 'artwork', input: { ref, input }, context });
+    if (!this.capabilities.includes('catalog.artwork')) {
+      return Promise.resolve(unsupportedCall('catalog.artwork'));
+    }
+    return this.#defer('artwork', context);
+  }
+
+  settleArtwork(result: Result<readonly ArtworkRef[]>): boolean {
+    return this.#settle('artwork', 0, result);
+  }
+
+  settleArtworkAt(
+    index: number,
+    result: Result<readonly ArtworkRef[]>,
+  ): boolean {
+    return this.#settle('artwork', index, result);
   }
 
   /** The wire capability the prefer hint maps to under declared caps. */
@@ -582,10 +608,35 @@ export class FakePlayer implements PlayerPort {
     return this.#take('cancelPrepare', input, undefined);
   }
 
+  #releaseDeferreds: Deferred<Result<void>>[] = [];
+  #deferNextRelease = false;
+
+  /** The next release call stays pending until settleRelease. */
+  holdNextRelease(): void {
+    this.#deferNextRelease = true;
+  }
+
+  /** Settles the oldest pending release; false when none pending. */
+  settleRelease(result: Result<void>): boolean {
+    const deferred = this.#releaseDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
+  }
+
   release(input: {
     handle: string;
     identity: { attemptId: string; queueRev: number };
   }): Promise<Result<void>> {
+    if (this.#deferNextRelease) {
+      this.#deferNextRelease = false;
+      const deferred = new Deferred<Result<void>>();
+      this.#releaseDeferreds.push(deferred);
+      this.calls.push({ method: 'release', input });
+      return deferred.promise;
+    }
     return this.#take('release', input, undefined);
   }
 
@@ -653,10 +704,27 @@ export class FakeStorage implements StoragePort {
   readonly loads: OperationContext[] = [];
   #loadDeferreds: Deferred<Result<PersistedState>>[] = [];
   #deferNextLoad = false;
+  #commitDeferreds: Deferred<Result<void>>[] = [];
+  #deferNextCommit = false;
 
   /** The next load stays pending until settleLoad. */
   holdNextLoad(): void {
     this.#deferNextLoad = true;
+  }
+
+  /** The next commit stays pending until settleCommit. */
+  holdNextCommit(): void {
+    this.#deferNextCommit = true;
+  }
+
+  /** Settles the oldest pending commit; false when none pending. */
+  settleCommit(result: Result<void>): boolean {
+    const deferred = this.#commitDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
   }
 
   /** Settles the oldest pending load; false when none pending. */
@@ -707,6 +775,26 @@ export class FakeStorage implements StoragePort {
         ),
       );
     }
+    if (this.#deferNextCommit) {
+      // A held commit is not durable yet — neither the stored state nor
+      // the commits log observe it until settleCommit resolves it.
+      this.#deferNextCommit = false;
+      const deferred = new Deferred<Result<void>>();
+      this.#commitDeferreds.push(deferred);
+      return deferred.promise.then((settled) => {
+        if (!settled.ok) {
+          return settled;
+        }
+        return this.#applyCommit(batch, context);
+      });
+    }
+    return Promise.resolve(this.#applyCommit(batch, context));
+  }
+
+  #applyCommit(
+    batch: StorageBatch,
+    context: OperationContext,
+  ): Result<void> {
     // The recorded batch is JSON-cloned; a function field survives
     // only as its applied result, so the merge runs on live state.
     this.commits.push({ batch: this.#clone(batch), context });
@@ -738,8 +826,8 @@ export class FakeStorage implements StoragePort {
     // Mirror sqlite: validate the merged document before any mutation
     // so tests can't commit states the real backend would reject.
     if (!isPersistedState(merged)) {
-      return Promise.resolve(
-        err(appError('invalid-response', 'commit batch failed validation')),
+      return err(
+        appError('invalid-response', 'commit batch failed validation'),
       );
     }
     this.#state = merged;
@@ -748,7 +836,7 @@ export class FakeStorage implements StoragePort {
         -FakeStorage.MAX_ATTEMPTS,
       );
     }
-    return Promise.resolve(ok(undefined));
+    return ok(undefined);
   }
 
   /** Diagnostics only: newest-first, capped at 500 stored traces. */

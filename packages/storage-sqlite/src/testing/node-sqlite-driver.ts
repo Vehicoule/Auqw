@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { CancellationSignal } from '@auqw/application';
 import { CANCELLED } from '../cancelled.ts';
@@ -53,33 +54,58 @@ function toRowId(value: number | bigint | undefined): number | null {
 export class NodeSqliteDriver implements SqliteDriver {
   readonly #db: DatabaseSync;
   readonly backups: string[] = [];
+  readonly droppedBackups: string[] = [];
   #closed = false;
 
   constructor(path = ':memory:') {
     this.#db = new DatabaseSync(path);
   }
 
-  /**
-   * `VACUUM INTO` a `<file>.bak-<tag>` sibling of the main database;
-   * an in-memory database has no durable file to preserve, so the
-   * tag is only recorded.
-   */
-  backup(tag: string): Promise<void> {
-    if (!/^[a-z0-9-]+$/i.test(tag)) {
-      throw new TypeError('backup tag must be alphanumeric/dashes');
-    }
-    this.backups.push(tag);
+  /** The main database's file path; empty for `:memory:`. */
+  #mainFile(): string | null {
     const rows = this.#db.prepare('PRAGMA database_list').all() as {
       name?: unknown;
       file?: unknown;
     }[];
     const file = rows.find((r) => r['name'] === 'main')?.['file'];
-    if (typeof file === 'string' && file.length > 0) {
+    return typeof file === 'string' && file.length > 0 ? file : null;
+  }
+
+  /**
+   * `VACUUM INTO` a `<file>.bak-<tag>` sibling of the main database;
+   * a stale image from a failed attempt is removed first — `VACUUM
+   * INTO` refuses an existing target and must not wedge retries.
+   * An in-memory database has no durable file to preserve, so the
+   * tag is only recorded.
+   */
+  backup(tag: string): Promise<void> {
+    this.#checkTag(tag);
+    this.backups.push(tag);
+    const file = this.#mainFile();
+    if (file !== null) {
+      rmSync(`${file}.bak-${tag}`, { force: true });
       this.#db.exec(
         `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
       );
     }
     return Promise.resolve();
+  }
+
+  /** Removes a `<file>.bak-<tag>` image; absent files are ignored. */
+  dropBackup(tag: string): Promise<void> {
+    this.#checkTag(tag);
+    this.droppedBackups.push(tag);
+    const file = this.#mainFile();
+    if (file !== null) {
+      rmSync(`${file}.bak-${tag}`, { force: true });
+    }
+    return Promise.resolve();
+  }
+
+  #checkTag(tag: string): void {
+    if (!/^[a-z0-9-]+$/i.test(tag)) {
+      throw new TypeError('backup tag must be alphanumeric/dashes');
+    }
   }
 
   async transaction<T>(
@@ -181,6 +207,10 @@ export class FailingDriver implements SqliteDriver {
 
   backup(tag: string): Promise<void> {
     return this.inner.backup(tag);
+  }
+
+  dropBackup(tag: string): Promise<void> {
+    return this.inner.dropBackup(tag);
   }
 
   async transaction<T>(

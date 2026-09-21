@@ -14,7 +14,12 @@
 //!   counter; a re-minted mime that differs from the prepared mime is
 //!   terminal `InvalidResponse` (a silent container swap is a bug);
 //! - a second consecutive `416` (or a `416` at/past a known total) is
-//!   honest end-of-stream evidence, not an error.
+//!   honest end-of-stream evidence, not an error;
+//! - any other permanent `4xx` is a terminal verdict on this URL —
+//!   `401` is a dead mint (`Expired`), `404`/`410` are `NotFound`, the
+//!   rest `InvalidResponse`; only `408`/`425`/`429` and `5xx` stay
+//!   retriable. A permanent refusal must never latch as `Transient`:
+//!   the session would stall forever on a verdict that cannot change.
 //!
 //! Priority: a demand fetch-through outranks speculative fill — an
 //! demand outside an in-flight fill aborts it and re-picks immediately.
@@ -112,8 +117,10 @@ enum FetchOutcome {
     /// A validated `206` — its body streamed into piecewise commits.
     Committed,
     /// Any other status for the caller's dispatch (403/416/…); the
-    /// body stream was dropped unread.
-    Status(u16),
+    /// body stream was dropped unread. On a `416`, the parsed
+    /// `bytes */N` total rides along — the wire's authoritative EOF
+    /// evidence.
+    Status(u16, Option<u64>),
 }
 
 /// Drive one range request end to end: await headers, and on a `206`
@@ -139,7 +146,17 @@ async fn drive_fetch(
         )
         .await?;
     if resp.status != 206 {
-        return Ok(FetchOutcome::Status(resp.status));
+        // `416` carries `Content-Range: bytes */N` — keep the total;
+        // it confirms EOF without spending a re-mint. Range units are
+        // case-insensitive (RFC 9110 §14.1.1).
+        let range_total = if resp.status == 416 {
+            resp.content_range
+                .as_deref()
+                .and_then(unsatisfied_range_total)
+        } else {
+            None
+        };
+        return Ok(FetchOutcome::Status(resp.status, range_total));
     }
     let declared = validate_206_head(session, resp.content_range.as_deref(), offset, len)?;
     let mut body = resp.body;
@@ -151,7 +168,7 @@ async fn drive_fetch(
         // the store.
         let take = usize::try_from((declared - got).min(piece.len() as u64)).unwrap_or(usize::MAX);
         if take > 0 {
-            session.commit(offset + got, &piece[..take])?;
+            session.commit(offset.saturating_add(got), &piece[..take])?;
             got += take as u64;
         }
         if take < piece.len() {
@@ -276,10 +293,34 @@ async fn fetch_chunk(
         match outcome {
             // Pieces already committed as the body streamed.
             FetchOutcome::Committed => return Outcome::Bytes,
-            FetchOutcome::Status(status) => match status {
-                416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
-                403 | 416 => {
-                    retried_416 = status == 416;
+            FetchOutcome::Status(status, range_total) => match status {
+                416 => {
+                    // Adopt the wire total before any mint spend: when
+                    // it is already authoritative, this 416 confirms
+                    // EOF at its real ceiling.
+                    if let Some(total) = range_total {
+                        match session.check_total(total) {
+                            Ok(()) => session.mark_eof_below(total),
+                            Err(e) => return Outcome::Failed(e),
+                        }
+                        if offset >= total {
+                            return Outcome::Eof(offset);
+                        }
+                        // `offset < total`: the server calls this range
+                        // unsatisfiable while declaring an extent that
+                        // satisfies it — self-contradictory, and the
+                        // retry-only EOF rule must not truncate below a
+                        // wire-declared ceiling.
+                        return Outcome::Failed(StreamError::InvalidResponse {
+                            message: format!(
+                                "416 at offset {offset} but Content-Range declares total {total}"
+                            ),
+                        });
+                    }
+                    if eof_confirmed(session, offset, retried_416) {
+                        return Outcome::Eof(offset);
+                    }
+                    retried_416 = true;
                     match remint(session).await {
                         Err(e) => {
                             return if stallable(&e) {
@@ -293,6 +334,16 @@ async fn fetch_chunk(
                         Ok(()) => transient_left = session.config.fetch_retries,
                     }
                 }
+                403 => match remint(session).await {
+                    Err(e) => {
+                        return if stallable(&e) {
+                            Outcome::Stalled(e)
+                        } else {
+                            Outcome::Failed(e)
+                        };
+                    }
+                    Ok(()) => transient_left = session.config.fetch_retries,
+                },
                 s => {
                     let e = classify_status(s, offset);
                     match retry_or_stall(session, through, e, &mut transient_left).await {
@@ -437,7 +488,10 @@ fn validate_206_head(
     if end < start {
         return Err(invalid(format!("Content-Range {start}-{end} inverted")));
     }
-    let declared = end - start + 1;
+    let declared = end
+        .checked_sub(start)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| invalid(format!("Content-Range {start}-{end} overflows")))?;
     if declared > max_len {
         return Err(invalid(format!(
             "declared {start}-{end} exceeds requested {max_len} at {offset}"
@@ -452,6 +506,22 @@ fn validate_206_head(
         session.check_total(t)?;
     }
     Ok(declared)
+}
+
+/// Parse the total from a `416`'s `Content-Range: <unit> */N` —
+/// the range unit is case-insensitive; the `*/` unsatisfied form is
+/// required (a satisfiable span on a 416 is a lie and is ignored).
+fn unsatisfied_range_total(cr: &str) -> Option<u64> {
+    let (unit, range) = cr.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    // `str::parse::<u64>` accepts a leading `+` — digits only.
+    let n = range.strip_prefix("*/")?.trim();
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<u64>().ok()
 }
 
 /// Parse `bytes START-END/TOTAL` (TOTAL may be `*`). The header value
@@ -490,12 +560,18 @@ fn parse_content_range(cr: &str) -> Result<(u64, u64, Option<u64>), String> {
 }
 
 /// Classify a non-`206`, non-remint status into the seam taxonomy.
+/// `5xx` and the retriable `408`/`425` are `Transient`, `429` is
+/// `RateLimited`; every other `4xx` is a permanent verdict on this
+/// URL and ends the session honestly rather than parking retriable
+/// forever.
 fn classify_status(status: u16, offset: u64) -> StreamError {
     let msg = || format!("status {status} at offset {offset}");
     match status {
-        404 => StreamError::NotFound,
+        401 => StreamError::Expired,
+        404 | 410 => StreamError::NotFound,
+        408 | 425 => StreamError::Transient { message: msg() },
         429 => StreamError::RateLimited { message: msg() },
-        200..=399 => StreamError::InvalidResponse {
+        200..=499 => StreamError::InvalidResponse {
             message: format!("range request answered {status}, not 206, at {offset}"),
         },
         _ => StreamError::Transient { message: msg() },
@@ -757,6 +833,9 @@ mod tests {
             (Some("bytes 64-127/1024"), "wrong-start"),
             (Some("items 0-127/1024"), "bad-unit"),
             (Some("bytes 0-63"), "no-total"),
+            // `end` at u64::MAX overflows `end - start + 1` —
+            // unrepresentable, never a debug panic or a wrapped len.
+            (Some("bytes 0-18446744073709551615/*"), "end-overflow"),
         ] {
             let d = TestDir::new(name);
             let s = session(config(&d), remint_ok());
@@ -981,8 +1060,20 @@ mod tests {
         let remint = remint_ok();
         let s = session(cfg, remint.clone());
         // Seek-read lands far past the end: 416, remint, 416 again →
-        // eof_below marks the ceiling instead of an error.
-        let fetch = Arc::new(ScriptedFetch::new(status_steps(416, 2)));
+        // eof_below marks the ceiling instead of an error. Bare 416s —
+        // a declared total above the offset is a contradiction, not
+        // EOF evidence.
+        let fetch = Arc::new(ScriptedFetch::new(
+            (0..2)
+                .map(|_| {
+                    Step::Reply(FetchResponse {
+                        status: 416,
+                        content_range: None,
+                        body: stream_body(vec![]),
+                    })
+                })
+                .collect(),
+        ));
         {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
             sh.fetch_through.insert(900, 1);
@@ -1073,6 +1164,65 @@ mod tests {
                 .len(),
             3,
             "transient retry budget is fetch_retries + the first attempt"
+        );
+        stop_pump(&s, task).await;
+    }
+
+    /// A permanent `4xx` is a terminal verdict on the URL, never a
+    /// latch: `401` reports `Expired` (a dead mint — retriable upstream
+    /// via re-resolve), `410` joins `404` as `NotFound`, and any other
+    /// permanent refusal is `InvalidResponse`. Only `408`/`425` among
+    /// `4xx` stay retriable, like `5xx`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_4xx_terminates_instead_of_stalling() {
+        for (status, kind) in [
+            (400u16, "invalid-response"),
+            (401, "expired"),
+            (410, "not-found"),
+            (418, "invalid-response"),
+        ] {
+            let d = TestDir::new(&format!("p{status}"));
+            let s = session(config(&d), remint_ok());
+            let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+                status,
+                content_range: None,
+                body: stream_body(vec![]),
+            })]));
+            let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+            wait_until(|| s.is_terminal()).await;
+            assert_eq!(s.terminal_err().map(|e| e.kind()), Some(kind), "{status}");
+            assert_eq!(
+                fetch
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len(),
+                1,
+                "a permanent {status} must not burn the retry budget"
+            );
+            stop_pump(&s, task).await;
+        }
+        // `408` (and `425`) are retriable `4xx`: retried within
+        // `fetch_retries`, then latched — still not terminal.
+        let d = TestDir::new("t408");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(status_steps(408, 3)));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        assert!(
+            matches!(latched(&s), Some(StreamError::Transient { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert!(!s.is_terminal(), "a 408 must never kill a session");
+        assert_eq!(
+            fetch
+                .requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            3,
+            "retriable 4xx spend the same retry budget as 5xx"
         );
         stop_pump(&s, task).await;
     }

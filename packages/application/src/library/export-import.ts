@@ -2,6 +2,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
+import { isSafeNonNegative } from '../domain.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import type { ExportDocument } from './library.ts';
 import { isExportDocument } from './library.ts';
@@ -103,7 +104,18 @@ export async function exportLibrary(
   clock: ClockPort,
   context: OperationContext,
 ): Promise<Result<ExportResult>> {
-  const exported = await storage.exportOwned(clock.nowMs(), context);
+  // An unguarded clock throws inside `exportOwned` or stamps a bogus
+  // exportedAtMs into the document — validate before the port call.
+  let nowMs: number;
+  try {
+    nowMs = clock.nowMs();
+  } catch {
+    return err(appError('internal', 'clock read failed'));
+  }
+  if (!isSafeNonNegative(nowMs)) {
+    return err(appError('internal', 'clock returned an unsafe timestamp'));
+  }
+  const exported = await storage.exportOwned(nowMs, context);
   if (!exported.ok) {
     return exported;
   }

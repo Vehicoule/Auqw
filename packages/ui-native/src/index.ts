@@ -54,14 +54,27 @@ export type { StateViewProps } from './states.tsx';
 export { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
 export type { AppNavbarProps, NavbarProps } from './navbar.tsx';
 
+// Extensionless specifiers for platform-split modules: an explicit
+// '.tsx' resolves to the shared file literally under Metro and the
+// '.native.tsx' variant is never considered.
+export { PlatformTabs } from './platform-tabs';
+export type { PlatformTabsProps } from './platform-tabs';
+export { AppStack, PushScreen, SheetScreen, StackItem } from './stack';
+export type {
+  AppStackProps,
+  PushScreenProps,
+  SheetScreenProps,
+  StackItemProps,
+} from './stack';
+
 export { MiniPlayer } from './mini-player.tsx';
 export type { MiniPlayerProps } from './mini-player.tsx';
 
 export { ModeSegment, StageSheet, TransportControls } from './stage-sheet.tsx';
 export type { StageSheetProps, TransportProps } from './stage-sheet.tsx';
 
-export { QueueList } from './queue-list.tsx';
-export type { QueueListProps } from './queue-list.tsx';
+export { QueueList } from './queue-list';
+export type { QueueListProps } from './queue-list';
 
 export { SearchScreen } from './search-screen.tsx';
 export type { SearchScreenProps } from './search-screen.tsx';

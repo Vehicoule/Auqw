@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use auqw_plugin_host::{
-    invoke, load, BudgetDimension, Budgets, HostServices, HttpClient, HttpError, HttpErrorKind,
-    HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest, ManifestError,
-    MemoryKeyValueStore, SystemClock,
+    invoke, load, ArtifactRef, BudgetDimension, Budgets, HostServices, HttpClient, HttpError,
+    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest,
+    ManifestError, MemoryKeyValueStore, SystemClock,
 };
 use serde_json::Value;
 use sha2::Digest;
@@ -31,9 +31,9 @@ fn svc<'a>(http: &'a dyn HttpClient, pot_provider: Option<&'a str>) -> HostServi
 
 static CLOCK: SystemClock = SystemClock;
 
-fn test_kv() -> &'static MemoryKeyValueStore {
-    static KV: std::sync::OnceLock<MemoryKeyValueStore> = std::sync::OnceLock::new();
-    KV.get_or_init(MemoryKeyValueStore::new)
+fn test_kv() -> Arc<MemoryKeyValueStore> {
+    static KV: std::sync::OnceLock<Arc<MemoryKeyValueStore>> = std::sync::OnceLock::new();
+    Arc::clone(KV.get_or_init(|| Arc::new(MemoryKeyValueStore::new())))
 }
 
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
@@ -569,6 +569,91 @@ async fn fuel_traps_infinite_loop() {
     // Wall-clock smoke bound (load-tolerant): the trap is the real
     // assertion; this only guards against pathological slowdown.
     assert!(elapsed < Duration::from_secs(15), "trap took {elapsed:?}");
+}
+
+/// A guest entry that outlives the deadline is detached and reported
+/// `deadline` at the deadline — fuel still bounds the detached burn —
+/// instead of holding the caller to fuel-out. The spin guest loops
+/// forever inside `handle`, so without the cap this test would run to
+/// the 200 M fuel grant (seconds to minutes on a loaded emulator).
+#[tokio::test]
+async fn deadline_caps_a_running_guest_entry() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdk/conformance/spin/spin.wasm"
+    );
+    let wasm = read_wasm(path);
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_millis(50);
+    budgets.fuel_per_entry = 200_000_000;
+    budgets.fuel_total = 2_000_000_000;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, _calls) = CannedHttp::new();
+    let t0 = Instant::now();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline cap, fuel_used={}",
+        attempt.fuel_used
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "deadline took {elapsed:?}"
+    );
+}
+
+/// A cancel that lands while a guest entry runs is reported at once —
+/// the detached entry keeps burning fuel in the background — rather
+/// than waiting for the entry to return.
+#[tokio::test]
+async fn cancel_preempts_a_running_guest_entry() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdk/conformance/spin/spin.wasm"
+    );
+    let wasm = read_wasm(path);
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_secs(60);
+    budgets.fuel_per_entry = 200_000_000;
+    budgets.fuel_total = 2_000_000_000;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, _calls) = CannedHttp::new();
+    let cancel = CancellationToken::new();
+    let cancel2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel2.cancel();
+    });
+    let t0 = Instant::now();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        cancel,
+        svc(&http, None),
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(
+        matches!(err(result), InvokeError::Cancelled),
+        "expected cancellation"
+    );
+    assert!(elapsed < Duration::from_secs(10), "cancel took {elapsed:?}");
 }
 
 #[tokio::test]
@@ -1494,6 +1579,212 @@ fn logger_wat() -> String {
     )
 }
 
+// ---------- host-owned headers ----------
+
+/// A guest-set `Host` would make the wire authority diverge from the
+/// allowlisted URL (domain fronting) — the request is a malformed
+/// step, never sent.
+#[tokio::test]
+async fn http_request_host_header_is_rejected() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+         \"headers\":[[\"Host\",\"evil.example\"]],\"body\":null}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// Hop-by-hop and body-framing names are host-owned too — the client
+/// computes them from the URL and body.
+#[tokio::test]
+async fn http_request_hop_by_hop_headers_are_rejected() {
+    for name in [
+        "connection",
+        "Transfer-Encoding",
+        "TE",
+        "upgrade",
+        "keep-alive",
+        "content-length",
+        "Proxy-Authorization",
+    ] {
+        let raw = format!(
+            "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+             \"payload\":{{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+             \"headers\":[[\"{name}\",\"x\"]],\"body\":null}}}}"
+        );
+        let e = raw_step_outcome(&raw, &["network:example.com"]).await;
+        assert!(matches!(e, InvokeError::InvalidMessage(_)), "{name}: {e:?}");
+    }
+}
+
+/// Ordinary custom headers still pass through to the client.
+#[tokio::test]
+async fn http_request_custom_headers_are_allowed() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+         \"headers\":[[\"X-Mode\",\"probe\"]],\"body\":null}}",
+    )));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 1;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    // The request was authorized and sent — the step cap ends the loop.
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(attempt.http_calls, 1);
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Steps
+            }
+        ),
+        "expected steps-cap error"
+    );
+}
+
+// ---------- guest strings in error text ----------
+
+/// A `fail.error.kind` outside the taxonomy is quoted in the
+/// InvalidMessage text — it must be redacted like sibling paths so a
+/// signed URL in the kind cannot leak.
+#[tokio::test]
+async fn fail_kind_is_redacted_in_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"https://a.b/s?sig=SYNTHETIC_SECRET\",\"message\":\"x\"}}",
+        &[],
+    )
+    .await;
+    let InvokeError::InvalidMessage(m) = e else {
+        panic!("expected InvalidMessage, got {e:?}")
+    };
+    assert!(!m.contains("SYNTHETIC_SECRET"), "{m}");
+}
+
+/// An off-schema key is quoted in the InvalidMessage text — same
+/// redaction contract.
+#[tokio::test]
+async fn unknown_key_is_redacted_in_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"done\",\"result\":null,\"https://a.b/?sig=SYNTHETIC_SECRET\":1}",
+        &[],
+    )
+    .await;
+    let InvokeError::InvalidMessage(m) = e else {
+        panic!("expected InvalidMessage, got {e:?}")
+    };
+    assert!(!m.contains("SYNTHETIC_SECRET"), "{m}");
+}
+
+// ---------- manifest re-validation at load ----------
+
+/// A manifest built without `from_json` — e.g. assembled field by
+/// field — still gets the grammar check at `load`: `network:*.`
+/// otherwise reaches the allowlist matcher and blesses every
+/// trailing-dot host.
+#[test]
+fn load_revalidates_programmatic_manifest() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&wasm));
+    let manifest = Manifest {
+        id: "test-plugin".into(),
+        version: "0.1.0".into(),
+        abi: "0.1.0".into(),
+        capabilities: vec!["playback.resolve".into()],
+        permissions: vec!["network:*.".into()],
+        artifact: ArtifactRef {
+            path: "t.wasm".into(),
+            digest,
+        },
+    };
+    let e = err(load(&wasm, manifest, &default_budgets()));
+    assert!(
+        matches!(e, LoadError::Manifest(ManifestError::InvalidField(_))),
+        "{e:?}"
+    );
+}
+
+// ---------- byte budget on over-cap responses ----------
+
+/// Returns a fixed body regardless of `max_response_bytes` — the
+/// client is not trusted to enforce the cap, so the host-side byte
+/// budget must still fire and still trace the call.
+struct UncappedBodyHttp {
+    size: usize,
+}
+
+impl HttpClient for UncappedBodyHttp {
+    fn send(
+        &self,
+        _req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let n = self.size;
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![0u8; n],
+            })
+        })
+    }
+}
+
+/// A response that blows the byte budget is rejected, but the call was
+/// still made and still spent bytes — `http_trace` must record it.
+#[tokio::test]
+async fn over_budget_response_is_still_traced() {
+    let wasm = ok(wat::parse_str(requester_wat("https://example.com/")));
+    let mut budgets = default_budgets();
+    budgets.max_bytes = 1024;
+    budgets.max_steps = 10;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&UncappedBodyHttp { size: 4096 }, None),
+    )
+    .await;
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Bytes
+            }
+        ),
+        "expected byte-cap error"
+    );
+    assert_eq!(attempt.http_calls, 1);
+    assert_eq!(attempt.http_trace.len(), 1);
+    assert_eq!(attempt.http_trace[0].status, Some(200));
+    assert_eq!(attempt.http_trace[0].bytes, 4096);
+}
+
+// ---------- guest log budget ----------
+
 /// The 129th log entry of one invocation is a typed budget failure,
 /// not silent allocation growth.
 #[tokio::test]
@@ -1525,4 +1816,294 @@ async fn guest_log_cap_stops_logger() {
     );
     assert_eq!(attempt.guest_log.len(), 128);
     assert_eq!(attempt.http_calls, 0);
+}
+
+// ---------- hardening regression tests ----------
+
+/// A guest-supplied `Host` header would let a shared-frontend edge
+/// serve a destination the manifest never permitted — the header is
+/// host-controlled, not guest-settable. Same for framing/hop-by-hop
+/// headers, which are a smuggling surface under any proxy.
+#[tokio::test]
+async fn host_controlled_headers_are_rejected() {
+    for header in [
+        "Host",
+        "Connection",
+        "Keep-Alive",
+        "Transfer-Encoding",
+        "Content-Length",
+        "TE",
+        "Trailer",
+        "Upgrade",
+        "Expect",
+        "Via",
+        "Proxy-Authorization",
+        "Proxy-Connection",
+    ] {
+        let msg = format!(
+            "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+             \"payload\":{{\"method\":\"GET\",\"url\":\"https://allowed.test/x\",\
+             \"headers\":[[\"{header}\",\"v\"]],\"body\":null}}}}"
+        );
+        let wasm = ok(wat::parse_str(raw_wat(&msg)));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for(&wasm, &["network:allowed.test"]),
+            &default_budgets(),
+        ));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "{header}"
+        );
+    }
+}
+
+/// `access_token` merged into the invoke payload is session material
+/// the guest must not echo into diagnostics — a `log` quoting it is
+/// masked, not recorded verbatim.
+#[tokio::test]
+async fn access_token_is_masked_in_guest_log() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"log\",\
+         \"payload\":{\"level\":\"info\",\"message\":\"saw tok-secret-value-9 ok\"}}",
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &[]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { attempt, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let entry = &attempt.guest_log[0];
+    assert!(!entry.message.contains("tok-secret-value-9"), "{entry:?}");
+    assert!(entry.message.contains("***"));
+}
+
+/// The same masking applies to a guest `fail` message.
+#[tokio::test]
+async fn access_token_is_masked_in_fail() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\
+         \"message\":\"abort at tok-secret-value-9\"}}",
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &[]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    match err(result) {
+        InvokeError::GuestFail { message, .. } => {
+            assert!(!message.contains("tok-secret-value-9"), "{message}");
+            assert!(message.contains("***"));
+        }
+        e => panic!("expected GuestFail, got {e:?}"),
+    }
+}
+
+/// `attempt`'s `Debug` output must not carry secrets — the field is
+/// crate-private and excluded from the impl.
+#[test]
+fn attempt_debug_does_not_leak_secrets() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let rt = ok(tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build());
+    let (http, _calls) = CannedHttp::new();
+    let invocation = rt.block_on(invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    ));
+    let dbg = format!("{:?}", invocation.attempt);
+    assert!(!dbg.contains("tok-secret-value-9"), "{dbg}");
+    assert!(!dbg.contains("secrets"), "{dbg}");
+}
+
+/// `load` must refuse modules that can never instantiate under the
+/// store limits — not admit them as valid artifacts that trap later.
+#[test]
+fn load_rejects_modules_beyond_store_limits() {
+    // Two memories: multi-memory is off in the ABI shape.
+    let wasm = ok(wat::parse_str(
+        r#"(module
+          (memory (export "memory") 1)
+          (memory 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))"#,
+    ));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "two memories"
+    );
+
+    // 4 GiB minimum memory — the store caps at `max_memory_bytes`.
+    let wasm = ok(wat::parse_str(
+        r#"(module
+          (memory (export "memory") 65536)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))"#,
+    ));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "4 GiB memory"
+    );
+
+    // 17 tables — the store allows 16.
+    let tables = "(table 1 funcref)".repeat(17);
+    let wasm = ok(wat::parse_str(format!(
+        "(module\n  (memory (export \"memory\") 1)\n  {tables}\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 0))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) (i64.const 0)))"
+    )));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "17 tables"
+    );
+}
+
+/// A manifest deserialized outside `from_json` is re-validated by
+/// `load` — the digest check runs against a policy that was verified,
+/// not just parsed.
+#[test]
+fn load_revalidates_a_deserialized_manifest() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    // `network:` names a public DNS destination or loopback — a
+    // non-loopback IP, a bare label, a TLD wildcard, or a broken name
+    // must not self-authorize.
+    for perm in [
+        "network:169.254.169.254",
+        "network:10.0.0.5",
+        "network:*.com",
+        "network:internal",
+        "network:bad..dots",
+        "network:sub.localhost",
+        "network:*.localhost",
+        "network:*.127.0.0.1",
+    ] {
+        let e = err(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &[perm])));
+        assert!(matches!(e, ManifestError::InvalidField(_)), "{perm}");
+    }
+    // And the same inputs rejected when a Manifest is materialized
+    // without going through `from_json`'s validation.
+    for perm in ["network:169.254.169.254", "network:*.com"] {
+        let mut manifest = manifest_for(&wasm, &[]);
+        manifest.permissions = vec![perm.to_string()];
+        let e = err(load(&wasm, manifest, &default_budgets()));
+        assert!(matches!(e, LoadError::Manifest(_)), "{perm}: {e:?}");
+    }
+    // The legitimate forms — dotted names and loopback literals — pass.
+    for perm in [
+        "network:example.com",
+        "network:*.googlevideo.com",
+        "network:127.0.0.1",
+        "network:localhost",
+    ] {
+        ok(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &[perm])));
+    }
+}
+
+// ---------- memory budget ----------
+
+/// Guest that tries `memory.grow 1024` from a 1-page memory with no
+/// declared `maximum`, then reports whether the grow was denied
+/// (`capped: true`) or succeeded (`capped: false`).
+fn grow_probe_wat() -> String {
+    let capped = "{\"type\":\"done\",\"result\":{\"capped\":true}}";
+    let grew = "{\"type\":\"done\",\"result\":{\"capped\":false}}";
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (local $capped i32)\n    \
+         (local.set $capped\n      \
+         (i32.lt_s (memory.grow (i32.const 1024)) (i32.const 0)))\n    \
+         (i64.or\n      \
+         (i64.shl\n        \
+         (i64.extend_i32_u\n          \
+         (select (i32.const 2048) (i32.const 2100) (local.get $capped)))\n        \
+         (i64.const 32))\n      \
+         (i64.extend_i32_u\n        \
+         (select (i32.const {}) (i32.const {}) (local.get $capped)))))\n  \
+         (data (i32.const 2048) \"{}\")\n  \
+         (data (i32.const 2100) \"{}\"))",
+        capped.len(),
+        grew.len(),
+        capped.replace('"', "\\\""),
+        grew.replace('"', "\\\""),
+    )
+}
+
+/// The memory cap is a store limiter, not a declared-maximum
+/// requirement: a guest with no `maximum` (rustc emits none) is still
+/// capped — `memory.grow` past `max_memory_bytes` returns -1.
+#[tokio::test]
+async fn memory_cap_binds_without_declared_maximum() {
+    let wasm = ok(wat::parse_str(grow_probe_wat()));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({ "capped": true }));
+}
+
+/// A declared minimum already over the cap fails `load`'s declared-
+/// resource check — the artifact is rejected before a store exists.
+#[test]
+fn memory_cap_rejects_over_cap_declared_minimum() {
+    const BIG_WAT: &str = "(module\n  (memory (export \"memory\") 1025)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 0))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) (i64.const 0)))";
+    let wasm = ok(wat::parse_str(BIG_WAT));
+    // `load` checks declared resources up front — an over-cap minimum
+    // is a load error, not a per-invoke trap.
+    let e = err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    assert!(matches!(e, LoadError::ExceedsLimits(_)), "{e:?}");
 }

@@ -789,6 +789,255 @@ async function pauseResumeSeek(): Promise<void> {
   assertEqual(seekCall.identity.queueRev, rev0 + 3);
 }
 
+// A failed queue commit rolls the engine back: the caller gets the
+// error, the published queue stays on storage's truth, and the
+// native transport call is never issued (commit precedes transport).
+async function queueCommitRollback(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const paused = await r.session.pause();
+  assert(!paused.ok, 'pause must report the failed commit');
+  assertEqual(paused.error.kind, 'transient');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'queue rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assert(snap.persistenceError !== undefined, 'persistenceError published');
+  assertEqual(calls(r, 'pause').length, 0, 'no native pause issued');
+}
+
+// A failed queue commit aborts writes still queued behind it: their
+// mutations were erased by the rollback, so each reports the boundary
+// failure rather than committing a state its mutation is absent from.
+async function queueCommitCascade(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const pPause = r.session.pause();
+  const pSeek = r.session.seekTo(9_000);
+  const [paused, seeked] = await Promise.all([pPause, pSeek]);
+  assert(!paused.ok && paused.error.kind === 'transient');
+  assert(!seeked.ok, 'queued seek must not claim a rolled-back state');
+  assertEqual(seeked.error.kind, 'superseded');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'both mutations rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assertEqual(snap.queue.positionMs, 0, 'seek position rolled back');
+  assert(snap.persistenceError !== undefined, 'persistenceError published');
+  assertEqual(calls(r, 'pause').length, 0, 'no native pause issued');
+  assertEqual(calls(r, 'seekTo').length, 0, 'no native seek issued');
+}
+
+// Each racing command commits its own post-mutation snapshot, never the
+// live engine: the earlier commit cannot carry the later mutation, so a
+// failure of the later commit rolls memory back to exactly what storage
+// holds — a restart never resurrects a command that returned an error.
+async function queueCommitIsolatesRacingMutations(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const pPause = r.session.pause();
+  const pSeek = r.session.seekTo(42_000);
+  const [paused, seeked] = await Promise.all([pPause, pSeek]);
+  assert(paused.ok, 'pause resolves');
+  assert(seeked.ok, 'seek resolves');
+  const queueCommits = r.storage.commits.filter(
+    (c) => c.batch.queue !== undefined,
+  );
+  const pauseCommit = queueCommits[queueCommits.length - 2]?.batch.queue;
+  const seekCommit = queueCommits[queueCommits.length - 1]?.batch.queue;
+  assertEqual(
+    pauseCommit?.positionMs,
+    0,
+    "pause's commit carries only its own mutation",
+  );
+  assertEqual(
+    seekCommit?.positionMs,
+    42_000,
+    "seek's commit carries its own mutation",
+  );
+  // Now fail a third mutation: memory must roll back to the committed
+  // state, and the last durable batch must agree.
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const reseek = await r.session.seekTo(9_000);
+  assert(!reseek.ok, 'failed commit reports the error');
+  assertEqual(
+    readyOf(r).queue.positionMs,
+    42_000,
+    'memory rolled back to committed state',
+  );
+  const lastQueue = r.storage.commits
+    .filter((c) => c.batch.queue !== undefined)
+    .at(-1)?.batch.queue;
+  assertEqual(
+    lastQueue?.positionMs,
+    42_000,
+    'last durable queue agrees with memory',
+  );
+}
+
+// A transition's queue write is captured and enqueued before the
+// cleanup awaits admit later commands, so a racing command's failed
+// commit rolls back over the transition without dropping its write —
+// restart must restore the new cursor, not the old one.
+async function transitionWriteSurvivesRacingCommit(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const svc: PlaybackIdentity = {
+    attemptId: 'svc-1',
+    queueRev: r.player.projections.at(-1)?.queueRev ?? 0,
+  };
+  // The transition write is captured and enqueued before the cleanup
+  // awaits admit a later command: hold the old handle's release so the
+  // handler parks there — the transition's own write already commits —
+  // then race a seek whose held commit fails afterwards: its rollback
+  // cannot invalidate the earlier transition write.
+  r.player.holdNextRelease();
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oB',
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: svc,
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'release').length,
+    1,
+    'handler parked releasing the old handle',
+  );
+  r.storage.holdNextCommit();
+  const pSeek = r.session.seekTo(9_000);
+  await pump();
+  r.player.settleRelease(ok(undefined));
+  await pump();
+  assert(
+    r.storage.settleCommit({
+      ok: false,
+      error: appError('transient', 'disk gone'),
+    }),
+    'seek write held',
+  );
+  const seeked = await pSeek;
+  assert(!seeked.ok, 'racing seek reports the failed commit');
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    'oB',
+    'transition retained in memory after rollback',
+  );
+  const transitionCommit = r.storage.commits
+    .filter((c) => c.batch.queue !== undefined)
+    .at(-1)?.batch.queue;
+  assertEqual(
+    transitionCommit?.currentOccurrenceId,
+    'oB',
+    'storage kept the transition — restart restores oB',
+  );
+  assertEqual(
+    transitionCommit?.positionMs,
+    0,
+    "transition's own snapshot, not the raced seek",
+  );
+}
+
+// A failed stop commit precedes transport teardown: the attempt stays
+// live, playback keeps reporting playing, and the rolled-back queue
+// agrees — nothing claims the item stopped.
+async function stopCommitKeepsPlayback(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const stopped = await r.session.stop();
+  assert(!stopped.ok, 'stop must report the failed commit');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'queue rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assertEqual(snap.queue.currentOccurrenceId, 'o1');
+  assert(snap.playback.type !== 'idle', 'playback untouched');
+  assertEqual(calls(r, 'release').length, 0, 'attempt never released');
+}
+
 async function previousSemantics(): Promise<void> {
   const r = rig(
     persisted({
@@ -1174,6 +1423,7 @@ async function portThrows(): Promise<void> {
       ) as Promise<Result<never>> as never,
     getDetails: () => Promise.resolve(ok([])),
     getEntity: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    artwork: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };
@@ -2643,6 +2893,14 @@ async function historyFlow(): Promise<void> {
   const snap0 = readyOf(r);
   const idA = 'identity' in snap0.playback ? snap0.playback.identity : undefined;
   assert(idA !== undefined);
+  // Listening time is accumulated from playing ticks — 'ended' alone
+  // is a completion claim, not 300 s of observed playback. Emit real
+  // ticks over the 120 s threshold (max continuous delta per tick),
+  // then end the track.
+  for (let pos = 2_500; pos <= 125_000; pos += 2_500) {
+    r.player.emit(statusEvent(idA, 'h-oA', 'playing', pos));
+    await pump(4);
+  }
   r.player.emit(statusEvent(idA, 'h-oA', 'ended', 300_000));
   await pump();
   const snap1 = readyOf(r);
@@ -3152,14 +3410,17 @@ async function reviewReloadPreservesMemory(): Promise<void> {
     signal: new CancellationSource().signal,
   });
   assert(captured.ok, 'snapshot capture failed');
-  const created = await r.session.ensureRecording(
+  // The concurrent mutation serializes behind the review op's held
+  // reload — issue it un-awaited, then settle the reload.
+  const createdPromise = r.session.ensureRecording(
     meta('itunes', 'i9', 'Roads', 'Portishead', 300_000),
   );
-  assert(created.ok, 'ensureRecording failed');
   assert(
     r.storage.settleLoad(captured),
     'review reload pending',
   );
+  const created = await createdPromise;
+  assert(created.ok, 'ensureRecording failed');
   const res = await confirmed;
   assert(res.ok, 'confirmReview failed');
   await pump();
@@ -3177,7 +3438,100 @@ async function reviewReloadPreservesMemory(): Promise<void> {
   );
 }
 
+/**
+ * Pause while a prepare is in flight: the intent lands on the queue,
+ * and the pending 'prepared' outcome holds the handle paused instead
+ * of autostarting.
+ */
+async function pauseDuringPreparing(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const enqueued = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Held', 'Artist', 300_000),
+  );
+  assert(enqueued.ok, 'enqueue failed');
+  const play = r.session.playOccurrence(enqueued.value);
+  await pump();
+  assertEqual(
+    readyOf(r).playback.type,
+    'preparing',
+    'prepare in flight',
+  );
+  const paused = await r.session.pause();
+  assert(paused.ok, 'pause during preparing holds intent');
+  assertEqual(readyOf(r).queue.mode, 'paused', 'queue paused');
+  await emitPrepared(r, 'h-paused');
+  const res = await play;
+  assert(res.ok, 'play resolved');
+  await pump();
+  assertEqual(
+    readyOf(r).playback.type,
+    'paused',
+    'prepared does not autostart a paused queue',
+  );
+  assertEqual(calls(r, 'play').length, 0, 'no play while paused');
+  const resumed = await r.session.resume();
+  assert(resumed.ok, 'resume plays the held attempt');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'playing');
+  assertEqual(calls(r, 'play').length, 1);
+}
+
+/** Seek while preparing rides on the queue position. */
+async function seekDuringPreparing(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const enqueued = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Seek', 'Artist', 300_000),
+  );
+  assert(enqueued.ok, 'enqueue failed');
+  const play = r.session.playOccurrence(enqueued.value);
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'preparing');
+  const seeked = await r.session.seekTo(42_000);
+  assert(seeked.ok, 'seek during preparing holds intent');
+  await emitPrepared(r, 'h-seek');
+  const res = await play;
+  assert(res.ok, 'play resolved');
+  await pump();
+  const playCalls = calls(r, 'play');
+  assertEqual(playCalls.length, 1, 'prepared autostarts when playing');
+  const input = playCalls[0]?.input as { positionMs?: number };
+  assertEqual(
+    input.positionMs,
+    42_000,
+    'play starts at the sought position',
+  );
+}
+
+/** A failed enqueue commit leaves queue and recordings untouched. */
+async function enqueueCommitFailureHonest(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const res = await r.session.enqueueMetadata(
+    meta('itunes', 'i9', 'Nope', 'Artist', 300_000),
+  );
+  assert(
+    !res.ok && res.error.kind === 'transient',
+    'commit failure is the op error',
+  );
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    0,
+    'failed enqueue stays out of the queue',
+  );
+  assertEqual(
+    readyOf(r).recordings.length,
+    0,
+    'failed enqueue mints no recording',
+  );
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
+  ['pauseDuringPreparing', pauseDuringPreparing],
+  ['seekDuringPreparing', seekDuringPreparing],
+  ['enqueueCommitFailureHonest', enqueueCommitFailureHonest],
   ['concurrentLikes', concurrentLikes],
   ['libraryFlow', libraryFlow],
   ['historyFlow', historyFlow],
@@ -3189,6 +3543,11 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['naturalEnded', naturalEnded],
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
+  ['queueCommitRollback', queueCommitRollback],
+  ['queueCommitCascade', queueCommitCascade],
+  ['queueCommitIsolatesRacingMutations', queueCommitIsolatesRacingMutations],
+  ['transitionWriteSurvivesRacingCommit', transitionWriteSurvivesRacingCommit],
+  ['stopCommitKeepsPlayback', stopCommitKeepsPlayback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],
   ['restartRestore', restartRestore],

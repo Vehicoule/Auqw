@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, View } from 'react-native';
+import {
+  BackHandler,
+  Linking,
+  Platform,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import * as Haptics from 'expo-haptics';
+import { NavigationBar } from 'expo-navigation-bar';
 import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
@@ -31,6 +40,7 @@ import type {
   OperationContext,
   ProviderCapability,
   ReadySession,
+  Result,
   SearchState,
   SessionState,
   SourceRef,
@@ -38,7 +48,7 @@ import type {
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
-  AppNavbar,
+  AppStack,
   CollectionScreen,
   CorrectionsScreen,
   EmptyState,
@@ -49,11 +59,15 @@ import {
   LibraryScreen,
   LoadingState,
   MiniPlayer,
+  PlatformTabs,
   PlaylistScreen,
   ProviderPickerSheet,
+  PushScreen,
   RowActionsSheet,
   SearchScreen,
   SettingsScreen,
+  SheetScreen,
+  StackItem,
   StageSheet,
   Text,
   ThemeProvider,
@@ -83,6 +97,7 @@ import type {
   DiagnosticsModel,
   LyricsModel,
   NavItemModel,
+  ProviderPickerOption,
   SearchStateModel,
   StageMode,
   TrackRowModel,
@@ -93,7 +108,7 @@ import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
 import { devRoute } from './src/dev-routes.ts';
-import { runSeamLink } from './seam-dev.ts';
+import { appFilePath, runSeamLink } from './seam-dev.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
 // set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
@@ -112,6 +127,13 @@ const NAV_ITEMS: readonly NavItemModel[] = [
 ];
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
+
+const THEME_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: 'system', label: 'system', detail: 'follow the OS' },
+  { key: 'dark', label: 'dark', detail: 'tokyo night' },
+  { key: 'light', label: 'light', detail: 'daylight' },
+  { key: 'oled', label: 'oled', detail: 'true black' },
+];
 
 type Boot =
   | { readonly type: 'loading' }
@@ -252,8 +274,10 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     [controller],
   );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
+  // OS font scale feeds textScale — accessibility sizing isn't opt-in.
+  const { fontScale } = useWindowDimensions();
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={theme} textScale={fontScale}>
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -366,6 +390,12 @@ type Overlay =
   | { readonly type: 'corrections' }
   | { readonly type: 'transfer' };
 
+/** A pushed route on the native screen stack. */
+type OverlayEntry = { readonly key: string; readonly overlay: Overlay };
+
+const entityRefKey = (ref: EntityRef): string =>
+  `${ref.provider}:${ref.kind}:${ref.id}`;
+
 type EntityFetch = {
   readonly ref: EntityRef;
   readonly page: EntityPage | null;
@@ -443,6 +473,19 @@ const IDLE_TRANSFER: TransferModel = {
   preview: null,
 };
 
+/**
+ * Session ops resolve typed errors rather than throwing — a dropped
+ * Result is a silent no-op. Keep failures observable: the `kind —
+ * message` shape is taxonomy text and carries no secrets.
+ */
+function reportResult(action: string, result: Result<unknown>): void {
+  if (!result.ok) {
+    console.warn(
+      `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
+    );
+  }
+}
+
 function Main({
   controller,
   state,
@@ -459,12 +502,24 @@ function Main({
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
+  // Recent searches: session-scoped, newest first — persisting them
+  // would be a storage-schema decision, so they die with the app.
+  const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
-  // Library-world overlay stack: one route deep — collection list,
-  // playlist editor, or provider entity page above the tab screen.
-  const [overlay, setOverlay] = useState<Overlay | null>(null);
-  const [entityFetch, setEntityFetch] = useState<EntityFetch | null>(null);
+  // Library-world overlay stack: pushed routes — collection list,
+  // playlist editor, provider entity page — rendered as native push
+  // screens above the tab shell. Entity pages keep a fetch per ref so
+  // popping back to a deeper screen restores its loaded content.
+  const [overlayStack, setOverlayStack] = useState<readonly OverlayEntry[]>(
+    [],
+  );
+  const overlayCounter = useRef(0);
+  const [entityFetches, setEntityFetches] = useState<
+    Readonly<Record<string, EntityFetch>>
+  >({});
+  const overlay = overlayStack[overlayStack.length - 1]?.overlay ?? null;
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   // Live download ledger — subscribed once; chips + the downloads
@@ -509,10 +564,18 @@ function Main({
     // has landed, a delayed snapshot resolving later is stale and
     // must not overwrite it.
     let edged = false;
-    const unsub = controller.connectivity.subscribe((snap) => {
-      edged = true;
-      setOnline(snap.online);
-    });
+    // Registration itself can throw (e.g. Android's callback quota) —
+    // a failed watch must not take the mounted shell down; the
+    // snapshot path below still seeds `online`.
+    let unsub: () => void = () => {};
+    try {
+      unsub = controller.connectivity.subscribe((snap) => {
+        edged = true;
+        setOnline(snap.online);
+      });
+    } catch {
+      // Edge-less mode: snapshot-only honesty.
+    }
     void controller.connectivity.snapshot().then((snap) => {
       if (!disposed && !edged && snap.ok) {
         setOnline(snap.value.online);
@@ -670,6 +733,43 @@ function Main({
     setSearchState(search.snapshot());
     return search.subscribe(setSearchState);
   }, [search]);
+
+  const runSearch = useCallback(
+    (q: string) => {
+      const trimmed = q.trim();
+      if (trimmed === '') {
+        search?.cancel();
+        return;
+      }
+      void search?.search({
+        query: trimmed,
+        limit: SEARCH_LIMIT,
+        storefront: state.settings.storefront,
+      });
+    },
+    [search, state.settings.storefront],
+  );
+
+  const recordRecentSearch = useCallback((q: string) => {
+    const trimmed = q.trim();
+    if (trimmed === '') {
+      return;
+    }
+    setSearchRecents((prev) =>
+      [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
+    );
+  }, []);
+
+  // Live results: keystrokes debounce into a real search; an emptied
+  // box cancels in-flight work and lands back on the idle/recents.
+  useEffect(() => {
+    if (query.trim() === '') {
+      search?.cancel();
+      return undefined;
+    }
+    const timer = setTimeout(() => runSearch(query), 350);
+    return () => clearTimeout(timer);
+  }, [query, search, runSearch]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
@@ -832,77 +932,81 @@ function Main({
     // localTick re-reads local.recordings() after a folder mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, downloads, online, controller, localTick]);
-  const collectionModel = useMemo(
-    () =>
-      overlay?.type === 'collection'
-        ? toCollectionModel(libraryModel, overlay.key)
-        : null,
-    [libraryModel, overlay],
-  );
-  const playlistModel = useMemo(() => {
-    if (overlay?.type !== 'playlist') {
-      return null;
-    }
-    const model = toPlaylistModel({
-      playlistId: overlay.playlistId,
-      playlists: state.playlists,
-      playlistEntries: state.playlistEntries,
-      recordings: state.recordings,
-      likes: state.likes,
-    });
-    const playingId =
-      state.playback.type === 'idle' ? null : state.playback.recordingId;
-    if (model === null) {
-      return model;
-    }
-    const local = controller.local();
-    const offline = online === false;
-    return {
-      ...model,
-      entries: model.entries.map((entry) => {
-        const chip =
-          downloadChipFor(entry.recordingId) ?? entry.row.download;
-        const owned =
-          chip === 'stored' || local?.uriFor(entry.recordingId) != null;
-        const offlineRow =
-          offline && !owned
-            ? { state: 'unavailable' as const, note: 'offline' }
-            : {};
-        return {
-          ...entry,
-          row: {
-            ...entry.row,
-            playing:
-              entry.recordingId === playingId ? true : entry.row.playing,
-            download: chip,
-            ...offlineRow,
-          },
-        };
-      }),
-    };
+  const playlistModelFor = useCallback(
+    (playlistId: string) => {
+      const model = toPlaylistModel({
+        playlistId,
+        playlists: state.playlists,
+        playlistEntries: state.playlistEntries,
+        recordings: state.recordings,
+        likes: state.likes,
+      });
+      const playingId =
+        state.playback.type === 'idle' ? null : state.playback.recordingId;
+      if (model === null) {
+        return model;
+      }
+      const local = controller.local();
+      const offline = online === false;
+      return {
+        ...model,
+        entries: model.entries.map((entry) => {
+          const chip =
+            downloadChipFor(entry.recordingId) ?? entry.row.download;
+          const owned =
+            chip === 'stored' ||
+            local?.uriFor(entry.recordingId) != null;
+          const offlineRow =
+            offline && !owned
+              ? { state: 'unavailable' as const, note: 'offline' }
+              : {};
+          return {
+            ...entry,
+            row: {
+              ...entry.row,
+              playing:
+                entry.recordingId === playingId
+                  ? true
+                  : entry.row.playing,
+              download: chip,
+              ...offlineRow,
+            },
+          };
+        }),
+      };
+    },
     // localTick re-reads local.uriFor after a folder mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlay, state, downloads, downloadChipFor, online, controller, localTick]);
-  const entityModel = useMemo(
-    () =>
+    [state, downloads, downloadChipFor, online, controller, localTick],
+  );
+  const entityModelFor = useCallback(
+    (fetch: EntityFetch | null) =>
       toEntityModel({
-        page: entityFetch?.page ?? null,
-        error: entityFetch?.error ?? null,
+        page: fetch?.page ?? null,
+        error: fetch?.error ?? null,
         likes: state.likes,
         entitySourceRefs: state.entitySourceRefs,
-        loadingMore: entityFetch?.loadingMore ?? false,
+        loadingMore: fetch?.loadingMore ?? false,
       }),
-    [entityFetch, state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
-  // resultMeta for search results.
+  // resultMeta for search results — namespaced per stack entry so two
+  // entity screens in the stack never collide.
   useEffect(() => {
     const map = entityMeta.current;
     map.clear();
-    entityFetch?.page?.items.forEach((meta, index) => {
-      map.set(toSearchRowModel(meta, index).key, meta);
-    });
-  }, [entityFetch?.page]);
+    for (const entry of overlayStack) {
+      if (entry.overlay.type !== 'entity') {
+        continue;
+      }
+      const fetch = entityFetches[entityRefKey(entry.overlay.ref)];
+      fetch?.page?.items.forEach((meta, index) => {
+        map.set(`${entry.key}:${toSearchRowModel(meta, index).key}`, meta);
+      });
+    }
+  }, [overlayStack, entityFetches]);
+
   const pickerItems = useMemo(
     () =>
       libraryModel.cards
@@ -982,6 +1086,7 @@ function Main({
     return toHomeModel({
       recordings: state.recordings,
       likes: state.likes,
+      playback: state.playback,
       suggestions:
         searchState.type === 'content' ? searchState.page.items : [],
 
@@ -1111,18 +1216,17 @@ function Main({
       }
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
+        recordRecentSearch(query);
         void session.addAndPlay(meta);
       }
     },
-    [session, canPlayMeta, playRecording],
+    [session, canPlayMeta, playRecording, query, recordRecentSearch],
   );
 
   const onSettingsSelect = useCallback(
     (key: string) => {
       if (key === 'theme') {
-        const i = THEME_ORDER.indexOf(state.settings.theme);
-        const theme = THEME_ORDER[(i + 1) % THEME_ORDER.length] ?? 'system';
-        void session.updateSettings({ ...state.settings, theme });
+        setThemePickerOpen(true);
         return;
       }
       if (
@@ -1137,7 +1241,7 @@ function Main({
       if (key === 'exportLibrary' || key === 'importLibrary') {
         importText.current = null;
         setTransfer(IDLE_TRANSFER);
-        setOverlay({ type: 'transfer' });
+        pushOverlay({ type: 'transfer' });
         return;
       }
       if (key === 'addLocalFolder') {
@@ -1238,10 +1342,12 @@ function Main({
     ) {
       return;
     }
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     void (playing ? session.pause() : session.resume());
   }, [session, playing, currentRecordingId, canPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       void session.toggleLike(currentRecordingId);
     }
   }, [session, currentRecordingId]);
@@ -1255,6 +1361,13 @@ function Main({
       }
     },
     [session, state.queue],
+  );
+
+  const onMoveQueueItemTo = useCallback(
+    (occurrenceId: string, toIndex: number) => {
+      void session.moveOccurrence(occurrenceId, toIndex);
+    },
+    [session],
   );
 
   // ---- lyrics (Stage lyrics mode — live read, cancel superseded) --
@@ -1363,12 +1476,14 @@ function Main({
     const ref: SourceRef | null =
       current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
     if (ref !== null) {
-      void session.startRadio(ref);
+      void session
+        .startRadio(ref)
+        .then((r) => reportResult('start radio', r));
     }
   }, [session, state, currentRecordingId]);
 
   const onStopRadio = useCallback(() => {
-    session.stopRadio();
+    reportResult('stop radio', session.stopRadio());
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
@@ -1610,38 +1725,140 @@ function Main({
 
   // ---- library world: overlay routes + entity fetch --------------
 
-  const closeOverlay = useCallback(() => {
-    setOverlay(null);
-    setEntityFetch(null);
+  const pushOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack((stack) => [
+      ...stack,
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
   }, []);
 
-  const openEntity = useCallback(
+  const resetOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack([
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
+  }, []);
+
+  /** Pop the top route — every screen's own back affordance. */
+  const closeOverlay = useCallback(() => {
+    setOverlayStack((stack) => stack.slice(0, -1));
+  }, []);
+
+  /** Native gesture/back dismissal removes a screen and all above it. */
+  const dismissOverlay = useCallback((key: string) => {
+    setOverlayStack((stack) => {
+      const index = stack.findIndex((entry) => entry.key === key);
+      return index === -1 ? stack : stack.slice(0, index);
+    });
+  }, []);
+
+  const clearOverlays = useCallback(() => {
+    setOverlayStack([]);
+    setEntityFetches({});
+  }, []);
+
+  const loadEntityPage = useCallback(
     (ref: EntityRef) => {
-      setOverlay({ type: 'entity', ref });
-      setEntityFetch({
-        ref,
-        page: null,
-        error: null,
-        loading: true,
-        loadingMore: false,
-      });
+      const key = entityRefKey(ref);
+      setEntityFetches((prev) => ({
+        ...prev,
+        [key]: {
+          ref,
+          page: null,
+          error: null,
+          loading: true,
+          loadingMore: false,
+        },
+      }));
       void session.getEntityPage(ref).then((result) => {
-        setEntityFetch((prev) =>
-          prev === null || prev.ref !== ref
-            ? prev
-            : result.ok
-              ? { ...prev, page: result.value, error: null, loading: false }
-              : { ...prev, page: null, error: result.error, loading: false },
-        );
+        setEntityFetches((prev) => {
+          const cur = prev[key];
+          if (cur === undefined || cur.ref !== ref) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [key]: result.ok
+              ? { ...cur, page: result.value, error: null, loading: false }
+              : { ...cur, page: null, error: result.error, loading: false },
+          };
+        });
       });
     },
     [session],
   );
 
+  const openEntity = useCallback(
+    (ref: EntityRef) => {
+      // Re-opening the entity already on top just reloads it.
+      const top = overlayStack[overlayStack.length - 1]?.overlay;
+      if (
+        top?.type === 'entity' &&
+        entityRefKey(top.ref) === entityRefKey(ref)
+      ) {
+        loadEntityPage(ref);
+        return;
+      }
+      pushOverlay({ type: 'entity', ref });
+      loadEntityPage(ref);
+    },
+    [overlayStack, pushOverlay, loadEntityPage],
+  );
+
+  // Android hardware back: native stack items dismiss themselves
+  // (nativeBackButtonDismissalEnabled) and sync state via onDismissed;
+  // this chain is the fallback ordering for anything the native side
+  // didn't consume — sheet → overlay → stage → tab → exit.
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (actionsFor !== null) {
+        setActionsFor(null);
+        return true;
+      }
+      if (pickerFor !== null) {
+        setPickerFor(null);
+        return true;
+      }
+      if (providerSlot !== null) {
+        setProviderSlot(null);
+        return true;
+      }
+      if (overlayStack.length > 0) {
+        closeOverlay();
+        return true;
+      }
+      if (expanded) {
+        setExpanded(false);
+        return true;
+      }
+      if (tab !== 'home') {
+        setTab('home');
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [
+    actionsFor,
+    pickerFor,
+    providerSlot,
+    overlayStack,
+    expanded,
+    tab,
+    closeOverlay,
+  ]);
+
   const onLoadMore = useCallback(() => {
-    const cur = entityFetch;
+    const top = overlay?.type === 'entity' ? overlay.ref : null;
+    const key = top === null ? null : entityRefKey(top);
+    const cur = key === null ? null : entityFetches[key] ?? null;
     const continuation = cur?.page?.continuation;
     if (
+      key === null ||
       cur === null ||
       cur.page === null ||
       continuation == null ||
@@ -1662,14 +1879,25 @@ function Main({
       kind: cur.ref.kind,
       id: continuation,
     };
-    setEntityFetch({ ...cur, loadingMore: true });
+    setEntityFetches((prev) => ({
+      ...prev,
+      [key]: { ...cur, loadingMore: true },
+    }));
     void session.getEntityPage(more).then((result) => {
-      setEntityFetch((latest) => {
-        if (latest === null || latest.ref !== cur.ref || latest.page === null) {
-          return latest;
+      setEntityFetches((prev) => {
+        const latest = prev[key];
+        if (
+          latest === undefined ||
+          latest.ref !== cur.ref ||
+          latest.page === null
+        ) {
+          return prev;
         }
         if (!result.ok) {
-          return { ...latest, error: result.error, loadingMore: false };
+          return {
+            ...prev,
+            [key]: { ...latest, error: result.error, loadingMore: false },
+          };
         }
         const seen = new Set(
           latest.page.items.map(
@@ -1684,17 +1912,20 @@ function Main({
             ),
         );
         return {
-          ...latest,
-          page: {
-            ...result.value,
-            items: [...latest.page.items, ...fresh],
+          ...prev,
+          [key]: {
+            ...latest,
+            page: {
+              ...result.value,
+              items: [...latest.page.items, ...fresh],
+            },
+            error: null,
+            loadingMore: false,
           },
-          error: null,
-          loadingMore: false,
         };
       });
     });
-  }, [session, entityFetch]);
+  }, [session, overlay, entityFetches]);
 
   const playCollectionRows = useCallback(
     (rows: readonly { recordingId: string }[]) => {
@@ -1712,65 +1943,79 @@ function Main({
     [session, canPlay],
   );
 
-  const playPlaylist = useCallback(() => {
-    if (playlistModel === null) {
-      return;
-    }
-    const playable = playlistModel.entries.filter((entry) =>
-      canPlay(entry.recordingId),
-    );
-    if (playable.length === 0) {
-      return;
-    }
-    void session.playRecordings(
-      playable.map((entry) => ({
-        recordingId: entry.recordingId,
-        // A provider pin beats owned bytes in #pickRef — drop it
-        // when bytes exist so downloads actually get played.
-        selectedRef: isOwned(entry.recordingId) ? null : entry.selectedRef,
-      })),
-    );
-  }, [session, playlistModel, isOwned, canPlay]);
+  const playPlaylist = useCallback(
+    (model: ReturnType<typeof playlistModelFor>) => {
+      if (model === null) {
+        return;
+      }
+      const playable = model.entries.filter((entry) =>
+        canPlay(entry.recordingId),
+      );
+      if (playable.length === 0) {
+        return;
+      }
+      void session.playRecordings(
+        playable.map((entry) => ({
+          recordingId: entry.recordingId,
+          // A provider pin beats owned bytes in #pickRef — drop it
+          // when bytes exist so downloads actually get played.
+          selectedRef: isOwned(entry.recordingId)
+            ? null
+            : entry.selectedRef,
+        })),
+      );
+    },
+    [session, isOwned, canPlay],
+  );
 
-  const playlistDownload = useMemo(() => {
-    if (playlistModel === null) {
-      return { state: 'none' as const, requests: [] };
-    }
-    const requests = playlistModel.entries.flatMap((entry) => {
-      const sourceRef = downloadRefFor(entry.recordingId);
-      return sourceRef === null
-        ? []
-        : [{ recordingId: entry.recordingId, sourceRef }];
-    });
-    // 'all' means every entry is owned — a stored download or a
-    // local file both count; only-downloadable entries gate it.
-    const allStored =
-      playlistModel.entries.length > 0 &&
-      playlistModel.entries.every((entry) => isOwned(entry.recordingId));
-    const anyTracked = playlistModel.entries.some(
-      (entry) =>
-        controller.downloads.recordFor(entry.recordingId) !== null ||
-        isOwned(entry.recordingId),
-    );
-    return {
-      state: allStored
-        ? ('all' as const)
-        : anyTracked
-          ? ('partial' as const)
-          : ('none' as const),
-      requests,
-    };
-  }, [playlistModel, downloads, controller, downloadRefFor, isOwned]);
+  const playlistDownloadFor = useCallback(
+    (model: ReturnType<typeof playlistModelFor>) => {
+      if (model === null) {
+        return { state: 'none' as const, requests: [] };
+      }
+      const requests = model.entries.flatMap((entry) => {
+        const sourceRef = downloadRefFor(entry.recordingId);
+        return sourceRef === null
+          ? []
+          : [{ recordingId: entry.recordingId, sourceRef }];
+      });
+      // 'all' means every entry is owned — a stored download or a
+      // local file both count; only-downloadable entries gate it.
+      const allStored =
+        model.entries.length > 0 &&
+        model.entries.every((entry) => isOwned(entry.recordingId));
+      const anyTracked = model.entries.some(
+        (entry) =>
+          controller.downloads.recordFor(entry.recordingId) !== null ||
+          isOwned(entry.recordingId),
+      );
+      return {
+        state: allStored
+          ? ('all' as const)
+          : anyTracked
+            ? ('partial' as const)
+            : ('none' as const),
+        requests,
+      };
+    },
+    // downloads/localTick bump re-derives ownership; downloadRefFor and
+    // isOwned already capture the pieces they read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [downloads, localTick, controller, downloadRefFor, isOwned],
+  );
 
-  const onPlaylistDownloadAll = useCallback(() => {
-    if (playlistDownload.requests.length === 0) {
-      return;
-    }
-    void controller.downloads.requestAll(
-      playlistDownload.requests,
-      new CancellationSource().signal,
-    );
-  }, [controller, playlistDownload]);
+  const onPlaylistDownloadAll = useCallback(
+    (requests: readonly { recordingId: string; sourceRef: SourceRef }[]) => {
+      if (requests.length === 0) {
+        return;
+      }
+      void controller.downloads.requestAll(
+        requests,
+        new CancellationSource().signal,
+      );
+    },
+    [controller],
+  );
 
   const addToPlaylist = useCallback(
     async (playlistId: string, target: ActionTarget) => {
@@ -1779,14 +2024,22 @@ function Main({
           ? target.recordingId
           : await session
             .ensureRecording(target.meta)
-            .then((r) => (r.ok ? r.value : null));
+            .then((r) => {
+              if (!r.ok) {
+                reportResult('prepare track', r);
+              }
+              return r.ok ? r.value : null;
+            });
       if (recordingId === null) {
         return;
       }
-      await session.addPlaylistEntry(
-        playlistId,
-        recordingId,
-        target.kind === 'metadata' ? target.meta.sourceRef : null,
+      reportResult(
+        'add to playlist',
+        await session.addPlaylistEntry(
+          playlistId,
+          recordingId,
+          target.kind === 'metadata' ? target.meta.sourceRef : null,
+        ),
       );
     },
     [session],
@@ -1807,7 +2060,11 @@ function Main({
     (name: string) => {
       const target = pickerFor;
       void session.createPlaylist(name).then((created) => {
-        if (created.ok && target !== null) {
+        if (!created.ok) {
+          reportResult('create playlist', created);
+          return;
+        }
+        if (target !== null) {
           void addToPlaylist(created.value, target);
         }
       });
@@ -1824,10 +2081,18 @@ function Main({
         return;
       }
       switch (key) {
+        case 'like':
+          if (target.kind === 'recording') {
+            void session
+              .toggleLike(target.recordingId)
+              .then((r) => reportResult('toggle like', r));
+          }
+          break;
         case 'enqueue':
           void (target.kind === 'recording'
             ? session.enqueueRecording(target.recordingId)
-            : session.enqueueMetadata(target.meta));
+            : session.enqueueMetadata(target.meta)
+          ).then((r) => reportResult('add to queue', r));
           break;
         case 'add':
           setPickerFor(target);
@@ -1847,7 +2112,9 @@ function Main({
               : (state.recordings.find((r) => r.id === target.recordingId)
                 ?.sourceRefs[0] ?? null);
           if (ref !== null) {
-            void session.startRadio(ref);
+            void session
+              .startRadio(ref)
+              .then((r) => reportResult('start radio', r));
           }
           break;
         }
@@ -1871,7 +2138,7 @@ function Main({
   const onOpenCard = useCallback(
     (card: { playlistId: string | null; entityRef: EntityRef | null }) => {
       if (card.playlistId !== null) {
-        setOverlay({ type: 'playlist', playlistId: card.playlistId });
+        pushOverlay({ type: 'playlist', playlistId: card.playlistId });
       } else if (card.entityRef !== null) {
         openEntity(card.entityRef);
       }
@@ -1882,9 +2149,11 @@ function Main({
   const onCreatePlaylist = useCallback(
     (name: string) => {
       void session.createPlaylist(name).then((created) => {
-        if (created.ok) {
-          setOverlay({ type: 'playlist', playlistId: created.value });
+        if (!created.ok) {
+          reportResult('create playlist', created);
+          return;
         }
+        pushOverlay({ type: 'playlist', playlistId: created.value });
       });
     },
     [session],
@@ -1934,8 +2203,14 @@ function Main({
         downloadRefFor: refFor,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
-      const [verb, qs] = body.split('?');
-      const params = new URLSearchParams(qs ?? '');
+      // Split on the first '?' only — param values may embed '?' of
+      // their own (import paths, pasted URLs), and `split('?')` would
+      // truncate them.
+      const queryIndex = body.indexOf('?');
+      const verb = queryIndex === -1 ? body : body.slice(0, queryIndex);
+      const params = new URLSearchParams(
+        queryIndex === -1 ? '' : body.slice(queryIndex + 1),
+      );
       switch (verb) {
         case 'open': {
           const target = params.get('tab') ?? 'home';
@@ -1948,17 +2223,16 @@ function Main({
           const playlistId = params.get('playlist');
           const collection = params.get('collection');
           if (playlistId !== null) {
-            setOverlay({ type: 'playlist', playlistId });
+            resetOverlay({ type: 'playlist', playlistId });
           } else if (
             collection === 'liked' ||
             collection === 'top50' ||
             collection === 'history' ||
             collection === 'downloads'
           ) {
-            setOverlay({ type: 'collection', key: collection });
+            resetOverlay({ type: 'collection', key: collection });
           } else {
-            setOverlay(null);
-            setEntityFetch(null);
+            clearOverlays();
           }
           break;
         }
@@ -1974,33 +2248,8 @@ function Main({
           ) {
             const ref: EntityRef = { provider, kind, id };
             setTab('library');
-            setOverlay({ type: 'entity', ref });
-            setEntityFetch({
-              ref,
-              page: null,
-              error: null,
-              loading: true,
-              loadingMore: false,
-            });
-            void s.getEntityPage(ref).then((result) => {
-              setEntityFetch((prev) =>
-                prev === null || prev.ref !== ref
-                  ? prev
-                  : result.ok
-                    ? {
-                      ...prev,
-                      page: result.value,
-                      error: null,
-                      loading: false,
-                    }
-                    : {
-                      ...prev,
-                      page: null,
-                      error: result.error,
-                      loading: false,
-                    },
-              );
-            });
+            resetOverlay({ type: 'entity', ref });
+            loadEntityPage(ref);
           }
           break;
         }
@@ -2021,34 +2270,34 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s.addAndPlay(meta);
+            void s.addAndPlay(meta).then((r) => reportResult('play result', r));
           }
           break;
         }
         case 'next':
-          void s.next();
+          void s.next().then((r) => reportResult('next', r));
           break;
         case 'previous':
-          void s.previous();
+          void s.previous().then((r) => reportResult('previous', r));
           break;
         case 'pause':
-          void s.pause();
+          void s.pause().then((r) => reportResult('pause', r));
           break;
         case 'resume':
-          void s.resume();
+          void s.resume().then((r) => reportResult('resume', r));
           break;
         case 'like-current':
           if (st.type === 'ready' && st.playback.type !== 'idle') {
             const id = st.playback.recordingId;
             if (id !== null) {
-              void s.toggleLike(id);
+              void s.toggleLike(id).then((r) => reportResult('toggle like', r));
             }
           }
           break;
         case 'seek': {
           const ms = Number(params.get('ms') ?? '0');
           if (Number.isSafeInteger(ms) && ms >= 0) {
-            void s.seekTo(ms);
+            void s.seekTo(ms).then((r) => reportResult('seek', r));
           }
           break;
         }
@@ -2097,14 +2346,14 @@ function Main({
           if (radioP !== null) {
             next.radioProvider = radioP === 'auto' ? null : radioP;
           }
-          void s.updateSettings(next);
+          void s.updateSettings(next).then((r) => reportResult('provider', r));
           break;
         }
         case 'corrections':
           // auqw://corrections — the review queue rides the settings
           // tab's overlay stack like a pushed settings detail.
           setTab('settings');
-          setOverlay({ type: 'corrections' });
+          resetOverlay({ type: 'corrections' });
           break;
         case 'review': {
           // auqw://review?list — dumps the pending queue to logcat.
@@ -2133,11 +2382,17 @@ function Main({
           const undoId = params.get('undo');
           if (confirmId !== null) {
             const candidate = Number(params.get('candidate') ?? '0');
-            void s.confirmReview(confirmId, candidate);
+            void s
+              .confirmReview(confirmId, candidate)
+              .then((r) => reportResult('confirm review', r));
           } else if (rejectId !== null) {
-            void s.rejectReview(rejectId);
+            void s
+              .rejectReview(rejectId)
+              .then((r) => reportResult('reject review', r));
           } else if (undoId !== null) {
-            void s.undoReview(undoId);
+            void s
+              .undoReview(undoId)
+              .then((r) => reportResult('undo review', r));
           }
           break;
         }
@@ -2172,7 +2427,7 @@ function Main({
         case 'downloads':
           // auqw://downloads — open the downloads collection.
           setTab('library');
-          setOverlay({ type: 'collection', key: 'downloads' });
+          resetOverlay({ type: 'collection', key: 'downloads' });
           console.log(
             `[journey] downloads=${ctl.downloads.list().length} rows`,
           );
@@ -2264,10 +2519,20 @@ function Main({
           // preview stage; ?apply-import applies the staged document —
           // the two legs mirror the interactive preview→confirm flow.
           setTab('settings');
-          setOverlay({ type: 'transfer' });
+          resetOverlay({ type: 'transfer' });
           const importPath = params.get('import');
           if (importPath !== null) {
             importText.current = null;
+            // A deep link must not read outside the app's own
+            // document/cache roots — anywhere else is a file-read
+            // primitive reachable by any intent sender. The fence
+            // (alias roots, dot-segment normalization, separator
+            // boundary) lives in seam-dev.ts.
+            const allowed = appFilePath(importPath) !== null;
+            if (!allowed) {
+              console.log('[journey] transfer import refused: outside app dirs');
+              break;
+            }
             setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
             void (async () => {
               try {
@@ -2319,7 +2584,7 @@ function Main({
           break;
         }
         case 'stop-radio':
-          void s.stopRadio();
+          reportResult('stop radio', s.stopRadio());
           break;
         default:
           break;
@@ -2342,12 +2607,15 @@ function Main({
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
         <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <NavigationBar
+          style={theme.scheme === 'light' ? 'dark' : 'light'}
+        />
         <GalleryScreen />
       </View>
     );
   }
-  const screen = (() => {
-    switch (tab) {
+  const renderTabScreen = (key: string) => {
+    switch (key) {
       case 'explore':
         return (
           <SearchScreen
@@ -2355,30 +2623,26 @@ function Main({
             query={query}
             topInset={topInset}
             onQueryChange={setQuery}
-            onSubmit={() =>
-              void search?.search({
-                query,
-                limit: SEARCH_LIMIT,
-                storefront: state.settings.storefront,
-              })
-            }
+            onSubmit={() => {
+              recordRecentSearch(query);
+              runSearch(query);
+            }}
             onCancel={() => {
               setQuery('');
               search?.cancel();
             }}
-            onRetry={() =>
-              void search?.search({
-                query: searchModel.query,
-                limit: SEARCH_LIMIT,
-                storefront: state.settings.storefront,
-              })
-            }
+            onRetry={() => runSearch(searchModel.query)}
             onResultPress={onResultPress}
             onContext={(row) => {
               const meta = resultMeta.current.get(row.key);
               if (meta !== undefined) {
                 setActionsFor({ kind: 'metadata', meta });
               }
+            }}
+            recents={searchRecents}
+            onRecentPress={(recent) => {
+              setQuery(recent);
+              recordRecentSearch(recent);
             }}
           />
         );
@@ -2393,7 +2657,7 @@ function Main({
               setActionsFor({ kind: 'recording', recordingId: id })
             }
             onOpenCollection={(key) =>
-              setOverlay({ type: 'collection', key })
+              pushOverlay({ type: 'collection', key })
             }
             onPlayCollection={(key) =>
               playCollectionRows(libraryModel.collectionRows[key])
@@ -2415,7 +2679,7 @@ function Main({
             onSelectRow={onSettingsSelect}
             onToggleRow={onSettingsToggle}
             onOpenCorrections={() =>
-              setOverlay({ type: 'corrections' })
+              pushOverlay({ type: 'corrections' })
             }
           />
         );
@@ -2425,23 +2689,23 @@ function Main({
             model={homeModel}
             topInset={topInset}
             onPressCard={(card) => void playRecording(card.key)}
+            onResume={() => void session.resume()}
           />
         );
     }
-  })();
+  };
 
-  const overlayScreen = (() => {
-    if (overlay === null) {
-      return null;
-    }
-    switch (overlay.type) {
-      case 'collection':
-        return collectionModel === null ? null : (
+  const renderOverlayEntry = (entry: OverlayEntry) => {
+    const current = entry.overlay;
+    switch (current.type) {
+      case 'collection': {
+        const model = toCollectionModel(libraryModel, current.key);
+        return model === null ? null : (
           <CollectionScreen
-            model={collectionModel}
+            model={model}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={() => playCollectionRows(collectionModel.rows)}
+            onPlayAll={() => playCollectionRows(model.rows)}
             onPressItem={(row) => void playRecording(row.recordingId)}
             onToggleLike={(row) => void session.toggleLike(row.recordingId)}
             onContext={(row) =>
@@ -2449,25 +2713,32 @@ function Main({
             }
           />
         );
-      case 'playlist':
+      }
+      case 'playlist': {
+        const playlistModel = playlistModelFor(current.playlistId);
         return (
           <PlaylistScreen
             model={playlistModel}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={playPlaylist}
-            onDownloadAll={onPlaylistDownloadAll}
-            downloadAllState={playlistDownload.state}
-            onRename={(name) => {
-              if (overlay.type === 'playlist') {
-                void session.renamePlaylist(overlay.playlistId, name);
-              }
-            }}
+            onPlayAll={() => playPlaylist(playlistModel)}
+            onDownloadAll={() =>
+              onPlaylistDownloadAll(playlistDownloadFor(playlistModel).requests)
+            }
+            downloadAllState={playlistDownloadFor(playlistModel).state}
+            onRename={(name) =>
+              void session
+                .renamePlaylist(current.playlistId, name)
+                .then((r) => reportResult('rename playlist', r))
+            }
             onDelete={() => {
-              if (overlay.type === 'playlist') {
-                void session.deletePlaylist(overlay.playlistId);
-                closeOverlay();
-              }
+              void Haptics.notificationAsync(
+                Haptics.NotificationFeedbackType.Warning,
+              );
+              void session
+                .deletePlaylist(current.playlistId)
+                .then((r) => reportResult('delete playlist', r));
+              dismissOverlay(entry.key);
             }}
             onPressEntry={(entry) => {
               if (!canPlay(entry.recordingId)) {
@@ -2490,55 +2761,82 @@ function Main({
               })
             }
             onRemoveEntry={(entry) =>
-              void session.removePlaylistEntry(entry.entryId)
+              void session
+                .removePlaylistEntry(entry.entryId)
+                .then((r) => reportResult('remove track', r))
             }
-            onMoveEntry={(entry, direction) => {
+            onMoveEntry={(move, direction) => {
               if (playlistModel === null) {
                 return;
               }
               const index = playlistModel.entries.findIndex(
-                (e) => e.entryId === entry.entryId,
+                (e) => e.entryId === move.entryId,
               );
               const sibling = playlistModel.entries[index + direction];
               if (sibling === undefined) {
                 return;
               }
-              void session.reorderPlaylistEntry(
-                entry.entryId,
-                direction === -1
-                  ? { before: sibling.entryId }
-                  : { after: sibling.entryId },
-              );
+              void session
+                .reorderPlaylistEntry(
+                  move.entryId,
+                  direction === -1
+                    ? { before: sibling.entryId }
+                    : { after: sibling.entryId },
+                )
+                .then((r) => reportResult('reorder playlist', r));
             }}
           />
         );
+      }
       case 'entity': {
-        const entityId = entityIdForRef(state.entitySourceRefs, overlay.ref);
+        const fetch = entityFetches[entityRefKey(current.ref)] ?? null;
+        const entityId = entityIdForRef(
+          state.entitySourceRefs,
+          current.ref,
+        );
+        const metaFor = (row: TrackRowModel) =>
+          entityMeta.current.get(`${entry.key}:${row.key}`);
         return (
           <EntityScreen
-            model={entityModel}
+            model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
+            onPlayAll={() => {
+              const metas = entityModelFor(fetch)
+                .items.map((row) => metaFor(row))
+                .filter(
+                  (m): m is TrackMetadata => m !== undefined,
+                );
+              void session.playMetadata(metas);
+            }}
+            onShuffleAll={() => {
+              const metas = entityModelFor(fetch)
+                .items.map((row) => metaFor(row))
+                .filter(
+                  (m): m is TrackMetadata => m !== undefined,
+                );
+              void session.playMetadata(metas, { shuffle: true });
+            }}
             onToggleLike={
               entityId === null
                 ? undefined
                 : () =>
-                  void session.toggleEntityLike(overlay.ref.kind, entityId)
+                  void session.toggleEntityLike(current.ref.kind, entityId)
             }
             onPressItem={(row) => {
-              const meta = entityMeta.current.get(row.key);
+              const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
                 void session.addAndPlay(meta);
               }
             }}
             onContext={(row) => {
-              const meta = entityMeta.current.get(row.key);
+              const meta = metaFor(row);
               if (meta !== undefined) {
                 setActionsFor({ kind: 'metadata', meta });
               }
             }}
             onLoadMore={onLoadMore}
-            onRetry={() => openEntity(overlay.ref)}
+            onRetry={() => loadEntityPage(current.ref)}
           />
         );
       }
@@ -2549,6 +2847,7 @@ function Main({
             topInset={topInset}
             onBack={closeOverlay}
             onFilter={setReviewFilter}
+            onRetry={loadReviews}
             onConfirm={(reviewId, candidateIndex) =>
               reviewOp(() => session.confirmReview(reviewId, candidateIndex))
             }
@@ -2575,188 +2874,263 @@ function Main({
       default:
         return null;
     }
-  })();
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-      <View style={{ flex: 1 }}>
-        {overlayScreen ?? screen}
-        {online === false && (
-          <View
-            style={{
-              position: 'absolute',
-              top: topInset + 4,
-              alignSelf: 'center',
-              paddingHorizontal: 12,
-              paddingVertical: 5,
-              borderRadius: 999,
-              backgroundColor: theme.colors.raised,
-              borderWidth: theme.strokes.hairline,
-              borderColor: theme.colors.hairline,
+      {/* Android button nav: keep system buttons readable on any
+          canvas — 'dark' style = dark buttons (for light canvases);
+          the config plugin value is a startup default. */}
+      <NavigationBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      <AppStack>
+        <StackItem stackKey="root">
+          <PlatformTabs
+            items={NAV_ITEMS}
+            activeKey={tab}
+            onSelect={(key) => {
+              setTab(key);
+              clearOverlays();
             }}
+            renderTab={renderTabScreen}
+            accessory={
+              player !== null && !expanded ? (
+                <MiniPlayer
+                  player={player}
+                  onPress={() => setExpanded(true)}
+                  onPlayPause={onPlayPause}
+                  onNext={() => advance('next')}
+                  onPrevious={() => advance('previous')}
+                  onToggleLike={onToggleLike}
+                  onDismiss={() => void session.stop()}
+                />
+              ) : undefined
+            }
+          />
+          {player !== null ? (
+            <StageSheet
+              player={player}
+              expanded={expanded}
+              onExpandChange={setExpanded}
+              mode={stageMode}
+              onModeChange={setStageMode}
+              queue={queueModel}
+              queueReordering={reordering}
+              topInset={topInset}
+              lyrics={lyricsModel}
+              radio={radioModel}
+              onPlayPause={onPlayPause}
+              onNext={() => advance('next')}
+              onPrevious={() => advance('previous')}
+              onToggleLike={onToggleLike}
+              download={
+                currentRecordingId !== null &&
+                (controller.downloads.recordFor(currentRecordingId) !==
+                  null ||
+                  downloadRefFor(currentRecordingId) !== null)
+                  ? (downloadChipFor(currentRecordingId) ?? 'idle')
+                  : null
+              }
+              onDownload={
+                currentRecordingId !== null
+                  ? () => onDownloadAction(currentRecordingId)
+                  : undefined
+              }
+              onSeek={(ms) => void session.seekTo(ms)}
+              onRetryLyrics={onRetryLyrics}
+              onStartRadio={radioCapable ? onStartRadio : undefined}
+              onStopRadio={onStopRadio}
+              onPressQueueItem={playQueueOccurrence}
+              onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+              onToggleQueueReorder={() => setReordering((v) => !v)}
+              onMoveQueueItem={onMoveQueueItem}
+              onMoveQueueItemTo={onMoveQueueItemTo}
+            />
+          ) : null}
+          {online === false && (
+            <View
+              style={{
+                position: 'absolute',
+                top: topInset + 4,
+                alignSelf: 'center',
+                paddingHorizontal: 12,
+                paddingVertical: 5,
+                borderRadius: 999,
+                backgroundColor: theme.colors.raised,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
+              }}
+            >
+              <Text variant="metadata" color="secondary">
+                offline — owned downloads play; streams wait
+              </Text>
+            </View>
+          )}
+        </StackItem>
+        {overlayStack.map((entry) => {
+          const content = renderOverlayEntry(entry);
+          return content === null ? null : (
+            <PushScreen
+              key={entry.key}
+              stackKey={entry.key}
+              onDismissed={() => dismissOverlay(entry.key)}
+            >
+              {content}
+            </PushScreen>
+          );
+        })}
+        {actionsFor !== null && (
+          <SheetScreen
+            stackKey="sheet-actions"
+            onDismissed={() => setActionsFor(null)}
           >
-            <Text variant="metadata" color="secondary">
-              offline — owned downloads play; streams wait
-            </Text>
-          </View>
+            <RowActionsSheet
+              title={
+                actionsFor.kind === 'recording'
+                  ? (state.recordings.find(
+                    (r) => r.id === actionsFor.recordingId,
+                  )?.title ?? 'track')
+                  : actionsFor.meta.title
+              }
+              actions={[
+                // Like lives in the sheet for recording targets — the
+                // row itself keeps the heart icon only as an indicator.
+                ...(actionsFor.kind === 'recording'
+                  ? [
+                    {
+                      key: 'like',
+                      label: state.likes.some(
+                        (l) =>
+                          l.entityKind === 'track' &&
+                          l.targetId === actionsFor.recordingId,
+                      )
+                        ? 'unlike'
+                        : 'like',
+                      icon: 'heart' as const,
+                    },
+                  ]
+                  : []),
+                {
+                  key: 'enqueue',
+                  label: 'add to queue',
+                  icon: 'queue' as const,
+                },
+                {
+                  key: 'add',
+                  label: 'add to playlist',
+                  icon: 'list-plus' as const,
+                },
+                // Download affordance where a provider ref can mint a
+                // stream — OR a ledger row already exists (cancel/retry/
+                // remove don't need a resolvable ref).
+                ...(actionsFor.kind === 'recording' &&
+                (controller.downloads.recordFor(actionsFor.recordingId) !==
+                  null ||
+                  downloadRefFor(actionsFor.recordingId) !== null)
+                  ? [
+                      {
+                        key: 'download',
+                        label: (() => {
+                          const row = controller.downloads.recordFor(
+                            actionsFor.recordingId,
+                          );
+                          return row === null
+                            ? 'download'
+                            : row.state === 'available'
+                              ? 'remove download'
+                              : row.state === 'failed_with_retry'
+                                ? 'retry download'
+                                : 'cancel download';
+                        })(),
+                        icon: 'download' as const,
+                      },
+                    ]
+                  : []),
+                // Only offer the seed affordance when a bundled
+                // provider declares radio.seed — an unsupported start
+                // is a dead end.
+                ...(radioCapable
+                  ? [
+                    {
+                      key: 'radio',
+                      label: 'start radio',
+                      icon: 'radio' as const,
+                    },
+                  ]
+                  : []),
+                ...(actionsFor.kind === 'metadata' &&
+                  actionsFor.meta.albumRef != null
+                  ? [
+                    {
+                      key: 'album',
+                      label: 'open album',
+                      icon: 'note' as const,
+                    },
+                  ]
+                  : []),
+                ...(actionsFor.kind === 'metadata' &&
+                  actionsFor.meta.artistRef != null
+                  ? [
+                    {
+                      key: 'artist',
+                      label: 'open artist',
+                      icon: 'library' as const,
+                    },
+                  ]
+                  : []),
+              ]}
+              onAction={onRowAction}
+              onDismiss={() => setActionsFor(null)}
+            />
+          </SheetScreen>
         )}
-      </View>
-      {player !== null && !expanded ? (
-        <MiniPlayer
-          player={player}
-          onPress={() => setExpanded(true)}
-          onPlayPause={onPlayPause}
-          onNext={() => advance('next')}
-          onPrevious={() => advance('previous')}
-          onToggleLike={onToggleLike}
-        />
-      ) : null}
-      <AppNavbar
-        items={NAV_ITEMS}
-        activeKey={tab}
-        onSelect={(key) => {
-          setTab(key);
-          closeOverlay();
-        }}
-        gestureHandle={Platform.OS === 'android'}
-      />
-      {player !== null ? (
-        <StageSheet
-          player={player}
-          expanded={expanded}
-          onExpandChange={setExpanded}
-          mode={stageMode}
-          onModeChange={setStageMode}
-          queue={queueModel}
-          queueReordering={reordering}
-          topInset={topInset}
-          lyrics={lyricsModel}
-          radio={radioModel}
-          onPlayPause={onPlayPause}
-          onNext={() => advance('next')}
-          onPrevious={() => advance('previous')}
-          onToggleLike={onToggleLike}
-          download={
-            currentRecordingId !== null &&
-            (controller.downloads.recordFor(currentRecordingId) !== null ||
-              downloadRefFor(currentRecordingId) !== null)
-              ? (downloadChipFor(currentRecordingId) ?? 'idle')
-              : null
-          }
-          onDownload={
-            currentRecordingId !== null
-              ? () => onDownloadAction(currentRecordingId)
-              : undefined
-          }
-          onSeek={(ms) => void session.seekTo(ms)}
-          onRetryLyrics={onRetryLyrics}
-          onStartRadio={radioCapable ? onStartRadio : undefined}
-          onStopRadio={onStopRadio}
-          onPressQueueItem={playQueueOccurrence}
-          onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
-          onToggleQueueReorder={() => setReordering((v) => !v)}
-          onMoveQueueItem={onMoveQueueItem}
-        />
-      ) : null}
-      {actionsFor !== null && (
-        <RowActionsSheet
-          title={
-            actionsFor.kind === 'recording'
-              ? (state.recordings.find(
-                (r) => r.id === actionsFor.recordingId,
-              )?.title ?? 'track')
-              : actionsFor.meta.title
-          }
-          actions={[
-            {
-              key: 'enqueue',
-              label: 'add to queue',
-              icon: 'queue' as const,
-            },
-            {
-              key: 'add',
-              label: 'add to playlist',
-              icon: 'list-plus' as const,
-            },
-            // Download affordance where a provider ref can mint a
-            // stream — OR a ledger row already exists (cancel/retry/
-            // remove don't need a resolvable ref).
-            ...(actionsFor.kind === 'recording' &&
-            (controller.downloads.recordFor(actionsFor.recordingId) !== null ||
-              downloadRefFor(actionsFor.recordingId) !== null)
-              ? [
-                  {
-                    key: 'download',
-                    label: (() => {
-                      const row = controller.downloads.recordFor(
-                        actionsFor.recordingId,
-                      );
-                      return row === null
-                        ? 'download'
-                        : row.state === 'available'
-                          ? 'remove download'
-                          : row.state === 'failed_with_retry'
-                            ? 'retry download'
-                            : 'cancel download';
-                    })(),
-                    icon: 'download' as const,
-                  },
-                ]
-              : []),
-            // Only offer the seed affordance when a bundled provider
-            // declares radio.seed — an unsupported start is a dead end.
-            ...(radioCapable
-              ? [
-                {
-                  key: 'radio',
-                  label: 'start radio',
-                  icon: 'radio' as const,
-                },
-              ]
-              : []),
-            ...(actionsFor.kind === 'metadata' &&
-              actionsFor.meta.albumRef != null
-              ? [
-                {
-                  key: 'album',
-                  label: 'open album',
-                  icon: 'note' as const,
-                },
-              ]
-              : []),
-            ...(actionsFor.kind === 'metadata' &&
-              actionsFor.meta.artistRef != null
-              ? [
-                {
-                  key: 'artist',
-                  label: 'open artist',
-                  icon: 'library' as const,
-                },
-              ]
-              : []),
-          ]}
-          onAction={onRowAction}
-          onDismiss={() => setActionsFor(null)}
-        />
-      )}
-      {pickerFor !== null && (
-        <AddToPlaylistSheet
-          playlists={pickerItems}
-          onPick={onPickPlaylist}
-          onCreate={onCreateAndPick}
-          onDismiss={() => setPickerFor(null)}
-        />
-      )}
-      {providerPicker !== null && (
-        <ProviderPickerSheet
-          title={providerPicker.title}
-          options={providerPicker.options}
-          selectedKey={providerPicker.selectedKey}
-          onPick={onPickProvider}
-          onDismiss={() => setProviderSlot(null)}
-        />
-      )}
+        {pickerFor !== null && (
+          <SheetScreen
+            stackKey="sheet-add-playlist"
+            onDismissed={() => setPickerFor(null)}
+          >
+            <AddToPlaylistSheet
+              playlists={pickerItems}
+              onPick={onPickPlaylist}
+              onCreate={onCreateAndPick}
+              onDismiss={() => setPickerFor(null)}
+            />
+          </SheetScreen>
+        )}
+        {providerPicker !== null && (
+          <SheetScreen
+            stackKey="sheet-provider"
+            onDismissed={() => setProviderSlot(null)}
+          >
+            <ProviderPickerSheet
+              title={providerPicker.title}
+              options={providerPicker.options}
+              selectedKey={providerPicker.selectedKey}
+              onPick={onPickProvider}
+              onDismiss={() => setProviderSlot(null)}
+            />
+          </SheetScreen>
+        )}
+        {themePickerOpen && (
+          <SheetScreen
+            stackKey="sheet-theme"
+            onDismissed={() => setThemePickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="theme"
+              options={THEME_OPTIONS}
+              selectedKey={state.settings.theme}
+              onPick={(key) => {
+                const theme =
+                  THEME_ORDER.find((t) => t === key) ?? 'system';
+                void session.updateSettings({ ...state.settings, theme });
+                setThemePickerOpen(false);
+              }}
+              onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+      </AppStack>
     </View>
   );
 }

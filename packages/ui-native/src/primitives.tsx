@@ -106,6 +106,9 @@ export function Text({
       };
   return (
     <RNText
+      // Theme textScale already carries the OS font scale — disabling
+      // native font scaling keeps it from being applied a second time.
+      allowFontScaling={false}
       numberOfLines={numberOfLines}
       adjustsFontSizeToFit={adjustsFontSizeToFit}
       minimumFontScale={minimumFontScale}
@@ -149,11 +152,14 @@ export function Hairline({
 export type PressableProps = {
   readonly onPress?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
+  readonly delayLongPress?: number | undefined;
   readonly accessibilityLabel: string;
+  readonly accessibilityHint?: string | undefined;
   readonly accessibilityRole?: AccessibilityRole | undefined;
   readonly accessibilityState?: AccessibilityState | undefined;
   readonly disabled?: boolean | undefined;
   readonly compact?: boolean | undefined;
+  readonly hitSlop?: Insets | undefined;
   readonly style?:
   | StyleProp<ViewStyle>
   | ((state: { pressed: boolean }) => StyleProp<ViewStyle>);
@@ -163,11 +169,14 @@ export type PressableProps = {
 export function Pressable({
   onPress,
   onLongPress,
+  delayLongPress,
   accessibilityLabel,
+  accessibilityHint,
   accessibilityRole = 'button',
   accessibilityState,
   disabled = false,
   compact = false,
+  hitSlop,
   style,
   children,
 }: PressableProps) {
@@ -181,11 +190,13 @@ export function Pressable({
     <RNPressable
       onPress={onPress}
       onLongPress={onLongPress}
+      delayLongPress={delayLongPress}
       disabled={off}
       accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
       accessibilityState={{ ...accessibilityState, disabled: off }}
-      hitSlop={compact ? slop : undefined}
+      hitSlop={hitSlop ?? (compact ? slop : undefined)}
       style={({ pressed }) => [
         !compact && {
           minWidth: theme.sizes.touch,
@@ -331,6 +342,8 @@ export function Artwork({
       ) : url === null ? (
         monogram !== null && monogram !== undefined && monogram !== '' ? (
           <RNText
+            // Monogram size is pure geometry — never font-scale it.
+            allowFontScaling={false}
             style={[
               theme.typography.heading,
               {

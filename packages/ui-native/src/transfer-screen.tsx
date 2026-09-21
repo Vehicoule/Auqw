@@ -299,8 +299,11 @@ function ImportBody({
             onPress={onResetImport}
             accessibilityLabel="cancel import"
             style={{
-              paddingHorizontal: theme.spacing.sm,
-              paddingVertical: theme.spacing.xs,
+              paddingHorizontal: theme.spacing.md,
+              minHeight: 26,
+              justifyContent: 'center',
+              borderRadius: theme.radius.pill,
+              backgroundColor: theme.colors.fg08,
             }}
           >
             <Text variant="metadata" color="secondary">

@@ -13,12 +13,14 @@ use std::sync::Arc;
 use auqw_plugin_host::{
     invoke, Attempt, Budgets, HostServices, KeyValueStore, LoadedPlugin, ReqwestClient, SystemClock,
 };
+
+use crate::PreparedSlot;
 use auqw_stream::{PhaseMarks, PrepareInfo, PreparedSource, Remint, StreamRegistry};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{lock, resource_from, AttemptSummary, HostError, PluginHost};
+use crate::{lock, resolve_resource_from, AttemptSummary, HostError, PluginHost};
 
 /// A prepared stream session as reported to the player: the opaque
 /// handle plus metadata. The signed URL never crosses this boundary.
@@ -146,6 +148,7 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
     match kind {
         "cancelled" => E::Cancelled,
         "expired" | "expired-resource" | "auth-expired" => E::Expired,
+        "auth-required" => E::AuthRequired { message },
         "rate-limit" => E::RateLimited { message },
         "streams-capped" => E::StreamsCapped { message },
         "transient" | "timeout" => E::Transient { message },
@@ -214,7 +217,7 @@ impl Remint for PluginRemint {
                 CancellationToken::new(),
                 HostServices {
                     http: &*http,
-                    kv: &*kv,
+                    kv,
                     clock: &clock,
                     pot_provider: pot_provider.as_deref(),
                 },
@@ -222,12 +225,11 @@ impl Remint for PluginRemint {
             .await;
             let (result, _attempt) = invocation.into_parts();
             let value = result.map_err(|e| invoke_err_as_seam(e.kind(), e.to_string()))?;
-            let resource = resource_from(&value);
-            if resource.url.is_empty() {
-                return Err(auqw_stream::StreamError::InvalidResponse {
-                    message: "remint resolve missing url".into(),
-                });
-            }
+            let resource = resolve_resource_from(&value).map_err(|field| {
+                auqw_stream::StreamError::InvalidResponse {
+                    message: format!("remint resolve missing or invalid {field}"),
+                }
+            })?;
             Ok(PreparedSource {
                 url: resource.url,
                 mime: resource.mime,
@@ -279,15 +281,17 @@ fn prepare_outcome(
     source_ref: String,
     provider: String,
 ) -> PrepareOutcome {
-    let resource = resource_from(value);
     let summary = AttemptSummary::from(attempt);
-    if resource.url.is_empty() {
-        return PrepareOutcome::Failed {
-            kind: "invalid-response".to_string(),
-            message: "resolve result missing url".to_string(),
-            attempt: summary,
-        };
-    }
+    let resource = match resolve_resource_from(value) {
+        Err(field) => {
+            return PrepareOutcome::Failed {
+                kind: "invalid-response".to_string(),
+                message: format!("resolve result missing or invalid {field}"),
+                attempt: summary,
+            };
+        }
+        Ok(resource) => resource,
+    };
     remint.pin_itag = resource.itag;
     let source = PreparedSource {
         url: resource.url,
@@ -359,6 +363,9 @@ impl PluginHost {
         };
         let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);
+        let cancels = Arc::clone(&self.cancels);
+        let cancelled_requests = Arc::clone(&self.cancelled_requests);
+        let prepared_delivery = Arc::clone(&self.prepared_delivery);
         // `prefer` is a key, not a value: absent means "guest default",
         // never a null that fails payload validation. `access_token`
         // rides via the `start_typed` merge.
@@ -373,11 +380,17 @@ impl PluginHost {
             Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 // `stream` is moved into the blocking closure below —
                 // keep a clone for the bookkeeping prune.
                 let registry = Arc::clone(&stream);
-                let outcome = match result {
+                // Counts this delivery's window for `cancel` — see
+                // `PrepareDelivery`. Held until the post-callback flip.
+                let mut delivery_ticket = None;
+                let mut outcome = match result {
                     Ok(value) => {
                         // Session creation does file I/O — run it on the
                         // blocking pool, not a runtime worker shared
@@ -390,29 +403,111 @@ impl PluginHost {
                             Err(_) => PrepareOutcome::Failed {
                                 kind: "internal".to_string(),
                                 message: "prepare worker panicked".to_string(),
-                                attempt: summary,
+                                attempt: summary.clone(),
                             },
                         }
                     }
                     Err(e) => PrepareOutcome::Failed {
                         kind: e.kind().to_string(),
                         message: e.to_string(),
-                        attempt: summary,
+                        attempt: summary.clone(),
                     },
                 };
+                // A cancel that outran both `cancels` and the handle
+                // map left a tombstone: the session just produced is
+                // orphaned-on-arrival — abandon it instead of handing
+                // out a live handle nobody will ever release.
+                let mut abandoned = None;
                 if let PrepareOutcome::Prepared {
                     stream: prepared, ..
                 } = &outcome
                 {
+                    let tombstoned = cancelled_requests
+                        .lock()
+                        .map(|mut m| m.remove(&request_id).is_some())
+                        .unwrap_or(false);
+                    if tombstoned {
+                        let _ = registry.cancel_if_unattached(&prepared.handle);
+                        listener.on_outcome(
+                            request_id,
+                            PrepareOutcome::Failed {
+                                kind: "cancelled".to_string(),
+                                message: "prepare cancelled".to_string(),
+                                attempt: summary.clone(),
+                            },
+                        );
+                        return;
+                    }
                     if let Ok(mut m) = prepared_handles.lock() {
                         // Sessions ended by supersede/evict/expiry saw
                         // neither cancel nor release — drop their stale
                         // mappings so the map tracks live handles only.
-                        m.retain(|_, h| *h == prepared.handle || registry.is_live(h));
-                        m.insert(request_id.clone(), prepared.handle.clone());
+                        m.retain(|_, s| s.handle == prepared.handle || registry.is_live(&s.handle));
+                        // A `cancel` that landed while the resolve was
+                        // completing already flipped the token —
+                        // deciding under this lock keeps the paths
+                        // exclusive: a later `cancel` sees the recorded
+                        // handle and abandons via `prepared_handles`,
+                        // while this one abandons directly instead of
+                        // delivering a live `Prepared`. The insert IS
+                        // the delivery commit — `delivered: false`
+                        // tells `cancel` the outcome is committed but
+                        // not yet on the wire, so it consumes the slot
+                        // without releasing the handle out from under
+                        // the listener.
+                        let was_cancelled = cancels
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.get(&request_id).map(CancellationToken::is_cancelled))
+                            .unwrap_or(false);
+                        if was_cancelled {
+                            abandoned = Some(prepared.handle.clone());
+                        } else {
+                            // `track` precedes `insert`: a `Pending`
+                            // slot always implies an in-flight count,
+                            // so a `cancel` that sees one waits for
+                            // this window to close.
+                            delivery_ticket = Some(prepared_delivery.track());
+                            m.insert(
+                                request_id.clone(),
+                                PreparedSlot {
+                                    handle: prepared.handle.clone(),
+                                    delivered: false,
+                                },
+                            );
+                        }
                     }
+                } else if let Ok(mut m) = cancelled_requests.lock() {
+                    // A tombstone for a request that failed on its own
+                    // is spent — don't let it poison a future request
+                    // that happens to reuse the id space.
+                    m.remove(&request_id);
                 }
-                listener.on_outcome(request_id, outcome);
+                if let Some(handle) = abandoned {
+                    let _ = registry.cancel_if_unattached(&handle);
+                    outcome = match outcome {
+                        PrepareOutcome::Prepared { attempt, .. } => PrepareOutcome::Failed {
+                            kind: "cancelled".to_string(),
+                            message: "cancelled".to_string(),
+                            attempt,
+                        },
+                        other => other,
+                    };
+                }
+                listener.on_outcome(request_id.clone(), outcome);
+                // The outcome is on the wire: flip `delivered` so a
+                // later `cancel` may release an unattached handle. A
+                // `cancel` parked mid-delivery stays asleep until the
+                // ticket drops below — `Prepared` always precedes its
+                // own teardown.
+                if delivery_ticket.is_some() {
+                    if let Ok(mut m) = prepared_handles.lock() {
+                        if let Some(slot) = m.get_mut(&request_id) {
+                            slot.delivered = true;
+                        }
+                    }
+                    drop(delivery_ticket);
+                }
             },
         )
     }
@@ -466,7 +561,7 @@ impl PluginHost {
     pub fn stream_release(&self, handle: String) -> Result<(), StreamError> {
         self.stream_registry()?.release(&handle).map_err(seam_err)?;
         if let Ok(mut m) = self.prepared_handles.lock() {
-            m.retain(|_, h| *h != handle);
+            m.retain(|_, s| s.handle != handle);
         }
         Ok(())
     }
@@ -510,8 +605,17 @@ impl PluginHost {
             .ok()
             .and_then(|d| u64::try_from(d.as_millis()).ok())
             .map(|now| now + 3_600_000);
+        // `source_ref` persists into the `{handle}.json` sidecar and
+        // shows in `{:?}` — a raw URL (possibly signed) can't be it.
+        // Hash the URL so coalescing still dedupes the same fixture.
+        let ref_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            url.hash(&mut h);
+            format!("dev-url:{:016x}", h.finish())
+        };
         let source = PreparedSource {
-            source_ref: url.clone(),
+            source_ref: ref_hash,
             provider: "dev-url".to_string(),
             url,
             mime,
