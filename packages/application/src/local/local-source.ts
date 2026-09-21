@@ -54,11 +54,21 @@ function titleFromName(name: string): string {
 /**
  * `fileId` = fingerprint + owning source: identical content in two
  * folders is two rows (per data.md); the fingerprint alone stays the
- * move-detection key inside one source. Inputs are ASCII ids/hex —
+ * move-detection key inside one source. Identical bytes appearing
+ * twice in ONE source collide on `sourceId|fingerprint` — the caller
+ * disambiguates by docId (the document identity), so a duplicate's id
+ * is still stable across rescans. Inputs are ASCII ids/hex —
  * byte loop, no TextEncoder (lib: ES2023 only).
  */
-function fileIdFor(fingerprint: string, sourceId: string): string {
-  const input = `${sourceId}|${fingerprint}`;
+function fileIdFor(
+  fingerprint: string,
+  sourceId: string,
+  docId?: string,
+): string {
+  const input =
+    docId === undefined
+      ? `${sourceId}|${fingerprint}`
+      : `${sourceId}|${fingerprint}|${docId}`;
   const bytes = new Uint8Array(input.length);
   for (let i = 0; i < input.length; i++) {
     bytes[i] = input.charCodeAt(i) & 0x7f;
@@ -401,10 +411,46 @@ export class LocalFileSource {
       }
     }
 
-    const rowsByFp = new Map(prior.map((f) => [f.fingerprint, f] as const));
+    // Move detection matches prior rows by fingerprint; a queue per
+    // fingerprint so identical-bytes duplicates each claim their own
+    // row instead of racing one. A row kept via docId is consumed
+    // here too — it must not also satisfy a later same-fp entry.
+    const rowsByFp = new Map<string, LocalFile[]>();
+    for (const f of prior) {
+      const queue = rowsByFp.get(f.fingerprint);
+      if (queue === undefined) {
+        rowsByFp.set(f.fingerprint, [f]);
+      } else {
+        queue.push(f);
+      }
+    }
+    const consumeFp = (row: LocalFile): void => {
+      const queue = rowsByFp.get(row.fingerprint);
+      if (queue === undefined) {
+        return;
+      }
+      const idx = queue.indexOf(row);
+      if (idx >= 0) {
+        queue.splice(idx, 1);
+      }
+      if (queue.length === 0) {
+        rowsByFp.delete(row.fingerprint);
+      }
+    };
+    const takeByFp = (fingerprint: string): LocalFile | undefined => {
+      const queue = rowsByFp.get(fingerprint);
+      const row = queue?.shift();
+      if (queue !== undefined && queue.length === 0) {
+        rowsByFp.delete(fingerprint);
+      }
+      return row;
+    };
     // Rows this scan produces for `sourceId` — committed over live
     // state in the write tail so a concurrent scan's files survive.
     const scanned: LocalFile[] = [];
+    // fileIds claimed this scan — a second copy of identical bytes
+    // disambiguates by docId so the commit's PK uniqueness holds.
+    const claimed = new Set<string>();
     let added = 0;
     let updated = 0;
 
@@ -415,8 +461,11 @@ export class LocalFileSource {
     for (const entry of entries) {
       const known = byDocId.get(entry.docId);
       if (known !== undefined && known.size === entry.size) {
-        // Unchanged — keep the row untouched.
+        // Unchanged — keep the row untouched and consume its queue
+        // slot so a same-fingerprint entry can't re-claim it.
         scanned.push(known);
+        claimed.add(known.fileId);
+        consumeFp(known);
         continue;
       }
       const fingerprint = fpByDoc.get(entry.docId);
@@ -425,11 +474,12 @@ export class LocalFileSource {
         // not evict a working file), but don't pretend it's fresh.
         if (known !== undefined) {
           scanned.push(known);
+          claimed.add(known.fileId);
+          consumeFp(known);
         }
         continue;
       }
-      const fileId = fileIdFor(fingerprint, sourceId);
-      const moved = rowsByFp.get(fingerprint);
+      const moved = takeByFp(fingerprint);
       if (moved !== undefined) {
         const refreshed: LocalFile = {
           ...moved,
@@ -437,11 +487,15 @@ export class LocalFileSource {
           size: entry.size,
         };
         scanned.push(refreshed);
+        claimed.add(refreshed.fileId);
         if (moved.docId !== entry.docId || moved.size !== entry.size) {
           updated += 1;
         }
         continue;
       }
+      const fileId = claimed.has(fileIdFor(fingerprint, sourceId))
+        ? fileIdFor(fingerprint, sourceId, entry.docId)
+        : fileIdFor(fingerprint, sourceId);
       const row: LocalFile = {
         fileId,
         sourceId,
@@ -455,6 +509,7 @@ export class LocalFileSource {
         genre: null,
         recordingId: '', // set after the batched tag read
       };
+      claimed.add(fileId);
       tagDocs.push(entry.docId);
       pendingRows.push(row);
     }
@@ -480,15 +535,24 @@ export class LocalFileSource {
     // `fp:` tombstone refs kept on recordings whose file rows vanished:
     // the same content returning — same source or a re-added folder —
     // re-links to its old recording (likes/playlists survive) instead
-    // of allocating a fresh identity.
+    // of allocating a fresh identity. Live `local` refs index by fileId
+    // too: an imported recording still carries the fileId this scan
+    // recomputes, so a post-import rescan rejoins it instead of
+    // duplicating the track.
     const recordingByRetainedFp = new Map<string, string>();
+    const recordingByFileId = new Map<string, string>();
     for (const r of this.#recordings) {
       for (const s of r.sourceRefs) {
-        if (s.provider === LOCAL_PROVIDER && s.id.startsWith('fp:')) {
+        if (s.provider !== LOCAL_PROVIDER) {
+          continue;
+        }
+        if (s.id.startsWith('fp:')) {
           const fp = s.id.slice(3);
           if (!recordingByRetainedFp.has(fp)) {
             recordingByRetainedFp.set(fp, r.id);
           }
+        } else if (!recordingByFileId.has(s.id)) {
+          recordingByFileId.set(s.id, r.id);
         }
       }
     }
@@ -512,11 +576,13 @@ export class LocalFileSource {
       const entry = entryByDoc.get(row.docId)!;
       const tag = tags.value[i] ?? null;
       const title = tag?.title ?? titleFromName(entry.name);
-      // Same docId, new bytes → keep the recording identity; same
+      // Same docId, new bytes → keep the recording identity; an
+      // imported row carrying this exact fileId rejoins it; same
       // fingerprint in another folder → join that recording; else new.
       const known = byDocId.get(row.docId);
       const existing =
         known?.recordingId ??
+        recordingByFileId.get(row.fileId) ??
         recordingByFp.get(row.fingerprint) ??
         recordingByRetainedFp.get(row.fingerprint);
       const recordingId = existing ?? this.#ids.next('rec');

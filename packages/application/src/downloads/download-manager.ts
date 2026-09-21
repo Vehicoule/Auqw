@@ -272,6 +272,15 @@ export class DownloadManager {
     return null;
   }
 
+  /**
+   * Ledger snapshot: the persisted rows themselves (with `filePath`),
+   * for callers that replace the storage sections and must clean up
+   * the files a swap orphaned.
+   */
+  records(): readonly DownloadRecord[] {
+    return [...this.#rows.values()].filter((row) => row.state !== 'removing');
+  }
+
   /** The `available` file name for playback resolution, if any. */
   fileFor(recordingId: string): string | null {
     const row = this.recordFor(recordingId);

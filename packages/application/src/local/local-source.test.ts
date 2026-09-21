@@ -534,6 +534,105 @@ async function runConcurrentScansKeepBoth(): Promise<void> {
   assert(source.recordings().length === 2, 'both recordings materialized');
 }
 
+/**
+ * Two copies of identical bytes under one folder: same fingerprint
+ * must not collide the fileId — the second gets a docId-disambiguated
+ * id, both rows index, and both join one shared recording.
+ */
+async function runDuplicateFilesOneFolder(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100), entry('d2', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpdup'));
+  tagReader.fingerprints.set('d2', fp('d2', 'fpdup'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  tagReader.tags.set('d2', tags('d2', 'Alpha'));
+
+  const added = must(await source.addFolder(signal()));
+  const files = source.filesFor(added.sourceId);
+  assert(files.length === 2, 'both duplicates indexed');
+  assert(files[0]!.fileId !== files[1]!.fileId, 'distinct fileIds');
+  assert(
+    files[0]!.recordingId === files[1]!.recordingId,
+    'duplicates share one recording',
+  );
+  assert(source.recordings().length === 1, 'one recording');
+
+  // Rescan is stable: both rows match by docId and keep their ids.
+  const before = files.map((f) => `${f.docId}:${f.fileId}`).sort();
+  must(await source.rescan(added.sourceId, signal()));
+  const after = source
+    .filesFor(added.sourceId)
+    .map((f) => `${f.docId}:${f.fileId}`)
+    .sort();
+  assert(
+    before.length === 2 && before.every((v, i) => v === after[i]),
+    'fileIds stable across rescans',
+  );
+}
+
+/**
+ * Import clears file rows but keeps recordings with live `local`
+ * refs. A rescan recomputes the same fileId — it must rejoin the
+ * imported recording, not mint a duplicate.
+ */
+async function runRescanRelinksImported(): Promise<void> {
+  // Learn the deterministic fileId for (sourceId, fingerprint) —
+  // the same pair recomputes it after the import wipes the rows.
+  const learn = rig();
+  pick(learn.tagReader);
+  learn.tagReader.entries.set(TREE, [entry('d1', 100, 'alpha.mp3')]);
+  learn.tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  learn.tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  const learned = must(await learn.source.addFolder(signal()));
+  const fileId = learn.source.filesFor(learned.sourceId)[0]!.fileId;
+
+  const { tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: learned.sourceId,
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-imported',
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [
+          { provider: 'local', kind: 'track', id: fileId },
+        ],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100, 'alpha.mp3')]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+
+  must(await source.rescan(learned.sourceId, signal()));
+  const files = source.filesFor(learned.sourceId);
+  assert(files.length === 1, 'one file row');
+  assertEqual(
+    files[0]!.recordingId,
+    'rec-imported',
+    'rejoined imported recording',
+  );
+  assert(source.recordings().length === 1, 'no duplicate recording');
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -549,4 +648,6 @@ export async function run(): Promise<void> {
   await runPickCancelled();
   await runRescanMergesFreshRecordings();
   await runConcurrentScansKeepBoth();
+  await runDuplicateFilesOneFolder();
+  await runRescanRelinksImported();
 }

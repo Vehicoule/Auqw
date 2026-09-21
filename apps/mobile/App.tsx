@@ -505,14 +505,23 @@ function Main({
 
   useEffect(() => {
     let disposed = false;
+    // Subscribe BEFORE the snapshot request: once any callback edge
+    // has landed, a delayed snapshot resolving later is stale and
+    // must not overwrite it.
+    let edged = false;
+    const unsub = controller.connectivity.subscribe((snap) => {
+      edged = true;
+      setOnline(snap.online);
+    });
     void controller.connectivity.snapshot().then((snap) => {
-      if (!disposed && snap.ok) {
+      if (!disposed && !edged && snap.ok) {
         setOnline(snap.value.online);
       }
     });
-    return controller.connectivity.subscribe((snap) => {
-      setOnline(snap.online);
-    });
+    return () => {
+      disposed = true;
+      unsub();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
 

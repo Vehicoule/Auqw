@@ -302,9 +302,13 @@ export async function createSessionController(
     log,
     fetchImpl: (url, init, signal) => {
       // Bridge the port's CancellationSignal onto fetch's AbortSignal.
+      // Detach on settle — a long transfer must not accumulate one
+      // controller per completed chunk on the shared signal.
       const abort = new AbortController();
-      signal.subscribe(() => abort.abort());
-      return fetch(url, { headers: init.headers, signal: abort.signal });
+      const unsub = signal.subscribe(() => abort.abort());
+      return fetch(url, { headers: init.headers, signal: abort.signal }).finally(
+        () => unsub(),
+      );
     },
     resolvePlayback: (ref, input, context) => {
       const provider = providerMap.get(
@@ -535,9 +539,11 @@ export async function createSessionController(
       if (!previewed.ok) {
         return previewed;
       }
-      // Drain first: importOwned swaps the persisted sections while
-      // leaving bytes on disk, so a live runner could repersist a
-      // deleted row and every finalized file would orphan.
+      // Drain first: a live runner could repersist a row the import
+      // is about to swap out from under it. Capture the ledger NOW —
+      // on success its rows are gone from storage, so the captured
+      // file paths are the only reference to the old bytes.
+      const priorRows = downloads.records();
       const stopped = await downloads.stop(signal);
       if (!stopped.ok) {
         void log.write({
@@ -547,31 +553,45 @@ export async function createSessionController(
         });
         return err(stopped.error);
       }
-      const cleared = await downloads.removeAll(signal);
-      if (!cleared.ok) {
-        void log.write({
-          level: 'warn',
-          message: `pre-import clear failed: ${cleared.error.kind}`,
-          atMs: clock.nowMs(),
-        });
-        // The ledger still names the surviving files — aborting keeps
-        // the only reference a later cleanup can retry against.
-        return err(cleared.error);
-      }
       try {
-        return await session.importLibrary(text);
+        const imported = await session.importLibrary(text);
+        if (imported.ok) {
+          // The swap landed — delete the old ledger's files by their
+          // captured paths. A failed import instead leaves the ledger
+          // untouched; the finally's rehydrate resumes its rows.
+          for (const row of priorRows) {
+            const removed = await transfer.removeFile(row.filePath, signal);
+            if (!removed.ok) {
+              void log.write({
+                level: 'warn',
+                message: `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+            }
+          }
+        }
+        return imported;
       } finally {
-        // Whatever landed — success, or a storage failure after the
-        // clear — the manager re-inits off the persisted ledger so it
-        // can never sit stopped with a stale row map.
+        // Whatever landed — success, or a storage failure — the
+        // manager re-inits off the persisted ledger so it can never
+        // sit stopped with a stale row map.
         await rehydrateMedia(signal);
       }
     },
     async dispose() {
+      // Stop while the FGS subscriber is still attached — it emits the
+      // zero-active update as stop demotes the last transferring row.
+      await downloads.stop(new CancellationSource().signal);
       for (const unsub of mediaUnsubs.splice(0)) {
         unsub();
       }
-      await downloads.stop(new CancellationSource().signal);
+      // Belt: start() may never have run, or an edge may have been
+      // missed — the dataSync service must come down regardless.
+      try {
+        await host.downloadsActiveChanged(0);
+      } catch {
+        // Method absent on this platform.
+      }
       await session.dispose();
       for (const provider of providers) {
         provider.dispose();
