@@ -245,6 +245,22 @@ export class QueueEngine {
     this.#tick();
   }
 
+  /**
+   * Stops playback without removing the current occurrence: the queue
+   * keeps its items, current clears, mode lands on 'stopped'.
+   */
+  stop(): void {
+    if (this.#currentId === null) {
+      return;
+    }
+    this.#requireTick();
+    this.#currentId = null;
+    this.#positionMs = 0;
+    this.#mode = 'stopped';
+    this.#blockedError = undefined;
+    this.#tick();
+  }
+
   previous(): void {
     if (this.#currentId === null) {
       return;
