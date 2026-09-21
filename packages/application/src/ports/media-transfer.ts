@@ -74,9 +74,9 @@ export interface MediaTransferPort {
   /** Bytes free on the volume that holds the managed dir. */
   freeBytes(signal: CancellationSignal): Promise<Result<number>>;
   /**
-   * Delete a finalized file (e.g. a removed download or a stale
-   * `available` row whose file vanished is handled by the manager).
-   * Idempotent: a missing file is ok.
+   * Delete a managed file AND its `<name>.part` staging file (a
+   * removed download, or a stale `available` row whose file vanished
+   * or shrank). Idempotent: missing files are ok.
    */
   removeFile(name: string, signal: CancellationSignal): Promise<Result<void>>;
   /**

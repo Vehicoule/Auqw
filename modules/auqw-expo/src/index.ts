@@ -225,6 +225,29 @@ export type QueueTransitionEvent = {
   handle: string | null;
 };
 
+// ---- TagReaderPort surface (slice 3 local files) ----
+
+export type TagReaderEntry = {
+  docId: string;
+  name: string;
+  size: number;
+  mime: string;
+};
+
+export type TagReaderFingerprint = {
+  docId: string;
+  fingerprint: string;
+};
+
+export type TagReaderTags = {
+  docId: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  durationMs: number | null;
+  genre: string | null;
+};
+
 type AuqwExpoEvents = {
   onResolveOutcome: (event: OutcomeEvent) => void;
   onRequestOutcome: (event: RequestOutcomeEvent) => void;
@@ -243,6 +266,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   cancel(requestId: string): void;
   runSpin(wasmBase64: string, manifestJson: string): Promise<SpinReport>;
   prepare(provider: string, sourceRef: string, attemptId: string, queueRev: number): Promise<string>;
+  prepareLocal(path: string, mime?: string | null): Promise<string>;
   play(handle: string, attemptId: string, queueRev: number, positionMs?: number): Promise<void>;
   pause(): Promise<void>;
   seekTo(positionMs: number): Promise<void>;
@@ -251,6 +275,19 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   releaseStream(handle: string): Promise<void>;
   phaseMarks(handle: string): Promise<StreamPhaseMarks>;
   setQueueProjection(projection: QueueProjection): Promise<void>;
+  tagPickFolder(): Promise<{ treeUri: string; label: string }>;
+  tagEnumerate(
+    treeUri: string,
+  ): Promise<readonly TagReaderEntry[]>;
+  tagFingerprint(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (TagReaderFingerprint | null)[]>;
+  tagRead(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (TagReaderTags | null)[]>;
+  docUri(treeUri: string, docId: string): string;
   devAttachFile(path: string): Promise<string>;
   devPrepareUrl(url: string, mime: string, contentLength?: number, remintable?: boolean): Promise<string>;
 }
@@ -309,6 +346,19 @@ export function prepare(
   queueRev: number,
 ): Promise<string> {
   return native.prepare(provider, sourceRef, attemptId, queueRev);
+}
+
+/**
+ * provider:'local' attach — registers an `lf-*` handle for a
+ * device-owned file path or content URI. No stream session is
+ * created: `play`/`releaseStream`/`cancelPrepare` resolve the handle
+ * locally (release/cancel are bookkeeping no-ops).
+ */
+export function prepareLocal(
+  path: string,
+  mime?: string | null,
+): Promise<string> {
+  return native.prepareLocal(path, mime ?? null);
 }
 
 /** Attach a prepared handle to the warm player and start playback. */
@@ -415,4 +465,38 @@ export function addQueueTransitionListener(
   listener: (event: QueueTransitionEvent) => void,
 ): EventSubscription {
   return native.addListener('onQueueTransition', listener);
+}
+
+// ---- TagReader wrappers ----
+
+/**
+ * SAF folder pick → persistable grant + label. Rejects `no-result`
+ * when the user cancels.
+ */
+export function tagPickFolder(): Promise<{ treeUri: string; label: string }> {
+  return native.tagPickFolder();
+}
+
+export function tagEnumerate(
+  treeUri: string,
+): Promise<readonly TagReaderEntry[]> {
+  return native.tagEnumerate(treeUri);
+}
+
+export function tagFingerprint(
+  treeUri: string,
+  docIds: readonly string[],
+): Promise<readonly (TagReaderFingerprint | null)[]> {
+  return native.tagFingerprint(treeUri, docIds);
+}
+
+export function tagRead(
+  treeUri: string,
+  docIds: readonly string[],
+): Promise<readonly (TagReaderTags | null)[]> {
+  return native.tagRead(treeUri, docIds);
+}
+
+export function docUri(treeUri: string, docId: string): string {
+  return native.docUri(treeUri, docId);
 }
