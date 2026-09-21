@@ -22,7 +22,10 @@ export interface ConnectivityPort {
   snapshot(): Promise<Result<ConnectivitySnapshot>>;
   /**
    * Subscribe to change edges. Returns an unsubscribe function.
-   * The current state is NOT replayed on subscribe.
+   * The FIRST subscriber may immediately receive the current state
+   * as a baseline edge (native monitors emit one on watch) — treat
+   * the first event as a state read, not a transition. Subsequent
+   * events are real change edges.
    */
   subscribe(
     listener: (snapshot: ConnectivitySnapshot) => void,

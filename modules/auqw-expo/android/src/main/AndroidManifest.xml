@@ -3,6 +3,9 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
   <!-- dataSync FGS keeps long download transfers alive under Doze. -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <!-- NetworkCallback registration + active-network capability reads
+       (connectivity monitor) need this normal permission. -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <!-- setWakeMode(WAKE_MODE_LOCAL) on the warm player. -->
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <!-- API 33+: without it the MediaSession notification the service

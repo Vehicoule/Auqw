@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 
 /**
  * ConnectivityManager NetworkCallback → {online, metered} edges for
@@ -92,6 +91,13 @@ class AuqwConnectivityMonitor(
     if (registered) {
       return
     }
+    // Register first: on failure (e.g. callback quota) `registered`
+    // stays false and a later start() retries instead of leaving the
+    // monitor claiming a callback that does not exist. The
+    // default-network callback's lifecycle follows the system default
+    // route, so a wifi→cell handoff fires edges even when both
+    // networks stay available — request-scoped callbacks miss that.
+    cm.registerDefaultNetworkCallback(callback)
     registered = true
     // Emit the current edge immediately — first observers get a
     // baseline, not silence until the next network change.
@@ -99,12 +105,6 @@ class AuqwConnectivityMonitor(
     lastOnline = online
     lastMetered = metered
     emit(online, metered)
-    cm.registerNetworkCallback(
-      NetworkRequest.Builder()
-        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        .build(),
-      callback,
-    )
   }
 
   fun stop() {
