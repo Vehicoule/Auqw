@@ -348,26 +348,23 @@ export class MatchingEngine {
   }
 
   /**
-   * Scores one candidate; returns null when hard label axes reject it
-   * or it fails the similarity floor. Public so provider-asserted
-   * pairings (e.g. a radio page's own refs) can record real evidence
-   * instead of a fabricated score.
+   * True only on hard incompatibilities — a version-label axis
+   * mismatch (e.g. live vs studio) or a clean/explicit conflict.
+   * Similarity-floor misses are ordinary metadata drift, not a
+   * rejection. Public so provider-asserted pairings (e.g. a radio
+   * page's own refs) can distinguish the two.
    */
-  static evidence(
+  static hardConflict(
     recording: Recording,
     candidate: MatchCandidate,
-  ): { evidence: MatchEvidence } | null {
-    const intended = analyzeTitle(recording.title);
+  ): boolean {
     const intendedLabels = new Set(recording.versionLabels);
     const candidateLabels = new Set(
       extractVersionLabels(candidate.title, candidate.explicit),
     );
-
-    // Hard rejections come before any scoring; a label mismatch
-    // rejects even an exact-ISRC candidate.
     for (const axis of HARD_AXES) {
       if (intendedLabels.has(axis) !== candidateLabels.has(axis)) {
-        return null;
+        return true;
       }
     }
     const cleanOrExplicit = (labels: ReadonlySet<VersionLabel>) =>
@@ -378,11 +375,31 @@ export class MatchingEngine {
           : null;
     const intendedCE = cleanOrExplicit(intendedLabels);
     const candidateCE = cleanOrExplicit(candidateLabels);
-    if (
+    return (
       intendedCE !== null &&
       candidateCE !== null &&
       intendedCE !== candidateCE
-    ) {
+    );
+  }
+
+  /**
+   * Scores one candidate; returns null when hard label axes reject it
+   * or it fails the similarity floor. Public so provider-asserted
+   * pairings (e.g. a radio page's own refs) can record real evidence
+   * instead of a fabricated score.
+   */
+  static evidence(
+    recording: Recording,
+    candidate: MatchCandidate,
+  ): { evidence: MatchEvidence } | null {
+    const intended = analyzeTitle(recording.title);
+    const candidateLabels = new Set(
+      extractVersionLabels(candidate.title, candidate.explicit),
+    );
+
+    // Hard rejections come before any scoring; a label mismatch
+    // rejects even an exact-ISRC candidate.
+    if (this.hardConflict(recording, candidate)) {
       return null;
     }
 

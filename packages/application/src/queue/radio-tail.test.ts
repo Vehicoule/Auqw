@@ -521,6 +521,36 @@ async function purePlanRejectsMismatched(): Promise<void> {
     'user-rejected pairing not enqueued',
   );
   assertEqual(planDenied.recordings.length, 1);
+  // A similarity-floor miss without a hard conflict is metadata drift:
+  // the shared ref identifies the recording, so it is refreshed and
+  // enqueued — just without a new mapping assertion.
+  const stale: Recording = {
+    ...recording('rS', [ref('youtube-music', 'v3')]),
+    title: 'Untitled',
+  };
+  const planDrift = planRadioPage(
+    [stale],
+    [],
+    [meta('youtube-music', 'v3', 'Parachute', 'Coldplay', 300_000)],
+    ids,
+    'youtube-music',
+    9,
+  );
+  assertEqual(
+    planDrift.occurrences.length,
+    1,
+    'same-ref drifted item still enqueues',
+  );
+  assertEqual(
+    planDrift.recordings[0]?.title,
+    'Parachute',
+    'provider metadata refreshes drift',
+  );
+  assertEqual(
+    planDrift.recordings[0]?.mappings.length,
+    0,
+    'no mapping written without evidence',
+  );
 }
 
 async function radioSeedFlow(): Promise<void> {

@@ -177,9 +177,12 @@ function winningMapping(
  * Records the provider's own assertion that `ref` serves `recording`
  * as an `automatic` mapping, with the real scored evidence. A
  * user-confirmed same-ref winner settles the pairing and returns the
- * recording as-is; a rejected winner or a hard-rejecting evidence
- * score returns null — the item is then not this recording and the
- * caller must not merge it in or enqueue under it.
+ * recording as-is; a rejected winner or a hard label conflict returns
+ * null — the item is then not this recording and the caller must not
+ * merge it in or enqueue under it. A similarity-floor miss without a
+ * hard conflict is ordinary metadata drift: the shared ref still
+ * identifies this recording, so the caller merges and enqueues but no
+ * automatic mapping is written without real evidence.
  */
 function withProviderMapping(
   recording: Recording,
@@ -199,7 +202,9 @@ function withProviderMapping(
   }
   const scored = MatchingEngine.evidence(recording, item);
   if (scored === null) {
-    return null;
+    return MatchingEngine.hardConflict(recording, item)
+      ? null
+      : recording;
   }
   const evidence: MatchEvidence = scored.evidence;
   const mapping: SourceMapping = {
