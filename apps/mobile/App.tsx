@@ -823,19 +823,34 @@ function Main({
     if (model === null) {
       return model;
     }
+    const local = controller.local();
+    const offline = online === false;
     return {
       ...model,
-      entries: model.entries.map((entry) => ({
-        ...entry,
-        row: {
-          ...entry.row,
-          playing:
-            entry.recordingId === playingId ? true : entry.row.playing,
-          download: downloadChipFor(entry.recordingId) ?? entry.row.download,
-        },
-      })),
+      entries: model.entries.map((entry) => {
+        const chip =
+          downloadChipFor(entry.recordingId) ?? entry.row.download;
+        const owned =
+          chip === 'stored' || local?.uriFor(entry.recordingId) != null;
+        const offlineRow =
+          offline && !owned
+            ? { state: 'unavailable' as const, note: 'offline' }
+            : {};
+        return {
+          ...entry,
+          row: {
+            ...entry.row,
+            playing:
+              entry.recordingId === playingId ? true : entry.row.playing,
+            download: chip,
+            ...offlineRow,
+          },
+        };
+      }),
     };
-  }, [overlay, state, downloads, downloadChipFor]);
+    // localTick re-reads local.uriFor after a folder mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlay, state, downloads, downloadChipFor, online, controller, localTick]);
   const entityModel = useMemo(
     () =>
       toEntityModel({

@@ -344,9 +344,7 @@ export function LibraryScreen({
         }}
       >
         {model.collections.map((tile) => {
-          // 'downloads' has no collection screen — it never narrows
-          // into the openable keys.
-          const key = tile.key === 'downloads' ? null : tile.key;
+          const key = tile.key;
           return (
             <View key={tile.key} style={{ flexBasis: '48.5%', flexGrow: 1 }}>
               <CollectionTile
