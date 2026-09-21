@@ -5,6 +5,7 @@ import {
   type LocalFile,
   type LocalSource,
   type Recording,
+  type SourceRef,
 } from '../domain.ts';
 import { appError, err, ok, type Result } from '../errors.ts';
 import { createSha256 } from '../downloads/sha256.ts';
@@ -424,6 +425,21 @@ export class LocalFileSource {
         recordingByFp.set(f.fingerprint, f.recordingId);
       }
     }
+    // `fp:` tombstone refs kept on recordings whose file rows vanished:
+    // the same content returning — same source or a re-added folder —
+    // re-links to its old recording (likes/playlists survive) instead
+    // of allocating a fresh identity.
+    const recordingByRetainedFp = new Map<string, string>();
+    for (const r of this.#recordings) {
+      for (const s of r.sourceRefs) {
+        if (s.provider === LOCAL_PROVIDER && s.id.startsWith('fp:')) {
+          const fp = s.id.slice(3);
+          if (!recordingByRetainedFp.has(fp)) {
+            recordingByRetainedFp.set(fp, r.id);
+          }
+        }
+      }
+    }
 
     // Recording upserts are deferred into the commit's fresh-read
     // merge — a recording created or edited by the session since boot
@@ -431,6 +447,7 @@ export class LocalFileSource {
     const pendingRecordings: {
       recordingId: string;
       fileId: string;
+      fingerprint: string;
       title: string;
       artist: string | null;
       album: string | null;
@@ -446,7 +463,10 @@ export class LocalFileSource {
       // Same docId, new bytes → keep the recording identity; same
       // fingerprint in another folder → join that recording; else new.
       const known = byDocId.get(row.docId);
-      const existing = known?.recordingId ?? recordingByFp.get(row.fingerprint);
+      const existing =
+        known?.recordingId ??
+        recordingByFp.get(row.fingerprint) ??
+        recordingByRetainedFp.get(row.fingerprint);
       const recordingId = existing ?? this.#ids.next('rec');
       recordingByFp.set(row.fingerprint, recordingId);
       nextFiles.push({
@@ -462,6 +482,7 @@ export class LocalFileSource {
       pendingRecordings.push({
         recordingId,
         fileId: row.fileId,
+        fingerprint: row.fingerprint,
         title,
         artist: tag?.artist ?? null,
         album: tag?.album ?? null,
@@ -486,7 +507,10 @@ export class LocalFileSource {
     );
 
     const mergeRecordings = (current: readonly Recording[]): Recording[] => {
-      const merged = stripLocalRefs(vanished, current);
+      // Upserts first, strip second: a changed-content file replaces
+      // its own dead ref, and the strip's ≥1-ref guard only applies
+      // to recordings that gained no replacement.
+      const merged = [...current];
       const byId = new Map(merged.map((r, i) => [r.id, i] as const));
       const upsert = (r: Recording): void => {
         const idx = byId.get(r.id);
@@ -526,10 +550,24 @@ export class LocalFileSource {
               s.id === p.fileId,
           )
         ) {
-          upsert({ ...existing, sourceRefs: [...existing.sourceRefs, ref] });
+          // Restoring a live ref retires its `fp:` tombstone — the
+          // row's local identity is the file again, not the marker.
+          upsert({
+            ...existing,
+            sourceRefs: [
+              ...existing.sourceRefs.filter(
+                (s) =>
+                  !(
+                    s.provider === LOCAL_PROVIDER &&
+                    s.id === `fp:${p.fingerprint}`
+                  ),
+              ),
+              ref,
+            ],
+          });
         }
       }
-      return merged;
+      return stripLocalRefs(vanished, merged);
     };
 
     const committed = await this.#commitSections(
@@ -559,6 +597,10 @@ export class LocalFileSource {
 /**
  * Drop `provider:'local'` refs whose fileId is gone from `recordings`
  * — the recording row persists; dead refs must not survive export.
+ * A local-only recording would strip to zero refs, which violates
+ * the ≥1-ref record invariant (sqlite's commit rejects the batch):
+ * its stale fingerprint ref stays — inert (no file row, so uriFor
+ * never resolves it) and re-links if the same file is re-added.
  */
 function stripLocalRefs(
   removed: readonly LocalFile[],
@@ -568,14 +610,38 @@ function stripLocalRefs(
     return [...recordings];
   }
   const dead = new Set(removed.map((f) => f.fileId));
-  return recordings.map((r) =>
-    r.sourceRefs.some((s) => s.provider === LOCAL_PROVIDER && dead.has(s.id))
-      ? {
-          ...r,
-          sourceRefs: r.sourceRefs.filter(
-            (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
-          ),
-        }
-      : r,
-  );
+  const fpByFileId = new Map(removed.map((f) => [f.fileId, f.fingerprint]));
+  return recordings.map((r) => {
+    if (
+      !r.sourceRefs.some(
+        (s) => s.provider === LOCAL_PROVIDER && dead.has(s.id),
+      )
+    ) {
+      return r;
+    }
+    const kept = r.sourceRefs.filter(
+      (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
+    );
+    // Every dead local ref becomes an `fp:` tombstone — inert to
+    // uriFor, keyed by raw fingerprint so a returning file re-links
+    // to this recording even under a fresh sourceId (re-added folder).
+    // On rows with surviving refs they preserve local identity; on
+    // zero-kept rows they also satisfy the ≥1-ref invariant.
+    const tombstones = new Map<string, SourceRef>();
+    for (const s of r.sourceRefs) {
+      const fp =
+        s.provider === LOCAL_PROVIDER ? fpByFileId.get(s.id) : undefined;
+      if (fp !== undefined) {
+        tombstones.set(fp, { ...s, id: `fp:${fp}` });
+      }
+    }
+    const seen = new Set(kept.map((s) => `${s.provider}|${s.kind}|${s.id}`));
+    const merged = [
+      ...kept,
+      ...[...tombstones.values()].filter(
+        (t) => !seen.has(`${t.provider}|${t.kind}|${t.id}`),
+      ),
+    ];
+    return { ...r, sourceRefs: merged };
+  });
 }

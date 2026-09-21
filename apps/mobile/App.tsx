@@ -73,6 +73,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  toTrackRowModel,
   useTheme,
 } from '@auqw/ui-native';
 import type {
@@ -908,7 +909,66 @@ function Main({
         })),
     [libraryModel],
   );
-  const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
+  // Local recordings join search results application-side (never
+  // provider routing): match the submitted query against
+  // provenance-local rows. Keys are `local:<recordingId>` so a press
+  // routes to the owned-bytes path, not addAndPlay.
+  const localResults = useMemo(() => {
+    const query = searchState.type === 'idle' ? '' : searchState.query;
+    const terms = query
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((t) => t.length > 0);
+    if (terms.length === 0) {
+      return [];
+    }
+    const liked = new Set(
+      state.likes
+        .filter((l) => l.entityKind === 'track')
+        .map((l) => l.targetId),
+    );
+    const local = controller.local();
+    const rows: TrackRowModel[] = [];
+    for (const rec of state.recordings) {
+      // Folder removal keeps the recording but drops its file row —
+      // uriFor is the owned-bytes truth; orphans never surface.
+      if (rec.provenance !== 'local' || local?.uriFor(rec.id) == null) {
+        continue;
+      }
+      const haystack =
+        `${rec.title} ${rec.artist ?? ''} ${rec.album ?? ''}`.toLowerCase();
+      if (terms.every((t) => haystack.includes(t))) {
+        rows.push(
+          toTrackRowModel(rec, {
+            key: `local:${rec.id}`,
+            liked: liked.has(rec.id),
+            note: 'local',
+          }),
+        );
+        if (rows.length >= 25) {
+          break;
+        }
+      }
+    }
+    return rows;
+    // localTick re-reads local.uriFor after a folder mutation — a
+    // removed folder's recordings persist but must stop matching.
+  }, [searchState, state.recordings, state.likes, controller, localTick]);
+  const searchModel = useMemo(() => {
+    const base = toSearchModel(searchState);
+    if (localResults.length === 0 || base.phase === 'idle') {
+      return base;
+    }
+    const results = [...localResults, ...base.results];
+    if (base.phase === 'ready' || base.phase === 'loading') {
+      return { ...base, results };
+    }
+    // Provider empty/error/unavailable but local files matched — the
+    // rows still play (owned bytes), so surface them instead of the
+    // bare failure.
+    return { ...base, phase: 'ready' as const, results };
+  }, [searchState, localResults]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
@@ -945,8 +1005,13 @@ function Main({
       toSettingsModel(state.settings, diagnostics, {
         storageText,
         localFolderCount: controller.local()?.list().length,
+        localSources: controller
+          .local()
+          ?.list()
+          .map((s) => ({ sourceId: s.sourceId, label: s.label })),
+        downloadCount: downloads.length,
       }),
-    [state, diagnostics, storageText, localTick, controller],
+    [state, diagnostics, storageText, localTick, controller, downloads],
   );
 
   const playRecording = useCallback(
@@ -1026,12 +1091,18 @@ function Main({
 
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
+      // Local merged rows are existing recordings — play through the
+      // owned-bytes path rather than re-ingesting provider metadata.
+      if (row.key.startsWith('local:')) {
+        void playRecording(row.key.slice('local:'.length));
+        return;
+      }
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         void session.addAndPlay(meta);
       }
     },
-    [session, canPlayMeta],
+    [session, canPlayMeta, playRecording],
   );
 
   const onSettingsSelect = useCallback(
@@ -1072,6 +1143,28 @@ function Main({
           });
         return;
       }
+      if (key === 'removeAllDownloads') {
+        void controller.downloads
+          .removeAll(new CancellationSource().signal)
+          .then(refreshUsage);
+        return;
+      }
+      if (key.startsWith('localSourceRemove:')) {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        const sourceId = key.slice('localSourceRemove:'.length);
+        void local
+          .removeSource(sourceId, new CancellationSource().signal)
+          .then((removed) => {
+            if (removed.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
       if (key === 'rescanLocal' || key === 'localSources') {
         const local = controller.local();
         if (local === null) {
@@ -1089,7 +1182,7 @@ function Main({
       }
       // storefront, quality, downloadStorage rows are display-only.
     },
-    [session, state.settings, controller, refreshLocal],
+    [session, state.settings, controller, refreshLocal, refreshUsage],
   );
 
   const onSettingsToggle = useCallback(

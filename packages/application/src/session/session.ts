@@ -183,6 +183,15 @@ export type SessionDeps = {
    * still wins; a foreign pin can't resolve under it anyway.
    */
   readonly localPlaybackFor?: (recordingId: string) => string | null;
+  /**
+   * Slice-3 zero-resolution gate: synchronous "is the network usable"
+   * read. When it reports false, a play attempt whose pick isn't
+   * `provider:'local'` fails `unavailable` BEFORE any candidates/
+   * resolve/prepare call, and unowned projection items carry
+   * provider:null/sourceRef:null. Omitted = optimistically online
+   * (platforms without a connectivity surface keep prior behavior).
+   */
+  readonly isOnline?: () => boolean;
 };
 
 const OP_DEADLINE_MS = 15_000;
@@ -320,6 +329,7 @@ export class Session {
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
+  readonly #isOnline: () => boolean;
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -354,6 +364,7 @@ export class Session {
     this.#ids = deps.ids;
     this.#log = deps.log;
     this.#localPlaybackFor = deps.localPlaybackFor ?? (() => null);
+    this.#isOnline = deps.isOnline ?? (() => true);
     this.#corrections = createCorrections({
       storage: deps.storage,
       ids: deps.ids,
@@ -742,6 +753,20 @@ export class Session {
     this.#publish();
     this.#derived();
     return ok(undefined);
+  }
+
+  /**
+   * Connectivity edge from the platform monitor — invoked AFTER the
+   * `isOnline` dep already reads the new value. Re-projects the
+   * native queue so offline items lose their remote refs (and regain
+   * them on reconnect), cancels in-flight speculative mapping, and
+   * re-evaluates the successor/radio triggers under the new truth.
+   */
+  connectivityChanged(): void {
+    if (!this.#requireReady().ok) {
+      return;
+    }
+    this.#derived();
   }
 
   async enqueueRecording(recordingId: string): Promise<Result<string>> {
@@ -1796,6 +1821,10 @@ export class Session {
     if (record === null || !shouldGrowRadio(record, r.queue.snapshot())) {
       return;
     }
+    // Radio growth spends the network — skip when offline.
+    if (!this.#isOnline()) {
+      return;
+    }
     record.fetching = true;
     this.#publish();
     const work = this.#radioTail.then(() => this.#growRadio(record));
@@ -2261,6 +2290,13 @@ export class Session {
     occurrenceSelected: SourceRef | null,
   ): SourceRef | null {
     const provider = this.#ready?.settings.playbackProvider ?? '';
+    // Offline: only owned bytes can attach — a provider pin would
+    // fire a network call it can't satisfy, so even an active-
+    // provider pin loses to a download or local file here.
+    if (!this.#isOnline()) {
+      const owned = this.#localPlaybackFor(recording.id);
+      return owned === null ? null : localTrackRef(owned);
+    }
     if (
       occurrenceSelected !== null &&
       occurrenceSelected.provider === provider
@@ -2342,6 +2378,18 @@ export class Session {
     }
 
     let ref = this.#pickRef(recording, occurrence.selectedRef);
+    // Offline zero-resolution gate: only owned bytes play. A null ref
+    // would fire playback.candidates and a provider ref would start a
+    // stream attach — both spend the network it doesn't have.
+    const online = this.#isOnline();
+    if (!online && (ref === null || ref.provider !== LOCAL_PROVIDER)) {
+      const error = appError(
+        'unavailable',
+        'offline — no local bytes for this recording',
+      );
+      await this.#failAttempt(attempt, error);
+      return err(error);
+    }
     if (ref === null) {
       const resolved = await this.#resolveViaCandidates(
         attempt,
@@ -2929,15 +2977,22 @@ export class Session {
       return null;
     }
     const snap = r.queue.snapshot();
+    // Offline honesty: items without local bytes project null refs so
+    // the native cursor can't attempt a network attach for them.
+    const online = this.#isOnline();
     const items: QueueProjectionItem[] = snap.occurrences.map(
       (occurrence) => {
         const recording = r.recordings.find(
           (rec) => rec.id === occurrence.recordingId,
         );
-        const selected =
+        const picked =
           recording === undefined
             ? null
             : this.#pickRef(recording, occurrence.selectedRef);
+        const selected =
+          !online && picked !== null && picked.provider !== LOCAL_PROVIDER
+            ? null
+            : picked;
         const artwork = recording?.artwork.find(
           (a) => typeof a.url === 'string' && a.url.startsWith('https://'),
         );
@@ -3211,6 +3266,10 @@ export class Session {
     // unvetoed source ref — is already projected; no mapping task is
     // needed.
     if (this.#pickRef(recording, successor.selectedRef) !== null) {
+      return;
+    }
+    // Speculative work spends the network too — skip when offline.
+    if (!this.#isOnline()) {
       return;
     }
     const routed = this.#router.providerFor(

@@ -5,6 +5,7 @@ import type { ErrorKind, Result } from '../errors.ts';
 import type {
   DownloadRecord,
   QueueOccurrence,
+  Recording,
   Settings,
   SourceRef,
 } from '../domain.ts';
@@ -46,6 +47,29 @@ function ref(id: string): SourceRef {
   return { provider: 'ytm', kind: 'track', id };
 }
 
+function recording(id: string): Recording {
+  return {
+    id,
+    title: `Song ${id}`,
+    artist: 'Artist',
+    album: 'Album',
+    durationMs: 300_000,
+    releaseYear: 2020,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    isrc: null,
+    versionLabels: [],
+    sourceRefs: [ref(id)],
+    mappings: [],
+    provenance: 'provider',
+  };
+}
+
+// Every recordingId the suite exercises — storage validates the merged
+// document exactly like sqlite, so download/queue rows need parents.
+const REC_IDS = ['rec-1', 'rec-2', 'rec-a', 'rec-b', 'rec-p', 'rec-r', 'rec-v'];
+
 function settings(downloadMetered = false): Settings {
   return {
     catalogProvider: 'itunes',
@@ -73,7 +97,7 @@ function queue(
 
 function persisted(downloads: readonly DownloadRecord[]): PersistedState {
   return {
-    recordings: [],
+    recordings: REC_IDS.map(recording),
     likes: [],
     entities: [],
     entitySourceRefs: [],

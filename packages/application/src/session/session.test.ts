@@ -153,6 +153,7 @@ function rig(
   state: PersistedState,
   extraProviders: ProviderPort[] = [],
   localPlayback?: Map<string, string>,
+  online?: () => boolean,
 ): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
@@ -172,6 +173,7 @@ function rig(
     log,
     defaults: SETTINGS,
     localPlaybackFor: (recordingId) => localPlayback?.get(recordingId) ?? null,
+    isOnline: online ?? (() => true),
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -3224,7 +3226,226 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['reviewReloadPreservesMemory', reviewReloadPreservesMemory],
   ['localPlaybackPreferred', localPlaybackPreferred],
   ['localPlaybackPinnedForeign', localPlaybackPinnedForeign],
+  ['offlineGateUnowned', offlineGateUnowned],
+  ['offlineGateLocalStillPlays', offlineGateLocalStillPlays],
+  ['offlineProjectionNulls', offlineProjectionNulls],
+  ['offlinePinnedOwnedStillPlays', offlinePinnedOwnedStillPlays],
+  ['connectivityEdgeReprojects', connectivityEdgeReprojects],
 ] as const;
+
+// Offline + unowned: the attempt must fail 'unavailable' BEFORE any
+// candidates/resolve/prepare call — zero resolution calls is the
+// airplane gate's core assertion.
+async function offlineGateUnowned(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    () => false,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const outcome = await started;
+  assert(!outcome.ok && outcome.error.kind === 'unavailable',
+    'offline unowned must fail unavailable');
+  assertEqual(r.ytm.pendingCount('candidates'), 0, 'no candidates call');
+  assertEqual(calls(r, 'prepare').length, 0, 'no prepare call');
+  const snap = readyOf(r);
+  assertEqual(snap.playback.type, 'failed', 'playback failed');
+  assert(snap.queue.blockedError !== undefined, 'queue blocked honestly');
+}
+
+// Offline + owned bytes: provider:'local' still attaches; the
+// unmapped successor never triggers a candidates call (offline
+// successor mapping is skipped).
+async function offlineGateLocalStillPlays(): Promise<void> {
+  const localMap = new Map([['r1', 'file:///data/dl-9']]);
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [ref('youtube-music', 'y1')]),
+        recording('r2', [ref('youtube-music', 'y2')]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1'), occurrence('o2', 'r2')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    localMap,
+    () => false,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  const input = prep?.input as
+    | { provider: string; sourceRef: string }
+    | undefined;
+  assertEqual(input?.provider, 'local', 'local attach under airplane');
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'lf-9'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-lf-9')));
+  assert((await started).ok, 'local play failed');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'offline successor mapping skipped',
+  );
+}
+
+// Offline projection: unowned items carry null provider/sourceRef so
+// the native cursor can't attempt a network attach; owned items keep
+// their provider:'local' uri.
+async function offlineProjectionNulls(): Promise<void> {
+  const localMap = new Map([['r2', 'content://tree/file-2']]);
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [ref('youtube-music', 'y1')]),
+        recording('r2', [ref('youtube-music', 'y2')]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1'), occurrence('o2', 'r2')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    localMap,
+    () => false,
+  );
+  await restoreOk(r);
+  await pump();
+  const projection = r.player.projections.at(-1);
+  assert(projection !== undefined, 'a projection was sent');
+  const first = projection.items.find((i) => i.occurrenceId === 'o1');
+  const second = projection.items.find((i) => i.occurrenceId === 'o2');
+  assertEqual(first?.provider, null, 'unowned item projects null');
+  assertEqual(first?.sourceRef, null, 'unowned item projects null ref');
+  assertEqual(second?.provider, 'local', 'owned item keeps local');
+  assertEqual(
+    second?.sourceRef,
+    'content://tree/file-2',
+    'owned item keeps its uri',
+  );
+}
+
+// Offline + a provider pin + owned bytes: the pin can't attach
+// without a network, so the owned file still wins.
+async function offlinePinnedOwnedStillPlays(): Promise<void> {
+  const localMap = new Map([['r1', 'file:///data/dl-7']]);
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    localMap,
+    () => false,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const prep = calls(r, 'prepare').at(-1);
+  const input = prep?.input as
+    | { provider: string; sourceRef: string }
+    | undefined;
+  assertEqual(input?.provider, 'local', 'pin loses to owned bytes offline');
+  assertEqual(input?.sourceRef, 'file:///data/dl-7', 'local uri attaches');
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'no resolution under airplane',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'lf-7'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-lf-7')));
+  assert((await started).ok, 'pinned local play resolves');
+}
+
+// A connectivity edge rebuilds the projection: online→offline drops
+// unowned refs; offline→online restores them — both without a queue
+// mutation.
+async function connectivityEdgeReprojects(): Promise<void> {
+  let online = true;
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('r1', [ref('youtube-music', 'y1')]),
+        recording('r2', [ref('youtube-music', 'y2')]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1'), occurrence('o2', 'r2')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  await pump();
+  const before = r.player.projections.at(-1);
+  const beforeSecond = before?.items.find((i) => i.occurrenceId === 'o2');
+  assertEqual(
+    beforeSecond?.provider,
+    'youtube-music',
+    'online projection keeps provider ref',
+  );
+  online = false;
+  r.session.connectivityChanged();
+  await pump();
+  const offline = r.player.projections.at(-1);
+  const offlineSecond = offline?.items.find((i) => i.occurrenceId === 'o2');
+  assertEqual(
+    offlineSecond?.provider,
+    null,
+    'edge re-projects unowned item to null',
+  );
+  assert(offline !== before, 'a fresh projection was installed');
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  const restored = r.player.projections.at(-1);
+  const restoredSecond = restored?.items.find(
+    (i) => i.occurrenceId === 'o2',
+  );
+  assertEqual(
+    restoredSecond?.provider,
+    'youtube-music',
+    'reconnect restores provider ref',
+  );
+}
 
 // Owned bytes beat an auto-pick: a recording with local playback
 // prepares through provider:'local' and projects the URI to the

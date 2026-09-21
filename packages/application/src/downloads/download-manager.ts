@@ -674,6 +674,10 @@ export class DownloadManager {
     }
     this.#rows.delete(row.downloadId);
     this.#persistedOffset.delete(row.downloadId);
+    // Emit the row's final state post-delete — listeners re-read
+    // list() and see the row gone; without this the last event they
+    // saw (`removing`) still contained it.
+    this.#emit(marked.value);
     const persisted = await this.#persist();
     if (!persisted.ok) {
       return persisted;

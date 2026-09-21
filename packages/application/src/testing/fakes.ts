@@ -49,7 +49,7 @@ import type {
   StorageBatch,
   StoragePort,
 } from '../ports/storage.ts';
-import { isExportDocument } from '../library/library.ts';
+import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
 
 function isSafeNonNegative(value: unknown): value is number {
@@ -697,7 +697,7 @@ export class FakeStorage implements StoragePort {
     this.commits.push({ batch: this.#clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
     const staged = this.#clone(batch);
-    this.#state = {
+    const merged: PersistedState = {
       recordings: staged.recordings ?? this.#state.recordings,
       likes: staged.likes ?? this.#state.likes,
       entities: staged.entities ?? this.#state.entities,
@@ -717,6 +717,14 @@ export class FakeStorage implements StoragePort {
       queue: staged.queue ?? this.#state.queue,
       settings: staged.settings ?? this.#state.settings,
     };
+    // Mirror sqlite: validate the merged document before any mutation
+    // so tests can't commit states the real backend would reject.
+    if (!isPersistedState(merged)) {
+      return Promise.resolve(
+        err(appError('invalid-response', 'commit batch failed validation')),
+      );
+    }
+    this.#state = merged;
     if (staged.attempts !== undefined) {
       this.#attempts = [...this.#attempts, ...staged.attempts].slice(
         -FakeStorage.MAX_ATTEMPTS,

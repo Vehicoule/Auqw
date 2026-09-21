@@ -240,6 +240,11 @@ export async function createSessionController(
   // `local` is constructed in start(); the playback hook reads the
   // box so a URI resolves the moment a source exists.
   let localSource: LocalFileSource | null = null;
+  // Cached connectivity read for the session's zero-resolution gate.
+  // Optimistic true until start() seeds it — matches the unwatched
+  // (iOS) port's convention; a failed read drops to offline, never
+  // silently online.
+  let lastOnline = true;
   const log = createLog();
   const session = new Session({
     storage,
@@ -265,6 +270,7 @@ export async function createSessionController(
             }
             return localSource?.uriFor(recordingId) ?? null;
           },
+          isOnline: () => lastOnline,
         }
       : {}),
   });
@@ -471,6 +477,38 @@ export async function createSessionController(
           }
         }),
       );
+      // Offline gate feed: seed the cached read, then keep it live on
+      // connectivity edges. Installed before downloads.init so the
+      // monitor's baseline edge can't be missed.
+      try {
+        const seeded = await connectivity.snapshot();
+        const online = seeded.ok ? seeded.value.online : false;
+        if (online !== lastOnline) {
+          // Seeding flipped the optimistic default — if restore
+          // already projected remote refs, re-derive them now; the
+          // monitor's identical baseline edge gets deduped below.
+          lastOnline = online;
+          session.connectivityChanged();
+        }
+      } catch {
+        lastOnline = false;
+        session.connectivityChanged();
+      }
+      try {
+        mediaUnsubs.push(
+          connectivity.subscribe((snap) => {
+            if (snap.online === lastOnline) {
+              return;
+            }
+            // Update the gate's read BEFORE the session re-derives —
+            // connectivityChanged() reads isOnline() synchronously.
+            lastOnline = snap.online;
+            session.connectivityChanged();
+          }),
+        );
+      } catch {
+        // No monitor on this platform — the session stays optimistic.
+      }
       const inited = await downloads.init(loaded.value.downloads, signal);
       if (!inited.ok) {
         log.write({
@@ -478,6 +516,13 @@ export async function createSessionController(
           message: `download init failed: ${inited.error.kind}`,
           atMs: clock.nowMs(),
         });
+      }
+      // Final re-derive: a connectivity seed/edge during boot may
+      // have projected while the download ledger was still empty —
+      // replay the current truth now that owned files resolve. A
+      // failed init leaves rows unverified — don't project them.
+      if (inited.ok) {
+        session.connectivityChanged();
       }
     },
     rehydrateMedia,
