@@ -485,9 +485,9 @@ function GalleryBody({
       </Section>
 
       <Section title="navbars" note="m3e bar · liquid glass capsule">
-        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
+        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
         <View style={{ height: theme.spacing.md }} />
-        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} gestureHandle />
+        <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
       </Section>
 
       <Section title="transport" note="m3e squircle · ios glass">
@@ -542,7 +542,6 @@ function GalleryBody({
                 items={fixtureNavItems}
                 activeKey={nav}
                 onSelect={setNav}
-                gestureHandle
               />
             </Frame>
           </View>

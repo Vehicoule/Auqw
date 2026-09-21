@@ -23,7 +23,6 @@ const config: ExpoConfig = {
       monochromeImage: './assets/android-icon-monochrome.png',
     },
     predictiveBackGestureEnabled: true,
-    edgeToEdgeEnabled: true,
   },
   plugins: [
     [
@@ -39,12 +38,10 @@ const config: ExpoConfig = {
     [
       'expo-navigation-bar',
       {
-        // Edge-to-edge content draws under the gesture nav bar; keep the
-        // bar itself transparent and its buttons readable on the canvas.
-        backgroundColor: '#00000000',
-        barStyle: 'light',
-        borderColor: '#00000000',
-        position: 'absolute',
+        // Android 16 edge-to-edge is mandatory — light buttons over the
+        // app canvas; the style is re-applied per theme at runtime.
+        style: 'light',
+        enforceContrast: false,
       },
     ],
   ],

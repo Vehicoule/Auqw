@@ -54,6 +54,9 @@ export type { StateViewProps } from './states.tsx';
 export { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
 export type { AppNavbarProps, NavbarProps } from './navbar.tsx';
 
+export { PlatformTabs } from './platform-tabs.tsx';
+export type { PlatformTabsProps } from './platform-tabs.tsx';
+
 export { MiniPlayer } from './mini-player.tsx';
 export type { MiniPlayerProps } from './mini-player.tsx';
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, View } from 'react-native';
+import { Linking, Platform, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   SafeAreaProvider,
@@ -36,7 +36,6 @@ import type {
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
-  AppNavbar,
   CollectionScreen,
   CorrectionsScreen,
   EmptyState,
@@ -47,6 +46,7 @@ import {
   LibraryScreen,
   LoadingState,
   MiniPlayer,
+  PlatformTabs,
   PlaylistScreen,
   ProviderPickerSheet,
   RowActionsSheet,
@@ -1669,8 +1669,8 @@ function Main({
       </View>
     );
   }
-  const screen = (() => {
-    switch (tab) {
+  const renderTabScreen = (key: string) => {
+    switch (key) {
       case 'explore':
         return (
           <SearchScreen
@@ -1751,7 +1751,7 @@ function Main({
           />
         );
     }
-  })();
+  };
 
   const overlayScreen = (() => {
     if (overlay === null) {
@@ -1896,24 +1896,33 @@ function Main({
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-      <View style={{ flex: 1 }}>{overlayScreen ?? screen}</View>
-      {player !== null && !expanded ? (
-        <MiniPlayer
-          player={player}
-          onPress={() => setExpanded(true)}
-          onPlayPause={onPlayPause}
-          onNext={() => void session.next()}
-          onPrevious={() => void session.previous()}
-          onToggleLike={onToggleLike}
-        />
-      ) : null}
-      <AppNavbar
+      <PlatformTabs
         items={NAV_ITEMS}
         activeKey={tab}
         onSelect={(key) => {
           setTab(key);
           closeOverlay();
         }}
+        renderTab={(key) => (
+          <View style={{ flex: 1 }}>
+            {renderTabScreen(key)}
+            {key === tab && overlayScreen !== null ? (
+              <View style={StyleSheet.absoluteFill}>{overlayScreen}</View>
+            ) : null}
+          </View>
+        )}
+        accessory={
+          player !== null && !expanded ? (
+            <MiniPlayer
+              player={player}
+              onPress={() => setExpanded(true)}
+              onPlayPause={onPlayPause}
+              onNext={() => void session.next()}
+              onPrevious={() => void session.previous()}
+              onToggleLike={onToggleLike}
+            />
+          ) : undefined
+        }
       />
       {player !== null ? (
         <StageSheet
