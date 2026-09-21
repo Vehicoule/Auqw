@@ -761,7 +761,7 @@ export type QueueModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
-  readonly unavailableRecordingIds?: ReadonlySet<string>;
+  readonly unavailableRecordingIds?: ReadonlySet<string> | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
