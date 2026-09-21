@@ -843,7 +843,7 @@ impl SessionInner {
         let mut store = lock(&self.store)?;
         if store.covers(position) {
             let bytes = store.read_at(position, max_len)?;
-            sh.read_pos = sh.read_pos.max(position + bytes.len() as u64);
+            sh.read_pos = sh.read_pos.max(position.saturating_add(bytes.len() as u64));
             drop(store);
             self.pump_notify.notify_one();
             return Ok(Some(bytes));
