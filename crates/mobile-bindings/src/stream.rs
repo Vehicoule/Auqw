@@ -13,6 +13,8 @@ use std::sync::Arc;
 use auqw_plugin_host::{
     invoke, Attempt, Budgets, HostServices, KeyValueStore, LoadedPlugin, ReqwestClient, SystemClock,
 };
+
+use crate::PreparedSlot;
 use auqw_stream::{PhaseMarks, PrepareInfo, PreparedSource, Remint, StreamRegistry};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -363,6 +365,7 @@ impl PluginHost {
         let prepared_handles = Arc::clone(&self.prepared_handles);
         let cancels = Arc::clone(&self.cancels);
         let cancelled_requests = Arc::clone(&self.cancelled_requests);
+        let prepared_delivery = Arc::clone(&self.prepared_delivery);
         // `prefer` is a key, not a value: absent means "guest default",
         // never a null that fails payload validation. `access_token`
         // rides via the `start_typed` merge.
@@ -384,6 +387,9 @@ impl PluginHost {
                 // `stream` is moved into the blocking closure below —
                 // keep a clone for the bookkeeping prune.
                 let registry = Arc::clone(&stream);
+                // Counts this delivery's window for `cancel` — see
+                // `PrepareDelivery`. Held until the post-callback flip.
+                let mut delivery_ticket = None;
                 let mut outcome = match result {
                     Ok(value) => {
                         // Session creation does file I/O — run it on the
@@ -436,14 +442,19 @@ impl PluginHost {
                         // Sessions ended by supersede/evict/expiry saw
                         // neither cancel nor release — drop their stale
                         // mappings so the map tracks live handles only.
-                        m.retain(|_, h| *h == prepared.handle || registry.is_live(h));
+                        m.retain(|_, s| s.handle == prepared.handle || registry.is_live(&s.handle));
                         // A `cancel` that landed while the resolve was
                         // completing already flipped the token —
                         // deciding under this lock keeps the paths
                         // exclusive: a later `cancel` sees the recorded
                         // handle and abandons via `prepared_handles`,
                         // while this one abandons directly instead of
-                        // delivering a live `Prepared`.
+                        // delivering a live `Prepared`. The insert IS
+                        // the delivery commit — `delivered: false`
+                        // tells `cancel` the outcome is committed but
+                        // not yet on the wire, so it consumes the slot
+                        // without releasing the handle out from under
+                        // the listener.
                         let was_cancelled = cancels
                             .lock()
                             .ok()
@@ -452,7 +463,18 @@ impl PluginHost {
                         if was_cancelled {
                             abandoned = Some(prepared.handle.clone());
                         } else {
-                            m.insert(request_id.clone(), prepared.handle.clone());
+                            // `track` precedes `insert`: a `Pending`
+                            // slot always implies an in-flight count,
+                            // so a `cancel` that sees one waits for
+                            // this window to close.
+                            delivery_ticket = Some(prepared_delivery.track());
+                            m.insert(
+                                request_id.clone(),
+                                PreparedSlot {
+                                    handle: prepared.handle.clone(),
+                                    delivered: false,
+                                },
+                            );
                         }
                     }
                 } else if let Ok(mut m) = cancelled_requests.lock() {
@@ -472,7 +494,20 @@ impl PluginHost {
                         other => other,
                     };
                 }
-                listener.on_outcome(request_id, outcome);
+                listener.on_outcome(request_id.clone(), outcome);
+                // The outcome is on the wire: flip `delivered` so a
+                // later `cancel` may release an unattached handle. A
+                // `cancel` parked mid-delivery stays asleep until the
+                // ticket drops below — `Prepared` always precedes its
+                // own teardown.
+                if delivery_ticket.is_some() {
+                    if let Ok(mut m) = prepared_handles.lock() {
+                        if let Some(slot) = m.get_mut(&request_id) {
+                            slot.delivered = true;
+                        }
+                    }
+                    drop(delivery_ticket);
+                }
             },
         )
     }
@@ -526,7 +561,7 @@ impl PluginHost {
     pub fn stream_release(&self, handle: String) -> Result<(), StreamError> {
         self.stream_registry()?.release(&handle).map_err(seam_err)?;
         if let Ok(mut m) = self.prepared_handles.lock() {
-            m.retain(|_, h| *h != handle);
+            m.retain(|_, s| s.handle != handle);
         }
         Ok(())
     }

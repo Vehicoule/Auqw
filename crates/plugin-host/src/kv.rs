@@ -230,16 +230,25 @@ impl FileKeyValueStore {
             TMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let tmp = PathBuf::from(tmp_name);
-        {
-            let mut file = std::fs::File::create(&tmp)
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            file.write_all(&json)
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            file.sync_all()
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+        // Unique per write means a failed commit leaves its own debris —
+        // best-effort remove the staging file on any error before the
+        // rename lands.
+        let staged = (|| -> Result<(), KvError> {
+            {
+                let mut file = std::fs::File::create(&tmp)
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+                file.write_all(&json)
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+                file.sync_all()
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            }
+            std::fs::rename(&tmp, &self.path)
+                .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))
+        })();
+        if staged.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))?;
+        staged?;
         // The rename's directory entry needs its own sync — without it
         // a crash could still lose the committed file.
         if let Some(parent) = self.path.parent() {

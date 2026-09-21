@@ -337,8 +337,10 @@ async fn run(
     if let Some(token) = payload
         .get("access_token")
         .and_then(Value::as_str)
-        .filter(|s| s.len() >= 8)
+        .filter(|s| !s.is_empty())
     {
+        // No length floor: a short token is still credential material,
+        // and the no-secrets-in-logs rule outranks log legibility.
         attempt.secrets.push(token.to_string());
     }
     // The namespace snapshot is staged for the whole invocation; on a
@@ -475,6 +477,11 @@ async fn run(
                         .await
                         .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
                         .map_err(|e| InvokeError::HostService(e.to_string()))?;
+                    // A cancel that landed mid-fsync couldn't stop the
+                    // write — blocking fs I/O isn't abortable — but the
+                    // invocation's RESULT is still honest: the caller
+                    // sees cancelled, not a silent success.
+                    check_preemption(ctx)?;
                 }
                 return Ok(result);
             }

@@ -243,11 +243,9 @@ export function appFilePath(rawPath: string): string | null {
     }
     return variants;
   });
-  let normalized: string;
-  try {
-    normalized = new URL(`file://${rawPath}`).pathname;
-  } catch {
-    normalized = rawPath;
+  const normalized = parseFilePath(rawPath);
+  if (normalized === null) {
+    return null;
   }
   // The boundary must end on a path separator — `files-evil/x` is a
   // sibling, not "inside files/".
@@ -255,6 +253,59 @@ export function appFilePath(rawPath: string): string | null {
     normalized.startsWith(root.endsWith('/') ? root : `${root}/`),
   );
   return inside ? normalized : null;
+}
+
+/** Parse a caller-supplied path — plain absolute or `file://` URI —
+ * into a canonical absolute path for the fence check. `URL` keeps
+ * percent-encoded dots verbatim in the pathname, so the path is
+ * decoded before dot-segment normalization: an unnormalized `%2e%2e`
+ * would pass the prefix test and only resolve into a traversal when
+ * the file is opened. Returns null on anything that isn't a clean
+ * local path (bad encoding, non-file scheme, remote authority, or a
+ * `..` that climbs above the root). */
+function parseFilePath(rawPath: string): string | null {
+  if (rawPath.includes('\0')) {
+    return null;
+  }
+  let pathname: string;
+  if (rawPath.startsWith('file://')) {
+    let url: URL;
+    try {
+      url = new URL(rawPath);
+    } catch {
+      return null;
+    }
+    // `file://host/...` names a remote share — local files only.
+    if (url.hostname !== '' && url.hostname !== 'localhost') {
+      return null;
+    }
+    pathname = url.pathname;
+  } else {
+    pathname = rawPath;
+  }
+  if (!pathname.startsWith('/')) {
+    return null;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const out: string[] = [];
+  for (const seg of decoded.split('/')) {
+    if (seg === '' || seg === '.') {
+      continue;
+    }
+    if (seg === '..') {
+      if (out.pop() === undefined) {
+        return null;
+      }
+      continue;
+    }
+    out.push(seg);
+  }
+  return `/${out.join('/')}`;
 }
 
 export async function runSeamLink(url: string): Promise<void> {

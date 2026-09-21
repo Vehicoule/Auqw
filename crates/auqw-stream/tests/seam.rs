@@ -960,7 +960,8 @@ async fn malformed_content_range_never_echoes_server_text() {
 /// A double-`416` confirms the resource ends below the demand offset:
 /// the reader gets EOF, later reads above the ceiling are EOF too,
 /// and the pruned demand position is never refetched (the remint-storm
-/// regression at seam level).
+/// regression at seam level). Bare 416s — no declared total — so the
+/// retried-refusal rule is what confirms EOF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eof_ceiling_serves_reads_and_prunes_demand() {
     let d = TestDir::new("eofdemand");
@@ -970,12 +971,12 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
         VecDeque::from([
             Step::Reply(FetchResponse {
                 status: 416,
-                content_range: Some("bytes */1024".into()),
+                content_range: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
-                content_range: Some("bytes */1024".into()),
+                content_range: None,
                 body: stream_body(vec![]),
             }),
         ]),
@@ -1014,6 +1015,58 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
         "demand position refetched past the EOF ceiling"
     );
     assert_eq!(fetch.count_at(950), 0);
+}
+
+/// A `416` that declares `bytes */N` with `N` above the requested
+/// offset contradicts itself — the range was satisfiable on the
+/// server's own accounting. The pump must fail `invalid-response`,
+/// never confirm EOF below a wire-declared ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contradictory_416_total_fails_instead_of_eof() {
+    let d = TestDir::new("eofcontradict");
+    let mut pages = HashMap::new();
+    pages.insert(
+        900u64,
+        VecDeque::from([
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: stream_body(vec![]),
+            }),
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */1024".into()),
+                body: stream_body(vec![]),
+            }),
+        ]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let mut src = source(4096);
+    src.content_length = None;
+    let h = reg
+        .prepare(
+            src,
+            Arc::new(OkRemint {
+                calls: AtomicU32::new(0),
+            }),
+        )
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    let err = std::thread::scope(|s| s.spawn(|| reg.read(&h, 900, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"));
+    let err = match err {
+        Ok(bytes) => panic!("expected failure, got {} bytes", bytes.len()),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), "invalid-response", "{err}");
+    // The first contradictory 416 already fails — no re-mint, no retry.
+    assert_eq!(fetch.count_at(900), 1);
 }
 
 /// Cross-session priority: while an attached session's demand read is

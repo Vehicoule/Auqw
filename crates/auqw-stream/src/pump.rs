@@ -306,6 +306,16 @@ async fn fetch_chunk(
                         if offset >= total {
                             return Outcome::Eof(offset);
                         }
+                        // `offset < total`: the server calls this range
+                        // unsatisfiable while declaring an extent that
+                        // satisfies it — self-contradictory, and the
+                        // retry-only EOF rule must not truncate below a
+                        // wire-declared ceiling.
+                        return Outcome::Failed(StreamError::InvalidResponse {
+                            message: format!(
+                                "416 at offset {offset} but Content-Range declares total {total}"
+                            ),
+                        });
                     }
                     if eof_confirmed(session, offset, retried_416) {
                         return Outcome::Eof(offset);
@@ -1050,8 +1060,20 @@ mod tests {
         let remint = remint_ok();
         let s = session(cfg, remint.clone());
         // Seek-read lands far past the end: 416, remint, 416 again →
-        // eof_below marks the ceiling instead of an error.
-        let fetch = Arc::new(ScriptedFetch::new(status_steps(416, 2)));
+        // eof_below marks the ceiling instead of an error. Bare 416s —
+        // a declared total above the offset is a contradiction, not
+        // EOF evidence.
+        let fetch = Arc::new(ScriptedFetch::new(
+            (0..2)
+                .map(|_| {
+                    Step::Reply(FetchResponse {
+                        status: 416,
+                        content_range: None,
+                        body: stream_body(vec![]),
+                    })
+                })
+                .collect(),
+        ));
         {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
             sh.fetch_through.insert(900, 1);
