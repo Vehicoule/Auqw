@@ -20,6 +20,7 @@ import type {
 import { SqliteStorage } from '@auqw/storage-sqlite';
 import type {
   AuqwConnectivityNative,
+  AuqwDownloadsNative,
   AuqwExpoHostModuleLike,
   AuqwTagReaderNative,
 } from '../adapters/auqw-expo-surface.ts';
@@ -55,6 +56,12 @@ const LYRICS_LRCLIB_MANIFEST: unknown = require('../../assets/plugins/lyrics-lrc
  * (docs/specs/providers.md); `theme: 'system'` and `prefetch: true`
  * match the domain Settings contract.
  */
+function nativeMessage(thrown: unknown): string {
+  return thrown instanceof Error && thrown.message.length > 0
+    ? thrown.message
+    : 'native call failed';
+}
+
 const DEFAULT_SETTINGS: Settings = {
   catalogProvider: 'itunes',
   playbackProvider: 'youtube-music',
@@ -136,7 +143,10 @@ export type SessionControllerOptions = {
  * state; construction only assembles the dependency graph.
  */
 export async function createSessionController(
-  host: AuqwExpoHostModuleLike & AuqwConnectivityNative & AuqwTagReaderNative,
+  host: AuqwExpoHostModuleLike &
+    AuqwConnectivityNative &
+    AuqwTagReaderNative &
+    AuqwDownloadsNative,
   options: SessionControllerOptions = {},
 ): Promise<SessionController> {
   // Fuel config matches the Slice-0 gate values.
@@ -331,6 +341,33 @@ export async function createSessionController(
         },
       );
       await downloads.init(loaded.value.downloads, signal);
+      // dataSync FGS keep-alive: drive the service off the ledger —
+      // 'transferring' rows only (queued/metered-waiting rows hold no
+      // network and must not keep a foreground service posted). The
+      // native surface is Android-only; iOS lacks the method — its
+      // absence resolves to a warn, not a crash.
+      let lastActive = -1;
+      downloads.subscribe(() => {
+        const active = downloads
+          .list()
+          .filter((d) => d.state === 'transferring').length;
+        if (active === lastActive) {
+          return;
+        }
+        lastActive = active;
+        try {
+          void host.downloadsActiveChanged(active).catch((thrown) => {
+            void log.write({
+              level: 'warn',
+              message: `fgs update failed: ${nativeMessage(thrown)}`,
+              atMs: clock.nowMs(),
+            });
+          });
+        } catch {
+          // Method absent on this platform — downloads still work;
+          // only Doze-protected long transfers are degraded.
+        }
+      });
     },
     async dispose() {
       await downloads.stop(new CancellationSource().signal);

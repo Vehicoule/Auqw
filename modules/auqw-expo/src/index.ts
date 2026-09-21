@@ -290,6 +290,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   ): Promise<readonly (TagReaderTags | null)[]>;
   docUri(treeUri: string, docId: string): string;
   devAttachFile(path: string): Promise<string>;
+  downloadsActiveChanged(active: number): Promise<void>;
   devPrepareUrl(url: string, mime: string, contentLength?: number, remintable?: boolean): Promise<string>;
   connectivitySnapshot(): Promise<ConnectivityChangedEvent>;
   connectivityWatch(): void;
@@ -416,6 +417,17 @@ export function setQueueProjection(projection: QueueProjection): Promise<void> {
  * player so the attach→rendered-first-frame floor is measured without
  * the seam. Dev instrumentation; resolves with the dev handle.
  */
+/**
+ * Slice-3 keep-alive: the DownloadManager reports its live
+ * active-transfer count; >0 runs the `dataSync` foreground service
+ * (notification channel 'auqw-downloads'), 0 stops it. The service
+ * carries no state — a process kill just means the next init resumes
+ * rows from their committed offsets.
+ */
+export function downloadsActiveChanged(active: number): Promise<void> {
+  return native.downloadsActiveChanged(active);
+}
+
 export function devAttachFile(path: string): Promise<string> {
   return native.devAttachFile(path);
 }
