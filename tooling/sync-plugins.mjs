@@ -20,6 +20,7 @@ import {
 } from 'node:crypto';
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -31,6 +32,36 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCK = join(ROOT, 'providers.lock.json');
 const OUT = join(ROOT, 'apps/mobile/assets/plugins');
+
+// Resolve a lock-relative source path. On a case-sensitive filesystem a
+// sibling checkout may carry different casing than the lock expects
+// (e.g. `../auqw-plugins` vs an `Auqw-plugins` clone), so after the
+// exact path fails each segment is matched case-insensitively — the
+// first sorted match wins, keeping the fallback deterministic. If any
+// segment is unresolvable the original path is returned so the error
+// still names what the lock asked for.
+const resolveSourcePath = (rel) => {
+  const abs = resolve(ROOT, rel);
+  if (existsSync(abs)) return abs;
+  let cur = '/';
+  for (const part of abs.split('/')) {
+    if (!part) continue;
+    let entries;
+    try {
+      entries = readdirSync(cur);
+    } catch {
+      return abs;
+    }
+    const match = entries.includes(part)
+      ? part
+      : entries
+          .filter((e) => e.toLowerCase() === part.toLowerCase())
+          .sort()[0];
+    if (match === undefined) return abs;
+    cur = join(cur, match);
+  }
+  return cur;
+};
 
 const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')}`;
 
@@ -116,8 +147,9 @@ for (const plugin of lock.plugins) {
   let wasm;
   let manifest;
   let wasmPath;
+  let releaseDir;
   if (source.startsWith('local-build:')) {
-    wasmPath = resolve(ROOT, source.slice('local-build:'.length));
+    wasmPath = resolveSourcePath(source.slice('local-build:'.length));
     wasm = readFileSync(wasmPath);
     if (sha256(wasm) !== plugin.digest) {
       throw new Error(`${plugin.id}: digest mismatch lock=${plugin.digest} actual=${sha256(wasm)}`);
@@ -127,7 +159,8 @@ for (const plugin of lock.plugins) {
     if (!lock.keyId || !lock.publicKey) {
       throw new Error('release sources need keyId + publicKey in providers.lock.json');
     }
-    ({ wasm, manifest } = verifyRelease(plugin, resolve(ROOT, source.slice('release:'.length))));
+    releaseDir = resolveSourcePath(source.slice('release:'.length));
+    ({ wasm, manifest } = verifyRelease(plugin, releaseDir));
   } else {
     throw new Error(`${plugin.id}: unsupported source ${source}`);
   }
@@ -148,7 +181,7 @@ for (const plugin of lock.plugins) {
     throw new Error(`${plugin.id}: manifest digest ${manifest.artifact.digest} != lock ${plugin.digest}`);
   }
   copyFileSync(
-    wasmPath ?? join(resolve(ROOT, source.slice('release:'.length)), `${plugin.id}-${plugin.version}.wasm`),
+    wasmPath ?? join(releaseDir, `${plugin.id}-${plugin.version}.wasm`),
     join(OUT, `${plugin.id}.wasm`),
   );
   writeFileSync(join(OUT, `${plugin.id}.manifest.json`), JSON.stringify(manifest));

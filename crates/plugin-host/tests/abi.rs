@@ -571,6 +571,91 @@ async fn fuel_traps_infinite_loop() {
     assert!(elapsed < Duration::from_secs(15), "trap took {elapsed:?}");
 }
 
+/// A guest entry that outlives the deadline is detached and reported
+/// `deadline` at the deadline — fuel still bounds the detached burn —
+/// instead of holding the caller to fuel-out. The spin guest loops
+/// forever inside `handle`, so without the cap this test would run to
+/// the 200 M fuel grant (seconds to minutes on a loaded emulator).
+#[tokio::test]
+async fn deadline_caps_a_running_guest_entry() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdk/conformance/spin/spin.wasm"
+    );
+    let wasm = read_wasm(path);
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_millis(50);
+    budgets.fuel_per_entry = 200_000_000;
+    budgets.fuel_total = 2_000_000_000;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, _calls) = CannedHttp::new();
+    let t0 = Instant::now();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline cap, fuel_used={}",
+        attempt.fuel_used
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "deadline took {elapsed:?}"
+    );
+}
+
+/// A cancel that lands while a guest entry runs is reported at once —
+/// the detached entry keeps burning fuel in the background — rather
+/// than waiting for the entry to return.
+#[tokio::test]
+async fn cancel_preempts_a_running_guest_entry() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdk/conformance/spin/spin.wasm"
+    );
+    let wasm = read_wasm(path);
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_secs(60);
+    budgets.fuel_per_entry = 200_000_000;
+    budgets.fuel_total = 2_000_000_000;
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &budgets));
+    let (http, _calls) = CannedHttp::new();
+    let cancel = CancellationToken::new();
+    let cancel2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel2.cancel();
+    });
+    let t0 = Instant::now();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        cancel,
+        svc(&http, None),
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(
+        matches!(err(result), InvokeError::Cancelled),
+        "expected cancellation"
+    );
+    assert!(elapsed < Duration::from_secs(10), "cancel took {elapsed:?}");
+}
+
 #[tokio::test]
 async fn step_limit_stops_requester() {
     let wasm = ok(wat::parse_str(requester_wat("https://example.com/")));

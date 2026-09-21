@@ -315,7 +315,8 @@ async fn run(
         }
         let len = u32::try_from(input.len())
             .map_err(|_| InvokeError::InvalidMessage("step input exceeds u32".into()))?;
-        let ptr = call_entry(&mut store, &alloc, len, ctx.budgets, attempt)?;
+        let (s, ptr) = call_entry(store, alloc, len, ctx, attempt).await?;
+        store = s;
         if len > 0 && ptr == 0 {
             return Err(InvokeError::InvalidMessage("alloc returned null".into()));
         }
@@ -325,13 +326,14 @@ async fn run(
         // `alloc` and `handle` are separate entries — the token and the
         // deadline are checked before each, not just at the loop top.
         check_preemption(ctx)?;
-        let packed = call_entry(&mut store, &handle, (ptr, len), ctx.budgets, attempt)?;
+        let (s, packed) = call_entry(store, handle, (ptr, len), ctx, attempt).await?;
+        store = s;
         attempt.steps += 1;
-        // A cancellation or deadline that landed while the guest ran
-        // outranks whatever the entry produced: the caller's intent
-        // wins over a result it no longer wants. Wasmi cannot preempt
-        // a CPU-bound entry mid-run — fuel is that bound — but the
-        // outcome is still reported as cancelled/deadline-exceeded.
+        // A cancellation or deadline that lands while the guest runs
+        // preempts the entry itself: `call_entry` detaches it at the
+        // remaining deadline (fuel still bounds the background burn)
+        // and the outcome is reported as cancelled/deadline-exceeded —
+        // the caller's intent wins over a result it no longer wants.
         check_preemption(ctx)?;
         let out_ptr = usize::try_from(packed >> 32)
             .map_err(|_| InvokeError::InvalidMessage("response pointer overflow".into()))?;
@@ -456,20 +458,30 @@ fn check_preemption(ctx: &StepCtx<'_>) -> Result<(), InvokeError> {
     Ok(())
 }
 
-/// Enter a guest export with fuel accounting. Per-entry fuel is the
-/// smaller of `fuel_per_entry` and the remaining total; an out-of-fuel
-/// trap maps to `BudgetExceeded { Fuel }`.
-fn call_entry<P, R>(
-    store: &mut Store<HostState>,
-    func: &TypedFunc<P, R>,
+/// Enter a guest export with fuel accounting and a wall-clock cap.
+/// Per-entry fuel is the smaller of `fuel_per_entry` and the remaining
+/// total; an out-of-fuel trap maps to `BudgetExceeded { Fuel }`.
+///
+/// Wasmi cannot preempt a running entry mid-call, and fuel is a
+/// CPU-work bound, not a time bound — a slow interpreter holds the
+/// caller until fuel-out. The call therefore runs on the blocking pool
+/// under `remaining-deadline` (and races the cancel token): on expiry
+/// the entry detaches — fuel still bounds its background burn — and the
+/// invocation reports `deadline`/`cancelled` at the deadline rather
+/// than at guest completion. Fuel booked on a detach is the full grant:
+/// the entry may still be consuming it where the caller can't see.
+async fn call_entry<P, R>(
+    mut store: Store<HostState>,
+    func: TypedFunc<P, R>,
     params: P,
-    budgets: &Budgets,
+    ctx: &StepCtx<'_>,
     attempt: &mut Attempt,
-) -> Result<R, InvokeError>
+) -> Result<(Store<HostState>, R), InvokeError>
 where
-    P: WasmParams,
-    R: WasmResults,
+    P: WasmParams + Send + 'static,
+    R: WasmResults + Send + 'static,
 {
+    let budgets = ctx.budgets;
     let allowance = budgets
         .fuel_per_entry
         .min(budgets.fuel_total.saturating_sub(attempt.fuel_used));
@@ -481,17 +493,40 @@ where
     store
         .set_fuel(allowance)
         .map_err(|e| InvokeError::GuestTrap(e.to_string()))?;
-    let result = func.call(&mut *store, params);
-    let remaining = store.get_fuel().unwrap_or(0);
-    attempt.fuel_used += allowance.saturating_sub(remaining);
-    match result {
-        Ok(value) => Ok(value),
-        Err(e) if e.as_trap_code() == Some(TrapCode::OutOfFuel) => {
-            Err(InvokeError::BudgetExceeded {
-                dimension: BudgetDimension::Fuel,
-            })
+    let join = tokio::task::spawn_blocking(move || {
+        let result = func.call(&mut store, params);
+        (store, result)
+    });
+    let remaining = budgets.deadline.saturating_sub(ctx.started.elapsed());
+    tokio::select! {
+        // Cancel outranks expiry — same ordering as `check_preemption`.
+        biased;
+        () = ctx.cancel.cancelled() => {
+            attempt.fuel_used += allowance;
+            Err(InvokeError::Cancelled)
         }
-        Err(e) => Err(InvokeError::GuestTrap(e.to_string())),
+        outcome = tokio::time::timeout(remaining, join) => match outcome {
+            Err(_elapsed) => {
+                attempt.fuel_used += allowance;
+                Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Deadline,
+                })
+            }
+            Ok(Err(join_err)) => Err(InvokeError::GuestTrap(join_err.to_string())),
+            Ok(Ok((store, result))) => {
+                let fuel_remaining = store.get_fuel().unwrap_or(0);
+                attempt.fuel_used += allowance.saturating_sub(fuel_remaining);
+                match result {
+                    Ok(value) => Ok((store, value)),
+                    Err(e) if e.as_trap_code() == Some(TrapCode::OutOfFuel) => {
+                        Err(InvokeError::BudgetExceeded {
+                            dimension: BudgetDimension::Fuel,
+                        })
+                    }
+                    Err(e) => Err(InvokeError::GuestTrap(e.to_string())),
+                }
+            }
+        },
     }
 }
 
