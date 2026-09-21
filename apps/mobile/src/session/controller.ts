@@ -5,6 +5,7 @@ import {
   appError,
   CancellationSource,
   DownloadManager,
+  err,
   LocalFileSource,
   previewImport,
   Session,
@@ -544,6 +545,7 @@ export async function createSessionController(
           message: `pre-import stop failed: ${stopped.error.kind}`,
           atMs: clock.nowMs(),
         });
+        return err(stopped.error);
       }
       const cleared = await downloads.removeAll(signal);
       if (!cleared.ok) {
@@ -552,6 +554,9 @@ export async function createSessionController(
           message: `pre-import clear failed: ${cleared.error.kind}`,
           atMs: clock.nowMs(),
         });
+        // The ledger still names the surviving files — aborting keeps
+        // the only reference a later cleanup can retry against.
+        return err(cleared.error);
       }
       try {
         return await session.importLibrary(text);

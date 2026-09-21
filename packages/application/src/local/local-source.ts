@@ -93,6 +93,9 @@ export class LocalFileSource {
   #recordings: Recording[];
   /** Serializes scans: at most one per source at a time. */
   readonly #scans = new Map<string, Promise<unknown>>();
+  /** Serializes every write to the owned sections — a commit merges
+   * over live state inside the tail, never over a stale snapshot. */
+  #writeTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     deps: LocalFileSourceDeps,
@@ -166,14 +169,17 @@ export class LocalFileSource {
       addedMs: this.#clock.nowMs(),
       lastScanMs: null,
     };
-    const committed = await this.#storage.commit(
-      { localSources: [...this.#sources, source] },
-      ctx(this.#ids, this.#clock, signal),
+    const committed = await this.#commitSections(
+      ({ sources, files }) => ({
+        sources: [...sources, source],
+        files,
+        recordings: (current) => [...current],
+      }),
+      signal,
     );
     if (!committed.ok) {
       return err(committed.error);
     }
-    this.#sources = [...this.#sources, source];
     const scanned = await this.rescan(source.sourceId, signal);
     if (!scanned.ok) {
       void this.#log.write({
@@ -234,13 +240,18 @@ export class LocalFileSource {
     if (!this.#sources.some((s) => s.sourceId === sourceId)) {
       return err(appError('not-found', 'unknown local source'));
     }
-    const nextSources = this.#sources.filter((s) => s.sourceId !== sourceId);
-    const nextFiles = this.#files.filter((f) => f.sourceId !== sourceId);
-    const removed = this.#files.filter((f) => f.sourceId === sourceId);
     const committed = await this.#commitSections(
-      nextSources,
-      nextFiles,
-      (current) => stripLocalRefs(removed, current),
+      ({ sources, files }) => {
+        if (!sources.some((s) => s.sourceId === sourceId)) {
+          return null; // a queued op already dropped the grant
+        }
+        const removed = files.filter((f) => f.sourceId === sourceId);
+        return {
+          sources: sources.filter((s) => s.sourceId !== sourceId),
+          files: files.filter((f) => f.sourceId !== sourceId),
+          recordings: (current) => stripLocalRefs(removed, current),
+        };
+      },
       signal,
     );
     if (!committed.ok) {
@@ -254,42 +265,81 @@ export class LocalFileSource {
    * by merging our delta over a fresh storage read, never the boot
    * snapshot: session mutations between scans (provider refreshes,
    * added catalog rows, mapping edits) must survive a rescan.
-   * `localSources`/`localFiles` are owned exclusively by this class.
+   * `localSources`/`localFiles` are owned exclusively by this class —
+   * every write runs on the write tail and computes its next arrays
+   * from the live state, so overlapping ops (scans of different
+   * sources, folder add/remove) can't lose each other's rows. A
+   * `null` merge result no-ops the commit: the op's precondition
+   * vanished while it queued.
    */
   async #commitSections(
-    nextSources: LocalSource[],
-    nextFiles: LocalFile[],
-    mergeRecordings: (current: readonly Recording[]) => Recording[],
+    merge: (current: { sources: LocalSource[]; files: LocalFile[] }) => {
+      sources: LocalSource[];
+      files: LocalFile[];
+      recordings: (current: readonly Recording[]) => Recording[];
+    } | null,
     signal: CancellationSignal,
   ): Promise<Result<void>> {
-    const fresh = await this.#storage.load(ctx(this.#ids, this.#clock, signal));
-    if (!fresh.ok) {
-      return err(fresh.error);
-    }
-    const merged = mergeRecordings(fresh.value.recordings);
-    const committed = await this.#storage.commit(
-      {
-        localSources: nextSources,
-        localFiles: nextFiles,
-        recordings: merged,
-      },
-      ctx(this.#ids, this.#clock, signal),
-    );
-    if (!committed.ok) {
-      return err(committed.error);
-    }
-    this.#sources = nextSources;
-    this.#files = nextFiles;
-    this.#recordings = merged;
-    return ok(undefined);
+    const run = async (): Promise<Result<void>> => {
+      if (signal.cancelled) {
+        return err(cancelled());
+      }
+      const next = merge({ sources: this.#sources, files: this.#files });
+      if (next === null) {
+        return ok(undefined);
+      }
+      const fresh = await this.#storage.load(
+        ctx(this.#ids, this.#clock, signal),
+      );
+      if (!fresh.ok) {
+        return err(fresh.error);
+      }
+      const merged = next.recordings(fresh.value.recordings);
+      const committed = await this.#storage.commit(
+        {
+          localSources: next.sources,
+          localFiles: next.files,
+          recordings: merged,
+        },
+        ctx(this.#ids, this.#clock, signal),
+      );
+      if (!committed.ok) {
+        return err(committed.error);
+      }
+      this.#sources = next.sources;
+      this.#files = next.files;
+      this.#recordings = merged;
+      return ok(undefined);
+    };
+    // A throwing op must not poison the tail — the next queued write
+    // still runs on live state.
+    const tail = this.#writeTail.then(async () => {
+      try {
+        return await run();
+      } catch (thrown) {
+        return err(
+          appError(
+            'internal',
+            thrown instanceof Error ? thrown.message : 'commit failed',
+          ),
+        );
+      }
+    });
+    this.#writeTail = tail;
+    return tail;
   }
 
   async #scanSerialized(
     sourceId: string,
     signal: CancellationSignal,
   ): Promise<Result<ScanReport>> {
-    const running = this.#scans.get(sourceId);
-    if (running !== undefined) {
+    // Queued waiters re-check the map after each settle — two waiters
+    // must not both start when the running scan lands.
+    for (;;) {
+      const running = this.#scans.get(sourceId);
+      if (running === undefined) {
+        break;
+      }
       await running.catch(() => undefined);
       if (signal.cancelled) {
         return err(cancelled());
@@ -352,7 +402,9 @@ export class LocalFileSource {
     }
 
     const rowsByFp = new Map(prior.map((f) => [f.fingerprint, f] as const));
-    const nextFiles = this.#files.filter((f) => f.sourceId !== sourceId);
+    // Rows this scan produces for `sourceId` — committed over live
+    // state in the write tail so a concurrent scan's files survive.
+    const scanned: LocalFile[] = [];
     let added = 0;
     let updated = 0;
 
@@ -364,7 +416,7 @@ export class LocalFileSource {
       const known = byDocId.get(entry.docId);
       if (known !== undefined && known.size === entry.size) {
         // Unchanged — keep the row untouched.
-        nextFiles.push(known);
+        scanned.push(known);
         continue;
       }
       const fingerprint = fpByDoc.get(entry.docId);
@@ -372,7 +424,7 @@ export class LocalFileSource {
         // Unreadable: keep the prior row (transient read failure must
         // not evict a working file), but don't pretend it's fresh.
         if (known !== undefined) {
-          nextFiles.push(known);
+          scanned.push(known);
         }
         continue;
       }
@@ -384,7 +436,7 @@ export class LocalFileSource {
           docId: entry.docId,
           size: entry.size,
         };
-        nextFiles.push(refreshed);
+        scanned.push(refreshed);
         if (moved.docId !== entry.docId || moved.size !== entry.size) {
           updated += 1;
         }
@@ -469,7 +521,7 @@ export class LocalFileSource {
         recordingByRetainedFp.get(row.fingerprint);
       const recordingId = existing ?? this.#ids.next('rec');
       recordingByFp.set(row.fingerprint, recordingId);
-      nextFiles.push({
+      scanned.push({
         ...row,
         recordingId,
         title,
@@ -495,16 +547,13 @@ export class LocalFileSource {
     // changed content (same docId, new fingerprint → new fileId):
     // drop the rows, strip the dead `provider:'local'` refs. The
     // recording persists as owned data.
-    const live = new Set(nextFiles.map((f) => f.fileId));
+    const live = new Set(scanned.map((f) => f.fileId));
     const vanished = prior.filter((f) => !live.has(f.fileId));
 
     const nextSource: LocalSource = {
       ...source,
       lastScanMs: this.#clock.nowMs(),
     };
-    const nextSources = this.#sources.map((s) =>
-      s.sourceId === sourceId ? nextSource : s,
-    );
 
     const mergeRecordings = (current: readonly Recording[]): Recording[] => {
       // Upserts first, strip second: a changed-content file replaces
@@ -571,9 +620,23 @@ export class LocalFileSource {
     };
 
     const committed = await this.#commitSections(
-      nextSources,
-      nextFiles,
-      mergeRecordings,
+      ({ sources, files }) => {
+        // The grant may have been dropped while this scan read tags —
+        // its rows must not resurrect under a removed source.
+        if (!sources.some((s) => s.sourceId === sourceId)) {
+          return null;
+        }
+        return {
+          sources: sources.map((s) =>
+            s.sourceId === sourceId ? nextSource : s,
+          ),
+          files: [
+            ...files.filter((f) => f.sourceId !== sourceId),
+            ...scanned,
+          ],
+          recordings: mergeRecordings,
+        };
+      },
       signal,
     );
     if (!committed.ok) {

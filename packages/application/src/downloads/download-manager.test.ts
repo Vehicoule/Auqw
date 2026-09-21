@@ -557,6 +557,90 @@ async function cancelInFlight(): Promise<void> {
   assertEqual(r.transfer.sinks[0]?.abortedKeep, true, '.part kept');
 }
 
+/**
+ * remove() must wait for the runner's real teardown — a slow abort
+ * (fsync'd .part close, scale of a real task) can't be outrun by a
+ * microtask drain before the file delete lands.
+ */
+async function removeWaitsForRunner(): Promise<void> {
+  const content = bytes(2 * 1024 * 1024);
+  let calls = 0;
+  const stallingFetch: RangeFetch = (_url, init, signal) => {
+    const header = init.headers['Range'] ?? '';
+    const m = /^bytes=(\d+)-(\d+)$/.exec(header);
+    if (m === null) {
+      return Promise.resolve(resp(400, new Uint8Array(0), null));
+    }
+    const start = Number(m[1]);
+    const end = Math.min(Number(m[2]), content.length - 1);
+    calls += 1;
+    if (calls === 1) {
+      const slice = content.slice(start, end + 1);
+      return Promise.resolve(
+        resp(206, slice, `bytes ${start}-${end}/${content.length}`, slice.slice().buffer),
+      );
+    }
+    return new Promise((_res, rej) => {
+      signal.subscribe(() => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        rej(error);
+      });
+    });
+  };
+  const r = rig({ content, wireFetch: stallingFetch });
+  // abort() resolves on a caller-held latch — teardown stays pending
+  // well past any bounded drain until the test releases it.
+  let releaseAbort: () => void = () => {};
+  const abortGate = new Promise<void>((resolve) => {
+    releaseAbort = resolve;
+  });
+  const innerBegin = r.transfer.begin.bind(r.transfer);
+  r.transfer.begin = async (input, signal) => {
+    const got = await innerBegin(input, signal);
+    if (!got.ok) {
+      return got;
+    }
+    const inner = got.value;
+    return ok({
+      write: (b: Uint8Array) => inner.write(b),
+      commit: () => inner.commit(),
+      finalize: (d: string | null) => inner.finalize(d),
+      abort: async (keep: boolean) => {
+        await abortGate;
+        return inner.abort(keep);
+      },
+    });
+  };
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(100);
+  assertEqual(r.manager.recordFor('rec-1')?.state, 'transferring', 'in flight');
+  let settled = false;
+  const removal = r.manager
+    .remove(req.value.downloadId, r.signal)
+    .then((res) => {
+      settled = true;
+      return res;
+    });
+  // Far past the bounded drain the old code relied on — removal still
+  // must not land while the runner's abort is outstanding.
+  await drain(400);
+  assert(!settled, 'remove waits on runner teardown');
+  releaseAbort();
+  const done = await removal;
+  assert(done.ok, 'remove resolves after teardown');
+  assert(
+    r.transfer.removedFiles.includes(req.value.filePath),
+    'file removed after close',
+  );
+  assertEqual(r.manager.recordFor('rec-1'), null, 'row dropped');
+}
+
 async function mintFailureTyped(): Promise<void> {
   const r = rig({ mintError: 'expired' });
   await r.manager.init([], r.signal);
@@ -630,6 +714,7 @@ export async function run(): Promise<void> {
   await meteredAllowed();
   await cancelRequested();
   await cancelInFlight();
+  await removeWaitsForRunner();
   await removeDeletes();
   await requestAllSnapshots();
   await initIntegrity();

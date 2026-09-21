@@ -84,12 +84,16 @@ export const DEFAULT_CHUNK_TIMEOUT_MS = 60_000;
 /** `bytes start-end/total` — the only Content-Range shape a 206 may carry. */
 function parseContentRange(
   header: string | null,
-): { start: number; total: number } | null {
+): { start: number; end: number; total: number } | null {
   const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(header ?? '');
   if (match === null) {
     return null;
   }
-  return { start: Number(match[1]), total: Number(match[3]) };
+  return {
+    start: Number(match[1]),
+    end: Number(match[2]),
+    total: Number(match[3]),
+  };
 }
 
 type Chunk = {
@@ -123,9 +127,19 @@ async function fetchChunk(
     child.cancel();
   }
   try {
+    // The timeout covers headers AND body — a stalled arrayBuffer()
+    // must lose this race or the transfer hangs past its stall budget.
     const result = await Promise.race([
       fetchImpl(url, { headers: { Range: `bytes=${start}-${end}` } }, child.signal)
-        .then((resp) => ({ resp }))
+        .then(async (resp) => ({
+          resp,
+          // Buffering a non-206 body would read a whole-file 200 or an
+          // unbounded error page into memory for nothing.
+          bytes:
+            resp.status === 206
+              ? new Uint8Array(await resp.arrayBuffer())
+              : new Uint8Array(0),
+        }))
         .catch(asTransport),
       clock.sleep(timeoutMs, child.signal).then(() => null),
     ]);
@@ -144,19 +158,13 @@ async function fetchChunk(
       );
     }
     const resp = result.resp;
-    // Buffering a non-206 body would read a whole-file 200 or an
-    // unbounded error page into memory for nothing.
-    const bytes =
-      resp.status === 206
-        ? new Uint8Array(await resp.arrayBuffer().catch(asTransport))
-        : new Uint8Array(0);
     // Response and body are in — release the timeout sleeper early
     // so it doesn't linger a full timeout per chunk.
     child.cancel();
     return {
       status: resp.status,
       contentRange: resp.headers.get('content-range'),
-      bytes,
+      bytes: result.bytes,
     };
   } catch (thrown) {
     if (thrown instanceof DownloadFailure) {
@@ -373,10 +381,18 @@ export async function runTransfer(options: {
             `chunk ${start}-${end}: HTTP ${chunk.status}`,
           );
         }
-        // The served window must start where we asked — a 206 lying
-        // about its offset or total splices foreign bytes.
+        // The served window must start where we asked and stay inside
+        // the request — a 206 lying about its span splices foreign
+        // bytes.
         const range = parseContentRange(chunk.contentRange);
-        if (range === null || range.start !== start || range.total <= 0) {
+        if (
+          range === null ||
+          range.start !== start ||
+          range.end < range.start ||
+          range.end > end ||
+          range.end >= range.total ||
+          range.total <= 0
+        ) {
           throw new DownloadFailure(
             'invalid-response',
             `chunk ${start}-${end}: bad Content-Range`,
@@ -390,14 +406,13 @@ export async function runTransfer(options: {
             `chunk ${start}-${end}: Content-Range total changed mid-stream`,
           );
         }
-        // An empty partial body makes no progress; an oversized body
-        // would overlap the next range fetch.
-        if (chunk.bytes.length === 0 || chunk.bytes.length > end - start + 1) {
+        // The body must be exactly what Content-Range declares — a
+        // shorter/longer read shifts every later offset.
+        const declared = range.end - range.start + 1;
+        if (chunk.bytes.length !== declared) {
           throw new DownloadFailure(
             'invalid-response',
-            `chunk ${start}-${end}: ${
-              chunk.bytes.length === 0 ? 'empty' : 'oversized'
-            } body`,
+            `chunk ${start}-${end}: body ${chunk.bytes.length}B vs declared ${declared}B`,
           );
         }
         const written = await sink.write(chunk.bytes);

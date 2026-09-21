@@ -151,9 +151,10 @@ export function createAuqwExpoPlayer(
 ): PlayerPort {
   const listeners = new Set<(event: PlayerEvent) => void>();
   let subscriptions: readonly AuqwExpoSubscription[] | null = null;
-  /** provider:'local' prepares mint their own request ids — the
-   * plugin host never sees them, so cancelPrepare must short-circuit
-   * (releasing the minted handle when the prepared event already ran). */
+  /** provider:'local' prepares mint their own `lf-req-*` ids — the
+   * plugin host never sees them, so cancelPrepare short-circuits on
+   * the prefix. The entry holds the minted handle until release or
+   * cancelPrepare reclaims it — it must not outlive the stream. */
   const localPrepares = new Map<string, string | null>();
   let localSeq = 0;
 
@@ -173,7 +174,6 @@ export function createAuqwExpoPlayer(
       ? input.sourceRef
       : null;
     const requestId = `lf-req-${++localSeq}`;
-    localPrepares.set(requestId, null);
     if (path === null) {
       emit({
         type: 'prepare',
@@ -187,6 +187,7 @@ export function createAuqwExpoPlayer(
       });
       return ok(requestId);
     }
+    localPrepares.set(requestId, null);
     try {
       const handle = await module.prepareLocal(path, null);
       localPrepares.set(requestId, handle);
@@ -201,6 +202,8 @@ export function createAuqwExpoPlayer(
         },
       });
     } catch (thrown) {
+      // No handle minted — the entry has nothing left to reclaim.
+      localPrepares.delete(requestId);
       emit({
         type: 'prepare',
         requestId,
@@ -425,13 +428,13 @@ export function createAuqwExpoPlayer(
       return guard(() => module.stop());
     },
     cancelPrepare(input) {
-      // Local prepares never reached the plugin host — nothing on the
-      // host to cancel. A minted handle dies with release; release it
-      // here so a canceled prepare can't orphan the lf-* registry entry.
-      const localHandle = localPrepares.get(input.requestId);
-      if (localHandle !== undefined) {
+      // lf-* ids are minted here and never reach the plugin host —
+      // nothing on the host to cancel. A minted handle dies via
+      // releaseStream so a cancelled prepare can't orphan it.
+      if (input.requestId.startsWith('lf-req-')) {
+        const localHandle = localPrepares.get(input.requestId);
         localPrepares.delete(input.requestId);
-        if (localHandle !== null) {
+        if (localHandle !== undefined && localHandle !== null) {
           return guard(() => module.releaseStream(localHandle));
         }
         return Promise.resolve(ok(undefined));
@@ -439,6 +442,14 @@ export function createAuqwExpoPlayer(
       return guard(() => module.cancelPrepare(input.requestId));
     },
     release(input) {
+      // Releases arrive by handle, not requestId — drop the local
+      // prepare entry too or the map grows for the adapter's lifetime.
+      for (const [requestId, handle] of localPrepares) {
+        if (handle === input.handle) {
+          localPrepares.delete(requestId);
+          break;
+        }
+      }
       return guard(() => module.releaseStream(input.handle));
     },
     setQueueProjection(projection: QueueProjection) {

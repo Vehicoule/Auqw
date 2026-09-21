@@ -97,6 +97,9 @@ export class DownloadManager {
   readonly #rows = new Map<string, DownloadRecord>();
   /** downloadId → cancel handle for the in-flight transfer. */
   readonly #active = new Map<string, CancellationSource>();
+  /** downloadId → the runner's settle promise — remove() awaits real
+   * teardown (fetch aborted, sink closed), never a microtask drain. */
+  readonly #runners = new Map<string, Promise<void>>();
   readonly #listeners = new Set<(progress: DownloadProgress) => void>();
   /** Last offset the ledger durably persisted, per row. */
   readonly #persistedOffset = new Map<string, number>();
@@ -661,12 +664,10 @@ export class DownloadManager {
     if (running !== undefined) {
       // The settle path sees `removing` and returns without writing.
       running.cancel();
-      // Microtask drain — lets the cancelled runner settle so it stops
-      // writing the .part before we delete it. Bounded: never waits on
-      // the wire, only on already-resolving promise chains.
-      for (let i = 0; i < 200 && this.#active.has(row.downloadId); i += 1) {
-        await Promise.resolve();
-      }
+      // Wait on the runner's own completion: abort and sink teardown
+      // settle on real tasks, and the .part must be closed before the
+      // delete below touches it.
+      await this.#runners.get(row.downloadId);
     }
     const removed = await this.#deps.transfer.removeFile(row.filePath, signal);
     if (!removed.ok) {
@@ -724,10 +725,19 @@ export class DownloadManager {
         // pump can't double-start the same row.
         const source = new CancellationSource();
         this.#active.set(next.downloadId, source);
-        void this.#run(next, source).finally(() => {
-          this.#active.delete(next.downloadId);
-          void this.#pump();
-        });
+        const done = this.#run(next, source)
+          .catch((thrown) => {
+            this.#log(
+              'error',
+              `downloads: runner ${next.downloadId} threw: ${thrown instanceof Error ? thrown.message : 'unknown'}`,
+            );
+          })
+          .finally(() => {
+            this.#active.delete(next.downloadId);
+            this.#runners.delete(next.downloadId);
+            void this.#pump();
+          });
+        this.#runners.set(next.downloadId, done);
       }
     } finally {
       this.#pumping = false;

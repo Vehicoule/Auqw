@@ -18,7 +18,9 @@ type WireRequest = {
 type WireBehavior =
   | { kind: 'serve' }
   | { kind: 'status'; status: number; contentRange?: string | null; body?: Uint8Array }
-  | { kind: 'stall' };
+  | { kind: 'stall' }
+  /** Headers land; the body never does — the stall the timeout must cover. */
+  | { kind: 'stallBody' };
 
 /**
  * Scripted wire: every fetch sends a Range header; the default serve
@@ -58,6 +60,23 @@ class Wire {
     switch (behavior.kind) {
       case 'stall':
         return new Promise<RangeFetchResponse>(() => {});
+      case 'stallBody': {
+        const file = this.files.get(url);
+        if (file === undefined) {
+          return Promise.resolve(makeResponse(404, new Uint8Array(0), null));
+        }
+        const last = Math.min(end, file.length - 1);
+        const resp = makeResponse(
+          206,
+          new Uint8Array(0),
+          `bytes ${start}-${last}/${file.length}`,
+        );
+        return Promise.resolve({
+          ...resp,
+          arrayBuffer: (): Promise<ArrayBuffer> =>
+            new Promise<ArrayBuffer>(() => {}),
+        });
+      }
       case 'status':
         return Promise.resolve(
           makeResponse(
@@ -71,9 +90,12 @@ class Wire {
         if (file === undefined) {
           return Promise.resolve(makeResponse(404, new Uint8Array(0), null));
         }
-        const bytes = file.subarray(start, end + 1);
+        // A real server clamps the window at EOF; echoing the asked
+        // end past it would trip the range checks we now verify.
+        const last = Math.min(end, file.length - 1);
+        const bytes = file.subarray(start, last + 1);
         return Promise.resolve(
-          makeResponse(206, bytes, `bytes ${start}-${end}/${file.length}`),
+          makeResponse(206, bytes, `bytes ${start}-${last}/${file.length}`),
         );
       }
     }
@@ -487,6 +509,9 @@ async function contentRangeViolations(): Promise<void> {
   };
   await mk('bytes 1-4/10', 'wrong start');
   await mk('bytes 0-4/0', 'zero total');
+  await mk('bytes 0-5/10', 'end beyond request');
+  await mk('bytes 0-3/3', 'end past total');
+  await mk('bytes 0-1/10', 'end underdeclared vs body');
   await mk('garbage', 'unparseable');
   await mk(null, 'missing header');
   // Total changes mid-stream.
@@ -614,6 +639,35 @@ async function stallTimeout(): Promise<void> {
   clock.advance(1_000);
   const result = await p;
   assert(!result.ok, 'stalled chunk must fail');
+  assertEqual(result.error.kind, 'transient');
+}
+
+async function stallBodyTimeout(): Promise<void> {
+  // Headers arrive on time but the body never does — the timeout must
+  // still fire, or the transfer hangs past its stall budget.
+  const wire = new Wire();
+  wire.serve('https://cdn/x', bytes(4));
+  wire.script(0, { kind: 'stallBody' });
+  const transfer = new FakeTransfer();
+  transfer.enqueueSink({});
+  const clock = new FakeClock();
+  const p = runTransfer({
+    destName: 't.mp4',
+    first: resource('https://cdn/x', 4),
+    remint: remintServes(resource('https://cdn/x', 4)),
+    transfer,
+    fetchImpl: wire.fetch,
+    clock,
+    signal: source().signal,
+    hasher: createSha256,
+    chunkTimeoutMs: 1_000,
+  });
+  for (let i = 0; i < 200 && clock.pendingSleepers === 0; i += 1) {
+    await Promise.resolve();
+  }
+  clock.advance(1_000);
+  const result = await p;
+  assert(!result.ok, 'stalled body must fail');
   assertEqual(result.error.kind, 'transient');
 }
 
@@ -789,6 +843,7 @@ export async function run(): Promise<void> {
   await bodyViolations();
   await nonHttps();
   await stallTimeout();
+  await stallBodyTimeout();
   await midTransferCancel();
   await preCancelled();
   await sinkFailures();

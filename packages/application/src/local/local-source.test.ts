@@ -490,6 +490,50 @@ async function runRescanMergesFreshRecordings(): Promise<void> {
   assert(reloaded.recordings.length === committed.length, 'commit landed');
 }
 
+/**
+ * Two folders scanned concurrently — each commit must merge over
+ * live state, so neither scan's rows are lost to a stale snapshot.
+ */
+async function runConcurrentScansKeepBoth(): Promise<void> {
+  const TREE2 =
+    'content://com.android.externalstorage.documents/tree/other';
+  const { storage, tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'A',
+        addedMs: 1,
+        lastScanMs: null,
+      },
+      {
+        sourceId: 's2',
+        treeUri: TREE2,
+        label: 'B',
+        addedMs: 1,
+        lastScanMs: null,
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100, 'alpha.mp3')]);
+  tagReader.entries.set(TREE2, [entry('d2', 200, 'beta.mp3')]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.fingerprints.set('d2', fp('d2', 'fpb'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  tagReader.tags.set('d2', tags('d2', 'Beta'));
+
+  const [a, b] = await Promise.all([
+    source.rescan('s1', signal()),
+    source.rescan('s2', signal()),
+  ]);
+  assert(a.ok && b.ok, 'both scans ok');
+  assert(source.filesFor('s1').length === 1, 's1 row survives');
+  assert(source.filesFor('s2').length === 1, 's2 row survives');
+  const last = storage.commits.at(-1)!.batch;
+  assertEqual(last.localFiles?.length, 2, 'commit carries both rows');
+  assert(source.recordings().length === 2, 'both recordings materialized');
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -504,4 +548,5 @@ export async function run(): Promise<void> {
   await runMixedRemoveRelinksRecording();
   await runPickCancelled();
   await runRescanMergesFreshRecordings();
+  await runConcurrentScansKeepBoth();
 }
