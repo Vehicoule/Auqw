@@ -705,6 +705,45 @@ export class Session {
     return ok(occurrenceId);
   }
 
+  /**
+   * Reconcile in-memory recordings with a LocalFileSource scan commit.
+   * The source owns provenance:'local' rows — it persists them itself —
+   * so after a scan the session adopts the source's snapshot for those
+   * ids: upsert every row it reports and drop in-memory local rows it
+   * no longer reports (file removed). Non-local rows pass through.
+   * No persist: the source already committed the same rows.
+   */
+  syncLocalRecordings(localRows: readonly Recording[]): Result<void> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    // Only local rows are adopted — a foreign row would overwrite a
+    // catalog mutation a racing op just made in memory.
+    const committed = localRows.filter((rec) => rec.provenance === 'local');
+    const committedIds = new Set(committed.map((rec) => rec.id));
+    const byId = new Map(committed.map((rec) => [rec.id, rec]));
+    const known = new Set<string>();
+    const merged: Recording[] = [];
+    for (const rec of r.recordings) {
+      known.add(rec.id);
+      if (rec.provenance === 'local' && !committedIds.has(rec.id)) {
+        continue;
+      }
+      merged.push(byId.get(rec.id) ?? rec);
+    }
+    for (const rec of committed) {
+      if (!known.has(rec.id)) {
+        merged.push(rec);
+      }
+    }
+    r.recordings = merged;
+    this.#publish();
+    this.#derived();
+    return ok(undefined);
+  }
+
   async enqueueRecording(recordingId: string): Promise<Result<string>> {
     const ready = this.#requireReady();
     if (!ready.ok) {

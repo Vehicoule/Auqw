@@ -20,6 +20,7 @@ const EMPTY_HINTS = {
   liked: 'liked tracks land here',
   top50: 'plays count once you listen',
   history: 'played tracks land here',
+  downloads: 'downloaded tracks land here',
 } as const;
 
 export function CollectionScreen({

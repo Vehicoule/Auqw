@@ -21,10 +21,10 @@ export type LibraryScreenProps = {
   readonly onToggleLike?: ((recordingId: string) => void) | undefined;
   readonly onContext?: ((recordingId: string) => void) | undefined;
   readonly onOpenCollection?:
-  | ((key: 'liked' | 'top50' | 'history') => void)
+  | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
   | undefined;
   readonly onPlayCollection?:
-  | ((key: 'liked' | 'top50' | 'history') => void)
+  | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
   | undefined;
   readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
   readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;

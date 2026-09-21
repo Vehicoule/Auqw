@@ -96,7 +96,7 @@ export function TrackRow({
         onPress={onPress}
         onLongPress={onLongPress}
         compact
-        accessibilityLabel={`${row.title}${row.artist === null ? '' : `, ${row.artist}`}${unavailable ? ', unavailable' : ''}${row.playing ? ', playing' : ''}${row.liked ? ', liked' : ''}`}
+        accessibilityLabel={`${row.title}${row.artist === null ? '' : `, ${row.artist}`}${unavailable ? ', unavailable' : ''}${row.playing ? ', playing' : ''}${row.liked ? ', liked' : ''}${row.download === null ? '' : `, download ${row.download === 'stored' ? 'complete' : row.download}`}`}
         accessibilityRole="button"
         accessibilityState={{ selected: row.playing }}
         style={({ pressed }) => [
@@ -178,6 +178,35 @@ export function TrackRow({
         >
           {formatClock(row.durationMs)}
         </Text>
+        {row.download !== null && (
+          <View
+            style={{
+              width: 26,
+              height: 30,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            accessible={false}
+          >
+            <Icon
+              name={
+                row.download === 'stored'
+                  ? 'check'
+                  : row.download === 'failed'
+                    ? 'warn'
+                    : 'download'
+              }
+              size={13}
+              color={
+                row.download === 'failed'
+                  ? theme.colors.warn
+                  : row.download === 'stored'
+                    ? theme.colors.accent
+                    : theme.colors.textSecondary
+              }
+            />
+          </View>
+        )}
         {row.state !== 'available' && (
           <View
             style={{

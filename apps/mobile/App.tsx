@@ -17,6 +17,8 @@ import * as AuqwExpo from 'auqw-expo';
 import {
   CancellationSource,
   SearchSession,
+  effectiveMapping,
+  isRefRejected,
   previewImport,
 } from '@auqw/application';
 import type {
@@ -53,6 +55,7 @@ import {
   SearchScreen,
   SettingsScreen,
   StageSheet,
+  Text,
   ThemeProvider,
   TransferScreen,
   entityIdForRef,
@@ -75,6 +78,7 @@ import {
 import type {
   CollectionRowModel,
   CorrectionsFilter,
+  DownloadChip,
   DiagnosticsModel,
   LyricsModel,
   NavItemModel,
@@ -125,6 +129,7 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let controller: SessionController | null = null;
+    let startSource: CancellationSource | null = null;
     setBoot({ type: 'loading' });
     void (async () => {
       try {
@@ -146,6 +151,12 @@ export function App() {
         // restore() never throws — its Result surfaces through
         // session state as 'restore-failed'.
         await created.session.restore();
+        // Slice-3 bring-up: local index + download ledger. Ran after
+        // restore so its storage reads can't interleave. The source
+        // is retained so unmount cancels a still-running start —
+        // DownloadManager.init must never run after dispose.
+        startSource = new CancellationSource();
+        await created.start(startSource.signal);
         if (disposed) {
           await created.dispose();
           return;
@@ -163,6 +174,7 @@ export function App() {
     })();
     return () => {
       disposed = true;
+      startSource?.cancel();
       const c = controller;
       controller = null;
       if (c !== null) {
@@ -341,7 +353,7 @@ function attemptLabel(trace: AttemptTrace): string {
 }
 
 type Overlay =
-  | { readonly type: 'collection'; readonly key: 'liked' | 'top50' | 'history' }
+  | { readonly type: 'collection'; readonly key: 'liked' | 'top50' | 'history' | 'downloads' }
   | { readonly type: 'playlist'; readonly playlistId: string }
   | { readonly type: 'entity'; readonly ref: EntityRef }
   | { readonly type: 'corrections' }
@@ -404,6 +416,18 @@ const OPTIONAL_SLOTS: ReadonlySet<ProviderSlot> = new Set([
   'radioProvider',
 ]);
 
+function formatBytes(bytes: number, free: number): string {
+  const gb = (n: number) =>
+    n >= 1e9
+      ? `${(n / 1e9).toFixed(1)} gb`
+      : n >= 1e6
+        ? `${(n / 1e6).toFixed(0)} mb`
+        : n === 0
+          ? '0 kb'
+          : `${Math.max(1, Math.round(n / 1e3))} kb`;
+  return `${gb(bytes)} used · ${gb(free)} free`;
+}
+
 const IDLE_TRANSFER: TransferModel = {
   exportPhase: 'idle',
   exportDetail: null,
@@ -436,6 +460,150 @@ function Main({
   const [entityFetch, setEntityFetch] = useState<EntityFetch | null>(null);
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
+  // Live download ledger — subscribed once; chips + the downloads
+  // collection + the stage action all read it.
+  const [downloads, setDownloads] = useState(
+    () => controller.downloads.list(),
+  );
+  // null = connectivity unknown (no baseline yet) — the offline
+  // banner renders only on an explicit false.
+  const [online, setOnline] = useState<boolean | null>(null);
+  // Bumped after a local-folder mutation so the model re-reads
+  // `local.recordings()` — the source is storage-backed, not
+  // evented, and scans here are user-initiated only.
+  const [localTick, setLocalTick] = useState(0);
+
+  const [storageText, setStorageText] = useState<string | null>(null);
+  useEffect(() => {
+    setDownloads(controller.downloads.list());
+    const refreshUsage = () => {
+      void controller.downloads
+        .usage(new CancellationSource().signal)
+        .then((u) => {
+          if (u.ok) {
+            setStorageText(formatBytes(u.value.bytes, u.value.free));
+          }
+        });
+    };
+    refreshUsage();
+    return controller.downloads.subscribe(() => {
+      setDownloads(controller.downloads.list());
+      refreshUsage();
+    });
+  }, [controller]);
+
+  const refreshLocal = useCallback(() => {
+    setLocalTick((t) => t + 1);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void controller.connectivity.snapshot().then((snap) => {
+      if (!disposed && snap.ok) {
+        setOnline(snap.value.online);
+      }
+    });
+    return controller.connectivity.subscribe((snap) => {
+      setOnline(snap.online);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+
+  const downloadChipFor = useCallback(
+    (recordingId: string): DownloadChip | null => {
+      const row = controller.downloads.recordFor(recordingId);
+      if (row === null) {
+        return null;
+      }
+      return row.state === 'requested'
+        ? 'queued'
+        : row.state === 'transferring'
+          ? 'downloading'
+          : row.state === 'available'
+            ? 'stored'
+            : 'failed';
+    },
+    [controller],
+  );
+
+  // A download needs a playable provider ref — recordings carrying
+  // only a `local` ref are already owned bytes; the action hides.
+  const downloadRefFor = useCallback(
+    (recordingId: string): SourceRef | null => {
+      const recording = state.recordings.find((r) => r.id === recordingId);
+      if (recording === undefined) {
+        return null;
+      }
+      // Mirrors Session.#pickRef's provider path — a download is
+      // resolved by the active playback provider, so only a mapping
+      // verdict or a non-rejected ref it owns can produce a stream.
+      // Other providers' refs would fail resolvePlayback: hide them.
+      const provider = state.settings.playbackProvider;
+      const mapped = effectiveMapping(recording, provider);
+      if (mapped !== null) {
+        return mapped.ref;
+      }
+      return (
+        recording.sourceRefs.find(
+          (r) =>
+            r.provider === provider &&
+            r.kind === 'track' &&
+            !isRefRejected(recording.mappings, r),
+        ) ?? null
+      );
+    },
+    [state.recordings, state.settings.playbackProvider],
+  );
+
+  // Bytes on disk — a stored download or a scanned local file. Used
+  // to drop provider pins (owned wins) and to roll download state up.
+  const isOwned = useCallback(
+    (recordingId: string): boolean =>
+      controller.downloads.fileFor(recordingId) !== null ||
+      (controller.local()?.uriFor(recordingId) ?? null) !== null,
+    [controller],
+  );
+
+  // Offline honesty: rows render 'unavailable' when offline and
+  // unowned — their play affordances must not fire a remote attempt.
+  const canPlay = useCallback(
+    (recordingId: string): boolean =>
+      online !== false || isOwned(recordingId),
+    [online, isOwned],
+  );
+
+  // Single download affordance: absent → request; queued/downloading
+  // → cancel; failed → retry; stored → remove. The sheet label says
+  // which it is.
+  const onDownloadAction = useCallback(
+    (recordingId: string) => {
+      const signal = new CancellationSource().signal;
+      const existing = controller.downloads.recordFor(recordingId);
+      if (existing === null) {
+        const sourceRef = downloadRefFor(recordingId);
+        if (sourceRef === null) {
+          return;
+        }
+        void controller.downloads.request({ recordingId, sourceRef }, signal);
+        return;
+      }
+      switch (existing.state) {
+        case 'requested':
+        case 'transferring':
+          void controller.downloads.cancel(existing.downloadId, signal);
+          return;
+        case 'failed_with_retry':
+          void controller.downloads.retry(existing.downloadId, signal);
+          return;
+        case 'available':
+          void controller.downloads.remove(existing.downloadId, signal);
+          return;
+        default:
+          return;
+      }
+    },
+    [controller, downloadRefFor],
+  );
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
   // Lyrics are a live read off the Stage's lyrics mode, not session
   // state — the fetch is keyed to the playing recording and canceled
@@ -544,8 +712,25 @@ function Main({
     [state],
   );
   const libraryModel = useMemo(() => {
+    // Local index rows (provenance 'local') are authoritative over
+    // the session's in-memory copies — a scan commits fresher tags
+    // than restore loaded. Session stays authoritative for every
+    // other row.
+    const local = controller.local();
+    const recordings = (() => {
+      if (local === null) {
+        return state.recordings;
+      }
+      const byId = new Map(state.recordings.map((r) => [r.id, r]));
+      for (const r of local.recordings()) {
+        if (r.provenance === 'local') {
+          byId.set(r.id, r);
+        }
+      }
+      return [...byId.values()];
+    })();
     const model = toLibraryModel({
-      recordings: state.recordings,
+      recordings,
       likes: state.likes,
       playlists: state.playlists,
       playlistEntries: state.playlistEntries,
@@ -553,31 +738,68 @@ function Main({
       playCounts: state.playCounts,
       entities: state.entities,
       entitySourceRefs: state.entitySourceRefs,
+      downloads,
     });
     const playingId =
       state.playback.type === 'idle' ? null : state.playback.recordingId;
-    if (playingId === null) {
-      return model;
-    }
-    const mark = (row: CollectionRowModel): CollectionRowModel =>
-      row.recordingId === playingId
-        ? { ...row, row: { ...row.row, playing: true } }
-        : row;
+    const chipByRecording = new Map<string, DownloadChip>(
+      downloads
+        .filter((d) => d.state !== 'removing')
+        .map((d) => [
+          d.recordingId,
+          d.state === 'requested'
+            ? 'queued'
+            : d.state === 'transferring'
+              ? 'downloading'
+              : d.state === 'available'
+                ? 'stored'
+                : 'failed',
+        ]),
+    );
+    const localUriFor = (id: string): string | null =>
+      local?.uriFor(id) ?? null;
+    // Honest-offline: with connectivity explicitly down, a row plays
+    // only from owned bytes (stored download or local file) — remote
+    // streams degrade to 'unavailable' instead of spinning.
+    const offline = online === false;
+    const decorate = (
+      row: TrackRowModel,
+      recordingId: string,
+    ): TrackRowModel => {
+      const chip = chipByRecording.get(recordingId) ?? row.download;
+      const owned =
+        chip === 'stored' || localUriFor(recordingId) !== null;
+      const offlineRow =
+        offline && !owned
+          ? { state: 'unavailable' as const, note: 'offline' }
+          : {};
+      return {
+        ...row,
+        playing: recordingId === playingId ? true : row.playing,
+        download: chip ?? null,
+        ...offlineRow,
+      };
+    };
+    const mark = (row: CollectionRowModel): CollectionRowModel => ({
+      ...row,
+      row: decorate(row.row, row.recordingId),
+    });
     return {
       ...model,
-      items: model.items.map((row) =>
-        row.key === playingId ? { ...row, playing: true } : row,
-      ),
+      items: model.items.map((row) => decorate(row, row.key)),
       recentlyAdded: model.recentlyAdded.map((row) =>
-        row.key === playingId ? { ...row, playing: true } : row,
+        decorate(row, row.key),
       ),
       collectionRows: {
         liked: model.collectionRows.liked.map(mark),
         top50: model.collectionRows.top50.map(mark),
         history: model.collectionRows.history.map(mark),
+        downloads: model.collectionRows.downloads.map(mark),
       },
     };
-  }, [state]);
+    // localTick re-reads local.recordings() after a folder mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, downloads, online, controller, localTick]);
   const collectionModel = useMemo(
     () =>
       overlay?.type === 'collection'
@@ -598,18 +820,22 @@ function Main({
     });
     const playingId =
       state.playback.type === 'idle' ? null : state.playback.recordingId;
-    if (model === null || playingId === null) {
+    if (model === null) {
       return model;
     }
     return {
       ...model,
-      entries: model.entries.map((entry) =>
-        entry.recordingId === playingId
-          ? { ...entry, row: { ...entry.row, playing: true } }
-          : entry,
-      ),
+      entries: model.entries.map((entry) => ({
+        ...entry,
+        row: {
+          ...entry.row,
+          playing:
+            entry.recordingId === playingId ? true : entry.row.playing,
+          download: downloadChipFor(entry.recordingId) ?? entry.row.download,
+        },
+      })),
     };
-  }, [overlay, state]);
+  }, [overlay, state, downloads, downloadChipFor]);
   const entityModel = useMemo(
     () =>
       toEntityModel({
@@ -678,18 +904,25 @@ function Main({
     [state, controller, attempts, pendingReviews],
   );
   const settingsModel = useMemo(
-    () => toSettingsModel(state.settings, diagnostics),
-    [state, diagnostics],
+    () =>
+      toSettingsModel(state.settings, diagnostics, {
+        storageText,
+        localFolderCount: controller.local()?.list().length,
+      }),
+    [state, diagnostics, storageText, localTick, controller],
   );
 
   const playRecording = useCallback(
     async (recordingId: string) => {
+      if (!canPlay(recordingId)) {
+        return;
+      }
       const enqueued = await session.enqueueRecording(recordingId);
       if (enqueued.ok) {
         await session.playOccurrence(enqueued.value);
       }
     },
-    [session],
+    [session, canPlay],
   );
 
   const onResultPress = useCallback(
@@ -725,9 +958,39 @@ function Main({
         setOverlay({ type: 'transfer' });
         return;
       }
-      // storefront and quality rows are display-only.
+      if (key === 'addLocalFolder') {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        void local
+          .addFolder(new CancellationSource().signal)
+          .then((added) => {
+            if (added.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
+      if (key === 'rescanLocal' || key === 'localSources') {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        void local
+          .rescan(undefined, new CancellationSource().signal)
+          .then((scanned) => {
+            if (scanned.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
+      // storefront, quality, downloadStorage rows are display-only.
     },
-    [session, state.settings],
+    [session, state.settings, controller, refreshLocal],
   );
 
   const onSettingsToggle = useCallback(
@@ -738,8 +1001,23 @@ function Main({
           prefetch: !state.settings.prefetch,
         });
       }
+      if (key === 'downloadMetered') {
+        const next = state.settings.downloadMetered !== true;
+        void session
+          .updateSettings({
+            ...state.settings,
+            downloadMetered: next,
+          })
+          .then((updated) => {
+            // Wake the scheduler only after the setting commits — a
+            // kick that lands first reads the old metered flag.
+            if (updated.ok && next) {
+              controller.downloads.kick();
+            }
+          });
+      }
     },
-    [session, state.settings],
+    [session, state.settings, controller],
   );
 
   const playback = state.playback;
@@ -1203,27 +1481,79 @@ function Main({
 
   const playCollectionRows = useCallback(
     (rows: readonly { recordingId: string }[]) => {
+      const playable = rows.filter((row) => canPlay(row.recordingId));
+      if (playable.length === 0) {
+        return;
+      }
       void session.playRecordings(
-        rows.map((row) => ({
+        playable.map((row) => ({
           recordingId: row.recordingId,
           selectedRef: null,
         })),
       );
     },
-    [session],
+    [session, canPlay],
   );
 
   const playPlaylist = useCallback(() => {
     if (playlistModel === null) {
       return;
     }
+    const playable = playlistModel.entries.filter((entry) =>
+      canPlay(entry.recordingId),
+    );
+    if (playable.length === 0) {
+      return;
+    }
     void session.playRecordings(
-      playlistModel.entries.map((entry) => ({
+      playable.map((entry) => ({
         recordingId: entry.recordingId,
-        selectedRef: entry.selectedRef,
+        // A provider pin beats owned bytes in #pickRef — drop it
+        // when bytes exist so downloads actually get played.
+        selectedRef: isOwned(entry.recordingId) ? null : entry.selectedRef,
       })),
     );
-  }, [session, playlistModel]);
+  }, [session, playlistModel, isOwned, canPlay]);
+
+  const playlistDownload = useMemo(() => {
+    if (playlistModel === null) {
+      return { state: 'none' as const, requests: [] };
+    }
+    const requests = playlistModel.entries.flatMap((entry) => {
+      const sourceRef = downloadRefFor(entry.recordingId);
+      return sourceRef === null
+        ? []
+        : [{ recordingId: entry.recordingId, sourceRef }];
+    });
+    // 'all' means every entry is owned — a stored download or a
+    // local file both count; only-downloadable entries gate it.
+    const allStored =
+      playlistModel.entries.length > 0 &&
+      playlistModel.entries.every((entry) => isOwned(entry.recordingId));
+    const anyTracked = playlistModel.entries.some(
+      (entry) =>
+        controller.downloads.recordFor(entry.recordingId) !== null ||
+        isOwned(entry.recordingId),
+    );
+    return {
+      state: allStored
+        ? ('all' as const)
+        : anyTracked
+          ? ('partial' as const)
+          : ('none' as const),
+      requests,
+    };
+  }, [playlistModel, downloads, controller, downloadRefFor, isOwned]);
+
+  const onPlaylistDownloadAll = useCallback(() => {
+    if (playlistDownload.requests.length === 0) {
+      return;
+    }
+    void controller.downloads.requestAll(
+      playlistDownload.requests,
+      new CancellationSource().signal,
+    );
+  }, [controller, playlistDownload]);
 
   const addToPlaylist = useCallback(
     async (playlistId: string, target: ActionTarget) => {
@@ -1285,6 +1615,11 @@ function Main({
         case 'add':
           setPickerFor(target);
           break;
+        case 'download':
+          if (target.kind === 'recording') {
+            onDownloadAction(target.recordingId);
+          }
+          break;
         case 'radio': {
           // Track-seeded at this release: a metadata row seeds its own
           // ref; a library row seeds its first source ref. No ref
@@ -1313,7 +1648,7 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity, state.recordings],
+    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction],
   );
 
   const onOpenCard = useCallback(
@@ -1345,9 +1680,10 @@ function Main({
   // like-current, seek?ms=, lyrics, radio?provider=&id=, stop-radio,
   // provider?catalog=&playback=&lyrics=&radio=, corrections,
   // review?list|confirm=&candidate=|reject=|undo=, transfer?export|
-  // import=<path>|apply-import. Never ships in release bundles.
-  const journeyDeps = useRef({ session, search, state });
-  journeyDeps.current = { session, search, state };
+  // import=<path>|apply-import, download?i=N|downloads, local-add|
+  // local-rescan|local-list, airplane. Never ships in release bundles.
+  const journeyDeps = useRef({ session, search, state, controller, downloadRefFor });
+  journeyDeps.current = { session, search, state, controller, downloadRefFor };
   useEffect(() => {
     if (!__DEV__) {
       return undefined;
@@ -1373,7 +1709,13 @@ function Main({
         void runSeamLink(url);
         return;
       }
-      const { session: s, search: se, state: st } = journeyDeps.current;
+      const {
+        session: s,
+        search: se,
+        state: st,
+        controller: ctl,
+        downloadRefFor: refFor,
+      } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       const [verb, qs] = body.split('?');
       const params = new URLSearchParams(qs ?? '');
@@ -1393,7 +1735,8 @@ function Main({
           } else if (
             collection === 'liked' ||
             collection === 'top50' ||
-            collection === 'history'
+            collection === 'history' ||
+            collection === 'downloads'
           ) {
             setOverlay({ type: 'collection', key: collection });
           } else {
@@ -1579,6 +1922,123 @@ function Main({
           } else if (undoId !== null) {
             void s.undoReview(undoId);
           }
+          break;
+        }
+        case 'download': {
+          // auqw://download?i=N — request a download for the Nth
+          // library recording (play-result indexing convention).
+          const i = Number(params.get('i') ?? '0');
+          const recording = st.recordings[i];
+          if (recording === undefined) {
+            console.log(`[journey] download index ${i} out of range`);
+            break;
+          }
+          const sourceRef = refFor(recording.id);
+          if (sourceRef === null) {
+            console.log('[journey] download: no playable ref (local-only?)');
+            break;
+          }
+          void ctl.downloads
+            .request(
+              { recordingId: recording.id, sourceRef },
+              new CancellationSource().signal,
+            )
+            .then((res) =>
+              console.log(
+                res.ok
+                  ? `[journey] download ${res.value.downloadId} state=${res.value.state}`
+                  : `[journey] download failed: ${res.error.kind}`,
+              ),
+            );
+          break;
+        }
+        case 'downloads':
+          // auqw://downloads — open the downloads collection.
+          setTab('library');
+          setOverlay({ type: 'collection', key: 'downloads' });
+          console.log(
+            `[journey] downloads=${ctl.downloads.list().length} rows`,
+          );
+          break;
+        case 'local-add': {
+          // auqw://local-add — drives the real SAF folder picker.
+          const local = ctl.local();
+          if (local === null) {
+            console.log('[journey] local-add: source not started');
+            break;
+          }
+          void local
+            .addFolder(new CancellationSource().signal)
+            .then((added) => {
+              if (added.ok) {
+                s.syncLocalRecordings(local.recordings());
+              }
+              console.log(
+                added.ok
+                  ? `[journey] local-add source=${added.value.sourceId}`
+                  : `[journey] local-add failed: ${added.error.kind}`,
+              );
+            });
+          break;
+        }
+        case 'local-rescan': {
+          const local = ctl.local();
+          if (local === null) {
+            console.log('[journey] local-rescan: source not started');
+            break;
+          }
+          void local
+            .rescan(undefined, new CancellationSource().signal)
+            .then((scanned) => {
+              if (!scanned.ok) {
+                console.log(
+                  `[journey] local-rescan failed: ${scanned.error.kind}`,
+                );
+                return;
+              }
+              s.syncLocalRecordings(local.recordings());
+              for (const report of scanned.value) {
+                console.log(
+                  `[journey] rescan ${report.sourceId}: +${report.added}` +
+                    ` ~${report.updated} -${report.removed}`,
+                );
+              }
+            });
+          break;
+        }
+        case 'local-list': {
+          const local = ctl.local();
+          if (local === null) {
+            console.log('[journey] local-list: source not started');
+            break;
+          }
+          for (const source of local.list()) {
+            console.log(
+              `[journey] local ${source.sourceId} label=${source.label}` +
+                ` files=${local.filesFor(source.sourceId).length}`,
+            );
+          }
+          console.log(
+            `[journey] local sources=${local.list().length} recordings=${local.recordings().length}`,
+          );
+          break;
+        }
+        case 'airplane': {
+          // auqw://airplane — the airplane-mode gate probe: logs the
+          // connectivity snapshot and how many rows own bytes, so the
+          // physical journey asserts honest offline behaviour.
+          void ctl.connectivity.snapshot().then((snap) => {
+            if (!snap.ok) {
+              console.log(`[journey] airplane probe failed: ${snap.error.kind}`);
+              return;
+            }
+            const owned = ctl.downloads
+              .list()
+              .filter((d) => d.state === 'available').length;
+            console.log(
+              `[journey] airplane online=${snap.value.online} metered=${snap.value.metered} owned=${owned} pending=${ctl.downloads.list().length}`,
+            );
+          });
           break;
         }
         case 'transfer': {
@@ -1779,6 +2239,8 @@ function Main({
             topInset={topInset}
             onBack={closeOverlay}
             onPlayAll={playPlaylist}
+            onDownloadAll={onPlaylistDownloadAll}
+            downloadAllState={playlistDownload.state}
             onRename={(name) => {
               if (overlay.type === 'playlist') {
                 void session.renamePlaylist(overlay.playlistId, name);
@@ -1790,14 +2252,19 @@ function Main({
                 closeOverlay();
               }
             }}
-            onPressEntry={(entry) =>
+            onPressEntry={(entry) => {
+              if (!canPlay(entry.recordingId)) {
+                return;
+              }
               void session.playRecordings([
                 {
                   recordingId: entry.recordingId,
-                  selectedRef: entry.selectedRef,
+                  selectedRef: isOwned(entry.recordingId)
+                    ? null
+                    : entry.selectedRef,
                 },
-              ])
-            }
+              ]);
+            }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
               setActionsFor({
@@ -1896,7 +2363,28 @@ function Main({
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-      <View style={{ flex: 1 }}>{overlayScreen ?? screen}</View>
+      <View style={{ flex: 1 }}>
+        {overlayScreen ?? screen}
+        {online === false && (
+          <View
+            style={{
+              position: 'absolute',
+              top: topInset + 4,
+              alignSelf: 'center',
+              paddingHorizontal: 12,
+              paddingVertical: 5,
+              borderRadius: 999,
+              backgroundColor: theme.colors.raised,
+              borderWidth: theme.strokes.hairline,
+              borderColor: theme.colors.hairline,
+            }}
+          >
+            <Text variant="metadata" color="secondary">
+              offline — owned downloads play; streams wait
+            </Text>
+          </View>
+        )}
+      </View>
       {player !== null && !expanded ? (
         <MiniPlayer
           player={player}
@@ -1932,6 +2420,17 @@ function Main({
           onNext={() => void session.next()}
           onPrevious={() => void session.previous()}
           onToggleLike={onToggleLike}
+          download={
+            currentRecordingId !== null &&
+            downloadRefFor(currentRecordingId) !== null
+              ? (downloadChipFor(currentRecordingId) ?? 'idle')
+              : null
+          }
+          onDownload={
+            currentRecordingId !== null
+              ? () => onDownloadAction(currentRecordingId)
+              : undefined
+          }
           onSeek={(ms) => void session.seekTo(ms)}
           onRetryLyrics={onRetryLyrics}
           onStartRadio={radioCapable ? onStartRadio : undefined}
@@ -1962,6 +2461,29 @@ function Main({
               label: 'add to playlist',
               icon: 'list-plus' as const,
             },
+            // Download affordance only where a playable provider ref
+            // exists — a local-only recording is owned bytes already.
+            ...(actionsFor.kind === 'recording' &&
+            downloadRefFor(actionsFor.recordingId) !== null
+              ? [
+                  {
+                    key: 'download',
+                    label: (() => {
+                      const row = controller.downloads.recordFor(
+                        actionsFor.recordingId,
+                      );
+                      return row === null
+                        ? 'download'
+                        : row.state === 'available'
+                          ? 'remove download'
+                          : row.state === 'failed_with_retry'
+                            ? 'retry download'
+                            : 'cancel download';
+                    })(),
+                    icon: 'download' as const,
+                  },
+                ]
+              : []),
             // Only offer the seed affordance when a bundled provider
             // declares radio.seed — an unsupported start is a dead end.
             ...(radioCapable

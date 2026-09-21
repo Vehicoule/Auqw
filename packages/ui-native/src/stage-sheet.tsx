@@ -44,6 +44,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /** Owned-bytes state of the current track; null hides the button. */
+  readonly download?: import('./view-models.ts').DownloadChip | null | undefined;
+  readonly onDownload?: (() => void) | undefined;
 };
 
 function transportVariant(
@@ -98,6 +101,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
+  download = null,
+  onDownload,
 }: TransportProps) {
   const theme = useTheme();
   const v = transportVariant(theme, variant);
@@ -168,6 +173,38 @@ export function TransportControls({
         onPress={onNext}
         style={v.main}
       />
+      {download !== null && (
+        <IconButton
+          icon={
+            download === 'stored'
+              ? 'check'
+              : download === 'failed'
+                ? 'warn'
+                : 'download'
+          }
+          size={32}
+          iconSize={14}
+          color={
+            download === 'failed'
+              ? theme.colors.warn
+              : download === 'stored'
+                ? theme.colors.accent
+                : theme.colors.textSecondary
+          }
+          accessibilityLabel={
+            download === 'stored'
+              ? 'downloaded — remove'
+              : download === 'failed'
+                ? 'download failed — retry'
+                : download === 'queued' || download === 'downloading'
+                  ? 'downloading — cancel'
+                  : 'download'
+          }
+          active={download === 'stored'}
+          onPress={onDownload}
+          style={v.side}
+        />
+      )}
     </View>
   );
 }
@@ -256,6 +293,8 @@ export type StageSheetProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  readonly download?: import('./view-models.ts').DownloadChip | null | undefined;
+  readonly onDownload?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
@@ -287,6 +326,8 @@ export function StageSheet({
   onNext,
   onPrevious,
   onToggleLike,
+  download = null,
+  onDownload,
   onSeek,
   onRetryLyrics,
   onStartRadio,
@@ -487,6 +528,8 @@ export function StageSheet({
               onPrevious={onPrevious}
               onNext={onNext}
               onToggleLike={onToggleLike}
+              download={download}
+              onDownload={onDownload}
             />
           </View>
           {/*
