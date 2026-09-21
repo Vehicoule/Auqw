@@ -755,6 +755,20 @@ export class Session {
     return ok(undefined);
   }
 
+  /**
+   * Connectivity edge from the platform monitor — invoked AFTER the
+   * `isOnline` dep already reads the new value. Re-projects the
+   * native queue so offline items lose their remote refs (and regain
+   * them on reconnect), cancels in-flight speculative mapping, and
+   * re-evaluates the successor/radio triggers under the new truth.
+   */
+  connectivityChanged(): void {
+    if (!this.#requireReady().ok) {
+      return;
+    }
+    this.#derived();
+  }
+
   async enqueueRecording(recordingId: string): Promise<Result<string>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1807,6 +1821,10 @@ export class Session {
     if (record === null || !shouldGrowRadio(record, r.queue.snapshot())) {
       return;
     }
+    // Radio growth spends the network — skip when offline.
+    if (!this.#isOnline()) {
+      return;
+    }
     record.fetching = true;
     this.#publish();
     const work = this.#radioTail.then(() => this.#growRadio(record));
@@ -2272,6 +2290,13 @@ export class Session {
     occurrenceSelected: SourceRef | null,
   ): SourceRef | null {
     const provider = this.#ready?.settings.playbackProvider ?? '';
+    // Offline: only owned bytes can attach — a provider pin would
+    // fire a network call it can't satisfy, so even an active-
+    // provider pin loses to a download or local file here.
+    if (!this.#isOnline()) {
+      const owned = this.#localPlaybackFor(recording.id);
+      return owned === null ? null : localTrackRef(owned);
+    }
     if (
       occurrenceSelected !== null &&
       occurrenceSelected.provider === provider

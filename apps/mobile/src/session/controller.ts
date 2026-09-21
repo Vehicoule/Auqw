@@ -491,7 +491,13 @@ export async function createSessionController(
       try {
         mediaUnsubs.push(
           connectivity.subscribe((snap) => {
+            if (snap.online === lastOnline) {
+              return;
+            }
+            // Update the gate's read BEFORE the session re-derives —
+            // connectivityChanged() reads isOnline() synchronously.
             lastOnline = snap.online;
+            session.connectivityChanged();
           }),
         );
       } catch {

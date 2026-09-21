@@ -928,9 +928,12 @@ function Main({
         .filter((l) => l.entityKind === 'track')
         .map((l) => l.targetId),
     );
+    const local = controller.local();
     const rows: TrackRowModel[] = [];
     for (const rec of state.recordings) {
-      if (rec.provenance !== 'local') {
+      // Folder removal keeps the recording but drops its file row —
+      // uriFor is the owned-bytes truth; orphans never surface.
+      if (rec.provenance !== 'local' || local?.uriFor(rec.id) == null) {
         continue;
       }
       const haystack =
@@ -949,7 +952,9 @@ function Main({
       }
     }
     return rows;
-  }, [searchState, state.recordings, state.likes]);
+    // localTick re-reads local.uriFor after a folder mutation — a
+    // removed folder's recordings persist but must stop matching.
+  }, [searchState, state.recordings, state.likes, controller, localTick]);
   const searchModel = useMemo(() => {
     const base = toSearchModel(searchState);
     if (localResults.length === 0 || base.phase === 'idle') {
