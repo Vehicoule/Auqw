@@ -301,6 +301,10 @@ export type AuqwTagTagsNative = {
   genre: string | null;
 };
 
+export type AuqwDownloadsNative = {
+  downloadsActiveChanged(active: number): Promise<void>;
+};
+
 export type AuqwTagReaderNative = {
   tagPickFolder(): Promise<{ treeUri: string; label: string }>;
   tagEnumerate(treeUri: string): Promise<readonly AuqwTagEntryNative[]>;

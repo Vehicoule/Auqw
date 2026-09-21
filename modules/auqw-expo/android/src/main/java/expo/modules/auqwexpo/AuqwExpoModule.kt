@@ -243,6 +243,7 @@ class AuqwExpoModule : Module() {
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
 
+
   /** Lazily created on the first connectivity observer. */
   private var connectivityMonitor: AuqwConnectivityMonitor? = null
 
@@ -259,6 +260,7 @@ class AuqwExpoModule : Module() {
   private class LocalHandle(val path: String, val mime: String?)
   private val localHandles = java.util.concurrent.ConcurrentHashMap<String, LocalHandle>()
   private val localSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
   @Volatile
   private var installedProjection: QueueProjectionInput? = null
   // The occurrence the currently attached stream serves: FIXED at a
@@ -873,6 +875,15 @@ class AuqwExpoModule : Module() {
 
     Function("docUri") { treeUri: String, docId: String ->
       AuqwTagReader.documentUri(Uri.parse(treeUri), docId)
+    }
+
+    // Slice-3 dataSync FGS: JS reports the live active-transfer count;
+    // the service is a stateless keep-alive (see AuqwDownloadService).
+    AsyncFunction("downloadsActiveChanged") { active: Double ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("no-result", "no react context", null)
+      AuqwDownloadService.update(ctx.applicationContext, active.toInt())
+      null
     }
   }
 

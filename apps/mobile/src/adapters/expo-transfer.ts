@@ -163,7 +163,11 @@ class ExpoTransferSink implements TransferSink {
 
 export function createExpoTransfer(
   deps: ExpoTransferDeps = {},
-): { transfer: MediaTransferPort; dir: string } {
+): {
+  transfer: MediaTransferPort;
+  dir: string;
+  uriFor: (name: string) => string;
+} {
   const directory =
     deps.directory ?? new Directory(Paths.document, 'downloads');
   const PART_SUFFIX = '.part';
@@ -237,6 +241,11 @@ export function createExpoTransfer(
         return cancelled();
       }
       try {
+        // A clean install has no transfer directory yet — that's
+        // honestly "nothing to sweep", not an error.
+        if (!directory.exists) {
+          return ok(0);
+        }
         const keep = new Set(keepPaths);
         let swept = 0;
         for (const entry of directory.list()) {
@@ -263,6 +272,10 @@ export function createExpoTransfer(
         return cancelled();
       }
       try {
+        // Missing directory on a clean install reads as zero bytes.
+        if (!directory.exists) {
+          return ok(0);
+        }
         let total = 0;
         for (const entry of directory.list()) {
           if (signal.cancelled) {
@@ -324,5 +337,11 @@ export function createExpoTransfer(
     },
   };
 
-  return { transfer, dir: directory.uri };
+  return {
+    transfer,
+    dir: directory.uri,
+    // Full file:// URI for a finalized name — what the local player
+    // must receive (the ledger stores bare names only).
+    uriFor: (name: string): string => fileFor(name).uri,
+  };
 }

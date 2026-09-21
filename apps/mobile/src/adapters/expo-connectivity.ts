@@ -99,3 +99,18 @@ export function createExpoConnectivity(
     },
   };
 }
+
+/**
+ * Fallback port for hosts with no connectivity native surface (iOS —
+ * the Kotlin monitor is Android-only). Snapshot reports
+ * optimistically online/unmetered so remote playback and transfers
+ * attempt normally and fail honestly if the network is actually
+ * down; `subscribe` never fires (no edge source exists).
+ */
+export function createUnwatchedConnectivity(): ConnectivityPort {
+  return {
+    snapshot: () =>
+      Promise.resolve(ok({ online: true, metered: false })),
+    subscribe: () => () => {},
+  };
+}

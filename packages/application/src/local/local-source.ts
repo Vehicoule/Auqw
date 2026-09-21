@@ -111,7 +111,11 @@ export class LocalFileSource {
     this.#recordings = [...state.recordings];
   }
 
-  /** Recordings exposed for merge: scan keeps this array current. */
+  /**
+   * Recordings exposed for merge: scan keeps this array current.
+   * Only `provenance === 'local'` rows are ours — the wider array is
+   * refreshed from storage at every commit, never written back stale.
+   */
   recordings(): readonly Recording[] {
     return this.#recordings.filter((r) => r.provenance === 'local');
   }
@@ -232,12 +236,41 @@ export class LocalFileSource {
     const nextSources = this.#sources.filter((s) => s.sourceId !== sourceId);
     const nextFiles = this.#files.filter((f) => f.sourceId !== sourceId);
     const removed = this.#files.filter((f) => f.sourceId === sourceId);
-    const nextRecordings = stripLocalRefs(removed, this.#recordings);
+    const committed = await this.#commitSections(
+      nextSources,
+      nextFiles,
+      (current) => stripLocalRefs(removed, current),
+      signal,
+    );
+    if (!committed.ok) {
+      return committed;
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * The `recordings` section is shared with the session — commit it
+   * by merging our delta over a fresh storage read, never the boot
+   * snapshot: session mutations between scans (provider refreshes,
+   * added catalog rows, mapping edits) must survive a rescan.
+   * `localSources`/`localFiles` are owned exclusively by this class.
+   */
+  async #commitSections(
+    nextSources: LocalSource[],
+    nextFiles: LocalFile[],
+    mergeRecordings: (current: readonly Recording[]) => Recording[],
+    signal: CancellationSignal,
+  ): Promise<Result<void>> {
+    const fresh = await this.#storage.load(ctx(this.#ids, this.#clock, signal));
+    if (!fresh.ok) {
+      return err(fresh.error);
+    }
+    const merged = mergeRecordings(fresh.value.recordings);
     const committed = await this.#storage.commit(
       {
         localSources: nextSources,
         localFiles: nextFiles,
-        recordings: nextRecordings,
+        recordings: merged,
       },
       ctx(this.#ids, this.#clock, signal),
     );
@@ -246,7 +279,7 @@ export class LocalFileSource {
     }
     this.#sources = nextSources;
     this.#files = nextFiles;
-    this.#recordings = nextRecordings;
+    this.#recordings = merged;
     return ok(undefined);
   }
 
@@ -319,7 +352,6 @@ export class LocalFileSource {
 
     const rowsByFp = new Map(prior.map((f) => [f.fingerprint, f] as const));
     const nextFiles = this.#files.filter((f) => f.sourceId !== sourceId);
-    const nextRecordings = [...this.#recordings];
     let added = 0;
     let updated = 0;
 
@@ -392,18 +424,19 @@ export class LocalFileSource {
         recordingByFp.set(f.fingerprint, f.recordingId);
       }
     }
-    const recordingById = new Map(
-      nextRecordings.map((r) => [r.id, r] as const),
-    );
-    const pushRecording = (r: Recording): void => {
-      const idx = nextRecordings.findIndex((x) => x.id === r.id);
-      if (idx >= 0) {
-        nextRecordings[idx] = r;
-      } else {
-        nextRecordings.push(r);
-      }
-      recordingById.set(r.id, r);
-    };
+
+    // Recording upserts are deferred into the commit's fresh-read
+    // merge — a recording created or edited by the session since boot
+    // must not be clobbered by our stale copy (or vice versa).
+    const pendingRecordings: {
+      recordingId: string;
+      fileId: string;
+      title: string;
+      artist: string | null;
+      album: string | null;
+      durationMs: number | null;
+      genre: string | null;
+    }[] = [];
 
     for (let i = 0; i < pendingRows.length; i++) {
       const row = pendingRows[i]!;
@@ -426,37 +459,15 @@ export class LocalFileSource {
         genre: tag?.genre ?? null,
       });
       added += 1;
-
-      const rec = recordingById.get(recordingId);
-      const ref = localTrackRef(row.fileId);
-      const hasRef =
-        rec !== undefined &&
-        rec.sourceRefs.some(
-          (s) =>
-            s.provider === LOCAL_PROVIDER &&
-            s.kind === 'track' &&
-            s.id === row.fileId,
-        );
-      if (rec === undefined) {
-        pushRecording({
-          id: recordingId,
-          title,
-          artist: tag?.artist ?? null,
-          album: tag?.album ?? null,
-          durationMs: tag?.durationMs ?? null,
-          releaseYear: null,
-          artwork: [],
-          explicit: null,
-          genre: tag?.genre ?? null,
-          isrc: null,
-          versionLabels: [],
-          sourceRefs: [ref],
-          mappings: [],
-          provenance: 'local',
-        });
-      } else if (!hasRef) {
-        pushRecording({ ...rec, sourceRefs: [...rec.sourceRefs, ref] });
-      }
+      pendingRecordings.push({
+        recordingId,
+        fileId: row.fileId,
+        title,
+        artist: tag?.artist ?? null,
+        album: tag?.album ?? null,
+        durationMs: tag?.durationMs ?? null,
+        genre: tag?.genre ?? null,
+      });
     }
 
     // File rows whose fileId didn't survive — vanished docIds AND
@@ -465,7 +476,6 @@ export class LocalFileSource {
     // recording persists as owned data.
     const live = new Set(nextFiles.map((f) => f.fileId));
     const vanished = prior.filter((f) => !live.has(f.fileId));
-    const stripped = stripLocalRefs(vanished, nextRecordings);
 
     const nextSource: LocalSource = {
       ...source,
@@ -475,20 +485,62 @@ export class LocalFileSource {
       s.sourceId === sourceId ? nextSource : s,
     );
 
-    const committed = await this.#storage.commit(
-      {
-        localSources: nextSources,
-        localFiles: nextFiles,
-        recordings: stripped,
-      },
-      ctx(this.#ids, this.#clock, signal),
+    const mergeRecordings = (current: readonly Recording[]): Recording[] => {
+      const merged = stripLocalRefs(vanished, current);
+      const byId = new Map(merged.map((r, i) => [r.id, i] as const));
+      const upsert = (r: Recording): void => {
+        const idx = byId.get(r.id);
+        if (idx === undefined) {
+          byId.set(r.id, merged.length);
+          merged.push(r);
+        } else {
+          merged[idx] = r;
+        }
+      };
+      for (const p of pendingRecordings) {
+        const rec = byId.get(p.recordingId);
+        const ref = localTrackRef(p.fileId);
+        const existing = rec === undefined ? undefined : merged[rec];
+        if (existing === undefined) {
+          upsert({
+            id: p.recordingId,
+            title: p.title,
+            artist: p.artist,
+            album: p.album,
+            durationMs: p.durationMs,
+            releaseYear: null,
+            artwork: [],
+            explicit: null,
+            genre: p.genre,
+            isrc: null,
+            versionLabels: [],
+            sourceRefs: [ref],
+            mappings: [],
+            provenance: 'local',
+          });
+        } else if (
+          !existing.sourceRefs.some(
+            (s) =>
+              s.provider === LOCAL_PROVIDER &&
+              s.kind === 'track' &&
+              s.id === p.fileId,
+          )
+        ) {
+          upsert({ ...existing, sourceRefs: [...existing.sourceRefs, ref] });
+        }
+      }
+      return merged;
+    };
+
+    const committed = await this.#commitSections(
+      nextSources,
+      nextFiles,
+      mergeRecordings,
+      signal,
     );
     if (!committed.ok) {
       return err(committed.error);
     }
-    this.#sources = nextSources;
-    this.#files = nextFiles;
-    this.#recordings = stripped;
     void this.#log.write({
       level: 'info',
       message: `local: scan ${sourceId} entries=${entries.length} added=${added} removed=${vanished.length} unreadable=${unreadableDocs.size}`,

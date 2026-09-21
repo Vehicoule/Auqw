@@ -393,6 +393,7 @@ function GalleryBody({
               playing: false,
               state: 'available',
               note: null,
+              download: null,
             }}
             reorderControls="buttons"
             onMoveUp={noop}
