@@ -259,6 +259,24 @@ export function nativeError(thrown: unknown): AppError {
 }
 
 // ---------------------------------------------------------------------------
+// Connectivity monitor — mirrors the auqw-expo `connectivity*` surface.
+// ---------------------------------------------------------------------------
+
+export type AuqwConnectivityEvent = {
+  online: boolean;
+  metered: boolean;
+};
+
+export type AuqwConnectivityNative = {
+  connectivitySnapshot(): Promise<AuqwConnectivityEvent>;
+  connectivityWatch(): void;
+  connectivityUnwatch(): void;
+  addConnectivityChangedListener(
+    listener: (event: AuqwConnectivityEvent) => void,
+  ): AuqwExpoSubscription;
+};
+
+// ---------------------------------------------------------------------------
 // TagReader — mirrors the auqw-expo `tag*`/`docUri` surface (slice 3).
 // ---------------------------------------------------------------------------
 

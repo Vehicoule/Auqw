@@ -255,6 +255,7 @@ type AuqwExpoEvents = {
   onPlaybackStatus: (event: PlaybackStatusEvent) => void;
   onPhaseMark: (event: PhaseMarkEvent) => void;
   onQueueTransition: (event: QueueTransitionEvent) => void;
+  onConnectivityChanged: (event: ConnectivityChangedEvent) => void;
 };
 
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
@@ -290,6 +291,9 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   docUri(treeUri: string, docId: string): string;
   devAttachFile(path: string): Promise<string>;
   devPrepareUrl(url: string, mime: string, contentLength?: number, remintable?: boolean): Promise<string>;
+  connectivitySnapshot(): Promise<ConnectivityChangedEvent>;
+  connectivityWatch(): void;
+  connectivityUnwatch(): void;
 }
 
 const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
@@ -465,6 +469,31 @@ export function addQueueTransitionListener(
   listener: (event: QueueTransitionEvent) => void,
 ): EventSubscription {
   return native.addListener('onQueueTransition', listener);
+}
+
+/** {online, metered} — snapshot read and the change-edge payload. */
+export type ConnectivityChangedEvent = {
+  online: boolean;
+  metered: boolean;
+};
+
+export function connectivitySnapshot(): Promise<ConnectivityChangedEvent> {
+  return native.connectivitySnapshot();
+}
+
+/** Start the NetworkCallback — emits a baseline edge immediately. */
+export function connectivityWatch(): void {
+  native.connectivityWatch();
+}
+
+export function connectivityUnwatch(): void {
+  native.connectivityUnwatch();
+}
+
+export function addConnectivityChangedListener(
+  listener: (event: ConnectivityChangedEvent) => void,
+): EventSubscription {
+  return native.addListener('onConnectivityChanged', listener);
 }
 
 // ---- TagReader wrappers ----

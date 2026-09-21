@@ -62,6 +62,7 @@ private const val EVENT_PREPARE_OUTCOME = "onPrepareOutcome"
 private const val EVENT_PLAYBACK_STATUS = "onPlaybackStatus"
 private const val EVENT_PHASE_MARK = "onPhaseMark"
 private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
+private const val EVENT_CONNECTIVITY = "onConnectivityChanged"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
@@ -242,6 +243,18 @@ class AuqwExpoModule : Module() {
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
 
+  /** Lazily created on the first connectivity observer. */
+  private var connectivityMonitor: AuqwConnectivityMonitor? = null
+
+  private fun connectivityMonitorInstance(ctx: Context): AuqwConnectivityMonitor =
+    connectivityMonitor
+      ?: AuqwConnectivityMonitor(ctx) { online, metered ->
+        sendEvent(
+          EVENT_CONNECTIVITY,
+          mapOf("online" to online, "metered" to metered)
+        )
+      }.also { connectivityMonitor = it }
+
   /** provider:'local' attach tokens — path/mime for an lf-* handle. */
   private class LocalHandle(val path: String, val mime: String?)
   private val localHandles = java.util.concurrent.ConcurrentHashMap<String, LocalHandle>()
@@ -321,7 +334,8 @@ class AuqwExpoModule : Module() {
       EVENT_PREPARE_OUTCOME,
       EVENT_PLAYBACK_STATUS,
       EVENT_PHASE_MARK,
-      EVENT_QUEUE_TRANSITION
+      EVENT_QUEUE_TRANSITION,
+      EVENT_CONNECTIVITY
     )
 
     OnCreate {
@@ -334,6 +348,8 @@ class AuqwExpoModule : Module() {
 
     OnDestroy {
       try {
+        connectivityMonitor?.stop()
+        connectivityMonitor = null
         boundService?.remoteDispatcher = null
         appContext.reactContext?.unbindService(serviceConnection)
       } catch (e: Exception) {
@@ -342,6 +358,31 @@ class AuqwExpoModule : Module() {
       // lf-* handles are bookkeeping only — drop the registry so a
       // recreated module can't resurrect a dead caller's file attach.
       localHandles.clear()
+    }
+
+    /**
+     * Point-in-time {online, metered} for the scheduler — a local
+     * read of the active network's capabilities, never a probe.
+     */
+    AsyncFunction("connectivitySnapshot") { ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+      val (online, metered) = connectivityMonitorInstance(ctx).snapshot()
+      mapOf("online" to online, "metered" to metered)
+    }
+
+    /**
+     * Register the NetworkCallback. Emits a baseline edge at start —
+     * subscribers get the current state, not silence until a change.
+     * Idempotent; unwatch stops the callback.
+     */
+    Function("connectivityWatch") { ->
+      val ctx = appContext.reactContext ?: return@Function
+      connectivityMonitorInstance(ctx).start()
+    }
+
+    Function("connectivityUnwatch") { ->
+      connectivityMonitor?.stop()
     }
 
     AsyncFunction("createHost") { config: HostConfigInput ->
