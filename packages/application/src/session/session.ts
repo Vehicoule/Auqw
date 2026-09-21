@@ -3292,12 +3292,14 @@ export class Session {
       }
       return;
     }
-    // Listened time accumulates real deltas between playing ticks —
+    // Listened time accumulates real deltas between status ticks —
     // a seek forward must not mint a play for a span that never
     // played, and a position regression must not subtract. Anything
     // above the cap is a jump, not playback: no credit, just a new
-    // baseline.
-    if (event.state === 'playing') {
+    // baseline. 'ended' joins the same accumulator — its absolute
+    // end position after a tail seek would otherwise mint unplayed
+    // time through the threshold.
+    if (event.state === 'playing' || event.state === 'ended') {
       const lastPos = active.lastStatusPositionMs;
       if (lastPos !== undefined && event.positionMs > lastPos) {
         const delta = event.positionMs - lastPos;
@@ -3310,11 +3312,7 @@ export class Session {
     await this.#maybeRecordPlay(
       active.occurrenceId,
       active.recordingId,
-      // 'ended' is a completion claim — the stream ran to its end;
-      // the delta accumulator only applies to periodic ticks.
-      event.state === 'ended'
-        ? event.positionMs
-        : active.listenedMsAccum,
+      active.listenedMsAccum,
       event.durationMs ??
       r.recordings.find((rec) => rec.id === active.recordingId)
         ?.durationMs ??
@@ -3642,6 +3640,19 @@ export class Session {
         : items.findIndex(
           (i) => i.occurrenceId === marker?.currentOccurrenceId,
         );
+    // A service move emits the projection it captured at move-start,
+    // which can lag one JS install. Its identity echoes that captured
+    // rev (a fresh attach keys to proj.queueRev) while a same-item
+    // restart echoes the live re-keyed attach rev — either proves the
+    // event; only a revision newer than the install is impossible.
+    const currentProjection =
+      projection !== null &&
+      event.projectionId === projection.projectionId &&
+      event.projectedQueueRev === projection.queueRev;
+    const staleReconcilable =
+      !currentProjection &&
+      projection !== null &&
+      event.projectedQueueRev <= projection.queueRev;
     const identityOk =
       event.toOccurrenceId === null
         ? event.identity === null && event.handle === null
@@ -3649,7 +3660,8 @@ export class Session {
         event.handle !== null &&
         event.handle.length > 0 &&
         event.identity.attemptId.length > 0 &&
-        event.identity.queueRev === projection?.queueRev;
+        (event.identity.queueRev === projection?.queueRev ||
+          event.identity.queueRev === event.projectedQueueRev);
     let legal = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
       const successor =
@@ -3676,24 +3688,16 @@ export class Session {
       event.fromOccurrenceId !== marker.currentOccurrenceId ||
       !legal ||
       !identityOk ||
-      !isSafeNonNegative(event.positionMs)
+      !isSafeNonNegative(event.positionMs) ||
+      (!currentProjection && !staleReconcilable)
     ) {
       this.#logWarn('queue transition rejected');
       return;
     }
-    if (
-      event.projectionId !== projection.projectionId ||
-      event.projectedQueueRev !== projection.queueRev
-    ) {
-      // A remote step lands on the projection the service has, which
-      // can lag one JS install. Since `from`/`to` were already proven
-      // legal against the INSTALLED edges above, a stale-but-past
-      // revision is safe to reconcile — a revision newer than the
-      // install describes a projection that never existed here.
-      if (event.projectedQueueRev > projection.queueRev) {
-        this.#logWarn('queue transition rejected');
-        return;
-      }
+    if (!currentProjection) {
+      // The event's edge was already proven legal against the
+      // INSTALLED projection above, so a stale-but-past revision is
+      // safe to reconcile.
       this.#logWarn('queue transition on superseded projection — reconciled');
     }
     if (event.reason === 'ended' && event.fromOccurrenceId !== null) {

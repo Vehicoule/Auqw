@@ -802,11 +802,12 @@ fn authorize_resume(
     }))
 }
 
-/// Collect every string leaf of a JSON value into `out` — used to
-/// register pot-provider token material in the redaction set.
+/// Collect every non-empty string leaf of a JSON value into `out` —
+/// used to register pot-provider token material in the redaction set;
+/// a short leaf is still token material, so no length floor.
 fn collect_secret_strings(v: &Value, out: &mut Vec<String>) {
     match v {
-        Value::String(s) if s.len() >= 8 => out.push(s.clone()),
+        Value::String(s) if !s.is_empty() => out.push(s.clone()),
         Value::Array(a) => a.iter().for_each(|i| collect_secret_strings(i, out)),
         Value::Object(m) => m.values().for_each(|i| collect_secret_strings(i, out)),
         _ => {}

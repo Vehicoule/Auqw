@@ -2879,6 +2879,14 @@ async function historyFlow(): Promise<void> {
   const snap0 = readyOf(r);
   const idA = 'identity' in snap0.playback ? snap0.playback.identity : undefined;
   assert(idA !== undefined);
+  // Listening time is accumulated from playing ticks — 'ended' alone
+  // is a completion claim, not 300 s of observed playback. Emit real
+  // ticks over the 120 s threshold (max continuous delta per tick),
+  // then end the track.
+  for (let pos = 2_500; pos <= 125_000; pos += 2_500) {
+    r.player.emit(statusEvent(idA, 'h-oA', 'playing', pos));
+    await pump(4);
+  }
   r.player.emit(statusEvent(idA, 'h-oA', 'ended', 300_000));
   await pump();
   const snap1 = readyOf(r);

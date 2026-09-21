@@ -48,9 +48,10 @@ pub fn redact_text(text: &str, secrets: &[String]) -> String {
             i += ch.len_utf8();
         }
     }
-    // Substring masking only makes sense for real token material — a
-    // short string would mangle unrelated text.
-    for secret in secrets.iter().filter(|s| s.len() >= 8) {
+    // Every registered secret is masked — no length floor: a short
+    // token is still credential material, and the no-secrets-in-logs
+    // rule outranks log legibility (callers only push real tokens).
+    for secret in secrets.iter().filter(|s| !s.is_empty()) {
         out = out.replace(secret.as_str(), "***");
     }
     out
@@ -101,10 +102,12 @@ mod tests {
     }
 
     #[test]
-    fn short_secrets_are_not_masked() {
+    fn short_secrets_are_masked() {
+        // No length floor — a short token is still credential
+        // material; over-masking inside words is the safe direction.
         let secrets = vec!["pin".to_string()];
         let out = redact_text("spinning pinwheel", &secrets);
-        assert_eq!(out, "spinning pinwheel");
+        assert_eq!(out, "s***ning ***wheel");
     }
 
     #[test]
