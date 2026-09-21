@@ -3645,6 +3645,21 @@ export class Session {
       r.playback = { type: 'idle' };
     }
     this.#publish();
+    // Capture and enqueue the transition's own snapshot before any
+    // cleanup await can admit a later queue command: its segment then
+    // precedes theirs, so a later command's rollback cannot invalidate
+    // the transition its `before` retained. The epoch guard still drops
+    // the write when an earlier pending commit rolls the lineage back
+    // over it, and the committed-revision guard keeps a staler capture
+    // from regressing a staged commit.
+    const queueSnap = r.queue.snapshot();
+    const queueEpoch = r.queueEpoch;
+    const queueWrite = this.#persist(() =>
+      r.queueEpoch === queueEpoch &&
+      queueSnap.revision > r.queueCommittedRev
+        ? { queue: queueSnap }
+        : {},
+    );
     if (prev !== null) {
       prev.source.cancel();
       prev.timer?.cancel();
@@ -3662,18 +3677,7 @@ export class Session {
         );
       }
     }
-    // Call-time snapshot + lineage epoch and committed-revision guard:
-    // a rolled-back lineage would write a resurrected mutation, and a
-    // staler revision would regress a staged commit — the thunk drops
-    // to an empty batch in either case.
-    const queueSnap = r.queue.snapshot();
-    const queueEpoch = r.queueEpoch;
-    await this.#persist(() =>
-      r.queueEpoch === queueEpoch &&
-      queueSnap.revision > r.queueCommittedRev
-        ? { queue: queueSnap }
-        : {},
-    );
+    await queueWrite;
     // Native may already be several moves ahead. Re-projecting this
     // intermediate cursor would stop its live stream and reject queued moves.
     this.#mappingSource?.cancel();

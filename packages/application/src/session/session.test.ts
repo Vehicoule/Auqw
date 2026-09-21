@@ -908,6 +908,93 @@ async function queueCommitIsolatesRacingMutations(): Promise<void> {
   );
 }
 
+// A transition's queue write is captured and enqueued before the
+// cleanup awaits admit later commands, so a racing command's failed
+// commit rolls back over the transition without dropping its write —
+// restart must restore the new cursor, not the old one.
+async function transitionWriteSurvivesRacingCommit(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const svc: PlaybackIdentity = {
+    attemptId: 'svc-1',
+    queueRev: r.player.projections.at(-1)?.queueRev ?? 0,
+  };
+  // The transition write is captured and enqueued before the cleanup
+  // awaits admit a later command: hold the old handle's release so the
+  // handler parks there — the transition's own write already commits —
+  // then race a seek whose held commit fails afterwards: its rollback
+  // cannot invalidate the earlier transition write.
+  r.player.holdNextRelease();
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oB',
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: svc,
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'release').length,
+    1,
+    'handler parked releasing the old handle',
+  );
+  r.storage.holdNextCommit();
+  const pSeek = r.session.seekTo(9_000);
+  await pump();
+  r.player.settleRelease(ok(undefined));
+  await pump();
+  assert(
+    r.storage.settleCommit({
+      ok: false,
+      error: appError('transient', 'disk gone'),
+    }),
+    'seek write held',
+  );
+  const seeked = await pSeek;
+  assert(!seeked.ok, 'racing seek reports the failed commit');
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    'oB',
+    'transition retained in memory after rollback',
+  );
+  const transitionCommit = r.storage.commits
+    .filter((c) => c.batch.queue !== undefined)
+    .at(-1)?.batch.queue;
+  assertEqual(
+    transitionCommit?.currentOccurrenceId,
+    'oB',
+    'storage kept the transition — restart restores oB',
+  );
+  assertEqual(
+    transitionCommit?.positionMs,
+    0,
+    "transition's own snapshot, not the raced seek",
+  );
+}
+
 // A failed stop commit precedes transport teardown: the attempt stays
 // live, playback keeps reporting playing, and the rolled-back queue
 // agrees — nothing claims the item stopped.
@@ -3437,6 +3524,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['queueCommitRollback', queueCommitRollback],
   ['queueCommitCascade', queueCommitCascade],
   ['queueCommitIsolatesRacingMutations', queueCommitIsolatesRacingMutations],
+  ['transitionWriteSurvivesRacingCommit', transitionWriteSurvivesRacingCommit],
   ['stopCommitKeepsPlayback', stopCommitKeepsPlayback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],

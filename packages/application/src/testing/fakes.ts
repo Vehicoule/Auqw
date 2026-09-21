@@ -593,10 +593,35 @@ export class FakePlayer implements PlayerPort {
     return this.#take('cancelPrepare', input, undefined);
   }
 
+  #releaseDeferreds: Deferred<Result<void>>[] = [];
+  #deferNextRelease = false;
+
+  /** The next release call stays pending until settleRelease. */
+  holdNextRelease(): void {
+    this.#deferNextRelease = true;
+  }
+
+  /** Settles the oldest pending release; false when none pending. */
+  settleRelease(result: Result<void>): boolean {
+    const deferred = this.#releaseDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
+  }
+
   release(input: {
     handle: string;
     identity: { attemptId: string; queueRev: number };
   }): Promise<Result<void>> {
+    if (this.#deferNextRelease) {
+      this.#deferNextRelease = false;
+      const deferred = new Deferred<Result<void>>();
+      this.#releaseDeferreds.push(deferred);
+      this.calls.push({ method: 'release', input });
+      return deferred.promise;
+    }
     return this.#take('release', input, undefined);
   }
 
@@ -664,10 +689,27 @@ export class FakeStorage implements StoragePort {
   readonly loads: OperationContext[] = [];
   #loadDeferreds: Deferred<Result<PersistedState>>[] = [];
   #deferNextLoad = false;
+  #commitDeferreds: Deferred<Result<void>>[] = [];
+  #deferNextCommit = false;
 
   /** The next load stays pending until settleLoad. */
   holdNextLoad(): void {
     this.#deferNextLoad = true;
+  }
+
+  /** The next commit stays pending until settleCommit. */
+  holdNextCommit(): void {
+    this.#deferNextCommit = true;
+  }
+
+  /** Settles the oldest pending commit; false when none pending. */
+  settleCommit(result: Result<void>): boolean {
+    const deferred = this.#commitDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
   }
 
   /** Settles the oldest pending load; false when none pending. */
@@ -705,6 +747,24 @@ export class FakeStorage implements StoragePort {
       this.#failWith = null;
       return Promise.resolve({ ok: false, error });
     }
+    if (this.#deferNextCommit) {
+      // A held commit is not durable yet — neither the stored state nor
+      // the commits log observe it until settleCommit resolves it.
+      this.#deferNextCommit = false;
+      const deferred = new Deferred<Result<void>>();
+      this.#commitDeferreds.push(deferred);
+      return deferred.promise.then((settled) => {
+        if (settled.ok) {
+          this.#applyCommit(batch, context);
+        }
+        return settled;
+      });
+    }
+    this.#applyCommit(batch, context);
+    return Promise.resolve(ok(undefined));
+  }
+
+  #applyCommit(batch: StorageBatch, context: OperationContext): void {
     this.commits.push({ batch: this.#clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
     const staged = this.#clone(batch);
@@ -730,7 +790,6 @@ export class FakeStorage implements StoragePort {
         -FakeStorage.MAX_ATTEMPTS,
       );
     }
-    return Promise.resolve(ok(undefined));
   }
 
   /** Diagnostics only: newest-first, capped at 500 stored traces. */
