@@ -49,8 +49,10 @@ impl Manifest {
 
     /// Structural validation beyond the JSON shape. Mirrors
     /// `sdk/contract/manifest.schema.json` — the schema is the contract;
-    /// this validator must not accept what it rejects. `load` re-runs
-    /// it because a manifest built programmatically skips `from_json`.
+    /// this validator must not accept what it rejects. `from_json` runs
+    /// it already; `load` runs it again so a `Manifest` built by any
+    /// other path (direct `Deserialize`, `serde_json::from_value`, field
+    /// mutation) cannot smuggle an unvalidated policy into the host.
     pub(crate) fn validate(&self) -> Result<(), ManifestError> {
         let bad = |m: &str| ManifestError::InvalidField(m.to_string());
         // ^[a-z0-9][a-z0-9-]*$
@@ -128,8 +130,14 @@ impl Manifest {
             let rest = p
                 .strip_prefix("network:")
                 .ok_or_else(|| ManifestError::InvalidField(format!("bad permission {p:?}")))?;
-            // ^(\*\.)?[a-z0-9.-]+$ — and a wildcard needs a real domain.
-            let body = rest.strip_prefix("*.").unwrap_or(rest);
+            // ^(\*\.)?[a-z0-9.-]+$ — a DNS name, or a loopback literal.
+            // Non-loopback IPs (`169.254.169.254`, LAN ranges) and
+            // whole-TLD wildcards let a manifest self-authorize
+            // endpoints no reviewed permission should reach; loopback
+            // (`127.x`, `localhost`) stays legal for dev/test targets —
+            // it can only ever reach the device itself.
+            let wildcarded = rest.starts_with("*.");
+            let body = if wildcarded { &rest[2..] } else { rest };
             if body.is_empty()
                 || !body
                     .bytes()
@@ -137,6 +145,25 @@ impl Manifest {
             {
                 return Err(ManifestError::InvalidField(format!(
                     "bad network permission {p:?}"
+                )));
+            }
+            // A wildcard over a loopback literal would grant every
+            // `*.localhost`/`*.127.x` destination — loopback stays
+            // legal only as the unwildcarded literal.
+            let is_loopback = !wildcarded
+                && (body == "localhost"
+                    || body
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()));
+            let is_ip = body.parse::<std::net::IpAddr>().is_ok();
+            if !is_loopback
+                && (is_ip
+                    || !body.contains('.')
+                    || body.split('.').any(str::is_empty)
+                    || body.ends_with(".localhost"))
+            {
+                return Err(ManifestError::InvalidField(format!(
+                    "network permission {p:?} is not a public DNS name"
                 )));
             }
         }

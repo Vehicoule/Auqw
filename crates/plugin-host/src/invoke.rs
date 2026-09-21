@@ -17,7 +17,7 @@ use wasmi::{
 
 use crate::attempt::{Attempt, GuestLogEntry, HttpTraceEntry};
 use crate::budgets::{BudgetDimension, Budgets};
-use crate::error::{HttpErrorKind, InvokeError, LoadError, GUEST_FAIL_KINDS};
+use crate::error::{HttpErrorKind, InvokeError, KvError, LoadError, GUEST_FAIL_KINDS};
 use crate::http::HttpRequest;
 use crate::kv::{MAX_KV_KEY_BYTES, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES};
 use crate::manifest::Manifest;
@@ -42,6 +42,7 @@ const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
 const HOST_OWNED_HEADERS: &[&str] = &[
     "connection",
     "content-length",
+    "expect",
     "host",
     "keep-alive",
     "proxy-authenticate",
@@ -50,6 +51,7 @@ const HOST_OWNED_HEADERS: &[&str] = &[
     "trailer",
     "transfer-encoding",
     "upgrade",
+    "via",
 ];
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -124,7 +126,7 @@ pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<Loaded
             actual: digest,
         });
     }
-    check_module_shape(wasm)?;
+    check_module_shape(wasm, budgets)?;
     let mut config = Config::default();
     config.consume_fuel(true);
     let engine = Engine::new(&config);
@@ -147,9 +149,15 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Zero-import and no-start-section checks via `wasmparser`.
-fn check_module_shape(wasm: &[u8]) -> Result<(), LoadError> {
+/// Zero-import, no-start-section, and declared-resource checks via
+/// `wasmparser`. The store limiter only bites at instantiation — a
+/// module that declares two memories or a 4 GiB minimum would pass
+/// `load` and then `guest-trap` on every invoke; reject it here as a
+/// load error so the artifact pipeline sees the real verdict.
+fn check_module_shape(wasm: &[u8], budgets: &Budgets) -> Result<(), LoadError> {
     use wasmparser::Payload;
+    let mut memories = 0u32;
+    let mut tables = 0u32;
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| LoadError::Malformed(e.to_string()))?;
         match payload {
@@ -160,8 +168,47 @@ fn check_module_shape(wasm: &[u8]) -> Result<(), LoadError> {
                 }
             }
             Payload::StartSection { .. } => return Err(LoadError::StartSection),
+            Payload::MemorySection(reader) => {
+                for mem in reader {
+                    let mem = mem.map_err(|e| LoadError::Malformed(e.to_string()))?;
+                    memories += 1;
+                    let page_bytes = 1u64 << mem.page_size_log2.unwrap_or(16);
+                    let min_bytes = mem.initial.saturating_mul(page_bytes);
+                    if mem.memory64 || min_bytes > budgets.max_memory_bytes as u64 {
+                        return Err(LoadError::ExceedsLimits(format!(
+                            "memory minimum {min_bytes} bytes exceeds {}",
+                            budgets.max_memory_bytes
+                        )));
+                    }
+                }
+            }
+            Payload::TableSection(reader) => {
+                for table in reader {
+                    let table = table.map_err(|e| LoadError::Malformed(e.to_string()))?;
+                    tables += 1;
+                    // The element cap is per-table — the same bound the
+                    // store applies — so summing across tables would
+                    // reject artifacts that are within policy.
+                    if table.ty.initial > budgets.max_table_elements as u64 {
+                        return Err(LoadError::ExceedsLimits(format!(
+                            "table declares {} elements; per-table cap is {}",
+                            table.ty.initial, budgets.max_table_elements
+                        )));
+                    }
+                }
+            }
             _ => {}
         }
+    }
+    if memories > 1 {
+        return Err(LoadError::ExceedsLimits(format!(
+            "module declares {memories} memories; ABI allows 1"
+        )));
+    }
+    if tables > 16 {
+        return Err(LoadError::ExceedsLimits(format!(
+            "module declares {tables} tables; the store caps at 16"
+        )));
     }
     Ok(())
 }
@@ -252,6 +299,7 @@ pub async fn invoke(
         elapsed: std::time::Duration::ZERO,
         http_trace: Vec::new(),
         guest_log: Vec::new(),
+        secrets: Vec::new(),
     };
     let ctx = StepCtx {
         plugin,
@@ -282,6 +330,18 @@ async fn run(
         .any(|c| c == capability)
     {
         return Err(InvokeError::CapabilityNotDeclared(capability.to_string()));
+    }
+    // Token material the host merged into the payload must never echo
+    // back into logs or errors — seed the redaction set before the
+    // guest speaks.
+    if let Some(token) = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        // No length floor: a short token is still credential material,
+        // and the no-secrets-in-logs rule outranks log legibility.
+        attempt.secrets.push(token.to_string());
     }
     // The namespace snapshot is staged for the whole invocation; on a
     // valid `done` only the staged patch commits — every other
@@ -342,7 +402,8 @@ async fn run(
         }
         let len = u32::try_from(input.len())
             .map_err(|_| InvokeError::InvalidMessage("step input exceeds u32".into()))?;
-        let ptr = call_entry(&mut store, &alloc, len, ctx.budgets, attempt)?;
+        let (s, ptr) = call_entry(store, alloc, len, ctx, attempt).await?;
+        store = s;
         if len > 0 && ptr == 0 {
             return Err(InvokeError::InvalidMessage("alloc returned null".into()));
         }
@@ -352,13 +413,14 @@ async fn run(
         // `alloc` and `handle` are separate entries — the token and the
         // deadline are checked before each, not just at the loop top.
         check_preemption(ctx)?;
-        let packed = call_entry(&mut store, &handle, (ptr, len), ctx.budgets, attempt)?;
+        let (s, packed) = call_entry(store, handle, (ptr, len), ctx, attempt).await?;
+        store = s;
         attempt.steps += 1;
-        // A cancellation or deadline that landed while the guest ran
-        // outranks whatever the entry produced: the caller's intent
-        // wins over a result it no longer wants. Wasmi cannot preempt
-        // a CPU-bound entry mid-run — fuel is that bound — but the
-        // outcome is still reported as cancelled/deadline-exceeded.
+        // A cancellation or deadline that lands while the guest runs
+        // preempts the entry itself: `call_entry` detaches it at the
+        // remaining deadline (fuel still bounds the background burn)
+        // and the outcome is reported as cancelled/deadline-exceeded —
+        // the caller's intent wins over a result it no longer wants.
         check_preemption(ctx)?;
         let out_ptr = usize::try_from(packed >> 32)
             .map_err(|_| InvokeError::InvalidMessage("response pointer overflow".into()))?;
@@ -399,6 +461,9 @@ async fn run(
                         ));
                     }
                 }
+                // A cancel landing in the commit's fsync+rename window
+                // must not commit — check once more on the doorstep.
+                check_preemption(ctx)?;
                 // The result survived every check — only now does the
                 // staged patch apply against the committed namespace.
                 // Committing means the fsync+rename chain of a
@@ -408,10 +473,24 @@ async fn run(
                     let kv = Arc::clone(&ctx.services.kv);
                     let plugin_id = ctx.plugin.manifest.id.clone();
                     let writes = staged_kv.writes();
-                    tokio::task::spawn_blocking(move || kv.commit(&plugin_id, writes))
-                        .await
-                        .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
-                        .map_err(|e| InvokeError::HostService(e.to_string()))?;
+                    let token = ctx.cancel.clone();
+                    // The cancel token is the commit's admission gate:
+                    // the store evaluates it under its write lock on
+                    // the doorstep of publication, so a cancel can
+                    // never be beaten by a commit it should have
+                    // stopped — the two are one critical section.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        kv.commit_admitting(&plugin_id, writes, &move || !token.is_cancelled())
+                    })
+                    .await
+                    .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?;
+                    match outcome {
+                        // Admission declined = the cancel won before
+                        // publication — report cancelled, not a host error.
+                        Err(KvError::Rejected(_)) => return Err(InvokeError::Cancelled),
+                        Err(e) => return Err(InvokeError::HostService(e.to_string())),
+                        Ok(()) => check_preemption(ctx)?,
+                    }
                 }
                 return Ok(result);
             }
@@ -426,7 +505,7 @@ async fn run(
                 if !GUEST_FAIL_KINDS.contains(&kind) {
                     return Err(InvokeError::InvalidMessage(format!(
                         "fail.error.kind {:?} is not in the ABI taxonomy",
-                        redact_text(kind)
+                        redact_text(kind, &attempt.secrets)
                     )));
                 }
                 // Guest-controlled text: a message can quote a signed
@@ -440,7 +519,7 @@ async fn run(
                     })?;
                 return Err(InvokeError::GuestFail {
                     kind: kind.to_string(),
-                    message: redact_text(message),
+                    message: redact_text(message, &attempt.secrets),
                 });
             }
             Some("host_request") => {
@@ -449,7 +528,7 @@ async fn run(
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
                     "unknown message type in guest output: {}",
-                    redact_text(&msg.to_string())
+                    redact_text(&msg.to_string(), &attempt.secrets)
                 )));
             }
         }
@@ -468,7 +547,7 @@ fn check_keys(obj: &Value, allowed: &[&str], what: &str) -> Result<(), InvokeErr
         if !allowed.contains(&key.as_str()) {
             return Err(InvokeError::InvalidMessage(format!(
                 "{what}.{} is not in the ABI schema",
-                redact_text(key)
+                redact_text(key, &[])
             )));
         }
     }
@@ -491,20 +570,46 @@ fn check_preemption(ctx: &StepCtx<'_>) -> Result<(), InvokeError> {
     Ok(())
 }
 
-/// Enter a guest export with fuel accounting. Per-entry fuel is the
-/// smaller of `fuel_per_entry` and the remaining total; an out-of-fuel
-/// trap maps to `BudgetExceeded { Fuel }`.
-fn call_entry<P, R>(
-    store: &mut Store<HostState>,
-    func: &TypedFunc<P, R>,
+/// Global bound on concurrently-executing guest entries. Wasmi cannot
+/// preempt a running `call`, so a deadline/cancel expiry leaves a
+/// detached `spawn_blocking` task burning its fuel grant. Without a
+/// bound, repeated timeouts would pile detached CPU work onto the
+/// shared blocking pool; permits sized to `available_parallelism` keep
+/// the zombie count at the CPU budget.
+fn entry_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        tokio::sync::Semaphore::new(n.max(2))
+    })
+}
+
+/// Enter a guest export with fuel accounting and a wall-clock cap.
+/// Per-entry fuel is the smaller of `fuel_per_entry` and the remaining
+/// total; an out-of-fuel trap maps to `BudgetExceeded { Fuel }`.
+///
+/// Wasmi cannot preempt a running entry mid-call, and fuel is a
+/// CPU-work bound, not a time bound — a slow interpreter holds the
+/// caller until fuel-out. The call therefore runs on the blocking pool
+/// under `remaining-deadline` (and races the cancel token): on expiry
+/// the entry detaches — fuel still bounds its background burn — and the
+/// invocation reports `deadline`/`cancelled` at the deadline rather
+/// than at guest completion. Fuel booked on a detach is the full grant:
+/// the entry may still be consuming it where the caller can't see.
+async fn call_entry<P, R>(
+    mut store: Store<HostState>,
+    func: TypedFunc<P, R>,
     params: P,
-    budgets: &Budgets,
+    ctx: &StepCtx<'_>,
     attempt: &mut Attempt,
-) -> Result<R, InvokeError>
+) -> Result<(Store<HostState>, R), InvokeError>
 where
-    P: WasmParams,
-    R: WasmResults,
+    P: WasmParams + Send + 'static,
+    R: WasmResults + Send + 'static,
 {
+    let budgets = ctx.budgets;
     let allowance = budgets
         .fuel_per_entry
         .min(budgets.fuel_total.saturating_sub(attempt.fuel_used));
@@ -516,17 +621,69 @@ where
     store
         .set_fuel(allowance)
         .map_err(|e| InvokeError::GuestTrap(e.to_string()))?;
-    let result = func.call(&mut *store, params);
-    let remaining = store.get_fuel().unwrap_or(0);
-    attempt.fuel_used += allowance.saturating_sub(remaining);
-    match result {
-        Ok(value) => Ok(value),
-        Err(e) if e.as_trap_code() == Some(TrapCode::OutOfFuel) => {
-            Err(InvokeError::BudgetExceeded {
-                dimension: BudgetDimension::Fuel,
-            })
+    // A deadline/cancel expiry detaches the spawn_blocking task — wasmi
+    // has no mid-call interrupt, so the guest keeps burning its fuel
+    // grant in the background. A global permit pool bounds that
+    // detached burn — but queueing for a permit is itself wall-clock
+    // work, so the wait races the same deadline: an expired waiter
+    // reports Deadline instead of starting a call the caller already
+    // gave up on.
+    let deadline_at = tokio::time::Instant::from_std(ctx.started + budgets.deadline);
+    let permit = tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
+        () = tokio::time::sleep_until(deadline_at) => {
+            return Err(InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline,
+            });
         }
-        Err(e) => Err(InvokeError::GuestTrap(e.to_string())),
+        p = entry_permits().acquire() => {
+            p.map_err(|_| InvokeError::GuestTrap("entry permits closed".to_string()))?
+        }
+    };
+    // A permit may arrive in the same instant the deadline crossed —
+    // re-check so no guest entry starts past its deadline.
+    let remaining = budgets.deadline.saturating_sub(ctx.started.elapsed());
+    if remaining.is_zero() {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Deadline,
+        });
+    }
+    let join = tokio::task::spawn_blocking(move || {
+        // Held until the call returns — a detached task still counts.
+        let _permit = permit;
+        let result = func.call(&mut store, params);
+        (store, result)
+    });
+    tokio::select! {
+        // Cancel outranks expiry — same ordering as `check_preemption`.
+        biased;
+        () = ctx.cancel.cancelled() => {
+            attempt.fuel_used += allowance;
+            Err(InvokeError::Cancelled)
+        }
+        outcome = tokio::time::timeout(remaining, join) => match outcome {
+            Err(_elapsed) => {
+                attempt.fuel_used += allowance;
+                Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Deadline,
+                })
+            }
+            Ok(Err(join_err)) => Err(InvokeError::GuestTrap(join_err.to_string())),
+            Ok(Ok((store, result))) => {
+                let fuel_remaining = store.get_fuel().unwrap_or(0);
+                attempt.fuel_used += allowance.saturating_sub(fuel_remaining);
+                match result {
+                    Ok(value) => Ok((store, value)),
+                    Err(e) if e.as_trap_code() == Some(TrapCode::OutOfFuel) => {
+                        Err(InvokeError::BudgetExceeded {
+                            dimension: BudgetDimension::Fuel,
+                        })
+                    }
+                    Err(e) => Err(InvokeError::GuestTrap(e.to_string())),
+                }
+            }
+        },
     }
 }
 
@@ -554,7 +711,7 @@ async fn host_request_step(
         {
             return Err(InvokeError::InvalidMessage(format!(
                 "host_request kind {:?} requires ABI 0.2.0",
-                redact_text(kind)
+                redact_text(kind, &attempt.secrets)
             )));
         }
         // `resume` is the 0.3.0 service kind — an older manifest is an
@@ -641,7 +798,20 @@ fn authorize_resume(
         headers: vec![("Range".to_string(), range)],
         body: None,
         expected_range: Some((offset, length)),
+        collect_secrets: false,
     }))
+}
+
+/// Collect every non-empty string leaf of a JSON value into `out` —
+/// used to register pot-provider token material in the redaction set;
+/// a short leaf is still token material, so no length floor.
+fn collect_secret_strings(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if !s.is_empty() => out.push(s.clone()),
+        Value::Array(a) => a.iter().for_each(|i| collect_secret_strings(i, out)),
+        Value::Object(m) => m.values().for_each(|i| collect_secret_strings(i, out)),
+        _ => {}
+    }
 }
 
 /// Whether a `206` response's `Content-Range` agrees with the range a
@@ -734,6 +904,7 @@ fn authorize_pot_token(
         headers: vec![("Content-Type".into(), "application/json".into())],
         body: Some(body),
         expected_range: None,
+        collect_secrets: true,
     }))
 }
 
@@ -769,8 +940,15 @@ async fn perform_call(
         .http_timeout
         .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
     let expected_range = req.expected_range;
+    let collect_secrets = req.collect_secrets;
     let method = req.method.clone();
-    let traced_url = redact_url(&req.url);
+    // The pot provider URL is an operator LAN address — it must not
+    // reach the trace even redacted.
+    let traced_url = if collect_secrets {
+        "<pot-provider>".to_string()
+    } else {
+        redact_url(&req.url)
+    };
     let call = ctx.services.http.send(
         HttpRequest {
             method: req.method,
@@ -817,6 +995,14 @@ async fn perform_call(
                     dimension: BudgetDimension::Bytes,
                 });
             }
+            // The pot provider's JSON carries token material — register
+            // its string leaves so a guest echo into `log`/`fail` is
+            // masked rather than leaked.
+            if collect_secrets {
+                if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
+                    collect_secret_strings(&v, &mut attempt.secrets);
+                }
+            }
             // A `resume` call that lands a `206` must agree with the
             // range it asked for — a lying `Content-Range` is a failed
             // host request, not a body the guest has to re-verify.
@@ -860,7 +1046,7 @@ async fn perform_call(
                     host_error(
                         id,
                         kind.guest_kind().unwrap_or("transient"),
-                        &redact_text(&e.message),
+                        &redact_text(&e.message, &attempt.secrets),
                     )
                 }
             }
@@ -918,10 +1104,13 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         // request's authority diverge from the allowlisted URL host
         // (domain fronting), and hop-by-hop/framing names
         // (`Connection`, `TE`, `Transfer-Encoding`, `Content-Length`)
-        // are smuggling surfaces — the client sets them itself.
+        // are smuggling surfaces — the client sets them itself. A
+        // `proxy-` prefix is denied wholesale: proxy field names are
+        // host policy, not guest input.
         if HOST_OWNED_HEADERS
             .iter()
             .any(|r| name.eq_ignore_ascii_case(r))
+            || name.to_ascii_lowercase().starts_with("proxy-")
         {
             return Err(invalid("http_request header name is reserved"));
         }
@@ -945,6 +1134,7 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         headers,
         body,
         expected_range: None,
+        collect_secrets: false,
     })
 }
 
@@ -957,6 +1147,10 @@ struct ParsedHttpRequest {
     /// header was built from, verified against a `206`'s
     /// `Content-Range`.
     expected_range: Option<(u64, Option<u64>)>,
+    /// Set for `pot_token` calls: the provider's JSON response carries
+    /// token material — collect its string leaves into the redaction
+    /// set so the guest can't echo them into logs.
+    collect_secrets: bool,
 }
 
 /// Serialize a `host_error` step message for the guest.
@@ -1037,8 +1231,10 @@ impl StagedKv {
 }
 
 /// The `key` field shared by `kv_get`/`kv_set` payloads. Shape
-/// violations (missing, wrong type, empty, overlong) end the
-/// invocation like any malformed step message.
+/// violations (missing, wrong type, empty) end the invocation like
+/// any malformed step message; the byte cap is a *cap* like the value
+/// and namespace ones — a recoverable `host_error`, not a protocol
+/// violation that kills the call.
 fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
     let invalid = |m: &str| InvokeError::InvalidMessage(format!("{what}.{m}"));
     let key = payload
@@ -1047,9 +1243,6 @@ fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
         .ok_or_else(|| invalid("key missing or not a string"))?;
     if key.is_empty() {
         return Err(invalid("key is empty"));
-    }
-    if key.len() > MAX_KV_KEY_BYTES {
-        return Err(invalid("key exceeds 128 bytes"));
     }
     Ok(key.to_string())
 }
@@ -1063,6 +1256,9 @@ fn kv_get_step(
 ) -> Result<Vec<u8>, InvokeError> {
     check_keys(payload, &["key"], "kv_get.payload")?;
     let key = parse_kv_key(payload, "kv_get")?;
+    if key.len() > MAX_KV_KEY_BYTES {
+        return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
+    }
     if !ctx.plugin.manifest.allows_kv() {
         return host_error(id, "permission-denied", "kv not permitted");
     }
@@ -1083,6 +1279,9 @@ fn kv_set_step(
 ) -> Result<Vec<u8>, InvokeError> {
     check_keys(payload, &["key", "value"], "kv_set.payload")?;
     let key = parse_kv_key(payload, "kv_set")?;
+    if key.len() > MAX_KV_KEY_BYTES {
+        return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
+    }
     let value = match payload.get("value") {
         None => {
             return Err(InvokeError::InvalidMessage("kv_set.value missing".into()));
@@ -1124,20 +1323,19 @@ fn log_step(payload: &Value, id: u32, attempt: &mut Attempt) -> Result<Vec<u8>, 
         .and_then(Value::as_str)
         .ok_or_else(|| InvokeError::InvalidMessage("log.message missing".into()))?;
     if message.len() > MAX_LOG_MESSAGE_BYTES {
-        return Err(InvokeError::InvalidMessage(
-            "log.message exceeds 4096 bytes".into(),
-        ));
+        return host_error(id, "invalid-response", "log message exceeds 4096 bytes");
     }
     if attempt.guest_log.len() >= MAX_GUEST_LOG_ENTRIES {
         return Err(InvokeError::BudgetExceeded {
             dimension: BudgetDimension::GuestLog,
         });
     }
-    // Guest text can quote a signed URL it legitimately saw; redact
-    // before it can reach diagnostics.
+    // Guest text can quote a signed URL it legitimately saw or echo
+    // token material the host handed it; redact before it can reach
+    // diagnostics.
     attempt.guest_log.push(GuestLogEntry {
         level: level.to_string(),
-        message: redact_text(message),
+        message: redact_text(message, &attempt.secrets),
     });
     host_ok(id)
 }

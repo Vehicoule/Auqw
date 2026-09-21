@@ -10,10 +10,12 @@ pub fn redact_url(url: &str) -> String {
 }
 
 /// Strip query + fragment from every `http(s)://` URL inside arbitrary
-/// text. Guest-supplied strings (e.g. `fail` messages) can quote a
-/// signed stream URL; redaction must survive embedding, not just a
-/// whole-string URL. A truncated URL keeps `?…` as the cut marker.
-pub fn redact_text(text: &str) -> String {
+/// text, then mask every value in `secrets` verbatim. Guest-supplied
+/// strings (e.g. `fail` messages) can quote a signed stream URL or echo
+/// back token material the host handed them; redaction must survive
+/// embedding, not just a whole-string URL. A truncated URL keeps `?…`
+/// as the cut marker; a masked secret leaves `***`.
+pub fn redact_text(text: &str, secrets: &[String]) -> String {
     // Bytes that cannot be part of a URL token.
     const URL_END: &[u8] = b" \t\r\n\"'<>)],}";
     let bytes = text.as_bytes();
@@ -46,6 +48,12 @@ pub fn redact_text(text: &str) -> String {
             i += ch.len_utf8();
         }
     }
+    // Every registered secret is masked — no length floor: a short
+    // token is still credential material, and the no-secrets-in-logs
+    // rule outranks log legibility (callers only push real tokens).
+    for secret in secrets.iter().filter(|s| !s.is_empty()) {
+        out = out.replace(secret.as_str(), "***");
+    }
     out
 }
 
@@ -71,15 +79,41 @@ mod tests {
     fn embedded_urls_lose_their_query() {
         let text = "fetch https://rr1---sn.x.c/v?sig=SECRET&pot=TOKEN failed; retry https://b.c/d";
         assert_eq!(
-            redact_text(text),
+            redact_text(text, &[]),
             "fetch https://rr1---sn.x.c/v?… failed; retry https://b.c/d"
         );
     }
 
     #[test]
+    fn schemes_redact_case_insensitively() {
+        let text = "hit HTTPS://a.b/s?sig=SECRET and HtTp://c.d/e?tok=SECRET done";
+        let out = redact_text(text, &[]);
+        assert!(!out.contains("SECRET"), "{out}");
+        assert_eq!(out, "hit HTTPS://a.b/s?… and HtTp://c.d/e?… done");
+    }
+
+    #[test]
+    fn secrets_are_masked_wherever_they_appear() {
+        let secrets = vec!["guest-access-token-123".to_string()];
+        let text = "token was guest-access-token-123 in https://a.b/s?x=guest-access-token-123";
+        let out = redact_text(text, &secrets);
+        assert!(!out.contains("guest-access-token-123"), "{out}");
+        assert_eq!(out, "token was *** in https://a.b/s?…");
+    }
+
+    #[test]
+    fn short_secrets_are_masked() {
+        // No length floor — a short token is still credential
+        // material; over-masking inside words is the safe direction.
+        let secrets = vec!["pin".to_string()];
+        let out = redact_text("spinning pinwheel", &secrets);
+        assert_eq!(out, "s***ning ***wheel");
+    }
+
+    #[test]
     fn secrets_cannot_survive() {
         let text = "bad https://a.b/stream?expire=1&sig=SYNTHETIC_SECRET end";
-        let out = redact_text(text);
+        let out = redact_text(text, &[]);
         assert!(!out.contains("SYNTHETIC_SECRET"), "{out}");
         assert!(out.starts_with("bad https://a.b/stream"));
         assert!(out.ends_with(" end"));
@@ -88,7 +122,7 @@ mod tests {
     #[test]
     fn uppercase_scheme_still_redacts() {
         let text = "w HTTPS://a.b/s?sig=SYNTHETIC_SECRET Http://c.d/?q=1 e";
-        let out = redact_text(text);
+        let out = redact_text(text, &[]);
         assert!(!out.contains("SYNTHETIC_SECRET"), "{out}");
         assert!(out.starts_with("w HTTPS://a.b/s?… Http://c.d/?…"), "{out}");
         assert!(out.ends_with(" e"));

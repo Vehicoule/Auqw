@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -42,6 +43,24 @@ pub trait KeyValueStore: Send + Sync {
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<(), KvError> {
+        self.commit_admitting(plugin_id, writes, &|| true)
+    }
+
+    /// `commit` gated by `admit`, evaluated inside the store's write
+    /// serialization immediately before publication — admission and
+    /// publish are one critical section, so a precondition that flips
+    /// concurrently (e.g. an invocation cancel) cannot lose to a
+    /// commit that already left the gate.
+    ///
+    /// # Errors
+    /// [`KvError::Rejected`] when `admit` declines — nothing is
+    /// committed. Otherwise as [`commit`](KeyValueStore::commit).
+    fn commit_admitting(
+        &self,
+        plugin_id: &str,
+        writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError>;
 }
 
@@ -58,11 +77,14 @@ fn caps_violation(ns: &BTreeMap<String, Vec<u8>>) -> Option<String> {
         if key.is_empty() || key.len() > MAX_KV_KEY_BYTES {
             return Some(format!(
                 "key {:?} violates the 128-byte cap",
-                redact_text(key)
+                redact_text(key, &[])
             ));
         }
         if value.len() > MAX_KV_VALUE_BYTES {
-            return Some(format!("key {:?} value exceeds 64 KiB", redact_text(key)));
+            return Some(format!(
+                "key {:?} value exceeds 64 KiB",
+                redact_text(key, &[])
+            ));
         }
         total += key.len() + value.len();
     }
@@ -118,10 +140,11 @@ impl KeyValueStore for MemoryKeyValueStore {
         Ok(self.lock()?.get(plugin_id).cloned().unwrap_or_default())
     }
 
-    fn commit(
+    fn commit_admitting(
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -131,6 +154,11 @@ impl KeyValueStore for MemoryKeyValueStore {
         apply_patch(&mut ns, writes);
         if let Some(msg) = caps_violation(&ns) {
             return Err(KvError::TooLarge(msg));
+        }
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
         }
         if ns.is_empty() {
             maps.remove(plugin_id);
@@ -214,19 +242,37 @@ impl FileKeyValueStore {
             })
             .collect();
         let json = serde_json::to_vec(&encoded).map_err(|e| KvError::Io(format!("encode: {e}")))?;
+        // A unique sibling tmp per write: two store instances on one
+        // path must not clobber each other's staging file (they'd still
+        // last-writer-wins at rename — a documented one-store-per-path
+        // assumption — but the committed file stays whole).
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut tmp_name = self.path.as_os_str().to_os_string();
-        tmp_name.push(".tmp");
+        tmp_name.push(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let tmp = PathBuf::from(tmp_name);
-        {
-            let mut file = std::fs::File::create(&tmp)
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            file.write_all(&json)
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            file.sync_all()
-                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+        // Unique per write means a failed commit leaves its own debris —
+        // best-effort remove the staging file on any error before the
+        // rename lands.
+        let staged = (|| -> Result<(), KvError> {
+            {
+                let mut file = std::fs::File::create(&tmp)
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+                file.write_all(&json)
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+                file.sync_all()
+                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            }
+            std::fs::rename(&tmp, &self.path)
+                .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))
+        })();
+        if staged.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))?;
+        staged?;
         // The rename's directory entry needs its own sync — without it
         // a crash could still lose the committed file.
         if let Some(parent) = self.path.parent() {
@@ -245,10 +291,11 @@ impl KeyValueStore for FileKeyValueStore {
         Ok(self.read_all()?.get(plugin_id).cloned().unwrap_or_default())
     }
 
-    fn commit(
+    fn commit_admitting(
         &self,
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
+        admit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -259,6 +306,14 @@ impl KeyValueStore for FileKeyValueStore {
         apply_patch(&mut ns, writes);
         if let Some(msg) = caps_violation(&ns) {
             return Err(KvError::TooLarge(msg));
+        }
+        // The gate runs under the write lock on the doorstep of the
+        // rename — a cancel that lands after this point has already
+        // won or lost atomically, never mid-publication.
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
         }
         if ns.is_empty() {
             all.remove(plugin_id);

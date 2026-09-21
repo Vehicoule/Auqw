@@ -620,8 +620,8 @@ async fn kv_namespace_total_cap_is_refused() {
     assert!(!committed.contains_key("k4"));
 }
 
-/// A 129-UTF-8-byte key is a malformed message — terminal
-/// `invalid-message`, not a staged write.
+/// A 129-UTF-8-byte key is a refused host request — a recoverable
+/// `host_error` like over-cap values, and nothing commits.
 #[tokio::test]
 async fn kv_key_over_128_bytes_is_invalid_message() {
     let kv = Arc::new(MemoryKeyValueStore::new());
@@ -646,13 +646,15 @@ async fn kv_key_over_128_bytes_is_invalid_message() {
         services(&http, kv.clone(), &clock),
     )
     .await;
+    // Over-cap keys are a recoverable `host_error` like over-cap values —
+    // the guest chose to propagate it as its terminal `fail`.
     let e = err(result);
-    assert_eq!(e.kind(), "invalid-message");
+    assert_eq!(e.kind(), "invalid-response");
     assert!(ok(kv.snapshot("test-plugin")).is_empty());
 }
 
-/// A `log` message over 4096 bytes is a malformed message; the staged
-/// write dies with the invocation.
+/// A `log` message over 4096 bytes is a recoverable `host_error`; the
+/// guest's propagation of it still drops the staged write.
 #[tokio::test]
 async fn log_message_over_cap_is_invalid_message() {
     let kv = Arc::new(MemoryKeyValueStore::new());
@@ -679,7 +681,7 @@ async fn log_message_over_cap_is_invalid_message() {
     )
     .await;
     let e = err(result);
-    assert_eq!(e.kind(), "invalid-message");
+    assert_eq!(e.kind(), "invalid-response");
     assert!(ok(kv.snapshot("test-plugin")).is_empty());
 }
 

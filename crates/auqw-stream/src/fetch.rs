@@ -97,15 +97,67 @@ impl ReqwestFetch {
     }
 }
 
+/// Host (sans port/userinfo) of an `https://` URL — case-insensitive
+/// scheme per RFC 3986. Anything else returns `None`.
+fn https_host(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let no_user = authority.rsplit('@').next()?;
+    if no_user.starts_with('[') {
+        // Literal v6: host is inside the brackets.
+        let end = no_user.find(']')?;
+        return Some(&no_user[1..end]);
+    }
+    no_user.split(':').next()
+}
+
 /// The redirect target worth one re-issue: a 3xx carrying an absolute
-/// `https://` `Location`. Anything else — non-3xx, no header, relative
-/// or plain-http target — is answered verbatim so the caller sees the
-/// same response a redirect-blind fetch would have returned.
-fn follow_target(status: u16, location: Option<&str>) -> Option<&str> {
+/// `https://` `Location` on the mint host itself or one of its
+/// subdomain siblings (CDN edge re-issues land under the same parent
+/// domain). Anything else — non-3xx, no header, relative/plain-http
+/// target, or a foreign host — is answered verbatim so the caller
+/// sees the same response a redirect-blind fetch would have returned.
+fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> Option<&'a str> {
     if !(300..400).contains(&status) {
         return None;
     }
-    location.filter(|t| t.starts_with("https://"))
+    let target = location?;
+    let target_host = https_host(target)?.to_ascii_lowercase();
+    let mint_host = https_host(mint_url)?.to_ascii_lowercase();
+    if redirect_in_scope(&target_host, &mint_host) {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+/// Parent zones whose sibling hosts form one operator trust zone —
+/// CDN edges re-issue across siblings (`rr1` → `rr2---sn-x`), so a
+/// redirect between them is a load-balance, not a boundary hop. Only
+/// zones wholly operated by the provider's CDN qualify:
+/// `googleusercontent.com` is excluded because user-uploaded content
+/// lives under it (`lh3.googleusercontent.com` et al.) — a sibling
+/// there could be attacker data wearing the mint's signature, while
+/// every `*.googlevideo.com`/`*.dzcdn.net` sibling is provider edge
+/// infrastructure.
+const EDGE_PARENT_ZONES: &[&str] = &["googlevideo.com", "dzcdn.net"];
+
+/// Is `target_host` inside the mint's trust scope: the mint host
+/// itself, one of its subdomains, or — when the mint sits under a
+/// known edge parent zone — a sibling under that parent.
+fn redirect_in_scope(target_host: &str, mint_host: &str) -> bool {
+    if target_host == mint_host || target_host.ends_with(&format!(".{mint_host}")) {
+        return true;
+    }
+    match mint_host.split_once('.') {
+        Some((_, parent)) => {
+            EDGE_PARENT_ZONES.contains(&parent) && target_host.ends_with(&format!(".{parent}"))
+        }
+        None => false,
+    }
 }
 
 impl Fetch for ReqwestFetch {
@@ -142,7 +194,7 @@ impl Fetch for ReqwestFetch {
                             .headers()
                             .get(reqwest::header::LOCATION)
                             .and_then(|v| v.to_str().ok());
-                        if let Some(target) = follow_target(resp.status().as_u16(), location) {
+                        if let Some(target) = follow_target(resp.status().as_u16(), location, url) {
                             current = target.to_string();
                             continue;
                         }
@@ -319,27 +371,101 @@ mod tests {
         assert!(matches!(result, Ok(Some(Err(StreamError::Cancelled)))));
     }
 
+    const MINT: &str = "https://rr1---sn-x.googlevideo.com/videoplayback?sig=1";
+
     #[test]
-    fn follow_target_accepts_https_location_on_3xx() {
+    fn follow_target_accepts_same_host_https_location_on_3xx() {
         assert_eq!(
             follow_target(
                 302,
-                Some("https://rr1---sn-x.googlevideo.com/videoplayback?rn=1")
+                Some("https://rr1---sn-x.googlevideo.com/videoplayback?rn=1"),
+                MINT
             ),
             Some("https://rr1---sn-x.googlevideo.com/videoplayback?rn=1")
         );
     }
 
     #[test]
-    fn follow_target_refuses_downgrade_and_non_3xx() {
+    fn follow_target_accepts_subdomain_of_mint_host() {
         assert_eq!(
-            follow_target(302, Some("http://rr1---sn-x.googlevideo.com/videoplayback")),
+            follow_target(302, Some("https://cdn.rr1---sn-x.googlevideo.com/x"), MINT),
+            Some("https://cdn.rr1---sn-x.googlevideo.com/x")
+        );
+        // Sibling edge under the same parent domain (rr1 -> rr2).
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://rr2---sn-x.googlevideo.com/videoplayback"),
+                MINT
+            ),
+            Some("https://rr2---sn-x.googlevideo.com/videoplayback")
+        );
+    }
+
+    #[test]
+    fn follow_target_refuses_foreign_host_downgrade_and_non_3xx() {
+        assert_eq!(
+            follow_target(302, Some("https://attacker.example.com/x"), MINT),
             None
         );
-        assert_eq!(follow_target(302, Some("/relative/path")), None);
-        assert_eq!(follow_target(302, None), None);
+        // A lookalike name under the mint's parent is still inside the
+        // provider's trust zone — the parent domain owns the policy.
         assert_eq!(
-            follow_target(206, Some("https://rr1---sn-x.googlevideo.com/x")),
+            follow_target(302, Some("https://evil-rr1---sn-x.googlevideo.com/x"), MINT),
+            Some("https://evil-rr1---sn-x.googlevideo.com/x")
+        );
+        // A lookalike on the full mint host (no dot boundary) is not.
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://evil-rr1---sn-x.googlevideo.com.evil.com/x"),
+                MINT
+            ),
+            None
+        );
+        assert_eq!(
+            follow_target(
+                302,
+                Some("http://rr1---sn-x.googlevideo.com/videoplayback"),
+                MINT
+            ),
+            None
+        );
+        assert_eq!(follow_target(302, Some("/relative/path"), MINT), None);
+        assert_eq!(follow_target(302, None, MINT), None);
+        assert_eq!(
+            follow_target(206, Some("https://rr1---sn-x.googlevideo.com/x"), MINT),
+            None
+        );
+        // `HTTPS` in mixed case still counts as https.
+        assert_eq!(
+            follow_target(302, Some("HTTPS://rr1---sn-x.googlevideo.com/x"), MINT),
+            Some("HTTPS://rr1---sn-x.googlevideo.com/x")
+        );
+        // Sibling widening applies only under a known edge parent zone —
+        // an arbitrary sibling is a foreign host.
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://evil.example.com/x"),
+                "https://media.example.com/a"
+            ),
+            None
+        );
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://other.co.uk/x"),
+                "https://example.co.uk/a"
+            ),
+            None
+        );
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://edge2.example.co.uk/x"),
+                "https://media.example.co.uk/a"
+            ),
             None
         );
     }

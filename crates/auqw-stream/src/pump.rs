@@ -117,8 +117,10 @@ enum FetchOutcome {
     /// A validated `206` — its body streamed into piecewise commits.
     Committed,
     /// Any other status for the caller's dispatch (403/416/…); the
-    /// body stream was dropped unread.
-    Status(u16),
+    /// body stream was dropped unread. On a `416`, the parsed
+    /// `bytes */N` total rides along — the wire's authoritative EOF
+    /// evidence.
+    Status(u16, Option<u64>),
 }
 
 /// Drive one range request end to end: await headers, and on a `206`
@@ -144,7 +146,17 @@ async fn drive_fetch(
         )
         .await?;
     if resp.status != 206 {
-        return Ok(FetchOutcome::Status(resp.status));
+        // `416` carries `Content-Range: bytes */N` — keep the total;
+        // it confirms EOF without spending a re-mint. Range units are
+        // case-insensitive (RFC 9110 §14.1.1).
+        let range_total = if resp.status == 416 {
+            resp.content_range
+                .as_deref()
+                .and_then(unsatisfied_range_total)
+        } else {
+            None
+        };
+        return Ok(FetchOutcome::Status(resp.status, range_total));
     }
     let declared = validate_206_head(session, resp.content_range.as_deref(), offset, len)?;
     let mut body = resp.body;
@@ -156,7 +168,7 @@ async fn drive_fetch(
         // the store.
         let take = usize::try_from((declared - got).min(piece.len() as u64)).unwrap_or(usize::MAX);
         if take > 0 {
-            session.commit(offset + got, &piece[..take])?;
+            session.commit(offset.saturating_add(got), &piece[..take])?;
             got += take as u64;
         }
         if take < piece.len() {
@@ -281,10 +293,34 @@ async fn fetch_chunk(
         match outcome {
             // Pieces already committed as the body streamed.
             FetchOutcome::Committed => return Outcome::Bytes,
-            FetchOutcome::Status(status) => match status {
-                416 if eof_confirmed(session, offset, retried_416) => return Outcome::Eof(offset),
-                403 | 416 => {
-                    retried_416 = status == 416;
+            FetchOutcome::Status(status, range_total) => match status {
+                416 => {
+                    // Adopt the wire total before any mint spend: when
+                    // it is already authoritative, this 416 confirms
+                    // EOF at its real ceiling.
+                    if let Some(total) = range_total {
+                        match session.check_total(total) {
+                            Ok(()) => session.mark_eof_below(total),
+                            Err(e) => return Outcome::Failed(e),
+                        }
+                        if offset >= total {
+                            return Outcome::Eof(offset);
+                        }
+                        // `offset < total`: the server calls this range
+                        // unsatisfiable while declaring an extent that
+                        // satisfies it — self-contradictory, and the
+                        // retry-only EOF rule must not truncate below a
+                        // wire-declared ceiling.
+                        return Outcome::Failed(StreamError::InvalidResponse {
+                            message: format!(
+                                "416 at offset {offset} but Content-Range declares total {total}"
+                            ),
+                        });
+                    }
+                    if eof_confirmed(session, offset, retried_416) {
+                        return Outcome::Eof(offset);
+                    }
+                    retried_416 = true;
                     match remint(session).await {
                         Err(e) => {
                             return if stallable(&e) {
@@ -298,6 +334,16 @@ async fn fetch_chunk(
                         Ok(()) => transient_left = session.config.fetch_retries,
                     }
                 }
+                403 => match remint(session).await {
+                    Err(e) => {
+                        return if stallable(&e) {
+                            Outcome::Stalled(e)
+                        } else {
+                            Outcome::Failed(e)
+                        };
+                    }
+                    Ok(()) => transient_left = session.config.fetch_retries,
+                },
                 s => {
                     let e = classify_status(s, offset);
                     match retry_or_stall(session, through, e, &mut transient_left).await {
@@ -460,6 +506,22 @@ fn validate_206_head(
         session.check_total(t)?;
     }
     Ok(declared)
+}
+
+/// Parse the total from a `416`'s `Content-Range: <unit> */N` —
+/// the range unit is case-insensitive; the `*/` unsatisfied form is
+/// required (a satisfiable span on a 416 is a lie and is ignored).
+fn unsatisfied_range_total(cr: &str) -> Option<u64> {
+    let (unit, range) = cr.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    // `str::parse::<u64>` accepts a leading `+` — digits only.
+    let n = range.strip_prefix("*/")?.trim();
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<u64>().ok()
 }
 
 /// Parse `bytes START-END/TOTAL` (TOTAL may be `*`). The header value
@@ -998,8 +1060,20 @@ mod tests {
         let remint = remint_ok();
         let s = session(cfg, remint.clone());
         // Seek-read lands far past the end: 416, remint, 416 again →
-        // eof_below marks the ceiling instead of an error.
-        let fetch = Arc::new(ScriptedFetch::new(status_steps(416, 2)));
+        // eof_below marks the ceiling instead of an error. Bare 416s —
+        // a declared total above the offset is a contradiction, not
+        // EOF evidence.
+        let fetch = Arc::new(ScriptedFetch::new(
+            (0..2)
+                .map(|_| {
+                    Step::Reply(FetchResponse {
+                        status: 416,
+                        content_range: None,
+                        body: stream_body(vec![]),
+                    })
+                })
+                .collect(),
+        ));
         {
             let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
             sh.fetch_through.insert(900, 1);

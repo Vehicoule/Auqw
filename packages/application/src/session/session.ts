@@ -73,6 +73,7 @@ import {
 } from '../library/playlists.ts';
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
+import type { MatchOutcome } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -177,6 +178,9 @@ export type SessionDeps = {
 
 const OP_DEADLINE_MS = 15_000;
 const CANDIDATE_LIMIT = 25;
+// Status ticks fire ~1 s; a position delta above this between ticks
+// is a seek/jump, not played time.
+const MAX_TICK_DELTA_MS = 2_500;
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -240,6 +244,10 @@ type ActiveAttempt = {
   endedHandled: boolean;
   terminalError?: AppError;
   timer?: CancellationSource;
+  /** Last accepted status position — deltas feed `listenedMs`. */
+  lastStatusPositionMs?: number;
+  /** Actual played span summed from tick deltas (seeks don't count). */
+  listenedMsAccum: number;
 };
 
 type Ready = {
@@ -389,7 +397,7 @@ type ProjectionMarker = {
   readonly projection: QueueProjection;
   currentOccurrenceId: string | null;
   reconciledQueueRev: number;
-  status: 'pending' | 'installed' | 'failed';
+  status: 'pending' | 'installed' | 'failed' | 'superseded';
   done: Promise<void>;
 };
 
@@ -430,6 +438,7 @@ export class Session {
   #disposed = false;
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
+  #restorePromise: Promise<Result<void>> | null = null;
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -852,6 +861,24 @@ export class Session {
     if (this.#ready !== null) {
       return ok(undefined);
     }
+    // Concurrent restore callers share the in-flight load — a
+    // second parallel restore would double the storage round-trip
+    // for nothing. The memo only holds while a load is in flight:
+    // a settled failure must NOT stick — retry has to reload.
+    if (this.#restorePromise === null) {
+      const p = this.#doRestore().finally(() => {
+        // Only clear the promise this closure belongs to — a rehydrate
+        // may have already replaced it with a newer in-flight restore.
+        if (this.#ready === null && this.#restorePromise === p) {
+          this.#restorePromise = null;
+        }
+      });
+      this.#restorePromise = p;
+    }
+    return this.#restorePromise;
+  }
+
+  async #doRestore(): Promise<Result<void>> {
     const source = new CancellationSource();
     this.#opSources.add(source);
     let loaded: Result<PersistedState>;
@@ -2010,6 +2037,7 @@ export class Session {
       }
       // Rehydrate from the replaced document: restore() performs the
       // load path whenever #ready is null.
+      this.#restorePromise = null;
       const restored = await this.restore();
       if (!restored.ok) {
         return restored;
@@ -2430,6 +2458,14 @@ export class Session {
           queueRev: after.revision,
         };
         active.identity = identity;
+        // Publish the re-keyed identity before the transport call: if
+        // a supersede lands during the await the post-call publish is
+        // skipped, and an unpublished identity must never reach the
+        // player.
+        this.#setPlaybackFromStatus(
+          active,
+          r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing',
+        );
         const result = await this.#bounded(() =>
           this.#player.seekTo({ positionMs: 0, identity }),
         );
@@ -2443,11 +2479,33 @@ export class Session {
     }
     const moved = await this.#persistQueue(r, before);
     if (!moved.ok) {
+      // A rolled-back move must not leave playback on a cursor the
+      // store no longer holds — converge onto the durable tip (this
+      // command's own `before`, or whatever a later commit landed).
+      const durable = r.queue.snapshot();
+      if (
+        durable.revision === r.queueCommittedRev &&
+        durable.mode === 'playing' &&
+        durable.currentOccurrenceId !== null &&
+        durable.currentOccurrenceId !== this.#active?.occurrenceId
+      ) {
+        this.#own(this.#startAttempt(durable.currentOccurrenceId));
+      }
       return moved;
     }
     this.#derived();
-    if (after.mode === 'playing' && after.currentOccurrenceId !== null) {
-      return this.#startAttempt(after.currentOccurrenceId);
+    // Transport ops are not serialized — a concurrent next/previous
+    // may have moved the cursor again while the persist was in
+    // flight. Serve the DURABLE cursor: when the live snapshot carries
+    // a newer mutation whose own commit is still in flight, defer to
+    // that command's continuation — starting an uncommitted cursor now
+    // would keep playing it if its commit later rolls back.
+    const latest = r.queue.snapshot();
+    if (latest.revision !== r.queueCommittedRev) {
+      return ok(undefined);
+    }
+    if (latest.mode === 'playing' && latest.currentOccurrenceId !== null) {
+      return this.#startAttempt(latest.currentOccurrenceId);
     }
     await this.#supersede();
     const ready2 = this.#ready;
@@ -2497,6 +2555,9 @@ export class Session {
       queueRev: r.queue.snapshot().revision,
     };
     active.identity = identity;
+    // Same ordering rule as play/seek: the re-keyed identity must be
+    // published before the transport call carries it.
+    this.#setPlaybackFromStatus(active, 'paused');
     const result = await this.#bounded(() => this.#player.pause(identity));
     if (!result.ok) {
       await this.#failAttempt(active, result.error);
@@ -2546,6 +2607,10 @@ export class Session {
         queueRev: r.queue.snapshot().revision,
       };
       active.identity = identity;
+      // Same ordering rule: the identity the transport call carries
+      // must already be observable in the published record, in case a
+      // supersede during the await skips the post-call publish.
+      this.#setPlaybackFromStatus(active, 'paused');
       const result = await this.#bounded(() =>
         this.#player.play({
           handle: active.handle ?? '',
@@ -2608,6 +2673,13 @@ export class Session {
       queueRev: r.queue.snapshot().revision,
     };
     active.identity = identity;
+    // Publish the re-keyed identity before the transport call so a
+    // supersede during the await can't leave a play/seek carrying an
+    // identity no snapshot ever showed.
+    this.#setPlaybackFromStatus(
+      active,
+      r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing',
+    );
     const result = await this.#bounded(() =>
       this.#player.seekTo({ positionMs, identity }),
     );
@@ -2781,6 +2853,7 @@ export class Session {
       deadlineMs,
       preparedHandled: false,
       endedHandled: false,
+      listenedMsAccum: 0,
     };
     this.#active = attempt;
     r.playback = {
@@ -2902,11 +2975,20 @@ export class Session {
       await this.#failAttempt(attempt, result.error);
       return result;
     }
-    const outcome = MatchingEngine.match(
-      recording,
-      result.value,
-      recording.mappings,
-    );
+    // Malformed provider candidates can throw inside match — that
+    // must fail the attempt honestly, not wedge it unwound.
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(
+        recording,
+        result.value,
+        recording.mappings,
+      );
+    } catch (thrown) {
+      const error = fromUnknown(thrown);
+      await this.#failAttempt(attempt, error);
+      return err(error);
+    }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
       // fails honestly. The enqueue is best-effort — a review-write
@@ -3210,10 +3292,27 @@ export class Session {
       }
       return;
     }
+    // Listened time accumulates real deltas between status ticks —
+    // a seek forward must not mint a play for a span that never
+    // played, and a position regression must not subtract. Anything
+    // above the cap is a jump, not playback: no credit, just a new
+    // baseline. 'ended' joins the same accumulator — its absolute
+    // end position after a tail seek would otherwise mint unplayed
+    // time through the threshold.
+    if (event.state === 'playing' || event.state === 'ended') {
+      const lastPos = active.lastStatusPositionMs;
+      if (lastPos !== undefined && event.positionMs > lastPos) {
+        const delta = event.positionMs - lastPos;
+        if (delta <= MAX_TICK_DELTA_MS) {
+          active.listenedMsAccum += delta;
+        }
+      }
+      active.lastStatusPositionMs = event.positionMs;
+    }
     await this.#maybeRecordPlay(
       active.occurrenceId,
       active.recordingId,
-      event.positionMs,
+      active.listenedMsAccum,
       event.durationMs ??
       r.recordings.find((rec) => rec.id === active.recordingId)
         ?.durationMs ??
@@ -3480,6 +3579,13 @@ export class Session {
       status: 'pending',
       done: Promise.resolve(),
     };
+    const displaced = this.#projection;
+    if (displaced !== null && displaced.status === 'pending') {
+      // The awaited `done` still resolves, but the marker stops
+      // pretending to be the latest word — readers checking
+      // `status` after the wait see 'superseded', not 'installed'.
+      displaced.status = 'superseded';
+    }
     this.#projection = marker;
     marker.done = (async () => {
       const result = await this.#bounded(() =>
@@ -3534,6 +3640,19 @@ export class Session {
         : items.findIndex(
           (i) => i.occurrenceId === marker?.currentOccurrenceId,
         );
+    // A service move emits the projection it captured at move-start,
+    // which can lag one JS install. Its identity echoes that captured
+    // rev (a fresh attach keys to proj.queueRev) while a same-item
+    // restart echoes the live re-keyed attach rev — either proves the
+    // event; only a revision newer than the install is impossible.
+    const currentProjection =
+      projection !== null &&
+      event.projectionId === projection.projectionId &&
+      event.projectedQueueRev === projection.queueRev;
+    const staleReconcilable =
+      !currentProjection &&
+      projection !== null &&
+      event.projectedQueueRev <= projection.queueRev;
     const identityOk =
       event.toOccurrenceId === null
         ? event.identity === null && event.handle === null
@@ -3541,7 +3660,8 @@ export class Session {
         event.handle !== null &&
         event.handle.length > 0 &&
         event.identity.attemptId.length > 0 &&
-        event.identity.queueRev === projection?.queueRev;
+        (event.identity.queueRev === projection?.queueRev ||
+          event.identity.queueRev === event.projectedQueueRev);
     let legal = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
       const successor =
@@ -3565,15 +3685,20 @@ export class Session {
       marker === null ||
       cursorIndex < 0 ||
       r.queue.snapshot().revision !== marker.reconciledQueueRev ||
-      event.projectionId !== projection.projectionId ||
-      event.projectedQueueRev !== projection.queueRev ||
       event.fromOccurrenceId !== marker.currentOccurrenceId ||
       !legal ||
       !identityOk ||
-      !isSafeNonNegative(event.positionMs)
+      !isSafeNonNegative(event.positionMs) ||
+      (!currentProjection && !staleReconcilable)
     ) {
       this.#logWarn('queue transition rejected');
       return;
+    }
+    if (!currentProjection) {
+      // The event's edge was already proven legal against the
+      // INSTALLED projection above, so a stale-but-past revision is
+      // safe to reconcile.
+      this.#logWarn('queue transition on superseded projection — reconciled');
     }
     if (event.reason === 'ended' && event.fromOccurrenceId !== null) {
       // The service completed the occurrence without a JS 'ended':
@@ -3631,6 +3756,10 @@ export class Session {
         handle: event.handle,
         preparedHandled: true,
         endedHandled: false,
+        // The adopted attempt's prior play span is unknown — count
+        // from the adopted position so threshold math stays honest.
+        listenedMsAccum: event.positionMs,
+        lastStatusPositionMs: event.positionMs,
       };
       this.#active = attempt;
       r.playback = {
@@ -3776,7 +3905,13 @@ export class Session {
       if (rec === undefined) {
         return;
       }
-      const outcome = MatchingEngine.match(rec, result.value, rec.mappings);
+      let outcome: MatchOutcome;
+      try {
+        outcome = MatchingEngine.match(rec, result.value, rec.mappings);
+      } catch {
+        this.#logWarn('successor mapping threw on malformed candidates');
+        return;
+      }
       if (outcome.type !== 'matched') {
         this.#logWarn('successor mapping unresolved');
         return;

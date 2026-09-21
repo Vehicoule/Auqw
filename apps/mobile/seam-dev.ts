@@ -16,10 +16,16 @@
 //   auqw://seam-release?handle=…   releaseStream on a handle (teardown gate)
 //   auqw://seam-stop             player stop (teardown gate)
 //   auqw://seam-auth?token=…       session-trust leg — set the OAuth
-//                                  access token merged into resolves
+//                                  access token merged into resolves.
+//                                  Prefer `file=<path>` (a file containing
+//                                  the token) — `token=` leaves the live
+//                                  credential in system-visible intent data.
 //   auqw://seam-auth-start?client_id=…;client_secret=…
 //                                  OAuth device flow: prints user_code +
-//                                  verification_url for the user to approve
+//                                  verification_url for the user to approve.
+//                                  Prefer `creds=<path>` (JSON file with
+//                                  {"client_id","client_secret"}) — keeps
+//                                  the secret out of the intent URI.
 //   auqw://seam-auth-poll          completes the flow → setAuthToken
 //   auqw://seam-auth-refresh       refresh-grant → setAuthToken
 //   auqw://seam-auth-clear         drop token + stored device state
@@ -80,9 +86,18 @@ let pluginId: string | null = null;
 let lastHandle: string | null = null;
 let lastRequestId: string | null = null;
 let audioLeg: AudioPlayer | null = null;
-// Single pending outcome for the one-shot `seam` leg — the harness is
-// sequential, so one slot suffices.
-let pendingPrepare: ((e: PrepareOutcomeEvent) => void) | null = null;
+// Prepare waiters keyed by request id — a seam leg resolves ONLY the
+// outcome carrying the id it itself was issued, so overlapping seam
+// links can never cross resolvers.
+const prepareWaiters = new Map<string, (e: PrepareOutcomeEvent) => void>();
+// Legs between `prepare()` and receiving their request id: an instant
+// answer can arrive before the id is known, so its outcome is buffered
+// — but only while a registration window is open (an outcome with no
+// leg to claim it is ordinary app traffic and must not accumulate),
+// and bounded so a window left open can't grow without limit.
+let awaitingPrepareId = 0;
+let unmatchedOutcomes: PrepareOutcomeEvent[] = [];
+const UNMATCHED_OUTCOME_CAP = 32;
 
 // ── Session-trust (OAuth device flow) ───────────────────────────────
 // The app side owns credentials + refresh — the guest only ever sees
@@ -131,8 +146,16 @@ function arm(): void {
     } else {
       slog(`prepare-failed req=${e.requestId} kind=${e.outcome.kind} t=${Date.now()}`);
     }
-    pendingPrepare?.(e);
-    pendingPrepare = null;
+    const waiter = prepareWaiters.get(e.requestId);
+    if (waiter !== undefined) {
+      prepareWaiters.delete(e.requestId);
+      waiter(e);
+    } else if (
+      awaitingPrepareId > 0 &&
+      unmatchedOutcomes.length < UNMATCHED_OUTCOME_CAP
+    ) {
+      unmatchedOutcomes.push(e);
+    }
   });
   addPlaybackStatusListener((e) => {
     slog(`status ${e.handle} ${e.state} pos=${e.positionMs}ms t=${Date.now()}`);
@@ -143,6 +166,9 @@ function arm(): void {
 }
 
 async function ensureHost(): Promise<void> {
+  // createHost clears the stream registry and stops the player — a
+  // seam leg while the app is mid-playback kills the app's handles.
+  // That blast radius is intentional: the legs run standalone.
   if (!hostReady) {
     // Same fuel config as App.tsx's ensureHost; Android runs the
     // decided webm-first prefer hint.
@@ -184,6 +210,19 @@ function param(query: string, key: string): string | null {
   return null;
 }
 
+/** Numeric query params must be finite — `Number(garbage)` is NaN,
+ * which Kotlin `toULong()` coerces to 0 and would silently zero the
+ * byte/position bounds the legs measure. */
+function finiteParam(raw: string | null): number | null | undefined {
+  if (raw === null) {
+    return undefined;
+  }
+  const n = Number(raw);
+  // Kotlin receives these as `toULong()` bounds — negatives, fractions,
+  // and unsafe integers all coerce wrongly there.
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
 function describe(error: unknown): string {
   if (error instanceof Error) {
     // Expo coded errors carry the taxonomy kind as `code` — surface it
@@ -192,6 +231,85 @@ function describe(error: unknown): string {
     return typeof code === 'string' ? `${code}: ${error.message}` : error.message;
   }
   return String(error);
+}
+
+/** Deep-link file reads are fenced to the app's own document/cache
+ * roots — anywhere else is a file-read primitive reachable by any
+ * intent sender. Returns the dot-segment-normalized path when inside,
+ * else null. Android's canonical root is /data/user/0/<pkg>/;
+ * /data/data/<pkg>/ is the same directory by alias, so allow both. */
+export function appFilePath(rawPath: string): string | null {
+  const roots = [Paths.document.uri, Paths.cache.uri].flatMap((root) => {
+    const plain = root.replace(/^file:\/\//, '');
+    const variants = [plain];
+    if (plain.startsWith('/data/user/0/')) {
+      variants.push(plain.replace('/data/user/0/', '/data/data/'));
+    }
+    return variants;
+  });
+  const normalized = parseFilePath(rawPath);
+  if (normalized === null) {
+    return null;
+  }
+  // The boundary must end on a path separator — `files-evil/x` is a
+  // sibling, not "inside files/".
+  const inside = roots.some((root) =>
+    normalized.startsWith(root.endsWith('/') ? root : `${root}/`),
+  );
+  return inside ? normalized : null;
+}
+
+/** Parse a caller-supplied path — plain absolute or `file://` URI —
+ * into a canonical absolute path for the fence check. `URL` keeps
+ * percent-encoded dots verbatim in the pathname, so the path is
+ * decoded before dot-segment normalization: an unnormalized `%2e%2e`
+ * would pass the prefix test and only resolve into a traversal when
+ * the file is opened. Returns null on anything that isn't a clean
+ * local path (bad encoding, non-file scheme, remote authority, or a
+ * `..` that climbs above the root). */
+function parseFilePath(rawPath: string): string | null {
+  if (rawPath.includes('\0')) {
+    return null;
+  }
+  let pathname: string;
+  if (rawPath.startsWith('file://')) {
+    let url: URL;
+    try {
+      url = new URL(rawPath);
+    } catch {
+      return null;
+    }
+    // `file://host/...` names a remote share — local files only.
+    if (url.hostname !== '' && url.hostname !== 'localhost') {
+      return null;
+    }
+    pathname = url.pathname;
+  } else {
+    pathname = rawPath;
+  }
+  if (!pathname.startsWith('/')) {
+    return null;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const out: string[] = [];
+  for (const seg of decoded.split('/')) {
+    if (seg === '' || seg === '.') {
+      continue;
+    }
+    if (seg === '..') {
+      if (out.pop() === undefined) {
+        return null;
+      }
+      continue;
+    }
+    out.push(seg);
+  }
+  return `/${out.join('/')}`;
 }
 
 export async function runSeamLink(url: string): Promise<void> {
@@ -242,10 +360,31 @@ export async function runSeamLink(url: string): Promise<void> {
       }
       const id = await ensureSeam();
       const provider = param(query, 'provider') ?? id;
+      let resolveOutcome!: (e: PrepareOutcomeEvent) => void;
       const outcomeP = new Promise<PrepareOutcomeEvent>((resolve) => {
-        pendingPrepare = resolve;
+        resolveOutcome = resolve;
       });
-      lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
+      awaitingPrepareId += 1;
+      try {
+        lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
+        // A buffered outcome may already carry this requestId — an
+        // immediate prepare answer outruns the await above.
+        const buffered = unmatchedOutcomes.findIndex(
+          (o) => o.requestId === lastRequestId,
+        );
+        const hit =
+          buffered >= 0 ? unmatchedOutcomes.splice(buffered, 1)[0] : undefined;
+        if (hit !== undefined) {
+          resolveOutcome(hit);
+        } else {
+          prepareWaiters.set(lastRequestId, resolveOutcome);
+        }
+      } finally {
+        awaitingPrepareId -= 1;
+        if (awaitingPrepareId === 0) {
+          unmatchedOutcomes = [];
+        }
+      }
       const e = await outcomeP;
       if (e.outcome.type !== 'prepared') {
         slog(`seam prepare failed kind=${e.outcome.kind}`);
@@ -272,8 +411,12 @@ export async function runSeamLink(url: string): Promise<void> {
         return;
       }
       const mime = param(query, 'mime') ?? 'audio/mp4';
-      const bytes = param(query, 'bytes');
-      const pos = param(query, 'pos');
+      const bytes = finiteParam(param(query, 'bytes'));
+      const pos = finiteParam(param(query, 'pos'));
+      if (bytes === null || pos === null) {
+        slog('seam-url bad numeric param');
+        return;
+      }
       const remint = param(query, 'remint') === '1';
       const waitHead = param(query, 'wait') === 'head';
       await ensureHost();
@@ -281,7 +424,7 @@ export async function runSeamLink(url: string): Promise<void> {
       lastHandle = await devPrepareUrl(
         streamUrl,
         mime,
-        bytes ? Number(bytes) : undefined,
+        bytes,
         remint,
       );
       slog(`seam-url prepared handle=${lastHandle} +${Date.now() - t0}ms remint=${remint}`);
@@ -301,7 +444,7 @@ export async function runSeamLink(url: string): Promise<void> {
         slog(`seam-url head-ready=${ready} +${Date.now() - t0}ms`);
       }
       const ta = Date.now();
-      await play(lastHandle, `dev-${Date.now()}`, 0, pos ? Number(pos) : undefined);
+      await play(lastHandle, `dev-${Date.now()}`, 0, pos);
       slog(`seam-url attach-sent handle=${lastHandle} pos=${pos ?? 0} +${Date.now() - ta}ms total+${Date.now() - t0}ms`);
     } else if (match[1] === 'seam-release') {
       const handle = param(query, 'handle') ?? lastHandle;
@@ -314,7 +457,17 @@ export async function runSeamLink(url: string): Promise<void> {
       await stop();
       slog(`seam-stop done t=${Date.now()}`);
     } else if (match[1] === 'seam-auth') {
-      const token = param(query, 'token');
+      const tokenFileParam = param(query, 'file');
+      const tokenFile =
+        tokenFileParam !== null ? appFilePath(tokenFileParam) : null;
+      if (tokenFileParam !== null && tokenFile === null) {
+        slog('seam-auth refused: file outside app dirs');
+        return;
+      }
+      const token =
+        tokenFile !== null
+          ? (await new File(tokenFile).text()).trim()
+          : param(query, 'token');
       if (!token) {
         return;
       }
@@ -322,7 +475,23 @@ export async function runSeamLink(url: string): Promise<void> {
       setAuthToken(token);
       slog(`seam-auth token set t=${Date.now()}`);
     } else if (match[1] === 'seam-auth-start') {
-      const id = param(query, 'client_id');
+      const credsParam = param(query, 'creds');
+      const credsFile =
+        credsParam !== null ? appFilePath(credsParam) : null;
+      if (credsParam !== null && credsFile === null) {
+        slog('seam-auth-start refused: creds outside app dirs');
+        return;
+      }
+      let id = param(query, 'client_id');
+      let secret = param(query, 'client_secret');
+      if (credsFile !== null) {
+        const creds = JSON.parse(await new File(credsFile).text()) as {
+          client_id?: string;
+          client_secret?: string;
+        };
+        id = creds.client_id ?? id;
+        secret = creds.client_secret ?? secret;
+      }
       if (!id) {
         return;
       }
@@ -338,7 +507,7 @@ export async function runSeamLink(url: string): Promise<void> {
       const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : 1800;
       // Only commit state on a live flow — a failed start must not
       // orphan a prior session's client/refresh pairing.
-      oauthClient = { id, secret: param(query, 'client_secret') };
+      oauthClient = { id, secret };
       deviceFlow = deviceCode
         ? { deviceCode, expiresAtMs: Date.now() + expiresIn * 1000 }
         : null;
@@ -434,14 +603,18 @@ export async function runSeamLink(url: string): Promise<void> {
         return;
       }
       const mime = param(query, 'mime') ?? 'audio/mp4';
-      const bytes = param(query, 'bytes');
+      const bytes = finiteParam(param(query, 'bytes'));
+      if (bytes === null) {
+        slog('seam-queue bad bytes param');
+        return;
+      }
       const title = param(query, 'title') ?? 'dev title';
       const artist = param(query, 'artist');
       await ensureHost();
       lastHandle = await devPrepareUrl(
         streamUrl,
         mime,
-        bytes ? Number(bytes) : undefined,
+        bytes,
       );
       slog(`seam-queue prepared handle=${lastHandle} t=${Date.now()}`);
       await setQueueProjection({

@@ -103,7 +103,7 @@ import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
 import { devRoute } from './src/dev-routes.ts';
-import { runSeamLink } from './seam-dev.ts';
+import { appFilePath, runSeamLink } from './seam-dev.ts';
 
 // PO-token service (bgutil /get_pot contract). Off unless configured —
 // set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
@@ -1688,21 +1688,21 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s.addAndPlay(meta);
+            void s.addAndPlay(meta).then((r) => reportResult('play result', r));
           }
           break;
         }
         case 'next':
-          void s.next();
+          void s.next().then((r) => reportResult('next', r));
           break;
         case 'previous':
-          void s.previous();
+          void s.previous().then((r) => reportResult('previous', r));
           break;
         case 'pause':
-          void s.pause();
+          void s.pause().then((r) => reportResult('pause', r));
           break;
         case 'resume':
-          void s.resume();
+          void s.resume().then((r) => reportResult('resume', r));
           break;
         case 'like-current':
           if (st.type === 'ready' && st.playback.type !== 'idle') {
@@ -1715,7 +1715,7 @@ function Main({
         case 'seek': {
           const ms = Number(params.get('ms') ?? '0');
           if (Number.isSafeInteger(ms) && ms >= 0) {
-            void s.seekTo(ms);
+            void s.seekTo(ms).then((r) => reportResult('seek', r));
           }
           break;
         }
@@ -1764,7 +1764,7 @@ function Main({
           if (radioP !== null) {
             next.radioProvider = radioP === 'auto' ? null : radioP;
           }
-          void s.updateSettings(next);
+          void s.updateSettings(next).then((r) => reportResult('provider', r));
           break;
         }
         case 'corrections':
@@ -1824,6 +1824,16 @@ function Main({
           const importPath = params.get('import');
           if (importPath !== null) {
             importText.current = null;
+            // A deep link must not read outside the app's own
+            // document/cache roots — anywhere else is a file-read
+            // primitive reachable by any intent sender. The fence
+            // (alias roots, dot-segment normalization, separator
+            // boundary) lives in seam-dev.ts.
+            const allowed = appFilePath(importPath) !== null;
+            if (!allowed) {
+              console.log('[journey] transfer import refused: outside app dirs');
+              break;
+            }
             setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
             void (async () => {
               try {

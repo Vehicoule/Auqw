@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::time::Instant;
 
 use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
@@ -59,10 +60,17 @@ pub struct HostConfig {
 const SESSION_TRUST_CAPABILITIES: &[&str] =
     &["playback.resolve", "playback.candidates", "radio.seed"];
 
+/// A cancel tombstone only needs to outlive its race window — the
+/// cancel-to-delivery gap is milliseconds; a minute is far past any
+/// real delivery while still short enough that unconsumed tombstones
+/// (a cancelled resolve, a request that failed on its own) can't pin
+/// the cap forever.
+const CANCEL_TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One HTTP call from the attempt trace. `url` is already stripped of
 /// query and fragment by the host — the signed parameters never cross
 /// this boundary.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct HttpTraceSummary {
     /// HTTP method.
     pub method: String,
@@ -77,7 +85,7 @@ pub struct HttpTraceSummary {
 }
 
 /// One guest `log` entry, already redacted by the host.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct GuestLogSummary {
     /// `debug` | `info` | `warn` | `error`.
     pub level: String,
@@ -86,7 +94,7 @@ pub struct GuestLogSummary {
 }
 
 /// Per-invocation accounting for diagnostics.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct AttemptSummary {
     /// Host-generated request id.
     pub request_id: String,
@@ -257,6 +265,64 @@ pub trait RequestListener: Send + Sync {
     fn on_outcome(&self, request_id: String, outcome: RequestOutcome);
 }
 
+/// A produced session slot in `prepared_handles`. `delivered` flips
+/// once the `Prepared` outcome is on the wire: `cancel` releases a
+/// delivered handle (the app cancelled an unattached session) but
+/// waits out a mid-delivery one — the `Prepared` never names a
+/// session that died before it arrived.
+struct PreparedSlot {
+    handle: String,
+    delivered: bool,
+}
+
+/// Counts deliveries inside their insert→wire→flip window so a
+/// `cancel` that finds a not-yet-delivered slot can wait for it
+/// instead of releasing a handle the listener hasn't seen yet.
+/// `PreparedSlot { delivered: false }` always implies `in_flight > 0`
+/// for that request's own delivery — the increment precedes the
+/// insert — so `await_idle` lands strictly past the flip.
+#[derive(Default)]
+struct PrepareDelivery {
+    in_flight: Mutex<u64>,
+    done: Condvar,
+}
+
+impl PrepareDelivery {
+    /// Enter the delivery window. The returned ticket decrements the
+    /// count on drop, so a panic mid-callback can't strand waiters.
+    fn track(&self) -> PrepareDeliveryTicket<'_> {
+        if let Ok(mut n) = self.in_flight.lock() {
+            *n += 1;
+        }
+        PrepareDeliveryTicket(self)
+    }
+
+    /// Block until no delivery is inside its window. Poisoned locks
+    /// degrade to "no wait" — a lost wakeup must not wedge `cancel`.
+    fn await_idle(&self) {
+        let Ok(mut n) = self.in_flight.lock() else {
+            return;
+        };
+        while *n > 0 {
+            match self.done.wait(n) {
+                Ok(guard) => n = guard,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+struct PrepareDeliveryTicket<'a>(&'a PrepareDelivery);
+
+impl Drop for PrepareDeliveryTicket<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut n) = self.0.in_flight.lock() {
+            *n = n.saturating_sub(1);
+            self.0.done.notify_all();
+        }
+    }
+}
+
 /// The plugin host object: owns a tokio runtime, an HTTP client, the
 /// loaded plugin set, and per-request cancellation tokens.
 #[derive(uniffi::Object)]
@@ -276,10 +342,25 @@ pub struct PluginHost {
     stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    /// `prepare` request id → produced stream handle, so a
+    /// `prepare` request id → produced session slot, so a
     /// `cancelPrepare` landing after `prepared` can abandon the session
-    /// (only while still unattached — see `cancel`).
-    prepared_handles: Arc<Mutex<HashMap<String, String>>>,
+    /// (only while still unattached AND already delivered — see
+    /// `cancel` and [`PreparedSlot`]).
+    prepared_handles: Arc<Mutex<HashMap<String, PreparedSlot>>>,
+    /// `cancel` ids that arrived while the prepare was still inside
+    /// its window — neither `cancels` nor `prepared_handles` knew it
+    /// yet, or the invocation token was already spent while delivery
+    /// was still registering the handle. The outcome path checks the
+    /// tombstone before registering the handle so a late cancel can't
+    /// orphan a live session. Tombstones expire — one never consumed
+    /// by a delivery is swept on the next insert.
+    cancelled_requests: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Delivery window gate — see [`PrepareDelivery`]. A `cancel`
+    /// landing mid-delivery waits here for the flip, then releases
+    /// synchronously. `on_outcome` callbacks must not call back into
+    /// `cancel` for the in-flight request (Kotlin hops threads; a
+    /// synchronous re-entry would wait on itself).
+    prepared_delivery: Arc<PrepareDelivery>,
     counter: AtomicU64,
 }
 
@@ -398,6 +479,8 @@ impl PluginHost {
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             prepared_handles: Arc::new(Mutex::new(HashMap::new())),
+            cancelled_requests: Arc::new(Mutex::new(HashMap::new())),
+            prepared_delivery: Arc::new(PrepareDelivery::default()),
             counter: AtomicU64::new(0),
         }))
     }
@@ -453,7 +536,10 @@ impl PluginHost {
             Value::Object(payload),
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 let outcome = match result {
                     // `done.result` is untyped past the boundary — a result
                     // missing a schema-required field is an invalid
@@ -508,7 +594,10 @@ impl PluginHost {
             payload,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
-                let summary = AttemptSummary::from(&attempt);
+                let mut summary = AttemptSummary::from(&attempt);
+                // The summary must join by the caller-facing id —
+                // the inner `invoke-N` never leaves this closure.
+                summary.request_id = request_id.clone();
                 let outcome = match result {
                     Ok(value) => RequestOutcome::Succeeded {
                         result_json: value.to_string(),
@@ -525,10 +614,16 @@ impl PluginHost {
         )
     }
 
-    /// Cancel an in-flight request; unknown ids are a no-op. A
-    /// `cancelPrepare` landing after `prepared` also abandons the
-    /// produced session — but only while it is still unattached: a
-    /// playing consumer is never cancelled out from under playback.
+    /// Cancel an in-flight request. Unknown ids are a no-op except
+    /// that a plausible issued-id (`req-N`) is tombstoned briefly so a
+    /// cancel that outran the bookkeeping still abandons the session
+    /// it was about to receive. A `cancelPrepare` landing after
+    /// `prepared` also abandons the produced session — but only while
+    /// it is still unattached: a playing consumer is never cancelled
+    /// out from under playback. And only once the `prepared` outcome
+    /// is on the wire — a slot still mid-delivery is consumed but its
+    /// handle left live, or the listener would get a `Prepared` naming
+    /// a released session.
     pub fn cancel(&self, request_id: String) {
         if let Ok(m) = self.cancels.lock() {
             if let Some(token) = m.get(&request_id) {
@@ -539,12 +634,60 @@ impl PluginHost {
         // request ids — abandoning it is only safe once the cancelled
         // request was its last owner, or a surviving request's
         // `stream_open` would hit `cancelled`.
-        let handle = self.prepared_handles.lock().ok().and_then(|mut m| {
-            m.remove(&request_id)
-                .filter(|h| !m.values().any(|v| v == h))
+        let mut m = match self.prepared_handles.lock() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        if matches!(m.get(&request_id), Some(slot) if !slot.delivered) {
+            // Mid-delivery: the slot is committed but its `Prepared`
+            // is still en route to the listener. `Pending` strictly
+            // implies this request's delivery is inside the counted
+            // window, so idle ⇒ the flip ran (or the callback panicked
+            // — released below the same way, since nothing saw it).
+            // The map lock is dropped for the wait: the flip needs it.
+            drop(m);
+            self.prepared_delivery.await_idle();
+            match self.prepared_handles.lock() {
+                Ok(again) => m = again,
+                Err(_) => return,
+            }
+        }
+        let slot = m.remove(&request_id);
+        let delivered = slot.is_some();
+        let handle = slot.and_then(|slot| {
+            if m.values().any(|v| v.handle == slot.handle) {
+                None
+            } else {
+                Some(slot.handle)
+            }
         });
+        drop(m);
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
+        }
+        // Tombstone whenever no delivered handle was found — both the
+        // "outran the bookkeeping" window and the delivery window (a
+        // token still present in `cancels` is already spent while
+        // `prepare_outcome` is still registering). Only ids shaped like
+        // an issued `req-N` (N strictly below the counter — the counter
+        // is the NEXT id to issue) land in it, and tombstones expire:
+        // arbitrary ids can't fill the cap and starve a real race.
+        if !delivered {
+            let plausible = request_id
+                .strip_prefix("req-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| n < self.counter.load(Ordering::Relaxed));
+            if plausible {
+                if let Ok(mut m) = self.cancelled_requests.lock() {
+                    // Sweep expired tombstones before the cap check — a
+                    // stale set must not masquerade as a full one.
+                    let now = Instant::now();
+                    m.retain(|_, t| now.duration_since(*t) < CANCEL_TOMBSTONE_TTL);
+                    if m.len() < 64 {
+                        m.insert(request_id, now);
+                    }
+                }
+            }
         }
     }
 
