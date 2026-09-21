@@ -30,6 +30,7 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
@@ -229,6 +230,9 @@ class AuqwExpoModule : Module() {
   // handle into a stale "failed" status. Marks are lifted only while
   // the session is still routable (a genuinely failed release).
   private val releasedHandles = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+  /** One in-flight SAF folder pick — resolved by OnActivityResult. */
+  private var pendingPickPromise: Promise? = null
 
   // ---- queue projection state (player-looper confined) ----
   // The service executes a cursor inside ONE installed immutable
@@ -802,6 +806,75 @@ class AuqwExpoModule : Module() {
       val p = awaitPlayer()
       onPlayerThread(p) { installProjection(p, projection) }
       null
+    }
+
+    // ---- TagReaderPort: SAF picker + tree scan + tag reads ----
+
+    AsyncFunction("tagPickFolder") { promise: Promise ->
+      val activity = appContext.currentActivity
+        ?: throw CodedException("unavailable", "no foreground activity", null)
+      if (pendingPickPromise != null) {
+        throw CodedException("unavailable", "folder pick already in flight", null)
+      }
+      pendingPickPromise = promise
+      try {
+        activity.startActivityForResult(
+          Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
+          AuqwTagReader.PICK_REQUEST_CODE
+        )
+      } catch (e: Exception) {
+        pendingPickPromise = null
+        throw CodedException("internal", e.message, e)
+      }
+    }
+
+    OnActivityResult { _, payload ->
+      if (payload.requestCode != AuqwTagReader.PICK_REQUEST_CODE) {
+        return@OnActivityResult
+      }
+      val promise = pendingPickPromise
+      pendingPickPromise = null
+      if (promise == null) {
+        return@OnActivityResult
+      }
+      val uri = payload.data?.data
+      val ctx = appContext.reactContext
+      if (payload.resultCode != android.app.Activity.RESULT_OK || uri == null || ctx == null) {
+        promise.reject(CodedException("no-result", "folder pick cancelled", null))
+        return@OnActivityResult
+      }
+      try {
+        val (treeUri, label) = AuqwTagReader.persistAndLabel(ctx, uri)
+        promise.resolve(mapOf("treeUri" to treeUri, "label" to label))
+      } catch (e: Exception) {
+        promise.reject(CodedException("internal", e.message, e))
+      }
+    }
+
+    AsyncFunction("tagEnumerate") Coroutine { treeUri: String ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      try {
+        AuqwTagReader.enumerate(ctx, Uri.parse(treeUri))
+      } catch (e: SecurityException) {
+        throw CodedException("permission-denied", "tree grant revoked", e)
+      }
+    }
+
+    AsyncFunction("tagFingerprint") Coroutine { treeUri: String, docIds: List<String> ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      AuqwTagReader.fingerprint(ctx, Uri.parse(treeUri), docIds)
+    }
+
+    AsyncFunction("tagRead") Coroutine { treeUri: String, docIds: List<String> ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      AuqwTagReader.readTags(ctx, Uri.parse(treeUri), docIds)
+    }
+
+    Function("docUri") { treeUri: String, docId: String ->
+      AuqwTagReader.documentUri(Uri.parse(treeUri), docId)
     }
   }
 

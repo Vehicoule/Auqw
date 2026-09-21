@@ -275,3 +275,42 @@ export type AuqwConnectivityNative = {
     listener: (event: AuqwConnectivityEvent) => void,
   ): AuqwExpoSubscription;
 };
+
+// ---------------------------------------------------------------------------
+// TagReader — mirrors the auqw-expo `tag*`/`docUri` surface (slice 3).
+// ---------------------------------------------------------------------------
+
+export type AuqwTagEntryNative = {
+  docId: string;
+  name: string;
+  size: number;
+  mime: string;
+};
+
+export type AuqwTagFingerprintNative = {
+  docId: string;
+  fingerprint: string;
+};
+
+export type AuqwTagTagsNative = {
+  docId: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  durationMs: number | null;
+  genre: string | null;
+};
+
+export type AuqwTagReaderNative = {
+  tagPickFolder(): Promise<{ treeUri: string; label: string }>;
+  tagEnumerate(treeUri: string): Promise<readonly AuqwTagEntryNative[]>;
+  tagFingerprint(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (AuqwTagFingerprintNative | null)[]>;
+  tagRead(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (AuqwTagTagsNative | null)[]>;
+  docUri(treeUri: string, docId: string): string;
+};
