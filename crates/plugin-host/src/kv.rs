@@ -59,11 +59,14 @@ fn caps_violation(ns: &BTreeMap<String, Vec<u8>>) -> Option<String> {
         if key.is_empty() || key.len() > MAX_KV_KEY_BYTES {
             return Some(format!(
                 "key {:?} violates the 128-byte cap",
-                redact_text(key)
+                redact_text(key, &[])
             ));
         }
         if value.len() > MAX_KV_VALUE_BYTES {
-            return Some(format!("key {:?} value exceeds 64 KiB", redact_text(key)));
+            return Some(format!(
+                "key {:?} value exceeds 64 KiB",
+                redact_text(key, &[])
+            ));
         }
         total += key.len() + value.len();
     }
