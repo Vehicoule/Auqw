@@ -267,6 +267,15 @@ type Ready = {
    * instead of committing a state their own mutation never landed in.
    */
   queueEpoch: number;
+  /**
+   * Revision of the last durably committed queue snapshot. A queue
+   * command commits its own post-mutation snapshot, never the live
+   * engine — without this, a segment-fresh draft (mapping adoption)
+   * could land first and an earlier-captured stale snapshot would
+   * regress the store. A queued write whose revision is already
+   * covered is durable through the covering commit, so it skips.
+   */
+  queueCommittedRev: number;
   settings: Settings;
   playback: SessionPlayback;
   radio: RadioTailRecord | null;
@@ -649,15 +658,19 @@ export class Session {
         const context = this.#newContext('persist', deadlineMs, source.signal);
         // A thunk batch evaluates inside the segment so it commits
         // the freshest mirror, not the state captured at call time.
-        return await this.#withDeadline(
-          () =>
-            this.#storage.commit(
-              typeof batch === 'function' ? batch() : batch,
-              context,
-            ),
+        const evaluated = typeof batch === 'function' ? batch() : batch;
+        const committed = await this.#withDeadline(
+          () => this.#storage.commit(evaluated, context),
           deadlineMs,
           source,
         );
+        if (committed.ok && evaluated.queue !== undefined) {
+          generation.queueCommittedRev = Math.max(
+            generation.queueCommittedRev,
+            evaluated.queue.revision,
+          );
+        }
+        return committed;
       });
     } finally {
       this.#opSources.delete(source);
@@ -713,6 +726,12 @@ export class Session {
             this.#publish();
             return err(committed.error);
           }
+          if (batch.queue !== undefined) {
+            r.queueCommittedRev = Math.max(
+              r.queueCommittedRev,
+              batch.queue.revision,
+            );
+          }
           r.persistenceError = undefined;
         }
         const outcome = apply(r);
@@ -741,6 +760,12 @@ export class Session {
    */
   async #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
     const epoch = r.queueEpoch;
+    // This command's own post-mutation state — captured at call time,
+    // never the live engine at segment time. Committing `after` keeps
+    // each command's durable batch to what it itself produced: a later
+    // command's mutation can neither ride this commit nor survive in
+    // storage after its own commit rolls memory back.
+    const after = r.queue.snapshot();
     const generation = this.#ready;
     const source = new CancellationSource();
     this.#opSources.add(source);
@@ -760,11 +785,16 @@ export class Session {
             appError('superseded', 'queue state was rolled back'),
           );
         }
+        if (after.revision <= r.queueCommittedRev) {
+          // A later-enqueued segment (e.g. a staged mapping adoption)
+          // already committed a snapshot that contains this mutation —
+          // re-committing the earlier revision would regress the store.
+          return ok(undefined);
+        }
         const deadlineMs = this.#deadline();
         const context = this.#newContext('persist', deadlineMs, source.signal);
         const committed = await this.#withDeadline(
-          () =>
-            this.#storage.commit({ queue: r.queue.snapshot() }, context),
+          () => this.#storage.commit({ queue: after }, context),
           deadlineMs,
           source,
         );
@@ -776,6 +806,7 @@ export class Session {
           this.#publish();
           return err(committed.error);
         }
+        r.queueCommittedRev = after.revision;
         r.persistenceError = undefined;
         return committed;
       });
@@ -874,6 +905,7 @@ export class Session {
       lyricsCache: [...data.lyricsCache],
       queue,
       queueEpoch: 0,
+      queueCommittedRev: data.queue.revision,
       settings: { ...data.settings },
       playback: { type: 'idle' },
       radio: null,
@@ -3630,7 +3662,18 @@ export class Session {
         );
       }
     }
-    await this.#persist(() => ({ queue: r.queue.snapshot() }));
+    // Call-time snapshot + lineage epoch and committed-revision guard:
+    // a rolled-back lineage would write a resurrected mutation, and a
+    // staler revision would regress a staged commit — the thunk drops
+    // to an empty batch in either case.
+    const queueSnap = r.queue.snapshot();
+    const queueEpoch = r.queueEpoch;
+    await this.#persist(() =>
+      r.queueEpoch === queueEpoch &&
+      queueSnap.revision > r.queueCommittedRev
+        ? { queue: queueSnap }
+        : {},
+    );
     // Native may already be several moves ahead. Re-projecting this
     // intermediate cursor would stop its live stream and reject queued moves.
     this.#mappingSource?.cancel();

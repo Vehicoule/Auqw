@@ -847,6 +847,67 @@ async function queueCommitCascade(): Promise<void> {
   assertEqual(calls(r, 'seekTo').length, 0, 'no native seek issued');
 }
 
+// Each racing command commits its own post-mutation snapshot, never the
+// live engine: the earlier commit cannot carry the later mutation, so a
+// failure of the later commit rolls memory back to exactly what storage
+// holds — a restart never resurrects a command that returned an error.
+async function queueCommitIsolatesRacingMutations(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const pPause = r.session.pause();
+  const pSeek = r.session.seekTo(42_000);
+  const [paused, seeked] = await Promise.all([pPause, pSeek]);
+  assert(paused.ok, 'pause resolves');
+  assert(seeked.ok, 'seek resolves');
+  const queueCommits = r.storage.commits.filter(
+    (c) => c.batch.queue !== undefined,
+  );
+  const pauseCommit = queueCommits[queueCommits.length - 2]?.batch.queue;
+  const seekCommit = queueCommits[queueCommits.length - 1]?.batch.queue;
+  assertEqual(
+    pauseCommit?.positionMs,
+    0,
+    "pause's commit carries only its own mutation",
+  );
+  assertEqual(
+    seekCommit?.positionMs,
+    42_000,
+    "seek's commit carries its own mutation",
+  );
+  // Now fail a third mutation: memory must roll back to the committed
+  // state, and the last durable batch must agree.
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const reseek = await r.session.seekTo(9_000);
+  assert(!reseek.ok, 'failed commit reports the error');
+  assertEqual(
+    readyOf(r).queue.positionMs,
+    42_000,
+    'memory rolled back to committed state',
+  );
+  const lastQueue = r.storage.commits
+    .filter((c) => c.batch.queue !== undefined)
+    .at(-1)?.batch.queue;
+  assertEqual(
+    lastQueue?.positionMs,
+    42_000,
+    'last durable queue agrees with memory',
+  );
+}
+
 // A failed stop commit precedes transport teardown: the attempt stays
 // live, playback keeps reporting playing, and the rolled-back queue
 // agrees — nothing claims the item stopped.
@@ -3375,6 +3436,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pauseResumeSeek', pauseResumeSeek],
   ['queueCommitRollback', queueCommitRollback],
   ['queueCommitCascade', queueCommitCascade],
+  ['queueCommitIsolatesRacingMutations', queueCommitIsolatesRacingMutations],
   ['stopCommitKeepsPlayback', stopCommitKeepsPlayback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],
