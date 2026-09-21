@@ -765,6 +765,7 @@ function testHomeAndNav(): void {
   const home = toHomeModel({
     recordings: fixtureRecordings,
     likes: fixtureLikes,
+    playback: { type: 'idle' },
     suggestions: fixtureSearchResults,
     greeting: 'good evening',
     subline: '3 liked',

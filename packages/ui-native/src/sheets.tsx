@@ -6,9 +6,11 @@ import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 
 /**
- * Sheet building blocks: a bottom-anchored overlay (scrim + raised
- * panel), a name field matching the search-field treatment, and the
- * two Slice-2 sheets — row actions and the add-to-playlist picker.
+ * Sheet building blocks: the content frame (title row + actions) plus
+ * a name field matching the search-field treatment, reused by the
+ * Slice-2 sheets — row actions and the add-to-playlist picker. The
+ * surrounding chrome is the host's job: `SheetScreen` in stack.tsx /
+ * stack.native.tsx (native formSheet, or scrim + panel on web).
  * Sheets own no state beyond the draft name; every action delegates.
  */
 
@@ -31,58 +33,34 @@ function SheetScaffold({
   const theme = useTheme();
   return (
     <View
+      accessibilityViewIsModal
       style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: theme.colors.scrim,
-        justifyContent: 'flex-end',
+        paddingHorizontal: theme.spacing.lg,
+        paddingTop: theme.spacing.md,
+        paddingBottom: theme.spacing.xl,
+        gap: theme.spacing.xs,
       }}
     >
-      {/* Tap-outside dismiss lives on the scrim, not the panel. */}
-      <Pressable
-        compact
-        onPress={onDismiss}
-        accessibilityLabel={`dismiss ${title}`}
-        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
-      />
       <View
-        accessibilityViewIsModal
         style={{
-          backgroundColor: theme.colors.raised,
-          borderTopLeftRadius: theme.radius.float,
-          borderTopRightRadius: theme.radius.float,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          paddingHorizontal: theme.spacing.lg,
-          paddingTop: theme.spacing.md,
-          paddingBottom: theme.spacing.xl,
-          gap: theme.spacing.xs,
+          flexDirection: 'row',
+          alignItems: 'center',
+          marginBottom: theme.spacing.sm,
         }}
       >
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            marginBottom: theme.spacing.sm,
-          }}
+        <Text variant="heading" color="bright" style={{ flex: 1 }}>
+          {title}
+        </Text>
+        <Pressable
+          compact
+          onPress={onDismiss}
+          accessibilityLabel="close"
+          style={{ padding: theme.spacing.xs }}
         >
-          <Text variant="heading" color="bright" style={{ flex: 1 }}>
-            {title}
-          </Text>
-          <Pressable
-            compact
-            onPress={onDismiss}
-            accessibilityLabel="close"
-            style={{ padding: theme.spacing.xs }}
-          >
-            <Icon name="close" size={14} color={theme.colors.textSecondary} />
-          </Pressable>
-        </View>
-        {children}
+          <Icon name="close" size={14} color={theme.colors.textSecondary} />
+        </Pressable>
       </View>
+      {children}
     </View>
   );
 }

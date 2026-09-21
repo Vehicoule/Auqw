@@ -22,7 +22,7 @@ const config: ExpoConfig = {
       backgroundImage: './assets/android-icon-background.png',
       monochromeImage: './assets/android-icon-monochrome.png',
     },
-    predictiveBackGestureEnabled: false,
+    predictiveBackGestureEnabled: true,
   },
   plugins: [
     [
@@ -35,6 +35,15 @@ const config: ExpoConfig = {
       },
     ],
     'expo-sqlite',
+    [
+      'expo-navigation-bar',
+      {
+        // Android 16 edge-to-edge is mandatory — light buttons over the
+        // app canvas; the style is re-applied per theme at runtime.
+        style: 'light',
+        enforceContrast: false,
+      },
+    ],
   ],
 };
 

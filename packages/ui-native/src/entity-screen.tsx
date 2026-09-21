@@ -11,18 +11,74 @@ import {
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type { EntityScreenModel, TrackRowModel } from './view-models.ts';
+import type { IconName } from './primitives.tsx';
 
 export type EntityScreenProps = {
   readonly model: EntityScreenModel;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
+  readonly onPlayAll?: (() => void) | undefined;
+  readonly onShuffleAll?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   readonly onPressItem?: ((row: TrackRowModel) => void) | undefined;
   readonly onContext?: ((row: TrackRowModel) => void) | undefined;
   readonly onLoadMore?: (() => void) | undefined;
   readonly onRetry?: (() => void) | undefined;
 };
+
+function HeaderPill({
+  label,
+  icon,
+  accent = false,
+  disabled = false,
+  onPress,
+}: {
+  readonly label: string;
+  readonly icon: IconName;
+  readonly accent?: boolean | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly onPress?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={disabled ? undefined : onPress}
+      accessibilityLabel={label}
+      accessibilityState={{ disabled }}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.lg,
+        minHeight: 34,
+        flex: 1,
+        borderRadius: theme.radius.pill,
+        backgroundColor: accent
+          ? theme.colors.accentSoft
+          : theme.colors.fg08,
+      }}
+    >
+      <Icon
+        name={icon}
+        size={13}
+        color={disabled
+          ? theme.colors.fg25
+          : accent
+            ? theme.colors.accent
+            : theme.colors.textPrimary}
+      />
+      <Text
+        variant="metadata"
+        color={disabled ? 'secondary' : accent ? 'accent' : 'primary'}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
 
 function BackRow({ onBack }: { readonly onBack?: (() => void) | undefined }) {
   const theme = useTheme();
@@ -56,6 +112,8 @@ export function EntityScreen({
   topInset = 0,
   scrollEnabled = true,
   onBack,
+  onPlayAll,
+  onShuffleAll,
   onToggleLike,
   onPressItem,
   onContext,
@@ -107,7 +165,6 @@ export function EntityScreen({
         style={{
           flexDirection: 'row',
           alignItems: 'center',
-          gap: theme.spacing.sm,
           paddingHorizontal: theme.spacing.lg,
         }}
       >
@@ -123,20 +180,60 @@ export function EntityScreen({
             color={theme.colors.textSecondary}
           />
         </Pressable>
-        <Artwork url={model.artworkUrl} size={72} />
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text variant="metadata" color="secondary" uppercase>
-            {model.kind ?? 'entity'}
+      </View>
+
+      {/* Hero: centered artwork + title block, then the action pills. */}
+      <View style={{ alignItems: 'center', paddingHorizontal: theme.spacing.xl }}>
+        <Artwork url={model.artworkUrl} size={160} />
+        <Text
+          variant="metadata"
+          color="secondary"
+          uppercase
+          style={{ marginTop: theme.spacing.md }}
+        >
+          {model.kind ?? 'entity'}
+        </Text>
+        <Text
+          variant="heading"
+          color="bright"
+          numberOfLines={2}
+          style={{ textAlign: 'center' }}
+        >
+          {model.title}
+        </Text>
+        {model.subtitle !== null && (
+          <Text
+            variant="metadata"
+            color="secondary"
+            numberOfLines={1}
+            style={{ marginTop: 2 }}
+          >
+            {model.subtitle}
           </Text>
-          <Text variant="heading" color="bright" numberOfLines={2}>
-            {model.title}
-          </Text>
-          {model.subtitle !== null && (
-            <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {model.subtitle}
-            </Text>
-          )}
-        </View>
+        )}
+      </View>
+
+      <View
+        style={{
+          flexDirection: 'row',
+          gap: theme.spacing.sm,
+          marginHorizontal: theme.spacing.lg,
+          marginTop: theme.spacing.md,
+        }}
+      >
+        <HeaderPill
+          label="play"
+          icon="play"
+          accent
+          disabled={model.items.length === 0}
+          onPress={onPlayAll}
+        />
+        <HeaderPill
+          label="shuffle"
+          icon="shuffle"
+          disabled={model.items.length === 0}
+          onPress={onShuffleAll}
+        />
         {/*
          * Like only binds to a materialized entity (canLike); an
          * unmaterialized page shows the heart disabled — an honest

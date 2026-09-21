@@ -809,6 +809,67 @@ export class Session {
     return this.playOccurrence(first);
   }
 
+  /**
+   * Play provider items that may not be recordings yet: the whole list
+   * validates first, each item materializes via `#upsertRecording`,
+   * one enqueue + one commit covers the batch, then the first new
+   * occurrence plays. `shuffle` draws a uniform random order for the
+   * enqueued occurrences — a play-order shuffle, not a queue mode.
+   */
+  async playMetadata(
+    items: readonly TrackMetadata[],
+    options?: { readonly shuffle?: boolean | undefined },
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    if (items.length === 0) {
+      return err(appError('invalid-response', 'empty play list'));
+    }
+    for (const item of items) {
+      if (!isTrackMetadata(item)) {
+        return err(appError('invalid-response', 'metadata failed validation'));
+      }
+    }
+    const r = ready.value;
+    const ordered =
+      options?.shuffle === true
+        ? items
+          // Random-key sort — uniform over permutations, no index
+          // access under noUncheckedIndexedAccess.
+          .map((item) => ({ item, rank: Math.random() }))
+          .sort((a, b) => a.rank - b.rank)
+          .map(({ item }) => item)
+        : items;
+    let first = '';
+    for (const metadata of ordered) {
+      const recording = this.#upsertRecording(r, metadata);
+      const occurrenceId = this.#ids.next('occ');
+      if (first === '') {
+        first = occurrenceId;
+      }
+      r.queue.enqueue({
+        occurrenceId,
+        recordingId: recording.id,
+        selectedRef:
+          metadata.sourceRef.provider === r.settings.playbackProvider
+            ? metadata.sourceRef
+            : null,
+      });
+    }
+    this.#publish();
+    const persisted = await this.#persist({
+      recordings: r.recordings,
+      queue: r.queue.snapshot(),
+    });
+    this.#derived();
+    if (!persisted.ok) {
+      return err(persisted.error);
+    }
+    return this.playOccurrence(first);
+  }
+
   toggleLike(recordingId: string): Promise<Result<void>> {
     // Compute each replacement from the previous committed like set.
     const work = this.#likeTail.then(() => this.#toggleLike(recordingId));
@@ -1933,6 +1994,33 @@ export class Session {
 
   async skipCurrent(): Promise<Result<void>> {
     return this.#advance('next');
+  }
+
+  /**
+   * Stop playback and clear the current occurrence — the queue keeps
+   * its items. This is the mini-player dismiss path: playback goes
+   * idle, so the chrome unmounts itself on the next publish.
+   */
+  async stop(): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (r.queue.snapshot().currentOccurrenceId === null) {
+      return err(appError('no-result', 'queue has no current occurrence'));
+    }
+    try {
+      r.queue.stop();
+    } catch (thrown) {
+      return err(fromUnknown(thrown));
+    }
+    await this.#supersede();
+    r.playback = { type: 'idle' };
+    await this.#persist({ queue: r.queue.snapshot() });
+    this.#derived();
+    this.#publish();
+    return ok(undefined);
   }
 
   async #advance(method: 'next' | 'previous'): Promise<Result<void>> {

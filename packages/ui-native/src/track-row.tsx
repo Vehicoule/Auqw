@@ -11,6 +11,8 @@ import {
 import { formatClock } from './view-models.ts';
 import type { TrackRowModel } from './view-models.ts';
 
+const DRAG_HANDLE_SLOP = { top: 8, bottom: 8, left: 10, right: 10 };
+
 export type TrackRowProps = {
   readonly row: TrackRowModel;
   readonly badge?: string | null | undefined;
@@ -19,6 +21,7 @@ export type TrackRowProps = {
   readonly onToggleLike?: (() => void) | undefined;
   readonly onContext?: (() => void) | undefined;
   readonly reorderControls?: 'none' | 'drag' | 'buttons' | undefined;
+  readonly onDragStart?: (() => void) | undefined;
   readonly onMoveUp?: (() => void) | undefined;
   readonly onMoveDown?: (() => void) | undefined;
   readonly onRemove?: (() => void) | undefined;
@@ -32,6 +35,7 @@ export function TrackRow({
   onToggleLike,
   onContext,
   reorderControls = 'none',
+  onDragStart,
   onMoveUp,
   onMoveDown,
   onRemove,
@@ -58,11 +62,20 @@ export function TrackRow({
       {reorderControls !== 'none' && (
         <View style={{ marginRight: -4 }}>
           {reorderControls === 'drag' ? (
-            <Icon
-              name="drag-handle"
-              size={14}
-              color={theme.colors.textSecondary}
-            />
+            <Pressable
+              compact
+              onLongPress={onDragStart}
+              delayLongPress={120}
+              accessibilityLabel="drag to reorder"
+              hitSlop={DRAG_HANDLE_SLOP}
+              style={{ padding: 3 }}
+            >
+              <Icon
+                name="drag-handle"
+                size={14}
+                color={theme.colors.textSecondary}
+              />
+            </Pressable>
           ) : (
             // Paired chevrons: clamp vertical slop so their hit
             // regions can't overlap and misroute the move direction.
@@ -94,11 +107,14 @@ export function TrackRow({
        */}
       <Pressable
         onPress={onPress}
-        onLongPress={onLongPress}
+        onLongPress={onLongPress ?? onContext}
         compact
         accessibilityLabel={`${row.title}${row.artist === null ? '' : `, ${row.artist}`}${unavailable ? ', unavailable' : ''}${row.playing ? ', playing' : ''}${row.liked ? ', liked' : ''}`}
         accessibilityRole="button"
         accessibilityState={{ selected: row.playing }}
+        accessibilityHint={
+          onContext === undefined ? undefined : 'long-press for more actions'
+        }
         style={({ pressed }) => [
           {
             flex: 1,
@@ -223,15 +239,11 @@ export function TrackRow({
             onPress={onRemove}
           />
         )}
-        {onContext !== undefined && (
-          <IconButton
-            icon="list-plus"
-            size={30}
-            iconSize={14}
-            accessibilityLabel={`more actions for ${row.title}`}
-            onPress={onContext}
-          />
-        )}
+        {/*
+         * No visible context button: long-press opens the row actions
+         * (Spotify/Files idiom) — the trailing cluster stays at
+         * duration + warn + heart instead of crowding a fourth slot.
+         */}
       </View>
     </View>
   );
