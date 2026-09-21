@@ -6,6 +6,10 @@ export type AudioStatus = {
   playing: boolean;
   currentTime: number;
   duration: number;
+  // emitStatus classifies on these — omitting them parks playback in
+  // 'buffering' forever.
+  isLoaded?: boolean;
+  isBuffering?: boolean;
   didJustFinish?: boolean;
 };
 
@@ -31,7 +35,13 @@ export function createAudioPlayer(_source: unknown): AudioPlayer {
     play() {
       this.playing = true;
       for (const l of listeners) {
-        l({ playing: true, currentTime: 0, duration: 64 });
+        l({
+          playing: true,
+          currentTime: this.currentTime,
+          duration: 64,
+          isLoaded: true,
+          isBuffering: false,
+        });
       }
     },
     pause() {

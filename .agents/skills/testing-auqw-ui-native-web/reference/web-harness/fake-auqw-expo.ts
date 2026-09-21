@@ -87,9 +87,22 @@ const markChan = channel<Record<string, unknown>>();
 const transitionChan = channel<Record<string, unknown>>();
 
 const MEDIA_URL = 'https://localhost:8088/media/track.wav';
-// MUST equal the served file's exact byte count (64 KiB for the
-// generated default in server.mjs).
+// server.mjs's argv[2] sets the real byte count — read it from the
+// /media-meta.json route it serves, so a custom media file can't
+// desync resolve vs Content-Range. Fallback matches its generated
+// 64 KiB default.
 const MEDIA_BYTES = 65536;
+let mediaBytesCache: number | null = null;
+let mediaBytesPromise: Promise<number> | null = null;
+function mediaBytes(): Promise<number> {
+  mediaBytesPromise ??= fetch('/media-meta.json')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) =>
+      typeof j?.bytes === 'number' && j.bytes > 0 ? j.bytes : MEDIA_BYTES,
+    )
+    .catch(() => MEDIA_BYTES);
+  return mediaBytesPromise;
+}
 
 const CANNED_TRACK = {
   source_ref: { provider: 'youtube-music', kind: 'track', id: 'mock-1' },
@@ -120,7 +133,7 @@ function cannedResult(capability: string): string {
         bitrate_kbps: 1411,
         expires_at_ms: null,
         client: 'web-harness',
-        content_length: MEDIA_BYTES,
+        content_length: mediaBytesCache ?? MEDIA_BYTES,
       });
     case 'catalog.metadata':
       return JSON.stringify({ items: [CANNED_TRACK] });
@@ -146,7 +159,8 @@ export function startRequest(
   _payload: Record<string, unknown>,
 ): Promise<string> {
   const requestId = nextId('req');
-  queueMicrotask(() =>
+  void mediaBytes().then((n) => {
+    mediaBytesCache = n;
     reqChan.emit({
       requestId,
       outcome: {
@@ -154,13 +168,14 @@ export function startRequest(
         resultJson: cannedResult(capability),
         attempt: { ...ATTEMPT, requestId },
       },
-    }),
-  );
+    });
+  });
   return Promise.resolve(requestId);
 }
 export function startResolve(_pluginId: string, _sourceRef: string): Promise<string> {
   const requestId = nextId('res');
-  queueMicrotask(() =>
+  void mediaBytes().then((bytes) => {
+    mediaBytesCache = bytes;
     resolveChan.emit({
       requestId,
       outcome: {
@@ -170,12 +185,12 @@ export function startResolve(_pluginId: string, _sourceRef: string): Promise<str
           mime: 'audio/wav',
           bitrateKbps: 1411,
           client: 'web-harness',
-          contentLength: MEDIA_BYTES,
+          contentLength: bytes,
         },
         attempt: { ...ATTEMPT, requestId },
       },
-    }),
-  );
+    });
+  });
   return Promise.resolve(requestId);
 }
 export function cancel(_requestId: string): void {}
@@ -208,18 +223,19 @@ export function prepare(
 ): Promise<string> {
   const requestId = nextId('prep');
   const handle = nextId('h');
-  queueMicrotask(() =>
+  void mediaBytes().then((bytes) => {
+    mediaBytesCache = bytes;
     prepChan.emit({
       requestId,
       attemptId,
       queueRev,
       outcome: {
         type: 'prepared',
-        stream: { handle, mime: 'audio/wav', contentLength: MEDIA_BYTES },
+        stream: { handle, mime: 'audio/wav', contentLength: bytes },
         attempt: { ...ATTEMPT, requestId },
       },
-    }),
-  );
+    });
+  });
   return Promise.resolve(requestId);
 }
 export function prepareLocal(_path: string, mime?: string | null): Promise<string> {

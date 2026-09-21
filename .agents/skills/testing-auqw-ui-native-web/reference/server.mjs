@@ -57,17 +57,28 @@ const media =
     ? readFileSync(mediaPath)
     : defaultMedia();
 
-// ---- http :8087 — static dist/ ----
+// ---- http :8087 — static dist/ + media-meta ----
 httpServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  let path = url.pathname === '/' ? '/index.html' : url.pathname;
-  let file = join(DIST, path);
-  if (!existsSync(file) || !statSync(file).isFile()) {
-    file = join(DIST, 'index.html'); // SPA fallback
+  // The fake host reads the served byte count from here — a custom
+  // media file (argv[2]) keeps resolve/Content-Range consistent.
+  if (url.pathname === '/media-meta.json') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ bytes: media.length }));
+    return;
   }
-  res.setHeader('Content-Type', MIME[extname(file)] ?? 'application/octet-stream');
-  res.end(readFileSync(file));
-}).listen(8087, () => console.log('dist on http://localhost:8087'));
+  const path = url.pathname === '/' ? '/index.html' : url.pathname;
+  // Containment: a crafted path must not escape DIST.
+  const file = resolve(DIST, `.${path}`);
+  const served =
+    file.startsWith(DIST + '/') && existsSync(file) && statSync(file).isFile()
+      ? file
+      : join(DIST, 'index.html'); // SPA fallback
+  res.setHeader('Content-Type', MIME[extname(served)] ?? 'application/octet-stream');
+  res.end(readFileSync(served));
+}).listen(8087, '127.0.0.1', () =>
+  console.log('dist on http://localhost:8087'),
+);
 
 // ---- https :8088 — range media endpoint ----
 if (!existsSync(CERT) || !existsSync(KEY)) {
@@ -118,6 +129,6 @@ httpsServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }, (req, res) => 
     'Content-Type': 'audio/wav',
   });
   res.end(media);
-}).listen(8088, () =>
+}).listen(8088, '127.0.0.1', () =>
   console.log(`media on https://localhost:8088/media/track.wav (${media.length} bytes)`),
 );

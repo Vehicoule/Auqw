@@ -9,7 +9,10 @@
 // variant, back `store` with IndexedDB.
 
 type Bytes = Uint8Array;
-const store = new Map<string, Bytes>();
+// Shared via globalThis so the expo-asset stub can seed asset bytes
+// (module instances are separately bundled; this is the seam).
+const store: Map<string, Bytes> = ((globalThis as { __auqwFsStore?: Map<string, Bytes> })
+  .__auqwFsStore ??= new Map());
 const dirs = new Set<string>(['file:///docs/', 'file:///docs/downloads/']);
 
 const norm = (...parts: (string | Directory | File)[]): string =>
@@ -99,11 +102,24 @@ export class File {
   open(mode: string): FileHandle {
     return new FileHandle(this.uri, mode);
   }
+  move(to: File | Directory, opts?: { overwrite?: boolean }): void {
+    this.moveSync(to, opts);
+  }
   moveSync(to: File | Directory, _opts?: { overwrite?: boolean }): void {
     const target = to instanceof Directory ? norm(to.uri, this.name) : to.uri;
     const data = store.get(this.uri) ?? new Uint8Array(0);
     store.set(target, data);
     store.delete(this.uri);
+  }
+  // The plugin loader calls this for bundled wasm assets; the fake
+  // host never parses the bytes, so a missing entry decodes empty.
+  base64(): string {
+    const data = store.get(this.uri) ?? new Uint8Array(0);
+    let s = '';
+    for (let i = 0; i < data.length; i += 0x8000) {
+      s += String.fromCharCode(...data.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
   }
   text(): string {
     return new TextDecoder().decode(store.get(this.uri) ?? new Uint8Array(0));

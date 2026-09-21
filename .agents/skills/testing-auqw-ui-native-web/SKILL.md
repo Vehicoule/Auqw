@@ -40,7 +40,8 @@ The app boots and the full domain stack runs in Chrome via an `expo export --pla
 ## Contract pitfalls (all verified by hitting them)
 
 - Canned catalog `source_ref.provider` MUST equal `settings.playbackProvider` (`'youtube-music'`); `storefront` must be `/^[A-Z]{2}$/`.
-- `playback.resolve` `content_length` MUST equal the served file's exact byte count — else `Content-Range total changed mid-stream`.
+- `playback.resolve` `content_length` MUST equal the served file's exact byte count — the fake host reads it live from the server's `/media-meta.json`, so a custom media file (`node server.mjs path/to/song.wav`) stays consistent automatically.
+- The fs fake exposes `File.base64()`/`move()` (the plugin loader and artwork commit need them) and shares its byte store with the `expo-asset` stub via `globalThis.__auqwFsStore`.
 - Media endpoint MUST be **https** — transfer-policy rejects `http://` mints (`invalid-response: non-https stream url`).
 - Cross-origin range fetches need `Access-Control-Expose-Headers: Content-Range, Accept-Ranges, Content-Length` + OPTIONS — otherwise `headers.get('Content-Range')` is null.
 - Seam stubs: `setQueueProjection` must resolve normally — a throwing stub wedges the queue and sets session `persistenceError`.
