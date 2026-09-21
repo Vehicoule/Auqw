@@ -633,6 +633,34 @@ async function runRescanRelinksImported(): Promise<void> {
   assert(source.recordings().length === 1, 'no duplicate recording');
 }
 
+/**
+ * SAF doc ids may carry non-ASCII: 'i' and 'é' share low 7 bits —
+ * a masked hash would collide the disambiguated fileIds.
+ */
+async function runUnicodeDocIdsNoCollision(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [
+    entry('d1', 100),
+    entry('i', 100),
+    entry('é', 100),
+  ]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpdup'));
+  tagReader.fingerprints.set('i', fp('i', 'fpdup'));
+  tagReader.fingerprints.set('é', fp('é', 'fpdup'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  tagReader.tags.set('i', tags('i', 'Alpha'));
+  tagReader.tags.set('é', tags('é', 'Alpha'));
+
+  const added = must(await source.addFolder(signal()));
+  const files = source.filesFor(added.sourceId);
+  assert(files.length === 3, 'all three indexed');
+  assert(
+    new Set(files.map((f) => f.fileId)).size === 3,
+    'distinct fileIds for non-ASCII docIds',
+  );
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -650,4 +678,5 @@ export async function run(): Promise<void> {
   await runConcurrentScansKeepBoth();
   await runDuplicateFilesOneFolder();
   await runRescanRelinksImported();
+  await runUnicodeDocIdsNoCollision();
 }

@@ -3,6 +3,7 @@ import type { CancellationSignal, OperationContext } from '../cancellation.ts';
 import { ok, err, appError } from '../errors.ts';
 import type { ErrorKind, Result } from '../errors.ts';
 import type {
+  DownloadProgress,
   DownloadRecord,
   QueueOccurrence,
   Recording,
@@ -641,6 +642,111 @@ async function removeWaitsForRunner(): Promise<void> {
   assertEqual(r.manager.recordFor('rec-1'), null, 'row dropped');
 }
 
+/**
+ * stop() must wait for each runner's real teardown — an import that
+ * deletes files right after stop would otherwise race an open sink.
+ */
+async function stopWaitsForRunner(): Promise<void> {
+  const content = bytes(2 * 1024 * 1024);
+  let calls = 0;
+  const stallingFetch: RangeFetch = (_url, init, signal) => {
+    const header = init.headers['Range'] ?? '';
+    const m = /^bytes=(\d+)-(\d+)$/.exec(header);
+    if (m === null) {
+      return Promise.resolve(resp(400, new Uint8Array(0), null));
+    }
+    const start = Number(m[1]);
+    const end = Math.min(Number(m[2]), content.length - 1);
+    calls += 1;
+    if (calls === 1) {
+      const slice = content.slice(start, end + 1);
+      return Promise.resolve(
+        resp(206, slice, `bytes ${start}-${end}/${content.length}`, slice.slice().buffer),
+      );
+    }
+    return new Promise((_res, rej) => {
+      signal.subscribe(() => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        rej(error);
+      });
+    });
+  };
+  const r = rig({ content, wireFetch: stallingFetch });
+  let releaseAbort: () => void = () => {};
+  const abortGate = new Promise<void>((resolve) => {
+    releaseAbort = resolve;
+  });
+  const innerBegin = r.transfer.begin.bind(r.transfer);
+  r.transfer.begin = async (input, signal) => {
+    const got = await innerBegin(input, signal);
+    if (!got.ok) {
+      return got;
+    }
+    const inner = got.value;
+    return ok({
+      write: (b: Uint8Array) => inner.write(b),
+      commit: () => inner.commit(),
+      finalize: (d: string | null) => inner.finalize(d),
+      abort: async (keep: boolean) => {
+        await abortGate;
+        return inner.abort(keep);
+      },
+    });
+  };
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(100);
+  assertEqual(r.manager.recordFor('rec-1')?.state, 'transferring', 'in flight');
+  let settled = false;
+  const stopped = r.manager.stop(r.signal).then((res) => {
+    settled = true;
+    return res;
+  });
+  await drain(400);
+  assert(!settled, 'stop waits on runner teardown');
+  releaseAbort();
+  const done = await stopped;
+  assert(done.ok, 'stop resolves after teardown');
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'requested',
+    'demoted row stays resumable',
+  );
+}
+
+/**
+ * init publishes the ledger only after verification — a failed check
+ * mid-init leaves an honest empty map (and emits the drop for any UI
+ * holding the prior rows), never half-checked rows.
+ */
+async function initFailurePublishesNothing(): Promise<void> {
+  const ledger = [row({ downloadId: 'd1', state: 'available', bytes: 10 })];
+  const r = rig();
+  r.transfer.statResults.set('dl-d1', { exists: true, bytes: 10 });
+  const first = await r.manager.init(ledger, r.signal);
+  assert(first.ok, 'first init ok');
+  assertEqual(r.manager.recordFor('rec-1')?.state, 'available');
+  // Re-init against the same ledger, now with removeFile failing.
+  r.transfer.statResults.set('dl-d1', { exists: false, bytes: null });
+  r.transfer.removeFile = async () =>
+    err(appError('unavailable', 'fs blocked'));
+  const seen: DownloadProgress[] = [];
+  r.manager.subscribe((p) => seen.push(p));
+  const res = await r.manager.init(ledger, r.signal);
+  assert(!res.ok, 'init fails');
+  assertEqual(r.manager.list().length, 0, 'ledger honest empty');
+  assertEqual(r.manager.fileFor('rec-1'), null, 'no unchecked file served');
+  assert(
+    seen.some((p) => p.downloadId === 'd1' && p.state === 'removing'),
+    'dropped row emitted',
+  );
+}
+
 async function mintFailureTyped(): Promise<void> {
   const r = rig({ mintError: 'expired' });
   await r.manager.init([], r.signal);
@@ -715,6 +821,8 @@ export async function run(): Promise<void> {
   await cancelRequested();
   await cancelInFlight();
   await removeWaitsForRunner();
+  await stopWaitsForRunner();
+  await initFailurePublishesNothing();
   await removeDeletes();
   await requestAllSnapshots();
   await initIntegrity();

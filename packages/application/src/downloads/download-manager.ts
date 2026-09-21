@@ -133,19 +133,30 @@ export class DownloadManager {
   ): Promise<Result<void>> {
     this.#unsubConnectivity?.();
     this.#stopped = false;
-    // A second init loads a fresh ledger — rows absent from the new
-    // snapshot must not survive into later commits.
+    // Stage the loaded rows in a private map: the integrity checks
+    // below mutate it, and it publishes to #rows only after every
+    // check and the fixup persist succeed. A failed init leaves an
+    // honest empty ledger — unchecked rows must never be readable
+    // through fileFor/recordFor while a caller decides to proceed.
+    const dropped = [...this.#rows.values()];
     this.#rows.clear();
     this.#persistedOffset.clear();
+    const staged = new Map<string, DownloadRecord>();
     for (const row of downloads) {
-      this.#rows.set(row.downloadId, row);
-      this.#persistedOffset.set(row.downloadId, row.committedOffset);
+      staged.set(row.downloadId, row);
     }
+    const failed = <T>(result: Result<T>): Result<T> => {
+      // One emit per dropped row refreshes any UI holding them.
+      for (const row of dropped) {
+        this.#emit({ ...row, state: 'removing' });
+      }
+      return result;
+    };
 
     // Keep .part files for rows that own resumable bytes — including
     // failed_with_retry, whose explicit retry resumes the prefix.
     const keep = new Set<string>();
-    for (const row of this.#rows.values()) {
+    for (const row of staged.values()) {
       if (
         row.state === 'requested' ||
         row.state === 'transferring' ||
@@ -156,21 +167,21 @@ export class DownloadManager {
     }
     const swept = await this.#deps.transfer.sweepPartials([...keep], signal);
     if (!swept.ok) {
-      return swept;
+      return failed(swept);
     }
     if (swept.value > 0) {
       this.#log('info', `downloads: swept ${swept.value} stale .part files`);
     }
 
     let dirty = false;
-    for (const row of [...this.#rows.values()]) {
+    for (const row of [...staged.values()]) {
       if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return failed(err(appError('cancelled', 'cancelled')));
       }
       if (row.state === 'available') {
         const st = await this.#deps.transfer.stat(row.filePath, signal);
         if (!st.ok) {
-          return st;
+          return failed(st);
         }
         // Vanished file — or a size the ledger never recorded
         // (truncated/replaced media must not play as offline content).
@@ -185,10 +196,9 @@ export class DownloadManager {
             signal,
           );
           if (!removed.ok) {
-            return removed;
+            return failed(removed);
           }
-          this.#rows.delete(row.downloadId);
-          this.#persistedOffset.delete(row.downloadId);
+          staged.delete(row.downloadId);
           dirty = true;
           this.#log(
             'warn',
@@ -201,22 +211,26 @@ export class DownloadManager {
           signal,
         );
         if (!removed.ok) {
-          return removed;
+          return failed(removed);
         }
-        this.#rows.delete(row.downloadId);
-        this.#persistedOffset.delete(row.downloadId);
+        staged.delete(row.downloadId);
         dirty = true;
       } else if (row.state === 'transferring') {
         // Interrupted mid-transfer — resume from the durable offset.
-        this.#rows.set(row.downloadId, { ...row, state: 'requested' });
+        staged.set(row.downloadId, { ...row, state: 'requested' });
         dirty = true;
       }
     }
     if (dirty) {
-      const persisted = await this.#persist();
+      const persisted = await this.#persist([...staged.values()]);
       if (!persisted.ok) {
-        return persisted;
+        return failed(persisted);
       }
+    }
+    // Verified — publish the staged ledger.
+    for (const row of staged.values()) {
+      this.#rows.set(row.downloadId, row);
+      this.#persistedOffset.set(row.downloadId, row.committedOffset);
     }
 
     // Connectivity edges re-run the scheduler (offline → online, or
@@ -251,6 +265,11 @@ export class DownloadManager {
       }
       source.cancel();
     }
+    // Wait for real teardown — the runner owns its sink until settle,
+    // so a caller that deletes the files right after stop (library
+    // import) must not race an open handle. allSettled: a runner's
+    // own failure is already recorded on its row.
+    await Promise.allSettled([...this.#runners.values()]);
     return ok(undefined);
   }
 
@@ -571,10 +590,13 @@ export class DownloadManager {
    * `downloads` array from live memory, so queued writes are
    * idempotent (a later commit just repeats the newest data).
    */
-  #persist(): Promise<Result<void>> {
+  #persist(snapshot?: readonly DownloadRecord[]): Promise<Result<void>> {
     const run = (): Promise<Result<void>> =>
       this.#deps.storage.commit(
-        { downloads: [...this.#rows.values()] },
+        // Callers that pass a snapshot (init staging) commit exactly
+        // that set; the default reads the live map at run time, so a
+        // queued commit carries the newest rows.
+        { downloads: snapshot !== undefined ? [...snapshot] : [...this.#rows.values()] },
         {
           requestId: 'persist',
           deadlineMs: this.#deps.clock.nowMs() + RESOLVE_DEADLINE_MS,

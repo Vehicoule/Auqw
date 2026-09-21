@@ -57,8 +57,7 @@ function titleFromName(name: string): string {
  * move-detection key inside one source. Identical bytes appearing
  * twice in ONE source collide on `sourceId|fingerprint` — the caller
  * disambiguates by docId (the document identity), so a duplicate's id
- * is still stable across rescans. Inputs are ASCII ids/hex —
- * byte loop, no TextEncoder (lib: ES2023 only).
+ * is still stable across rescans.
  */
 function fileIdFor(
   fingerprint: string,
@@ -69,13 +68,45 @@ function fileIdFor(
     docId === undefined
       ? `${sourceId}|${fingerprint}`
       : `${sourceId}|${fingerprint}|${docId}`;
-  const bytes = new Uint8Array(input.length);
-  for (let i = 0; i < input.length; i++) {
-    bytes[i] = input.charCodeAt(i) & 0x7f;
-  }
   const h = createSha256();
-  h.update(bytes);
+  h.update(utf8(input));
   return `lf-${h.digest()}`;
+}
+
+/**
+ * UTF-8 encode without TextEncoder (lib: ES2023 — no DOM types).
+ * Real UTF-8, not a mask: SAF doc ids may carry non-ASCII characters
+ * and two ids that differ only above U+007F must hash differently.
+ * Lone surrogates encode as their own code point — hashing needs
+ * determinism, not validity.
+ */
+function utf8(input: string): Uint8Array {
+  const out: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const cp = input.codePointAt(i) ?? 0;
+    if (cp > 0xffff) {
+      i++; // low surrogate consumed with the pair
+    }
+    if (cp < 0x80) {
+      out.push(cp);
+    } else if (cp < 0x800) {
+      out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    } else if (cp < 0x10000) {
+      out.push(
+        0xe0 | (cp >> 12),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f),
+      );
+    } else {
+      out.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f),
+      );
+    }
+  }
+  return new Uint8Array(out);
 }
 
 /**
