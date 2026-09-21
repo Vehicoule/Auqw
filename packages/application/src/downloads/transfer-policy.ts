@@ -63,6 +63,19 @@ export function asAppError(thrown: unknown): AppError {
   return appError('internal', 'download failed');
 }
 
+/**
+ * fetch rejects with TypeError on transport failure (DNS, reset, body
+ * read drop) — a retryable blip. Scoped to the fetch site only: a
+ * TypeError from the hasher, remint, or a callback is a programmer
+ * error and must stay `internal`, not enter a network retry loop.
+ */
+function asTransport(thrown: unknown): never {
+  if (thrown instanceof TypeError) {
+    throw new DownloadFailure('transient', 'download network error');
+  }
+  throw thrown;
+}
+
 export const DEFAULT_CHUNK_SIZE = 1_048_576;
 export const DEFAULT_MINT_BUDGET = 8;
 export const DEFAULT_ZERO_PROGRESS_LIMIT = 2;
@@ -111,11 +124,9 @@ async function fetchChunk(
   }
   try {
     const result = await Promise.race([
-      fetchImpl(
-        url,
-        { headers: { Range: `bytes=${start}-${end}` } },
-        child.signal,
-      ).then((resp) => ({ resp })),
+      fetchImpl(url, { headers: { Range: `bytes=${start}-${end}` } }, child.signal)
+        .then((resp) => ({ resp }))
+        .catch(asTransport),
       clock.sleep(timeoutMs, child.signal).then(() => null),
     ]);
     if (result === null) {
@@ -137,8 +148,11 @@ async function fetchChunk(
     // unbounded error page into memory for nothing.
     const bytes =
       resp.status === 206
-        ? new Uint8Array(await resp.arrayBuffer())
+        ? new Uint8Array(await resp.arrayBuffer().catch(asTransport))
         : new Uint8Array(0);
+    // Response and body are in — release the timeout sleeper early
+    // so it doesn't linger a full timeout per chunk.
+    child.cancel();
     return {
       status: resp.status,
       contentRange: resp.headers.get('content-range'),
