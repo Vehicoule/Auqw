@@ -26,6 +26,7 @@ import {
   isArtworkRef,
   isEntityRef,
   isProviderCapability,
+  isSourceRef,
   isTrackMetadata,
   ok,
 } from '@auqw/application';
@@ -143,6 +144,30 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   return isTrackMetadata(candidate) ? candidate : null;
 }
 
+/**
+ * Shared `trackMetadata.items` decode: the wire schema leaves
+ * `source_ref.kind` permissive and providers legitimately emit
+ * album/artist rows (deezer catalog.entity/metadata), so a well-formed
+ * non-track item is dropped rather than poisoning the whole page. An
+ * item that fails track decoding for any other reason still rejects
+ * the batch.
+ */
+function toTrackItems(items: readonly unknown[]): TrackMetadata[] | null {
+  const out: TrackMetadata[] = [];
+  for (const item of items) {
+    const sourceRef = isRecord(item) ? item['source_ref'] : undefined;
+    if (isSourceRef(sourceRef) && sourceRef.kind !== 'track') {
+      continue;
+    }
+    const track = toTrackMetadata(item);
+    if (track === null) {
+      return null;
+    }
+    out.push(track);
+  }
+  return out;
+}
+
 function toTrackList(value: unknown): readonly TrackMetadata[] | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items'])) {
     return null;
@@ -151,15 +176,7 @@ function toTrackList(value: unknown): readonly TrackMetadata[] | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const out: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    out.push(track);
-  }
-  return out;
+  return toTrackItems(items);
 }
 
 function toSearchPage(value: unknown): SearchPage | null {
@@ -173,13 +190,9 @@ function toSearchPage(value: unknown): SearchPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const out: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    out.push(track);
+  const out = toTrackItems(items);
+  if (out === null) {
+    return null;
   }
   return { items: out, storefront: value['storefront'] };
 }
@@ -307,13 +320,9 @@ function toEntityPage(value: unknown): EntityPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const tracks: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    tracks.push(track);
+  const tracks = toTrackItems(items);
+  if (tracks === null) {
+    return null;
   }
   const continuation = value['continuation'] ?? null;
   if (
@@ -451,13 +460,9 @@ function toRadioPage(value: unknown): RadioPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const candidates: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    candidates.push(track);
+  const candidates = toTrackItems(items);
+  if (candidates === null) {
+    return null;
   }
   const continuation = value['continuation'];
   if (

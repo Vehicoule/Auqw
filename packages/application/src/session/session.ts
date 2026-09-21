@@ -269,6 +269,72 @@ function playlistSections(r: Ready): PlaylistState {
   return { playlists: r.playlists, entries: r.playlistEntries };
 }
 
+/**
+ * What a staged write produces: the section batch to commit plus the
+ * in-memory apply. An omitted `batch` means nothing durable changed
+ * — the apply still runs and publishes.
+ */
+type CommitStage<T> = {
+  readonly batch?: StorageBatch;
+  readonly apply: (r: Ready) => T;
+};
+
+/**
+ * Find-or-create the recording a provider result describes, purely:
+ * an existing recording carrying the same source ref is refreshed in
+ * place, otherwise a new row appends. The caller stages the result
+ * through a commit before mirroring it — commit-first owned writes.
+ */
+function upsertRecordingIn(
+  recordings: readonly Recording[],
+  metadata: TrackMetadata,
+  newId: string,
+): { readonly recordings: Recording[]; readonly recording: Recording } {
+  const ref = metadata.sourceRef;
+  const existing = recordings.find((rec) =>
+    rec.sourceRefs.some((s) => sameRef(s, ref)),
+  );
+  if (existing === undefined) {
+    const recording = recordingFromMetadata(metadata, newId);
+    return { recordings: [...recordings, recording], recording };
+  }
+  const hasRef = existing.sourceRefs.some((s) => sameRef(s, ref));
+  const updated: Recording = {
+    ...mergeRecordingMetadata(existing, metadata),
+    sourceRefs: hasRef
+      ? existing.sourceRefs
+      : [...existing.sourceRefs, ref],
+  };
+  return {
+    recordings: recordings.map((rec) =>
+      rec.id === updated.id ? updated : rec,
+    ),
+    recording: updated,
+  };
+}
+
+/**
+ * A published snapshot must never alias mutable session state:
+ * section elements freeze recursively so a listener that mutates a
+ * row cannot corrupt the mirror. `Object.isFrozen` short-circuits
+ * already-frozen subtrees, so repeat publishes stay cheap.
+ */
+function deepFreeze<T>(value: T): T {
+  const seen = new Set<object>();
+  const visit = (node: unknown): void => {
+    if (typeof node !== 'object' || node === null || seen.has(node)) {
+      return;
+    }
+    seen.add(node);
+    for (const child of Object.values(node)) {
+      visit(child);
+    }
+    Object.freeze(node);
+  };
+  visit(value);
+  return value;
+}
+
 /** Latest sent projection plus its install status at the service. */
 type ProjectionMarker = {
   readonly projection: QueueProjection;
@@ -300,7 +366,13 @@ export class Session {
   #likeTail: Promise<void> = Promise.resolve();
   #playlistTail: Promise<void> = Promise.resolve();
   #lyricsTail: Promise<void> = Promise.resolve();
-  #reviewTail: Promise<void> = Promise.resolve();
+  /**
+   * The one storage tail: every commit — session writes, review ops,
+   * the import swap — serializes through it, so a read-modify-write
+   * corrections op can never interleave with a session section write
+   * (corrections load→commit races session recordings writers).
+   */
+  #storageTail: Promise<void> = Promise.resolve();
   readonly #corrections: Corrections;
   #radioTail: Promise<void> = Promise.resolve();
   #entityTail: Promise<void> = Promise.resolve();
@@ -367,7 +439,7 @@ export class Session {
   #publish(): void {
     if (this.#ready !== null) {
       const ready = this.#ready;
-      const base = {
+      const base = deepFreeze({
         type: 'ready' as const,
         recordings: Object.freeze([...ready.recordings]),
         likes: Object.freeze([...ready.likes]),
@@ -381,7 +453,7 @@ export class Session {
         settings: { ...ready.settings },
         playback: ready.playback,
         radio: publishRadio(ready.radio),
-      };
+      });
       this.#state =
         ready.persistenceError === undefined
           ? base
@@ -501,28 +573,113 @@ export class Session {
     return { requestId: this.#ids.next(prefix), deadlineMs, signal };
   }
 
+  /**
+   * Serializes one storage segment on `#storageTail`. Review ops run
+   * whole read-modify-write cycles inside a segment, so they are
+   * atomic against every session commit — and a commit queued behind
+   * them evaluates its batch against the freshest mirror.
+   */
+  #enqueueStorage<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
+    const work = this.#storageTail.then(fn);
+    this.#storageTail = work.then(() => undefined, () => undefined);
+    return work;
+  }
+
   /** Bounded, nonfatal persistence. Failures publish persistenceError. */
-  async #persist(batch: StorageBatch): Promise<Result<void>> {
+  async #persist(
+    batch: StorageBatch | (() => StorageBatch),
+  ): Promise<Result<void>> {
+    // The Ready the caller staged against — a commit queued behind an
+    // import's ready-swap carries sections from a discarded library
+    // and must never land.
+    const generation = this.#ready;
     const source = new CancellationSource();
     this.#opSources.add(source);
     let result: Result<void>;
     try {
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('persist', deadlineMs, source.signal);
-      result = await this.#withDeadline(
-        () => this.#storage.commit(batch, context),
-        deadlineMs,
-        source,
-      );
+      result = await this.#enqueueStorage(async () => {
+        if (generation === null || generation !== this.#ready) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        const deadlineMs = this.#deadline();
+        const context = this.#newContext('persist', deadlineMs, source.signal);
+        // A thunk batch evaluates inside the segment so it commits
+        // the freshest mirror, not the state captured at call time.
+        return await this.#withDeadline(
+          () =>
+            this.#storage.commit(
+              typeof batch === 'function' ? batch() : batch,
+              context,
+            ),
+          deadlineMs,
+          source,
+        );
+      });
     } finally {
       this.#opSources.delete(source);
     }
     const ready = this.#ready;
-    if (ready !== null) {
+    if (ready !== null && ready === generation) {
       ready.persistenceError = result.ok ? undefined : result.error;
       this.#publish();
     }
     return result.ok ? ok(undefined) : result;
+  }
+
+  /**
+   * Commit-first mutation: `stage` computes its batch inside the
+   * storage segment — against the freshest committed mirror — and
+   * the apply lands in the same segment right after a successful
+   * commit. A failed commit changes nothing, so `err()` is honest
+   * and no stale captured batch can ride a later unrelated commit.
+   */
+  async #commitStaged<T>(
+    stage: (r: Ready) => Result<CommitStage<T>>,
+  ): Promise<Result<T>> {
+    const generation = this.#ready;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const r = this.#ready;
+        if (generation === null || r !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        const staged = stage(r);
+        if (!staged.ok) {
+          return err(staged.error);
+        }
+        const { batch, apply } = staged.value;
+        if (batch !== undefined) {
+          const deadlineMs = this.#deadline();
+          const context = this.#newContext(
+            'persist',
+            deadlineMs,
+            source.signal,
+          );
+          const committed = await this.#withDeadline(
+            () => this.#storage.commit(batch, context),
+            deadlineMs,
+            source,
+          );
+          if (!committed.ok) {
+            r.persistenceError = committed.error;
+            this.#publish();
+            return err(committed.error);
+          }
+          r.persistenceError = undefined;
+        }
+        const outcome = apply(r);
+        this.#publish();
+        return ok(outcome);
+      });
+    } finally {
+      this.#opSources.delete(source);
+    }
   }
 
   /** Bounded, nonfatal, sanitized internal logging. */
@@ -631,38 +788,6 @@ export class Session {
 
   // ---- library ----------------------------------------------------
 
-  /**
-   * Find-or-create the recording a provider result describes: an
-   * existing recording carrying the same source ref is refreshed in
-   * place, otherwise a new row is appended. In-memory only — the
-   * caller owns the persist.
-   */
-  #upsertRecording(r: Ready, metadata: TrackMetadata): Recording {
-    const ref = metadata.sourceRef;
-    const existing = r.recordings.find((rec) =>
-      rec.sourceRefs.some((s) => sameRef(s, ref)),
-    );
-    if (existing === undefined) {
-      const recording = recordingFromMetadata(
-        metadata,
-        this.#ids.next('rec'),
-      );
-      r.recordings = [...r.recordings, recording];
-      return recording;
-    }
-    const hasRef = existing.sourceRefs.some((s) => sameRef(s, ref));
-    const updated: Recording = {
-      ...mergeRecordingMetadata(existing, metadata),
-      sourceRefs: hasRef
-        ? existing.sourceRefs
-        : [...existing.sourceRefs, ref],
-    };
-    r.recordings = r.recordings.map((rec) =>
-      rec.id === updated.id ? updated : rec,
-    );
-    return updated;
-  }
-
   async enqueueMetadata(metadata: TrackMetadata): Promise<Result<string>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -671,26 +796,36 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const r = ready.value;
-    const ref = metadata.sourceRef;
-    const recording = this.#upsertRecording(r, metadata);
-    const occurrenceId = this.#ids.next('occ');
-    r.queue.enqueue({
-      occurrenceId,
-      recordingId: recording.id,
-      selectedRef:
-        ref.provider === r.settings.playbackProvider ? ref : null,
-    });
-    this.#publish();
-    const persisted = await this.#persist({
-      recordings: r.recordings,
-      queue: r.queue.snapshot(),
+    const staged = await this.#commitStaged((r) => {
+      const up = upsertRecordingIn(
+        r.recordings,
+        metadata,
+        this.#ids.next('rec'),
+      );
+      const occurrenceId = this.#ids.next('occ');
+      const draft = new QueueEngine(r.queue.snapshot());
+      draft.enqueue({
+        occurrenceId,
+        recordingId: up.recording.id,
+        selectedRef:
+          metadata.sourceRef.provider === r.settings.playbackProvider
+            ? metadata.sourceRef
+            : null,
+      });
+      return ok({
+        batch: { recordings: up.recordings, queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.recordings = [...up.recordings];
+          rr.queue = draft;
+          return occurrenceId;
+        },
+      });
     });
     this.#derived();
-    if (!persisted.ok) {
-      return err(persisted.error);
+    if (!staged.ok) {
+      return err(staged.error);
     }
-    return ok(occurrenceId);
+    return ok(staged.value);
   }
 
   async enqueueRecording(recordingId: string): Promise<Result<string>> {
@@ -699,23 +834,34 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const recording = r.recordings.find((rec) => rec.id === recordingId);
-    if (recording === undefined) {
+    if (!r.recordings.some((rec) => rec.id === recordingId)) {
       return err(appError('not-found', 'unknown recording'));
     }
-    const occurrenceId = this.#ids.next('occ');
-    r.queue.enqueue({
-      occurrenceId,
-      recordingId,
-      selectedRef: this.#pickRef(recording, null),
+    const staged = await this.#commitStaged((cur) => {
+      const live = cur.recordings.find((rec) => rec.id === recordingId);
+      if (live === undefined) {
+        return err(appError('not-found', 'unknown recording'));
+      }
+      const occurrenceId = this.#ids.next('occ');
+      const draft = new QueueEngine(cur.queue.snapshot());
+      draft.enqueue({
+        occurrenceId,
+        recordingId,
+        selectedRef: this.#pickRef(live, null),
+      });
+      return ok({
+        batch: { queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.queue = draft;
+          return occurrenceId;
+        },
+      });
     });
-    this.#publish();
-    const persisted = await this.#persist({ queue: r.queue.snapshot() });
     this.#derived();
-    if (!persisted.ok) {
-      return err(persisted.error);
+    if (!staged.ok) {
+      return err(staged.error);
     }
-    return ok(occurrenceId);
+    return ok(staged.value);
   }
 
   async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
@@ -741,15 +887,25 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const r = ready.value;
-    const recording = this.#upsertRecording(r, metadata);
-    this.#publish();
-    const persisted = await this.#persist({ recordings: r.recordings });
+    const staged = await this.#commitStaged((r) => {
+      const up = upsertRecordingIn(
+        r.recordings,
+        metadata,
+        this.#ids.next('rec'),
+      );
+      return ok({
+        batch: { recordings: up.recordings },
+        apply: (rr) => {
+          rr.recordings = [...up.recordings];
+          return up.recording.id;
+        },
+      });
+    });
     this.#derived();
-    if (!persisted.ok) {
-      return err(persisted.error);
+    if (!staged.ok) {
+      return err(staged.error);
     }
-    return ok(recording.id);
+    return ok(staged.value);
   }
 
   /**
@@ -788,30 +944,36 @@ export class Session {
       // falls back to mappings exactly like a playlist-entry pin.
       resolved.push({ recordingId: recording.id, ref: item.selectedRef });
     }
-    let first = '';
-    for (const item of resolved) {
-      const occurrenceId = this.#ids.next('occ');
-      if (first === '') {
-        first = occurrenceId;
+    const staged = await this.#commitStaged((r) => {
+      const draft = new QueueEngine(r.queue.snapshot());
+      const occurrenceIds: string[] = [];
+      for (const item of resolved) {
+        const occurrenceId = this.#ids.next('occ');
+        occurrenceIds.push(occurrenceId);
+        draft.enqueue({
+          occurrenceId,
+          recordingId: item.recordingId,
+          selectedRef: item.ref,
+        });
       }
-      r.queue.enqueue({
-        occurrenceId,
-        recordingId: item.recordingId,
-        selectedRef: item.ref,
+      return ok({
+        batch: { queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.queue = draft;
+          return occurrenceIds[0] ?? '';
+        },
       });
-    }
-    this.#publish();
-    const persisted = await this.#persist({ queue: r.queue.snapshot() });
+    });
     this.#derived();
-    if (!persisted.ok) {
-      return err(persisted.error);
+    if (!staged.ok) {
+      return err(staged.error);
     }
-    return this.playOccurrence(first);
+    return this.playOccurrence(staged.value);
   }
 
   /**
    * Play provider items that may not be recordings yet: the whole list
-   * validates first, each item materializes via `#upsertRecording`,
+   * validates first, each item materializes via `upsertRecordingIn`,
    * one enqueue + one commit covers the batch, then the first new
    * occurrence plays. `shuffle` draws a uniform random order for the
    * enqueued occurrences — a play-order shuffle, not a queue mode.
@@ -832,7 +994,6 @@ export class Session {
         return err(appError('invalid-response', 'metadata failed validation'));
       }
     }
-    const r = ready.value;
     const ordered =
       options?.shuffle === true
         ? items
@@ -842,32 +1003,42 @@ export class Session {
           .sort((a, b) => a.rank - b.rank)
           .map(({ item }) => item)
         : items;
-    let first = '';
-    for (const metadata of ordered) {
-      const recording = this.#upsertRecording(r, metadata);
-      const occurrenceId = this.#ids.next('occ');
-      if (first === '') {
-        first = occurrenceId;
+    const staged = await this.#commitStaged((r) => {
+      let recordings = r.recordings;
+      const draft = new QueueEngine(r.queue.snapshot());
+      const occurrenceIds: string[] = [];
+      for (const metadata of ordered) {
+        const up = upsertRecordingIn(
+          recordings,
+          metadata,
+          this.#ids.next('rec'),
+        );
+        recordings = up.recordings;
+        const occurrenceId = this.#ids.next('occ');
+        occurrenceIds.push(occurrenceId);
+        draft.enqueue({
+          occurrenceId,
+          recordingId: up.recording.id,
+          selectedRef:
+            metadata.sourceRef.provider === r.settings.playbackProvider
+              ? metadata.sourceRef
+              : null,
+        });
       }
-      r.queue.enqueue({
-        occurrenceId,
-        recordingId: recording.id,
-        selectedRef:
-          metadata.sourceRef.provider === r.settings.playbackProvider
-            ? metadata.sourceRef
-            : null,
+      return ok({
+        batch: { recordings, queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.recordings = [...recordings];
+          rr.queue = draft;
+          return occurrenceIds[0] ?? '';
+        },
       });
-    }
-    this.#publish();
-    const persisted = await this.#persist({
-      recordings: r.recordings,
-      queue: r.queue.snapshot(),
     });
     this.#derived();
-    if (!persisted.ok) {
-      return err(persisted.error);
+    if (!staged.ok) {
+      return err(staged.error);
     }
-    return this.playOccurrence(first);
+    return this.playOccurrence(staged.value);
   }
 
   toggleLike(recordingId: string): Promise<Result<void>> {
@@ -1398,16 +1569,25 @@ export class Session {
       return Promise.resolve(err(ready.error));
     }
     const r = ready.value;
-    const work = this.#reviewTail.then(async () => {
+    // The whole review op — corrections' load->mutate->commit, the
+    // reload, and the mirror merge — is a single segment on the
+    // storage tail: it serializes against every session commit, so a
+    // verdict can never be clobbered by an interleaved recordings
+    // write (and vice versa).
+    const work = this.#enqueueStorage(async () => {
       const result = await op(context?.signal);
       if (!result.ok) {
         return result;
       }
-      const reloaded = await this.#storage.load(
-        this.#newContext(
-          'reload',
-          this.#deadline(),
-          context?.signal ?? new CancellationSource().signal,
+      // The reload runs through #bounded like every storage call —
+      // a hanging load fails the segment instead of wedging the tail.
+      const reloaded = await this.#bounded(() =>
+        this.#storage.load(
+          this.#newContext(
+            'reload',
+            this.#deadline(),
+            context?.signal ?? new CancellationSource().signal,
+          ),
         ),
       );
       if (reloaded.ok && isPersistedState(reloaded.value)) {
@@ -1446,7 +1626,6 @@ export class Session {
       this.#derived();
       return result;
     });
-    this.#reviewTail = work.then(() => undefined, () => undefined);
     this.#own(work);
     return work;
   }
@@ -1651,10 +1830,17 @@ export class Session {
       }
       const deadlineMs = this.#deadline();
       const context = this.#newContext('import', deadlineMs, source.signal);
-      const applied = await this.#withDeadline(
-        () => applyImport(this.#storage, preview.value.doc, context),
-        deadlineMs,
-        source,
+      // The swap runs as a segment on the storage tail: every writer
+      // queued ahead commits first and is rolled forward, and a
+      // writer that staged against the old Ready and commits behind
+      // the swap is superseded by the generation check in #persist —
+      // never stale-applied over the imported sections.
+      const applied = await this.#enqueueStorage(() =>
+        this.#withDeadline(
+          () => applyImport(this.#storage, preview.value.doc, context),
+          deadlineMs,
+          source,
+        ),
       );
       if (!applied.ok) {
         return applied;
@@ -1767,26 +1953,21 @@ export class Session {
       this.#publish();
       return err(seeded.error);
     }
-    const applied = this.#applyRadioPage(r, seeded.value);
-    if (!applied.ok) {
+    const staged = await this.#commitStaged((cur) =>
+      this.#stageRadioPage(cur, seeded.value),
+    );
+    if (!staged.ok) {
       r.radio = null;
       this.#publish();
-      return err(applied.error);
+      return err(staged.error);
     }
     record.continuation = seeded.value.continuation;
     if (record.continuation === null) {
       record.status = 'ended';
     }
     this.#publish();
-    if (applied.value.changed) {
-      const persisted = await this.#persist({
-        recordings: r.recordings,
-        queue: r.queue.snapshot(),
-      });
+    if (staged.value.changed) {
       this.#derived();
-      if (!persisted.ok) {
-        return err(persisted.error);
-      }
     }
     return ok(undefined);
   }
@@ -1864,10 +2045,12 @@ export class Session {
       this.#publish();
       return;
     }
-    const applied = this.#applyRadioPage(r, result.value);
-    if (!applied.ok) {
+    const staged = await this.#commitStaged((cur) =>
+      this.#stageRadioPage(cur, result.value),
+    );
+    if (!staged.ok) {
       record.status = 'failed';
-      record.error = applied.error;
+      record.error = staged.error;
       this.#publish();
       return;
     }
@@ -1876,11 +2059,7 @@ export class Session {
       record.status = 'ended';
     }
     this.#publish();
-    if (applied.value.changed) {
-      await this.#persist({
-        recordings: r.recordings,
-        queue: r.queue.snapshot(),
-      });
+    if (staged.value.changed) {
       // derived() re-evaluates the window: a page that still leaves
       // the tail short chains the next continuation immediately.
       this.#derived();
@@ -1919,13 +2098,16 @@ export class Session {
   }
 
   /**
-   * Applies a fetched page to library + queue: validates the wire
-   * shape (one corrupt item fails the whole page), dedupes against
-   * the queue, mints/merges recordings, then enqueues the survivors.
-   * Atomic at the persist batch — the caller writes `recordings` +
-   * `queue` in a single commit, all items or none.
+   * Stages a fetched page against library + queue: validates the wire
+   * shape (one corrupt item fails the whole page), dedupes and
+   * mints/merges via `planRadioPage`, then enqueues the survivors on
+   * a draft engine. Pure — the recordings write and the queue move
+   * commit together, all items or none, before the mirror updates.
    */
-  #applyRadioPage(r: Ready, page: RadioPage): Result<{ changed: boolean }> {
+  #stageRadioPage(
+    r: Ready,
+    page: RadioPage,
+  ): Result<CommitStage<{ changed: boolean }>> {
     if (!isRadioPage(page)) {
       return err(
         appError('invalid-response', 'radio page failed validation'),
@@ -1944,18 +2126,26 @@ export class Session {
       now,
     );
     const recordingsChanged = plan.recordings !== r.recordings;
-    if (recordingsChanged) {
-      r.recordings = [...plan.recordings];
-    }
+    const draft = new QueueEngine(r.queue.snapshot());
     try {
       for (const occurrence of plan.occurrences) {
-        r.queue.enqueue(occurrence);
+        draft.enqueue(occurrence);
       }
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    if (!recordingsChanged && plan.occurrences.length === 0) {
+      return ok({ apply: () => ({ changed: false }) });
+    }
+    const recordings = plan.recordings;
+    const queue = draft.snapshot();
     return ok({
-      changed: recordingsChanged || plan.occurrences.length > 0,
+      batch: { recordings, queue },
+      apply: (rr) => {
+        rr.recordings = [...recordings];
+        rr.queue = draft;
+        return { changed: true };
+      },
     });
   }
 
@@ -1979,7 +2169,7 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     return this.#startAttempt(occurrenceId);
   }
@@ -2017,7 +2207,7 @@ export class Session {
     }
     await this.#supersede();
     r.playback = { type: 'idle' };
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     this.#publish();
     return ok(undefined);
@@ -2052,7 +2242,7 @@ export class Session {
       after.currentOccurrenceId === before.currentOccurrenceId
     ) {
       // Restart the same item: seek natively, keep the attempt.
-      await this.#persist({ queue: after });
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
       this.#derived();
       const active = this.#active;
       if (
@@ -2076,7 +2266,7 @@ export class Session {
       this.#publish();
       return ok(undefined);
     }
-    await this.#persist({ queue: after });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     if (after.mode === 'playing' && after.currentOccurrenceId !== null) {
       return this.#startAttempt(after.currentOccurrenceId);
@@ -2097,13 +2287,21 @@ export class Session {
     }
     const r = ready.value;
     const active = this.#active;
-    if (active === null || active.handle === undefined) {
+    if (active === null) {
       return err(appError('unavailable', 'no active playback to pause'));
     }
     try {
       r.queue.pause();
     } catch (thrown) {
       return err(fromUnknown(thrown));
+    }
+    if (active.handle === undefined) {
+      // Prepare still in flight: pause intent lands on the queue and
+      // the pending 'prepared' outcome must not autostart it.
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      this.#derived();
+      this.#publish();
+      return ok(undefined);
     }
     const identity = {
       attemptId: active.identity.attemptId,
@@ -2118,7 +2316,7 @@ export class Session {
     if (!this.#isStale(active)) {
       this.#setPlaybackFromStatus(active, 'paused');
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     return ok(undefined);
   }
@@ -2139,6 +2337,14 @@ export class Session {
       return err(fromUnknown(thrown));
     }
     const active = this.#active;
+    if (active !== null && active.handle === undefined) {
+      // A prepare is already in flight: the ticked 'playing' intent
+      // means the pending 'prepared' outcome autostarts it.
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      this.#derived();
+      this.#publish();
+      return ok(undefined);
+    }
     if (active !== null && active.handle !== undefined) {
       const identity = {
         attemptId: active.identity.attemptId,
@@ -2159,12 +2365,12 @@ export class Session {
       if (!this.#isStale(active)) {
         this.#setPlaybackFromStatus(active, 'playing');
       }
-      await this.#persist({ queue: r.queue.snapshot() });
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
       this.#derived();
       return ok(undefined);
     }
     // No live handle (e.g. after restore): prepare fresh.
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     return this.#startAttempt(snap.currentOccurrenceId);
   }
@@ -2181,13 +2387,21 @@ export class Session {
         appError('invalid-response', 'position must be safe nonnegative'),
       );
     }
-    if (active === null || active.handle === undefined) {
+    if (active === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
     try {
       r.queue.seekTo(positionMs);
     } catch (thrown) {
       return err(fromUnknown(thrown));
+    }
+    if (active.handle === undefined) {
+      // Seek intent rides on the queue snapshot; the pending
+      // 'prepared' outcome plays from it.
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
+      this.#derived();
+      this.#publish();
+      return ok(undefined);
     }
     const identity = {
       attemptId: active.identity.attemptId,
@@ -2205,7 +2419,7 @@ export class Session {
       const mode = r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing';
       this.#setPlaybackFromStatus(active, mode);
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     return ok(undefined);
   }
@@ -2225,7 +2439,7 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     return this.#startAttempt(current);
   }
@@ -2249,7 +2463,7 @@ export class Session {
         ready2.playback = { type: 'idle' };
       }
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     const snap = r.queue.snapshot();
     if (
@@ -2278,7 +2492,7 @@ export class Session {
           : fromUnknown(thrown),
       );
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
     this.#publish();
     return ok(undefined);
@@ -2483,13 +2697,15 @@ export class Session {
       // Park the candidates for user resolution; the attempt still
       // fails honestly. The enqueue is best-effort — a review-write
       // failure must not mask the match outcome.
-      const enqueued = await this.#corrections.enqueueReview(
-        recording.id,
-        outcome.candidates.map((c) => ({
-          metadata: c.candidate,
-          ref: c.candidate.sourceRef,
-        })),
-        attempt.source.signal,
+      const enqueued = await this.#enqueueStorage(() =>
+        this.#corrections.enqueueReview(
+          recording.id,
+          outcome.candidates.map((c) => ({
+            metadata: c.candidate,
+            ref: c.candidate.sourceRef,
+          })),
+          attempt.source.signal,
+        ),
       );
       if (!enqueued.ok) {
         this.#logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
@@ -2535,10 +2751,10 @@ export class Session {
       return err(fromUnknown(thrown));
     }
     this.#publish();
-    await this.#persist({
+    await this.#persist(() => ({
       recordings: r.recordings,
       queue: r.queue.snapshot(),
-    });
+    }));
     this.#derived();
     return ok(ref);
   }
@@ -2688,7 +2904,7 @@ export class Session {
       error,
     };
     this.#publish();
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     this.#derived();
   }
 
@@ -2809,7 +3025,7 @@ export class Session {
       } catch {
         return;
       }
-      await this.#persist({ queue: r.queue.snapshot() });
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
       this.#derived();
       const snap = r.queue.snapshot();
       if (snap.currentOccurrenceId !== null && snap.mode === 'playing') {
@@ -2831,7 +3047,7 @@ export class Session {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      await this.#persist({ queue: r.queue.snapshot() });
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
       this.#derived();
     } else if (
       event.state === 'playing' &&
@@ -2846,7 +3062,7 @@ export class Session {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      await this.#persist({ queue: r.queue.snapshot() });
+      await this.#persist(() => ({ queue: r.queue.snapshot() }));
       this.#derived();
     }
     if (this.#isStale(active)) {
@@ -2920,6 +3136,14 @@ export class Session {
       return;
     }
     active.handle = event.outcome.stream.handle;
+    if (r.queue.snapshot().mode === 'paused') {
+      // Paused while the prepare was in flight — user intent wins:
+      // hold the handle and report paused, never autostart.
+      this.#setPlaybackFromStatus(active, 'paused');
+      await this.#persist({ attempts: [event.outcome.attempt] });
+      this.#maybeMapSuccessor();
+      return;
+    }
     const playResult = await this.#bounded(() =>
       this.#player.play({
         handle:
@@ -2935,6 +3159,9 @@ export class Session {
     }
     if (!playResult.ok) {
       await this.#failAttempt(active, playResult.error);
+      // The trace survives the transport failure, same contract as
+      // the prepare-failure branch above.
+      await this.#persist({ attempts: [event.outcome.attempt] });
       return;
     }
     this.#setPlaybackFromStatus(active, 'buffering');
@@ -3181,7 +3408,7 @@ export class Session {
         );
       }
     }
-    await this.#persist({ queue: r.queue.snapshot() });
+    await this.#persist(() => ({ queue: r.queue.snapshot() }));
     // Native may already be several moves ahead. Re-projecting this
     // intermediate cursor would stop its live stream and reject queued moves.
     this.#mappingSource?.cancel();
@@ -3347,10 +3574,10 @@ export class Session {
         return;
       }
       this.#publish();
-      await this.#persist({
+      await this.#persist(() => ({
         recordings: ready2.recordings,
         queue: ready2.queue.snapshot(),
-      });
+      }));
       this.#own(this.#projectQueue());
     })();
     this.#own(work);

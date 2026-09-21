@@ -267,6 +267,19 @@ function lrcParsing(): void {
   // Newline-bearing text cannot smuggle extra records.
   const smuggled = linesToLrc([{ tMs: 1_000, text: 'one\ntwo' }]);
   assertEqual(smuggled.split('\n').length, 1, 'embedded newlines flatten');
+
+  // Text starting with '[' round-trips: the serializer separates the
+  // stamp so the parser never reads the text as a second timestamp.
+  const bracketed = lines([
+    [0, '[Chorus]'],
+    [10_000, '[offset:+500]'],
+    [20_000, 'tail'],
+  ]);
+  assertDeepEqual(
+    parseLrc(linesToLrc(bracketed)).map((l) => [l.tMs, l.text]),
+    bracketed.map((l) => [l.tMs, l.text]),
+    'bracketed text round-trips losslessly',
+  );
 }
 
 // ---- cache mapping --------------------------------------------------------

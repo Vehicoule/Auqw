@@ -281,10 +281,12 @@ export function planRadioPage(
     let rec: Recording;
     if (found !== undefined) {
       const current = working.get(found.id) ?? found;
-      rec = withProviderMapping(
-        mergeRecordingMetadata(current, item),
+      // Evidence scores against the pre-merge recording — scoring the
+      // post-merge copy is tautologically perfect, so a mismatched
+      // item's hard-reject must fire before the metadata is folded in.
+      rec = mergeRecordingMetadata(
+        withProviderMapping(current, item, matchedAtMs),
         item,
-        matchedAtMs,
       );
     } else {
       rec = withProviderMapping(
