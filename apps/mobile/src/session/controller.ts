@@ -31,7 +31,10 @@ import {
   createPluginProvider,
   manifestCapabilities,
 } from '../adapters/plugin-provider.ts';
-import { createExpoConnectivity } from '../adapters/expo-connectivity.ts';
+import {
+  createExpoConnectivity,
+  createUnwatchedConnectivity,
+} from '../adapters/expo-connectivity.ts';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createExpoTagReader } from '../adapters/expo-tag-reader.ts';
 import { createExpoTransfer } from '../adapters/expo-transfer.ts';
@@ -207,7 +210,12 @@ export async function createSessionController(
   }))(providerMap);
   const ids = createIds();
   const clock = createClock();
-  const connectivity = createExpoConnectivity(host);
+  // The Kotlin NetworkCallback monitor is Android-only; iOS gets the
+  // unwatched fallback — no native methods exist there to call.
+  const connectivity =
+    Platform.OS === 'android'
+      ? createExpoConnectivity(host)
+      : createUnwatchedConnectivity();
   const { transfer, uriFor: downloadUriFor } = createExpoTransfer();
   // `local` is constructed in start(); the playback hook reads the
   // box so a URI resolves the moment a source exists.

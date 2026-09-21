@@ -564,6 +564,14 @@ function Main({
     [controller],
   );
 
+  // Offline honesty: rows render 'unavailable' when offline and
+  // unowned — their play affordances must not fire a remote attempt.
+  const canPlay = useCallback(
+    (recordingId: string): boolean =>
+      online !== false || isOwned(recordingId),
+    [online, isOwned],
+  );
+
   // Single download affordance: absent → request; queued/downloading
   // → cancel; failed → retry; stored → remove. The sheet label says
   // which it is.
@@ -906,12 +914,15 @@ function Main({
 
   const playRecording = useCallback(
     async (recordingId: string) => {
+      if (!canPlay(recordingId)) {
+        return;
+      }
       const enqueued = await session.enqueueRecording(recordingId);
       if (enqueued.ok) {
         await session.playOccurrence(enqueued.value);
       }
     },
-    [session],
+    [session, canPlay],
   );
 
   const onResultPress = useCallback(
@@ -1470,29 +1481,39 @@ function Main({
 
   const playCollectionRows = useCallback(
     (rows: readonly { recordingId: string }[]) => {
+      const playable = rows.filter((row) => canPlay(row.recordingId));
+      if (playable.length === 0) {
+        return;
+      }
       void session.playRecordings(
-        rows.map((row) => ({
+        playable.map((row) => ({
           recordingId: row.recordingId,
           selectedRef: null,
         })),
       );
     },
-    [session],
+    [session, canPlay],
   );
 
   const playPlaylist = useCallback(() => {
     if (playlistModel === null) {
       return;
     }
+    const playable = playlistModel.entries.filter((entry) =>
+      canPlay(entry.recordingId),
+    );
+    if (playable.length === 0) {
+      return;
+    }
     void session.playRecordings(
-      playlistModel.entries.map((entry) => ({
+      playable.map((entry) => ({
         recordingId: entry.recordingId,
         // A provider pin beats owned bytes in #pickRef — drop it
         // when bytes exist so downloads actually get played.
         selectedRef: isOwned(entry.recordingId) ? null : entry.selectedRef,
       })),
     );
-  }, [session, playlistModel, isOwned]);
+  }, [session, playlistModel, isOwned, canPlay]);
 
   const playlistDownload = useMemo(() => {
     if (playlistModel === null) {
@@ -2231,7 +2252,10 @@ function Main({
                 closeOverlay();
               }
             }}
-            onPressEntry={(entry) =>
+            onPressEntry={(entry) => {
+              if (!canPlay(entry.recordingId)) {
+                return;
+              }
               void session.playRecordings([
                 {
                   recordingId: entry.recordingId,
@@ -2239,8 +2263,8 @@ function Main({
                     ? null
                     : entry.selectedRef,
                 },
-              ])
-            }
+              ]);
+            }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
               setActionsFor({
