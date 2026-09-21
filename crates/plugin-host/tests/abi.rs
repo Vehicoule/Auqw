@@ -1611,3 +1611,226 @@ async fn guest_log_cap_stops_logger() {
     assert_eq!(attempt.guest_log.len(), 128);
     assert_eq!(attempt.http_calls, 0);
 }
+
+// ---------- hardening regression tests ----------
+
+/// A guest-supplied `Host` header would let a shared-frontend edge
+/// serve a destination the manifest never permitted — the header is
+/// host-controlled, not guest-settable. Same for framing/hop-by-hop
+/// headers, which are a smuggling surface under any proxy.
+#[tokio::test]
+async fn host_controlled_headers_are_rejected() {
+    for header in [
+        "Host",
+        "Connection",
+        "Keep-Alive",
+        "Transfer-Encoding",
+        "Content-Length",
+        "TE",
+        "Trailer",
+        "Upgrade",
+        "Expect",
+        "Via",
+        "Proxy-Authorization",
+        "Proxy-Connection",
+    ] {
+        let msg = format!(
+            "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+             \"payload\":{{\"method\":\"GET\",\"url\":\"https://allowed.test/x\",\
+             \"headers\":[[\"{header}\",\"v\"]],\"body\":null}}}}"
+        );
+        let wasm = ok(wat::parse_str(raw_wat(&msg)));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for(&wasm, &["network:allowed.test"]),
+            &default_budgets(),
+        ));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "{header}"
+        );
+    }
+}
+
+/// `access_token` merged into the invoke payload is session material
+/// the guest must not echo into diagnostics — a `log` quoting it is
+/// masked, not recorded verbatim.
+#[tokio::test]
+async fn access_token_is_masked_in_guest_log() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"log\",\
+         \"payload\":{\"level\":\"info\",\"message\":\"saw tok-secret-value-9 ok\"}}",
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &[]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { attempt, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let entry = &attempt.guest_log[0];
+    assert!(!entry.message.contains("tok-secret-value-9"), "{entry:?}");
+    assert!(entry.message.contains("***"));
+}
+
+/// The same masking applies to a guest `fail` message.
+#[tokio::test]
+async fn access_token_is_masked_in_fail() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\
+         \"message\":\"abort at tok-secret-value-9\"}}",
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &[]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    match err(result) {
+        InvokeError::GuestFail { message, .. } => {
+            assert!(!message.contains("tok-secret-value-9"), "{message}");
+            assert!(message.contains("***"));
+        }
+        e => panic!("expected GuestFail, got {e:?}"),
+    }
+}
+
+/// `attempt`'s `Debug` output must not carry secrets — the field is
+/// crate-private and excluded from the impl.
+#[test]
+fn attempt_debug_does_not_leak_secrets() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let rt = ok(tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build());
+    let (http, _calls) = CannedHttp::new();
+    let invocation = rt.block_on(invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({"access_token": "tok-secret-value-9"}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    ));
+    let dbg = format!("{:?}", invocation.attempt);
+    assert!(!dbg.contains("tok-secret-value-9"), "{dbg}");
+    assert!(!dbg.contains("secrets"), "{dbg}");
+}
+
+/// `load` must refuse modules that can never instantiate under the
+/// store limits — not admit them as valid artifacts that trap later.
+#[test]
+fn load_rejects_modules_beyond_store_limits() {
+    // Two memories: multi-memory is off in the ABI shape.
+    let wasm = ok(wat::parse_str(
+        r#"(module
+          (memory (export "memory") 1)
+          (memory 1)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))"#,
+    ));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "two memories"
+    );
+
+    // 4 GiB minimum memory — the store caps at `max_memory_bytes`.
+    let wasm = ok(wat::parse_str(
+        r#"(module
+          (memory (export "memory") 65536)
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "handle") (param i32 i32) (result i64) (i64.const 0)))"#,
+    ));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "4 GiB memory"
+    );
+
+    // 17 tables — the store allows 16.
+    let tables = "(table 1 funcref)".repeat(17);
+    let wasm = ok(wat::parse_str(format!(
+        "(module\n  (memory (export \"memory\") 1)\n  {tables}\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 0))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) (i64.const 0)))"
+    )));
+    assert!(
+        matches!(
+            err(load(&wasm, manifest_for(&wasm, &[]), &default_budgets())),
+            LoadError::ExceedsLimits(_)
+        ),
+        "17 tables"
+    );
+}
+
+/// A manifest deserialized outside `from_json` is re-validated by
+/// `load` — the digest check runs against a policy that was verified,
+/// not just parsed.
+#[test]
+fn load_revalidates_a_deserialized_manifest() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    // `network:` names a public DNS destination or loopback — a
+    // non-loopback IP, a bare label, a TLD wildcard, or a broken name
+    // must not self-authorize.
+    for perm in [
+        "network:169.254.169.254",
+        "network:10.0.0.5",
+        "network:*.com",
+        "network:internal",
+        "network:bad..dots",
+        "network:sub.localhost",
+    ] {
+        let e = err(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &[perm])));
+        assert!(matches!(e, ManifestError::InvalidField(_)), "{perm}");
+    }
+    // And the same inputs rejected when a Manifest is materialized
+    // without going through `from_json`'s validation.
+    for perm in ["network:169.254.169.254", "network:*.com"] {
+        let mut manifest = manifest_for(&wasm, &[]);
+        manifest.permissions = vec![perm.to_string()];
+        let e = err(load(&wasm, manifest, &default_budgets()));
+        assert!(matches!(e, LoadError::Manifest(_)), "{perm}: {e:?}");
+    }
+    // The legitimate forms — dotted names and loopback literals — pass.
+    for perm in [
+        "network:example.com",
+        "network:*.googlevideo.com",
+        "network:127.0.0.1",
+        "network:localhost",
+    ] {
+        ok(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &[perm])));
+    }
+}

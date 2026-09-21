@@ -102,7 +102,10 @@ pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<Loaded
             actual: digest,
         });
     }
-    check_module_shape(wasm)?;
+    // `Manifest` is `Deserialize`, so a caller can hold one built around
+    // `from_json` — validate again here rather than trusting provenance.
+    manifest.validate()?;
+    check_module_shape(wasm, budgets)?;
     let mut config = Config::default();
     config.consume_fuel(true);
     let engine = Engine::new(&config);
@@ -125,9 +128,16 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Zero-import and no-start-section checks via `wasmparser`.
-fn check_module_shape(wasm: &[u8]) -> Result<(), LoadError> {
+/// Zero-import, no-start-section, and declared-resource checks via
+/// `wasmparser`. The store limiter only bites at instantiation — a
+/// module that declares two memories or a 4 GiB minimum would pass
+/// `load` and then `guest-trap` on every invoke; reject it here as a
+/// load error so the artifact pipeline sees the real verdict.
+fn check_module_shape(wasm: &[u8], budgets: &Budgets) -> Result<(), LoadError> {
     use wasmparser::Payload;
+    let mut memories = 0u32;
+    let mut tables = 0u32;
+    let mut table_elements: u64 = 0;
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| LoadError::Malformed(e.to_string()))?;
         match payload {
@@ -138,8 +148,45 @@ fn check_module_shape(wasm: &[u8]) -> Result<(), LoadError> {
                 }
             }
             Payload::StartSection { .. } => return Err(LoadError::StartSection),
+            Payload::MemorySection(reader) => {
+                for mem in reader {
+                    let mem = mem.map_err(|e| LoadError::Malformed(e.to_string()))?;
+                    memories += 1;
+                    let page_bytes = 1u64 << mem.page_size_log2.unwrap_or(16);
+                    let min_bytes = mem.initial.saturating_mul(page_bytes);
+                    if mem.memory64 || min_bytes > budgets.max_memory_bytes as u64 {
+                        return Err(LoadError::ExceedsLimits(format!(
+                            "memory minimum {min_bytes} bytes exceeds {}",
+                            budgets.max_memory_bytes
+                        )));
+                    }
+                }
+            }
+            Payload::TableSection(reader) => {
+                for table in reader {
+                    let table = table.map_err(|e| LoadError::Malformed(e.to_string()))?;
+                    tables += 1;
+                    table_elements = table_elements.saturating_add(table.ty.initial);
+                }
+            }
             _ => {}
         }
+    }
+    if memories > 1 {
+        return Err(LoadError::ExceedsLimits(format!(
+            "module declares {memories} memories; ABI allows 1"
+        )));
+    }
+    if tables > 16 {
+        return Err(LoadError::ExceedsLimits(format!(
+            "module declares {tables} tables; the store caps at 16"
+        )));
+    }
+    if table_elements > budgets.max_table_elements as u64 {
+        return Err(LoadError::ExceedsLimits(format!(
+            "declared table elements {table_elements} exceed {}",
+            budgets.max_table_elements
+        )));
     }
     Ok(())
 }
@@ -230,6 +277,7 @@ pub async fn invoke(
         elapsed: std::time::Duration::ZERO,
         http_trace: Vec::new(),
         guest_log: Vec::new(),
+        secrets: Vec::new(),
     };
     let ctx = StepCtx {
         plugin,
@@ -260,6 +308,16 @@ async fn run(
         .any(|c| c == capability)
     {
         return Err(InvokeError::CapabilityNotDeclared(capability.to_string()));
+    }
+    // Token material the host merged into the payload must never echo
+    // back into logs or errors — seed the redaction set before the
+    // guest speaks.
+    if let Some(token) = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|s| s.len() >= 8)
+    {
+        attempt.secrets.push(token.to_string());
     }
     // The namespace snapshot is staged for the whole invocation; on a
     // valid `done` only the staged patch commits — every other
@@ -374,6 +432,9 @@ async fn run(
                         ));
                     }
                 }
+                // A cancel landing in the commit's fsync+rename window
+                // must not commit — check once more on the doorstep.
+                check_preemption(ctx)?;
                 // The result survived every check — only now does the
                 // staged patch apply against the committed namespace.
                 if ctx.plugin.manifest.allows_kv() && staged_kv.has_writes() {
@@ -408,7 +469,7 @@ async fn run(
                     })?;
                 return Err(InvokeError::GuestFail {
                     kind: kind.to_string(),
-                    message: redact_text(message),
+                    message: redact_text(message, &attempt.secrets),
                 });
             }
             Some("host_request") => {
@@ -417,7 +478,7 @@ async fn run(
             _ => {
                 return Err(InvokeError::InvalidMessage(format!(
                     "unknown message type in guest output: {}",
-                    redact_text(&msg.to_string())
+                    redact_text(&msg.to_string(), &attempt.secrets)
                 )));
             }
         }
@@ -640,7 +701,19 @@ fn authorize_resume(
         headers: vec![("Range".to_string(), range)],
         body: None,
         expected_range: Some((offset, length)),
+        collect_secrets: false,
     }))
+}
+
+/// Collect every string leaf of a JSON value into `out` — used to
+/// register pot-provider token material in the redaction set.
+fn collect_secret_strings(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if s.len() >= 8 => out.push(s.clone()),
+        Value::Array(a) => a.iter().for_each(|i| collect_secret_strings(i, out)),
+        Value::Object(m) => m.values().for_each(|i| collect_secret_strings(i, out)),
+        _ => {}
+    }
 }
 
 /// Whether a `206` response's `Content-Range` agrees with the range a
@@ -733,6 +806,7 @@ fn authorize_pot_token(
         headers: vec![("Content-Type".into(), "application/json".into())],
         body: Some(body),
         expected_range: None,
+        collect_secrets: true,
     }))
 }
 
@@ -768,8 +842,15 @@ async fn perform_call(
         .http_timeout
         .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
     let expected_range = req.expected_range;
+    let collect_secrets = req.collect_secrets;
     let method = req.method.clone();
-    let traced_url = redact_url(&req.url);
+    // The pot provider URL is an operator LAN address — it must not
+    // reach the trace even redacted.
+    let traced_url = if collect_secrets {
+        "<pot-provider>".to_string()
+    } else {
+        redact_url(&req.url)
+    };
     let call = ctx.services.http.send(
         HttpRequest {
             method: req.method,
@@ -813,6 +894,14 @@ async fn perform_call(
                 bytes: resp.body.len() as u64,
                 elapsed,
             });
+            // The pot provider's JSON carries token material — register
+            // its string leaves so a guest echo into `log`/`fail` is
+            // masked rather than leaked.
+            if collect_secrets {
+                if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
+                    collect_secret_strings(&v, &mut attempt.secrets);
+                }
+            }
             // A `resume` call that lands a `206` must agree with the
             // range it asked for — a lying `Content-Range` is a failed
             // host request, not a body the guest has to re-verify.
@@ -856,7 +945,7 @@ async fn perform_call(
                     host_error(
                         id,
                         kind.guest_kind().unwrap_or("transient"),
-                        &redact_text(&e.message),
+                        &redact_text(&e.message, &attempt.secrets),
                     )
                 }
             }
@@ -910,6 +999,28 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         {
             return Err(invalid("http_request header malformed"));
         }
+        // The wire authority stays with the allow-listed URL: a guest
+        // `Host` (or h2 `:authority` — the charset check already bars
+        // `:`) would let a shared-frontend edge serve a destination the
+        // manifest never permitted. Framing/hop-by-hop headers are
+        // denied for the same reason — smuggling through any proxy in
+        // the path.
+        const DENIED_HEADERS: &[&str] = &[
+            "host",
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "content-length",
+            "te",
+            "trailer",
+            "upgrade",
+            "expect",
+            "via",
+        ];
+        let lower = name.to_ascii_lowercase();
+        if DENIED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
+            return Err(invalid("http_request header is host-controlled"));
+        }
         headers.push((name.to_string(), value.to_string()));
     }
     // `body` is a required key — `null` means bodiless, but its absence
@@ -930,6 +1041,7 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         headers,
         body,
         expected_range: None,
+        collect_secrets: false,
     })
 }
 
@@ -942,6 +1054,10 @@ struct ParsedHttpRequest {
     /// header was built from, verified against a `206`'s
     /// `Content-Range`.
     expected_range: Option<(u64, Option<u64>)>,
+    /// Set for `pot_token` calls: the provider's JSON response carries
+    /// token material — collect its string leaves into the redaction
+    /// set so the guest can't echo them into logs.
+    collect_secrets: bool,
 }
 
 /// Serialize a `host_error` step message for the guest.
@@ -1022,8 +1138,10 @@ impl StagedKv {
 }
 
 /// The `key` field shared by `kv_get`/`kv_set` payloads. Shape
-/// violations (missing, wrong type, empty, overlong) end the
-/// invocation like any malformed step message.
+/// violations (missing, wrong type, empty) end the invocation like
+/// any malformed step message; the byte cap is a *cap* like the value
+/// and namespace ones — a recoverable `host_error`, not a protocol
+/// violation that kills the call.
 fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
     let invalid = |m: &str| InvokeError::InvalidMessage(format!("{what}.{m}"));
     let key = payload
@@ -1032,9 +1150,6 @@ fn parse_kv_key(payload: &Value, what: &str) -> Result<String, InvokeError> {
         .ok_or_else(|| invalid("key missing or not a string"))?;
     if key.is_empty() {
         return Err(invalid("key is empty"));
-    }
-    if key.len() > MAX_KV_KEY_BYTES {
-        return Err(invalid("key exceeds 128 bytes"));
     }
     Ok(key.to_string())
 }
@@ -1048,6 +1163,9 @@ fn kv_get_step(
 ) -> Result<Vec<u8>, InvokeError> {
     check_keys(payload, &["key"], "kv_get.payload")?;
     let key = parse_kv_key(payload, "kv_get")?;
+    if key.len() > MAX_KV_KEY_BYTES {
+        return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
+    }
     if !ctx.plugin.manifest.allows_kv() {
         return host_error(id, "permission-denied", "kv not permitted");
     }
@@ -1068,6 +1186,9 @@ fn kv_set_step(
 ) -> Result<Vec<u8>, InvokeError> {
     check_keys(payload, &["key", "value"], "kv_set.payload")?;
     let key = parse_kv_key(payload, "kv_set")?;
+    if key.len() > MAX_KV_KEY_BYTES {
+        return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
+    }
     let value = match payload.get("value") {
         None => {
             return Err(InvokeError::InvalidMessage("kv_set.value missing".into()));
@@ -1109,20 +1230,19 @@ fn log_step(payload: &Value, id: u32, attempt: &mut Attempt) -> Result<Vec<u8>, 
         .and_then(Value::as_str)
         .ok_or_else(|| InvokeError::InvalidMessage("log.message missing".into()))?;
     if message.len() > MAX_LOG_MESSAGE_BYTES {
-        return Err(InvokeError::InvalidMessage(
-            "log.message exceeds 4096 bytes".into(),
-        ));
+        return host_error(id, "invalid-response", "log message exceeds 4096 bytes");
     }
     if attempt.guest_log.len() >= MAX_GUEST_LOG_ENTRIES {
         return Err(InvokeError::BudgetExceeded {
             dimension: BudgetDimension::GuestLog,
         });
     }
-    // Guest text can quote a signed URL it legitimately saw; redact
-    // before it can reach diagnostics.
+    // Guest text can quote a signed URL it legitimately saw or echo
+    // token material the host handed it; redact before it can reach
+    // diagnostics.
     attempt.guest_log.push(GuestLogEntry {
         level: level.to_string(),
-        message: redact_text(message),
+        message: redact_text(message, &attempt.secrets),
     });
     host_ok(id)
 }

@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -210,8 +211,17 @@ impl FileKeyValueStore {
             })
             .collect();
         let json = serde_json::to_vec(&encoded).map_err(|e| KvError::Io(format!("encode: {e}")))?;
+        // A unique sibling tmp per write: two store instances on one
+        // path must not clobber each other's staging file (they'd still
+        // last-writer-wins at rename — a documented one-store-per-path
+        // assumption — but the committed file stays whole).
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut tmp_name = self.path.as_os_str().to_os_string();
-        tmp_name.push(".tmp");
+        tmp_name.push(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let tmp = PathBuf::from(tmp_name);
         {
             let mut file = std::fs::File::create(&tmp)

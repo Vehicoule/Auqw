@@ -60,6 +60,10 @@ pub enum LoadError {
         /// Export name.
         name: &'static str,
     },
+    /// The module's declared memories/tables exceed what the store
+    /// limits permit — it could never instantiate.
+    #[error("module exceeds host limits: {0}")]
+    ExceedsLimits(String),
     /// The artifact is not a valid WebAssembly module.
     #[error("invalid wasm module: {0}")]
     Malformed(String),
