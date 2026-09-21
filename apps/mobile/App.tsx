@@ -38,6 +38,7 @@ import type {
   OperationContext,
   ProviderCapability,
   ReadySession,
+  Result,
   SearchState,
   SessionState,
   SourceRef,
@@ -440,6 +441,19 @@ const IDLE_TRANSFER: TransferModel = {
   importDetail: null,
   preview: null,
 };
+
+/**
+ * Session ops resolve typed errors rather than throwing — a dropped
+ * Result is a silent no-op. Keep failures observable: the `kind —
+ * message` shape is taxonomy text and carries no secrets.
+ */
+function reportResult(action: string, result: Result<unknown>): void {
+  if (!result.ok) {
+    console.warn(
+      `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
+    );
+  }
+}
 
 function Main({
   controller,
@@ -960,12 +974,14 @@ function Main({
     const ref: SourceRef | null =
       current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
     if (ref !== null) {
-      void session.startRadio(ref);
+      void session
+        .startRadio(ref)
+        .then((r) => reportResult('start radio', r));
     }
   }, [session, state, currentRecordingId]);
 
   const onStopRadio = useCallback(() => {
-    session.stopRadio();
+    reportResult('stop radio', session.stopRadio());
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
@@ -1439,14 +1455,22 @@ function Main({
           ? target.recordingId
           : await session
             .ensureRecording(target.meta)
-            .then((r) => (r.ok ? r.value : null));
+            .then((r) => {
+              if (!r.ok) {
+                reportResult('prepare track', r);
+              }
+              return r.ok ? r.value : null;
+            });
       if (recordingId === null) {
         return;
       }
-      await session.addPlaylistEntry(
-        playlistId,
-        recordingId,
-        target.kind === 'metadata' ? target.meta.sourceRef : null,
+      reportResult(
+        'add to playlist',
+        await session.addPlaylistEntry(
+          playlistId,
+          recordingId,
+          target.kind === 'metadata' ? target.meta.sourceRef : null,
+        ),
       );
     },
     [session],
@@ -1467,7 +1491,11 @@ function Main({
     (name: string) => {
       const target = pickerFor;
       void session.createPlaylist(name).then((created) => {
-        if (created.ok && target !== null) {
+        if (!created.ok) {
+          reportResult('create playlist', created);
+          return;
+        }
+        if (target !== null) {
           void addToPlaylist(created.value, target);
         }
       });
@@ -1486,13 +1514,16 @@ function Main({
       switch (key) {
         case 'like':
           if (target.kind === 'recording') {
-            void session.toggleLike(target.recordingId);
+            void session
+              .toggleLike(target.recordingId)
+              .then((r) => reportResult('toggle like', r));
           }
           break;
         case 'enqueue':
           void (target.kind === 'recording'
             ? session.enqueueRecording(target.recordingId)
-            : session.enqueueMetadata(target.meta));
+            : session.enqueueMetadata(target.meta)
+          ).then((r) => reportResult('add to queue', r));
           break;
         case 'add':
           setPickerFor(target);
@@ -1507,7 +1538,9 @@ function Main({
               : (state.recordings.find((r) => r.id === target.recordingId)
                 ?.sourceRefs[0] ?? null);
           if (ref !== null) {
-            void session.startRadio(ref);
+            void session
+              .startRadio(ref)
+              .then((r) => reportResult('start radio', r));
           }
           break;
         }
@@ -1542,9 +1575,11 @@ function Main({
   const onCreatePlaylist = useCallback(
     (name: string) => {
       void session.createPlaylist(name).then((created) => {
-        if (created.ok) {
-          pushOverlay({ type: 'playlist', playlistId: created.value });
+        if (!created.ok) {
+          reportResult('create playlist', created);
+          return;
         }
+        pushOverlay({ type: 'playlist', playlistId: created.value });
       });
     },
     [session],
@@ -1587,8 +1622,14 @@ function Main({
       }
       const { session: s, search: se, state: st } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
-      const [verb, qs] = body.split('?');
-      const params = new URLSearchParams(qs ?? '');
+      // Split on the first '?' only — param values may embed '?' of
+      // their own (import paths, pasted URLs), and `split('?')` would
+      // truncate them.
+      const queryIndex = body.indexOf('?');
+      const verb = queryIndex === -1 ? body : body.slice(0, queryIndex);
+      const params = new URLSearchParams(
+        queryIndex === -1 ? '' : body.slice(queryIndex + 1),
+      );
       switch (verb) {
         case 'open': {
           const target = params.get('tab') ?? 'home';
@@ -1667,7 +1708,7 @@ function Main({
           if (st.type === 'ready' && st.playback.type !== 'idle') {
             const id = st.playback.recordingId;
             if (id !== null) {
-              void s.toggleLike(id);
+              void s.toggleLike(id).then((r) => reportResult('toggle like', r));
             }
           }
           break;
@@ -1759,11 +1800,17 @@ function Main({
           const undoId = params.get('undo');
           if (confirmId !== null) {
             const candidate = Number(params.get('candidate') ?? '0');
-            void s.confirmReview(confirmId, candidate);
+            void s
+              .confirmReview(confirmId, candidate)
+              .then((r) => reportResult('confirm review', r));
           } else if (rejectId !== null) {
-            void s.rejectReview(rejectId);
+            void s
+              .rejectReview(rejectId)
+              .then((r) => reportResult('reject review', r));
           } else if (undoId !== null) {
-            void s.undoReview(undoId);
+            void s
+              .undoReview(undoId)
+              .then((r) => reportResult('undo review', r));
           }
           break;
         }
@@ -1828,7 +1875,7 @@ function Main({
           break;
         }
         case 'stop-radio':
-          void s.stopRadio();
+          reportResult('stop radio', s.stopRadio());
           break;
         default:
           break;
@@ -1967,13 +2014,17 @@ function Main({
             onBack={closeOverlay}
             onPlayAll={() => playPlaylist(playlistModel)}
             onRename={(name) =>
-              void session.renamePlaylist(current.playlistId, name)
+              void session
+                .renamePlaylist(current.playlistId, name)
+                .then((r) => reportResult('rename playlist', r))
             }
             onDelete={() => {
               void Haptics.notificationAsync(
                 Haptics.NotificationFeedbackType.Warning,
               );
-              void session.deletePlaylist(current.playlistId);
+              void session
+                .deletePlaylist(current.playlistId)
+                .then((r) => reportResult('delete playlist', r));
               dismissOverlay(entry.key);
             }}
             onPressEntry={(entry) =>
@@ -1992,7 +2043,9 @@ function Main({
               })
             }
             onRemoveEntry={(entry) =>
-              void session.removePlaylistEntry(entry.entryId)
+              void session
+                .removePlaylistEntry(entry.entryId)
+                .then((r) => reportResult('remove track', r))
             }
             onMoveEntry={(move, direction) => {
               if (playlistModel === null) {
@@ -2005,12 +2058,14 @@ function Main({
               if (sibling === undefined) {
                 return;
               }
-              void session.reorderPlaylistEntry(
-                move.entryId,
-                direction === -1
-                  ? { before: sibling.entryId }
-                  : { after: sibling.entryId },
-              );
+              void session
+                .reorderPlaylistEntry(
+                  move.entryId,
+                  direction === -1
+                    ? { before: sibling.entryId }
+                    : { after: sibling.entryId },
+                )
+                .then((r) => reportResult('reorder playlist', r));
             }}
           />
         );
@@ -2074,6 +2129,7 @@ function Main({
             topInset={topInset}
             onBack={closeOverlay}
             onFilter={setReviewFilter}
+            onRetry={loadReviews}
             onConfirm={(reviewId, candidateIndex) =>
               reviewOp(() => session.confirmReview(reviewId, candidateIndex))
             }
