@@ -519,8 +519,11 @@ export async function createSessionController(
       }
       // Final re-derive: a connectivity seed/edge during boot may
       // have projected while the download ledger was still empty —
-      // replay the current truth now that owned files resolve.
-      session.connectivityChanged();
+      // replay the current truth now that owned files resolve. A
+      // failed init leaves rows unverified — don't project them.
+      if (inited.ok) {
+        session.connectivityChanged();
+      }
     },
     rehydrateMedia,
     async replaceLibrary(text, signal) {
