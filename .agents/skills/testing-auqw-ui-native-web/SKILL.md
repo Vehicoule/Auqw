@@ -65,5 +65,10 @@ fuser -k 8087/tcp 8088/tcp 2>/dev/null || true
 
 When you only need `packages/ui-native` components — not the session/download stack — the lighter path still works: `index.web.ts` registering a `web-gallery.tsx` that wraps `GalleryScreen` in `GestureHandlerRootView` + `SafeAreaProvider` with `useFonts(JetBrainsMono_*)`, `main: index.web.ts` + `@expo/metro-runtime`, then export + static-serve. No fake ports needed; everything is fixtures — callbacks are `noop`, gestures don't track mouse drags (use the state chips), and App-level wiring (tab bar, sheets, theme picker) is unreachable.
 
+- Gallery `Frame`s are full-width, not phone-width: at ~950px desktop width the `StageSheet` artwork (`aspectRatio: 1`, `fill`) is taller than the 620px frame and clips the transport controls — resize the Chrome window to ~530px wide (`wmctrl -r Auqw -e 0,10,40,530,720`) so sheet content renders fully before judging it.
+- `browser_console` CDP may attach to a different Chrome window when several are open (evals returning `querySelectorAll('div').length === 0` = wrong target). Visual assertions from screenshots are sufficient; close extra windows if you need console evals.
+- CorrectionsScreen's `onRetry` prop isn't wired in the gallery fixtures, so the corrections "error" frame shows no retry button — expected coverage gap, not a bug.
+- Token/colour assertions: use `getComputedStyle` in the browser console (e.g. secondary text = `rgb(143, 153, 194)` for `#8f99c2`).
+
 ## Devin Secrets Needed
 - none
