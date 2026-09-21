@@ -870,6 +870,8 @@ export type FakeSinkScript = {
   commitError?: AppError;
   /** Fail `finalize` with this error once (checksum mismatch etc.). */
   finalizeError?: AppError;
+  /** Digest `finalize` reports as the real file hash. */
+  digest?: string;
 };
 
 export class FakeTransferSink implements TransferSink {
@@ -895,6 +897,9 @@ export class FakeTransferSink implements TransferSink {
       finalizeError:
         script.finalizeError ??
         appError('invalid-response', 'checksum mismatch'),
+      digest:
+        script.digest ??
+        'f'.repeat(64),
     };
     this.#bytes = partial;
     this.#committed = partial;
@@ -935,7 +940,7 @@ export class FakeTransferSink implements TransferSink {
     return ok(this.#committed);
   }
 
-  async finalize(sha256Hex: string): Promise<Result<void>> {
+  async finalize(expected: string | null): Promise<Result<string>> {
     if (this.#closed) {
       return err(appError('invalid-response', 'sink is closed'));
     }
@@ -944,9 +949,9 @@ export class FakeTransferSink implements TransferSink {
       this.#script.finalizeError = appError('transient', 'spent');
       return err(error);
     }
-    this.finalizedWith = sha256Hex;
+    this.finalizedWith = expected;
     this.#closed = true;
-    return ok(undefined);
+    return ok(this.#script.digest);
   }
 
   async abort(keep: boolean): Promise<Result<void>> {

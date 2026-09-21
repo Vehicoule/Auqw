@@ -7,6 +7,7 @@ export * from './ports/storage.ts';
 export * from './ports/media-transfer.ts';
 export * from './ports/tag-reader.ts';
 export * from './ports/connectivity.ts';
+export * from './downloads/transfer-policy.ts';
 export * from './ports/runtime.ts';
 export * from './ports/clock.ts';
 export * from './ports/log.ts';

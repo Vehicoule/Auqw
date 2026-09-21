@@ -18,11 +18,13 @@ export interface TransferSink {
    */
   commit(): Promise<Result<number>>;
   /**
-   * Verify `sha256Hex` over the full file (or the adapter's own
-   * integrity record) and atomically move `.part` to the final name.
-   * A checksum mismatch fails `invalid-response` and keeps `.part`.
+   * Compute the sha-256 hex digest over the complete file, verify it
+   * against `expected` when non-null (the policy's incremental digest
+   * covers only fresh runs — resumed transfers pass null), then
+   * atomically move `.part` to the final name. A mismatch fails
+   * `invalid-response` and keeps `.part`. Returns the real digest.
    */
-  finalize(sha256Hex: string): Promise<Result<void>>;
+  finalize(expected: string | null): Promise<Result<string>>;
   /**
    * End the transfer. `keep: true` retains the `.part` file for a
    * later resume; `false` deletes it.
