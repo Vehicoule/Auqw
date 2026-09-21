@@ -20,7 +20,7 @@ In `apps/mobile/`:
 2. `web-gallery.tsx`: wraps `GalleryScreen` in `GestureHandlerRootView` + `SafeAreaProvider` and gates on `useFonts(JetBrainsMono_*)` from `@expo-google-fonts/jetbrains-mono`.
 3. `package.json`: set `"main": "index.web.ts"` and add deps `@expo/metro-runtime@57.0.8`, `react-dom@19.2.3`, `react-native-web@0.21.2`.
 
-Then from the repo root (node 24 + pnpm 12.3.4). On this machine nvm may be absent — node/pnpm live at `~/.local/node/bin` and `~/.local/bin`; use the shim directly (`export PATH="/home/ubuntu/.local/bin:/home/ubuntu/.local/node/bin:$PATH"`), not `source ~/.nvm`:
+Then from the repo root (node 24 + pnpm 12.3.4). Standard env: `source ~/.nvm/nvm.sh && nvm use 24`. If nvm/node/pnpm aren't installed on your machine, provision them any way that works (e.g. a node 24 tarball + `npm i -g pnpm@12.3.4`) and make sure `node`/`pnpm` resolve on PATH:
 
 ```sh
 pnpm install
