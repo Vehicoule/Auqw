@@ -36,9 +36,19 @@ export interface SqliteDriver {
    * migration. Runs outside the transaction boundary (a file copy or
    * `VACUUM INTO` cannot run inside BEGIN). `tag` is a lowercase
    * alphanumeric label such as `v1`; drivers conventionally write
-   * `<db>.bak-<tag>` next to the database. A driver over an
-   * ephemeral (e.g. `:memory:`) database has nothing durable to
-   * preserve and may no-op.
+   * `<db>.bak-<tag>` next to the database. A stale `<db>.bak-<tag>`
+   * from an earlier failed attempt is replaced — the database is
+   * still at the pre-migration version, so the backup content is
+   * equivalent and the overwrite keeps initialize retryable.
+   * A driver over an ephemeral (e.g. `:memory:`) database has nothing
+   * durable to preserve and may no-op.
    */
   backup(tag: string): Promise<void>;
+  /**
+   * Removes the `<db>.bak-<tag>` image written by `backup`, invoked
+   * after the migration transaction commits so a full database copy
+   * does not persist. Best-effort: absence of the file is not an
+   * error, and ephemeral databases no-op.
+   */
+  dropBackup(tag: string): Promise<void>;
 }

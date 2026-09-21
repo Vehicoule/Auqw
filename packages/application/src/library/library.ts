@@ -521,7 +521,7 @@ function hasValidLibrarySections(
   ) {
     return false;
   }
-  const entityIds = new Set(entities.map((e) => e.entityId));
+  const entityKinds = new Map(entities.map((e) => [e.entityId, e.kind]));
   const playlistIds = new Set(playlists.map((p) => p.playlistId));
   const likeKeys = new Set<string>();
   for (const like of likes) {
@@ -530,16 +530,20 @@ function hasValidLibrarySections(
       return false;
     }
     likeKeys.add(key);
-    // 'track' likes name recordings; entity likes name entities.
-    const target =
-      like.entityKind === 'track' ? recordingIds : entityIds;
-    if (!target.has(like.targetId)) {
+    // 'track' likes name recordings; entity likes must name an entity
+    // of the same kind.
+    const resolves =
+      like.entityKind === 'track'
+        ? recordingIds.has(like.targetId)
+        : entityKinds.get(like.targetId) === like.entityKind;
+    if (!resolves) {
       return false;
     }
   }
   const entityRefKeys = new Set<string>();
   for (const ref of entitySourceRefs) {
-    if (!entityIds.has(ref.entityId)) {
+    // The ref's kind must agree with the target entity's kind.
+    if (entityKinds.get(ref.entityId) !== ref.ref.kind) {
       return false;
     }
     const key = `${ref.entityId} ${ref.provider}`;
