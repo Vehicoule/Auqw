@@ -821,7 +821,7 @@ function GalleryBody({
 
       <Section title="sheets" note="row actions · add to playlist">
         <Frame height={420}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <RowActionsSheet
               title="Dracula"
               actions={[
@@ -836,7 +836,7 @@ function GalleryBody({
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={460}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <AddToPlaylistSheet
               playlists={fixtureLibraryModel.cards
                 .filter((c) => c.kind === 'playlist' && c.playlistId !== null)
@@ -854,7 +854,7 @@ function GalleryBody({
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={360}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: theme.colors.raised }}>
             <ProviderPickerSheet
               title="lyrics provider"
               options={[

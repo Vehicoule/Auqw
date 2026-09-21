@@ -56,6 +56,13 @@ export type { AppNavbarProps, NavbarProps } from './navbar.tsx';
 
 export { PlatformTabs } from './platform-tabs.tsx';
 export type { PlatformTabsProps } from './platform-tabs.tsx';
+export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
+export type {
+  AppStackProps,
+  PushScreenProps,
+  SheetScreenProps,
+  StackItemProps,
+} from './stack.tsx';
 
 export { MiniPlayer } from './mini-player.tsx';
 export type { MiniPlayerProps } from './mini-player.tsx';
