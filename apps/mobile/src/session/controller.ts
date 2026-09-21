@@ -517,6 +517,10 @@ export async function createSessionController(
           atMs: clock.nowMs(),
         });
       }
+      // Final re-derive: a connectivity seed/edge during boot may
+      // have projected while the download ledger was still empty —
+      // replay the current truth now that owned files resolve.
+      session.connectivityChanged();
     },
     rehydrateMedia,
     async replaceLibrary(text, signal) {
