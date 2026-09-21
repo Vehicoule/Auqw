@@ -27,6 +27,7 @@ function recording(id: string): Recording {
     versionLabels: [],
     sourceRefs: [{ provider: 'itunes', kind: 'track', id: `it-${id}` }],
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -71,6 +72,9 @@ function assertPersistable(
     matchReviews: [],
     lyricsCache: [],
     artworkCache: [],
+    downloads: [],
+    localSources: [],
+    localFiles: [],
     queue: {
       revision: 0,
       occurrences: [],

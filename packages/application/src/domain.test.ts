@@ -1,5 +1,8 @@
 import {
+  isDownloadRecord,
   isEntityRef,
+  isLocalFile,
+  isLocalSource,
   isRecording,
   isSettings,
   isSourceRef,
@@ -7,7 +10,14 @@ import {
   isTrackRef,
   recordingFromMetadata,
 } from './domain.ts';
-import type { Settings, SourceRef, TrackMetadata } from './domain.ts';
+import type {
+  DownloadRecord,
+  LocalFile,
+  LocalSource,
+  Settings,
+  SourceRef,
+  TrackMetadata,
+} from './domain.ts';
 import { assert, assertEqual } from './testing/assert.ts';
 
 const REF: SourceRef = {
@@ -168,7 +178,17 @@ export function run(): void {
   assert(!isSettings({ ...settings, lyricsProvider: 7 }));
   assert(!isSettings({ ...settings, radioProvider: '' }));
   assert(!isSettings({ ...settings, strayProvider: 'x' }));
+  assert(
+    isSettings({ ...settings, downloadMetered: true }),
+    'metered downloads opt-in is a boolean',
+  );
+  assert(!isSettings({ ...settings, downloadMetered: 1 }));
 
+  assertEqual(recording.provenance, 'provider', 'provider minted');
+  assert(
+    !isRecording({ ...recording, provenance: 'external' }),
+    'provenance is a closed enum',
+  );
   assert(!isRecording({ ...recording, id: '' }));
   assert(!isRecording({ ...recording, versionLabels: ['bogus'] }));
   assert(
@@ -206,4 +226,97 @@ export function run(): void {
       ],
     }),
   );
+
+  // Slice-3 records: downloads, local sources, local files.
+  const download: DownloadRecord = {
+    downloadId: 'dl-1',
+    recordingId: 'rec-1',
+    provider: 'itunes',
+    sourceRef: REF,
+    filePath: '/downloads/rec-1.m4a',
+    bytes: 4_194_304,
+    state: 'available',
+    committedOffset: 4_194_304,
+    checksum: 'a'.repeat(64),
+    mime: 'audio/mp4',
+    itag: 140,
+    expiresAtMs: 500_000,
+    error: null,
+    priority: 2,
+    requestedMs: 100,
+    downloadedMs: 200,
+  };
+  assert(isDownloadRecord(download));
+  assert(
+    !isDownloadRecord({ ...download, state: 'deleted' }),
+    'download state is a closed enum',
+  );
+  assert(
+    !isDownloadRecord({ ...download, committedOffset: download.bytes + 1 }),
+    'resume offset cannot exceed the file',
+  );
+  assert(
+    !isDownloadRecord({ ...download, checksum: 'not-hex' }),
+    'checksum is sha-256 hex',
+  );
+  assert(
+    !isDownloadRecord({
+      ...download,
+      state: 'available' as const,
+      downloadedMs: null,
+    }),
+    'an available download carries its completion stamp',
+  );
+  assert(
+    isDownloadRecord({
+      ...download,
+      state: 'failed_with_retry' as const,
+      downloadedMs: null,
+      error: { kind: 'storage-full', message: 'disk full' },
+    }),
+  );
+  assert(
+    !isDownloadRecord({
+      ...download,
+      error: { kind: 'x'.repeat(65), message: 'k' },
+    }),
+  );
+  assert(!isDownloadRecord({ ...download, extra: true }));
+
+  const source: LocalSource = {
+    sourceId: 'src-1',
+    treeUri: 'content://com.android.externalstorage.documents/tree/music',
+    label: 'Music',
+    addedMs: 10,
+    lastScanMs: null,
+  };
+  assert(isLocalSource(source));
+  assert(isLocalSource({ ...source, lastScanMs: 20 }));
+  assert(!isLocalSource({ ...source, lastScanMs: -1 }));
+  assert(!isLocalSource({ ...source, treeUri: '' }));
+
+  const file: LocalFile = {
+    fileId: 'lf-1',
+    sourceId: 'src-1',
+    docId: 'doc-9',
+    size: 4_194_304,
+    fingerprint: 'fp-abc',
+    title: 'Song',
+    artist: null,
+    album: null,
+    durationMs: null,
+    genre: null,
+    recordingId: 'rec-1',
+  };
+  assert(isLocalFile(file));
+  assert(
+    isLocalFile({
+      ...file,
+      title: null,
+      durationMs: 300_000,
+      genre: 'Rock',
+    }),
+  );
+  assert(!isLocalFile({ ...file, size: -1 }));
+  assert(!isLocalFile({ ...file, durationMs: 1.5 }));
 }

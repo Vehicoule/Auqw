@@ -17,15 +17,19 @@ import {
 } from '../domain.ts';
 import type {
   ArtworkRef,
+  DownloadRecord,
   EntityKind,
   EntityRef,
   Like,
+  LocalFile,
+  LocalSource,
   Recording,
   Settings,
   SourceMapping,
   SourceRef,
   TrackMetadata,
 } from '../domain.ts';
+import { isDownloadRecord, isLocalFile, isLocalSource } from '../domain.ts';
 
 /** Provider-independent album/artist page a like can attach to. */
 export type Entity = {
@@ -174,6 +178,9 @@ export type PersistedShape = {
   readonly matchReviews: readonly MatchReview[];
   readonly lyricsCache: readonly LyricsCacheEntry[];
   readonly artworkCache: readonly ArtworkCacheEntry[];
+  readonly downloads: readonly DownloadRecord[];
+  readonly localSources: readonly LocalSource[];
+  readonly localFiles: readonly LocalFile[];
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
 };
@@ -477,6 +484,11 @@ function isRecordingMapping(value: unknown): value is RecordingMapping {
 function hasValidLibrarySections(
   sections: Record<string, unknown>,
   recordingIds: ReadonlySet<string>,
+  localSections?: {
+    downloads: unknown;
+    localSources: unknown;
+    localFiles: unknown;
+  },
 ): boolean {
   const likes = sections['likes'];
   const entities = sections['entities'];
@@ -573,6 +585,49 @@ function hasValidLibrarySections(
       return false;
     }
   }
+  // Download/local sections persist with the library but never export —
+  // filePath/docId/treeUri are device-local. Their foreign keys still
+  // validate against the document's own rows.
+  if (localSections !== undefined) {
+    const downloads = localSections.downloads;
+    const localSources = localSections.localSources;
+    const localFiles = localSections.localFiles;
+    if (
+      !Array.isArray(downloads) ||
+      !downloads.every(isDownloadRecord) ||
+      !Array.isArray(localSources) ||
+      !localSources.every(isLocalSource) ||
+      !Array.isArray(localFiles) ||
+      !localFiles.every(isLocalFile)
+    ) {
+      return false;
+    }
+    if (
+      !hasUniqueIds(downloads, (d) => d.downloadId) ||
+      !hasUniqueIds(localSources, (s) => s.sourceId) ||
+      !hasUniqueIds(localFiles, (f) => f.fileId)
+    ) {
+      return false;
+    }
+    // One download per recording (recording_id UNIQUE in the schema).
+    if (!hasUniqueIds(downloads, (d) => d.recordingId)) {
+      return false;
+    }
+    const sourceIds = new Set(localSources.map((s) => s.sourceId));
+    for (const download of downloads) {
+      if (!recordingIds.has(download.recordingId)) {
+        return false;
+      }
+    }
+    for (const file of localFiles) {
+      if (
+        !sourceIds.has(file.sourceId) ||
+        !recordingIds.has(file.recordingId)
+      ) {
+        return false;
+      }
+    }
+  }
   return true;
 }
 
@@ -588,6 +643,9 @@ const PERSISTED_KEYS = [
   'matchReviews',
   'lyricsCache',
   'artworkCache',
+  'downloads',
+  'localSources',
+  'localFiles',
   'queue',
   'settings',
 ];
@@ -630,7 +688,13 @@ export function isPersistedState(value: unknown): value is PersistedShape {
   ) {
     return false;
   }
-  if (!hasValidLibrarySections(v, recordingIds)) {
+  if (
+    !hasValidLibrarySections(v, recordingIds, {
+      downloads: v['downloads'],
+      localSources: v['localSources'],
+      localFiles: v['localFiles'],
+    })
+  ) {
     return false;
   }
   for (const occurrence of queue.occurrences) {
@@ -710,9 +774,11 @@ export function isExportDocument(value: unknown): value is ExportDocument {
     mappingsByRecording.set(row.recordingId, list);
   }
   // Reassembling each recording also enforces >=1 source ref and
-  // (provider, kind, id) uniqueness per recording.
+  // (provider, kind, id) uniqueness per recording. Pre-slice-3 exports
+  // carry no `provenance`; every row then was provider-sourced.
   for (const { rec, id } of records) {
     const assembled = {
+      provenance: 'provider',
       ...rec,
       sourceRefs: refsByRecording.get(id) ?? [],
       mappings: mappingsByRecording.get(id) ?? [],

@@ -94,6 +94,7 @@ function recording(id: string, refs: readonly SourceRef[]): Recording {
     versionLabels: [],
     sourceRefs: refs,
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -128,6 +129,9 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
     matchReviews: partial.matchReviews ?? [],
     lyricsCache: partial.lyricsCache ?? [],
     artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? emptyQueue(),
     settings: partial.settings ?? SETTINGS,
   };
@@ -2511,6 +2515,9 @@ function applyCommits(
       matchReviews: batch.matchReviews ?? state.matchReviews,
       lyricsCache: batch.lyricsCache ?? state.lyricsCache,
       artworkCache: batch.artworkCache ?? state.artworkCache,
+      downloads: batch.downloads ?? state.downloads,
+      localSources: batch.localSources ?? state.localSources,
+      localFiles: batch.localFiles ?? state.localFiles,
       queue: batch.queue ?? state.queue,
       settings: batch.settings ?? state.settings,
     }),

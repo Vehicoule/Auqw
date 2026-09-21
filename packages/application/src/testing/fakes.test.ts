@@ -34,6 +34,9 @@ function state(): PersistedState {
     matchReviews: [],
     lyricsCache: [],
     artworkCache: [],
+    downloads: [],
+    localSources: [],
+    localFiles: [],
     queue: {
       revision: 0,
       occurrences: [],

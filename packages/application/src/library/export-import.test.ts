@@ -70,6 +70,7 @@ function recording(id: string, refs: readonly SourceRef[]): Recording {
     versionLabels: [],
     sourceRefs: refs,
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -104,6 +105,9 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
     matchReviews: partial.matchReviews ?? [],
     lyricsCache: partial.lyricsCache ?? [],
     artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? emptyQueue(),
     settings: partial.settings ?? SETTINGS,
   };
@@ -249,6 +253,7 @@ async function parseRejects(): Promise<void> {
     recordings: [],
     sourceRefs: [],
     mappings: [],
+    provenance: 'provider',
     likes: [{ entityKind: 'track', targetId: 'ghost', likedAtMs: 1 }],
     entities: [],
     entitySourceRefs: [],

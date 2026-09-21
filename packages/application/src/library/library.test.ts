@@ -49,6 +49,7 @@ const RECORDING: Recording = {
   versionLabels: [],
   sourceRefs: [TRACK_REF],
   mappings: [],
+  provenance: 'provider',
 };
 
 const ENTITY = {
@@ -156,6 +157,9 @@ function persisted(): Record<string, unknown> {
     matchReviews: [REVIEW],
     lyricsCache: [LYRICS],
     artworkCache: [ARTWORK],
+    downloads: [],
+    localSources: [],
+    localFiles: [],
     queue: QUEUE,
     settings: SETTINGS,
   };

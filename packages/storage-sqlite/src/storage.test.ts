@@ -5,10 +5,13 @@ import { CancellationSource } from '@auqw/application';
 import type {
   ArtworkCacheEntry,
   AttemptTrace,
+  DownloadRecord,
   Entity,
   EntitySourceRef,
   ExportDocument,
   Like,
+  LocalFile,
+  LocalSource,
   LyricsCacheEntry,
   MatchEvidence,
   MatchReview,
@@ -76,6 +79,7 @@ function recording(
     versionLabels: [],
     sourceRefs: refs,
     mappings,
+    provenance: 'provider',
     ...overrides,
   };
 }
@@ -1149,6 +1153,7 @@ async function importAtomicity(): Promise<void> {
       { recordingId: 'ghost', ref: ref('itunes', 'g1') },
     ],
     mappings: [],
+    provenance: 'provider',
     likes: [],
     entities: [],
     entitySourceRefs: [],
@@ -1190,6 +1195,7 @@ async function importAtomicity(): Promise<void> {
         genre: null,
         isrc: null,
         versionLabels: [],
+        provenance: 'provider',
       },
     ],
     sourceRefs: [{ recordingId: 'r9', ref: ref('itunes', 'i9') }],
@@ -1255,6 +1261,7 @@ async function importResetsExcluded(): Promise<void> {
         genre: null,
         isrc: null,
         versionLabels: [],
+        provenance: 'provider',
       },
     ],
     sourceRefs: [{ recordingId: 'r9', ref: ref('itunes', 'i9') }],
@@ -1301,6 +1308,171 @@ async function importResetsExcluded(): Promise<void> {
   driver.close();
 }
 
+function download(
+  recordingId: string,
+  overrides: Partial<DownloadRecord> = {},
+): DownloadRecord {
+  return {
+    downloadId: `dl-${recordingId}`,
+    recordingId,
+    provider: 'itunes',
+    sourceRef: ref('itunes', 'i1'),
+    filePath: `/downloads/${recordingId}.m4a`,
+    bytes: 4_194_304,
+    state: 'available',
+    committedOffset: 4_194_304,
+    checksum: 'a'.repeat(64),
+    mime: 'audio/mp4',
+    itag: 140,
+    expiresAtMs: 500_000,
+    error: null,
+    priority: 2,
+    requestedMs: 100,
+    downloadedMs: 200,
+    ...overrides,
+  };
+}
+
+// 15. v2 -> v3 migration: pre-existing rows survive, ALTERed columns
+// take their defaults, and the new tables accept rows.
+async function migrationV2toV3(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[1]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 2);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1, NULL, NULL, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
+      VALUES ('r1', 'Song r1', 'Artist', 'Album', 300000, 2020, '[]', NULL, 'Rock', NULL, '[]');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v2 -> v3 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.recordings.length, 1);
+  assertEqual(
+    state.recordings[0]?.provenance,
+    'provider',
+    'pre-slice-3 rows are provider-sourced',
+  );
+  assertEqual(
+    state.settings.downloadMetered,
+    undefined,
+    'metered downloads default off',
+  );
+  assertDeepEqual(state.downloads, []);
+  assertDeepEqual(state.localSources, []);
+  assertDeepEqual(state.localFiles, []);
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
+// 16. downloads + local_sources + local_files round-trip through
+// commit/load; a recording rewrite cascades its dependents; an
+// interrupted write rolls back.
+async function downloadLocalRoundtrip(): Promise<void> {
+  const { driver, failing, storage } = rig();
+  const recordings = [
+    recording('r1', [ref('itunes', 'i1')]),
+    recording('r2', [ref('local', 'lf-1')], [], { provenance: 'local' }),
+  ];
+  assert(
+    (await storage.commit({ recordings }, ctx().context)).ok,
+    'recordings commit',
+  );
+  const sources: LocalSource[] = [
+    {
+      sourceId: 'src-1',
+      treeUri: 'content://tree/music',
+      label: 'Music',
+      addedMs: 10,
+      lastScanMs: null,
+    },
+  ];
+  const files: LocalFile[] = [
+    {
+      fileId: 'lf-1',
+      sourceId: 'src-1',
+      docId: 'doc-42',
+      size: 4_194_304,
+      fingerprint: 'fp-abc',
+      title: 'Local Song',
+      artist: null,
+      album: null,
+      durationMs: null,
+      genre: null,
+      recordingId: 'r2',
+    },
+  ];
+  const downloads: DownloadRecord[] = [
+    download('r1'),
+    download('r2', {
+      downloadId: 'dl-r2',
+      provider: 'local',
+      sourceRef: ref('local', 'lf-1'),
+      filePath: '/downloads/lf-1.flac',
+      state: 'transferring',
+      committedOffset: 1_048_576,
+      checksum: null,
+      downloadedMs: null,
+      error: null,
+    }),
+  ];
+  const committed = await storage.commit(
+    { downloads, localSources: sources, localFiles: files },
+    ctx().context,
+  );
+  assert(committed.ok, 'download/local sections commit');
+  const state = await loadOk(storage);
+  assertDeepEqual(state.downloads, downloads, 'downloads round-trip');
+  assertDeepEqual(state.localSources, sources, 'sources round-trip');
+  assertDeepEqual(state.localFiles, files, 'files round-trip');
+  // A recording rewrite that orphans a download row fails validation —
+  // dependents must be rewritten consistently inside the batch.
+  const dangling = await storage.commit(
+    { recordings: [recordings[1]!] },
+    ctx().context,
+  );
+  assert(!dangling.ok, 'dangling download recording_id rejected');
+  const rescoped = await storage.commit(
+    {
+      recordings: [recordings[1]!],
+      downloads: [downloads[1]!],
+      localSources: sources,
+      localFiles: files,
+    },
+    ctx().context,
+  );
+  assert(rescoped.ok, 'consistent subset commit');
+  const after = await loadOk(storage);
+  assertEqual(
+    after.recordings.length,
+    1,
+    'recordings section replaced wholesale',
+  );
+  assertDeepEqual(after.downloads, [downloads[1]!], 'downloads cascade');
+  assertDeepEqual(after.localFiles, files, 'local files cascade');
+  // An interrupted write mid-insert rolls back the whole commit:
+  // execute 1 is the downloads DELETE, execute 2 the download INSERT.
+  const base = await loadOk(storage);
+  failing.failBeforeExecute(2);
+  const failed = await storage.commit(
+    { downloads: [download('r2', { downloadId: 'dl-x' })] },
+    ctx().context,
+  );
+  assert(!failed.ok, 'injected mid-write failure surfaces');
+  const restored = await loadOk(storage);
+  assertDeepEqual(restored, base, 'interrupted write rolls back');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -1319,6 +1491,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['parameterization', parameterization],
   ['migrationV1toV2', migrationV1toV2],
   ['migrationBackupFile', migrationBackupFile],
+  ['migrationV2toV3', migrationV2toV3],
+  ['downloadLocalRoundtrip', downloadLocalRoundtrip],
   ['ownedRoundtrip', ownedRoundtrip],
   ['exportImportRoundtrip', exportImportRoundtrip],
   ['importAtomicity', importAtomicity],

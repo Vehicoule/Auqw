@@ -78,7 +78,24 @@ export type Recording = {
   versionLabels: readonly VersionLabel[];
   sourceRefs: readonly SourceRef[];
   mappings: readonly SourceMapping[];
+  /**
+   * Where the recording came from: 'provider' rows are catalog-sourced
+   * and resolve through provider plugins; 'local' rows were materialized
+   * by a local-file scan and play through the built-in `local` provider
+   * convention. Defaults to 'provider' for pre-slice-3 data.
+   */
+  provenance: RecordingProvenance;
 };
+
+export type RecordingProvenance = 'provider' | 'local';
+
+/** The built-in local-files provider id — never routed to a plugin. */
+export const LOCAL_PROVIDER = 'local';
+
+/** sourceRef shape for a local file: the stable fingerprint-derived id. */
+export function localTrackRef(fileId: string): SourceRef {
+  return { provider: LOCAL_PROVIDER, kind: 'track', id: fileId };
+}
 
 export type LikeEntityKind = 'track' | EntityKind;
 
@@ -129,6 +146,11 @@ export type Settings = {
    * inside [ARTWORK_CACHE_BUDGET_MIN_BYTES, ARTWORK_CACHE_BUDGET_MAX_BYTES].
    */
   artworkCacheBytes?: number;
+  /**
+   * Cellular/metered-network downloads opt-in. Absent or false means
+   * downloads wait for an unmetered connection.
+   */
+  downloadMetered?: boolean;
 };
 
 const VERSION_LABELS: ReadonlySet<string> = new Set([
@@ -153,6 +175,11 @@ const SOURCE_REF_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
+
+const RECORDING_PROVENANCES: ReadonlySet<string> = new Set([
+  'provider',
+  'local',
+]);
 
 const LIKE_ENTITY_KINDS: ReadonlySet<string> = new Set([
   'track',
@@ -386,6 +413,7 @@ export function isRecording(value: unknown): value is Recording {
       'versionLabels',
       'sourceRefs',
       'mappings',
+      'provenance',
     ]) &&
     isString(value['id'], 64) &&
     isString(value['title'], 512) &&
@@ -408,7 +436,9 @@ export function isRecording(value: unknown): value is Recording {
     value['sourceRefs'].every(isTrackRef) &&
     hasUniqueSourceRefs(value['sourceRefs']) &&
     Array.isArray(value['mappings']) &&
-    value['mappings'].every(isSourceMapping)
+    value['mappings'].every(isSourceMapping) &&
+    typeof value['provenance'] === 'string' &&
+    RECORDING_PROVENANCES.has(value['provenance'])
   );
 }
 
@@ -428,6 +458,7 @@ export function isSettings(value: unknown): value is Settings {
       'lyricsProvider',
       'radioProvider',
       'artworkCacheBytes',
+      'downloadMetered',
     ]) &&
     isString(value['catalogProvider'], 64) &&
     isString(value['playbackProvider'], 64) &&
@@ -449,7 +480,9 @@ export function isSettings(value: unknown): value is Settings {
       (typeof value['artworkCacheBytes'] === 'number' &&
         Number.isSafeInteger(value['artworkCacheBytes']) &&
         value['artworkCacheBytes'] >= ARTWORK_CACHE_BUDGET_MIN_BYTES &&
-        value['artworkCacheBytes'] <= ARTWORK_CACHE_BUDGET_MAX_BYTES))
+        value['artworkCacheBytes'] <= ARTWORK_CACHE_BUDGET_MAX_BYTES)) &&
+    (value['downloadMetered'] === undefined ||
+      typeof value['downloadMetered'] === 'boolean')
   );
 }
 
@@ -559,6 +592,8 @@ export function recordingFromMetadata(
     versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
     sourceRefs: [metadata.sourceRef],
     mappings: [],
+    provenance:
+      metadata.sourceRef.provider === LOCAL_PROVIDER ? 'local' : 'provider',
   };
 }
 
@@ -585,4 +620,269 @@ export function mergeRecordingMetadata(
     isrc: metadata.isrc ?? recording.isrc,
     versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
   };
+}
+
+// ---- downloads (slice 3) -------------------------------------------------
+
+/**
+ * The download FSM's persisted states. `requested` is queued but
+ * unstarted; `transferring` holds a live or resumable transfer;
+ * `available` is the durable terminal (files never expire);
+ * `failed_with_retry` keeps the row for an explicit retry;
+ * `removing` is the delete-in-flight mark that startup finishes.
+ */
+export type DownloadState =
+  | 'requested'
+  | 'transferring'
+  | 'available'
+  | 'failed_with_retry'
+  | 'removing';
+
+/**
+ * One owned download row — at most one per recording
+ * (`recording_id UNIQUE`; a re-download replaces the row). `filePath`
+ * is device-local transport detail: it is never exported.
+ */
+export type DownloadRecord = {
+  downloadId: string;
+  recordingId: string;
+  /** The minting provider id — the provider that owns `sourceRef`. */
+  provider: string;
+  /** The mapping the transfer minted from, for resume/re-mint. */
+  sourceRef: SourceRef;
+  /** Absolute path of the committed file (device-local). */
+  filePath: string;
+  /** Final byte size once `state` is `available`; the sink size before. */
+  bytes: number;
+  state: DownloadState;
+  /** Durable resume offset — bytes the sink has committed. */
+  committedOffset: number;
+  /** SHA-256 hex of the finalized file; null until finalize. */
+  checksum: string | null;
+  mime: string | null;
+  /** Minted format pin (provider-specific, e.g. itag); null when none. */
+  itag: number | null;
+  /**
+   * Mint expiry of the in-flight/last source. Honest for partial
+   * downloads; `available` rows ignore it.
+   */
+  expiresAtMs: number | null;
+  /** The last typed failure on a `failed_with_retry` row. */
+  error: { kind: string; message: string } | null;
+  /** Scheduler band: lower starts earlier (see download-manager). */
+  priority: number;
+  requestedMs: number;
+  downloadedMs: number | null;
+};
+
+/** A user-pinned local-files folder (SAF tree grant). */
+export type LocalSource = {
+  sourceId: string;
+  /** Persisted SAF tree URI grant. */
+  treeUri: string;
+  label: string;
+  addedMs: number;
+  lastScanMs: number | null;
+};
+
+/**
+ * One scanned local file. `fileId` is fingerprint-derived (stable
+ * across moves); `docId` is the SAF document locator — refreshable,
+ * never exported.
+ */
+export type LocalFile = {
+  fileId: string;
+  sourceId: string;
+  docId: string;
+  size: number;
+  fingerprint: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  durationMs: number | null;
+  genre: string | null;
+  recordingId: string;
+};
+
+/** Live transfer progress for UI rows (not persisted). */
+export type DownloadProgress = {
+  downloadId: string;
+  recordingId: string;
+  state: DownloadState;
+  /** Bytes committed so far; equals `committedOffset` while live. */
+  transferredBytes: number;
+  /** Total when the wire reports it; null while unknown. */
+  totalBytes: number | null;
+};
+
+const DOWNLOAD_STATES: ReadonlySet<string> = new Set([
+  'requested',
+  'transferring',
+  'available',
+  'failed_with_retry',
+  'removing',
+]);
+
+export function isDownloadState(value: unknown): value is DownloadState {
+  return typeof value === 'string' && DOWNLOAD_STATES.has(value);
+}
+
+export function isDownloadRecord(value: unknown): value is DownloadRecord {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const {
+    downloadId,
+    recordingId,
+    provider,
+    sourceRef,
+    filePath,
+    bytes,
+    state,
+    committedOffset,
+    checksum,
+    mime,
+    itag,
+    expiresAtMs,
+    error,
+    priority,
+    requestedMs,
+    downloadedMs,
+  } = value;
+  return (
+    hasExactKeys(value, [
+      'downloadId',
+      'recordingId',
+      'provider',
+      'sourceRef',
+      'filePath',
+      'bytes',
+      'state',
+      'committedOffset',
+      'checksum',
+      'mime',
+      'itag',
+      'expiresAtMs',
+      'error',
+      'priority',
+      'requestedMs',
+      'downloadedMs',
+    ]) &&
+    isString(downloadId, 64) &&
+    isString(recordingId, 64) &&
+    isString(provider, 64) &&
+    isTrackRef(sourceRef) &&
+    isString(filePath, 1024) &&
+    isSafeNonNegative(bytes) &&
+    isDownloadState(state) &&
+    isSafeNonNegative(committedOffset) &&
+    committedOffset <= bytes &&
+    (checksum === null ||
+      (typeof checksum === 'string' && /^[0-9a-f]{64}$/.test(checksum))) &&
+    isOptString(mime, 128) &&
+    (itag === null ||
+      (typeof itag === 'number' && Number.isSafeInteger(itag))) &&
+    isOptSafeNonNegative(expiresAtMs) &&
+    (error === null ||
+      (isRecord(error) &&
+        hasExactKeys(error, ['kind', 'message']) &&
+        isString(error['kind'], 64) &&
+        typeof error['message'] === 'string' &&
+        error['message'].length <= 2048)) &&
+    isSafeNonNegative(priority) &&
+    isSafeNonNegative(requestedMs) &&
+    isOptSafeNonNegative(downloadedMs) &&
+    (state !== 'available' || downloadedMs !== null)
+  );
+}
+
+export function isLocalSource(value: unknown): value is LocalSource {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const { sourceId, treeUri, label, addedMs, lastScanMs } = value;
+  return (
+    hasExactKeys(value, [
+      'sourceId',
+      'treeUri',
+      'label',
+      'addedMs',
+      'lastScanMs',
+    ]) &&
+    isString(sourceId, 64) &&
+    isString(treeUri, 2048) &&
+    isString(label, 512) &&
+    isSafeNonNegative(addedMs) &&
+    isOptSafeNonNegative(lastScanMs)
+  );
+}
+
+export function isLocalFile(value: unknown): value is LocalFile {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const {
+    fileId,
+    sourceId,
+    docId,
+    size,
+    fingerprint,
+    title,
+    artist,
+    album,
+    durationMs,
+    genre,
+    recordingId,
+  } = value;
+  return (
+    hasExactKeys(value, [
+      'fileId',
+      'sourceId',
+      'docId',
+      'size',
+      'fingerprint',
+      'title',
+      'artist',
+      'album',
+      'durationMs',
+      'genre',
+      'recordingId',
+    ]) &&
+    isString(fileId, 128) &&
+    isString(sourceId, 64) &&
+    isString(docId, 2048) &&
+    isSafeNonNegative(size) &&
+    isString(fingerprint, 128) &&
+    isOptString(title, 512) &&
+    isOptString(artist, 512) &&
+    isOptString(album, 512) &&
+    isOptSafeNonNegative(durationMs) &&
+    isOptString(genre, 512) &&
+    isString(recordingId, 64)
+  );
+}
+
+export function isDownloadProgress(
+  value: unknown,
+): value is DownloadProgress {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const { downloadId, recordingId, state, transferredBytes, totalBytes } =
+    value;
+  return (
+    hasExactKeys(value, [
+      'downloadId',
+      'recordingId',
+      'state',
+      'transferredBytes',
+      'totalBytes',
+    ]) &&
+    isString(downloadId, 64) &&
+    isString(recordingId, 64) &&
+    isDownloadState(state) &&
+    isSafeNonNegative(transferredBytes) &&
+    isOptSafeNonNegative(totalBytes) &&
+    (totalBytes === null || transferredBytes <= totalBytes)
+  );
 }

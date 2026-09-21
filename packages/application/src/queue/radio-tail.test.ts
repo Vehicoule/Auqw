@@ -83,6 +83,7 @@ function recording(id: string, refs: readonly SourceRef[]): Recording {
     versionLabels: [],
     sourceRefs: refs,
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -148,6 +149,9 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
     matchReviews: partial.matchReviews ?? [],
     lyricsCache: partial.lyricsCache ?? [],
     artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? queue(),
     settings: partial.settings ?? SETTINGS,
   };

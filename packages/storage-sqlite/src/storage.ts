@@ -3,11 +3,15 @@ import type {
   ArtworkCacheEntry,
   AttemptTrace,
   CancellationSignal,
+  DownloadRecord,
+  DownloadState,
   Entity,
   EntityRef,
   EntitySourceRef,
   ExportDocument,
   Like,
+  LocalFile,
+  LocalSource,
   LyricsCacheEntry,
   MatchReview,
   OperationContext,
@@ -219,8 +223,8 @@ export class SqliteStorage implements StoragePort {
         this.#check(signal);
         if (version === 0) {
           await conn.execute(
-            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               this.#defaults.catalogProvider,
               this.#defaults.playbackProvider,
@@ -231,6 +235,7 @@ export class SqliteStorage implements StoragePort {
               this.#defaults.lyricsProvider ?? null,
               this.#defaults.radioProvider ?? null,
               this.#defaults.artworkCacheBytes ?? null,
+              this.#defaults.downloadMetered === true ? 1 : 0,
             ],
             signal,
           );
@@ -308,6 +313,10 @@ export class SqliteStorage implements StoragePort {
           lyricsCache: batch.lyricsCache ?? current.value.lyricsCache,
           artworkCache:
             batch.artworkCache ?? current.value.artworkCache,
+          downloads: batch.downloads ?? current.value.downloads,
+          localSources:
+            batch.localSources ?? current.value.localSources,
+          localFiles: batch.localFiles ?? current.value.localFiles,
           queue: batch.queue ?? current.value.queue,
           settings: batch.settings ?? current.value.settings,
         };
@@ -352,6 +361,14 @@ export class SqliteStorage implements StoragePort {
           likes: batch.likes !== undefined,
           recordings: batch.recordings !== undefined,
           artworkCache: batch.artworkCache !== undefined,
+          downloads:
+            batch.downloads !== undefined ||
+            batch.recordings !== undefined,
+          localFiles:
+            batch.localFiles !== undefined ||
+            batch.localSources !== undefined ||
+            batch.recordings !== undefined,
+          localSources: batch.localSources !== undefined,
           settings: batch.settings !== undefined,
         };
         const deletes: readonly (readonly [boolean, string])[] = [
@@ -361,6 +378,9 @@ export class SqliteStorage implements StoragePort {
           [rewrite.playCounts, 'DELETE FROM play_counts'],
           [rewrite.matchReviews, 'DELETE FROM match_reviews'],
           [rewrite.lyricsCache, 'DELETE FROM lyrics_cache'],
+          [rewrite.downloads, 'DELETE FROM downloads'],
+          [rewrite.localFiles, 'DELETE FROM local_files'],
+          [rewrite.localSources, 'DELETE FROM local_sources'],
           [rewrite.likes, 'DELETE FROM likes'],
           [rewrite.entitySourceRefs, 'DELETE FROM entity_source_refs'],
           [rewrite.entities, 'DELETE FROM entities'],
@@ -381,8 +401,8 @@ export class SqliteStorage implements StoragePort {
         if (rewrite.recordings) {
           for (const recording of merged.recordings) {
             await conn.execute(
-              `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 recording.id,
                 recording.title,
@@ -399,6 +419,7 @@ export class SqliteStorage implements StoragePort {
                 recording.genre,
                 recording.isrc,
                 JSON.stringify(recording.versionLabels),
+                recording.provenance,
               ],
               signal,
             );
@@ -578,6 +599,73 @@ export class SqliteStorage implements StoragePort {
             );
           }
         }
+        if (rewrite.downloads) {
+          for (const download of merged.downloads) {
+            await conn.execute(
+              `INSERT INTO downloads (download_id, recording_id, provider, source_ref_json, file_path, bytes, state, committed_offset, checksum, mime, itag, expires_at_ms, error_json, priority, requested_ms, downloaded_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                download.downloadId,
+                download.recordingId,
+                download.provider,
+                JSON.stringify(download.sourceRef),
+                download.filePath,
+                download.bytes,
+                download.state,
+                download.committedOffset,
+                download.checksum,
+                download.mime,
+                download.itag,
+                download.expiresAtMs,
+                download.error === null
+                  ? null
+                  : JSON.stringify(download.error),
+                download.priority,
+                download.requestedMs,
+                download.downloadedMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.localSources) {
+          for (const source of merged.localSources) {
+            await conn.execute(
+              `INSERT INTO local_sources (source_id, tree_uri, label, added_ms, last_scan_ms)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                source.sourceId,
+                source.treeUri,
+                source.label,
+                source.addedMs,
+                source.lastScanMs,
+              ],
+              signal,
+            );
+          }
+        }
+        if (rewrite.localFiles) {
+          for (const file of merged.localFiles) {
+            await conn.execute(
+              `INSERT INTO local_files (file_id, source_id, doc_id, size, fingerprint, title, artist, album, duration_ms, genre, recording_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                file.fileId,
+                file.sourceId,
+                file.docId,
+                file.size,
+                file.fingerprint,
+                file.title,
+                file.artist,
+                file.album,
+                file.durationMs,
+                file.genre,
+                file.recordingId,
+              ],
+              signal,
+            );
+          }
+        }
         this.#check(signal);
         if (rewrite.queueState) {
           await conn.execute(
@@ -615,8 +703,8 @@ export class SqliteStorage implements StoragePort {
         }
         if (rewrite.settings) {
           await conn.execute(
-            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               merged.settings.catalogProvider,
               merged.settings.playbackProvider,
@@ -627,6 +715,7 @@ export class SqliteStorage implements StoragePort {
               merged.settings.lyricsProvider ?? null,
               merged.settings.radioProvider ?? null,
               merged.settings.artworkCacheBytes ?? null,
+              merged.settings.downloadMetered === true ? 1 : 0,
             ],
             signal,
           );
@@ -751,9 +840,15 @@ export class SqliteStorage implements StoragePort {
         // lyrics_cache foreign-key into the recordings being
         // replaced, so they are cleared; attempt_traces and
         // artwork_cache have no such keys and are left untouched.
+        // Downloads/local_files also key into recordings and get
+        // wiped — the device-local files stay on disk for the
+        // integrity pass to reconcile; local_sources (the user's
+        // folder grants) are kept since the export never carried them.
         for (const statement of [
           'DELETE FROM queue_occurrences',
           'DELETE FROM lyrics_cache',
+          'DELETE FROM downloads',
+          'DELETE FROM local_files',
           'DELETE FROM likes',
           'DELETE FROM match_reviews',
           'DELETE FROM play_history',
@@ -800,8 +895,8 @@ export class SqliteStorage implements StoragePort {
         }
         for (const recording of doc.recordings) {
           await conn.execute(
-            `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               recording.id,
               recording.title,
@@ -818,6 +913,8 @@ export class SqliteStorage implements StoragePort {
               recording.genre,
               recording.isrc,
               JSON.stringify(recording.versionLabels),
+              // Pre-slice-3 exports carry no provenance — 'provider'.
+              recording.provenance ?? 'provider',
             ],
             signal,
           );
@@ -952,8 +1049,8 @@ export class SqliteStorage implements StoragePort {
           );
         }
         await conn.execute(
-          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             doc.settings.catalogProvider,
             doc.settings.playbackProvider,
@@ -964,6 +1061,7 @@ export class SqliteStorage implements StoragePort {
             doc.settings.lyricsProvider ?? null,
             doc.settings.radioProvider ?? null,
             doc.settings.artworkCacheBytes ?? null,
+            doc.settings.downloadMetered === true ? 1 : 0,
           ],
           signal,
         );
@@ -1040,6 +1138,9 @@ type TableRows = {
   matchReviews: readonly SqlRow[];
   lyricsCache: readonly SqlRow[];
   artworkCache: readonly SqlRow[];
+  downloads: readonly SqlRow[];
+  localSources: readonly SqlRow[];
+  localFiles: readonly SqlRow[];
   queueState: readonly SqlRow[];
   queueOccurrences: readonly SqlRow[];
   settings: readonly SqlRow[];
@@ -1068,6 +1169,9 @@ const TABLE_QUERIES: readonly (readonly [keyof TableRows, string])[] = [
   ['matchReviews', 'SELECT * FROM match_reviews ORDER BY rowid'],
   ['lyricsCache', 'SELECT * FROM lyrics_cache ORDER BY rowid'],
   ['artworkCache', 'SELECT * FROM artwork_cache ORDER BY rowid'],
+  ['downloads', 'SELECT * FROM downloads ORDER BY requested_ms, download_id'],
+  ['localSources', 'SELECT * FROM local_sources ORDER BY added_ms, source_id'],
+  ['localFiles', 'SELECT * FROM local_files ORDER BY source_id, file_id'],
   ['queueState', 'SELECT * FROM queue_state WHERE id = 1'],
   ['queueOccurrences', 'SELECT * FROM queue_occurrences ORDER BY ordinal'],
   ['settings', 'SELECT * FROM settings WHERE id = 1'],
@@ -1237,6 +1341,7 @@ function decodeState(rows: TableRows): PersistedState | null {
       ) as Recording['versionLabels'],
       sourceRefs: refsByRecording.get(id) ?? [],
       mappings: mappingsByRecording.get(id) ?? [],
+      provenance: row['provenance'] as Recording['provenance'],
     };
   });
   // likes: polymorphic target_id — 'track' names a recording,
@@ -1469,6 +1574,87 @@ function decodeState(rows: TableRows): PersistedState | null {
       lastAccessedMs: reqNonNegInt(row['last_accessed_ms']),
     };
   });
+  const downloadIds = new Set<string>();
+  const downloadedRecordingIds = new Set<string>();
+  const downloads: DownloadRecord[] = rows.downloads.map((row) => {
+    const downloadId = reqStr(row['download_id']);
+    if (downloadIds.has(downloadId)) {
+      fail();
+    }
+    downloadIds.add(downloadId);
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId) ||
+        downloadedRecordingIds.has(recordingId)) {
+      fail();
+    }
+    downloadedRecordingIds.add(recordingId);
+    const state = row['state'];
+    return {
+      downloadId,
+      recordingId,
+      provider: reqNonEmpty(row['provider']),
+      sourceRef: json(row['source_ref_json']) as SourceRef,
+      filePath: reqStr(row['file_path']),
+      bytes: reqNonNegInt(row['bytes']),
+      state: state as DownloadState,
+      committedOffset: reqNonNegInt(row['committed_offset']),
+      checksum: optStr(row['checksum']),
+      mime: optStr(row['mime']),
+      itag: optInt(row['itag']),
+      expiresAtMs: optInt(row['expires_at_ms']),
+      error:
+        row['error_json'] === null
+          ? null
+          : (json(row['error_json']) as DownloadRecord['error']),
+      priority: reqNonNegInt(row['priority']),
+      requestedMs: reqNonNegInt(row['requested_ms']),
+      downloadedMs: optInt(row['downloaded_ms']),
+    };
+  });
+  const localSourceIds = new Set<string>();
+  const localSources: LocalSource[] = rows.localSources.map((row) => {
+    const sourceId = reqStr(row['source_id']);
+    if (localSourceIds.has(sourceId)) {
+      fail();
+    }
+    localSourceIds.add(sourceId);
+    return {
+      sourceId,
+      treeUri: reqStr(row['tree_uri']),
+      label: reqStr(row['label']),
+      addedMs: reqNonNegInt(row['added_ms']),
+      lastScanMs: optInt(row['last_scan_ms']),
+    };
+  });
+  const localFileIds = new Set<string>();
+  const localFiles: LocalFile[] = rows.localFiles.map((row) => {
+    const fileId = reqStr(row['file_id']);
+    if (localFileIds.has(fileId)) {
+      fail();
+    }
+    localFileIds.add(fileId);
+    const sourceId = reqStr(row['source_id']);
+    if (!localSourceIds.has(sourceId)) {
+      fail();
+    }
+    const recordingId = reqStr(row['recording_id']);
+    if (!recordingIds.has(recordingId)) {
+      fail();
+    }
+    return {
+      fileId,
+      sourceId,
+      docId: reqStr(row['doc_id']),
+      size: reqNonNegInt(row['size']),
+      fingerprint: reqStr(row['fingerprint']),
+      title: optStr(row['title']),
+      artist: optStr(row['artist']),
+      album: optStr(row['album']),
+      durationMs: optInt(row['duration_ms']),
+      genre: optStr(row['genre']),
+      recordingId,
+    };
+  });
   const blocked =
     queueRow['blocked_error_json'] === null
       ? undefined
@@ -1538,6 +1724,9 @@ function decodeState(rows: TableRows): PersistedState | null {
     ...(settingsRow['artwork_cache_bytes'] === null
       ? {}
       : { artworkCacheBytes: reqInt(settingsRow['artwork_cache_bytes']) }),
+    ...(reqBool(settingsRow['download_metered'])
+      ? { downloadMetered: true }
+      : {}),
   };
   if (bad) {
     return null;
@@ -1554,6 +1743,9 @@ function decodeState(rows: TableRows): PersistedState | null {
     matchReviews,
     lyricsCache,
     artworkCache,
+    downloads,
+    localSources,
+    localFiles,
     queue,
     settings,
   };

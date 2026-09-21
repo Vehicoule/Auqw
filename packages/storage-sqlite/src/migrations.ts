@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 const MIGRATION_1: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS schema_version (
@@ -171,8 +171,66 @@ const MIGRATION_2: readonly string[] = [
   `ALTER TABLE likes_new RENAME TO likes`,
 ];
 
+/**
+ * v2 -> v3: offline slice (downloads + local files). `downloads` holds
+ * one row per recording (`recording_id UNIQUE` — re-download
+ * replaces); `local_sources`/`local_files` index user-picked folders.
+ * `recordings` gains `provenance` ('provider' default — every
+ * pre-slice-3 row is catalog-sourced), `settings` gains
+ * `download_metered` (off by default) — both via ALTER with defaults.
+ * `downloads.expires_at_ms`/`downloaded_ms` are mint-expiry and
+ * completion stamps; `error_json` carries the last typed failure on
+ * `failed_with_retry` rows.
+ */
+const MIGRATION_3: readonly string[] = [
+  `CREATE TABLE downloads (
+  download_id TEXT PRIMARY KEY,
+  recording_id TEXT NOT NULL UNIQUE REFERENCES recordings(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  source_ref_json TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  bytes INTEGER NOT NULL CHECK (bytes >= 0),
+  state TEXT NOT NULL CHECK (state IN ('requested','transferring','available','failed_with_retry','removing')),
+  committed_offset INTEGER NOT NULL CHECK (committed_offset >= 0),
+  checksum TEXT,
+  mime TEXT,
+  itag INTEGER,
+  expires_at_ms INTEGER CHECK (expires_at_ms >= 0 OR expires_at_ms IS NULL),
+  error_json TEXT,
+  priority INTEGER NOT NULL CHECK (priority >= 0),
+  requested_ms INTEGER NOT NULL CHECK (requested_ms >= 0),
+  downloaded_ms INTEGER CHECK (downloaded_ms >= 0 OR downloaded_ms IS NULL)
+)`,
+  `CREATE INDEX downloads_state_idx ON downloads(state)`,
+  `CREATE TABLE local_sources (
+  source_id TEXT PRIMARY KEY,
+  tree_uri TEXT NOT NULL,
+  label TEXT NOT NULL,
+  added_ms INTEGER NOT NULL CHECK (added_ms >= 0),
+  last_scan_ms INTEGER CHECK (last_scan_ms >= 0 OR last_scan_ms IS NULL)
+)`,
+  `CREATE TABLE local_files (
+  file_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES local_sources(source_id) ON DELETE CASCADE,
+  doc_id TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK (size >= 0),
+  fingerprint TEXT NOT NULL,
+  title TEXT,
+  artist TEXT,
+  album TEXT,
+  duration_ms INTEGER CHECK (duration_ms >= 0 OR duration_ms IS NULL),
+  genre TEXT,
+  recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE
+)`,
+  `CREATE INDEX local_files_source_idx ON local_files(source_id)`,
+  `CREATE INDEX local_files_fingerprint_idx ON local_files(fingerprint)`,
+  `ALTER TABLE recordings ADD COLUMN provenance TEXT NOT NULL DEFAULT 'provider' CHECK (provenance IN ('provider','local'))`,
+  `ALTER TABLE settings ADD COLUMN download_metered INTEGER NOT NULL DEFAULT 0 CHECK (download_metered IN (0,1))`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
   Object.freeze([...MIGRATION_2]),
+  Object.freeze([...MIGRATION_3]),
 ]);
