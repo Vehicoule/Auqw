@@ -238,22 +238,34 @@ export class DownloadManager {
     // the network ineligible pauses the ACTIVE transfer too — the
     // metered opt-out must protect the whole remaining transfer, not
     // just the next row selection.
-    this.#unsubConnectivity = this.#deps.connectivity.subscribe((snap) => {
-      const meteredAllowed =
-        this.#deps.settings().downloadMetered ?? false;
-      if (!snap.online || (snap.metered && !meteredAllowed)) {
-        void this.#demoteActive().then((demoted) => {
-          if (!demoted.ok) {
-            this.#log(
-              'warn',
-              `downloads: connectivity-edge pause failed: ${demoted.error.kind}`,
-            );
-          }
-        });
-        return;
-      }
-      void this.#pump();
-    });
+    try {
+      this.#unsubConnectivity = this.#deps.connectivity.subscribe((snap) => {
+        const meteredAllowed =
+          this.#deps.settings().downloadMetered ?? false;
+        if (!snap.online || (snap.metered && !meteredAllowed)) {
+          void this.#demoteActive().then((demoted) => {
+            if (!demoted.ok) {
+              this.#log(
+                'warn',
+                `downloads: connectivity-edge pause failed: ${demoted.error.kind}`,
+              );
+            }
+          });
+          return;
+        }
+        void this.#pump();
+      });
+    } catch {
+      // Watch registration can fail where snapshot() still works
+      // (e.g. Android's callback quota) — snapshot-only mode: the
+      // pump gates per-claim, and reevaluation/kick still drive
+      // scheduling; edges just never arrive.
+      this.#unsubConnectivity = null;
+      this.#log(
+        'warn',
+        'downloads: connectivity watch unavailable — snapshot-only gating',
+      );
+    }
     void this.#pump();
     return ok(undefined);
   }
@@ -541,6 +553,26 @@ export class DownloadManager {
 
   /** Settings toggle (e.g. metered opt-in) — re-run the scheduler. */
   kick(): void {
+    void this.#pump();
+  }
+
+  /**
+   * Eligibility moved outside a connectivity edge — e.g. the
+   * `downloadMetered` toggle flipped while the network stays
+   * cellular. Re-derives both directions: a now-ineligible snapshot
+   * pauses the ACTIVE transfer (same demotion as a metered edge), a
+   * now-eligible one pumps pending rows. An unreadable snapshot falls
+   * through to #pump, which gates on its own snapshot.
+   */
+  async reevaluateEligibility(): Promise<void> {
+    const snap = await this.#deps.connectivity.snapshot();
+    if (snap.ok) {
+      const meteredAllowed = this.#deps.settings().downloadMetered ?? false;
+      if (!snap.value.online || (snap.value.metered && !meteredAllowed)) {
+        void this.#demoteActive();
+        return;
+      }
+    }
     void this.#pump();
   }
 
@@ -908,6 +940,15 @@ export class DownloadManager {
         clock: this.#deps.clock,
         signal,
         resumeAtBytes: live.committedOffset,
+        // The descriptor the existing .part prefix was minted under —
+        // a mint that ignores the pin must restart at 0, never append.
+        expectedEncoding: {
+          mime: live.mime,
+          // bytes is the wire total during transfer; 0 means "never
+          // recorded" and skips the size check.
+          contentLength: live.bytes > 0 ? live.bytes : null,
+          itag: live.itag,
+        },
         hasher: this.#deps.hasher ?? createSha256,
         onProgress: ({ committed, total }) => {
           const current = this.#rows.get(live.downloadId);

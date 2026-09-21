@@ -1317,10 +1317,11 @@ function Main({
             downloadMetered: next,
           })
           .then((updated) => {
-            // Wake the scheduler only after the setting commits — a
-            // kick that lands first reads the old metered flag.
-            if (updated.ok && next) {
-              controller.downloads.kick();
+            // Re-derive only after the setting commits — toggling ON
+            // unblocks waiting rows, toggling OFF pauses an active
+            // cellular transfer; kick() can't demote mid-flight work.
+            if (updated.ok) {
+              void controller.downloads.reevaluateEligibility();
             }
           });
       }
@@ -1973,12 +1974,17 @@ function Main({
       if (model === null) {
         return { state: 'none' as const, requests: [] };
       }
-      const requests = model.entries.flatMap((entry) => {
-        const sourceRef = downloadRefFor(entry.recordingId);
-        return sourceRef === null
-          ? []
-          : [{ recordingId: entry.recordingId, sourceRef }];
-      });
+      // Only MISSING entries: requesting an already-owned recording
+      // with a changed mapping would delete its stored file first —
+      // 'download missing' must never cost offline playback.
+      const requests = model.entries
+        .filter((entry) => !isOwned(entry.recordingId))
+        .flatMap((entry) => {
+          const sourceRef = downloadRefFor(entry.recordingId);
+          return sourceRef === null
+            ? []
+            : [{ recordingId: entry.recordingId, sourceRef }];
+        });
       // 'all' means every entry is owned — a stored download or a
       // local file both count; only-downloadable entries gate it.
       const allStored =

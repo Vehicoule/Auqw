@@ -281,6 +281,76 @@ async function resumeOffset(): Promise<void> {
   assertEqual(result.value.bytes, 10);
 }
 
+async function resumeEncodingDescriptor(): Promise<void> {
+  // A matching descriptor resumes at the durable offset…
+  {
+    const wire = new Wire();
+    const file = bytes(10);
+    wire.serve('https://cdn/x', file);
+    const transfer = new FakeTransfer();
+    transfer.enqueueSink({ digest: 'bb'.repeat(32) });
+    const result = await runTransfer({
+      destName: 'track.mp4',
+      first: resource('https://cdn/x', 10),
+      remint: remintServes(resource('https://cdn/x', 10)),
+      transfer,
+      fetchImpl: wire.fetch,
+      clock: new FakeClock(),
+      signal: source().signal,
+      resumeAtBytes: 4,
+      expectedEncoding: { mime: 'audio/mp4', contentLength: 10, itag: 140 },
+      hasher: createSha256,
+      chunkSize: 4,
+    });
+    assert(result.ok, 'matching-descriptor resume ok');
+    assertEqual(
+      transfer.beginCalls[0]?.resumeAtBytes,
+      4,
+      'matching descriptor resumes',
+    );
+  }
+  // …but a mint that ignored the pin must never append onto foreign
+  // bytes — the prefix is another file, restart at 0.
+  {
+    const wire = new Wire();
+    const file = bytes(10);
+    wire.serve('https://cdn/x', file);
+    const transfer = new FakeTransfer();
+    transfer.enqueueSink({ digest: 'dd'.repeat(32) });
+    const result = await runTransfer({
+      destName: 'track.mp4',
+      first: resource('https://cdn/x', 10), // itag 140
+      remint: remintServes(resource('https://cdn/x', 10)),
+      transfer,
+      fetchImpl: wire.fetch,
+      clock: new FakeClock(),
+      signal: source().signal,
+      resumeAtBytes: 4,
+      expectedEncoding: { mime: 'audio/mp4', contentLength: 10, itag: 141 },
+      hasher: createSha256,
+      chunkSize: 4,
+    });
+    assert(result.ok, 'mismatch restart ok');
+    assertEqual(
+      transfer.beginCalls[0]?.resumeAtBytes,
+      0,
+      'encoding mismatch discards the prefix',
+    );
+    assertDeepEqual(
+      wire.requests.map((r) => r.start),
+      [0, 4, 8],
+      'ranges restart at 0',
+    );
+    const realSha = createSha256();
+    realSha.update(file);
+    assertEqual(
+      transfer.sinks[0]?.finalizedWith,
+      realSha.digest(),
+      'restarted run covers the file digest',
+    );
+  }
+}
+
 async function remintResumeOn403(): Promise<void> {
   const wire = new Wire();
   wire.serve('https://cdn/a', bytes(8));
@@ -833,6 +903,7 @@ export async function run(): Promise<void> {
   await sha256Vectors();
   await happyPath();
   await resumeOffset();
+  await resumeEncodingDescriptor();
   await remintResumeOn403();
   await remint416Too();
   await encodingChangeRestarts();

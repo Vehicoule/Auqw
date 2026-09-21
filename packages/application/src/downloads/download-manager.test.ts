@@ -176,6 +176,7 @@ type Rig = {
   content: Uint8Array;
   wire: { fetch: RangeFetch; ranges: string[] };
   mints: { resumeOffset: number | null; pinItag: number | null }[];
+  meteredFlag: { value: boolean };
   signal: CancellationSignal;
 };
 
@@ -204,6 +205,7 @@ function rig(over: {
   const ids = new SequenceIds();
   const log = new FakeLog();
   const queueState = over.queue ?? queue([]);
+  const meteredFlag = { value: over.meteredAllowed ?? false };
   const mints: Rig['mints'] = [];
   const mintError = over.mintError;
   const resolvePlayback = (
@@ -237,7 +239,7 @@ function rig(over: {
     fetchImpl: wireImpl.fetch,
     resolvePlayback,
     queue: () => queueState,
-    settings: () => settings(over.meteredAllowed),
+    settings: () => settings(meteredFlag.value),
   });
   return {
     manager,
@@ -250,6 +252,7 @@ function rig(over: {
     content,
     wire: wireImpl,
     mints,
+    meteredFlag,
     signal: NEVER,
   };
 }
@@ -879,6 +882,116 @@ async function meteredEdgePausesActive(): Promise<void> {
   );
 }
 
+/**
+ * The `downloadMetered` toggle is an eligibility change that arrives
+ * with NO connectivity edge — toggling off must pause the in-flight
+ * cellular transfer, toggling on must pump the paused row.
+ */
+async function meteredTogglePausesActive(): Promise<void> {
+  const content = bytes(3 * 1024 * 1024);
+  let calls = 0;
+  let abortedOnce = false;
+  const stallingFetch: RangeFetch = (_url, init, signal) => {
+    const header = init.headers['Range'] ?? '';
+    const m = /^bytes=(\d+)-(\d+)$/.exec(header);
+    if (m === null) {
+      return Promise.resolve(resp(400, new Uint8Array(0), null));
+    }
+    const start = Number(m[1]);
+    const end = Math.min(Number(m[2]), content.length - 1);
+    calls += 1;
+    if (calls === 1 || abortedOnce) {
+      const slice = content.slice(start, end + 1);
+      return Promise.resolve(
+        resp(206, slice, `bytes ${start}-${end}/${content.length}`, slice.slice().buffer),
+      );
+    }
+    return new Promise((_res, rej) => {
+      signal.subscribe(() => {
+        abortedOnce = true;
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        rej(error);
+      });
+    });
+  };
+  const r = rig({
+    content,
+    wireFetch: stallingFetch,
+    metered: true,
+    meteredAllowed: true,
+  });
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(100);
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'transferring',
+    'in flight on opted-in cellular',
+  );
+  // Toggle OFF with the network still metered — no edge fires.
+  r.meteredFlag.value = false;
+  await r.manager.reevaluateEligibility();
+  await drain(100);
+  const paused = r.manager.recordFor('rec-1');
+  assertEqual(paused?.state, 'requested', 'toggle-off demotes the runner');
+  assertEqual(
+    paused?.committedOffset,
+    1024 * 1024,
+    'committed offset kept across the toggle',
+  );
+  assertEqual(calls, 2, 'the in-flight fetch was cancelled');
+  // Toggle back ON — the same re-derivation pumps the paused row.
+  r.meteredFlag.value = true;
+  await r.manager.reevaluateEligibility();
+  await drain(100);
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'available',
+    'toggle-on resumes the paused row',
+  );
+  assertEqual(
+    r.mints[1]?.resumeOffset,
+    1024 * 1024,
+    'resume re-mints at the durable offset',
+  );
+}
+
+/**
+ * Native watch registration can throw (Android callback quota) while
+ * snapshot() still works — init degrades to snapshot-only gating
+ * instead of aborting boot.
+ */
+async function subscribeThrowDegrades(): Promise<void> {
+  const r = rig();
+  r.connectivity.subscribe = () => {
+    throw new Error('callback quota');
+  };
+  const inited = await r.manager.init([], r.signal);
+  assert(inited.ok, 'init survives a subscribe throw');
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(200);
+  assertEqual(
+    r.manager.recordFor('rec-1')?.state,
+    'available',
+    'snapshot-only gating still transfers',
+  );
+  assert(
+    r.log.entries.some(
+      (e) => e.level === 'warn' && e.message.includes('snapshot-only'),
+    ),
+    'warn logged',
+  );
+}
+
 export async function run(): Promise<void> {
   await happyPath();
   await dedupeSameMapping();
@@ -901,4 +1014,6 @@ export async function run(): Promise<void> {
   await usageReports();
   await rebandsOnQueueChange();
   await meteredEdgePausesActive();
+  await meteredTogglePausesActive();
+  await subscribeThrowDegrades();
 }

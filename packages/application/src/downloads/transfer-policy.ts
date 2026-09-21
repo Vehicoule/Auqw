@@ -219,9 +219,13 @@ export type TransferProgress = {
  * `resumeAtBytes` when the sink already holds a committed prefix.
  * `remint(resumeOffset, itag)` must re-resolve through
  * `resolvePlayback(ref, { resumeOffset: committed, pinItag })` and
- * return the fresh resource; the encoding triple
- * (mime/contentLength/bitrateKbps) pins the file — a change restarts
- * at 0, since bytes from another encoding cannot be spliced.
+ * return the fresh resource; the encoding descriptor
+ * (mime/contentLength/bitrateKbps/itag) pins the file — a change
+ * restarts at 0, since bytes from another encoding cannot be spliced.
+ * A resume (`resumeAtBytes` > 0) first checks `first` against
+ * `expectedEncoding`, the persisted descriptor of the mint that
+ * produced the `.part` prefix — appending foreign bytes would
+ * publish a corrupt file that still checksums cleanly.
  *
  * Fails typed: `expired-resource` when the mint budget or the
  * zero-progress limit runs out, `invalid-response` on wire-rule
@@ -253,6 +257,18 @@ export async function runTransfer(options: {
    * `finalize` then computes the true digest from disk.
    */
   resumeAtBytes?: number;
+  /**
+   * Descriptor of the mint that produced the existing prefix —
+   * required for honest resume. `null` `mime`/`contentLength` mean
+   * "not recorded" and skip that check; `itag` always compares —
+   * null is a real value (the mint had no format pin). Any mismatch
+   * with `first` restarts at 0.
+   */
+  expectedEncoding?: {
+    readonly mime: string | null;
+    readonly contentLength: number | null;
+    readonly itag: number | null;
+  };
   hasher: () => ChunkHasher;
   onProgress?: (progress: TransferProgress) => void;
   chunkSize?: number;
@@ -282,6 +298,21 @@ export async function runTransfer(options: {
     let url = current.url;
     let start = options.resumeAtBytes ?? 0;
     let total = current.contentLength;
+    const expected = options.expectedEncoding;
+    if (
+      start > 0 &&
+      expected !== undefined &&
+      (expected.mime !== current.mime ||
+        (expected.contentLength !== null &&
+          expected.contentLength !== current.contentLength) ||
+        expected.itag !== current.itag)
+    ) {
+      // The existing prefix was minted under a different encoding —
+      // the mint ignored the pin, or the provider changed the format.
+      // Discarding bytes loses progress; splicing them publishes a
+      // corrupt file — restart clean.
+      start = 0;
+    }
     let mints = 0;
     let zeroProgress = 0;
     let mintStart = start;
@@ -352,7 +383,8 @@ export async function runTransfer(options: {
           const sameEncoding =
             fresh.value.mime === current.mime &&
             fresh.value.contentLength === total &&
-            fresh.value.bitrateKbps === current.bitrateKbps;
+            fresh.value.bitrateKbps === current.bitrateKbps &&
+            fresh.value.itag === current.itag;
           if (sameEncoding) {
             mintStart = start;
             url = fresh.value.url;

@@ -459,26 +459,44 @@ export async function createSessionController(
       // absence resolves to a warn, not a crash. Subscribed BEFORE
       // init so a restored transfer's first edge can't be missed.
       let lastActive = -1;
+      // The same subscription watches the OWNED set: the session
+      // projection resolves queued items through the ledger, so a
+      // download completing (or a removal/integrity drop) must
+      // re-derive or native Next keeps streaming a now-owned remote
+      // ref — or attaches a file that no longer exists.
+      let ownedIds = new Set<string>();
       mediaUnsubs.push(
         downloads.subscribe(() => {
-          const active = downloads
-            .list()
-            .filter((d) => d.state === 'transferring').length;
-          if (active === lastActive) {
-            return;
-          }
-          lastActive = active;
-          try {
-            void host.downloadsActiveChanged(active).catch((thrown) => {
-              void log.write({
-                level: 'warn',
-                message: `fgs update failed: ${nativeMessage(thrown)}`,
-                atMs: clock.nowMs(),
+          const rows = downloads.list();
+          const active = rows.filter(
+            (d) => d.state === 'transferring',
+          ).length;
+          if (active !== lastActive) {
+            lastActive = active;
+            try {
+              void host.downloadsActiveChanged(active).catch((thrown) => {
+                void log.write({
+                  level: 'warn',
+                  message: `fgs update failed: ${nativeMessage(thrown)}`,
+                  atMs: clock.nowMs(),
+                });
               });
-            });
-          } catch {
-            // Method absent on this platform — downloads still work;
-            // only Doze-protected long transfers are degraded.
+            } catch {
+              // Method absent on this platform — downloads still work;
+              // only Doze-protected long transfers are degraded.
+            }
+          }
+          const nowOwned = new Set(
+            rows
+              .filter((d) => d.state === 'available')
+              .map((d) => d.recordingId),
+          );
+          const ownershipChanged =
+            nowOwned.size !== ownedIds.size ||
+            [...nowOwned].some((id) => !ownedIds.has(id));
+          if (ownershipChanged) {
+            ownedIds = nowOwned;
+            session.connectivityChanged();
           }
         }),
       );
