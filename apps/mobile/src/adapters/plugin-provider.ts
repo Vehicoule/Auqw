@@ -87,10 +87,17 @@ function isSafeNonNegative(value: unknown): value is number {
   );
 }
 
-function isOptInt(value: unknown, min: number): value is number | null {
+function isOptInt(
+  value: unknown,
+  min: number,
+  max: number = Number.MAX_SAFE_INTEGER,
+): value is number | null {
   return (
     value === null ||
-    (typeof value === 'number' && Number.isSafeInteger(value) && value >= min)
+    (typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= min &&
+      value <= max)
   );
 }
 
@@ -270,10 +277,10 @@ function toPlayableResource(value: unknown): PlayableResource | null {
   const contentLength = value['content_length'] ?? null;
   const itag = value['itag'] ?? null;
   if (
-    !isOptInt(bitrateKbps, 0) ||
+    !isOptInt(bitrateKbps, 0, 4294967295) ||
     !isOptInt(expiresAtMs, 0) ||
     !isOptInt(contentLength, 1) ||
-    !isOptInt(itag, 0)
+    !isOptInt(itag, 0, 4294967295)
   ) {
     return null;
   }

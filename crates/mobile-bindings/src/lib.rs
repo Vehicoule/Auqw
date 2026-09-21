@@ -682,8 +682,8 @@ fn resolve_resource_from(value: &Value) -> Result<ResolvedResource, &'static str
         _ => Err(key),
     };
     // A required nullable integer: the key is present, and its value
-    // is either null or an integer inside [min, max]. u32 fields
-    // reject contract-legal values the binding cannot represent.
+    // is either null or an integer inside [min, max] — the schema's
+    // declared bounds, which match the field widths this record uses.
     let req_int = |key: &'static str, min: u64, max: u64| match o.get(key) {
         None => Err(key),
         Some(Value::Null) => Ok(None),

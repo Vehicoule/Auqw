@@ -810,6 +810,75 @@ async function queueCommitRollback(): Promise<void> {
   assertEqual(calls(r, 'pause').length, 0, 'no native pause issued');
 }
 
+// A failed queue commit aborts writes still queued behind it: their
+// mutations were erased by the rollback, so each reports the boundary
+// failure rather than committing a state its mutation is absent from.
+async function queueCommitCascade(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const pPause = r.session.pause();
+  const pSeek = r.session.seekTo(9_000);
+  const [paused, seeked] = await Promise.all([pPause, pSeek]);
+  assert(!paused.ok && paused.error.kind === 'transient');
+  assert(!seeked.ok, 'queued seek must not claim a rolled-back state');
+  assertEqual(seeked.error.kind, 'superseded');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'both mutations rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assertEqual(snap.queue.positionMs, 0, 'seek position rolled back');
+  assert(snap.persistenceError !== undefined, 'persistenceError published');
+  assertEqual(calls(r, 'pause').length, 0, 'no native pause issued');
+  assertEqual(calls(r, 'seekTo').length, 0, 'no native seek issued');
+}
+
+// A failed stop commit precedes transport teardown: the attempt stays
+// live, playback keeps reporting playing, and the rolled-back queue
+// agrees — nothing claims the item stopped.
+async function stopCommitKeepsPlayback(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const rev0 = readyOf(r).queue.revision;
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const stopped = await r.session.stop();
+  assert(!stopped.ok, 'stop must report the failed commit');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.revision, rev0, 'queue rolled back');
+  assertEqual(snap.queue.mode, 'playing');
+  assertEqual(snap.queue.currentOccurrenceId, 'o1');
+  assert(snap.playback.type !== 'idle', 'playback untouched');
+  assertEqual(calls(r, 'release').length, 0, 'attempt never released');
+}
+
 async function previousSemantics(): Promise<void> {
   const r = rig(
     persisted({
@@ -3305,6 +3374,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
   ['queueCommitRollback', queueCommitRollback],
+  ['queueCommitCascade', queueCommitCascade],
+  ['stopCommitKeepsPlayback', stopCommitKeepsPlayback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],
   ['restartRestore', restartRestore],

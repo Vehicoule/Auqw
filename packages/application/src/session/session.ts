@@ -259,6 +259,14 @@ type Ready = {
    */
   lyricsCache: LyricsCacheEntry[];
   queue: QueueEngine;
+  /**
+   * Queue-write generation: bumped inside a storage segment when a
+   * queue commit fails and rolls the engine back. Writes enqueued
+   * with the old epoch captured the engine after that mutation — the
+   * rollback erased them — so they report the boundary failure
+   * instead of committing a state their own mutation never landed in.
+   */
+  queueEpoch: number;
   settings: Settings;
   playback: SessionPlayback;
   radio: RadioTailRecord | null;
@@ -685,37 +693,76 @@ export class Session {
   }
 
   /**
-   * `#persist` with a caller-visible failure contract: on a failed
-   * commit `rollback` restores the in-memory mutations the batch
-   * covered, so the published mirror matches storage and the returned
-   * error is honest — a failed command claims nothing it did not land.
+   * Queue-bearing commit with a caller-visible failure contract.
+   * `batch` evaluates inside the storage segment against the freshest
+   * mirror; `queueBefore` is the pre-mutation snapshot; `extras`
+   * restores any non-queue sections mutated alongside.
+   *
+   * Rollback and the `queueEpoch` bump run inside the segment so a
+   * write queued behind a failed one observes the new epoch before
+   * its own commit and aborts honestly: the rollback already erased
+   * its queue mutation, so committing would claim a state it did not
+   * produce. The mutation itself stays synchronous at call time — a
+   * pending 'prepared' outcome reads `r.queue` directly, outside the
+   * storage tail.
    */
-  async #commitChecked(
+  async #commitQueue(
+    r: Ready,
     batch: () => StorageBatch,
-    rollback: () => void,
+    queueBefore: QueueSnapshot,
+    extras: () => void = () => undefined,
   ): Promise<Result<void>> {
-    const persisted = await this.#persist(batch);
-    if (!persisted.ok) {
-      rollback();
-      this.#derived();
-      this.#publish();
+    const epoch = r.queueEpoch;
+    const generation = this.#ready;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const ready = this.#ready;
+        if (generation === null || ready !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        if (epoch !== r.queueEpoch) {
+          // An earlier queue commit failed and rolled the engine back
+          // over this write's mutation. Restore this write's own
+          // non-queue footprint — the queue rollback already ran —
+          // then report the boundary failure.
+          extras();
+          this.#derived();
+          this.#publish();
+          return err(
+            appError('superseded', 'queue state was rolled back'),
+          );
+        }
+        const deadlineMs = this.#deadline();
+        const context = this.#newContext('persist', deadlineMs, source.signal);
+        const committed = await this.#withDeadline(
+          () => this.#storage.commit(batch(), context),
+          deadlineMs,
+          source,
+        );
+        if (!committed.ok) {
+          r.queueEpoch += 1;
+          r.queue = new QueueEngine(queueBefore);
+          extras();
+          r.persistenceError = committed.error;
+          this.#derived();
+          this.#publish();
+          return err(committed.error);
+        }
+        r.persistenceError = undefined;
+        return committed;
+      });
+    } finally {
+      this.#opSources.delete(source);
     }
-    return persisted;
   }
 
-  /**
-   * Queue-only `#commitChecked`: `before` is the pre-mutation
-   * snapshot; a failed commit swaps the live engine back to it. The
-   * mutation itself must stay synchronous — a pending 'prepared'
-   * outcome reads `r.queue` directly, outside the storage tail.
-   */
+  /** Queue-only `#commitQueue`. */
   #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
-    return this.#commitChecked(
-      () => ({ queue: r.queue.snapshot() }),
-      () => {
-        r.queue = new QueueEngine(before);
-      },
-    );
+    return this.#commitQueue(r, () => ({ queue: r.queue.snapshot() }), before);
   }
 
   /** Bounded, nonfatal, sanitized internal logging. */
@@ -807,6 +854,7 @@ export class Session {
       playCounts: [...data.playCounts],
       lyricsCache: [...data.lyricsCache],
       queue,
+      queueEpoch: 0,
       settings: { ...data.settings },
       playback: { type: 'idle' },
       radio: null,
@@ -2268,11 +2316,18 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    await this.#supersede();
-    r.playback = { type: 'idle' };
+    // Commit the stopped queue before the irreversible transport
+    // teardown: a failed commit rolls the engine back to playing and
+    // leaves the live attempt untouched — the caller's error is
+    // honest and playback genuinely continues.
     const persisted = await this.#persistQueue(r, before);
     if (!persisted.ok) {
       return persisted;
+    }
+    await this.#supersede();
+    const ready2 = this.#ready;
+    if (ready2 !== null) {
+      ready2.playback = { type: 'idle' };
     }
     this.#derived();
     this.#publish();
@@ -2554,16 +2609,19 @@ export class Session {
     } catch {
       return err(appError('not-found', 'unknown occurrence'));
     }
+    // Commit the removal before superseding the removed occurrence's
+    // attempt: on a failed commit the engine rollback restores the
+    // item and the still-live attempt keeps it playing honestly.
+    const persisted = await this.#persistQueue(r, before);
+    if (!persisted.ok) {
+      return persisted;
+    }
     if (wasCurrent) {
       await this.#supersede();
       const ready2 = this.#ready;
       if (ready2 !== null) {
         ready2.playback = { type: 'idle' };
       }
-    }
-    const persisted = await this.#persistQueue(r, before);
-    if (!persisted.ok) {
-      return persisted;
     }
     this.#derived();
     const snap = r.queue.snapshot();
@@ -2858,14 +2916,15 @@ export class Session {
       return err(fromUnknown(thrown));
     }
     this.#publish();
-    const persisted = await this.#commitChecked(
+    const persisted = await this.#commitQueue(
+      r,
       () => ({
         recordings: r.recordings,
         queue: r.queue.snapshot(),
       }),
+      before,
       () => {
         r.recordings = recordingsBefore;
-        r.queue = new QueueEngine(before);
       },
     );
     this.#derived();
@@ -3714,14 +3773,15 @@ export class Session {
         return;
       }
       this.#publish();
-      const persisted = await this.#commitChecked(
+      const persisted = await this.#commitQueue(
+        ready2,
         () => ({
           recordings: ready2.recordings,
           queue: ready2.queue.snapshot(),
         }),
+        before,
         () => {
           ready2.recordings = recordingsBefore;
-          ready2.queue = new QueueEngine(before);
         },
       );
       if (!persisted.ok) {
