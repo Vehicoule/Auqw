@@ -88,7 +88,7 @@ export function progressPathState(
   const amount = clamp01(progress);
   return {
     dashLength: pathLength,
-    dashOffset: amount === 1 ? 0 : -(1 - amount) * pathLength,
+    dashOffset: (1 - amount) * pathLength,
     opacity: amount > 0 ? 1 : 0,
   };
 }
