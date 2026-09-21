@@ -574,22 +574,37 @@ where
     // A deadline/cancel expiry detaches the spawn_blocking task — wasmi
     // has no mid-call interrupt, so the guest keeps burning its fuel
     // grant in the background. A global permit pool bounds that
-    // detached burn: acquire blocks (inside the deadline) when
-    // `available_parallelism` calls are already running.
+    // detached burn — but queueing for a permit is itself wall-clock
+    // work, so the wait races the same deadline: an expired waiter
+    // reports Deadline instead of starting a call the caller already
+    // gave up on.
+    let deadline_at = tokio::time::Instant::from_std(ctx.started + budgets.deadline);
     let permit = tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
+        () = tokio::time::sleep_until(deadline_at) => {
+            return Err(InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline,
+            });
+        }
         p = entry_permits().acquire() => {
             p.map_err(|_| InvokeError::GuestTrap("entry permits closed".to_string()))?
         }
     };
+    // A permit may arrive in the same instant the deadline crossed —
+    // re-check so no guest entry starts past its deadline.
+    let remaining = budgets.deadline.saturating_sub(ctx.started.elapsed());
+    if remaining.is_zero() {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Deadline,
+        });
+    }
     let join = tokio::task::spawn_blocking(move || {
         // Held until the call returns — a detached task still counts.
         let _permit = permit;
         let result = func.call(&mut store, params);
         (store, result)
     });
-    let remaining = budgets.deadline.saturating_sub(ctx.started.elapsed());
     tokio::select! {
         // Cancel outranks expiry — same ordering as `check_preemption`.
         biased;

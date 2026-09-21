@@ -134,21 +134,25 @@ fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> 
     }
 }
 
+/// Parent zones whose sibling hosts form one operator trust zone —
+/// CDN edges re-issue across siblings (`rr1` → `rr2---sn-x`), so a
+/// redirect between them is a load-balance, not a boundary hop. Only
+/// parents the providers actually mint under qualify: widening to a
+/// sibling of an arbitrary `media.example.com` mint would follow to
+/// `evil.example.com`, an escape past the reviewed mint destination.
+const EDGE_PARENT_ZONES: &[&str] = &["googlevideo.com", "googleusercontent.com", "dzcdn.net"];
+
 /// Is `target_host` inside the mint's trust scope: the mint host
-/// itself, one of its subdomains, or a sibling under the parent domain
-/// (CDN edges re-issue across siblings: `rr1` → `rr2---sn-x`). The
-/// parent rule applies only when the parent's leading label is a real
-/// registrable name (≥3 chars) — mints like `example.co.uk` must not
-/// widen the scope to every `*.co.uk` site.
+/// itself, one of its subdomains, or — when the mint sits under a
+/// known edge parent zone — a sibling under that parent.
 fn redirect_in_scope(target_host: &str, mint_host: &str) -> bool {
     if target_host == mint_host || target_host.ends_with(&format!(".{mint_host}")) {
         return true;
     }
     match mint_host.split_once('.') {
-        Some((_, parent)) => match parent.split('.').next() {
-            Some(first) if first.len() >= 3 => target_host.ends_with(&format!(".{parent}")),
-            _ => false,
-        },
+        Some((_, parent)) => {
+            EDGE_PARENT_ZONES.contains(&parent) && target_host.ends_with(&format!(".{parent}"))
+        }
         None => false,
     }
 }
@@ -435,7 +439,16 @@ mod tests {
             follow_target(302, Some("HTTPS://rr1---sn-x.googlevideo.com/x"), MINT),
             Some("HTTPS://rr1---sn-x.googlevideo.com/x")
         );
-        // A mint on a shared-suffix shape does not widen to it.
+        // Sibling widening applies only under a known edge parent zone —
+        // an arbitrary sibling is a foreign host.
+        assert_eq!(
+            follow_target(
+                302,
+                Some("https://evil.example.com/x"),
+                "https://media.example.com/a"
+            ),
+            None
+        );
         assert_eq!(
             follow_target(
                 302,
@@ -450,7 +463,7 @@ mod tests {
                 Some("https://edge2.example.co.uk/x"),
                 "https://media.example.co.uk/a"
             ),
-            Some("https://edge2.example.co.uk/x")
+            None
         );
     }
 }

@@ -5,9 +5,10 @@
 //! [`ResolvedResource`] is a real signed stream URL — it must never be
 //! logged at any layer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::Instant;
 
 use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
@@ -56,6 +57,13 @@ pub struct HostConfig {
 /// the same session trust.
 const SESSION_TRUST_CAPABILITIES: &[&str] =
     &["playback.resolve", "playback.candidates", "radio.seed"];
+
+/// A cancel tombstone only needs to outlive its race window — the
+/// cancel-to-delivery gap is milliseconds; a minute is far past any
+/// real delivery while still short enough that unconsumed tombstones
+/// (a cancelled resolve, a request that failed on its own) can't pin
+/// the cap forever.
+const CANCEL_TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One HTTP call from the attempt trace. `url` is already stripped of
 /// query and fragment by the host — the signed parameters never cross
@@ -280,9 +288,12 @@ pub struct PluginHost {
     prepared_handles: Arc<Mutex<HashMap<String, String>>>,
     /// `cancel` ids that arrived while the prepare was still inside
     /// its window — neither `cancels` nor `prepared_handles` knew it
-    /// yet. The outcome path checks the tombstone before registering
-    /// the handle so a late cancel can't orphan a live session.
-    cancelled_requests: Arc<Mutex<HashSet<String>>>,
+    /// yet, or the invocation token was already spent while delivery
+    /// was still registering the handle. The outcome path checks the
+    /// tombstone before registering the handle so a late cancel can't
+    /// orphan a live session. Tombstones expire — one never consumed
+    /// by a delivery is swept on the next insert.
+    cancelled_requests: Arc<Mutex<HashMap<String, Instant>>>,
     counter: AtomicU64,
 }
 
@@ -365,7 +376,7 @@ impl PluginHost {
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             prepared_handles: Arc::new(Mutex::new(HashMap::new())),
-            cancelled_requests: Arc::new(Mutex::new(HashSet::new())),
+            cancelled_requests: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(0),
         }))
     }
@@ -507,20 +518,19 @@ impl PluginHost {
     /// it is still unattached: a playing consumer is never cancelled
     /// out from under playback.
     pub fn cancel(&self, request_id: String) {
-        let mut known = false;
         if let Ok(m) = self.cancels.lock() {
             if let Some(token) = m.get(&request_id) {
                 token.cancel();
-                known = true;
             }
         }
         // Coalesced prepares hand one session handle to several
         // request ids — abandoning it is only safe once the cancelled
         // request was its last owner, or a surviving request's
         // `stream_open` would hit `cancelled`.
+        let mut delivered = false;
         let handle = self.prepared_handles.lock().ok().and_then(|mut m| {
             if m.contains_key(&request_id) {
-                known = true;
+                delivered = true;
             }
             m.remove(&request_id)
                 .filter(|h| !m.values().any(|v| v == h))
@@ -528,22 +538,26 @@ impl PluginHost {
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
         }
-        if !known {
-            // The cancel outran the bookkeeping: the request is past
-            // its token but the handle isn't registered yet. Leave a
-            // tombstone — the outcome path consumes it and abandons
-            // the session it was about to hand out. The set is capped
-            // and only ids shaped like an issued `req-N` (N no higher
-            // than the counter) land in it — arbitrary strings can
-            // never fill the cap and starve a real cancel race.
+        // Tombstone whenever no delivered handle was found — both the
+        // "outran the bookkeeping" window and the delivery window (a
+        // token still present in `cancels` is already spent while
+        // `prepare_outcome` is still registering). Only ids shaped like
+        // an issued `req-N` (N strictly below the counter — the counter
+        // is the NEXT id to issue) land in it, and tombstones expire:
+        // arbitrary ids can't fill the cap and starve a real race.
+        if !delivered {
             let plausible = request_id
                 .strip_prefix("req-")
                 .and_then(|n| n.parse::<u64>().ok())
-                .is_some_and(|n| n <= self.counter.load(Ordering::Relaxed));
+                .is_some_and(|n| n < self.counter.load(Ordering::Relaxed));
             if plausible {
                 if let Ok(mut m) = self.cancelled_requests.lock() {
+                    // Sweep expired tombstones before the cap check — a
+                    // stale set must not masquerade as a full one.
+                    let now = Instant::now();
+                    m.retain(|_, t| now.duration_since(*t) < CANCEL_TOMBSTONE_TTL);
                     if m.len() < 64 {
-                        m.insert(request_id);
+                        m.insert(request_id, now);
                     }
                 }
             }

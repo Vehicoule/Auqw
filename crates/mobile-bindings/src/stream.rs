@@ -414,7 +414,7 @@ impl PluginHost {
                 {
                     let tombstoned = cancelled_requests
                         .lock()
-                        .map(|mut m| m.remove(&request_id))
+                        .map(|mut m| m.remove(&request_id).is_some())
                         .unwrap_or(false);
                     if tombstoned {
                         let _ = registry.cancel_if_unattached(&prepared.handle);
