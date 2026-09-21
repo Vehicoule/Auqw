@@ -96,10 +96,30 @@ class ExpoTransferSink implements TransferSink {
     }
   }
 
-  /** sha-256 over the whole .part — the finalize cross-check digest. */
+  /**
+   * sha-256 over the .part — the finalize cross-check digest. Streamed
+   * in bounded chunks: buffering a whole download in one JS allocation
+   * can OOM the app mid-finalize on a memory-constrained phone.
+   */
   #digestFile(): string {
+    const CHUNK = 1024 * 1024;
     const hasher = createSha256();
-    hasher.update(this.#part.bytesSync());
+    const handle = this.#part.open(FileMode.ReadOnly);
+    try {
+      for (;;) {
+        const chunk = handle.readBytes(CHUNK);
+        if (chunk.length === 0) {
+          break;
+        }
+        hasher.update(chunk);
+      }
+    } finally {
+      try {
+        handle.close();
+      } catch {
+        // Best-effort — a failed close changes nothing about the digest.
+      }
+    }
     return hasher.digest();
   }
 
@@ -118,9 +138,8 @@ class ExpoTransferSink implements TransferSink {
           appError('invalid-response', 'download checksum mismatch'),
         );
       }
-      if (this.#dest.exists) {
-        this.#dest.delete();
-      }
+      // Atomic replace: overwrite:true moves over an existing dest —
+      // deleting it first would lose a valid download if the move fails.
       this.#part.moveSync(this.#dest, { overwrite: true });
       return ok(digest);
     } catch (thrown) {
@@ -178,7 +197,10 @@ export function createExpoTransfer(
         if (
           input.destPath.includes('/') ||
           input.destPath.includes('\\') ||
-          input.destPath.length === 0
+          input.destPath.length === 0 ||
+          // `.part` is the staging suffix — a finalized name carrying
+          // it is indistinguishable from a stale partial to the sweeper.
+          input.destPath.endsWith(PART_SUFFIX)
         ) {
           return err(
             appError('invalid-response', 'destPath must be a bare name'),
@@ -218,6 +240,9 @@ export function createExpoTransfer(
         const keep = new Set(keepPaths);
         let swept = 0;
         for (const entry of directory.list()) {
+          if (signal.cancelled) {
+            return cancelled();
+          }
           if (!(entry instanceof File)) {
             continue;
           }
@@ -240,6 +265,9 @@ export function createExpoTransfer(
       try {
         let total = 0;
         for (const entry of directory.list()) {
+          if (signal.cancelled) {
+            return cancelled();
+          }
           if (entry instanceof File) {
             total += entry.info().size ?? 0;
           }
