@@ -695,6 +695,8 @@ function GalleryBody({
               onRetry={noop}
               onResultPress={noop}
               onContext={noop}
+              recents={['radiohead ok computer', 'boards of canada']}
+              onRecentPress={noop}
               scrollEnabled={false}
             />
           </Frame>

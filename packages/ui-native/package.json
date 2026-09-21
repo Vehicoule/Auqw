@@ -12,10 +12,13 @@
   },
   "dependencies": {
     "@auqw/application": "workspace:*",
-    "@auqw/design-tokens": "workspace:*"
+    "@auqw/design-tokens": "workspace:*",
+    "react-native-draggable-flatlist": "4.0.3"
   },
   "peerDependencies": {
     "expo-blur": "*",
+    "expo-glass-effect": "*",
+    "expo-haptics": "*",
     "react": "*",
     "react-native": "*",
     "react-native-gesture-handler": "*",

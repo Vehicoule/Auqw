@@ -5,6 +5,7 @@ import {
   Platform,
   StyleSheet,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
@@ -12,6 +13,7 @@ import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import * as Haptics from 'expo-haptics';
 import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
@@ -88,6 +90,7 @@ import type {
   DiagnosticsModel,
   LyricsModel,
   NavItemModel,
+  ProviderPickerOption,
   SearchStateModel,
   StageMode,
   TrackRowModel,
@@ -117,6 +120,13 @@ const NAV_ITEMS: readonly NavItemModel[] = [
 ];
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
+
+const THEME_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: 'system', label: 'system', detail: 'follow the OS' },
+  { key: 'dark', label: 'dark', detail: 'tokyo night' },
+  { key: 'light', label: 'light', detail: 'daylight' },
+  { key: 'oled', label: 'oled', detail: 'true black' },
+];
 
 type Boot =
   | { readonly type: 'loading' }
@@ -243,8 +253,10 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     [controller],
   );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
+  // OS font scale feeds textScale — accessibility sizing isn't opt-in.
+  const { fontScale } = useWindowDimensions();
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={theme} textScale={fontScale}>
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -444,6 +456,10 @@ function Main({
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
+  // Recent searches: session-scoped, newest first — persisting them
+  // would be a storage-schema decision, so they die with the app.
+  const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Library-world overlay stack: pushed routes — collection list,
@@ -505,6 +521,43 @@ function Main({
     setSearchState(search.snapshot());
     return search.subscribe(setSearchState);
   }, [search]);
+
+  const runSearch = useCallback(
+    (q: string) => {
+      const trimmed = q.trim();
+      if (trimmed === '') {
+        search?.cancel();
+        return;
+      }
+      void search?.search({
+        query: trimmed,
+        limit: SEARCH_LIMIT,
+        storefront: state.settings.storefront,
+      });
+    },
+    [search, state.settings.storefront],
+  );
+
+  const recordRecentSearch = useCallback((q: string) => {
+    const trimmed = q.trim();
+    if (trimmed === '') {
+      return;
+    }
+    setSearchRecents((prev) =>
+      [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
+    );
+  }, []);
+
+  // Live results: keystrokes debounce into a real search; an emptied
+  // box cancels in-flight work and lands back on the idle/recents.
+  useEffect(() => {
+    if (query.trim() === '') {
+      search?.cancel();
+      return undefined;
+    }
+    const timer = setTimeout(() => runSearch(query), 350);
+    return () => clearTimeout(timer);
+  }, [query, search, runSearch]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
@@ -675,6 +728,7 @@ function Main({
     return toHomeModel({
       recordings: state.recordings,
       likes: state.likes,
+      playback: state.playback,
       suggestions:
         searchState.type === 'content' ? searchState.page.items : [],
 
@@ -721,18 +775,17 @@ function Main({
     (row: TrackRowModel) => {
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined) {
+        recordRecentSearch(query);
         void session.addAndPlay(meta);
       }
     },
-    [session],
+    [session, query, recordRecentSearch],
   );
 
   const onSettingsSelect = useCallback(
     (key: string) => {
       if (key === 'theme') {
-        const i = THEME_ORDER.indexOf(state.settings.theme);
-        const theme = THEME_ORDER[(i + 1) % THEME_ORDER.length] ?? 'system';
-        void session.updateSettings({ ...state.settings, theme });
+        setThemePickerOpen(true);
         return;
       }
       if (
@@ -772,10 +825,12 @@ function Main({
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
   const onPlayPause = useCallback(() => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     void (playing ? session.pause() : session.resume());
   }, [session, playing]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       void session.toggleLike(currentRecordingId);
     }
   }, [session, currentRecordingId]);
@@ -789,6 +844,13 @@ function Main({
       }
     },
     [session, state.queue],
+  );
+
+  const onMoveQueueItemTo = useCallback(
+    (occurrenceId: string, toIndex: number) => {
+      void session.moveOccurrence(occurrenceId, toIndex);
+    },
+    [session],
   );
 
   // ---- lyrics (Stage lyrics mode — live read, cancel superseded) --
@@ -1421,6 +1483,11 @@ function Main({
         return;
       }
       switch (key) {
+        case 'like':
+          if (target.kind === 'recording') {
+            void session.toggleLike(target.recordingId);
+          }
+          break;
         case 'enqueue':
           void (target.kind === 'recording'
             ? session.enqueueRecording(target.recordingId)
@@ -1796,30 +1863,26 @@ function Main({
             query={query}
             topInset={topInset}
             onQueryChange={setQuery}
-            onSubmit={() =>
-              void search?.search({
-                query,
-                limit: SEARCH_LIMIT,
-                storefront: state.settings.storefront,
-              })
-            }
+            onSubmit={() => {
+              recordRecentSearch(query);
+              runSearch(query);
+            }}
             onCancel={() => {
               setQuery('');
               search?.cancel();
             }}
-            onRetry={() =>
-              void search?.search({
-                query: searchModel.query,
-                limit: SEARCH_LIMIT,
-                storefront: state.settings.storefront,
-              })
-            }
+            onRetry={() => runSearch(searchModel.query)}
             onResultPress={onResultPress}
             onContext={(row) => {
               const meta = resultMeta.current.get(row.key);
               if (meta !== undefined) {
                 setActionsFor({ kind: 'metadata', meta });
               }
+            }}
+            recents={searchRecents}
+            onRecentPress={(recent) => {
+              setQuery(recent);
+              recordRecentSearch(recent);
             }}
           />
         );
@@ -1866,6 +1929,7 @@ function Main({
             model={homeModel}
             topInset={topInset}
             onPressCard={(card) => void playRecording(card.key)}
+            onResume={() => void session.resume()}
           />
         );
     }
@@ -1902,6 +1966,9 @@ function Main({
               void session.renamePlaylist(current.playlistId, name)
             }
             onDelete={() => {
+              void Haptics.notificationAsync(
+                Haptics.NotificationFeedbackType.Warning,
+              );
               void session.deletePlaylist(current.playlistId);
               dismissOverlay(entry.key);
             }}
@@ -1957,6 +2024,22 @@ function Main({
             model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
+            onPlayAll={() => {
+              const metas = entityModelFor(fetch)
+                .items.map((row) => metaFor(row))
+                .filter(
+                  (m): m is TrackMetadata => m !== undefined,
+                );
+              void session.playMetadata(metas);
+            }}
+            onShuffleAll={() => {
+              const metas = entityModelFor(fetch)
+                .items.map((row) => metaFor(row))
+                .filter(
+                  (m): m is TrackMetadata => m !== undefined,
+                );
+              void session.playMetadata(metas, { shuffle: true });
+            }}
             onToggleLike={
               entityId === null
                 ? undefined
@@ -2037,6 +2120,7 @@ function Main({
                   onNext={() => void session.next()}
                   onPrevious={() => void session.previous()}
                   onToggleLike={onToggleLike}
+                  onDismiss={() => void session.stop()}
                 />
               ) : undefined
             }
@@ -2065,6 +2149,7 @@ function Main({
               onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
               onToggleQueueReorder={() => setReordering((v) => !v)}
               onMoveQueueItem={onMoveQueueItem}
+              onMoveQueueItemTo={onMoveQueueItemTo}
             />
           ) : null}
         </StackItem>
@@ -2094,6 +2179,23 @@ function Main({
                   : actionsFor.meta.title
               }
               actions={[
+                // Like lives in the sheet for recording targets — the
+                // row itself keeps the heart icon only as an indicator.
+                ...(actionsFor.kind === 'recording'
+                  ? [
+                    {
+                      key: 'like',
+                      label: state.likes.some(
+                        (l) =>
+                          l.entityKind === 'track' &&
+                          l.targetId === actionsFor.recordingId,
+                      )
+                        ? 'unlike'
+                        : 'like',
+                      icon: 'heart' as const,
+                    },
+                  ]
+                  : []),
                 {
                   key: 'enqueue',
                   label: 'add to queue',
@@ -2166,6 +2268,25 @@ function Main({
               selectedKey={providerPicker.selectedKey}
               onPick={onPickProvider}
               onDismiss={() => setProviderSlot(null)}
+            />
+          </SheetScreen>
+        )}
+        {themePickerOpen && (
+          <SheetScreen
+            stackKey="sheet-theme"
+            onDismissed={() => setThemePickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="theme"
+              options={THEME_OPTIONS}
+              selectedKey={state.settings.theme}
+              onPick={(key) => {
+                const theme =
+                  THEME_ORDER.find((t) => t === key) ?? 'system';
+                void session.updateSettings({ ...state.settings, theme });
+                setThemePickerOpen(false);
+              }}
+              onDismiss={() => setThemePickerOpen(false)}
             />
           </SheetScreen>
         )}

@@ -264,7 +264,13 @@ function ReviewRow({
               onReject === undefined ? undefined : () => onReject(row.reviewId)
             }
             accessibilityLabel={`reject ${row.title}`}
-            style={{ paddingHorizontal: theme.spacing.xs }}
+            style={{
+              paddingHorizontal: theme.spacing.md,
+              minHeight: 26,
+              justifyContent: 'center',
+              borderRadius: theme.radius.pill,
+              backgroundColor: theme.colors.fg08,
+            }}
           >
             <Text variant="metadata" color="warn">
               reject all
@@ -277,7 +283,13 @@ function ReviewRow({
               onUndo === undefined ? undefined : () => onUndo(row.reviewId)
             }
             accessibilityLabel={`undo ${row.title}`}
-            style={{ paddingHorizontal: theme.spacing.xs }}
+            style={{
+              paddingHorizontal: theme.spacing.md,
+              minHeight: 26,
+              justifyContent: 'center',
+              borderRadius: theme.radius.pill,
+              backgroundColor: theme.colors.fg08,
+            }}
           >
             <Text variant="metadata" color="primary">
               undo

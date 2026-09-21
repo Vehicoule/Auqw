@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { KeyboardAvoidingView, StyleSheet, View } from 'react-native';
 import { Pressable } from './primitives.tsx';
 import { useTheme } from './theme.tsx';
 
@@ -69,17 +69,21 @@ export function SheetScreen({ onDismissed, children }: SheetScreenProps) {
         accessibilityLabel="dismiss"
         style={StyleSheet.absoluteFill}
       />
-      <View
-        style={{
-          backgroundColor: theme.colors.raised,
-          borderTopLeftRadius: theme.radius.float,
-          borderTopRightRadius: theme.radius.float,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-        }}
-      >
-        {children}
-      </View>
+      {/* Native formSheets resize with the keyboard on their own; the
+          web/desktop panel needs KAV so NameField isn't covered. */}
+      <KeyboardAvoidingView behavior="padding">
+        <View
+          style={{
+            backgroundColor: theme.colors.raised,
+            borderTopLeftRadius: theme.radius.float,
+            borderTopRightRadius: theme.radius.float,
+            borderWidth: theme.strokes.hairline,
+            borderColor: theme.colors.hairline,
+          }}
+        >
+          {children}
+        </View>
+      </KeyboardAvoidingView>
     </View>
   );
 }

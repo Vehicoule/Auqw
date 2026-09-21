@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
-import { Platform, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
@@ -22,6 +23,8 @@ export type MiniPlayerProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /** Swipe-down: dismiss stops playback; the queue keeps its items. */
+  readonly onDismiss?: (() => void) | undefined;
 };
 
 export function MiniPlayer({
@@ -32,6 +35,7 @@ export function MiniPlayer({
   onNext,
   onPrevious,
   onToggleLike,
+  onDismiss,
 }: MiniPlayerProps) {
   const theme = useTheme();
   const ios = platform === 'ios';
@@ -52,11 +56,13 @@ export function MiniPlayer({
             scheduleOnRN(onNext);
           } else if (e.translationX > 40 && onPrevious !== undefined) {
             scheduleOnRN(onPrevious);
+          } else if (e.translationY > 40 && onDismiss !== undefined) {
+            scheduleOnRN(onDismiss);
           } else if (e.translationY < -40 && onPress !== undefined) {
             scheduleOnRN(onPress);
           }
         }),
-    [onNext, onPrevious, onPress],
+    [onNext, onPrevious, onPress, onDismiss],
   );
   return (
     <GestureDetector gesture={swipe}>
@@ -71,19 +77,24 @@ export function MiniPlayer({
           overflow: 'hidden',
         }}
       >
-        {ios && (
-          <BlurView
-            intensity={60}
-            tint={theme.scheme === 'light' ? 'light' : 'dark'}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-            }}
-          />
-        )}
+        {/*
+         * iOS 26+: real Liquid Glass backdrop; below that the BlurView
+         * stays. Off-iOS GlassView is a plain View passthrough anyway.
+         */}
+        {ios &&
+          (isLiquidGlassAvailable() ? (
+            <GlassView
+              glassEffectStyle="regular"
+              colorScheme={theme.scheme === 'light' ? 'light' : 'dark'}
+              style={StyleSheet.absoluteFill}
+            />
+          ) : (
+            <BlurView
+              intensity={60}
+              tint={theme.scheme === 'light' ? 'light' : 'dark'}
+              style={StyleSheet.absoluteFill}
+            />
+          ))}
         {/*
          * Action buttons are siblings of the open-player pressable,
          * not children: a labelled pressable groups its descendants
