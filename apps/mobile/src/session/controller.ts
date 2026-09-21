@@ -101,6 +101,12 @@ export type SessionController = {
    * with restore's own writes.
    */
   start(signal: CancellationSignal): Promise<void>;
+  /**
+   * Re-loads persisted state into the media owners after a
+   * whole-library replace (import): rebuilds the local source and
+   * re-inits the download ledger so their rows can't go stale.
+   */
+  rehydrateMedia(signal: CancellationSignal): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -406,6 +412,46 @@ export async function createSessionController(
           // only Doze-protected long transfers are degraded.
         }
       });
+    },
+    /**
+     * A whole-library replace (import) swaps the persisted sections
+     * out from under the media owners — re-init the download ledger
+     * and rebuild the local source from the post-import snapshot
+     * before the UI calls back in.
+     */
+    async rehydrateMedia(signal: CancellationSignal) {
+      const loaded = await storage.load({
+        requestId: ids.next('media-rehydrate'),
+        deadlineMs: clock.nowMs() + 30_000,
+        signal,
+      });
+      if (!loaded.ok || signal.cancelled) {
+        void log.write({
+          level: 'warn',
+          message: 'media rehydrate skipped: storage load failed',
+          atMs: clock.nowMs(),
+        });
+        return;
+      }
+      localSource = new LocalFileSource(
+        { storage, tagReader: createExpoTagReader(host), ids, clock, log },
+        {
+          localSources: loaded.value.localSources,
+          localFiles: loaded.value.localFiles,
+          recordings: loaded.value.recordings,
+        },
+      );
+      const inited = await downloads.init(loaded.value.downloads, signal);
+      if (!inited.ok) {
+        void log.write({
+          level: 'warn',
+          message: `download re-init failed: ${inited.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+      }
+      // Imported recordings replace prior local rows — the session
+      // re-merges provenance-local rows through this hook.
+      session.syncLocalRecordings(localSource.recordings());
     },
     async dispose() {
       await downloads.stop(new CancellationSource().signal);

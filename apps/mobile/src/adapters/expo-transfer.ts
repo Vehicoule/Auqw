@@ -241,6 +241,11 @@ export function createExpoTransfer(
         return cancelled();
       }
       try {
+        // A clean install has no transfer directory yet — that's
+        // honestly "nothing to sweep", not an error.
+        if (!directory.exists) {
+          return ok(0);
+        }
         const keep = new Set(keepPaths);
         let swept = 0;
         for (const entry of directory.list()) {
@@ -267,6 +272,10 @@ export function createExpoTransfer(
         return cancelled();
       }
       try {
+        // Missing directory on a clean install reads as zero bytes.
+        if (!directory.exists) {
+          return ok(0);
+        }
         let total = 0;
         for (const entry of directory.list()) {
           if (signal.cancelled) {

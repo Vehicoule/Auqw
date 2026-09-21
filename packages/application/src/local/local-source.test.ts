@@ -314,6 +314,78 @@ async function runPickCancelled(): Promise<void> {
   assert(source.list().length === 0, 'no source row');
 }
 
+async function runRescanMergesFreshRecordings(): Promise<void> {
+  const { storage, tagReader, ids, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+  await source.addFolder(signal());
+  const localRec = source.recordings()[0]!;
+
+  // A session write lands between scans: a new catalog recording and
+  // an edited local title. The source's boot snapshot is stale now.
+  const catalog = {
+    id: 'rec-catalog',
+    title: 'Catalog Song',
+    artist: 'B',
+    album: null,
+    durationMs: null,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    isrc: null,
+    versionLabels: [],
+    sourceRefs: [{ provider: 'youtube-music', kind: 'track', id: 'yt-1' }],
+    mappings: [],
+    provenance: 'provider',
+  } as const;
+  const sessionWrite = must(
+    await storage.commit(
+      {
+        recordings: [
+          { ...localRec, title: 'Alpha (remaster)' },
+          catalog,
+        ],
+      },
+      {
+        requestId: ids.next('session-write'),
+        deadlineMs: 0,
+        signal: signal(),
+      },
+    ),
+  );
+  void sessionWrite;
+
+  // A second file arrives; the rescan must merge over the fresh set —
+  // neither the catalog row nor the edited title may be lost.
+  tagReader.entries.set(TREE, [entry('d1', 100), entry('d2', 200)]);
+  tagReader.fingerprints.set('d2', fp('d2', 'fpb'));
+  tagReader.tags.set('d2', tags('d2', 'Beta'));
+  must(await source.rescan(undefined, signal()));
+
+  const committed = storage.commits.at(-1)!.batch.recordings!;
+  const byId = new Map(committed.map((r) => [r.id, r]));
+  assert(byId.has('rec-catalog'), 'catalog row survives the rescan');
+  assert(
+    byId.get(localRec.id)!.title === 'Alpha (remaster)',
+    'session edit survives the rescan',
+  );
+  assert(
+    committed.some((r) => r.title === 'Beta'),
+    'new local recording upserted',
+  );
+  const reloaded = must(
+    await storage.load({
+      requestId: 't',
+      deadlineMs: 0,
+      signal: signal(),
+    }),
+  );
+  assert(reloaded.recordings.length === committed.length, 'commit landed');
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -325,4 +397,5 @@ export async function run(): Promise<void> {
   await runUnreadableKeepsRow();
   await runRemoveSource();
   await runPickCancelled();
+  await runRescanMergesFreshRecordings();
 }

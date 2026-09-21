@@ -474,23 +474,23 @@ function Main({
   const [localTick, setLocalTick] = useState(0);
 
   const [storageText, setStorageText] = useState<string | null>(null);
+  const refreshUsage = useCallback(() => {
+    void controller.downloads
+      .usage(new CancellationSource().signal)
+      .then((u) => {
+        if (u.ok) {
+          setStorageText(formatBytes(u.value.bytes, u.value.free));
+        }
+      });
+  }, [controller]);
   useEffect(() => {
     setDownloads(controller.downloads.list());
-    const refreshUsage = () => {
-      void controller.downloads
-        .usage(new CancellationSource().signal)
-        .then((u) => {
-          if (u.ok) {
-            setStorageText(formatBytes(u.value.bytes, u.value.free));
-          }
-        });
-    };
     refreshUsage();
     return controller.downloads.subscribe(() => {
       setDownloads(controller.downloads.list());
       refreshUsage();
     });
-  }, [controller]);
+  }, [controller, refreshUsage]);
 
   const refreshLocal = useCallback(() => {
     setLocalTick((t) => t + 1);
@@ -596,13 +596,18 @@ function Main({
           void controller.downloads.retry(existing.downloadId, signal);
           return;
         case 'available':
-          void controller.downloads.remove(existing.downloadId, signal);
+          // The 'removing' transition fires before the file is gone —
+          // refresh usage again once removal settles so Settings
+          // doesn't display the freed bytes until the next event.
+          void controller.downloads
+            .remove(existing.downloadId, signal)
+            .then(refreshUsage);
           return;
         default:
           return;
       }
     },
-    [controller, downloadRefFor],
+    [controller, downloadRefFor, refreshUsage],
   );
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
   // Lyrics are a live read off the Stage's lyrics mode, not session
@@ -940,14 +945,76 @@ function Main({
     [session, canPlay],
   );
 
+  // Queue presses and transport follow the same offline rule as
+  // library rows: an unowned target must not start a remote attempt.
+  const playQueueOccurrence = useCallback(
+    (occurrenceId: string) => {
+      const occurrence = state.queue.occurrences.find(
+        (o) => o.occurrenceId === occurrenceId,
+      );
+      if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
+        return;
+      }
+      void session.playOccurrence(occurrenceId);
+    },
+    [session, state.queue, canPlay],
+  );
+
+  // Mirrors QueueEngine.next()/previous() targeting: next → index+1
+  // (never wraps); previous → restart current when positionMs>3s or
+  // at index 0, else index−1. The gate sees the same target the
+  // engine would land on.
+  const advance = useCallback(
+    (method: 'next' | 'previous') => {
+      if (online === false) {
+        const { occurrences, currentOccurrenceId, positionMs } = state.queue;
+        const index = occurrences.findIndex(
+          (o) => o.occurrenceId === currentOccurrenceId,
+        );
+        const target =
+          method === 'next'
+            ? occurrences[index + 1]
+            : positionMs > 3000 || index <= 0
+              ? occurrences[index]
+              : occurrences[index - 1];
+        if (target !== undefined && !isOwned(target.recordingId)) {
+          return;
+        }
+      }
+      void (method === 'next' ? session.next() : session.previous());
+    },
+    [online, state.queue, isOwned, session],
+  );
+
+  // Offline honesty for metadata paths (cached search/entity rows):
+  // the materialized recording is playable offline only when owned —
+  // a provider ref alone would start a remote attempt the UI says
+  // waits for connectivity.
+  const canPlayMeta = useCallback(
+    (meta: TrackMetadata): boolean => {
+      if (online !== false) {
+        return true;
+      }
+      const ref = meta.sourceRef;
+      const recording = state.recordings.find((r) =>
+        r.sourceRefs.some(
+          (s) =>
+            s.provider === ref.provider && s.kind === ref.kind && s.id === ref.id,
+        ),
+      );
+      return recording !== undefined && isOwned(recording.id);
+    },
+    [online, state.recordings, isOwned],
+  );
+
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
       const meta = resultMeta.current.get(row.key);
-      if (meta !== undefined) {
+      if (meta !== undefined && canPlayMeta(meta)) {
         void session.addAndPlay(meta);
       }
     },
-    [session],
+    [session, canPlayMeta],
   );
 
   const onSettingsSelect = useCallback(
@@ -1334,6 +1401,9 @@ function Main({
         return;
       }
       importText.current = null;
+      // The persisted sections were swapped — media owners rehydrate
+      // before the UI reads downloads/local rows again.
+      void controller.rehydrateMedia(new CancellationSource().signal);
       const counts = result.value.counts;
       setTransfer((prev) => ({
         ...prev,
@@ -1341,7 +1411,7 @@ function Main({
         importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
       }));
     });
-  }, [session]);
+  }, [session, controller]);
 
   const onResetImport = useCallback(() => {
     importText.current = null;
@@ -2325,7 +2395,7 @@ function Main({
             }
             onPressItem={(row) => {
               const meta = entityMeta.current.get(row.key);
-              if (meta !== undefined) {
+              if (meta !== undefined && canPlayMeta(meta)) {
                 void session.addAndPlay(meta);
               }
             }}
@@ -2405,8 +2475,8 @@ function Main({
           player={player}
           onPress={() => setExpanded(true)}
           onPlayPause={onPlayPause}
-          onNext={() => void session.next()}
-          onPrevious={() => void session.previous()}
+          onNext={() => advance('next')}
+          onPrevious={() => advance('previous')}
           onToggleLike={onToggleLike}
         />
       ) : null}
@@ -2432,12 +2502,13 @@ function Main({
           lyrics={lyricsModel}
           radio={radioModel}
           onPlayPause={onPlayPause}
-          onNext={() => void session.next()}
-          onPrevious={() => void session.previous()}
+          onNext={() => advance('next')}
+          onPrevious={() => advance('previous')}
           onToggleLike={onToggleLike}
           download={
             currentRecordingId !== null &&
-            downloadRefFor(currentRecordingId) !== null
+            (controller.downloads.recordFor(currentRecordingId) !== null ||
+              downloadRefFor(currentRecordingId) !== null)
               ? (downloadChipFor(currentRecordingId) ?? 'idle')
               : null
           }
@@ -2450,7 +2521,7 @@ function Main({
           onRetryLyrics={onRetryLyrics}
           onStartRadio={radioCapable ? onStartRadio : undefined}
           onStopRadio={onStopRadio}
-          onPressQueueItem={(id) => void session.playOccurrence(id)}
+          onPressQueueItem={playQueueOccurrence}
           onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
           onToggleQueueReorder={() => setReordering((v) => !v)}
           onMoveQueueItem={onMoveQueueItem}
@@ -2476,10 +2547,12 @@ function Main({
               label: 'add to playlist',
               icon: 'list-plus' as const,
             },
-            // Download affordance only where a playable provider ref
-            // exists — a local-only recording is owned bytes already.
+            // Download affordance where a provider ref can mint a
+            // stream — OR a ledger row already exists (cancel/retry/
+            // remove don't need a resolvable ref).
             ...(actionsFor.kind === 'recording' &&
-            downloadRefFor(actionsFor.recordingId) !== null
+            (controller.downloads.recordFor(actionsFor.recordingId) !== null ||
+              downloadRefFor(actionsFor.recordingId) !== null)
               ? [
                   {
                     key: 'download',

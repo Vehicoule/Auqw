@@ -1377,7 +1377,7 @@ export function toSettingsModel(
           media.localFolderCount === undefined
             ? '—'
             : `${media.localFolderCount}`,
-        kind: 'navigation',
+        kind: 'value',
         enabled: true,
       },
       {
