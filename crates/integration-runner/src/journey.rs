@@ -241,7 +241,7 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
             }
         }
     };
-    let kv = NullKv;
+    let kv = std::sync::Arc::new(NullKv);
     let clock = SystemClock;
     let Invocation { result, attempt } = auqw_plugin_host::invoke(
         plugin,
@@ -251,7 +251,7 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
         CancellationToken::new(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: None,
         },

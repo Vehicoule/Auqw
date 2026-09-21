@@ -214,7 +214,7 @@ impl Remint for PluginRemint {
                 CancellationToken::new(),
                 HostServices {
                     http: &*http,
-                    kv: &*kv,
+                    kv,
                     clock: &clock,
                     pot_provider: pot_provider.as_deref(),
                 },

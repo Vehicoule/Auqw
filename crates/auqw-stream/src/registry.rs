@@ -502,23 +502,33 @@ async fn reap_loop(
     let interval = interval.max(Duration::from_millis(50));
     loop {
         tokio::time::sleep(interval).await;
-        let doomed: Vec<Arc<SessionInner>> = sessions
+        let doomed: Vec<(String, Arc<SessionInner>)> = sessions
             .lock()
             .map(|m| {
-                m.values()
-                    .filter(|s| !s.is_terminal() && s.detached_for().is_some_and(|d| d >= ttl))
-                    .cloned()
+                m.iter()
+                    .filter(|(_, s)| !s.is_terminal() && s.detached_for().is_some_and(|d| d >= ttl))
+                    .map(|(h, s)| (h.clone(), Arc::clone(s)))
                     .collect()
             })
             .unwrap_or_default();
-        for s in doomed {
+        for (handle, s) in doomed {
             // Recheck under `shared`: an attach landing between the
             // filter and here clears `detached_since`, so the recheck
             // fails and the attach wins — never an evict on a session
             // a consumer just reconnected to.
-            s.terminate_if(StreamError::Evicted, |sh| {
+            if s.terminate_if(StreamError::Evicted, |sh| {
                 sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
-            });
+            }) {
+                // The evicted session can never attach or serve again —
+                // keeping its entry only grows the map on every
+                // abandoned prepare, and callers routing by handle drop
+                // it on the `not-found` answer anyway. Entries killed
+                // by other paths keep their typed terminal error until
+                // the next supersede prunes them.
+                if let Ok(mut m) = sessions.lock() {
+                    m.remove(&handle);
+                }
+            }
         }
     }
 }

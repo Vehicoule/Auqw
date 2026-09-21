@@ -526,7 +526,7 @@ impl PluginHost {
             CancellationToken::new(),
             HostServices {
                 http: &*self.http,
-                kv: &*self.kv,
+                kv: Arc::clone(&self.kv),
                 clock: &clock,
                 pot_provider: self.pot_provider_url.as_deref(),
             },
@@ -603,7 +603,7 @@ impl PluginHost {
                 token,
                 HostServices {
                     http: &*http,
-                    kv: &*kv,
+                    kv,
                     clock: &clock,
                     pot_provider: pot_provider.as_deref(),
                 },

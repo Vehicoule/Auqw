@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use auqw_plugin_host::{
-    invoke, load, BudgetDimension, Budgets, HostServices, HttpClient, HttpError, HttpErrorKind,
-    HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest, ManifestError,
-    MemoryKeyValueStore, SystemClock,
+    invoke, load, ArtifactRef, BudgetDimension, Budgets, HostServices, HttpClient, HttpError,
+    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest,
+    ManifestError, MemoryKeyValueStore, SystemClock,
 };
 use serde_json::Value;
 use sha2::Digest;
@@ -31,9 +31,9 @@ fn svc<'a>(http: &'a dyn HttpClient, pot_provider: Option<&'a str>) -> HostServi
 
 static CLOCK: SystemClock = SystemClock;
 
-fn test_kv() -> &'static MemoryKeyValueStore {
-    static KV: std::sync::OnceLock<MemoryKeyValueStore> = std::sync::OnceLock::new();
-    KV.get_or_init(MemoryKeyValueStore::new)
+fn test_kv() -> Arc<MemoryKeyValueStore> {
+    static KV: std::sync::OnceLock<Arc<MemoryKeyValueStore>> = std::sync::OnceLock::new();
+    Arc::clone(KV.get_or_init(|| Arc::new(MemoryKeyValueStore::new())))
 }
 
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
@@ -1493,6 +1493,212 @@ fn logger_wat() -> String {
          \"payload\":{\"level\":\"info\",\"message\":\"m\"}}",
     )
 }
+
+// ---------- host-owned headers ----------
+
+/// A guest-set `Host` would make the wire authority diverge from the
+/// allowlisted URL (domain fronting) — the request is a malformed
+/// step, never sent.
+#[tokio::test]
+async fn http_request_host_header_is_rejected() {
+    let e = raw_step_outcome(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+         \"headers\":[[\"Host\",\"evil.example\"]],\"body\":null}}",
+        &["network:example.com"],
+    )
+    .await;
+    assert!(matches!(e, InvokeError::InvalidMessage(_)), "{e:?}");
+}
+
+/// Hop-by-hop and body-framing names are host-owned too — the client
+/// computes them from the URL and body.
+#[tokio::test]
+async fn http_request_hop_by_hop_headers_are_rejected() {
+    for name in [
+        "connection",
+        "Transfer-Encoding",
+        "TE",
+        "upgrade",
+        "keep-alive",
+        "content-length",
+        "Proxy-Authorization",
+    ] {
+        let raw = format!(
+            "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+             \"payload\":{{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+             \"headers\":[[\"{name}\",\"x\"]],\"body\":null}}}}"
+        );
+        let e = raw_step_outcome(&raw, &["network:example.com"]).await;
+        assert!(matches!(e, InvokeError::InvalidMessage(_)), "{name}: {e:?}");
+    }
+}
+
+/// Ordinary custom headers still pass through to the client.
+#[tokio::test]
+async fn http_request_custom_headers_are_allowed() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"method\":\"GET\",\"url\":\"https://example.com/\",\
+         \"headers\":[[\"X-Mode\",\"probe\"]],\"body\":null}}",
+    )));
+    let mut budgets = default_budgets();
+    budgets.max_steps = 1;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    // The request was authorized and sent — the step cap ends the loop.
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(attempt.http_calls, 1);
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Steps
+            }
+        ),
+        "expected steps-cap error"
+    );
+}
+
+// ---------- guest strings in error text ----------
+
+/// A `fail.error.kind` outside the taxonomy is quoted in the
+/// InvalidMessage text — it must be redacted like sibling paths so a
+/// signed URL in the kind cannot leak.
+#[tokio::test]
+async fn fail_kind_is_redacted_in_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"https://a.b/s?sig=SYNTHETIC_SECRET\",\"message\":\"x\"}}",
+        &[],
+    )
+    .await;
+    let InvokeError::InvalidMessage(m) = e else {
+        panic!("expected InvalidMessage, got {e:?}")
+    };
+    assert!(!m.contains("SYNTHETIC_SECRET"), "{m}");
+}
+
+/// An off-schema key is quoted in the InvalidMessage text — same
+/// redaction contract.
+#[tokio::test]
+async fn unknown_key_is_redacted_in_invalid_message() {
+    let e = raw_step_outcome(
+        "{\"type\":\"done\",\"result\":null,\"https://a.b/?sig=SYNTHETIC_SECRET\":1}",
+        &[],
+    )
+    .await;
+    let InvokeError::InvalidMessage(m) = e else {
+        panic!("expected InvalidMessage, got {e:?}")
+    };
+    assert!(!m.contains("SYNTHETIC_SECRET"), "{m}");
+}
+
+// ---------- manifest re-validation at load ----------
+
+/// A manifest built without `from_json` — e.g. assembled field by
+/// field — still gets the grammar check at `load`: `network:*.`
+/// otherwise reaches the allowlist matcher and blesses every
+/// trailing-dot host.
+#[test]
+fn load_revalidates_programmatic_manifest() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&wasm));
+    let manifest = Manifest {
+        id: "test-plugin".into(),
+        version: "0.1.0".into(),
+        abi: "0.1.0".into(),
+        capabilities: vec!["playback.resolve".into()],
+        permissions: vec!["network:*.".into()],
+        artifact: ArtifactRef {
+            path: "t.wasm".into(),
+            digest,
+        },
+    };
+    let e = err(load(&wasm, manifest, &default_budgets()));
+    assert!(
+        matches!(e, LoadError::Manifest(ManifestError::InvalidField(_))),
+        "{e:?}"
+    );
+}
+
+// ---------- byte budget on over-cap responses ----------
+
+/// Returns a fixed body regardless of `max_response_bytes` — the
+/// client is not trusted to enforce the cap, so the host-side byte
+/// budget must still fire and still trace the call.
+struct UncappedBodyHttp {
+    size: usize,
+}
+
+impl HttpClient for UncappedBodyHttp {
+    fn send(
+        &self,
+        _req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let n = self.size;
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![0u8; n],
+            })
+        })
+    }
+}
+
+/// A response that blows the byte budget is rejected, but the call was
+/// still made and still spent bytes — `http_trace` must record it.
+#[tokio::test]
+async fn over_budget_response_is_still_traced() {
+    let wasm = ok(wat::parse_str(requester_wat("https://example.com/")));
+    let mut budgets = default_budgets();
+    budgets.max_bytes = 1024;
+    budgets.max_steps = 10;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&UncappedBodyHttp { size: 4096 }, None),
+    )
+    .await;
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Bytes
+            }
+        ),
+        "expected byte-cap error"
+    );
+    assert_eq!(attempt.http_calls, 1);
+    assert_eq!(attempt.http_trace.len(), 1);
+    assert_eq!(attempt.http_trace[0].status, Some(200));
+    assert_eq!(attempt.http_trace[0].bytes, 4096);
+}
+
+// ---------- guest log budget ----------
 
 /// The 129th log entry of one invocation is a typed budget failure,
 /// not silent allocation growth.

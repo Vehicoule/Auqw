@@ -761,8 +761,13 @@ async fn abandoned_prepare_is_evicted_by_the_reaper() {
         .unwrap_or_else(|e| panic!("prepare: {e}"))
         .handle;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // An evicted session leaves the map entirely — callers routing by
+    // handle drop the dead entry on this `not-found` instead of it
+    // lingering forever.
     let e = err_of(reg.read(&h, 0, 1));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
+    let e = err_of(reg.phase_marks(&h));
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1340,10 +1345,10 @@ async fn detached_session_evicted_by_detached_age() {
     tokio::time::sleep(Duration::from_millis(70)).await;
     assert!(reg.is_live(&h), "reaped on session age, not detached age");
     // Once the detached window itself reaches the TTL the reaper ends
-    // it — Evicted, the abandon verdict.
+    // it and drops the handle — a stale handle answers not-found.
     wait_until(|| !reg.is_live(&h)).await;
     let e = err_of(reg.attach(&h, 0));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 /// A body that yields its first piece and then hangs must still serve

@@ -2,6 +2,7 @@
 //! reach outside its sandbox arrives through these ports — the guest
 //! itself only emits `host_request` step messages.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::http::HttpClient;
@@ -11,8 +12,10 @@ use crate::kv::KeyValueStore;
 pub struct HostServices<'a> {
     /// Performs the guest's authorized outbound HTTP.
     pub http: &'a dyn HttpClient,
-    /// Per-plugin KV namespace snapshots and commits.
-    pub kv: &'a dyn KeyValueStore,
+    /// Per-plugin KV namespace snapshots and commits — `Arc` so an
+    /// invocation can hand the call to the blocking pool instead of
+    /// stalling a runtime worker on file I/O.
+    pub kv: Arc<dyn KeyValueStore>,
     /// Wall clock backing `now_ms` requests.
     pub clock: &'a dyn HostClock,
     /// Base URL of a bgutil-compatible PO-token service

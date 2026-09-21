@@ -49,8 +49,9 @@ impl Manifest {
 
     /// Structural validation beyond the JSON shape. Mirrors
     /// `sdk/contract/manifest.schema.json` — the schema is the contract;
-    /// this validator must not accept what it rejects.
-    fn validate(&self) -> Result<(), ManifestError> {
+    /// this validator must not accept what it rejects. `load` re-runs
+    /// it because a manifest built programmatically skips `from_json`.
+    pub(crate) fn validate(&self) -> Result<(), ManifestError> {
         let bad = |m: &str| ManifestError::InvalidField(m.to_string());
         // ^[a-z0-9][a-z0-9-]*$
         let mut chars = self.id.chars();

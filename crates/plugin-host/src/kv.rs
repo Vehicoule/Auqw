@@ -12,6 +12,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
 use crate::error::KvError;
+use crate::redact::redact_text;
 
 /// KV key cap, in UTF-8 bytes.
 pub(crate) const MAX_KV_KEY_BYTES: usize = 128;
@@ -55,10 +56,13 @@ fn caps_violation(ns: &BTreeMap<String, Vec<u8>>) -> Option<String> {
     let mut total = 0usize;
     for (key, value) in ns {
         if key.is_empty() || key.len() > MAX_KV_KEY_BYTES {
-            return Some(format!("key {key:?} violates the 128-byte cap"));
+            return Some(format!(
+                "key {:?} violates the 128-byte cap",
+                redact_text(key)
+            ));
         }
         if value.len() > MAX_KV_VALUE_BYTES {
-            return Some(format!("key {key:?} value exceeds 64 KiB"));
+            return Some(format!("key {:?} value exceeds 64 KiB", redact_text(key)));
         }
         total += key.len() + value.len();
     }
