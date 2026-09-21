@@ -240,6 +240,11 @@ export async function createSessionController(
   // `local` is constructed in start(); the playback hook reads the
   // box so a URI resolves the moment a source exists.
   let localSource: LocalFileSource | null = null;
+  // Cached connectivity read for the session's zero-resolution gate.
+  // Optimistic true until start() seeds it — matches the unwatched
+  // (iOS) port's convention; a failed read drops to offline, never
+  // silently online.
+  let lastOnline = true;
   const log = createLog();
   const session = new Session({
     storage,
@@ -265,6 +270,7 @@ export async function createSessionController(
             }
             return localSource?.uriFor(recordingId) ?? null;
           },
+          isOnline: () => lastOnline,
         }
       : {}),
   });
@@ -471,6 +477,26 @@ export async function createSessionController(
           }
         }),
       );
+      // Offline gate feed: seed the cached read, then keep it live on
+      // connectivity edges. Installed before downloads.init so the
+      // monitor's baseline edge can't be missed.
+      try {
+        const seeded = await connectivity.snapshot();
+        if (seeded.ok) {
+          lastOnline = seeded.value.online;
+        }
+      } catch {
+        lastOnline = false;
+      }
+      try {
+        mediaUnsubs.push(
+          connectivity.subscribe((snap) => {
+            lastOnline = snap.online;
+          }),
+        );
+      } catch {
+        // No monitor on this platform — the session stays optimistic.
+      }
       const inited = await downloads.init(loaded.value.downloads, signal);
       if (!inited.ok) {
         log.write({

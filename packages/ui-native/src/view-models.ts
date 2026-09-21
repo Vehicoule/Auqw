@@ -1295,7 +1295,12 @@ export function toHomeModel(input: {
 export function toSettingsModel(
   settings: Settings,
   diagnostics: DiagnosticsModel,
-  media: { readonly storageText?: string | null; readonly localFolderCount?: number | undefined } = {},
+  media: {
+    readonly storageText?: string | null;
+    readonly localFolderCount?: number | undefined;
+    readonly localSources?: readonly { sourceId: string; label: string }[];
+    readonly downloadCount?: number | undefined;
+  } = {},
 ): SettingsModel {
   return {
     theme: settings.theme,
@@ -1371,6 +1376,16 @@ export function toSettingsModel(
         enabled: true,
       },
       {
+        key: 'removeAllDownloads',
+        label: 'remove all downloads',
+        value:
+          media.downloadCount === undefined
+            ? null
+            : `${media.downloadCount}`,
+        kind: 'navigation',
+        enabled: (media.downloadCount ?? 0) > 0,
+      },
+      {
         key: 'localSources',
         label: 'local folders',
         value:
@@ -1380,6 +1395,15 @@ export function toSettingsModel(
         kind: 'value',
         enabled: true,
       },
+      // One removal row per granted source — the plan's local-files
+      // "remove" affordance without a picker surface.
+      ...(media.localSources ?? []).map((source) => ({
+        key: `localSourceRemove:${source.sourceId}`,
+        label: `remove “${source.label}”`,
+        value: null,
+        kind: 'navigation' as const,
+        enabled: true,
+      })),
       {
         key: 'addLocalFolder',
         label: 'add local folder',
