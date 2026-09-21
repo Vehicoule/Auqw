@@ -151,6 +151,69 @@ export function createAuqwExpoPlayer(
 ): PlayerPort {
   const listeners = new Set<(event: PlayerEvent) => void>();
   let subscriptions: readonly AuqwExpoSubscription[] | null = null;
+  /** provider:'local' prepares mint their own request ids — the
+   * plugin host never sees them, so cancelPrepare must short-circuit
+   * (releasing the minted handle when the prepared event already ran). */
+  const localPrepares = new Map<string, string | null>();
+  let localSeq = 0;
+
+  /**
+   * provider:'local' — registers an `lf-*` handle on the module and
+   * reports the outcome through the same prepare event the plugin
+   * path uses, so the session FSM treats local attach identically.
+   * sourceRef carries the file path or content URI verbatim (the
+   * provider:'local' convention — the ref id IS the URI).
+   */
+  async function prepareLocalFile(input: {
+    provider: string;
+    sourceRef: string;
+    identity: PlaybackIdentity;
+  }): Promise<Result<string>> {
+    const path = isBoundedString(input.sourceRef, 4096)
+      ? input.sourceRef
+      : null;
+    const requestId = `lf-req-${++localSeq}`;
+    localPrepares.set(requestId, null);
+    if (path === null) {
+      emit({
+        type: 'prepare',
+        requestId,
+        identity: input.identity,
+        outcome: {
+          type: 'failed',
+          error: appError('invalid-response', 'bad local sourceRef'),
+          attempt: toAttemptTrace(null, requestId),
+        },
+      });
+      return ok(requestId);
+    }
+    try {
+      const handle = await module.prepareLocal(path, null);
+      localPrepares.set(requestId, handle);
+      emit({
+        type: 'prepare',
+        requestId,
+        identity: input.identity,
+        outcome: {
+          type: 'prepared',
+          stream: { handle, mime: 'audio/*' },
+          attempt: toAttemptTrace(null, requestId),
+        },
+      });
+    } catch (thrown) {
+      emit({
+        type: 'prepare',
+        requestId,
+        identity: input.identity,
+        outcome: {
+          type: 'failed',
+          error: nativeError(thrown),
+          attempt: toAttemptTrace(null, requestId),
+        },
+      });
+    }
+    return ok(requestId);
+  }
 
   function emit(event: PlayerEvent): void {
     for (const listener of [...listeners]) {
@@ -330,6 +393,9 @@ export function createAuqwExpoPlayer(
 
   return {
     prepare(input) {
+      if (input.provider === 'local') {
+        return prepareLocalFile(input);
+      }
       return guard(() =>
         module.prepare(
           input.provider,
@@ -359,6 +425,17 @@ export function createAuqwExpoPlayer(
       return guard(() => module.stop());
     },
     cancelPrepare(input) {
+      // Local prepares never reached the plugin host — nothing on the
+      // host to cancel. A minted handle dies with release; release it
+      // here so a canceled prepare can't orphan the lf-* registry entry.
+      const localHandle = localPrepares.get(input.requestId);
+      if (localHandle !== undefined) {
+        localPrepares.delete(input.requestId);
+        if (localHandle !== null) {
+          return guard(() => module.releaseStream(localHandle));
+        }
+        return Promise.resolve(ok(undefined));
+      }
       return guard(() => module.cancelPrepare(input.requestId));
     },
     release(input) {

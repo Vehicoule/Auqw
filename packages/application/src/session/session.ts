@@ -46,6 +46,7 @@ import type {
   Corrections,
   ReviewFilter,
 } from '../library/corrections.ts';
+import { LOCAL_PROVIDER, localTrackRef } from '../domain.ts';
 import {
   applyAcceptance,
   lyricsCacheEntry,
@@ -173,6 +174,15 @@ export type SessionDeps = {
   readonly ids: IdPort;
   readonly log: LogPort;
   readonly defaults: Settings;
+  /**
+   * Slice-3 offline hook: returns a playable local URI (file:// or
+   * content://) when the recording has `available` bytes on disk or
+   * is a provenance:'local' file, else null. A hit makes pickRef
+   * synthesize `provider:'local'` with the URI as the ref id — owned
+   * bytes, never the network. A pin for the active playback provider
+   * still wins; a foreign pin can't resolve under it anyway.
+   */
+  readonly localPlaybackFor?: (recordingId: string) => string | null;
 };
 
 const OP_DEADLINE_MS = 15_000;
@@ -309,6 +319,7 @@ export class Session {
   #disposed = false;
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
+  readonly #localPlaybackFor: (recordingId: string) => string | null;
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -342,6 +353,7 @@ export class Session {
     this.#clock = deps.clock;
     this.#ids = deps.ids;
     this.#log = deps.log;
+    this.#localPlaybackFor = deps.localPlaybackFor ?? (() => null);
     this.#corrections = createCorrections({
       storage: deps.storage,
       ids: deps.ids,
@@ -2216,6 +2228,18 @@ export class Session {
     ) {
       return occurrenceSelected;
     }
+    // Owned bytes beat any auto-pick: a download or local file plays
+    // offline-honest. A pin for the active provider won above; a
+    // foreign pin can't resolve under it anyway, so the owned file
+    // still wins.
+    const local = this.#localPlaybackFor(recording.id);
+    if (
+      local !== null &&
+      (occurrenceSelected === null ||
+        occurrenceSelected.provider !== provider)
+    ) {
+      return localTrackRef(local);
+    }
     const verdict = effectiveMapping(recording, provider);
     if (verdict !== null) {
       return verdict.ref;
@@ -2302,18 +2326,22 @@ export class Session {
       );
     }
 
-    const routed = this.#router.providerFor(
-      'playback.resolve',
-      selectionFromSettings(r.settings),
-    );
-    if (!routed.ok) {
-      await this.#failAttempt(attempt, routed.error);
-      return err(routed.error);
+    // A provider:'local' pick bypasses the plugin router — the adapter
+    // attaches the URI directly (no resolve capability on a file).
+    if (ref.provider !== LOCAL_PROVIDER) {
+      const routed = this.#router.providerFor(
+        'playback.resolve',
+        selectionFromSettings(r.settings),
+      );
+      if (!routed.ok) {
+        await this.#failAttempt(attempt, routed.error);
+        return err(routed.error);
+      }
     }
     const prepared = await this.#withDeadline(
       () =>
         this.#player.prepare({
-          provider: r.settings.playbackProvider,
+          provider: ref.provider,
           sourceRef: ref.id,
           identity: attempt.identity,
         }),
