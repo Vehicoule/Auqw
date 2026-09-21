@@ -7,7 +7,8 @@ import type { Result } from '../errors.ts';
  * returns ok the offset is resumable across restarts. `finalize`
  * verifies the checksum and atomically renames `.part` to the final
  * name; `abort` ends the sink, keeping or cleaning the partial file
- * deterministically.
+ * deterministically. On a checksum mismatch `.part` is DELETED —
+ * corrupt bytes are worthless to a later resume.
  */
 export interface TransferSink {
   write(bytes: Uint8Array): Promise<Result<void>>;
@@ -22,7 +23,7 @@ export interface TransferSink {
    * against `expected` when non-null (the policy's incremental digest
    * covers only fresh runs — resumed transfers pass null), then
    * atomically move `.part` to the final name. A mismatch fails
-   * `invalid-response` and keeps `.part`. Returns the real digest.
+   * `invalid-response` and deletes `.part`. Returns the real digest.
    */
   finalize(expected: string | null): Promise<Result<string>>;
   /**
@@ -49,8 +50,11 @@ export interface MediaTransferPort {
   /**
    * Open (or create) the `.part` sibling of `destPath` for a
    * transfer. `resumeAtBytes > 0` resumes in place — the sink appends
-   * after the existing committed prefix; a missing/short `.part`
-   * starts at 0 honestly.
+   * after the existing committed prefix. The `.part` MUST already
+   * hold exactly `resumeAtBytes` bytes; a missing or size-mismatched
+   * `.part` fails `invalid-response` (the caller drops its ledger
+   * row and retries from 0 — splicing a prefix that never landed
+   * would corrupt the file).
    */
   begin(
     input: { destPath: string; resumeAtBytes: number },
@@ -58,7 +62,8 @@ export interface MediaTransferPort {
   ): Promise<Result<TransferSink>>;
   /**
    * Delete stale `.part` files left by an interrupted process that
-   * have no owning transfer row. Returns the reclaimed byte count.
+   * have no owning transfer row. `keepPaths` are the `.part` NAMES
+   * (e.g. `track.mp4.part`) to keep. Returns the reclaimed file count.
    */
   sweepPartials(
     keepPaths: readonly string[],
@@ -76,7 +81,8 @@ export interface MediaTransferPort {
   removeFile(name: string, signal: CancellationSignal): Promise<Result<void>>;
   /**
    * File-exists check for startup integrity: does the finalized file
-   * for `name` exist with `bytes` size?
+   * for `name` exist, and with what size? `bytes` is null when the
+   * size cannot be read.
    */
   stat(
     name: string,
