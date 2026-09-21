@@ -26,7 +26,8 @@ export function createExpoConnectivity(
       return;
     }
     watching = true;
-    native.connectivityWatch();
+    // Listener BEFORE watch: the native monitor emits its baseline
+    // edge inside connectivityWatch — registering after would drop it.
     subscription = native.addConnectivityChangedListener((event) => {
       const snapshot: ConnectivitySnapshot = {
         online: event.online,
@@ -40,6 +41,7 @@ export function createExpoConnectivity(
         }
       }
     });
+    native.connectivityWatch();
   };
 
   const dropWatch = (): void => {

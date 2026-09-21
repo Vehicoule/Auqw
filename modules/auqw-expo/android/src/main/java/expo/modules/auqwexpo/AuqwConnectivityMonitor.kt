@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 
 /**
  * ConnectivityManager NetworkCallback → {online, metered} edges for
@@ -99,12 +98,11 @@ class AuqwConnectivityMonitor(
     lastOnline = online
     lastMetered = metered
     emit(online, metered)
-    cm.registerNetworkCallback(
-      NetworkRequest.Builder()
-        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        .build(),
-      callback,
-    )
+    // Default-network callback: lifecycle follows the system default
+    // route, so a wifi→cell default handoff fires onAvailable/onLost
+    // even when both networks stay available. A request-scoped
+    // callback would miss that edge — snapshot() reads activeNetwork.
+    cm.registerDefaultNetworkCallback(callback)
   }
 
   fun stop() {

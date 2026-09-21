@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <!-- NetworkCallback registration + active-network capability reads
+       (connectivity monitor) need this normal permission. -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <!-- setWakeMode(WAKE_MODE_LOCAL) on the warm player. -->
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <!-- API 33+: without it the MediaSession notification the service
