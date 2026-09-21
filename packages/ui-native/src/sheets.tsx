@@ -370,6 +370,7 @@ export function AddToPlaylistSheet({
               : (name) => {
                 onCreate(name);
                 setDraft('');
+                setCreating(false);
               }
           }
           onCancel={() => {

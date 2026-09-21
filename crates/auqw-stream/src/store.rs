@@ -111,11 +111,10 @@ impl Sidecar {
             }
             prev_end = *e;
         }
-        if sidecar
-            .total
-            .or(sidecar.hint_total)
-            .is_some_and(|t| prev_end > t)
-        {
+        // Only the wire-authoritative `total` bounds the map —
+        // `hint_total` is resolve-time metadata that may legitimately
+        // run short of committed bytes (the wire answered past it).
+        if sidecar.total.is_some_and(|t| prev_end > t) {
             return Err("extents exceed declared total".into());
         }
         Ok(sidecar)
@@ -242,10 +241,12 @@ impl SparseStore {
                 message: format!("write {start}: {e}"),
             })?;
         let mut new_start = start;
-        // `start` is a validated in-file offset but the extent end
-        // still needs checked math — a commit at u64::MAX must not
-        // wrap into a bogus extent.
-        let mut new_end = start.saturating_add(bytes.len() as u64);
+        let mut new_end =
+            start
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| StreamError::Internal {
+                    message: format!("write {start}: extent end overflows"),
+                })?;
         let absorbed: Vec<u64> = self
             .extents
             .range(..=new_end)
@@ -524,6 +525,38 @@ mod tests {
         std::fs::write(&paths.sidecar, b"{not json").unwrap_or_else(|e| panic!("w: {e}"));
         assert!(Sidecar::load(&paths.sidecar).is_err());
         drop(dir);
+    }
+
+    /// `hint_total` is resolve-time metadata — the wire can legitimately
+    /// answer past it, so extents beyond the hint are *not* corruption.
+    /// The wire-authoritative `total` still bounds the map: extents past
+    /// it can never have come from the write path, so they are.
+    #[test]
+    fn sidecar_extents_may_pass_hint_but_not_wire_total() {
+        let meta = || SidecarMeta {
+            source_ref: "vid".into(),
+            provider: "test".into(),
+            mime: "audio/mp4".into(),
+            itag: None,
+            bitrate_kbps: None,
+            expires_at_ms: None,
+        };
+        let (_d, paths, mut s) = store("hintbounds"); // hint_total = 1000
+        insert(&mut s, 0, 1200); // committed past the hint
+        s.persist(&paths, &meta())
+            .unwrap_or_else(|e| panic!("persist: {e}"));
+        let loaded = Sidecar::load(&paths.sidecar).unwrap_or_else(|e| panic!("load: {e}"));
+        assert_eq!(loaded.extents, vec![(0, 1200)]);
+        assert_eq!(loaded.hint_total, Some(1000));
+        let (_d2, paths, mut s) = store("wirebounds");
+        s.set_total(64); // wire-authoritative
+        insert(&mut s, 0, 128);
+        s.persist(&paths, &meta())
+            .unwrap_or_else(|e| panic!("persist: {e}"));
+        assert!(
+            Sidecar::load(&paths.sidecar).is_err(),
+            "extents past the wire total are corruption"
+        );
     }
 
     /// The persist cadence is a byte budget, not a piece count — the

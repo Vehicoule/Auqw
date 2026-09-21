@@ -505,56 +505,6 @@
         }
       }
     },
-    "resolveResult": {
-      "type": "object",
-      "required": [
-        "url",
-        "mime",
-        "bitrate_kbps",
-        "expires_at_ms",
-        "client"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "url": {
-          "type": "string"
-        },
-        "mime": {
-          "type": "string"
-        },
-        "bitrate_kbps": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0
-        },
-        "expires_at_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0
-        },
-        "content_length": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 1
-        },
-        "client": {
-          "type": "string"
-        },
-        "itag": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0
-        }
-      }
-    },
     "done": {
       "type": "object",
       "required": [

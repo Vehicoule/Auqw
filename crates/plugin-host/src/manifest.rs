@@ -136,7 +136,8 @@ impl Manifest {
             // endpoints no reviewed permission should reach; loopback
             // (`127.x`, `localhost`) stays legal for dev/test targets —
             // it can only ever reach the device itself.
-            let body = rest.strip_prefix("*.").unwrap_or(rest);
+            let wildcarded = rest.starts_with("*.");
+            let body = if wildcarded { &rest[2..] } else { rest };
             if body.is_empty()
                 || !body
                     .bytes()
@@ -146,10 +147,14 @@ impl Manifest {
                     "bad network permission {p:?}"
                 )));
             }
-            let is_loopback = body == "localhost"
-                || body
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback());
+            // A wildcard over a loopback literal would grant every
+            // `*.localhost`/`*.127.x` destination — loopback stays
+            // legal only as the unwildcarded literal.
+            let is_loopback = !wildcarded
+                && (body == "localhost"
+                    || body
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()));
             let is_ip = body.parse::<std::net::IpAddr>().is_ok();
             if !is_loopback
                 && (is_ip

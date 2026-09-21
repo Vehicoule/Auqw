@@ -21,12 +21,13 @@ const SUFFIX: &[u8] = b"}";
 /// invocation, so the leak is bounded by the step budget.
 #[no_mangle]
 pub extern "C" fn alloc(len: u32) -> u32 {
-    let Ok(layout) = Layout::from_size_align(len as usize, 1) else {
+    // `alloc` with a zero-sized layout is UB; a 0 request gets a 1-byte
+    // buffer it never writes through (same guard as the SDK `__alloc`).
+    let Ok(layout) = Layout::from_size_align((len as usize).max(1), 1) else {
         return 0;
     };
-    // SAFETY: `layout` has nonzero size per the caller contract (the host
-    // only requests nonempty step messages); the returned pointer is a
-    // valid guest-owned buffer of `len` bytes.
+    // SAFETY: `layout` has nonzero size by construction; the returned
+    // pointer is a valid guest-owned buffer of `len` bytes.
     unsafe { std::alloc::alloc(layout) as u32 }
 }
 

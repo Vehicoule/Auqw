@@ -89,14 +89,21 @@ export function recordPlay(
   ) {
     return { ...sections, recorded: false };
   }
+  // The observed horizon is the newest stamped event: wall-clock
+  // regressions can never move it backward, so stamps and the
+  // retention window both stay monotonic.
+  const horizon = sections.playHistory.reduce(
+    (max, e) => Math.max(max, e.playedMs),
+    input.nowMs,
+  );
   const event: PlayEvent = {
     eventId: input.eventId,
     recordingId: input.recordingId,
     occurrenceId: input.occurrenceId,
-    playedMs: input.nowMs,
+    playedMs: horizon,
     listenedMs: input.listenedMs,
   };
-  const cutoff = input.nowMs - PLAY_HISTORY_RETENTION_MS;
+  const cutoff = horizon - PLAY_HISTORY_RETENTION_MS;
   const playHistory = [
     ...sections.playHistory.filter((e) => e.playedMs >= cutoff),
     event,
@@ -107,7 +114,7 @@ export function recordPlay(
   const count: PlayCount = {
     recordingId: input.recordingId,
     count: (existing?.count ?? 0) + 1,
-    lastMs: input.nowMs,
+    lastMs: Math.max(horizon, existing?.lastMs ?? 0),
   };
   const playCounts =
     existing === undefined

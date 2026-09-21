@@ -41,9 +41,35 @@ import type {
   SqlRow,
   SqlValue,
 } from './driver.ts';
-import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
+import {
+  CURRENT_SCHEMA_VERSION,
+  KNOWN_TABLES,
+  MIGRATIONS,
+} from './migrations.ts';
 
 const ATTEMPT_CAP = 500;
+
+/**
+ * Transaction tails keyed by driver: one driver is one connection, so
+ * transactions serialize per driver even when several SqliteStorage
+ * instances share it.
+ */
+const TRANSACTION_TAILS = new WeakMap<
+  SqliteDriver,
+  { tail: Promise<void> }
+>();
+
+/**
+ * Initialize sections keyed by driver: probe, backup, and migrate are
+ * three steps split across two transactions (VACUUM INTO cannot run
+ * inside BEGIN), so instances sharing a driver must serialize the
+ * whole sequence — otherwise a second probe can capture a version the
+ * first instance has already migrated past and replay its DDL.
+ */
+const INITIALIZE_TAILS = new WeakMap<
+  SqliteDriver,
+  { tail: Promise<void> }
+>();
 
 function transientError(): AppError {
   return appError('transient', 'storage operation failed');
@@ -72,6 +98,13 @@ function newerSchema(): AppError {
   );
 }
 
+function invalidExport(): AppError {
+  return appError(
+    'invalid-response',
+    'exportedAtMs must be a safe nonnegative integer',
+  );
+}
+
 function cancelledError(): AppError {
   return appError('cancelled', 'cancelled');
 }
@@ -87,7 +120,6 @@ export class SqliteStorage implements StoragePort {
   readonly #driver: SqliteDriver;
   readonly #defaults: Settings;
   #init: Promise<Result<void>> | null = null;
-  #transactionTail: Promise<void> = Promise.resolve();
 
   constructor(driver: SqliteDriver, defaultSettings: Settings) {
     if (!isSettings(defaultSettings)) {
@@ -103,16 +135,43 @@ export class SqliteStorage implements StoragePort {
     }
   }
 
-  /** One connection cannot run overlapping BEGIN/COMMIT sequences. */
+  /**
+   * The whole probe→backup→migrate sequence queued on the driver's
+   * initialize tail. Each inner `#transaction` still serializes on the
+   * transaction tail, so ordinary commits can interleave between the
+   * sequence's steps — only a second instance's initialize waits.
+   */
+  #exclusiveInit<T>(work: () => Promise<T>): Promise<T> {
+    let slot = INITIALIZE_TAILS.get(this.#driver);
+    if (slot === undefined) {
+      slot = { tail: Promise.resolve() };
+      INITIALIZE_TAILS.set(this.#driver, slot);
+    }
+    const result = slot.tail.then(work);
+    slot.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  /**
+   * One connection cannot run overlapping BEGIN/COMMIT sequences.
+   * The tail is keyed on the driver, not this instance: several
+   * SqliteStorage objects over one driver share its connection and
+   * must queue on the same tail.
+   */
   #transaction<T>(
     work: (connection: SqliteConnection) => Promise<T>,
     signal: CancellationSignal,
   ): Promise<T> {
-    const result = this.#transactionTail.then(() => {
+    let slot = TRANSACTION_TAILS.get(this.#driver);
+    if (slot === undefined) {
+      slot = { tail: Promise.resolve() };
+      TRANSACTION_TAILS.set(this.#driver, slot);
+    }
+    const result = slot.tail.then(() => {
       this.#check(signal);
       return this.#driver.transaction(work, signal);
     });
-    this.#transactionTail = result.then(() => undefined, () => undefined);
+    slot.tail = result.then(() => undefined, () => undefined);
     return result;
   }
 
@@ -138,7 +197,7 @@ export class SqliteStorage implements StoragePort {
     if (existing !== null) {
       return existing;
     }
-    const work = this.#runInitialize(context);
+    const work = this.#exclusiveInit(() => this.#runInitialize(context));
     this.#init = work;
     void work.then((result) => {
       if (!result.ok && this.#init === work) {
@@ -166,6 +225,22 @@ export class SqliteStorage implements StoragePort {
           signal,
         );
         if (found.length === 0) {
+          // Version zero claims an empty database. One that already
+          // holds application-named tables is a foreign file being
+          // adopted — reject it rather than merge into it. Partial
+          // migrations cannot get here: each migration is one
+          // transaction and rolls back whole.
+          const foreign = await conn.query<SqlRow>(
+            `SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN (${KNOWN_TABLES.map(() => '?').join(',')})
+             LIMIT 1`,
+            [...KNOWN_TABLES],
+            signal,
+          );
+          if (foreign.length > 0) {
+            return err(invalidSchema());
+          }
           return ok(0);
         }
         const rows = await conn.query<SqlRow>(
@@ -203,7 +278,7 @@ export class SqliteStorage implements StoragePort {
         this.#check(signal);
         await this.#driver.backup(`v${version}`);
       }
-      return await this.#transaction(async (conn) => {
+      const migrated = await this.#transaction(async (conn) => {
         this.#check(signal);
         await conn.execute(
           'PRAGMA foreign_keys = ON',
@@ -254,6 +329,18 @@ export class SqliteStorage implements StoragePort {
         }
         return ok(undefined);
       }, signal);
+      if (migrated.ok && version > 0) {
+        // The pre-migration image has served its purpose — drop it so
+        // a full database copy does not persist. Cleanup is
+        // best-effort: a failed remove leaves an advisory file, not a
+        // failed initialize.
+        try {
+          await this.#driver.dropBackup(`v${version}`);
+        } catch {
+          // Advisory file cleanup; see above.
+        }
+      }
+      return migrated;
     } catch (thrown) {
       return err(this.#mapError(thrown, signal));
     }
@@ -705,8 +792,10 @@ export class SqliteStorage implements StoragePort {
     exportedAtMs: number,
     context: OperationContext,
   ): Promise<Result<ExportDocument>> {
+    // The port never throws: a bad timestamp (e.g. a broken clock)
+    // is a typed error, not a TypeError.
     if (!Number.isSafeInteger(exportedAtMs) || exportedAtMs < 0) {
-      throw new TypeError('exportedAtMs must be a safe nonnegative integer');
+      return err(invalidExport());
     }
     const init = await this.initialize(context);
     if (!init.ok) {
@@ -1259,15 +1348,23 @@ function decodeState(rows: TableRows): PersistedState | null {
       likedAtMs: reqNonNegInt(row['liked_ms']),
     };
   });
-  // Entities: ids first so entity_source_refs and entity-kind likes
-  // can be verified; duplicate entity rows rejected without the PK.
+  // Entities: ids and kinds first so entity_source_refs and
+  // entity-kind likes can be verified; duplicate entity rows rejected
+  // without the PK.
   const entityIds = new Set<string>();
+  const entityKinds = new Map<string, Entity['kind']>();
   for (const row of rows.entities) {
     const id = reqStr(row['entity_id']);
     if (entityIds.has(id)) {
       fail();
     }
     entityIds.add(id);
+    const kind = row['kind'];
+    if (kind !== 'album' && kind !== 'artist') {
+      fail();
+    } else {
+      entityKinds.set(id, kind);
+    }
   }
   const entities: Entity[] = rows.entities.map((row) => {
     const kind = row['kind'];
@@ -1287,8 +1384,13 @@ function decodeState(rows: TableRows): PersistedState | null {
     };
   });
   for (const like of likes) {
-    const targets = like.entityKind === 'track' ? recordingIds : entityIds;
-    if (!targets.has(like.targetId)) {
+    // 'track' likes name recordings; entity likes must name an entity
+    // of the same kind.
+    const resolves =
+      like.entityKind === 'track'
+        ? recordingIds.has(like.targetId)
+        : entityKinds.get(like.targetId) === like.entityKind;
+    if (!resolves) {
       fail();
     }
   }
@@ -1305,10 +1407,19 @@ function decodeState(rows: TableRows): PersistedState | null {
         fail();
       }
       entityRefKeys.add(key);
+      const ref = json(row['ref_json']);
+      // The ref's kind must agree with the target entity's kind.
+      if (
+        typeof ref !== 'object' ||
+        ref === null ||
+        (ref as EntityRef).kind !== entityKinds.get(entityId)
+      ) {
+        fail();
+      }
       return {
         entityId,
         provider,
-        ref: json(row['ref_json']) as EntityRef,
+        ref: ref as EntityRef,
       };
     },
   );

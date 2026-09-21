@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -33,6 +34,25 @@ const MAX_LOG_MESSAGE_BYTES: usize = 4096;
 const MAX_GUEST_LOG_ENTRIES: usize = 128;
 /// Levels a guest `log` request may use.
 const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
+
+/// Header names an `http_request` may not set (matched
+/// ASCII-case-insensitively): `Host` must come from the authorized URL,
+/// never the guest, and the rest are hop-by-hop or body-framing fields
+/// the client computes itself.
+const HOST_OWNED_HEADERS: &[&str] = &[
+    "connection",
+    "content-length",
+    "expect",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "via",
+];
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -83,6 +103,10 @@ impl LoadedPlugin {
 /// # Errors
 /// Returns [`LoadError`] for any contract or policy violation.
 pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<LoadedPlugin, LoadError> {
+    // A programmatically built manifest never passed through
+    // `from_json`'s grammar check — `network:*.` would otherwise reach
+    // the allowlist matcher and bless any trailing-dot host.
+    manifest.validate()?;
     if wasm.len() > budgets.max_artifact_bytes {
         return Err(LoadError::ArtifactTooLarge {
             max: budgets.max_artifact_bytes,
@@ -102,9 +126,6 @@ pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<Loaded
             actual: digest,
         });
     }
-    // `Manifest` is `Deserialize`, so a caller can hold one built around
-    // `from_json` — validate again here rather than trusting provenance.
-    manifest.validate()?;
     check_module_shape(wasm, budgets)?;
     let mut config = Config::default();
     config.consume_fuel(true);
@@ -322,15 +343,20 @@ async fn run(
     }
     // The namespace snapshot is staged for the whole invocation; on a
     // valid `done` only the staged patch commits — every other
-    // terminal path drops it.
-    let mut staged_kv = StagedKv::new(if ctx.plugin.manifest.allows_kv() {
-        ctx.services
-            .kv
-            .snapshot(&ctx.plugin.manifest.id)
+    // terminal path drops it. A file-backed store does a blocking
+    // read+parse here — hand it to the blocking pool so a runtime
+    // worker never stalls on fs I/O.
+    let staged_base = if ctx.plugin.manifest.allows_kv() {
+        let kv = Arc::clone(&ctx.services.kv);
+        let plugin_id = ctx.plugin.manifest.id.clone();
+        tokio::task::spawn_blocking(move || kv.snapshot(&plugin_id))
+            .await
+            .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
             .map_err(|e| InvokeError::HostService(e.to_string()))?
     } else {
         BTreeMap::new()
-    });
+    };
+    let mut staged_kv = StagedKv::new(staged_base);
     let limits = StoreLimitsBuilder::new()
         .memory_size(ctx.budgets.max_memory_bytes)
         .table_elements(ctx.budgets.max_table_elements)
@@ -438,10 +464,16 @@ async fn run(
                 check_preemption(ctx)?;
                 // The result survived every check — only now does the
                 // staged patch apply against the committed namespace.
+                // Committing means the fsync+rename chain of a
+                // file-backed store — offloaded for the same reason as
+                // the snapshot above.
                 if ctx.plugin.manifest.allows_kv() && staged_kv.has_writes() {
-                    ctx.services
-                        .kv
-                        .commit(&ctx.plugin.manifest.id, staged_kv.writes())
+                    let kv = Arc::clone(&ctx.services.kv);
+                    let plugin_id = ctx.plugin.manifest.id.clone();
+                    let writes = staged_kv.writes();
+                    tokio::task::spawn_blocking(move || kv.commit(&plugin_id, writes))
+                        .await
+                        .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
                         .map_err(|e| InvokeError::HostService(e.to_string()))?;
                 }
                 return Ok(result);
@@ -456,7 +488,8 @@ async fn run(
                     .ok_or_else(|| InvokeError::InvalidMessage("fail.error.kind missing".into()))?;
                 if !GUEST_FAIL_KINDS.contains(&kind) {
                     return Err(InvokeError::InvalidMessage(format!(
-                        "fail.error.kind {kind:?} is not in the ABI taxonomy"
+                        "fail.error.kind {:?} is not in the ABI taxonomy",
+                        redact_text(kind, &attempt.secrets)
                     )));
                 }
                 // Guest-controlled text: a message can quote a signed
@@ -497,7 +530,8 @@ fn check_keys(obj: &Value, allowed: &[&str], what: &str) -> Result<(), InvokeErr
     for key in map.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(InvokeError::InvalidMessage(format!(
-                "{what}.{key} is not in the ABI schema"
+                "{what}.{} is not in the ABI schema",
+                redact_text(key, &[])
             )));
         }
     }
@@ -660,7 +694,8 @@ async fn host_request_step(
                 && matches!(kind, "kv_get" | "kv_set" | "log" | "now_ms") =>
         {
             return Err(InvokeError::InvalidMessage(format!(
-                "host_request kind {kind:?} requires ABI 0.2.0"
+                "host_request kind {:?} requires ABI 0.2.0",
+                redact_text(kind, &attempt.secrets)
             )));
         }
         // `resume` is the 0.3.0 service kind — an older manifest is an
@@ -928,11 +963,9 @@ async fn perform_call(
     match result {
         Ok(resp) => {
             attempt.bytes += out_bytes + resp.body.len() as u64;
-            if attempt.bytes > ctx.budgets.max_bytes {
-                return Err(InvokeError::BudgetExceeded {
-                    dimension: BudgetDimension::Bytes,
-                });
-            }
+            // The response spent bytes whether or not it fit the
+            // budget — trace it first so an over-cap call isn't
+            // silently absent from the attempt's record.
             attempt.http_trace.push(HttpTraceEntry {
                 method,
                 url: traced_url,
@@ -940,6 +973,11 @@ async fn perform_call(
                 bytes: resp.body.len() as u64,
                 elapsed,
             });
+            if attempt.bytes > ctx.budgets.max_bytes {
+                return Err(InvokeError::BudgetExceeded {
+                    dimension: BudgetDimension::Bytes,
+                });
+            }
             // The pot provider's JSON carries token material — register
             // its string leaves so a guest echo into `log`/`fail` is
             // masked rather than leaked.
@@ -1045,27 +1083,19 @@ fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError>
         {
             return Err(invalid("http_request header malformed"));
         }
-        // The wire authority stays with the allow-listed URL: a guest
-        // `Host` (or h2 `:authority` — the charset check already bars
-        // `:`) would let a shared-frontend edge serve a destination the
-        // manifest never permitted. Framing/hop-by-hop headers are
-        // denied for the same reason — smuggling through any proxy in
-        // the path.
-        const DENIED_HEADERS: &[&str] = &[
-            "host",
-            "connection",
-            "keep-alive",
-            "transfer-encoding",
-            "content-length",
-            "te",
-            "trailer",
-            "upgrade",
-            "expect",
-            "via",
-        ];
-        let lower = name.to_ascii_lowercase();
-        if DENIED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
-            return Err(invalid("http_request header is host-controlled"));
+        // The wire stack owns these: a guest-set `Host` would let the
+        // request's authority diverge from the allowlisted URL host
+        // (domain fronting), and hop-by-hop/framing names
+        // (`Connection`, `TE`, `Transfer-Encoding`, `Content-Length`)
+        // are smuggling surfaces — the client sets them itself. A
+        // `proxy-` prefix is denied wholesale: proxy field names are
+        // host policy, not guest input.
+        if HOST_OWNED_HEADERS
+            .iter()
+            .any(|r| name.eq_ignore_ascii_case(r))
+            || name.to_ascii_lowercase().starts_with("proxy-")
+        {
+            return Err(invalid("http_request header name is reserved"));
         }
         headers.push((name.to_string(), value.to_string()));
     }

@@ -142,7 +142,15 @@ const verifyRelease = (plugin, dir) => {
   return { wasm, manifest: JSON.parse(manifestBuf.toString('utf8')) };
 };
 
+// Lock ids become output filenames below — a duplicate (or a collision
+// with the conformance guest's fixed 'spin' id) would silently overwrite
+// another plugin's synced artifacts.
+const ids = new Set(['spin']);
 for (const plugin of lock.plugins) {
+  if (ids.has(plugin.id)) {
+    throw new Error(`providers.lock.json: duplicate plugin id ${plugin.id}`);
+  }
+  ids.add(plugin.id);
   const source = plugin.source;
   let wasm;
   let manifest;

@@ -6,6 +6,7 @@
 //!   window_walk <plugin.wasm> <manifest.json> [video_id] [windows]
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use auqw_plugin_host::{
@@ -45,7 +46,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let clock = SystemClock;
     let outcome = invoke(
         &plugin,
@@ -55,7 +56,7 @@ async fn main() -> ExitCode {
         CancellationToken::new(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: None,
         },

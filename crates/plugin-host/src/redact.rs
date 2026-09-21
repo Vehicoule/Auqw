@@ -22,17 +22,7 @@ pub fn redact_text(text: &str, secrets: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < bytes.len() {
-        // URL schemes are case-insensitive and the guest controls the
-        // casing — `HTTPS://x?sig=…` must redact the same way.
-        let scheme_len =
-            if bytes[i..].len() >= 8 && bytes[i..i + 8].eq_ignore_ascii_case(b"https://") {
-                8
-            } else if bytes[i..].len() >= 7 && bytes[i..i + 7].eq_ignore_ascii_case(b"http://") {
-                7
-            } else {
-                0
-            };
-        if scheme_len > 0 {
+        if has_url_scheme(&bytes[i..]) {
             let mut j = i;
             while j < bytes.len()
                 && !URL_END.contains(&bytes[j])
@@ -64,6 +54,14 @@ pub fn redact_text(text: &str, secrets: &[String]) -> String {
         out = out.replace(secret.as_str(), "***");
     }
     out
+}
+
+/// Whether `b` begins with `http://` or `https://` under an
+/// ASCII-case-insensitive match — schemes are case-insensitive, so
+/// `HTTPS://` leaks signed params exactly like its lowercase form.
+fn has_url_scheme(b: &[u8]) -> bool {
+    (b.len() >= 7 && b[..7].eq_ignore_ascii_case(b"http://"))
+        || (b.len() >= 8 && b[..8].eq_ignore_ascii_case(b"https://"))
 }
 
 #[cfg(test)]
@@ -116,5 +114,14 @@ mod tests {
         assert!(!out.contains("SYNTHETIC_SECRET"), "{out}");
         assert!(out.starts_with("bad https://a.b/stream"));
         assert!(out.ends_with(" end"));
+    }
+
+    #[test]
+    fn uppercase_scheme_still_redacts() {
+        let text = "w HTTPS://a.b/s?sig=SYNTHETIC_SECRET Http://c.d/?q=1 e";
+        let out = redact_text(text, &[]);
+        assert!(!out.contains("SYNTHETIC_SECRET"), "{out}");
+        assert!(out.starts_with("w HTTPS://a.b/s?… Http://c.d/?…"), "{out}");
+        assert!(out.ends_with(" e"));
     }
 }

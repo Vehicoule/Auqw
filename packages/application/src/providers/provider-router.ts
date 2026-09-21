@@ -1,5 +1,5 @@
 import type { OperationContext } from '../cancellation.ts';
-import type { Settings } from '../domain.ts';
+import type { ArtworkRef, Settings } from '../domain.ts';
 import type { EntityRef, SourceRef } from '../domain.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
@@ -162,6 +162,19 @@ export class ProviderRouter {
       return Promise.resolve(err(resolved.error));
     }
     return resolved.value.getEntity(ref, context);
+  }
+
+  /** `catalog.artwork` dispatches to the ref's own provider. */
+  artwork(
+    ref: SourceRef,
+    input: { size: 600 | 1200 },
+    context: OperationContext,
+  ): Promise<Result<readonly ArtworkRef[]>> {
+    const resolved = this.providerForRef(ref, 'catalog.artwork');
+    if (!resolved.ok) {
+      return Promise.resolve(err(resolved.error));
+    }
+    return resolved.value.artwork(ref, input, context);
   }
 
   /**

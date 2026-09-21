@@ -29,6 +29,15 @@ function cloneOccurrence(occurrence: QueueOccurrence): QueueOccurrence {
   });
 }
 
+/**
+ * `AppError` is readonly-typed but not frozen at creation; the engine
+ * stores its own frozen copy so a caller mutating the object it passed
+ * (or a snapshot's `blockedError`) can't reach engine state.
+ */
+function cloneError(error: AppError | undefined): AppError | undefined {
+  return error === undefined ? undefined : Object.freeze({ ...error });
+}
+
 function validateOccurrence(occurrence: QueueOccurrence): void {
   if (
     typeof occurrence.occurrenceId !== 'string' ||
@@ -137,7 +146,7 @@ export class QueueEngine {
     this.#currentId = currentId;
     this.#positionMs = positionMs;
     this.#mode = mode;
-    this.#blockedError = blockedError;
+    this.#blockedError = cloneError(blockedError);
   }
 
   snapshot(): QueueSnapshot {
@@ -291,9 +300,8 @@ export class QueueEngine {
       this.#currentId = prev.occurrenceId;
     }
     this.#positionMs = 0;
-    // A cross-occurrence move must not carry the failed track's
-    // blocked error onto the predecessor — every other transition
-    // clears it.
+    // The cursor moved: the failed item's blocked error must not
+    // misattribute to the new current occurrence.
     this.#blockedError = undefined;
     this.#tick();
   }
@@ -420,7 +428,7 @@ export class QueueEngine {
     }
     this.#requireTick();
     this.#mode = 'paused';
-    this.#blockedError = error;
+    this.#blockedError = cloneError(error);
     this.#tick();
   }
 

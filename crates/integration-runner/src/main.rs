@@ -135,6 +135,11 @@ async fn main() -> ExitCode {
             let outcome = run_journey(plugin, journey).await;
             if outcome.passed {
                 println!("journey ok — {} ({})", outcome.name, outcome.detail);
+                // A miss the journey absorbed still means the canned
+                // script was incomplete — surface it on pass too.
+                for miss in &outcome.misses {
+                    eprintln!("WARN journey {}: uncanned upstream {miss}", outcome.name);
+                }
             } else {
                 eprintln!(
                     "FAIL journey {} ({} upstream calls): {}",

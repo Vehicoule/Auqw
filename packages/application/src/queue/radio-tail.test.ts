@@ -475,6 +475,84 @@ async function purePlanExisting(): Promise<void> {
   assertEqual(plan2.recordings[0]?.mappings.length, 1, 'no mapping dupes');
 }
 
+async function purePlanRejectsMismatched(): Promise<void> {
+  const ids = new SequenceIds();
+  // Same provider ref, but the item's metadata hard-rejects the stored
+  // recording on the live axis: the item is not this recording — it
+  // must not be merged in or enqueued under it.
+  const existing: Recording = {
+    ...recording('rL', [ref('youtube-music', 'v1')]),
+    title: 'Song (Live)',
+    versionLabels: ['live'],
+  };
+  const recordings = [existing];
+  const item = meta('youtube-music', 'v1', 'Song', 'Artist', 300_000);
+  const plan = planRadioPage(recordings, [], [item], ids, 'youtube-music', 9);
+  assertEqual(plan.occurrences.length, 0, 'rejected item not enqueued');
+  assert(
+    plan.recordings === recordings,
+    'recordings untouched by a rejected item',
+  );
+  assertEqual(plan.recordings[0]?.title, 'Song (Live)');
+  assertEqual(plan.recordings[0]?.mappings.length, 0, 'no mapping written');
+  // A user-denied verdict for the same ref skips the item the same way.
+  const denied: Recording = {
+    ...recording('rD', [ref('youtube-music', 'v2')]),
+    mappings: [
+      {
+        ref: ref('youtube-music', 'v2'),
+        status: 'rejected',
+        matchedAtMs: 1,
+        evidence: evidence(),
+      },
+    ],
+  };
+  const planDenied = planRadioPage(
+    [denied],
+    [],
+    [meta('youtube-music', 'v2', 'Song rD', 'Artist', 300_000)],
+    ids,
+    'youtube-music',
+    9,
+  );
+  assertEqual(
+    planDenied.occurrences.length,
+    0,
+    'user-rejected pairing not enqueued',
+  );
+  assertEqual(planDenied.recordings.length, 1);
+  // A similarity-floor miss without a hard conflict is metadata drift:
+  // the shared ref identifies the recording, so it is refreshed and
+  // enqueued — just without a new mapping assertion.
+  const stale: Recording = {
+    ...recording('rS', [ref('youtube-music', 'v3')]),
+    title: 'Untitled',
+  };
+  const planDrift = planRadioPage(
+    [stale],
+    [],
+    [meta('youtube-music', 'v3', 'Parachute', 'Coldplay', 300_000)],
+    ids,
+    'youtube-music',
+    9,
+  );
+  assertEqual(
+    planDrift.occurrences.length,
+    1,
+    'same-ref drifted item still enqueues',
+  );
+  assertEqual(
+    planDrift.recordings[0]?.title,
+    'Parachute',
+    'provider metadata refreshes drift',
+  );
+  assertEqual(
+    planDrift.recordings[0]?.mappings.length,
+    0,
+    'no mapping written without evidence',
+  );
+}
+
 async function radioSeedFlow(): Promise<void> {
   const r = rig(persisted());
   await restoreOk(r);
@@ -977,6 +1055,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['purePlanDedupe', purePlanDedupe],
   ['purePlanMint', purePlanMint],
   ['purePlanExisting', purePlanExisting],
+  ['purePlanRejectsMismatched', purePlanRejectsMismatched],
   ['radioSeedFlow', radioSeedFlow],
   ['radioSeedValidation', radioSeedValidation],
   ['radioSeedFailure', radioSeedFailure],

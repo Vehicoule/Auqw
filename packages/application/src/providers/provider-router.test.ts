@@ -158,6 +158,7 @@ async function refScopedRouting(): Promise<void> {
   const deezer = new FakeProvider('deezer', [
     'catalog.search',
     'catalog.entity',
+    'catalog.artwork',
   ]);
   const router = new ProviderRouter([itunes, deezer]);
 
@@ -168,6 +169,13 @@ async function refScopedRouting(): Promise<void> {
   deezer.settleEntity(ok(ENTITY_PAGE));
   const result = await page;
   assert(result.ok && result.value === ENTITY_PAGE);
+
+  // catalog.artwork follows the same provenance rule through
+  // ProviderRouter.artwork — the ref's minting provider serves it.
+  const art = router.artwork(trackRef('deezer', 'd1'), { size: 600 }, ctx());
+  assertEqual(deezer.pendingCount('artwork'), 1);
+  deezer.settleArtwork(ok([]));
+  assert((await art).ok);
 
   // An itunes ref honestly reports unsupported — itunes never
   // declared catalog.entity, and the call is not rerouted to deezer.
