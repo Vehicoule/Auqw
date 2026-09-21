@@ -3,6 +3,7 @@
 //! Mirrors `tooling/sign.mjs verify` in the plugins repo — the payload
 //! construction there is the authority; this MUST stay byte-identical.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -103,7 +104,15 @@ pub fn verify_release(
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_buf)
         .map_err(|e| VerifyFailure(format!("plugin.manifest.json: {e}")))?;
 
+    // Provenance is untrusted until the signature verifies below, so
+    // the artifact name derived from it must be a plain filename —
+    // anything with a path component would read outside `dir`.
     let wasm_name = format!("{}-{}.wasm", provenance.plugin, provenance.version);
+    if Path::new(&wasm_name).file_name() != Some(OsStr::new(&wasm_name)) {
+        return bad(format!(
+            "artifact name {wasm_name:?} is not a plain filename"
+        ));
+    }
     let wasm = need(&wasm_name)?;
     let wasm_count = wasm_files(dir)?.len();
     if wasm_count != 1 {

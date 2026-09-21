@@ -301,6 +301,31 @@ async function payloadShapes(): Promise<void> {
   const detailsResult = await details;
   assert(detailsResult.ok);
   assertDeepEqual(detailsResult.value, [DOMAIN_TRACK]);
+
+  const artwork = p.artwork(
+    ref('itunes', '123'),
+    { size: 1200 },
+    ctx().context,
+  );
+  assertDeepEqual(host.requests[4], {
+    pluginId: 'plugin-x',
+    capability: 'catalog.artwork',
+    payload: {
+      ref: { provider: 'itunes', kind: 'track', id: '123' },
+      size: 1200,
+    },
+  });
+  host.succeed('req-5', {
+    source_ref: { provider: 'itunes', kind: 'track', id: '123' },
+    items: [
+      { url: 'https://art.example/x.png', width: 1200, height: 1200 },
+    ],
+  });
+  const artworkResult = await artwork;
+  assert(artworkResult.ok);
+  assertDeepEqual(artworkResult.value, [
+    { url: 'https://art.example/x.png', width: 1200, height: 1200 },
+  ]);
 }
 
 // 2. Request-id correlation across concurrent calls.
@@ -753,6 +778,12 @@ async function undeclaredCapability(): Promise<void> {
     ctx().context,
   );
   assert(!details.ok && details.error.kind === 'unsupported');
+  const artwork = await p.artwork(
+    ref('itunes', '1'),
+    { size: 600 },
+    ctx().context,
+  );
+  assert(!artwork.ok && artwork.error.kind === 'unsupported');
   assertEqual(host.requests.length, 0, 'no host request started');
 }
 

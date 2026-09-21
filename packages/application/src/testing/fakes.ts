@@ -3,6 +3,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, ok } from '../errors.ts';
 import type {
+  ArtworkRef,
   EntityRef,
   SourceRef,
   TrackMetadata,
@@ -187,6 +188,7 @@ type ProviderMethod =
   | 'resolve'
   | 'details'
   | 'entity'
+  | 'artwork'
   | 'lyrics'
   | 'radio';
 
@@ -223,6 +225,7 @@ export class FakeProvider implements ProviderPort {
     resolve: [],
     details: [],
     entity: [],
+    artwork: [],
     lyrics: [],
     radio: [],
   };
@@ -366,6 +369,29 @@ export class FakeProvider implements ProviderPort {
 
   settleEntityAt(index: number, result: Result<EntityPage>): boolean {
     return this.#settle('entity', index, result);
+  }
+
+  artwork(
+    ref: SourceRef,
+    input: { size: 600 | 1200 },
+    context: OperationContext,
+  ): Promise<Result<readonly ArtworkRef[]>> {
+    this.calls.push({ method: 'artwork', input: { ref, input }, context });
+    if (!this.capabilities.includes('catalog.artwork')) {
+      return Promise.resolve(unsupportedCall('catalog.artwork'));
+    }
+    return this.#defer('artwork', context);
+  }
+
+  settleArtwork(result: Result<readonly ArtworkRef[]>): boolean {
+    return this.#settle('artwork', 0, result);
+  }
+
+  settleArtworkAt(
+    index: number,
+    result: Result<readonly ArtworkRef[]>,
+  ): boolean {
+    return this.#settle('artwork', index, result);
   }
 
   /** The wire capability the prefer hint maps to under declared caps. */

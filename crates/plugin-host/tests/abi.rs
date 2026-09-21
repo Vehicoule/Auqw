@@ -1526,3 +1526,79 @@ async fn guest_log_cap_stops_logger() {
     assert_eq!(attempt.guest_log.len(), 128);
     assert_eq!(attempt.http_calls, 0);
 }
+
+// ---------- memory budget ----------
+
+/// Guest that tries `memory.grow 1024` from a 1-page memory with no
+/// declared `maximum`, then reports whether the grow was denied
+/// (`capped: true`) or succeeded (`capped: false`).
+fn grow_probe_wat() -> String {
+    let capped = "{\"type\":\"done\",\"result\":{\"capped\":true}}";
+    let grew = "{\"type\":\"done\",\"result\":{\"capped\":false}}";
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (local $capped i32)\n    \
+         (local.set $capped\n      \
+         (i32.lt_s (memory.grow (i32.const 1024)) (i32.const 0)))\n    \
+         (i64.or\n      \
+         (i64.shl\n        \
+         (i64.extend_i32_u\n          \
+         (select (i32.const 2048) (i32.const 2100) (local.get $capped)))\n        \
+         (i64.const 32))\n      \
+         (i64.extend_i32_u\n        \
+         (select (i32.const {}) (i32.const {}) (local.get $capped)))))\n  \
+         (data (i32.const 2048) \"{}\")\n  \
+         (data (i32.const 2100) \"{}\"))",
+        capped.len(),
+        grew.len(),
+        capped.replace('"', "\\\""),
+        grew.replace('"', "\\\""),
+    )
+}
+
+/// The memory cap is a store limiter, not a declared-maximum
+/// requirement: a guest with no `maximum` (rustc emits none) is still
+/// capped — `memory.grow` past `max_memory_bytes` returns -1.
+#[tokio::test]
+async fn memory_cap_binds_without_declared_maximum() {
+    let wasm = ok(wat::parse_str(grow_probe_wat()));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({ "capped": true }));
+}
+
+/// A declared minimum already over the cap fails instantiation —
+/// the limiter denies the initial allocation, not just growth.
+#[tokio::test]
+async fn memory_cap_rejects_over_cap_declared_minimum() {
+    const BIG_WAT: &str = "(module\n  (memory (export \"memory\") 1025)\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 0))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64) (i64.const 0)))";
+    let wasm = ok(wat::parse_str(BIG_WAT));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(
+        matches!(err(result), InvokeError::GuestTrap(_)),
+        "over-cap declared minimum must trap at instantiation"
+    );
+}

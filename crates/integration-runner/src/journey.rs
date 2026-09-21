@@ -278,11 +278,11 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
             false
         }
         (expected_kind, Err(e)) => {
-            let actual = format!("{e:?}");
-            if actual.contains(expected_kind) {
+            let actual = e.kind();
+            if actual == *expected_kind {
                 true
             } else {
-                detail = format!("expected error kind {expected_kind}, got {actual}");
+                detail = format!("expected error kind {expected_kind}, got {actual} ({e:?})");
                 false
             }
         }
