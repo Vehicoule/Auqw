@@ -21,7 +21,7 @@ import {
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
-import { QueueList } from './queue-list.tsx';
+import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   LyricsModel,

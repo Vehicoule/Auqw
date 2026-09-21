@@ -59,7 +59,10 @@ export function ThemeProvider({
       typography,
       motion,
       reducedMotion: reducedMotion ?? systemReduced,
-      textScale: Math.min(2, Math.max(1, textScale)),
+      // textScale comes from the OS font scale — smaller-than-default
+      // settings are legitimate (Android reaches ~0.85); the floor only
+      // guards against a degenerate value zeroing text.
+      textScale: Math.min(2, Math.max(0.5, textScale)),
     };
   }, [theme, system, reducedMotion, systemReduced, textScale]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
