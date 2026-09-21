@@ -1852,7 +1852,7 @@ function Main({
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
         <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
         <NavigationBar
-          style={theme.scheme === 'light' ? 'light' : 'dark'}
+          style={theme.scheme === 'light' ? 'dark' : 'light'}
         />
         <GalleryScreen />
       </View>
@@ -2106,9 +2106,9 @@ function Main({
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
       {/* Android button nav: keep system buttons readable on any
-          canvas — the config plugin's style is a startup default,
-          not a runtime value (no-op off Android). */}
-      <NavigationBar style={theme.scheme === 'light' ? 'light' : 'dark'} />
+          canvas — 'dark' style = dark buttons (for light canvases);
+          the config plugin value is a startup default. */}
+      <NavigationBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
       <AppStack>
         <StackItem stackKey="root">
           <PlatformTabs
