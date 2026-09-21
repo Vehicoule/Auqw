@@ -817,8 +817,35 @@ async function migrationV1toV2(): Promise<void> {
   driver.close();
 }
 
-// 14. A file-backed database leaves a real pre-migration image at
-// <db>.bak-v1 holding the old rows.
+// 13b. Two instances sharing one driver initialize concurrently: the
+// initialize tails serialize probe+backup+migrate, so the second
+// instance observes the migrated version and runs no migration of its
+// own — no DDL replay, one backup.
+async function sharedDriverInitialize(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 1);
+  `);
+  const first = new SqliteStorage(driver, SETTINGS);
+  const second = new SqliteStorage(driver, SETTINGS);
+  const [a, b] = await Promise.all([
+    first.initialize(ctx().context),
+    second.initialize(ctx().context),
+  ]);
+  assert(a.ok, 'first concurrent initialize resolves');
+  assert(b.ok, 'second concurrent initialize resolves');
+  assertDeepEqual(driver.backups, ['v1'], 'migration ran exactly once');
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
+// 14. A file-backed database takes a real pre-migration image at
+// <db>.bak-v1 and drops it once the migration commits — no durable
+// copy persists.
 async function migrationBackupFile(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'auqw-v1-'));
   try {
@@ -841,10 +868,54 @@ async function migrationBackupFile(): Promise<void> {
     const storage = new SqliteStorage(driver, SETTINGS);
     assert((await storage.initialize(ctx().context)).ok);
     const backupPath = `${file}.bak-v1`;
-    assert(
-      existsSync(backupPath),
-      'backup file written next to the database',
+    assertDeepEqual(driver.backups, ['v1'], 'pre-migration backup taken');
+    assertDeepEqual(
+      driver.droppedBackups,
+      ['v1'],
+      'backup dropped after commit',
     );
+    assert(
+      !existsSync(backupPath),
+      'backup file removed once the migration lands',
+    );
+    driver.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 14b. A failed migration attempt leaves <db>.bak-v1 behind; the next
+// initialize must replace it — not wedge on VACUUM INTO's
+// existing-target refusal — and clean it up on commit.
+async function backupRetryAfterFailure(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'auqw-bak-'));
+  try {
+    const file = join(dir, 'library.db');
+    const driver = new NodeSqliteDriver(file);
+    driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+    driver.execScript(`
+      INSERT INTO schema_version (id, version) VALUES (1, 1);
+      INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch)
+        VALUES (1, 'itunes', 'youtube-music', NULL, 256, 'system', 1);
+      INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+        VALUES (1, 0, NULL, 0, 'stopped', NULL);
+      INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json)
+        VALUES ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]');
+      INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+        VALUES ('r1', 0, 'itunes', 'track', 'i1');
+      INSERT INTO likes (entity_kind, entity_id, liked_at_ms)
+        VALUES ('track', 'r1', 42);
+    `);
+    const failing = new FailingDriver(driver);
+    const storage = new SqliteStorage(failing, SETTINGS);
+    // Migration txn executes: PRAGMA(1), MIGRATION_2 statements
+    // (2..21), version UPDATE(22) — execute 10 lands mid-DDL.
+    failing.failBeforeExecute(10);
+    const first = await storage.initialize(ctx().context);
+    assert(!first.ok && first.error.kind === 'transient');
+    const backupPath = `${file}.bak-v1`;
+    assert(existsSync(backupPath), 'failed attempt leaves the backup');
+    // The abandoned image still holds the pre-migration v1 rows.
     const backup = new NodeSqliteDriver(backupPath);
     const likeRows = await backup.transaction(async (conn) =>
       conn.query('SELECT entity_id, liked_at_ms FROM likes'),
@@ -854,11 +925,19 @@ async function migrationBackupFile(): Promise<void> {
       [{ entity_id: 'r1', liked_at_ms: 42 }],
       'backup holds the pre-migration v1 rows',
     );
-    const versions = await backup.transaction(async (conn) =>
-      conn.query('SELECT version FROM schema_version'),
-    );
-    assertEqual(versions[0]?.['version'], 1, 'backup stays at v1');
     backup.close();
+    // Retry replaces the stale image and succeeds — before the fix
+    // every retry failed at VACUUM INTO until manual deletion.
+    const retried = await storage.initialize(ctx().context);
+    assert(retried.ok, 'retry over a stale backup succeeds');
+    assert(!existsSync(backupPath), 'backup dropped after commit');
+    assertDeepEqual(driver.backups, ['v1', 'v1'], 'backup re-taken');
+    assertDeepEqual(driver.droppedBackups, ['v1']);
+    const state = await loadOk(storage);
+    assertEqual(state.recordings.length, 1, 'v1 rows migrated');
+    assertDeepEqual(state.likes, [
+      { entityKind: 'track', targetId: 'r1', likedAtMs: 42 },
+    ]);
     driver.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1216,6 +1295,162 @@ async function importAtomicity(): Promise<void> {
   driver.close();
 }
 
+// 19. Two storage instances over one driver share its transaction
+// tail — concurrent ops must not overlap BEGIN/COMMIT on the shared
+// connection.
+async function sharedDriverTransactions(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  const first = new SqliteStorage(driver, SETTINGS);
+  const second = new SqliteStorage(driver, SETTINGS);
+  // Initialize once: concurrent initializes from two fresh instances
+  // racing a v0 -> v2 migration is a separate coalescing question.
+  assert((await first.initialize(ctx().context)).ok);
+  const recordings = [recording('r1', [ref('itunes', 'i1')])];
+  const [a, b, c, d] = await Promise.all([
+    first.commit({ recordings, queue: EMPTY_QUEUE }, ctx().context),
+    second.commit({ settings: { ...SETTINGS, theme: 'dark' } }, ctx().context),
+    first.loadAttempts(5, ctx().context),
+    second.load(ctx().context),
+  ]);
+  assert(
+    a.ok && b.ok && c.ok && d.ok,
+    'interleaved instances serialize on the shared driver',
+  );
+  const state = await loadOk(first);
+  assertEqual(state.settings.theme, 'dark');
+  assertEqual(state.recordings.length, 1);
+  driver.close();
+}
+
+// 20. exportOwned never throws: an unsafe timestamp from a broken
+// clock returns a typed invalid-response, not a TypeError.
+async function exportOwnedUnsafeTimestamp(): Promise<void> {
+  const { driver, storage } = rig();
+  assert((await storage.initialize(ctx().context)).ok);
+  for (const bad of [
+    Number.NaN,
+    -1,
+    2 ** 53,
+    Number.POSITIVE_INFINITY,
+    1.5,
+  ]) {
+    const res = await storage.exportOwned(bad, ctx().context);
+    assert(!res.ok, `unsafe exportedAtMs rejected: ${bad}`);
+    assertEqual(res.error.kind, 'invalid-response');
+    assertEqual(
+      res.error.message,
+      'exportedAtMs must be a safe nonnegative integer',
+    );
+  }
+  driver.close();
+}
+
+// 21. Entity-kind cross-checks: a like's entityKind and an
+// entity_source_ref's kind must agree with the target entity's kind —
+// on both the commit-time and decode-time validators.
+async function entityKindCrossCheck(): Promise<void> {
+  const { driver, storage } = rig();
+  const sections = ownedSections();
+  await commitOwned(storage, sections);
+  // Commit side: an 'artist' like naming the album entity e-album.
+  const badLike = await storage.commit(
+    {
+      likes: [
+        ...sections.likes,
+        { entityKind: 'artist', targetId: 'e-album', likedAtMs: 5 },
+      ],
+    },
+    ctx().context,
+  );
+  assert(
+    !badLike.ok && badLike.error.kind === 'invalid-response',
+    'mismatched like rejected at commit',
+  );
+  // Decode side: the same row written past the validator fails load.
+  driver.execScript(
+    `INSERT INTO likes (entity_kind, target_id, liked_ms)
+     VALUES ('artist', 'e-album', 5)`,
+  );
+  const loaded = await storage.load(ctx().context);
+  assert(
+    !loaded.ok && loaded.error.kind === 'invalid-response',
+    'mismatched like fails decode',
+  );
+  driver.execScript(
+    `DELETE FROM likes WHERE entity_kind = 'artist' AND target_id = 'e-album'`,
+  );
+  // Commit side: an 'artist' ref on the album entity e-album.
+  const badRef = await storage.commit(
+    {
+      entitySourceRefs: [
+        ...sections.entitySourceRefs.filter((r) => r.entityId !== 'e-album'),
+        {
+          entityId: 'e-album',
+          provider: 'deezer',
+          ref: { provider: 'deezer', kind: 'artist', id: 'd-alb' },
+        },
+      ],
+    },
+    ctx().context,
+  );
+  assert(
+    !badRef.ok && badRef.error.kind === 'invalid-response',
+    'mismatched entity ref rejected at commit',
+  );
+  // Decode side.
+  driver.execScript(
+    `UPDATE entity_source_refs
+     SET ref_json = '{"provider":"deezer","kind":"artist","id":"d-alb"}'
+     WHERE entity_id = 'e-album'`,
+  );
+  const again = await storage.load(ctx().context);
+  assert(
+    !again.ok && again.error.kind === 'invalid-response',
+    'mismatched entity ref fails decode',
+  );
+  driver.close();
+}
+
+// 22. A database holding application-named tables but no
+// schema_version row is a foreign file, not a partial schema —
+// migrations are single transactions, so a legit partial can never
+// persist. initialize rejects it instead of silently merging into
+// tables whose constraints were never ours.
+async function foreignSchemaRejected(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`
+    CREATE TABLE recordings (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT, album TEXT,
+      duration_ms INTEGER, release_year INTEGER, artwork_json TEXT NOT NULL,
+      explicit INTEGER, genre TEXT, isrc TEXT, version_labels_json TEXT NOT NULL
+    );
+    INSERT INTO recordings VALUES
+      ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  const init = await storage.initialize(ctx().context);
+  assert(
+    !init.ok && init.error.kind === 'invalid-response',
+    'foreign database rejected at initialize',
+  );
+  driver.close();
+}
+
+// 23. Unrelated user tables outside the schema's names are
+// tolerated: only a collision with a table this schema owns is
+// rejected.
+async function unrelatedTablesTolerated(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`
+    CREATE TABLE scratchpad (note TEXT);
+    INSERT INTO scratchpad VALUES ('keep me');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  const init = await storage.initialize(ctx().context);
+  assert(init.ok, 'unrelated tables do not block initialize');
+  driver.close();
+}
+
 // 18. Import resets the rows that foreign-key into the replaced
 // recordings (queue occurrences, lyrics cache); attempt traces and
 // the artwork cache have no such keys and survive untouched.
@@ -1318,11 +1553,18 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['coalescedCancel', coalescedCancel],
   ['parameterization', parameterization],
   ['migrationV1toV2', migrationV1toV2],
+  ['sharedDriverInitialize', sharedDriverInitialize],
   ['migrationBackupFile', migrationBackupFile],
+  ['backupRetryAfterFailure', backupRetryAfterFailure],
   ['ownedRoundtrip', ownedRoundtrip],
   ['exportImportRoundtrip', exportImportRoundtrip],
   ['importAtomicity', importAtomicity],
   ['importResetsExcluded', importResetsExcluded],
+  ['sharedDriverTransactions', sharedDriverTransactions],
+  ['exportOwnedUnsafeTimestamp', exportOwnedUnsafeTimestamp],
+  ['entityKindCrossCheck', entityKindCrossCheck],
+  ['foreignSchemaRejected', foreignSchemaRejected],
+  ['unrelatedTablesTolerated', unrelatedTablesTolerated],
 ];
 
 for (const [name, fn] of TESTS) {

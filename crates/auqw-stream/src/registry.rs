@@ -48,7 +48,9 @@ pub struct PrepareInfo {
     /// plus already-terminal entries dropped from the map. Callers
     /// routing streams through a per-handle map (the mobile bindings)
     /// unregister these so a superseded handle can never be attached
-    /// against a stale routing entry. Empty on a coalesced prepare.
+    /// against a stale routing entry. A coalesced prepare's survivor
+    /// is never on it, but the list still carries every *other*
+    /// unattached session the scan ended.
     pub superseded: Vec<String>,
 }
 
@@ -227,9 +229,15 @@ impl StreamRegistry {
             return Err(StreamError::Cancelled);
         }
         if let Some(info) = self.reusable(&source.provider, &source.source_ref)? {
-            return Ok(info);
+            // A coalesced prepare still owns the supersede scan: the
+            // reused session is exempt by handle, but every *other*
+            // unattached session ends — an attached-then-detached
+            // sibling left live here would mean two unattached
+            // sessions coexisting.
+            let superseded = self.supersede_unattached(Some(&info.handle))?;
+            return Ok(PrepareInfo { superseded, ..info });
         }
-        let superseded = self.supersede_unattached()?;
+        let superseded = self.supersede_unattached(None)?;
         let handle = format!(
             "st-{}-{}",
             self.instance,
@@ -442,24 +450,28 @@ impl StreamRegistry {
     }
 
     /// Terminate every unattached non-terminal session with
-    /// `Superseded` and drop terminal handles from the map. The
+    /// `Superseded` and drop terminal handles from the map. `except`
+    /// exempts one handle outright — the survivor of a coalesced
+    /// prepare, which is unattached by definition and would otherwise
+    /// doom itself (and it is never named on the return list even if
+    /// it turned terminal between the reuse check and the scan). The
     /// still-unattached check is re-done inside the terminal
     /// transition — an attach that lands after the scan wins, so a
     /// playing consumer is never superseded by accident. Returns the
     /// handles the scan actually ended or pruned: callers routing by
     /// handle unregister these so a dead session's routing entry can
     /// never serve a later attach.
-    fn supersede_unattached(&self) -> Result<Vec<String>, StreamError> {
+    fn supersede_unattached(&self, except: Option<&str>) -> Result<Vec<String>, StreamError> {
         let (doomed, mut superseded) = {
             let mut sessions = lock(&self.sessions)?;
             let doomed: Vec<(String, Arc<SessionInner>)> = sessions
                 .iter()
-                .filter(|(_, s)| !s.is_attached() && !s.is_terminal())
+                .filter(|(h, s)| Some(h.as_str()) != except && !s.is_attached() && !s.is_terminal())
                 .map(|(h, s)| (h.clone(), Arc::clone(s)))
                 .collect();
             let mut pruned = Vec::new();
             sessions.retain(|h, s| {
-                if s.is_terminal() {
+                if s.is_terminal() && Some(h.as_str()) != except {
                     pruned.push(h.clone());
                     false
                 } else {
@@ -502,23 +514,33 @@ async fn reap_loop(
     let interval = interval.max(Duration::from_millis(50));
     loop {
         tokio::time::sleep(interval).await;
-        let doomed: Vec<Arc<SessionInner>> = sessions
+        let doomed: Vec<(String, Arc<SessionInner>)> = sessions
             .lock()
             .map(|m| {
-                m.values()
-                    .filter(|s| !s.is_terminal() && s.detached_for().is_some_and(|d| d >= ttl))
-                    .cloned()
+                m.iter()
+                    .filter(|(_, s)| !s.is_terminal() && s.detached_for().is_some_and(|d| d >= ttl))
+                    .map(|(h, s)| (h.clone(), Arc::clone(s)))
                     .collect()
             })
             .unwrap_or_default();
-        for s in doomed {
+        for (handle, s) in doomed {
             // Recheck under `shared`: an attach landing between the
             // filter and here clears `detached_since`, so the recheck
             // fails and the attach wins — never an evict on a session
             // a consumer just reconnected to.
-            s.terminate_if(StreamError::Evicted, |sh| {
+            if s.terminate_if(StreamError::Evicted, |sh| {
                 sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
-            });
+            }) {
+                // The evicted session can never attach or serve again —
+                // keeping its entry only grows the map on every
+                // abandoned prepare, and callers routing by handle drop
+                // it on the `not-found` answer anyway. Entries killed
+                // by other paths keep their typed terminal error until
+                // the next supersede prunes them.
+                if let Ok(mut m) = sessions.lock() {
+                    m.remove(&handle);
+                }
+            }
         }
     }
 }

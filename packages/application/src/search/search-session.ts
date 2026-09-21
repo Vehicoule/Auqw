@@ -257,9 +257,9 @@ export class SearchSession {
     }
 
     const error = result.error;
-    if (error.kind === 'cancelled') {
-      return this.#state;
-    }
+    // Our own cancels were filtered above; a provider-side 'cancelled'
+    // still settles the search — it flows through the stale-cache and
+    // error paths like any other failure rather than leaving 'loading'.
     const stale = this.#cache.get(key);
     if (stale !== undefined && stale.page.items.length > 0) {
       const state: SearchState = {

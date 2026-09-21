@@ -26,6 +26,7 @@ export type CorrectionsScreenProps = {
   | undefined;
   readonly onReject?: ((reviewId: string) => void) | undefined;
   readonly onUndo?: ((reviewId: string) => void) | undefined;
+  readonly onRetry?: (() => void) | undefined;
 };
 
 /**
@@ -44,6 +45,7 @@ export function CorrectionsScreen({
   onConfirm,
   onReject,
   onUndo,
+  onRetry,
 }: CorrectionsScreenProps) {
   const theme = useTheme();
   return (
@@ -120,7 +122,11 @@ export function CorrectionsScreen({
       {model.state === 'loading' ? (
         <LoadingState title="loading reviews" />
       ) : model.state === 'error' ? (
-        <ErrorState title="couldn't load reviews" hint={model.message} />
+        <ErrorState
+          title="couldn't load reviews"
+          hint={model.message}
+          onRetry={onRetry}
+        />
       ) : model.rows.length === 0 ? (
         <EmptyState
           title="nothing to review"

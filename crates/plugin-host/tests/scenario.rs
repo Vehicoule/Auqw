@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use auqw_plugin_host::{
@@ -109,7 +110,7 @@ impl HostClock for FixedClock {
 
 fn services<'a>(
     http: &'a dyn HttpClient,
-    kv: &'a dyn KeyValueStore,
+    kv: Arc<dyn KeyValueStore>,
     clock: &'a dyn HostClock,
 ) -> HostServices<'a> {
     HostServices {
@@ -124,7 +125,7 @@ fn services<'a>(
 /// inside the same invocation.
 #[tokio::test]
 async fn kv_commit_writes_and_reads_back() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -141,7 +142,7 @@ async fn kv_commit_writes_and_reads_back() {
         json!({"scenario": "kv_commit", "key": "k", "value": "v1"}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -160,7 +161,7 @@ async fn kv_commit_writes_and_reads_back() {
 /// A `fail` after staging must not commit anything.
 #[tokio::test]
 async fn kv_fail_discards_staged_writes() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -177,7 +178,7 @@ async fn kv_fail_discards_staged_writes() {
         json!({"scenario": "kv_fail", "key": "k", "value": "v1"}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -199,7 +200,7 @@ async fn file_store_persists_across_instances() {
     };
     let clock = FixedClock(0);
     {
-        let kv = ok(FileKeyValueStore::new(&path));
+        let kv = Arc::new(ok(FileKeyValueStore::new(&path)));
         let plugin = ok(load(
             SCENARIO_WASM,
             manifest_for(SCENARIO_WASM, &["kv"]),
@@ -211,12 +212,12 @@ async fn file_store_persists_across_instances() {
             json!({"scenario": "kv_commit", "key": "k", "value": "v1"}),
             &Budgets::default(),
             CancellationToken::new(),
-            services(&http, &kv, &clock),
+            services(&http, kv.clone(), &clock),
         )
         .await;
         ok(result);
     }
-    let kv = ok(FileKeyValueStore::new(&path));
+    let kv = Arc::new(ok(FileKeyValueStore::new(&path)));
     let committed: BTreeMap<String, Vec<u8>> = ok(kv.snapshot("test-plugin"));
     assert_eq!(
         committed.get("k").map(Vec::as_slice),
@@ -246,7 +247,7 @@ fn corrupt_file_store_is_typed_error() {
 /// Guest log text is redacted before it lands on the attempt.
 #[tokio::test]
 async fn guest_log_is_redacted() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -266,7 +267,7 @@ async fn guest_log_is_redacted() {
         }),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     ok(result);
@@ -283,7 +284,7 @@ async fn guest_log_is_redacted() {
 /// nothing is staged.
 #[tokio::test]
 async fn kv_without_permission_is_denied() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -300,7 +301,7 @@ async fn kv_without_permission_is_denied() {
         json!({"scenario": "kv_commit", "key": "k", "value": "v"}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -312,7 +313,7 @@ async fn kv_without_permission_is_denied() {
 /// mutates nothing.
 #[tokio::test]
 async fn kv_value_over_cap_is_refused() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -330,7 +331,7 @@ async fn kv_value_over_cap_is_refused() {
         json!({"scenario": "kv_commit", "key": "k", "value": big}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -342,7 +343,7 @@ async fn kv_value_over_cap_is_refused() {
 /// be allow-listed.
 #[tokio::test]
 async fn http_scenario_relays_response() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 503,
         body: b"hello".to_vec(),
@@ -359,7 +360,7 @@ async fn http_scenario_relays_response() {
         json!({"scenario": "http", "url": "https://allowed.test/x"}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -402,7 +403,7 @@ impl HttpClient for RangeHttp {
 /// agrees with the request.
 #[tokio::test]
 async fn resume_relays_206_body() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = RangeHttp {
         status: 206,
         content_range: Some("bytes 5-9/20"),
@@ -420,7 +421,7 @@ async fn resume_relays_206_body() {
         json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5, "length": 5}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -434,7 +435,7 @@ async fn resume_relays_206_body() {
 /// a misaligned body.
 #[tokio::test]
 async fn resume_rejects_mismatched_range() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = RangeHttp {
         status: 206,
         content_range: Some("bytes 4-9/20"),
@@ -452,7 +453,7 @@ async fn resume_rejects_mismatched_range() {
         json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5, "length": 5}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -462,7 +463,7 @@ async fn resume_rejects_mismatched_range() {
 /// `resume` uses the same destination allowlist as `http_request`.
 #[tokio::test]
 async fn resume_denied_without_permission() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = RangeHttp {
         status: 206,
         content_range: Some("bytes 5-9/20"),
@@ -480,7 +481,7 @@ async fn resume_denied_without_permission() {
         json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -491,7 +492,7 @@ async fn resume_denied_without_permission() {
 /// through instead of being range-checked.
 #[tokio::test]
 async fn resume_passes_non_206_through() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = RangeHttp {
         status: 200,
         content_range: None,
@@ -509,7 +510,7 @@ async fn resume_passes_non_206_through() {
         json!({"scenario": "resume", "url": "https://allowed.test/x", "offset": 5}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let result = ok(result);
@@ -520,7 +521,7 @@ async fn resume_passes_non_206_through() {
 /// The `echo` scenario passes the payload through unchanged.
 #[tokio::test]
 async fn echo_scenario_returns_payload() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -537,7 +538,7 @@ async fn echo_scenario_returns_payload() {
         json!({"scenario": "echo", "echo": {"n": 3}}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     assert_eq!(ok(result), json!({"n": 3}));
@@ -548,7 +549,7 @@ async fn echo_scenario_returns_payload() {
 /// send that never resolves until cancelled.
 #[tokio::test]
 async fn kv_http_cancel_discards_staged_write() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let clock = FixedClock(0);
     let plugin = ok(load(
         SCENARIO_WASM,
@@ -566,7 +567,7 @@ async fn kv_http_cancel_discards_staged_write() {
         }),
         &budgets,
         cancel.clone(),
-        services(&SleepHttp, &kv, &clock),
+        services(&SleepHttp, kv.clone(), &clock),
     );
     tokio::pin!(fut);
     // Drive the invocation until it is parked inside the HTTP send.
@@ -584,7 +585,7 @@ async fn kv_http_cancel_discards_staged_write() {
 /// 256 KiB namespace cap are refused and mutate nothing.
 #[tokio::test]
 async fn kv_namespace_total_cap_is_refused() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     // Prefill ~240 KiB of committed namespace across four keys.
     let patch: BTreeMap<String, Option<Vec<u8>>> = (0..4)
         .map(|i| (format!("k{i}"), Some(vec![b'x'; 60 * 1024])))
@@ -609,7 +610,7 @@ async fn kv_namespace_total_cap_is_refused() {
         }),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -623,7 +624,7 @@ async fn kv_namespace_total_cap_is_refused() {
 /// `invalid-message`, not a staged write.
 #[tokio::test]
 async fn kv_key_over_128_bytes_is_invalid_message() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -642,7 +643,7 @@ async fn kv_key_over_128_bytes_is_invalid_message() {
         }),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -654,7 +655,7 @@ async fn kv_key_over_128_bytes_is_invalid_message() {
 /// write dies with the invocation.
 #[tokio::test]
 async fn log_message_over_cap_is_invalid_message() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -674,7 +675,7 @@ async fn log_message_over_cap_is_invalid_message() {
         }),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     let e = err(result);
@@ -694,7 +695,7 @@ fn patch(entries: &[(&str, Option<&[u8]>)]) -> BTreeMap<String, Option<Vec<u8>>>
 /// not a stale replacement map.
 #[test]
 fn disjoint_kv_commits_both_survive() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     ok(kv.commit("p", patch(&[("a", Some(b"1"))])));
     ok(kv.commit("p", patch(&[("b", Some(b"2"))])));
     let snap = ok(kv.snapshot("p"));
@@ -706,7 +707,7 @@ fn disjoint_kv_commits_both_survive() {
 /// deletes.
 #[test]
 fn same_key_last_commit_wins_and_none_deletes() {
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     ok(kv.commit("p", patch(&[("k", Some(b"1"))])));
     ok(kv.commit("p", patch(&[("k", Some(b"2"))])));
     assert_eq!(
@@ -725,7 +726,7 @@ async fn no_write_done_does_not_touch_store() {
     let path = dir.join("plugin-kv.json");
     let _ = std::fs::remove_dir_all(&dir);
     ok(std::fs::create_dir_all(&dir).map_err(|e| format!("{e:?}")));
-    let kv = ok(FileKeyValueStore::new(&path));
+    let kv = Arc::new(ok(FileKeyValueStore::new(&path)));
     let http = CannedHttp {
         status: 200,
         body: vec![],
@@ -742,7 +743,7 @@ async fn no_write_done_does_not_touch_store() {
         json!({"scenario": "echo", "echo": {"ok": true}}),
         &Budgets::default(),
         CancellationToken::new(),
-        services(&http, &kv, &clock),
+        services(&http, kv.clone(), &clock),
     )
     .await;
     ok(result);

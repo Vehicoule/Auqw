@@ -2,6 +2,7 @@ package expo.modules.auqwexpo
 
 import java.util.concurrent.ConcurrentHashMap
 import uniffi.auqw_mobile_bindings.PluginHost
+import uniffi.auqw_mobile_bindings.StreamException
 
 /**
  * Maps a stream handle to the [PluginHost] that minted it. The Media3
@@ -17,6 +18,11 @@ class AuqwStreamRegistry {
 
   fun register(handle: String, host: PluginHost) {
     hosts[handle] = host
+    // Sessions ended without a supersede signal — TTL eviction, expiry —
+    // leave their routing entry behind forever. Sweep entries for
+    // handles the owning host no longer knows so the map only ever
+    // names a session the seam could still serve.
+    hosts.entries.removeIf { (h, owner) -> h != handle && !owner.knowsStream(h) }
   }
 
   fun unregister(handle: String) {
@@ -29,4 +35,22 @@ class AuqwStreamRegistry {
   fun clear() {
     hosts.clear()
   }
+
+  /**
+   * Whether `host` still has `handle` in its session map. `not-found`
+   * is the seam reporting the session gone for good; any other failure
+   * (or success, including terminal-but-known sessions a re-open must
+   * still see its typed error for) keeps the entry.
+   */
+  private fun PluginHost.knowsStream(handle: String): Boolean =
+    try {
+      streamPhaseMarks(handle)
+      true
+    } catch (e: StreamException) {
+      streamKind(e) != "not-found"
+    } catch (_: Exception) {
+      // Anything else is a transient host hiccup, not a dead handle —
+      // keep the entry rather than orphan a live session's routing.
+      true
+    }
 }

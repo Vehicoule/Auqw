@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{lock, resource_from, AttemptSummary, HostError, PluginHost};
+use crate::{lock, resolve_resource_from, AttemptSummary, HostError, PluginHost};
 
 /// A prepared stream session as reported to the player: the opaque
 /// handle plus metadata. The signed URL never crosses this boundary.
@@ -146,6 +146,7 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
     match kind {
         "cancelled" => E::Cancelled,
         "expired" | "expired-resource" | "auth-expired" => E::Expired,
+        "auth-required" => E::AuthRequired { message },
         "rate-limit" => E::RateLimited { message },
         "streams-capped" => E::StreamsCapped { message },
         "transient" | "timeout" => E::Transient { message },
@@ -214,7 +215,7 @@ impl Remint for PluginRemint {
                 CancellationToken::new(),
                 HostServices {
                     http: &*http,
-                    kv: &*kv,
+                    kv,
                     clock: &clock,
                     pot_provider: pot_provider.as_deref(),
                 },
@@ -222,12 +223,11 @@ impl Remint for PluginRemint {
             .await;
             let (result, _attempt) = invocation.into_parts();
             let value = result.map_err(|e| invoke_err_as_seam(e.kind(), e.to_string()))?;
-            let resource = resource_from(&value);
-            if resource.url.is_empty() {
-                return Err(auqw_stream::StreamError::InvalidResponse {
-                    message: "remint resolve missing url".into(),
-                });
-            }
+            let resource = resolve_resource_from(&value).map_err(|field| {
+                auqw_stream::StreamError::InvalidResponse {
+                    message: format!("remint resolve missing or invalid {field}"),
+                }
+            })?;
             Ok(PreparedSource {
                 url: resource.url,
                 mime: resource.mime,
@@ -279,15 +279,17 @@ fn prepare_outcome(
     source_ref: String,
     provider: String,
 ) -> PrepareOutcome {
-    let resource = resource_from(value);
     let summary = AttemptSummary::from(attempt);
-    if resource.url.is_empty() {
-        return PrepareOutcome::Failed {
-            kind: "invalid-response".to_string(),
-            message: "resolve result missing url".to_string(),
-            attempt: summary,
-        };
-    }
+    let resource = match resolve_resource_from(value) {
+        Err(field) => {
+            return PrepareOutcome::Failed {
+                kind: "invalid-response".to_string(),
+                message: format!("resolve result missing or invalid {field}"),
+                attempt: summary,
+            };
+        }
+        Ok(resource) => resource,
+    };
     remint.pin_itag = resource.itag;
     let source = PreparedSource {
         url: resource.url,
@@ -359,6 +361,7 @@ impl PluginHost {
         };
         let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);
+        let cancels = Arc::clone(&self.cancels);
         // `prefer` is a key, not a value: absent means "guest default",
         // never a null that fails payload validation. `access_token`
         // rides via the `start_typed` merge.
@@ -377,7 +380,7 @@ impl PluginHost {
                 // `stream` is moved into the blocking closure below —
                 // keep a clone for the bookkeeping prune.
                 let registry = Arc::clone(&stream);
-                let outcome = match result {
+                let mut outcome = match result {
                     Ok(value) => {
                         // Session creation does file I/O — run it on the
                         // blocking pool, not a runtime worker shared
@@ -400,6 +403,7 @@ impl PluginHost {
                         attempt: summary,
                     },
                 };
+                let mut abandoned = None;
                 if let PrepareOutcome::Prepared {
                     stream: prepared, ..
                 } = &outcome
@@ -409,8 +413,35 @@ impl PluginHost {
                         // neither cancel nor release — drop their stale
                         // mappings so the map tracks live handles only.
                         m.retain(|_, h| *h == prepared.handle || registry.is_live(h));
-                        m.insert(request_id.clone(), prepared.handle.clone());
+                        // A `cancel` that landed while the resolve was
+                        // completing already flipped the token —
+                        // deciding under this lock keeps the paths
+                        // exclusive: a later `cancel` sees the recorded
+                        // handle and abandons via `prepared_handles`,
+                        // while this one abandons directly instead of
+                        // delivering a live `Prepared`.
+                        let was_cancelled = cancels
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.get(&request_id).map(CancellationToken::is_cancelled))
+                            .unwrap_or(false);
+                        if was_cancelled {
+                            abandoned = Some(prepared.handle.clone());
+                        } else {
+                            m.insert(request_id.clone(), prepared.handle.clone());
+                        }
                     }
+                }
+                if let Some(handle) = abandoned {
+                    let _ = registry.cancel_if_unattached(&handle);
+                    outcome = match outcome {
+                        PrepareOutcome::Prepared { attempt, .. } => PrepareOutcome::Failed {
+                            kind: "cancelled".to_string(),
+                            message: "cancelled".to_string(),
+                            attempt,
+                        },
+                        other => other,
+                    };
                 }
                 listener.on_outcome(request_id, outcome);
             },

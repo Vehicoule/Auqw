@@ -1,5 +1,6 @@
 import type {
   AppError,
+  ArtworkRef,
   EntityMetadata,
   EntityPage,
   EntityRef,
@@ -26,6 +27,7 @@ import {
   isArtworkRef,
   isEntityRef,
   isProviderCapability,
+  isSourceRef,
   isTrackMetadata,
   ok,
 } from '@auqw/application';
@@ -85,10 +87,17 @@ function isSafeNonNegative(value: unknown): value is number {
   );
 }
 
-function isOptInt(value: unknown, min: number): value is number | null {
+function isOptInt(
+  value: unknown,
+  min: number,
+  max: number = Number.MAX_SAFE_INTEGER,
+): value is number | null {
   return (
     value === null ||
-    (typeof value === 'number' && Number.isSafeInteger(value) && value >= min)
+    (typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= min &&
+      value <= max)
   );
 }
 
@@ -143,6 +152,43 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   return isTrackMetadata(candidate) ? candidate : null;
 }
 
+/**
+ * Shared `trackMetadata.items` decode: the wire schema leaves
+ * `source_ref.kind` permissive and providers legitimately emit
+ * album/artist rows (deezer catalog.entity/metadata), so a well-formed
+ * non-track item is dropped rather than poisoning the whole page. An
+ * item that fails the full metadata decode — including a non-track
+ * row missing required fields — still rejects the batch.
+ */
+function toTrackItems(items: readonly unknown[]): TrackMetadata[] | null {
+  const out: TrackMetadata[] = [];
+  for (const item of items) {
+    const track = toTrackMetadata(item);
+    if (track !== null) {
+      out.push(track);
+      continue;
+    }
+    // "Well-formed non-track" = every field validates with only the
+    // kind constraint relaxed — decode again with the ref re-keyed
+    // as 'track'; a row that still fails is malformed, not non-track.
+    if (isRecord(item)) {
+      const sourceRef = item['source_ref'];
+      if (
+        isSourceRef(sourceRef) &&
+        sourceRef.kind !== 'track' &&
+        toTrackMetadata({
+          ...item,
+          source_ref: { ...sourceRef, kind: 'track' },
+        }) !== null
+      ) {
+        continue;
+      }
+    }
+    return null;
+  }
+  return out;
+}
+
 function toTrackList(value: unknown): readonly TrackMetadata[] | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items'])) {
     return null;
@@ -151,15 +197,7 @@ function toTrackList(value: unknown): readonly TrackMetadata[] | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const out: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    out.push(track);
-  }
-  return out;
+  return toTrackItems(items);
 }
 
 function toSearchPage(value: unknown): SearchPage | null {
@@ -173,13 +211,9 @@ function toSearchPage(value: unknown): SearchPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const out: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    out.push(track);
+  const out = toTrackItems(items);
+  if (out === null) {
+    return null;
   }
   return { items: out, storefront: value['storefront'] };
 }
@@ -243,10 +277,10 @@ function toPlayableResource(value: unknown): PlayableResource | null {
   const contentLength = value['content_length'] ?? null;
   const itag = value['itag'] ?? null;
   if (
-    !isOptInt(bitrateKbps, 0) ||
+    !isOptInt(bitrateKbps, 0, 4294967295) ||
     !isOptInt(expiresAtMs, 0) ||
     !isOptInt(contentLength, 1) ||
-    !isOptInt(itag, 0)
+    !isOptInt(itag, 0, 4294967295)
   ) {
     return null;
   }
@@ -307,13 +341,9 @@ function toEntityPage(value: unknown): EntityPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const tracks: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    tracks.push(track);
+  const tracks = toTrackItems(items);
+  if (tracks === null) {
+    return null;
   }
   const continuation = value['continuation'] ?? null;
   if (
@@ -451,13 +481,9 @@ function toRadioPage(value: unknown): RadioPage | null {
   if (!Array.isArray(items)) {
     return null;
   }
-  const candidates: TrackMetadata[] = [];
-  for (const item of items) {
-    const track = toTrackMetadata(item);
-    if (track === null) {
-      return null;
-    }
-    candidates.push(track);
+  const candidates = toTrackItems(items);
+  if (candidates === null) {
+    return null;
   }
   const continuation = value['continuation'];
   if (
@@ -467,6 +493,38 @@ function toRadioPage(value: unknown): RadioPage | null {
     return null;
   }
   return { candidates, continuation };
+}
+
+/** Wire `catalogArtworkResult` → domain `ArtworkRef` list. */
+function toArtworkItems(
+  value: unknown,
+  ref: SourceRef,
+): readonly ArtworkRef[] | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['source_ref', 'items'])) {
+    return null;
+  }
+  const sourceRef = value['source_ref'];
+  if (!isSourceRef(sourceRef)) {
+    return null;
+  }
+  // The wire ref is the plugin's own correlation answer: artwork for a
+  // different provider item is valid JSON that belongs to another track.
+  if (
+    sourceRef.provider !== ref.provider ||
+    sourceRef.kind !== ref.kind ||
+    sourceRef.id !== ref.id
+  ) {
+    return null;
+  }
+  const items = value['items'];
+  if (
+    !Array.isArray(items) ||
+    items.length > 8 ||
+    !items.every(isArtworkRef)
+  ) {
+    return null;
+  }
+  return items;
 }
 
 function wireRecordingQuery(query: RecordingQuery): Record<string, unknown> {
@@ -744,6 +802,18 @@ export function createPluginProvider(
         { ref: wireSourceRef(ref) },
         context,
         toEntityPage,
+      );
+    },
+    artwork(ref, input, context) {
+      const blocked = guard('catalog.artwork');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'catalog.artwork',
+        { ref: wireSourceRef(ref), size: input.size },
+        context,
+        (value) => toArtworkItems(value, ref),
       );
     },
     getLyrics(input, context) {

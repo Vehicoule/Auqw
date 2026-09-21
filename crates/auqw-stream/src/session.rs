@@ -297,21 +297,22 @@ impl SessionInner {
     /// [`Self::terminate`] only when `cond` holds under `shared` — the
     /// supersede scan's "still unattached" check and the terminal
     /// transition stay atomic, so an attach landing between them wins.
-    pub(crate) fn terminate_if(&self, e: StreamError, cond: impl FnOnce(&Shared) -> bool) {
+    /// Returns whether the transition ran: callers pruning handle maps
+    /// only remove an entry whose death they observed.
+    pub(crate) fn terminate_if(&self, e: StreamError, cond: impl FnOnce(&Shared) -> bool) -> bool {
         {
             // `persist_lock` → `shared` (lock order): the persist job
             // holds `persist_lock` across its sidecar write and checks
             // `terminal` under `shared`, so the write either lands
             // before this evict (and is removed) or is skipped — never
-            // an orphan sidecar outliving the session.
-            let Ok(_pg) = lock(&self.persist_lock) else {
-                return;
-            };
-            let Ok(mut sh) = lock(&self.shared) else {
-                return;
-            };
+            // an orphan sidecar outliving the session. A poisoned guard
+            // must not veto termination — a session that cannot end
+            // leaks its pump and readers forever, so recover the inner
+            // state and finish the transition.
+            let _pg = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut sh = self.shared.lock().unwrap_or_else(|p| p.into_inner());
             if sh.terminal.is_some() || !cond(&sh) {
-                return;
+                return false;
             }
             sh.terminal = Some(e);
             // Drain this session's demand contribution — a dead session
@@ -323,11 +324,11 @@ impl SessionInner {
         self.cancel.cancel();
         self.readers.notify_all();
         self.pump_notify.notify_one();
-        if let Ok(mut t) = self.task.lock() {
-            if let Some(h) = t.take() {
-                h.abort();
-            }
+        let mut t = self.task.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(h) = t.take() {
+            h.abort();
         }
+        true
     }
 
     /// The URL the pump fetches next (current mint).
@@ -842,7 +843,7 @@ impl SessionInner {
         let mut store = lock(&self.store)?;
         if store.covers(position) {
             let bytes = store.read_at(position, max_len)?;
-            sh.read_pos = sh.read_pos.max(position + bytes.len() as u64);
+            sh.read_pos = sh.read_pos.max(position.saturating_add(bytes.len() as u64));
             drop(store);
             self.pump_notify.notify_one();
             return Ok(Some(bytes));

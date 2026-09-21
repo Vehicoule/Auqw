@@ -7,6 +7,7 @@
 //!   request <plugin.wasm> <manifest.json> <capability> '<payload-json>'
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, HostServices, Manifest, MemoryKeyValueStore, ReqwestClient,
@@ -76,7 +77,7 @@ async fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let clock = SystemClock;
     let outcome = invoke(
         &plugin,
@@ -86,7 +87,7 @@ async fn run(args: &[String]) -> ExitCode {
         CancellationToken::new(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: None,
         },

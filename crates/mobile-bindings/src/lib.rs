@@ -46,7 +46,9 @@ pub struct HostConfig {
     pub prefer: Option<Vec<String>>,
     /// Initial OAuth access token for session-trust `Authorization:
     /// Bearer` on InnerTube calls. `None` starts anonymous; update it
-    /// later with [`PluginHost::set_auth_token`]. Never logged.
+    /// later with [`PluginHost::set_auth_token`]. Never logged. Values
+    /// outside the contract (`minLength: 1`, `maxLength: 8192`) are
+    /// treated as unset.
     pub auth_token: Option<String>,
 }
 
@@ -287,6 +289,42 @@ fn lock<'a, T>(m: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, HostError> {
     })
 }
 
+/// The container values `playbackResolvePayload.prefer` permits
+/// (enum `audio/webm`|`audio/mp4`, `maxItems: 2`, `uniqueItems`).
+const PREFER_CONTAINERS: &[&str] = &["audio/webm", "audio/mp4"];
+
+/// `access_token` contract bound — `minLength: 1`, `maxLength: 8192`.
+const ACCESS_TOKEN_MAX_LEN: usize = 8192;
+
+/// `prefer` arrives from the shell unchecked and is merged into the
+/// invoke payload verbatim, so it is normalized once at intake:
+/// filtered to the contract enum, deduplicated, capped at
+/// `maxItems: 2`. An empty result means "no hint" — the key stays
+/// absent rather than failing payload validation in the guest.
+fn sanitize_prefer(prefer: Option<Vec<String>>) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for value in prefer.into_iter().flatten() {
+        if out.len() == PREFER_CONTAINERS.len() {
+            break;
+        }
+        if PREFER_CONTAINERS.contains(&value.as_str()) && !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// An off-contract token (empty, or over `maxLength`) is worse than
+/// none — it would fail payload validation in the guest — so it
+/// clears the slot instead of being merged.
+fn valid_auth_token(token: Option<String>) -> Option<String> {
+    token.filter(|t| !t.is_empty() && t.chars().count() <= ACCESS_TOKEN_MAX_LEN)
+}
+
 fn parse_manifest_and_load(
     wasm: &[u8],
     manifest_json: &str,
@@ -354,8 +392,8 @@ impl PluginHost {
             kv,
             budgets,
             pot_provider_url: config.pot_provider_url,
-            prefer: config.prefer,
-            auth_token: Arc::new(RwLock::new(config.auth_token)),
+            prefer: sanitize_prefer(config.prefer),
+            auth_token: Arc::new(RwLock::new(valid_auth_token(config.auth_token))),
             stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
@@ -368,10 +406,13 @@ impl PluginHost {
     /// into every session-trust payload (`Authorization: Bearer` on
     /// InnerTube calls). Prepared sessions read the same slot at
     /// re-mint, so a refreshed token applies to in-flight playback
-    /// recovery. Never logged.
+    /// recovery. Never logged. An off-contract value (empty or over
+    /// the contract `maxLength`) clears the slot — the guest resolves
+    /// anonymous rather than receiving a payload that fails
+    /// validation.
     pub fn set_auth_token(&self, token: Option<String>) {
         if let Ok(mut slot) = self.auth_token.write() {
-            *slot = token;
+            *slot = valid_auth_token(token);
         }
     }
 
@@ -415,22 +456,19 @@ impl PluginHost {
                 let summary = AttemptSummary::from(&attempt);
                 let outcome = match result {
                     // `done.result` is untyped past the boundary — a result
-                    // without a url is an invalid response, never Resolved.
-                    Ok(value) => {
-                        let resource = resource_from(&value);
-                        if resource.url.is_empty() {
-                            ResolveOutcome::Failed {
-                                kind: "invalid-response".to_string(),
-                                message: "resolve result missing url".to_string(),
-                                attempt: summary,
-                            }
-                        } else {
-                            ResolveOutcome::Resolved {
-                                resource,
-                                attempt: summary,
-                            }
-                        }
-                    }
+                    // missing a schema-required field is an invalid
+                    // response, never Resolved.
+                    Ok(value) => match resolve_resource_from(&value) {
+                        Err(field) => ResolveOutcome::Failed {
+                            kind: "invalid-response".to_string(),
+                            message: format!("resolve result missing or invalid {field}"),
+                            attempt: summary,
+                        },
+                        Ok(resource) => ResolveOutcome::Resolved {
+                            resource,
+                            attempt: summary,
+                        },
+                    },
                     Err(e) => ResolveOutcome::Failed {
                         kind: e.kind().to_string(),
                         message: e.to_string(),
@@ -526,7 +564,7 @@ impl PluginHost {
             CancellationToken::new(),
             HostServices {
                 http: &*self.http,
-                kv: &*self.kv,
+                kv: Arc::clone(&self.kv),
                 clock: &clock,
                 pot_provider: self.pot_provider_url.as_deref(),
             },
@@ -603,7 +641,7 @@ impl PluginHost {
                 token,
                 HostServices {
                     http: &*http,
-                    kv: &*kv,
+                    kv,
                     clock: &clock,
                     pot_provider: pot_provider.as_deref(),
                 },
@@ -618,29 +656,62 @@ impl PluginHost {
     }
 }
 
-fn resource_from(value: &Value) -> ResolvedResource {
-    let get = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    ResolvedResource {
-        url: get("url"),
-        mime: get("mime"),
-        bitrate_kbps: value
-            .get("bitrate_kbps")
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
-        expires_at_ms: value.get("expires_at_ms").and_then(Value::as_u64),
-        client: get("client"),
-        content_length: value.get("content_length").and_then(Value::as_u64),
-        itag: value
-            .get("itag")
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
+/// Decode a `playbackResolveResult` object — the raw JSON is checked
+/// against the full contract shape, not field-by-field leniency:
+/// every required key must be present (nullable keys may carry `null`,
+/// never an absent key), strings are nonempty, integers sit inside
+/// their declared bounds, and unknown keys reject
+/// (`additionalProperties: false`). `Err(field)` names the first
+/// offending member; `"result"` means the value was not an object.
+fn resolve_resource_from(value: &Value) -> Result<ResolvedResource, &'static str> {
+    const KEYS: &[&str] = &[
+        "url",
+        "mime",
+        "bitrate_kbps",
+        "expires_at_ms",
+        "client",
+        "content_length",
+        "itag",
+    ];
+    let o = value.as_object().ok_or("result")?;
+    if o.keys().any(|k| !KEYS.contains(&k.as_str())) {
+        return Err("additionalProperties");
     }
+    let req_str = |key: &'static str| match o.get(key) {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        _ => Err(key),
+    };
+    // A required nullable integer: the key is present, and its value
+    // is either null or an integer inside [min, max] — the schema's
+    // declared bounds, which match the field widths this record uses.
+    let req_int = |key: &'static str, min: u64, max: u64| match o.get(key) {
+        None => Err(key),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(v) if (min..=max).contains(&v) => Ok(Some(v)),
+            _ => Err(key),
+        },
+        Some(_) => Err(key),
+    };
+    // An optional nullable integer: an absent key reads as null; a
+    // present non-null value must satisfy the bound.
+    let opt_int = |key: &'static str, min: u64, max: u64| match o.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(v) if (min..=max).contains(&v) => Ok(Some(v)),
+            _ => Err(key),
+        },
+        Some(_) => Err(key),
+    };
+    Ok(ResolvedResource {
+        url: req_str("url")?,
+        mime: req_str("mime")?,
+        bitrate_kbps: req_int("bitrate_kbps", 0, u64::from(u32::MAX))?.map(|v| v as u32),
+        expires_at_ms: req_int("expires_at_ms", 0, u64::MAX)?,
+        client: req_str("client")?,
+        content_length: opt_int("content_length", 1, u64::MAX)?,
+        itag: opt_int("itag", 0, u64::from(u32::MAX))?.map(|v| v as u32),
+    })
 }
 
 mod stream;
@@ -785,6 +856,61 @@ mod tests {
     }
 
     #[test]
+    fn resolve_missing_required_fields_report_invalid_response() {
+        // `playbackResolveResult` requires `url`, `mime`, `client`,
+        // `bitrate_kbps`, and `expires_at_ms` — a result missing,
+        // emptying, or mistyping any of them is Failed
+        // invalid-response, never Resolved{""}. `content_length`
+        // below its `minimum: 1` bound fails the same way.
+        for (i, result) in [
+            "{\"url\":\"https://example.com/a\",\"client\":\"IOS\"}",
+            "{\"url\":\"https://example.com/a\",\"mime\":\"audio/mp4\"}",
+            "{\"url\":\"https://example.com/a\",\"mime\":\"\",\"client\":\"IOS\"}",
+            // Present strings but the nullable integer keys absent.
+            "{\"url\":\"https://example.com/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\"}",
+            // Out-of-bounds `content_length` (minimum is 1).
+            "{\"url\":\"https://example.com/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\",\"bitrate_kbps\":null,\"expires_at_ms\":null,\"content_length\":0}",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let wasm = match wat::parse_str(done_wat(result)) {
+                Ok(w) => w,
+                Err(e) => panic!("wat: {e}"),
+            };
+            let host = match PluginHost::new(config()) {
+                Ok(h) => h,
+                Err(e) => panic!("host: {e}"),
+            };
+            let id = match host.load_plugin(
+                wasm.clone(),
+                manifest_json(&format!("done{i}"), &wasm, "[\"network:example.com\"]"),
+            ) {
+                Ok(id) => id,
+                Err(e) => panic!("load: {e}"),
+            };
+            let (tx, rx) = mpsc::channel();
+            if let Err(e) =
+                host.start_resolve(id, "vid12345678".into(), Box::new(ChannelListener { tx }))
+            {
+                panic!("start: {e}");
+            }
+            let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(v) => v,
+                Err(e) => panic!("listener: {e}"),
+            };
+            match outcome {
+                ResolveOutcome::Failed { kind, .. } => {
+                    assert_eq!(kind, "invalid-response", "result {result}");
+                }
+                ResolveOutcome::Resolved { .. } => {
+                    panic!("result {result} missing a required field — expected Failed");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unknown_plugin_errors() {
         let host = match PluginHost::new(config()) {
             Ok(h) => h,
@@ -859,6 +985,7 @@ mod tests {
     fn itag_reaches_the_resource() {
         let wasm = match wat::parse_str(done_wat(
             "{\"url\":\"https://example.com/a.m4a\",\"mime\":\"audio/mp4\",\
+             \"bitrate_kbps\":null,\"expires_at_ms\":null,\
              \"itag\":140,\"client\":\"IOS\"}",
         )) {
             Ok(w) => w,
@@ -1001,7 +1128,7 @@ mod tests {
             Err(e) => panic!("addr: {e}"),
         };
         let wasm = match wat::parse_str(done_wat(&format!(
-            "{{\"url\":\"https://127.0.0.1:{port}/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\"}}"
+            "{{\"url\":\"https://127.0.0.1:{port}/a\",\"mime\":\"audio/mp4\",\"client\":\"IOS\",\"bitrate_kbps\":null,\"expires_at_ms\":null}}"
         ))) {
             Ok(w) => w,
             Err(e) => panic!("wat: {e}"),
@@ -1071,5 +1198,141 @@ mod tests {
             Err(StreamError::Failed { kind, .. }) => assert_eq!(kind, "cancelled"),
             other => panic!("expected cancelled, got {other:?}"),
         }
+    }
+
+    struct RequestChannelListener {
+        tx: mpsc::Sender<(String, RequestOutcome)>,
+    }
+
+    impl RequestListener for RequestChannelListener {
+        fn on_outcome(&self, request_id: String, outcome: RequestOutcome) {
+            let _ = self.tx.send((request_id, outcome));
+        }
+    }
+
+    /// Run one `start_request` against the echo guest and return the
+    /// invoke `payload` it reported back verbatim.
+    fn invoke_payload(
+        host: &PluginHost,
+        plugin_id: &str,
+        capability: &str,
+        payload_json: &str,
+    ) -> Value {
+        let (tx, rx) = mpsc::channel();
+        let request_id = match host.start_request(
+            plugin_id.to_string(),
+            capability.to_string(),
+            payload_json.to_string(),
+            Box::new(RequestChannelListener { tx }),
+        ) {
+            Ok(r) => r,
+            Err(e) => panic!("start_request: {e}"),
+        };
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("listener: {e}"),
+        };
+        assert_eq!(rid, request_id);
+        let result_json = match outcome {
+            RequestOutcome::Succeeded { result_json, .. } => result_json,
+            RequestOutcome::Failed { kind, message, .. } => {
+                panic!("expected Succeeded, got Failed {kind}: {message}")
+            }
+        };
+        let message: Value = match serde_json::from_str(&result_json) {
+            Ok(v) => v,
+            Err(e) => panic!("result_json: {e}"),
+        };
+        message.get("payload").cloned().unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn session_trust_merge_reaches_the_invoke_payload() {
+        // The echo guest returns the invoke message verbatim, so the
+        // merged `access_token` is observable inside `payload`: a live
+        // slot replaces a stale caller-supplied key on session-trust
+        // capabilities, while non-trust capabilities pass untouched.
+        let mut cfg = config();
+        cfg.auth_token = Some("tok-live".to_string());
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let digest = format!("sha256:{:x}", sha2::Sha256::digest(ECHO_WASM));
+        let manifest = format!(
+            "{{\"id\":\"echo2\",\"version\":\"0.1.0\",\"abi\":\"0.2.0\",\
+             \"capabilities\":[\"playback.resolve\",\"catalog.search\"],\
+             \"permissions\":[],\"artifact\":{{\"path\":\"echo.wasm\",\"digest\":\"{digest}\"}}}}"
+        );
+        let id = match host.load_plugin(ECHO_WASM.to_vec(), manifest) {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let payload = invoke_payload(
+            &host,
+            &id,
+            "playback.resolve",
+            "{\"source_ref\":\"vid\",\"access_token\":\"stale\"}",
+        );
+        assert_eq!(payload["access_token"], json!("tok-live"));
+        assert_eq!(payload["source_ref"], json!("vid"));
+
+        // A capability outside the session-trust set is not merged —
+        // the caller's keys pass through verbatim.
+        let payload = invoke_payload(
+            &host,
+            &id,
+            "catalog.search",
+            "{\"query\":{\"text\":\"x\"},\"limit\":1,\"access_token\":\"caller\"}",
+        );
+        assert_eq!(payload["access_token"], json!("caller"));
+
+        // An off-contract token clears the slot — the payload then
+        // passes untouched, so a caller-supplied key survives (the
+        // dev seam journey path).
+        host.set_auth_token(Some(String::new()));
+        let payload = invoke_payload(
+            &host,
+            &id,
+            "playback.resolve",
+            "{\"source_ref\":\"vid\",\"access_token\":\"caller\"}",
+        );
+        assert_eq!(payload["access_token"], json!("caller"));
+        host.set_auth_token(Some("tok2".to_string()));
+        let payload = invoke_payload(&host, &id, "playback.resolve", "{\"source_ref\":\"v\"}");
+        assert_eq!(payload["access_token"], json!("tok2"));
+    }
+
+    #[test]
+    fn prefer_config_is_normalized_to_the_contract() {
+        // The merged `prefer` must satisfy the contract enum,
+        // `uniqueItems`, and `maxItems: 2` — off-contract entries are
+        // dropped and an empty result stays absent.
+        assert_eq!(sanitize_prefer(None), None);
+        assert_eq!(sanitize_prefer(Some(vec![])), None);
+        assert_eq!(sanitize_prefer(Some(vec!["video/mp4".to_string()])), None);
+        assert_eq!(
+            sanitize_prefer(Some(vec![
+                "audio/mp4".to_string(),
+                "audio/ogg".to_string(),
+                "audio/mp4".to_string(),
+                "audio/webm".to_string(),
+                "audio/mp4".to_string(),
+            ])),
+            Some(vec!["audio/mp4".to_string(), "audio/webm".to_string()])
+        );
+    }
+
+    #[test]
+    fn off_contract_auth_tokens_clear_the_slot() {
+        assert_eq!(valid_auth_token(None), None);
+        assert_eq!(valid_auth_token(Some(String::new())), None);
+        assert_eq!(valid_auth_token(Some("x".repeat(8193))), None);
+        assert_eq!(
+            valid_auth_token(Some("tok".to_string())),
+            Some("tok".to_string())
+        );
+        let max = "x".repeat(8192);
+        assert_eq!(valid_auth_token(Some(max.clone())), Some(max));
     }
 }

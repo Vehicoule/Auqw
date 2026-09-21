@@ -7,6 +7,7 @@
 //!   resolve --spin <spin.wasm>
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use auqw_plugin_host::{
@@ -108,7 +109,7 @@ async fn run(args: &[String]) -> ExitCode {
     let cancel = CancellationToken::new();
     let payload = serde_json::json!({ "source_ref": video_id });
 
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let clock = SystemClock;
     let fut = invoke(
         &plugin,
@@ -118,7 +119,7 @@ async fn run(args: &[String]) -> ExitCode {
         cancel.clone(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: pot_provider.as_deref(),
         },
@@ -202,7 +203,7 @@ async fn run_spin(path: &str) -> ExitCode {
         eprintln!("http client init failed");
         return ExitCode::FAILURE;
     };
-    let kv = MemoryKeyValueStore::new();
+    let kv = Arc::new(MemoryKeyValueStore::new());
     let clock = SystemClock;
     let t0 = Instant::now();
     let outcome = invoke(
@@ -213,7 +214,7 @@ async fn run_spin(path: &str) -> ExitCode {
         CancellationToken::new(),
         HostServices {
             http: &http,
-            kv: &kv,
+            kv: kv.clone(),
             clock: &clock,
             pot_provider: None,
         },

@@ -58,7 +58,10 @@ function bumpUpdated(
 ): readonly Playlist[] {
   return playlists.map((p) =>
     p.playlistId === playlistId && p.updatedMs !== nowMs
-      ? { ...p, updatedMs: nowMs }
+      ? // A regressed wall clock must never stamp `updatedMs` below
+        // `createdMs` — that row would fail validation on every later
+        // commit and poison the section. The stamp is monotonic.
+        { ...p, updatedMs: Math.max(nowMs, p.updatedMs) }
       : p,
   );
 }
@@ -102,7 +105,9 @@ export function renamePlaylist(
   }
   return {
     playlists: state.playlists.map((p) =>
-      p.playlistId === playlistId ? { ...p, name, updatedMs: nowMs } : p,
+      p.playlistId === playlistId
+        ? { ...p, name, updatedMs: Math.max(nowMs, p.updatedMs) }
+        : p,
     ),
     entries: state.entries,
   };

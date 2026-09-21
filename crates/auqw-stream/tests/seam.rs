@@ -761,8 +761,13 @@ async fn abandoned_prepare_is_evicted_by_the_reaper() {
         .unwrap_or_else(|e| panic!("prepare: {e}"))
         .handle;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // An evicted session leaves the map entirely — callers routing by
+    // handle drop the dead entry on this `not-found` instead of it
+    // lingering forever.
     let e = err_of(reg.read(&h, 0, 1));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
+    let e = err_of(reg.phase_marks(&h));
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1185,6 +1190,52 @@ async fn prepare_coalescing_requires_same_provider() {
     assert_eq!(err_of(reg.attach(&first.handle, 0)).kind(), "superseded");
 }
 
+/// A coalesced prepare returns the live survivor without creating a
+/// session — but it must still run the supersede scan, or an
+/// attached-then-detached sibling stays live and two unattached
+/// sessions coexist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coalesced_prepare_still_supersedes_detached_sibling() {
+    let d = TestDir::new("coalsup");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    // A attaches (exempt from supersede), then B prepares — both live.
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare a: {e}"));
+    reg.attach(&a.handle, 0)
+        .unwrap_or_else(|e| panic!("attach a: {e}"));
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    let b = reg
+        .prepare(sb.clone(), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert!(b.superseded.is_empty(), "{:?}", b.superseded);
+    // DataSource close: A is unattached again but still live.
+    reg.close(&a.handle)
+        .unwrap_or_else(|e| panic!("close a: {e}"));
+    // The repeat prepare coalesces onto B — A must not survive it.
+    let again = reg
+        .prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("reprepare: {e}"));
+    assert_eq!(again.handle, b.handle, "same provider+ref coalesces");
+    assert!(
+        again.superseded.contains(&a.handle),
+        "the coalesced prepare must still name the detached sibling: {:?}",
+        again.superseded
+    );
+    assert!(
+        !again.superseded.contains(&b.handle),
+        "the survivor must never be on its own supersede list: {:?}",
+        again.superseded
+    );
+    assert_eq!(err_of(reg.attach(&a.handle, 0)).kind(), "superseded");
+}
+
 /// The named read bound must outlive the recovery path a parked read
 /// waits on: one re-mint plus one bounded fetch attempt. A shorter
 /// deadline would surface cap death to the player as `transient`.
@@ -1340,10 +1391,10 @@ async fn detached_session_evicted_by_detached_age() {
     tokio::time::sleep(Duration::from_millis(70)).await;
     assert!(reg.is_live(&h), "reaped on session age, not detached age");
     // Once the detached window itself reaches the TTL the reaper ends
-    // it — Evicted, the abandon verdict.
+    // it and drops the handle — a stale handle answers not-found.
     wait_until(|| !reg.is_live(&h)).await;
     let e = err_of(reg.attach(&h, 0));
-    assert_eq!(e.kind(), "evicted", "{e}");
+    assert_eq!(e.kind(), "not-found", "{e}");
 }
 
 /// A body that yields its first piece and then hangs must still serve

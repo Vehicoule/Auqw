@@ -1,3 +1,4 @@
+import { File } from 'expo-file-system';
 import { openDatabaseAsync } from 'expo-sqlite';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import type { CancellationSignal } from '@auqw/application';
@@ -52,21 +53,47 @@ export async function createExpoSqliteDriver(
   // Connection-scoped; must be set outside any transaction to apply.
   await db.execAsync('PRAGMA foreign_keys = ON');
 
+  const checkTag = (tag: string): void => {
+    if (!/^[a-z0-9-]+$/i.test(tag)) {
+      throw new TypeError('backup tag must be alphanumeric/dashes');
+    }
+  };
+  // The device path of the main database, resolved from SQLite itself
+  // so the backup lands next to the file it preserves.
+  const mainFile = async (): Promise<string | null> => {
+    const rows = await db.getAllAsync<{ name: string; file: string }>(
+      'PRAGMA database_list',
+    );
+    const file = rows.find((r) => r.name === 'main')?.file;
+    return typeof file === 'string' && file.length > 0 ? file : null;
+  };
+  const backupFile = (tag: string, path: string): File =>
+    new File(`file://${path}.bak-${tag}`);
+
   return {
     async backup(tag: string): Promise<void> {
-      if (!/^[a-z0-9-]+$/i.test(tag)) {
-        throw new TypeError('backup tag must be alphanumeric/dashes');
-      }
-      // The device path of the main database, resolved from SQLite
-      // itself so the backup lands next to the file it preserves.
-      const rows = await db.getAllAsync<{ name: string; file: string }>(
-        'PRAGMA database_list',
-      );
-      const file = rows.find((r) => r.name === 'main')?.file;
-      if (typeof file === 'string' && file.length > 0) {
+      checkTag(tag);
+      const file = await mainFile();
+      if (file !== null) {
+        // VACUUM INTO refuses an existing target: a stale image from a
+        // failed attempt is replaced so retries stay retryable.
+        const target = backupFile(tag, file);
+        if (target.exists) {
+          target.delete();
+        }
         await db.execAsync(
           `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
         );
+      }
+    },
+    async dropBackup(tag: string): Promise<void> {
+      checkTag(tag);
+      const file = await mainFile();
+      if (file !== null) {
+        const target = backupFile(tag, file);
+        if (target.exists) {
+          target.delete();
+        }
       }
     },
     async transaction<T>(
