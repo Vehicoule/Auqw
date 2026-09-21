@@ -139,6 +139,12 @@ export type AuqwExpoPlayerLike = {
     attemptId: string,
     queueRev: number,
   ): Promise<string>;
+  /**
+   * provider:'local' attach — registers an `lf-*` handle for a
+   * device-owned file path or content URI. No stream session:
+   * release/cancel are bookkeeping no-ops.
+   */
+  prepareLocal(path: string, mime?: string | null): Promise<string>;
   play(
     handle: string,
     attemptId: string,

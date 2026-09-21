@@ -244,6 +244,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   cancel(requestId: string): void;
   runSpin(wasmBase64: string, manifestJson: string): Promise<SpinReport>;
   prepare(provider: string, sourceRef: string, attemptId: string, queueRev: number): Promise<string>;
+  prepareLocal(path: string, mime?: string | null): Promise<string>;
   play(handle: string, attemptId: string, queueRev: number, positionMs?: number): Promise<void>;
   pause(): Promise<void>;
   seekTo(positionMs: number): Promise<void>;
@@ -313,6 +314,19 @@ export function prepare(
   queueRev: number,
 ): Promise<string> {
   return native.prepare(provider, sourceRef, attemptId, queueRev);
+}
+
+/**
+ * provider:'local' attach — registers an `lf-*` handle for a
+ * device-owned file path or content URI. No stream session is
+ * created: `play`/`releaseStream`/`cancelPrepare` resolve the handle
+ * locally (release/cancel are bookkeeping no-ops).
+ */
+export function prepareLocal(
+  path: string,
+  mime?: string | null,
+): Promise<string> {
+  return native.prepareLocal(path, mime ?? null);
 }
 
 /** Attach a prepared handle to the warm player and start playback. */
