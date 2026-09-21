@@ -73,6 +73,7 @@ import {
 } from '../library/playlists.ts';
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
+import type { MatchOutcome } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -177,6 +178,9 @@ export type SessionDeps = {
 
 const OP_DEADLINE_MS = 15_000;
 const CANDIDATE_LIMIT = 25;
+// Status ticks fire ~1 s; a position delta above this between ticks
+// is a seek/jump, not played time.
+const MAX_TICK_DELTA_MS = 2_500;
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -240,6 +244,10 @@ type ActiveAttempt = {
   endedHandled: boolean;
   terminalError?: AppError;
   timer?: CancellationSource;
+  /** Last accepted status position — deltas feed `listenedMs`. */
+  lastStatusPositionMs?: number;
+  /** Actual played span summed from tick deltas (seeks don't count). */
+  listenedMsAccum: number;
 };
 
 type Ready = {
@@ -274,7 +282,7 @@ type ProjectionMarker = {
   readonly projection: QueueProjection;
   currentOccurrenceId: string | null;
   reconciledQueueRev: number;
-  status: 'pending' | 'installed' | 'failed';
+  status: 'pending' | 'installed' | 'failed' | 'superseded';
   done: Promise<void>;
 };
 
@@ -309,6 +317,7 @@ export class Session {
   #disposed = false;
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
+  #restorePromise: Promise<Result<void>> | null = null;
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -562,6 +571,14 @@ export class Session {
     if (this.#ready !== null) {
       return ok(undefined);
     }
+    // Concurrent restore callers share the in-flight load — a
+    // second parallel restore would double the storage round-trip
+    // for nothing.
+    this.#restorePromise ??= this.#doRestore();
+    return this.#restorePromise;
+  }
+
+  async #doRestore(): Promise<Result<void>> {
     const source = new CancellationSource();
     this.#opSources.add(source);
     let loaded: Result<PersistedState>;
@@ -1403,11 +1420,13 @@ export class Session {
       if (!result.ok) {
         return result;
       }
-      const reloaded = await this.#storage.load(
-        this.#newContext(
-          'reload',
-          this.#deadline(),
-          context?.signal ?? new CancellationSource().signal,
+      const reloaded = await this.#bounded(() =>
+        this.#storage.load(
+          this.#newContext(
+            'reload',
+            this.#deadline(),
+            context?.signal ?? new CancellationSource().signal,
+          ),
         ),
       );
       if (reloaded.ok && isPersistedState(reloaded.value)) {
@@ -1662,6 +1681,7 @@ export class Session {
       // Rehydrate from the replaced document: restore() performs the
       // load path whenever #ready is null.
       this.#ready = null;
+      this.#restorePromise = null;
       this.#state = { type: 'unhydrated' };
       const restored = await this.restore();
       if (!restored.ok) {
@@ -2078,8 +2098,12 @@ export class Session {
     }
     await this.#persist({ queue: after });
     this.#derived();
-    if (after.mode === 'playing' && after.currentOccurrenceId !== null) {
-      return this.#startAttempt(after.currentOccurrenceId);
+    // Transport ops are not serialized — a concurrent next/previous
+    // may have moved the cursor again while the persist was in
+    // flight. Serve the CURRENT cursor, never the pre-await snapshot.
+    const latest = r.queue.snapshot();
+    if (latest.mode === 'playing' && latest.currentOccurrenceId !== null) {
+      return this.#startAttempt(latest.currentOccurrenceId);
     }
     await this.#supersede();
     const ready2 = this.#ready;
@@ -2353,6 +2377,7 @@ export class Session {
       deadlineMs,
       preparedHandled: false,
       endedHandled: false,
+      listenedMsAccum: 0,
     };
     this.#active = attempt;
     r.playback = {
@@ -2474,11 +2499,20 @@ export class Session {
       await this.#failAttempt(attempt, result.error);
       return result;
     }
-    const outcome = MatchingEngine.match(
-      recording,
-      result.value,
-      recording.mappings,
-    );
+    // Malformed provider candidates can throw inside match — that
+    // must fail the attempt honestly, not wedge it unwound.
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(
+        recording,
+        result.value,
+        recording.mappings,
+      );
+    } catch (thrown) {
+      const error = fromUnknown(thrown);
+      await this.#failAttempt(attempt, error);
+      return err(error);
+    }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
       // fails honestly. The enqueue is best-effort — a review-write
@@ -2758,10 +2792,28 @@ export class Session {
       }
       return;
     }
+    // Listened time accumulates real deltas between playing ticks —
+    // a seek forward must not mint a play for a span that never
+    // played, and a position regression must not subtract. Anything
+    // above the cap is a jump, not playback.
+    if (event.state === 'playing') {
+      const lastPos = active.lastStatusPositionMs;
+      if (lastPos !== undefined && event.positionMs > lastPos) {
+        active.listenedMsAccum += Math.min(
+          event.positionMs - lastPos,
+          MAX_TICK_DELTA_MS,
+        );
+      }
+      active.lastStatusPositionMs = event.positionMs;
+    }
     await this.#maybeRecordPlay(
       active.occurrenceId,
       active.recordingId,
-      event.positionMs,
+      // 'ended' is a completion claim — the stream ran to its end;
+      // the delta accumulator only applies to periodic ticks.
+      event.state === 'ended'
+        ? event.positionMs
+        : active.listenedMsAccum,
       event.durationMs ??
       r.recordings.find((rec) => rec.id === active.recordingId)
         ?.durationMs ??
@@ -2999,6 +3051,13 @@ export class Session {
       status: 'pending',
       done: Promise.resolve(),
     };
+    const displaced = this.#projection;
+    if (displaced !== null && displaced.status === 'pending') {
+      // The awaited `done` still resolves, but the marker stops
+      // pretending to be the latest word — readers checking
+      // `status` after the wait see 'superseded', not 'installed'.
+      displaced.status = 'superseded';
+    }
     this.#projection = marker;
     marker.done = (async () => {
       const result = await this.#bounded(() =>
@@ -3084,8 +3143,6 @@ export class Session {
       marker === null ||
       cursorIndex < 0 ||
       r.queue.snapshot().revision !== marker.reconciledQueueRev ||
-      event.projectionId !== projection.projectionId ||
-      event.projectedQueueRev !== projection.queueRev ||
       event.fromOccurrenceId !== marker.currentOccurrenceId ||
       !legal ||
       !identityOk ||
@@ -3093,6 +3150,21 @@ export class Session {
     ) {
       this.#logWarn('queue transition rejected');
       return;
+    }
+    if (
+      event.projectionId !== projection.projectionId ||
+      event.projectedQueueRev !== projection.queueRev
+    ) {
+      // A remote step lands on the projection the service has, which
+      // can lag one JS install. Since `from`/`to` were already proven
+      // legal against the INSTALLED edges above, a stale-but-past
+      // revision is safe to reconcile — a revision newer than the
+      // install describes a projection that never existed here.
+      if (event.projectedQueueRev > projection.queueRev) {
+        this.#logWarn('queue transition rejected');
+        return;
+      }
+      this.#logWarn('queue transition on superseded projection — reconciled');
     }
     if (event.reason === 'ended' && event.fromOccurrenceId !== null) {
       // The service completed the occurrence without a JS 'ended':
@@ -3150,6 +3222,10 @@ export class Session {
         handle: event.handle,
         preparedHandled: true,
         endedHandled: false,
+        // The adopted attempt's prior play span is unknown — count
+        // from the adopted position so threshold math stays honest.
+        listenedMsAccum: event.positionMs,
+        lastStatusPositionMs: event.positionMs,
       };
       this.#active = attempt;
       r.playback = {
@@ -3280,7 +3356,13 @@ export class Session {
       if (rec === undefined) {
         return;
       }
-      const outcome = MatchingEngine.match(rec, result.value, rec.mappings);
+      let outcome: MatchOutcome;
+      try {
+        outcome = MatchingEngine.match(rec, result.value, rec.mappings);
+      } catch {
+        this.#logWarn('successor mapping threw on malformed candidates');
+        return;
+      }
       if (outcome.type !== 'matched') {
         this.#logWarn('successor mapping unresolved');
         return;

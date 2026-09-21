@@ -249,12 +249,55 @@ class AuqwExpoModule : Module() {
   // stamped with a monotonic move seq: an off-looper clear (host swap,
   // disconnect) can free the slot, and a stale outcome can never
   // misattribute a *newer* move's latch because the seqs differ.
-  private class ArmedMove(val proj: QueueProjectionInput, val seq: Long)
+  private class ArmedMove(
+    val proj: QueueProjectionInput,
+    val seq: Long,
+    // The host that minted the prepare — a swapped-out `host` field
+    // can never serve its cancel.
+    val mintHost: PluginHost,
+  ) {
+    // Registered once startPrepare returns; cleared latches cancel it.
+    @Volatile var requestId: String? = null
+  }
 
   @Volatile
   private var transitionInFlight: ArmedMove? = null
   private var transitionSeq = 0L
   private var svcSeq = 0
+
+  /** Drop an armed move and cancel its in-flight prepare on the host
+   * that minted it — a dropped move's resolve/mint otherwise runs to
+   * completion with no consumer for the outcome. (Off-looper safe:
+   * the latch is seq-stamped, so a stale outcome can never take a
+   * newer move's slot.)
+   */
+  private fun dropArmedMove() {
+    val move = transitionInFlight
+    transitionInFlight = null
+    val rid = move?.requestId ?: return
+    try {
+      move.mintHost.cancel(rid)
+    } catch (e: Exception) {
+      Log.w(TAG, "cancel of dropped transition $rid: ${e.message}")
+    }
+  }
+
+  /** Free the session behind an attached stream that lost its owner:
+   * mark the handle ended so a queued attach can't resurrect it,
+   * unroute it, and release on the host that minted it — best-effort,
+   * the same pattern as stale transition outcomes. */
+  private fun releaseAbandonedAttach(att: Attachment) {
+    if (releasedHandles.size < RELEASED_HANDLES_CAP) {
+      releasedHandles.add(att.handle)
+    }
+    val h = streamRegistry.hostFor(att.handle)
+    streamRegistry.unregister(att.handle)
+    try {
+      h?.streamRelease(att.handle)
+    } catch (e: Exception) {
+      Log.w(TAG, "release of abandoned attach ${att.handle}: ${e.message}")
+    }
+  }
   @Volatile
   private var notificationsRequested = false
 
@@ -366,7 +409,7 @@ class AuqwExpoModule : Module() {
       // an outcome the new host can never use. (Off-looper clear is
       // safe: the latch is seq-stamped, so a stale outcome can never
       // take a newer move's slot.)
-      transitionInFlight = null
+      dropArmedMove()
       // Every handle the old host served is dead — stop playback and
       // drop the join rather than let the old stream keep playing
       // until its reads fail one by one.
@@ -496,6 +539,9 @@ class AuqwExpoModule : Module() {
     // ---- Player surface: the PlayerPort transport contract ----
 
     AsyncFunction("prepare") { provider: String, sourceRef: String, attemptId: String, queueRev: Double ->
+      if (attemptId.isEmpty() || !isSafeNonNegative(queueRev)) {
+        throw CodedException("ERR_INVALID_ARGUMENT", "bad prepare arguments", null)
+      }
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       val listener = object : PrepareListener {
         override fun onOutcome(requestId: String, outcome: PrepareOutcome) {
@@ -581,9 +627,10 @@ class AuqwExpoModule : Module() {
         attached = null
         attachedForOccurrence = null
         attachedByService = false
-        // A stop kills any pending service move: its prepare outcome
-        // will land, see the superseded marker, and free its handle.
-        transitionInFlight = null
+        // A stop kills any pending service move: cancel its prepare
+        // so the resolve/mint stops burning budget, and mark the
+        // latch dropped for its (still-arriving) outcome.
+        dropArmedMove()
         p.stop()
         p.clearMediaItems()
       }
@@ -766,10 +813,17 @@ class AuqwExpoModule : Module() {
           }
         )
       }
+      // A service-minted attach dies with the service — the app may
+      // never have adopted the `svc-N` handle, so nothing else can
+      // own its release. An app-minted attach's session is the app's
+      // to release (it holds the handle) — only the join clears.
+      if (a != null && attachedByService) {
+        releaseAbandonedAttach(a)
+      }
       attached = null
       attachedForOccurrence = null
       attachedByService = false
-      transitionInFlight = null
+      dropArmedMove()
       // Reset so the next awaitPlayer rebinds instead of resolving a
       // stale deferred.
       player = null
@@ -836,6 +890,10 @@ class AuqwExpoModule : Module() {
     val p = awaitPlayer()
     val a = Attachment(handle, attemptId, queueRev, SystemClock.elapsedRealtime())
     onPlayerThread(p) {
+      // An app/dev-initiated attach supersedes any armed remote move:
+      // drop the latch (cancelling its prepare) so the stale outcome
+      // can't clobber this attach with the move's target.
+      dropArmedMove()
       attachOnPlayerThread(p, a, positionMs, uri, dataSourceFactory, bind, occurrenceId)
     }
   }
@@ -864,13 +922,16 @@ class AuqwExpoModule : Module() {
     if (dataSourceFactory === streamDataSourceFactory &&
       streamRegistry.hostFor(a.handle) == null
     ) {
+      // A stream that never reached the player reports position 0 —
+      // echoing the outgoing item's position would lie about progress.
       emitStatusFor(
         a,
         "failed",
         Bundle().apply {
           putString("kind", "superseded")
           putString("message", "stream handle ended before attach")
-        }
+        },
+        0.0
       )
       return
     }
@@ -905,9 +966,21 @@ class AuqwExpoModule : Module() {
     } else {
       ProgressiveMediaSource.Factory(dataSourceFactory)
     }).createMediaSource(mediaItem)
+    // Drop the outgoing join before touching the player — the
+    // IDLE→BUFFERING states setMediaSource/prepare fire synchronously
+    // would otherwise echo the replaced attach's identity.
+    attached = null
+    attachedForOccurrence = null
+    attachedByService = false
     p.setMediaSource(source, positionMs?.toLong() ?: 0L)
     p.prepare()
-    p.play()
+    // Service-initiated attaches (remote next/previous, ended advance)
+    // honor the transport's playWhenReady — a paused lock-screen press
+    // loads the successor but never starts audio. App-initiated `play`
+    // and dev legs always play: the caller asked for sound.
+    if (bind != OccurrenceBind.FIXED || p.playWhenReady) {
+      p.play()
+    }
     // The mark is emitted only once the attach is accepted — a
     // skipped attach leaves no stale mark behind; after play() the
     // sendEvent cost stays off the source-creation path.
@@ -938,8 +1011,14 @@ class AuqwExpoModule : Module() {
 
   /** Status under an explicit attachment — an attach that fails
    * before it can claim the player still owes its caller a failure
-   * under its own identity. */
-  private fun emitStatusFor(a: Attachment?, state: String, error: Bundle? = null) {
+   * under its own identity. `positionMs` overrides the player's live
+   * position for streams that never reached it. */
+  private fun emitStatusFor(
+    a: Attachment?,
+    state: String,
+    error: Bundle? = null,
+    positionMs: Double? = null
+  ) {
     if (a == null) {
       return
     }
@@ -951,8 +1030,11 @@ class AuqwExpoModule : Module() {
         putString("attemptId", a.attemptId)
         putDouble("queueRev", a.queueRev)
         putString("state", state)
-        putDouble("positionMs", p.currentPosition.coerceAtLeast(0).toDouble())
-        if (p.duration != C.TIME_UNSET) {
+        putDouble(
+          "positionMs",
+          positionMs ?: p.currentPosition.coerceAtLeast(0).toDouble()
+        )
+        if (positionMs == null && p.duration != C.TIME_UNSET) {
           putDouble("durationMs", p.duration.toDouble())
         }
         if (error != null) {
@@ -1037,17 +1119,16 @@ class AuqwExpoModule : Module() {
         attachedForOccurrence = null
         attachedByService = false
       }
-      !attachedByService -> {
-        // An app-initiated attach always serves the app's current
-        // cursor — rebind it onto the fresh revision.
-        attachedForOccurrence = proj.currentOccurrenceId
-      }
       attachedForOccurrence != proj.currentOccurrenceId -> {
-        // A service move the app superseded is still on the player —
-        // stop it rather than keep playing a rejected move.
+        // The attached stream serves an occurrence the new revision
+        // no longer has as cursor — a service move the app superseded,
+        // or an app attach bound under the previous cursor. Either way
+        // the app never owned this handle: stop it and free the
+        // session, or it leaks until expiry.
         attached = null
         attachedForOccurrence = null
         attachedByService = false
+        releaseAbandonedAttach(att)
         p.stop()
         p.clearMediaItems()
       }
@@ -1137,7 +1218,8 @@ class AuqwExpoModule : Module() {
     }
     val h = host ?: return
     val seq = ++transitionSeq
-    transitionInFlight = ArmedMove(proj, seq)
+    val armed = ArmedMove(proj, seq, h)
+    transitionInFlight = armed
     val listener = object : PrepareListener {
       override fun onOutcome(requestId: String, outcome: PrepareOutcome) {
         // Prepare outcomes fire on a host runtime worker — hop back
@@ -1155,9 +1237,9 @@ class AuqwExpoModule : Module() {
     try {
       // startPrepare only registers the request — it never blocks on
       // resolve, so the player looper (= main thread) is safe.
-      h.startPrepare(provider, sourceRef, listener)
+      armed.requestId = h.startPrepare(provider, sourceRef, listener)
     } catch (e: HostException) {
-      transitionInFlight = null
+      dropArmedMove()
       failEndedAttach(reason, "unavailable", e.message)
       Log.w(TAG, "transition prepare rejected: ${e.message}")
     }

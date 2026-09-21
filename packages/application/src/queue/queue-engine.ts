@@ -291,6 +291,10 @@ export class QueueEngine {
       this.#currentId = prev.occurrenceId;
     }
     this.#positionMs = 0;
+    // A cross-occurrence move must not carry the failed track's
+    // blocked error onto the predecessor — every other transition
+    // clears it.
+    this.#blockedError = undefined;
     this.#tick();
   }
 

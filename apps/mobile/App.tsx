@@ -1589,6 +1589,31 @@ function Main({
       const body = url.slice('auqw://'.length);
       const [verb, qs] = body.split('?');
       const params = new URLSearchParams(qs ?? '');
+      // A gate run drives verbs blindly — a failed session op must
+      // still leave a log line or the leg is indistinguishable from
+      // success.
+      const logRes = (
+        v: string,
+        p:
+          | Promise<{ ok: boolean; error?: { kind: string; message: string } }>
+          | { ok: boolean; error?: { kind: string; message: string } },
+      ) => {
+        const done = (res: {
+          ok: boolean;
+          error?: { kind: string; message: string };
+        }) => {
+          if (!res.ok) {
+            console.log(
+              `[journey] ${v} failed: ${res.error?.kind} — ${res.error?.message}`,
+            );
+          }
+        };
+        if (p instanceof Promise) {
+          void p.then(done);
+        } else {
+          done(p);
+        }
+      };
       switch (verb) {
         case 'open': {
           const target = params.get('tab') ?? 'home';
@@ -1647,34 +1672,34 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s.addAndPlay(meta);
+            logRes('play-result', s.addAndPlay(meta));
           }
           break;
         }
         case 'next':
-          void s.next();
+          logRes('next', s.next());
           break;
         case 'previous':
-          void s.previous();
+          logRes('previous', s.previous());
           break;
         case 'pause':
-          void s.pause();
+          logRes('pause', s.pause());
           break;
         case 'resume':
-          void s.resume();
+          logRes('resume', s.resume());
           break;
         case 'like-current':
           if (st.type === 'ready' && st.playback.type !== 'idle') {
             const id = st.playback.recordingId;
             if (id !== null) {
-              void s.toggleLike(id);
+              logRes('like-current', s.toggleLike(id));
             }
           }
           break;
         case 'seek': {
           const ms = Number(params.get('ms') ?? '0');
           if (Number.isSafeInteger(ms) && ms >= 0) {
-            void s.seekTo(ms);
+            logRes('seek', s.seekTo(ms));
           }
           break;
         }
@@ -1723,7 +1748,7 @@ function Main({
           if (radioP !== null) {
             next.radioProvider = radioP === 'auto' ? null : radioP;
           }
-          void s.updateSettings(next);
+          logRes('provider', s.updateSettings(next));
           break;
         }
         case 'corrections':
@@ -1759,11 +1784,11 @@ function Main({
           const undoId = params.get('undo');
           if (confirmId !== null) {
             const candidate = Number(params.get('candidate') ?? '0');
-            void s.confirmReview(confirmId, candidate);
+            logRes('review-confirm', s.confirmReview(confirmId, candidate));
           } else if (rejectId !== null) {
-            void s.rejectReview(rejectId);
+            logRes('review-reject', s.rejectReview(rejectId));
           } else if (undoId !== null) {
-            void s.undoReview(undoId);
+            logRes('review-undo', s.undoReview(undoId));
           }
           break;
         }
@@ -1777,6 +1802,36 @@ function Main({
           const importPath = params.get('import');
           if (importPath !== null) {
             importText.current = null;
+            // A deep link must not read outside the app's own
+            // document/cache roots — anywhere else is a file-read
+            // primitive reachable by any intent sender. Android's
+            // canonical root is /data/user/0/<pkg>/; /data/data/<pkg>/
+            // is the same directory by alias, so allow both forms.
+            const roots = [Paths.document.uri, Paths.cache.uri].flatMap(
+              (root) => {
+                const plain = root.replace(/^file:\/\//, '');
+                const roots = [plain];
+                if (plain.startsWith('/data/user/0/')) {
+                  roots.push(plain.replace('/data/user/0/', '/data/data/'));
+                }
+                return roots;
+              },
+            );
+            // Dot-segments resolve before the prefix check —
+            // files/../siblings is not "inside" the root.
+            let normalized: string;
+            try {
+              normalized = new URL(`file://${importPath}`).pathname;
+            } catch {
+              normalized = importPath;
+            }
+            const allowed = roots.some((root) =>
+              normalized.startsWith(root),
+            );
+            if (!allowed) {
+              console.log('[journey] transfer import refused: outside app dirs');
+              break;
+            }
             setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
             void (async () => {
               try {
@@ -1828,7 +1883,7 @@ function Main({
           break;
         }
         case 'stop-radio':
-          void s.stopRadio();
+          logRes('stop-radio', s.stopRadio());
           break;
         default:
           break;
