@@ -59,6 +59,18 @@ const TRANSACTION_TAILS = new WeakMap<
   { tail: Promise<void> }
 >();
 
+/**
+ * Initialize sections keyed by driver: probe, backup, and migrate are
+ * three steps split across two transactions (VACUUM INTO cannot run
+ * inside BEGIN), so instances sharing a driver must serialize the
+ * whole sequence — otherwise a second probe can capture a version the
+ * first instance has already migrated past and replay its DDL.
+ */
+const INITIALIZE_TAILS = new WeakMap<
+  SqliteDriver,
+  { tail: Promise<void> }
+>();
+
 function transientError(): AppError {
   return appError('transient', 'storage operation failed');
 }
@@ -124,6 +136,23 @@ export class SqliteStorage implements StoragePort {
   }
 
   /**
+   * The whole probe→backup→migrate sequence queued on the driver's
+   * initialize tail. Each inner `#transaction` still serializes on the
+   * transaction tail, so ordinary commits can interleave between the
+   * sequence's steps — only a second instance's initialize waits.
+   */
+  #exclusiveInit<T>(work: () => Promise<T>): Promise<T> {
+    let slot = INITIALIZE_TAILS.get(this.#driver);
+    if (slot === undefined) {
+      slot = { tail: Promise.resolve() };
+      INITIALIZE_TAILS.set(this.#driver, slot);
+    }
+    const result = slot.tail.then(work);
+    slot.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  /**
    * One connection cannot run overlapping BEGIN/COMMIT sequences.
    * The tail is keyed on the driver, not this instance: several
    * SqliteStorage objects over one driver share its connection and
@@ -168,7 +197,7 @@ export class SqliteStorage implements StoragePort {
     if (existing !== null) {
       return existing;
     }
-    const work = this.#runInitialize(context);
+    const work = this.#exclusiveInit(() => this.#runInitialize(context));
     this.#init = work;
     void work.then((result) => {
       if (!result.ok && this.#init === work) {

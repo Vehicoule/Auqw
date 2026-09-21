@@ -817,6 +817,32 @@ async function migrationV1toV2(): Promise<void> {
   driver.close();
 }
 
+// 13b. Two instances sharing one driver initialize concurrently: the
+// initialize tails serialize probe+backup+migrate, so the second
+// instance observes the migrated version and runs no migration of its
+// own — no DDL replay, one backup.
+async function sharedDriverInitialize(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 1);
+  `);
+  const first = new SqliteStorage(driver, SETTINGS);
+  const second = new SqliteStorage(driver, SETTINGS);
+  const [a, b] = await Promise.all([
+    first.initialize(ctx().context),
+    second.initialize(ctx().context),
+  ]);
+  assert(a.ok, 'first concurrent initialize resolves');
+  assert(b.ok, 'second concurrent initialize resolves');
+  assertDeepEqual(driver.backups, ['v1'], 'migration ran exactly once');
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
 // 14. A file-backed database takes a real pre-migration image at
 // <db>.bak-v1 and drops it once the migration commits — no durable
 // copy persists.
@@ -1527,6 +1553,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['coalescedCancel', coalescedCancel],
   ['parameterization', parameterization],
   ['migrationV1toV2', migrationV1toV2],
+  ['sharedDriverInitialize', sharedDriverInitialize],
   ['migrationBackupFile', migrationBackupFile],
   ['backupRetryAfterFailure', backupRetryAfterFailure],
   ['ownedRoundtrip', ownedRoundtrip],

@@ -322,6 +322,38 @@ function upsertRecordingIn(
 }
 
 /**
+ * Merge an automatic mapping into a recording row — same-ref
+ * conflicts resolve through the shared precedence rule: an automatic
+ * mapping never replaces or shadows a user-confirmed/rejected
+ * winner, and an older automatic winner is refreshed in place.
+ */
+function adoptAutomaticMapping(
+  rec: Recording,
+  ref: SourceRef,
+  mapping: SourceMapping,
+): Recording {
+  const winner = winningMapping(
+    rec.mappings.filter((m) => sameRef(m.ref, ref)),
+  );
+  let mappings = rec.mappings;
+  if (winner === undefined) {
+    mappings = [...rec.mappings, mapping];
+  } else if (
+    winner.status === 'automatic' &&
+    winner.matchedAtMs < mapping.matchedAtMs
+  ) {
+    mappings = rec.mappings.map((m) => (sameRef(m.ref, ref) ? mapping : m));
+  }
+  return {
+    ...rec,
+    mappings,
+    sourceRefs: rec.sourceRefs.some((s) => sameRef(s, ref))
+      ? rec.sourceRefs
+      : [...rec.sourceRefs, ref],
+  };
+}
+
+/**
  * A published snapshot must never alias mutable session state:
  * section elements freeze recursively so a listener that mutates a
  * row cannot corrupt the mirror. `Object.isFrozen` short-circuits
@@ -693,25 +725,21 @@ export class Session {
   }
 
   /**
-   * Queue-bearing commit with a caller-visible failure contract.
-   * `batch` evaluates inside the storage segment against the freshest
-   * mirror; `queueBefore` is the pre-mutation snapshot; `extras`
-   * restores any non-queue sections mutated alongside.
+   * Queue commit with a caller-visible failure contract. `before` is
+   * the pre-mutation snapshot; the mutation itself stays synchronous
+   * at call time — a pending 'prepared' outcome reads `r.queue`
+   * directly, outside the storage tail.
    *
    * Rollback and the `queueEpoch` bump run inside the segment so a
    * write queued behind a failed one observes the new epoch before
    * its own commit and aborts honestly: the rollback already erased
    * its queue mutation, so committing would claim a state it did not
-   * produce. The mutation itself stays synchronous at call time — a
-   * pending 'prepared' outcome reads `r.queue` directly, outside the
-   * storage tail.
+   * produce. (Writes that touch the queue plus another section —
+   * mapping adoptions — stage through `#commitStaged` instead, where
+   * the mutation is derived inside the segment and the engine swaps
+   * in only after a successful commit.)
    */
-  async #commitQueue(
-    r: Ready,
-    batch: () => StorageBatch,
-    queueBefore: QueueSnapshot,
-    extras: () => void = () => undefined,
-  ): Promise<Result<void>> {
+  async #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
     const epoch = r.queueEpoch;
     const generation = this.#ready;
     const source = new CancellationSource();
@@ -726,12 +754,8 @@ export class Session {
         }
         if (epoch !== r.queueEpoch) {
           // An earlier queue commit failed and rolled the engine back
-          // over this write's mutation. Restore this write's own
-          // non-queue footprint — the queue rollback already ran —
-          // then report the boundary failure.
-          extras();
-          this.#derived();
-          this.#publish();
+          // over this write's mutation — nothing is left for this
+          // write to commit, so report the boundary failure instead.
           return err(
             appError('superseded', 'queue state was rolled back'),
           );
@@ -739,14 +763,14 @@ export class Session {
         const deadlineMs = this.#deadline();
         const context = this.#newContext('persist', deadlineMs, source.signal);
         const committed = await this.#withDeadline(
-          () => this.#storage.commit(batch(), context),
+          () =>
+            this.#storage.commit({ queue: r.queue.snapshot() }, context),
           deadlineMs,
           source,
         );
         if (!committed.ok) {
           r.queueEpoch += 1;
-          r.queue = new QueueEngine(queueBefore);
-          extras();
+          r.queue = new QueueEngine(before);
           r.persistenceError = committed.error;
           this.#derived();
           this.#publish();
@@ -758,11 +782,6 @@ export class Session {
     } finally {
       this.#opSources.delete(source);
     }
-  }
-
-  /** Queue-only `#commitQueue`. */
-  #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
-    return this.#commitQueue(r, () => ({ queue: r.queue.snapshot() }), before);
   }
 
   /** Bounded, nonfatal, sanitized internal logging. */
@@ -2895,41 +2914,47 @@ export class Session {
       matchedAtMs: matchedAt,
       evidence: outcome.evidence,
     };
-    const hasMapping = recording.mappings.some((m) => sameRef(m.ref, ref));
-    const updated: Recording = {
-      ...recording,
-      mappings: hasMapping
-        ? recording.mappings.map((m) => (sameRef(m.ref, ref) ? mapping : m))
-        : [...recording.mappings, mapping],
-      sourceRefs: recording.sourceRefs.some((s) => sameRef(s, ref))
-        ? recording.sourceRefs
-        : [...recording.sourceRefs, ref],
-    };
-    const recordingsBefore = r.recordings;
-    const before = r.queue.snapshot();
-    r.recordings = r.recordings.map((rec) =>
-      rec.id === updated.id ? updated : rec,
-    );
-    try {
-      r.queue.setSelectedRef(occurrenceId, ref);
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    this.#publish();
-    const persisted = await this.#commitQueue(
-      r,
-      () => ({
-        recordings: r.recordings,
-        queue: r.queue.snapshot(),
-      }),
-      before,
-      () => {
-        r.recordings = recordingsBefore;
-      },
-    );
+    // The adoption stages inside the storage segment: recordings and
+    // the queue pin are re-derived against the freshest mirror and the
+    // queue engine is swapped in only after a successful commit, so a
+    // rolled-back queue write can never resurrect an uncommitted
+    // mapping from a stale capture.
+    const staged = await this.#commitStaged((ready) => {
+      const current = ready.recordings.find((rec) => rec.id === recording.id);
+      if (current === undefined) {
+        return err(appError('not-found', 'recording was removed'));
+      }
+      const hasMapping = current.mappings.some((m) => sameRef(m.ref, ref));
+      const updated: Recording = {
+        ...current,
+        mappings: hasMapping
+          ? current.mappings.map((m) => (sameRef(m.ref, ref) ? mapping : m))
+          : [...current.mappings, mapping],
+        sourceRefs: current.sourceRefs.some((s) => sameRef(s, ref))
+          ? current.sourceRefs
+          : [...current.sourceRefs, ref],
+      };
+      const draft = new QueueEngine(ready.queue.snapshot());
+      try {
+        draft.setSelectedRef(occurrenceId, ref);
+      } catch (thrown) {
+        return err(fromUnknown(thrown));
+      }
+      const recordings = ready.recordings.map((rec) =>
+        rec.id === updated.id ? updated : rec,
+      );
+      return ok<CommitStage<SourceRef>>({
+        batch: { recordings, queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.recordings = recordings;
+          rr.queue = draft;
+          return ref;
+        },
+      });
+    });
     this.#derived();
-    if (!persisted.ok) {
-      // The adoption never committed — memory is back on storage's
+    if (!staged.ok) {
+      // The adoption never committed — memory stayed on storage's
       // truth, but the ref resolved fine: the resolve contract is
       // met and playback proceeds unpinned.
       this.#logWarn('mapping adoption commit failed');
@@ -3714,37 +3739,13 @@ export class Session {
       if (matchedAt === null) {
         return;
       }
-      // Same-ref conflicts resolve through the shared precedence
-      // rule; an automatic mapping never replaces or shadows a
-      // user-confirmed/rejected winner, and an older automatic
-      // winner is refreshed in place.
-      const winner = winningMapping(
-        rec.mappings.filter((m) => sameRef(m.ref, ref)),
-      );
       const automatic: SourceMapping = {
         ref,
         status: 'automatic',
         matchedAtMs: matchedAt,
         evidence: outcome.evidence,
       };
-      let mappings = rec.mappings;
-      if (winner === undefined) {
-        mappings = [...rec.mappings, automatic];
-      } else if (
-        winner.status === 'automatic' &&
-        winner.matchedAtMs < matchedAt
-      ) {
-        mappings = rec.mappings.map((m) =>
-          sameRef(m.ref, ref) ? automatic : m,
-        );
-      }
-      const updated: Recording = {
-        ...rec,
-        mappings,
-        sourceRefs: rec.sourceRefs.some((s) => sameRef(s, ref))
-          ? rec.sourceRefs
-          : [...rec.sourceRefs, ref],
-      };
+      const updated = adoptAutomaticMapping(rec, ref, automatic);
       // Recheck it is still the immediate successor of the same
       // current under the same playback provider, and that the
       // resolved ref actually wins selection precedence.
@@ -3762,31 +3763,38 @@ export class Session {
       ) {
         return;
       }
-      const recordingsBefore = ready2.recordings;
-      const before = ready2.queue.snapshot();
-      ready2.recordings = ready2.recordings.map((x) =>
-        x.id === updated.id ? updated : x,
-      );
-      try {
-        ready2.queue.setSelectedRef(occurrenceId, ref);
-      } catch {
+      // Stage the adoption inside the storage segment against the
+      // freshest mirror — the queue engine swaps in only after a
+      // successful commit, so a rolled-back write can never leave a
+      // resurrected pin in memory.
+      const staged = await this.#commitStaged((ready3) => {
+        const current = ready3.recordings.find((x) => x.id === recordingId);
+        if (current === undefined) {
+          return err(internalError());
+        }
+        const adopted = adoptAutomaticMapping(current, ref, automatic);
+        const draft = new QueueEngine(ready3.queue.snapshot());
+        try {
+          draft.setSelectedRef(occurrenceId, ref);
+        } catch {
+          return err(internalError());
+        }
+        const recordings = ready3.recordings.map((x) =>
+          x.id === adopted.id ? adopted : x,
+        );
+        return ok<CommitStage<SourceRef>>({
+          batch: { recordings, queue: draft.snapshot() },
+          apply: (rr) => {
+            rr.recordings = recordings;
+            rr.queue = draft;
+            return ref;
+          },
+        });
+      });
+      if (!staged.ok) {
         return;
       }
-      this.#publish();
-      const persisted = await this.#commitQueue(
-        ready2,
-        () => ({
-          recordings: ready2.recordings,
-          queue: ready2.queue.snapshot(),
-        }),
-        before,
-        () => {
-          ready2.recordings = recordingsBefore;
-        },
-      );
-      if (!persisted.ok) {
-        return;
-      }
+      this.#derived();
       this.#own(this.#projectQueue());
     })();
     this.#own(work);
