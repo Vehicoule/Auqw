@@ -1298,7 +1298,9 @@ export function toSettingsModel(
   media: {
     readonly storageText?: string | null;
     readonly localFolderCount?: number | undefined;
-    readonly localSources?: readonly { sourceId: string; label: string }[];
+    readonly localSources?:
+      | readonly { sourceId: string; label: string }[]
+      | undefined;
     readonly downloadCount?: number | undefined;
   } = {},
 ): SettingsModel {
