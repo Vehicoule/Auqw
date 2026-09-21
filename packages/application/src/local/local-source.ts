@@ -447,6 +447,7 @@ export class LocalFileSource {
     const pendingRecordings: {
       recordingId: string;
       fileId: string;
+      fingerprint: string;
       title: string;
       artist: string | null;
       album: string | null;
@@ -481,6 +482,7 @@ export class LocalFileSource {
       pendingRecordings.push({
         recordingId,
         fileId: row.fileId,
+        fingerprint: row.fingerprint,
         title,
         artist: tag?.artist ?? null,
         album: tag?.album ?? null,
@@ -548,7 +550,21 @@ export class LocalFileSource {
               s.id === p.fileId,
           )
         ) {
-          upsert({ ...existing, sourceRefs: [...existing.sourceRefs, ref] });
+          // Restoring a live ref retires its `fp:` tombstone — the
+          // row's local identity is the file again, not the marker.
+          upsert({
+            ...existing,
+            sourceRefs: [
+              ...existing.sourceRefs.filter(
+                (s) =>
+                  !(
+                    s.provider === LOCAL_PROVIDER &&
+                    s.id === `fp:${p.fingerprint}`
+                  ),
+              ),
+              ref,
+            ],
+          });
         }
       }
       return stripLocalRefs(vanished, merged);
@@ -606,21 +622,26 @@ function stripLocalRefs(
     const kept = r.sourceRefs.filter(
       (s) => !(s.provider === LOCAL_PROVIDER && dead.has(s.id)),
     );
-    if (kept.length > 0) {
-      return { ...r, sourceRefs: kept };
-    }
-    // Stripping to zero refs would fail persisted-state validation —
-    // and the recording must persist as owned data. Retain the dead
-    // refs as `fp:` tombstones instead: inert to uriFor, keyed by
-    // fingerprint so a returning file re-links to this recording even
-    // under a new sourceId (re-added folder).
+    // Every dead local ref becomes an `fp:` tombstone — inert to
+    // uriFor, keyed by raw fingerprint so a returning file re-links
+    // to this recording even under a fresh sourceId (re-added folder).
+    // On rows with surviving refs they preserve local identity; on
+    // zero-kept rows they also satisfy the ≥1-ref invariant.
     const tombstones = new Map<string, SourceRef>();
     for (const s of r.sourceRefs) {
-      const fp = s.provider === LOCAL_PROVIDER ? fpByFileId.get(s.id) : null;
-      if (fp !== undefined && fp !== null) {
+      const fp =
+        s.provider === LOCAL_PROVIDER ? fpByFileId.get(s.id) : undefined;
+      if (fp !== undefined) {
         tombstones.set(fp, { ...s, id: `fp:${fp}` });
       }
     }
-    return tombstones.size === 0 ? r : { ...r, sourceRefs: [...tombstones.values()] };
+    const seen = new Set(kept.map((s) => `${s.provider}|${s.kind}|${s.id}`));
+    const merged = [
+      ...kept,
+      ...[...tombstones.values()].filter(
+        (t) => !seen.has(`${t.provider}|${t.kind}|${t.id}`),
+      ),
+    ];
+    return { ...r, sourceRefs: merged };
   });
 }

@@ -225,9 +225,15 @@ async function runChangedContentNewFileId(): Promise<void> {
     'same docId keeps the recording',
   );
   const rec = source.recordings()[0]!;
+  // New bytes keep the recording identity and gain the live ref; the
+  // dead ref becomes an `fp:` tombstone — if those exact old bytes
+  // ever reappear under another folder they re-link here instead of
+  // duplicating the recording.
   assert(
-    rec.sourceRefs.length === 1 && rec.sourceRefs[0]!.id === after[0]!.fileId,
-    'dead local ref stripped, new ref present',
+    rec.sourceRefs.length === 2 &&
+      rec.sourceRefs.some((s) => s.id === after[0]!.fileId) &&
+      rec.sourceRefs.some((s) => s.id === 'fp:fpa'),
+    'dead local ref tombstoned, new ref present',
   );
 }
 
@@ -353,6 +359,56 @@ async function runReaddRelinksRecording(): Promise<void> {
   assert(source.uriFor(rec.id) !== null, 'playable uri again');
 }
 
+async function runMixedRemoveRelinksRecording(): Promise<void> {
+  const { storage, tagReader, ids, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  const added = must(await source.addFolder(signal()));
+  const rec = source.recordings()[0]!;
+
+  // Resolution appended a provider ref — the row isn't local-only, so
+  // removal must still tombstone the dead local ref for re-linking.
+  must(
+    await storage.commit(
+      {
+        recordings: [
+          {
+            ...rec,
+            sourceRefs: [
+              ...rec.sourceRefs,
+              { provider: 'deezer', kind: 'track', id: 'dz-1' },
+            ],
+          },
+        ],
+      },
+      { requestId: ids.next('w'), deadlineMs: 0, signal: signal() },
+    ),
+  );
+
+  must(await source.removeSource(added.sourceId, signal()));
+  const orphan = source.recordings()[0]!;
+  assert(
+    orphan.sourceRefs.some((s) => s.provider === 'deezer') &&
+      orphan.sourceRefs.some(
+        (s) => s.provider === 'local' && s.id === 'fp:fpa',
+      ),
+    'provider ref + fingerprint tombstone survive removal',
+  );
+
+  must(await source.addFolder(signal()));
+  assertEqual(source.recordings().length, 1, 'no duplicate recording');
+  const relinked = source.recordings()[0]!;
+  assertEqual(relinked.id, rec.id, 'mixed row re-links via tombstone');
+  assert(
+    !relinked.sourceRefs.some((s) => s.id === 'fp:fpa') &&
+      relinked.sourceRefs.some(
+        (s) => s.provider === 'local' && s.id !== 'fp:fpa',
+      ),
+    'live local ref restored, tombstone retired',
+  );
+}
+
 async function runPickCancelled(): Promise<void> {
   const { tagReader, storage, source } = rig();
   // FakeTagReader default pickResult is a no-result err — as a user cancel.
@@ -445,6 +501,7 @@ export async function run(): Promise<void> {
   await runUnreadableKeepsRow();
   await runRemoveSource();
   await runReaddRelinksRecording();
+  await runMixedRemoveRelinksRecording();
   await runPickCancelled();
   await runRescanMergesFreshRecordings();
 }
