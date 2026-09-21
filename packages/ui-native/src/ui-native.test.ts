@@ -424,13 +424,13 @@ function testLibraryAndSettings(): void {
   assertEqual(byKey.get('liked')?.enabled, true, 'liked tile live');
   assertEqual(
     byKey.get('downloads')?.enabled,
-    false,
-    'downloads stay honestly unavailable in Slice 2',
+    true,
+    'downloads tile is live in Slice 3',
   );
-  assert(
-    byKey.get('downloads')?.note !== null &&
-    byKey.get('downloads')?.note !== undefined,
-    'downloads tile must explain its disabled state',
+  assertEqual(
+    byKey.get('downloads')?.count,
+    0,
+    'downloads tile counts stored rows, not pending',
   );
   assertEqual(byKey.get('top50')?.enabled, true, 'top 50 tile live');
   assertEqual(byKey.get('history')?.enabled, true, 'history tile live');

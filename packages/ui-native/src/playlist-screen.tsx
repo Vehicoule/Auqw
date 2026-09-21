@@ -24,6 +24,13 @@ export type PlaylistScreenProps = {
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onPlayAll?: (() => void) | undefined;
+  /**
+   * Download-all over the playlist's recordings. `downloadState`
+   * is the live roll-up — the button says what is true, never
+   * 'download all' when everything is already stored.
+   */
+  readonly onDownloadAll?: (() => void) | undefined;
+  readonly downloadAllState?: 'none' | 'partial' | 'all' | undefined;
   readonly onRename?: ((name: string) => void) | undefined;
   readonly onDelete?: (() => void) | undefined;
   readonly onPressEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
@@ -71,6 +78,8 @@ export function PlaylistScreen({
   scrollEnabled = true,
   onBack,
   onPlayAll,
+  onDownloadAll,
+  downloadAllState = 'none',
   onRename,
   onDelete,
   onPressEntry,
@@ -161,6 +170,22 @@ export function PlaylistScreen({
           marginBottom: theme.spacing.sm,
         }}
       >
+        {onDownloadAll !== undefined && (
+          <HeaderButton
+            label={
+              downloadAllState === 'all'
+                ? 'downloaded'
+                : downloadAllState === 'partial'
+                  ? 'download missing'
+                  : 'download all'
+            }
+            onPress={
+              model.count === 0 || downloadAllState === 'all'
+                ? undefined
+                : onDownloadAll
+            }
+          />
+        )}
         <HeaderButton
           label="rename"
           onPress={

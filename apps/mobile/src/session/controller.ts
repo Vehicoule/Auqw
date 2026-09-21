@@ -1,15 +1,28 @@
 import { Asset } from 'expo-asset';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
-import { CancellationSource, Session } from '@auqw/application';
+import {
+  appError,
+  CancellationSource,
+  DownloadManager,
+  LocalFileSource,
+  Session,
+} from '@auqw/application';
 import type {
   ArtworkCache,
+  CancellationSignal,
+  ConnectivityPort,
   PlayerPort,
   ProviderPort,
+  QueueSnapshot,
   Settings,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
-import type { AuqwExpoHostModuleLike } from '../adapters/auqw-expo-surface.ts';
+import type {
+  AuqwConnectivityNative,
+  AuqwExpoHostModuleLike,
+  AuqwTagReaderNative,
+} from '../adapters/auqw-expo-surface.ts';
 import { createExpoArtwork } from '../adapters/expo-artwork.ts';
 import { createExpoAudioPlayer } from '../adapters/expo-audio-player.ts';
 import type { PluginProvider } from '../adapters/plugin-provider.ts';
@@ -17,7 +30,10 @@ import {
   createPluginProvider,
   manifestCapabilities,
 } from '../adapters/plugin-provider.ts';
+import { createExpoConnectivity } from '../adapters/expo-connectivity.ts';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
+import { createExpoTagReader } from '../adapters/expo-tag-reader.ts';
+import { createExpoTransfer } from '../adapters/expo-transfer.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
 
 // Metro asset requires must be static literals. All pairs are
@@ -59,6 +75,22 @@ export type SessionController = {
    * settings surface calls `sweep` after shrinking the budget.
    */
   readonly artworkCache: ArtworkCache;
+  /** Slice-3 download ledger — `init`d in `start()`, after restore. */
+  readonly downloads: DownloadManager;
+  /**
+   * Local-files index — null until `start()` loads persisted state
+   * (its constructor takes the committed rows). UI must render a
+   * null-local state honestly (folders list empty, not '0 scanned').
+   */
+  readonly local: () => LocalFileSource | null;
+  readonly connectivity: ConnectivityPort;
+  /**
+   * Post-restore bring-up: loads persisted state once more, builds
+   * the local source over it, and inits the download ledger. Call
+   * after `session.restore()` — storage commits must not interleave
+   * with restore's own writes.
+   */
+  start(signal: CancellationSignal): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -104,7 +136,7 @@ export type SessionControllerOptions = {
  * state; construction only assembles the dependency graph.
  */
 export async function createSessionController(
-  host: AuqwExpoHostModuleLike,
+  host: AuqwExpoHostModuleLike & AuqwConnectivityNative & AuqwTagReaderNative,
   options: SessionControllerOptions = {},
 ): Promise<SessionController> {
   // Fuel config matches the Slice-0 gate values.
@@ -165,14 +197,90 @@ export async function createSessionController(
   }))(providerMap);
   const ids = createIds();
   const clock = createClock();
+  const connectivity = createExpoConnectivity(host);
+  const { transfer } = createExpoTransfer();
+  // `local` is constructed in start(); the playback hook reads the
+  // box so a URI resolves the moment a source exists.
+  let localSource: LocalFileSource | null = null;
+  const log = createLog();
   const session = new Session({
     storage,
     player,
     providers,
     clock,
     ids,
-    log: createLog(),
+    log,
     defaults: DEFAULT_SETTINGS,
+    localPlaybackFor: (recordingId) => {
+      // Owned bytes first: a stored download wins; a local file whose
+      // download was removed still plays from its document URI.
+      const file = downloads.fileFor(recordingId);
+      if (file !== null) {
+        return file;
+      }
+      return localSource?.uriFor(recordingId) ?? null;
+    },
+  });
+  type ReadyState = Extract<
+    ReturnType<Session['snapshot']>,
+    { type: 'ready' }
+  >;
+  const readyOr = <T>(
+    pick: (state: ReadyState) => T,
+    fallback: T,
+  ): T => {
+    const state = session.snapshot();
+    return state.type === 'ready' ? pick(state) : fallback;
+  };
+  const emptyQueue: QueueSnapshot = {
+    revision: 0,
+    occurrences: [],
+    currentOccurrenceId: null,
+    positionMs: 0,
+    mode: 'paused',
+  };
+  const downloads = new DownloadManager({
+    storage,
+    transfer,
+    connectivity,
+    clock,
+    ids,
+    log,
+    fetchImpl: (url, init, signal) => {
+      // Bridge the port's CancellationSignal onto fetch's AbortSignal.
+      const abort = new AbortController();
+      signal.subscribe(() => abort.abort());
+      return fetch(url, { headers: init.headers, signal: abort.signal });
+    },
+    resolvePlayback: (ref, input, context) => {
+      const provider = providerMap.get(
+        readyOr((s) => s.settings.playbackProvider, DEFAULT_SETTINGS.playbackProvider),
+      );
+      if (provider === undefined) {
+        return Promise.resolve({
+          ok: false as const,
+          error: appError('unavailable', 'playback provider not loaded'),
+        });
+      }
+      return provider.resolvePlayback(
+        ref,
+        {
+          targetBitrateKbps: readyOr(
+            (s) => s.settings.qualityKbps,
+            DEFAULT_SETTINGS.qualityKbps,
+          ),
+          prefer:
+            Platform.OS === 'ios'
+              ? ['audio/mp4']
+              : ['audio/webm', 'audio/mp4'],
+          pinItag: input.pinItag,
+          resumeOffset: input.resumeOffset,
+        },
+        context,
+      );
+    },
+    queue: () => readyOr((s) => s.queue, emptyQueue),
+    settings: () => readyOr((s) => s.settings, DEFAULT_SETTINGS),
   });
   const { cache: artworkCache } = createExpoArtwork({
     storage,
@@ -194,7 +302,38 @@ export async function createSessionController(
     providers,
     player,
     artworkCache,
+    downloads,
+    local: () => localSource,
+    connectivity,
+    async start(signal) {
+      const loaded = await storage.load({
+        requestId: ids.next('local-boot'),
+        deadlineMs: clock.nowMs() + 30_000,
+        signal,
+      });
+      if (!loaded.ok) {
+        // Persisted downloads stay un-initialized — the ledger is
+        // honest empty rather than half-loaded.
+        log.write({
+          level: 'warn',
+          message: `local boot load failed: ${loaded.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+        return;
+      }
+      const tagReader = createExpoTagReader(host);
+      localSource = new LocalFileSource(
+        { storage, tagReader, ids, clock, log },
+        {
+          localSources: loaded.value.localSources,
+          localFiles: loaded.value.localFiles,
+          recordings: loaded.value.recordings,
+        },
+      );
+      await downloads.init(loaded.value.downloads, signal);
+    },
     async dispose() {
+      await downloads.stop(new CancellationSource().signal);
       await session.dispose();
       for (const provider of providers) {
         provider.dispose();
