@@ -94,6 +94,10 @@ let pendingPrepare: {
   requestId: string;
   resolve: (e: PrepareOutcomeEvent) => void;
 } | null = null;
+// Outcomes arriving before the leg knows its requestId (a cached or
+// instantly-failing prepare can answer synchronously) are buffered —
+// dropping them would hang the leg's promise.
+let unmatchedOutcomes: PrepareOutcomeEvent[] = [];
 let pendingResolve: (e: PrepareOutcomeEvent) => void = () => {};
 
 // ── Session-trust (OAuth device flow) ───────────────────────────────
@@ -147,6 +151,8 @@ function arm(): void {
     if (pending !== null && e.requestId === pending.requestId) {
       pendingPrepare = null;
       pending.resolve(e);
+    } else {
+      unmatchedOutcomes.push(e);
     }
   });
   addPlaybackStatusListener((e) => {
@@ -300,12 +306,24 @@ export async function runSeamLink(url: string): Promise<void> {
       const id = await ensureSeam();
       const provider = param(query, 'provider') ?? id;
       const outcomeP = new Promise<PrepareOutcomeEvent>((resolve) => {
-        // Resolved with the requestId once `prepare` returns it — the
-        // listener matches on it before settling this leg.
         pendingResolve = resolve;
       });
       lastRequestId = await prepare(provider, ref, `dev-${Date.now()}`, 0);
-      pendingPrepare = { requestId: lastRequestId, resolve: pendingResolve };
+      pendingPrepare = {
+        requestId: lastRequestId,
+        resolve: pendingResolve,
+      };
+      // A buffered outcome may already carry this requestId — an
+      // immediate prepare answer outruns the assignment above.
+      const buffered = unmatchedOutcomes.findIndex(
+        (o) => o.requestId === lastRequestId,
+      );
+      const hit =
+        buffered >= 0 ? unmatchedOutcomes.splice(buffered, 1)[0] : undefined;
+      if (hit !== undefined) {
+        pendingPrepare = null;
+        pendingResolve(hit);
+      }
       const e = await outcomeP;
       if (e.outcome.type !== 'prepared') {
         slog(`seam prepare failed kind=${e.outcome.kind}`);

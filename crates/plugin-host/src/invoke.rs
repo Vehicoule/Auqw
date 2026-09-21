@@ -137,7 +137,6 @@ fn check_module_shape(wasm: &[u8], budgets: &Budgets) -> Result<(), LoadError> {
     use wasmparser::Payload;
     let mut memories = 0u32;
     let mut tables = 0u32;
-    let mut table_elements: u64 = 0;
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| LoadError::Malformed(e.to_string()))?;
         match payload {
@@ -166,7 +165,15 @@ fn check_module_shape(wasm: &[u8], budgets: &Budgets) -> Result<(), LoadError> {
                 for table in reader {
                     let table = table.map_err(|e| LoadError::Malformed(e.to_string()))?;
                     tables += 1;
-                    table_elements = table_elements.saturating_add(table.ty.initial);
+                    // The element cap is per-table — the same bound the
+                    // store applies — so summing across tables would
+                    // reject artifacts that are within policy.
+                    if table.ty.initial > budgets.max_table_elements as u64 {
+                        return Err(LoadError::ExceedsLimits(format!(
+                            "table declares {} elements; per-table cap is {}",
+                            table.ty.initial, budgets.max_table_elements
+                        )));
+                    }
                 }
             }
             _ => {}
@@ -180,12 +187,6 @@ fn check_module_shape(wasm: &[u8], budgets: &Budgets) -> Result<(), LoadError> {
     if tables > 16 {
         return Err(LoadError::ExceedsLimits(format!(
             "module declares {tables} tables; the store caps at 16"
-        )));
-    }
-    if table_elements > budgets.max_table_elements as u64 {
-        return Err(LoadError::ExceedsLimits(format!(
-            "declared table elements {table_elements} exceed {}",
-            budgets.max_table_elements
         )));
     }
     Ok(())
