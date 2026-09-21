@@ -713,15 +713,26 @@ function Main({
       }),
     [state],
   );
-  const queueModel = useMemo(
-    () =>
-      toQueueModel({
-        queue: state.queue,
-        recordings: state.recordings,
-        likes: state.likes,
-      }),
-    [state],
-  );
+  const queueModel = useMemo(() => {
+    // Same honesty rule as the library rows: offline + unowned marks
+    // 'unavailable' so a dead press isn't a surprise.
+    const unavailable =
+      online === false
+        ? new Set(
+            state.queue.occurrences
+              .map((o) => o.recordingId)
+              .filter((id) => !isOwned(id)),
+          )
+        : undefined;
+    return toQueueModel({
+      queue: state.queue,
+      recordings: state.recordings,
+      likes: state.likes,
+      unavailableRecordingIds: unavailable,
+    });
+    // isOwned re-reads downloads/local after their mutations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, online, isOwned, downloads, localTick]);
   const libraryModel = useMemo(() => {
     // Local index rows (provenance 'local') are authoritative over
     // the session's in-memory copies — a scan commits fresher tags

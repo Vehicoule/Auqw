@@ -6,6 +6,7 @@ import {
   CancellationSource,
   DownloadManager,
   LocalFileSource,
+  previewImport,
   Session,
 } from '@auqw/application';
 import type {
@@ -425,14 +426,6 @@ export async function createSessionController(
           recordings: loaded.value.recordings,
         },
       );
-      const inited = await downloads.init(loaded.value.downloads, signal);
-      if (!inited.ok) {
-        log.write({
-          level: 'warn',
-          message: `download init failed: ${inited.error.kind}`,
-          atMs: clock.nowMs(),
-        });
-      }
       // Re-band pending downloads when the queue moves: a track that
       // becomes now-playing jumps the line.
       let queueRevision = readyOr((s) => s.queue.revision, 0);
@@ -452,7 +445,8 @@ export async function createSessionController(
       // 'transferring' rows only (queued/metered-waiting rows hold no
       // network and must not keep a foreground service posted). The
       // native surface is Android-only; iOS lacks the method — its
-      // absence resolves to a warn, not a crash.
+      // absence resolves to a warn, not a crash. Subscribed BEFORE
+      // init so a restored transfer's first edge can't be missed.
       let lastActive = -1;
       mediaUnsubs.push(
         downloads.subscribe(() => {
@@ -477,9 +471,24 @@ export async function createSessionController(
           }
         }),
       );
+      const inited = await downloads.init(loaded.value.downloads, signal);
+      if (!inited.ok) {
+        log.write({
+          level: 'warn',
+          message: `download init failed: ${inited.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+      }
     },
     rehydrateMedia,
     async replaceLibrary(text, signal) {
+      // Validate BEFORE the drain: a malformed document must not
+      // destroy existing downloads. Session.importLibrary revalidates
+      // for the atomic commit regardless.
+      const previewed = previewImport(text);
+      if (!previewed.ok) {
+        return previewed;
+      }
       // Drain first: importOwned swaps the persisted sections while
       // leaving bytes on disk, so a live runner could repersist a
       // deleted row and every finalized file would orphan.
@@ -499,11 +508,14 @@ export async function createSessionController(
           atMs: clock.nowMs(),
         });
       }
-      const result = await session.importLibrary(text);
-      if (result.ok) {
+      try {
+        return await session.importLibrary(text);
+      } finally {
+        // Whatever landed — success, or a storage failure after the
+        // clear — the manager re-inits off the persisted ledger so it
+        // can never sit stopped with a stale row map.
         await rehydrateMedia(signal);
       }
-      return result;
     },
     async dispose() {
       for (const unsub of mediaUnsubs.splice(0)) {
