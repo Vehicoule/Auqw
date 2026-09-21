@@ -2,6 +2,7 @@ import type { ThemeName } from '@auqw/design-tokens';
 import type {
   AppError,
   ArtworkRef,
+  DownloadProgress,
   Entity,
   EntityKind,
   EntityPage,
@@ -17,7 +18,6 @@ import type {
   PlayCount,
   PlayEvent,
   QueueSnapshot,
-  DownloadProgress,
   RadioTail,
   Recording,
   SessionPlayback,

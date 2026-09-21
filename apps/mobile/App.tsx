@@ -23,7 +23,6 @@ import {
 import type {
   AppError,
   AttemptTrace,
-  DownloadProgress,
   EntityPage,
   EntityRef,
   LyricsSheet,
