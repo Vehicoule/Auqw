@@ -10,6 +10,7 @@ export * from './ports/connectivity.ts';
 export * from './downloads/transfer-policy.ts';
 export * from './local/local-source.ts';
 export * from './downloads/sha256.ts';
+export * from './downloads/download-manager.ts';
 export * from './ports/runtime.ts';
 export * from './ports/clock.ts';
 export * from './ports/log.ts';

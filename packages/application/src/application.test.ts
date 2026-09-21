@@ -15,6 +15,7 @@ import { run as runMatching } from './matching/matching-engine.test.ts';
 import { run as runSearch } from './search/search-session.test.ts';
 import { run as runFakes } from './testing/fakes.test.ts';
 import { run as runSession } from './session/session.test.ts';
+import { run as runDownloadManager } from './downloads/download-manager.test.ts';
 import { run as runProviderRouter } from './providers/provider-router.test.ts';
 import { run as runLocalSource } from './local/local-source.test.ts';
 
@@ -35,5 +36,6 @@ runMatching();
 await runSearch();
 await runFakes();
 await runSession();
+await runDownloadManager();
 await runProviderRouter();
 await runLocalSource();
