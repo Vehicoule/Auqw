@@ -3138,14 +3138,17 @@ async function reviewReloadPreservesMemory(): Promise<void> {
     signal: new CancellationSource().signal,
   });
   assert(captured.ok, 'snapshot capture failed');
-  const created = await r.session.ensureRecording(
+  // The concurrent mutation serializes behind the review op's held
+  // reload — issue it un-awaited, then settle the reload.
+  const createdPromise = r.session.ensureRecording(
     meta('itunes', 'i9', 'Roads', 'Portishead', 300_000),
   );
-  assert(created.ok, 'ensureRecording failed');
   assert(
     r.storage.settleLoad(captured),
     'review reload pending',
   );
+  const created = await createdPromise;
+  assert(created.ok, 'ensureRecording failed');
   const res = await confirmed;
   assert(res.ok, 'confirmReview failed');
   await pump();
@@ -3163,7 +3166,100 @@ async function reviewReloadPreservesMemory(): Promise<void> {
   );
 }
 
+/**
+ * Pause while a prepare is in flight: the intent lands on the queue,
+ * and the pending 'prepared' outcome holds the handle paused instead
+ * of autostarting.
+ */
+async function pauseDuringPreparing(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const enqueued = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Held', 'Artist', 300_000),
+  );
+  assert(enqueued.ok, 'enqueue failed');
+  const play = r.session.playOccurrence(enqueued.value);
+  await pump();
+  assertEqual(
+    readyOf(r).playback.type,
+    'preparing',
+    'prepare in flight',
+  );
+  const paused = await r.session.pause();
+  assert(paused.ok, 'pause during preparing holds intent');
+  assertEqual(readyOf(r).queue.mode, 'paused', 'queue paused');
+  await emitPrepared(r, 'h-paused');
+  const res = await play;
+  assert(res.ok, 'play resolved');
+  await pump();
+  assertEqual(
+    readyOf(r).playback.type,
+    'paused',
+    'prepared does not autostart a paused queue',
+  );
+  assertEqual(calls(r, 'play').length, 0, 'no play while paused');
+  const resumed = await r.session.resume();
+  assert(resumed.ok, 'resume plays the held attempt');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'playing');
+  assertEqual(calls(r, 'play').length, 1);
+}
+
+/** Seek while preparing rides on the queue position. */
+async function seekDuringPreparing(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const enqueued = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Seek', 'Artist', 300_000),
+  );
+  assert(enqueued.ok, 'enqueue failed');
+  const play = r.session.playOccurrence(enqueued.value);
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'preparing');
+  const seeked = await r.session.seekTo(42_000);
+  assert(seeked.ok, 'seek during preparing holds intent');
+  await emitPrepared(r, 'h-seek');
+  const res = await play;
+  assert(res.ok, 'play resolved');
+  await pump();
+  const playCalls = calls(r, 'play');
+  assertEqual(playCalls.length, 1, 'prepared autostarts when playing');
+  const input = playCalls[0]?.input as { positionMs?: number };
+  assertEqual(
+    input.positionMs,
+    42_000,
+    'play starts at the sought position',
+  );
+}
+
+/** A failed enqueue commit leaves queue and recordings untouched. */
+async function enqueueCommitFailureHonest(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  r.storage.failNext(appError('transient', 'disk gone'));
+  const res = await r.session.enqueueMetadata(
+    meta('itunes', 'i9', 'Nope', 'Artist', 300_000),
+  );
+  assert(
+    !res.ok && res.error.kind === 'transient',
+    'commit failure is the op error',
+  );
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    0,
+    'failed enqueue stays out of the queue',
+  );
+  assertEqual(
+    readyOf(r).recordings.length,
+    0,
+    'failed enqueue mints no recording',
+  );
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
+  ['pauseDuringPreparing', pauseDuringPreparing],
+  ['seekDuringPreparing', seekDuringPreparing],
+  ['enqueueCommitFailureHonest', enqueueCommitFailureHonest],
   ['concurrentLikes', concurrentLikes],
   ['libraryFlow', libraryFlow],
   ['historyFlow', historyFlow],

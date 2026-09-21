@@ -198,7 +198,9 @@ export function parseLrc(text: string): LyricsLine[] {
  * Serializes timed lines to `[mm:ss.xxx]` LRC — the storage form the
  * lyrics cache carries. Embedded newlines flatten to spaces so one
  * line can never smuggle extra records; round-trips through
- * {@link parseLrc} preserve `tMs` exactly.
+ * {@link parseLrc} preserve `tMs` exactly. Text beginning with `[`
+ * would re-parse as a tag, so it is prefixed with one space — the
+ * parser's trim restores the bracket verbatim.
  */
 export function linesToLrc(lines: readonly LyricsLine[]): string {
   return lines
@@ -211,7 +213,8 @@ export function linesToLrc(lines: readonly LyricsLine[]): string {
         `[${String(minutes).padStart(2, '0')}:` +
         `${String(seconds).padStart(2, '0')}.` +
         `${String(millis).padStart(3, '0')}]`;
-      return stamp + line.text.replace(/[\r\n]+/g, ' ');
+      const text = line.text.replace(/[\r\n]+/g, ' ');
+      return stamp + (text.startsWith('[') ? ' ' : '') + text;
     })
     .join('\n');
 }

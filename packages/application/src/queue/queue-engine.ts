@@ -291,6 +291,9 @@ export class QueueEngine {
       this.#currentId = prev.occurrenceId;
     }
     this.#positionMs = 0;
+    // The cursor moved: the failed item's blocked error must not
+    // misattribute to the new current occurrence.
+    this.#blockedError = undefined;
     this.#tick();
   }
 

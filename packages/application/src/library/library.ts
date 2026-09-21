@@ -331,7 +331,12 @@ export function isCandidateSnapshot(
   return (
     hasExactKeys(value, ['metadata', 'ref']) &&
     isTrackMetadata(metadata) &&
-    isTrackRef(ref)
+    isTrackRef(ref) &&
+    // The pinned ref and the frozen metadata describe one candidate —
+    // a snapshot whose halves disagree was corrupted or forged.
+    ref.provider === metadata.sourceRef.provider &&
+    ref.kind === metadata.sourceRef.kind &&
+    ref.id === metadata.sourceRef.id
   );
 }
 
