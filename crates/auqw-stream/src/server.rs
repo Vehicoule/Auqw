@@ -392,6 +392,7 @@ fn parse_request(reader: &mut BufReader<TcpStream>) -> Result<Request, StreamErr
     // `HTTP/1.x` and anything after are ignored — this server answers
     // the first request only.
     let mut range = None;
+    let mut seen_range = false;
     loop {
         let line = read_line(reader, &mut total, &mut lines)?;
         if line.trim_end().is_empty() {
@@ -399,15 +400,19 @@ fn parse_request(reader: &mut BufReader<TcpStream>) -> Result<Request, StreamErr
         }
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("range") {
-                if range.is_some() {
+                if seen_range {
                     // A second `Range` field merges into one
                     // multi-range request this server cannot
                     // serve — refuse rather than silently keep
-                    // the last interval.
+                    // the last interval. Keyed on the field's
+                    // presence, not on a parsed range: an
+                    // uninterpretable first field (non-`bytes`
+                    // unit) must not let the second slip through.
                     return Err(StreamError::InvalidResponse {
                         message: "multiple Range header fields".into(),
                     });
                 }
+                seen_range = true;
                 range = parse_range(value.trim());
             }
         }
@@ -1506,6 +1511,14 @@ mod tests {
             &url,
             "GET",
             &[("Range", "bytes=0-99"), ("Range", "bytes=200-299")],
+        );
+        assert_eq!(r.status, 400);
+        // An uninterpretable first field (non-`bytes` unit leaves
+        // `range` unset) must not let the second slip through.
+        let r = http(
+            &url,
+            "GET",
+            &[("Range", "items=0-99"), ("Range", "bytes=200-299")],
         );
         assert_eq!(r.status, 400);
         drop(server);
