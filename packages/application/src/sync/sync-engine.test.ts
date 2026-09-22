@@ -1523,6 +1523,85 @@ async function expiredHistoryPagination(): Promise<void> {
   );
 }
 
+async function relayedSkipListing(): Promise<void> {
+  // A replica that learned a seq was skipped must re-list the hole
+  // when it relays the device's later seqs — otherwise the next hop
+  // stalls its contiguous mark below the gap and every later page
+  // re-ships the same entries forever.
+  const a = await makeEngine('a', PLAY_HISTORY_RETENTION_MS + 1_000_000);
+  const b = await makeEngine('b', PLAY_HISTORY_RETENTION_MS + 1_000_000);
+  const c = await makeEngine('c', PLAY_HISTORY_RETENTION_MS + 1_000_000);
+  await mustWrite(a.engine, {
+    kind: 'playEvent',
+    recordId: 'ev-old',
+    field: 'event',
+    value: {
+      eventId: 'ev-old',
+      recordingId: 'r1',
+      occurrenceId: null,
+      playedMs: 1,
+      listenedMs: 5,
+    },
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 't1',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 't2',
+  });
+  const first = await a.engine.exportDelta(undefined, 10);
+  assert(first.ok);
+  assertDeepEqual(first.value.skipped, { a: [1] });
+  await mustApply(b.engine, first.value);
+  assertEqual(b.engine.cursor()['a'], 3);
+  // B relays A's seqs 2-3 to C: the learned hole must re-list or C
+  // stalls below it and re-pulls the same page forever.
+  const relayed = await b.engine.exportDelta(undefined, 10);
+  assert(relayed.ok);
+  assertDeepEqual(relayed.value.skipped, { a: [1] });
+  await mustApply(c.engine, relayed.value);
+  assertEqual(c.engine.cursor()['a'], 3);
+}
+
+async function unclaimedHoleNotExported(): Promise<void> {
+  // The complement: a hole below the shipped max but above this
+  // replica's own contiguous mark is unknown, not absent — a relay
+  // must never claim it, or downstream cursors would cross entries
+  // that still exist upstream.
+  const b = await makeEngine('b');
+  const c = await makeEngine('c');
+  // B holds A's seqs 2,3 but never learned seq 1 was skipped:
+  // contiguous[a] stays 0.
+  await mustApply(
+    b.engine,
+    delta([
+      {
+        ...rawEntry('recording', 'r2', 'title', 'x', { l: 2, c: 0 }, 'a'),
+        seq: 2,
+      },
+      {
+        ...rawEntry('recording', 'r3', 'title', 'y', { l: 3, c: 0 }, 'a'),
+        seq: 3,
+      },
+    ]),
+  );
+  assertEqual(b.engine.cursor()['a'], 0);
+  const relayed = await b.engine.exportDelta(undefined, 10);
+  assert(relayed.ok);
+  assertEqual(relayed.value.entries.length, 2);
+  assertEqual(relayed.value.skipped['a'], undefined);
+  // C inherits the same honest stall — it must not cross a seq
+  // nobody claimed absent.
+  await mustApply(c.engine, relayed.value);
+  assertEqual(c.engine.cursor()['a'], 0);
+}
+
 async function terminalRemoteStamp(): Promise<void> {
   // A valid-but-terminal remote stamp must fail BEFORE anything is
   // durable — a post-append failure would leave the entry durable and
@@ -1763,6 +1842,8 @@ export async function run(): Promise<void> {
   await hydrateRepairsDivergence();
   await concurrentPlayCounts();
   await expiredHistoryPagination();
+  await relayedSkipListing();
+  await unclaimedHoleNotExported();
   await terminalRemoteStamp();
   await localFreezeImmunity();
   await exportLimitZero();

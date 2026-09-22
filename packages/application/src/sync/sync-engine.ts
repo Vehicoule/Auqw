@@ -1719,15 +1719,23 @@ export async function createSyncEngine(
       // cursor can cross the holes (otherwise a permanently-dropped
       // seq stalls every later page forever).
       const retired = new Map<string, number[]>();
+      /** Log seqs above the requester's mark, per device — the
+       * presence set the gap derivation below is checked against. */
+      const present = new Map<string, Set<number>>();
       const eligible = changeLog
         .filter((entry) => {
-          if (since !== undefined) {
-            // Per-source contiguous seq: entries at or below the
-            // requester's mark are known-observed and never re-ship.
-            const seenUpTo = since[entry.deviceId] ?? 0;
-            if (entry.seq <= seenUpTo) {
-              return false;
+          // Per-source contiguous seq: entries at or below the
+          // requester's mark are known-observed and never re-ship.
+          const seenUpTo = since?.[entry.deviceId] ?? 0;
+          if (entry.seq > seenUpTo) {
+            let set = present.get(entry.deviceId);
+            if (set === undefined) {
+              set = new Set<number>();
+              present.set(entry.deviceId, set);
             }
+            set.add(entry.seq);
+          } else {
+            return false;
           }
           // History is a bounded window (data.md): a play event
           // beyond the retention window would be pruned on the
@@ -1739,14 +1747,11 @@ export async function createSyncEngine(
             isPlayEvent(entry.value) &&
             entry.value.playedMs < retainedFloor
           ) {
-            const mark = since?.[entry.deviceId] ?? 0;
-            if (entry.seq > mark) {
-              const list = retired.get(entry.deviceId);
-              if (list === undefined) {
-                retired.set(entry.deviceId, [entry.seq]);
-              } else {
-                list.push(entry.seq);
-              }
+            const list = retired.get(entry.deviceId);
+            if (list === undefined) {
+              retired.set(entry.deviceId, [entry.seq]);
+            } else {
+              list.push(entry.seq);
             }
             return false;
           }
@@ -1766,15 +1771,38 @@ export async function createSyncEngine(
         }
       }
       const skipped: Record<string, readonly number[]> = {};
-      for (const [dev, seqs] of retired) {
-        const bound = shippedMax.get(dev);
-        if (bound === undefined) {
-          continue;
-        }
+      for (const [dev, bound] of shippedMax) {
         const mark = since?.[dev] ?? 0;
-        const listed = seqs.filter((seq) => seq > mark && seq <= bound);
-        if (listed.length > 0) {
-          skipped[dev] = listed;
+        const listed = new Set<number>();
+        // Seq holes this replica already accounts for — skips learned
+        // from an upstream peer and rows pruned below its own
+        // contiguous mark. Without re-listing them a relay leaves
+        // downstream cursors stalled below the gaps forever, so every
+        // later page re-ships the same entries. Only seqs at or below
+        // this replica's contiguous mark may be claimed absent — a
+        // hole above it is unknown, not absent.
+        const accounted = Math.min(bound, contiguous.get(dev) ?? 0);
+        const logSeqs = present.get(dev);
+        // Emit at most the envelope bound: seqs past it are listed by
+        // the page whose higher requester mark reaches them.
+        for (
+          let seq = mark + 1;
+          seq <= accounted && listed.size < MAX_DELTA_ENTRIES;
+          seq += 1
+        ) {
+          if (logSeqs === undefined || !logSeqs.has(seq)) {
+            listed.add(seq);
+          }
+        }
+        for (const seq of retired.get(dev) ?? []) {
+          if (seq > mark && seq <= bound) {
+            listed.add(seq);
+          }
+        }
+        if (listed.size > 0) {
+          skipped[dev] = [...listed]
+            .sort((a, b) => a - b)
+            .slice(0, MAX_DELTA_ENTRIES);
         }
       }
       const doc: SyncDelta = {
