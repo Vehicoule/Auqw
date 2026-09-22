@@ -36,7 +36,7 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
   };
 }
 
-function fakeRuntime(host: PluginHostLike) {
+function fakeRuntime(host: PluginHostLike, devGateEnabled = true) {
   const calls: string[] = [];
   return {
     calls,
@@ -45,9 +45,13 @@ function fakeRuntime(host: PluginHostLike) {
         calls.push('host');
         return host;
       },
-      pluginsReady: () => Promise.resolve(['a', 'b']),
+      pluginsReady: () => {
+        calls.push('pluginsReady');
+        return Promise.resolve(['a', 'b']);
+      },
       status: () =>
         Promise.resolve({ bindings: 'loaded', plugins: ['a', 'b'] }),
+      devGateEnabled,
     }),
   };
 }
@@ -86,6 +90,12 @@ export async function run(): Promise<void> {
       prepared['stream']['handle'] === 'h1',
     'prepare outcome passes through',
   );
+  assert(
+    runtime.calls.indexOf('pluginsReady') !== -1 &&
+      runtime.calls.indexOf('pluginsReady') <
+        runtime.calls.indexOf('host'),
+    'prepare waits on the plugin directory before touching the host',
+  );
   try {
     await handlers['stream:prepare']?.({ pluginId: 1 });
     assert(false, 'bad prepare args must reject');
@@ -95,6 +105,41 @@ export async function run(): Promise<void> {
       'bad args → invalid-request',
     );
   }
+
+  // stream:dev-prepare is a dev-gate — off by default, http(s) only.
+  const gated = fakeRuntime(fakeHost(), false);
+  try {
+    await gated.handlers['stream:dev-prepare']?.({
+      url: 'https://example.test/a.mp4',
+      mime: 'audio/mp4',
+    });
+    assert(false, 'dev-prepare without the gate must refuse');
+  } catch (thrown) {
+    assert(
+      isRecord(thrown) && thrown['kind'] === 'unavailable',
+      'gate closed → unavailable',
+    );
+  }
+  try {
+    await handlers['stream:dev-prepare']?.({
+      url: 'file:///etc/passwd',
+      mime: 'audio/mp4',
+    });
+    assert(false, 'non-http dev-prepare must reject');
+  } catch (thrown) {
+    assert(
+      isRecord(thrown) && thrown['kind'] === 'invalid-request',
+      'file:// scheme → invalid-request',
+    );
+  }
+  const devPrepared = await handlers['stream:dev-prepare']?.({
+    url: 'https://example.test/a.mp4',
+    mime: 'audio/mp4',
+  });
+  assert(
+    isRecord(devPrepared) && devPrepared['handle'] === 'h2',
+    'dev-gated prepare returns the stream',
+  );
 
   // serveUrl wraps the URL; open/read/close/release/cancel forward.
   const url = await handlers['stream:serve-url']?.({ handle: 'h1' });

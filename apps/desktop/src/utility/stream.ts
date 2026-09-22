@@ -36,7 +36,7 @@ const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   cancelled: 'cancelled',
   unavailable: 'unavailable',
   'streams-capped': 'unavailable',
-  'rate-limited': 'unavailable',
+  'rate-limit': 'unavailable',
   transient: 'io-error',
   'auth-required': 'io-error',
   internal: 'internal',
@@ -117,12 +117,17 @@ export function createStreamHandlers(deps: {
   host(): PluginHostLike;
   pluginsReady(): Promise<readonly string[]>;
   status(): Promise<unknown>;
+  devGateEnabled?: boolean;
 }): Readonly<Record<string, UtilityHandler>> {
   return {
     [CHANNELS.hostPlugins]: () => deps.status(),
 
     [CHANNELS.streamPrepare]: async (args) => {
       const a = validated(isStreamPrepareArgs, 'stream:prepare')(args);
+      // startPrepare needs the plugin directory loaded, not just the
+      // bindings — pluginsReady memoizes, so a concurrent first prepare
+      // shares the one directory scan.
+      await deps.pluginsReady();
       const outcome = await deps
         .host()
         .startPrepare(a.pluginId, a.sourceRef, a.requestId)
@@ -134,6 +139,12 @@ export function createStreamHandlers(deps: {
 
     [CHANNELS.streamDevPrepare]: async (args) => {
       const a = validated(isStreamDevPrepareArgs, 'stream:dev-prepare')(args);
+      if (deps.devGateEnabled !== true) {
+        throw shellError(
+          'unavailable',
+          'stream:dev-prepare is a dev-gate — packaged builds refuse it',
+        );
+      }
       try {
         const stream = deps
           .host()

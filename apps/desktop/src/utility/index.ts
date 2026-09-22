@@ -38,7 +38,12 @@ if (port === null) {
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
   });
-  const route = createUtilityRouter(createStreamHandlers(runtime));
+  const route = createUtilityRouter(
+    createStreamHandlers({
+      ...runtime,
+      devGateEnabled: process.env.AUQW_DEV_GATE === '1',
+    }),
+  );
   port.on('message', (event) => {
     const raw: unknown = event.data;
     void respond(port, raw, route);

@@ -7,6 +7,7 @@ import type {
   PlayerPort,
   PreparedStream,
   QueueProjection,
+  QueueProjectionItem,
   QueueTransitionReason,
   Result,
 } from '@auqw/application';
@@ -201,8 +202,11 @@ export function createWebPlayerPort(deps: {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
   const listeners = new Set<(event: PlayerEvent) => void>();
-  let current: { handle: string; identity: PlaybackIdentity } | null =
-    null;
+  let current: {
+    handle: string;
+    identity: PlaybackIdentity;
+    occurrenceId: string | null;
+  } | null = null;
   let projection: QueueProjection | null = null;
   let mediaActionsInstalled = false;
   let seq = 0;
@@ -249,6 +253,86 @@ export function createWebPlayerPort(deps: {
     });
   }
 
+  function emitTransition(
+    p: QueueProjection,
+    toOccurrenceId: string | null,
+    reason: QueueTransitionReason,
+    positionMs: number,
+    identity: PlaybackIdentity | null,
+    handle: string | null,
+  ): void {
+    projection = { ...p, currentOccurrenceId: toOccurrenceId };
+    emit({
+      type: 'queue-transition',
+      projectionId: p.projectionId,
+      projectedQueueRev: p.queueRev,
+      fromOccurrenceId: p.currentOccurrenceId,
+      toOccurrenceId,
+      reason,
+      positionMs,
+      identity,
+      handle,
+    });
+  }
+
+  /**
+   * Freshly resolve+attach a projected item — the contract's service
+   * cursor move. The session adopts the emitted identity/handle as the
+   * live attempt, so the stream must already be attached to the element
+   * before the transition event lands. A failed attach surfaces as a
+   * `failed` status instead of an illegal transition.
+   */
+  async function attachItem(
+    p: QueueProjection,
+    item: QueueProjectionItem,
+    reason: QueueTransitionReason,
+  ): Promise<void> {
+    if (item.provider === null || item.sourceRef === null) {
+      status(
+        'failed',
+        appError('unavailable', 'projected item is not attachable'),
+      );
+      return;
+    }
+    const requestId = `watt-${++seq}`;
+    try {
+      const outcome = await stream.prepare({
+        pluginId: item.provider,
+        sourceRef: item.sourceRef,
+        requestId,
+      });
+      if (outcome.type !== 'prepared' || outcome.stream === undefined) {
+        const kind =
+          outcome.type === 'superseded' ? 'superseded' : toKind(outcome.kind);
+        status(
+          'failed',
+          appError(kind, outcome.message ?? 'successor prepare failed'),
+        );
+        return;
+      }
+      const handle = outcome.stream.handle;
+      const { url } = await stream.serveUrl({ handle });
+      const identity: PlaybackIdentity = {
+        attemptId: `watt-id-${seq}`,
+        queueRev: p.queueRev,
+      };
+      current = { handle, identity, occurrenceId: item.occurrenceId };
+      audio.src = url;
+      audio.currentTime = 0;
+      emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
+      emitMarks(handle, identity);
+      const shouldPlay = reason === 'ended' || p.mode === 'playing';
+      if (shouldPlay) {
+        await audio.play();
+      }
+      if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
+        deps.mediaSession.playbackState = shouldPlay ? 'playing' : 'paused';
+      }
+    } catch (thrown) {
+      status('failed', toError(thrown));
+    }
+  }
+
   function advanceQueue(reason: QueueTransitionReason): void {
     const p = projection;
     if (p === null) {
@@ -260,28 +344,43 @@ export function createWebPlayerPort(deps: {
     if (idx < 0) {
       return;
     }
-    let to: string | null;
     if (reason === 'remote-previous') {
-      to =
-        posMs() >= 3000 || idx === 0
-          ? p.items[idx]?.occurrenceId ?? null
-          : (p.items[idx - 1]?.occurrenceId ?? null);
-    } else {
-      to = idx + 1 < p.items.length ? (p.items[idx + 1]?.occurrenceId ?? null) : null;
+      const restart = posMs() >= 3000 || idx === 0;
+      if (restart) {
+        // Restart the current stream in place — same attempt echoes the
+        // live re-keyed revision per the transition contract.
+        const cur = current;
+        if (cur === null) {
+          return;
+        }
+        emitTransition(
+          p,
+          p.currentOccurrenceId,
+          reason,
+          0,
+          cur.identity,
+          cur.handle,
+        );
+        audio.currentTime = 0;
+        if (p.mode === 'playing') {
+          void audio.play().catch(() => undefined);
+        }
+        return;
+      }
+      const item = p.items[idx - 1];
+      if (item === undefined) {
+        return;
+      }
+      void attachItem(p, item, reason);
+      return;
     }
-    const from = p.currentOccurrenceId;
-    projection = { ...p, currentOccurrenceId: to };
-    emit({
-      type: 'queue-transition',
-      projectionId: p.projectionId,
-      projectedQueueRev: p.queueRev,
-      fromOccurrenceId: from,
-      toOccurrenceId: to,
-      reason,
-      positionMs: posMs(),
-      identity: null,
-      handle: null,
-    });
+    const successor = idx + 1 < p.items.length ? p.items[idx + 1] : undefined;
+    if (successor === undefined) {
+      // Tail of the queue — a null target means the cursor ran off.
+      emitTransition(p, null, reason, posMs(), null, null);
+      return;
+    }
+    void attachItem(p, successor, reason);
   }
 
   function emitMarks(
@@ -438,7 +537,11 @@ export function createWebPlayerPort(deps: {
       return guard(async () => {
         const { url } = await stream.serveUrl({ handle: input.handle });
         const identity = input.identity;
-        current = { handle: input.handle, identity };
+        current = {
+          handle: input.handle,
+          identity,
+          occurrenceId: projection?.currentOccurrenceId ?? null,
+        };
         audio.src = url;
         audio.currentTime = (input.positionMs ?? 0) / 1000;
         status('buffering');
@@ -501,6 +604,26 @@ export function createWebPlayerPort(deps: {
 
     async setQueueProjection(next) {
       projection = next;
+      // The session re-keys the live attempt's queueRev whenever it
+      // projects queue state for the SAME occurrence, then sends that
+      // re-keyed identity to transport calls — keep ours in step or the
+      // stale guard rejects legitimate pause/seek/stop. A projection
+      // naming another occurrence is left alone: that attach arrives
+      // through a fresh play() carrying its own revision.
+      if (
+        current !== null &&
+        next !== null &&
+        next.currentOccurrenceId !== null &&
+        next.currentOccurrenceId === current.occurrenceId
+      ) {
+        current = {
+          ...current,
+          identity: {
+            attemptId: current.identity.attemptId,
+            queueRev: next.queueRev,
+          },
+        };
+      }
       installMediaActions();
       return ok(undefined);
     },
