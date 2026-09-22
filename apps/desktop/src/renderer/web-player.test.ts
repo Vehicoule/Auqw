@@ -715,6 +715,39 @@ export async function run(): Promise<void> {
     );
   }
 
+  // Same-handle plays share a release marker: the stale play's own
+  // settle must not clear the live play's token — a release landing
+  // while it still waits invalidates it too.
+  {
+    const audio = fakeAudio();
+    const resolvers: Array<(v: { url: string }) => void> = [];
+    const stream = fakeStream({
+      serveUrl: () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const playA = player.play({ handle: 'h-1', identity });
+    const playB = player.play({
+      handle: 'h-1',
+      identity: { ...identity, attemptId: 'a2' },
+    });
+    // A resolves first and is stale by generation; its cleanup must
+    // leave B's marker alone.
+    resolvers[0]?.({ url: 'http://127.0.0.1:9/s/h-1a' });
+    await playA;
+    await player.release({ handle: 'h-1', identity });
+    resolvers[1]?.({ url: 'http://127.0.0.1:9/s/h-1b' });
+    await playB;
+    await settle();
+    assertEqual(
+      audio.src,
+      '',
+      'released pending play never attaches the element',
+    );
+  }
+
   // A live attach whose element start rejects must emit `failed` on
   // its own successor attempt — the transition already committed it,
   // so suppressing the failure strands an unusable stream.

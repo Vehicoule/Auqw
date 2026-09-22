@@ -213,10 +213,11 @@ export function createWebPlayerPort(deps: {
   /** Monotonic op generation — a superseded async completion (play,
    * cursor attach) must never touch `current` or the element. */
   let opGen = 0;
-  /** Handles an in-flight `play` can still attach — a `release` of one
-   * invalidates that op (bumps opGen) so its late serveUrl completion
-   * can't start a stream the host already dropped. */
-  const pendingPlays = new Set<string>();
+  /** In-flight `play` op generations keyed by handle — the newest
+   * writer wins, each play removes only its own token. A `release`
+   * of a tracked handle invalidates that op (bumps opGen) so its
+   * late serveUrl completion can't start a host-dropped stream. */
+  const pendingPlayGens = new Map<string, number>();
 
   const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
@@ -593,14 +594,14 @@ export function createWebPlayerPort(deps: {
 
     async play(input) {
       const gen = ++opGen;
-      pendingPlays.add(input.handle);
+      pendingPlayGens.set(input.handle, gen);
       return guard(async () => {
         try {
           const { url } = await stream.serveUrl({ handle: input.handle });
           // A newer play/prepare/stop superseded this one while the
           // loopback URL resolved — the late completion must not retake
           // the element. A release of this same handle landed too: it
-          // bumped opGen through the pendingPlays guard.
+          // bumped opGen through the pendingPlayGens guard.
           if (gen !== opGen) {
             return;
           }
@@ -619,7 +620,11 @@ export function createWebPlayerPort(deps: {
             deps.mediaSession.playbackState = 'playing';
           }
         } finally {
-          pendingPlays.delete(input.handle);
+          // Only this op's own token is removed — a superseded play
+          // must not clear the marker of the play that replaced it.
+          if (pendingPlayGens.get(input.handle) === gen) {
+            pendingPlayGens.delete(input.handle);
+          }
         }
       });
     },
@@ -674,7 +679,7 @@ export function createWebPlayerPort(deps: {
       // Releasing a handle an in-flight play is about to attach must
       // invalidate that op — otherwise its late serveUrl resolves into
       // an already-dropped host stream and audio resumes post-teardown.
-      if (pendingPlays.delete(input.handle)) {
+      if (pendingPlayGens.delete(input.handle)) {
         opGen++;
       }
       return guard(() => stream.release({ handle: input.handle }));
