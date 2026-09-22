@@ -712,6 +712,242 @@ export type AuqwStorage = {
   readonly dropBackup: (tag: string) => Promise<void>;
 };
 
+/* ------------------------------------------------------------------ */
+/* Sync — LAN transport, pairing, device registry, delta seam.         */
+/* ------------------------------------------------------------------ */
+
+/** Cap on an opaque delta document — sync payloads must not balloon IPC. */
+export const MAX_SYNC_DOC_BYTES = 1_048_576;
+
+export type SyncListenerState =
+  | 'starting'
+  | 'listening'
+  | 'unavailable'
+  | 'disabled';
+
+export type SyncStatusResult = {
+  readonly listener: SyncListenerState;
+  /** `ip:port` to feed a pairing payload, or null when nothing is up. */
+  readonly endpoint: string | null;
+  readonly boundPort: number | null;
+  readonly advertise: 'off' | 'announcing' | 'unavailable';
+  readonly pairedDevices: number;
+  readonly sessions: number;
+  readonly lastSyncAt: number | null;
+  readonly engine: 'ready' | 'absent';
+  readonly name: string;
+  readonly fingerprint: string | null;
+};
+
+export function isSyncStatusResult(
+  value: unknown,
+): value is SyncStatusResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'listener',
+      'endpoint',
+      'boundPort',
+      'advertise',
+      'pairedDevices',
+      'sessions',
+      'lastSyncAt',
+      'engine',
+      'name',
+      'fingerprint',
+    ]) &&
+    (value['listener'] === 'starting' ||
+      value['listener'] === 'listening' ||
+      value['listener'] === 'unavailable' ||
+      value['listener'] === 'disabled') &&
+    (value['endpoint'] === null ||
+      isBoundedString(value['endpoint'], 128)) &&
+    (value['boundPort'] === null ||
+      isSafeNonNegativeInt(value['boundPort'])) &&
+    (value['advertise'] === 'off' ||
+      value['advertise'] === 'announcing' ||
+      value['advertise'] === 'unavailable') &&
+    isSafeNonNegativeInt(value['pairedDevices']) &&
+    isSafeNonNegativeInt(value['sessions']) &&
+    (value['lastSyncAt'] === null ||
+      isFiniteNumber(value['lastSyncAt'])) &&
+    (value['engine'] === 'ready' || value['engine'] === 'absent') &&
+    isBoundedString(value['name'], 128) &&
+    (value['fingerprint'] === null ||
+      isBoundedString(value['fingerprint'], 128))
+  );
+}
+
+export type SyncPairingResult = {
+  /** QR-payload text: JSON {v, endpoint, code, fp}. */
+  readonly payload: string;
+  /** The 6-digit typed path — same session as the QR payload. */
+  readonly code: string;
+  readonly expiresAt: number;
+};
+
+export function isSyncPairingResult(
+  value: unknown,
+): value is SyncPairingResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['payload', 'code', 'expiresAt']) &&
+    isBoundedString(value['payload'], 1_024) &&
+    typeof value['code'] === 'string' &&
+    /^[0-9]{6}$/.test(value['code']) &&
+    isFiniteNumber(value['expiresAt'])
+  );
+}
+
+export type SyncDeviceInfo = {
+  readonly id: string;
+  readonly name: string;
+  readonly pairedAt: number;
+  readonly lastSeenAt: number;
+};
+
+function isSyncDeviceInfo(value: unknown): value is SyncDeviceInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id', 'name', 'pairedAt', 'lastSeenAt']) &&
+    isBoundedString(value['id'], 64) &&
+    isBoundedString(value['name'], 128) &&
+    isFiniteNumber(value['pairedAt']) &&
+    isFiniteNumber(value['lastSeenAt'])
+  );
+}
+
+export type SyncDevicesResult = {
+  readonly devices: readonly SyncDeviceInfo[];
+};
+
+export function isSyncDevicesResult(
+  value: unknown,
+): value is SyncDevicesResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['devices']) &&
+    Array.isArray(value['devices']) &&
+    value['devices'].length <= 64 &&
+    value['devices'].every(isSyncDeviceInfo)
+  );
+}
+
+export type SyncUnpairArgs = { readonly id: string };
+
+export function isSyncUnpairArgs(
+  value: unknown,
+): value is SyncUnpairArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id']) &&
+    isBoundedString(value['id'], 64)
+  );
+}
+
+/** Opaque delta document: any JSON structure that stays inside the cap. */
+export function isSyncDeltaDoc(value: unknown): boolean {
+  if (!(isRecord(value) || Array.isArray(value))) {
+    return false;
+  }
+  try {
+    const encoded = JSON.stringify(value);
+    return (
+      typeof encoded === 'string' &&
+      encoded.length <= MAX_SYNC_DOC_BYTES
+    );
+  } catch {
+    return false;
+  }
+}
+
+export type SyncDeltasArgs = { readonly since: string };
+
+export function isSyncDeltasArgs(
+  value: unknown,
+): value is SyncDeltasArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['since']) &&
+    // '' is a legal cursor — the engine reads it as "full snapshot".
+    typeof value['since'] === 'string' &&
+    value['since'].length <= 256
+  );
+}
+
+export type SyncDeltasResult = { readonly delta: unknown };
+
+export function isSyncDeltasResult(
+  value: unknown,
+): value is SyncDeltasResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta']) &&
+    isSyncDeltaDoc(value['delta'])
+  );
+}
+
+export type SyncImportDeltaArgs = {
+  readonly delta: unknown;
+  readonly deviceId?: string;
+};
+
+export function isSyncImportDeltaArgs(
+  value: unknown,
+): value is SyncImportDeltaArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta', 'deviceId']) &&
+    isSyncDeltaDoc(value['delta']) &&
+    (value['deviceId'] === undefined ||
+      isBoundedString(value['deviceId'], 64))
+  );
+}
+
+export type SyncImportDeltaResult = { readonly result: unknown };
+
+export function isSyncImportDeltaResult(
+  value: unknown,
+): value is SyncImportDeltaResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['result']) &&
+    isSyncDeltaDoc(value['result'])
+  );
+}
+
+export type SyncTriggerResult = {
+  readonly triggered: boolean;
+  readonly pending: boolean;
+};
+
+export function isSyncTriggerResult(
+  value: unknown,
+): value is SyncTriggerResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['triggered', 'pending']) &&
+    isBoolean(value['triggered']) &&
+    isBoolean(value['pending'])
+  );
+}
+
+/**
+ * The renderer's `api.sync.*` — one method per `sync:*` channel; the
+ * utility's sync service answers them all and works plugin-free.
+ */
+export type AuqwSync = {
+  readonly status: () => Promise<SyncStatusResult>;
+  readonly pairing: () => Promise<SyncPairingResult>;
+  readonly devices: () => Promise<SyncDevicesResult>;
+  readonly unpair: (args: SyncUnpairArgs) => Promise<void>;
+  readonly deltas: (args: SyncDeltasArgs) => Promise<SyncDeltasResult>;
+  readonly importDelta: (
+    args: SyncImportDeltaArgs,
+  ) => Promise<SyncImportDeltaResult>;
+  readonly trigger: () => Promise<SyncTriggerResult>;
+};
+
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
  * with a validated payload and rejects with a `ShellError`-shaped value.
@@ -739,6 +975,7 @@ export type AuqwApi = {
     readonly delete: (key: string) => Promise<void>;
   };
   readonly storage: AuqwStorage;
+  readonly sync: AuqwSync;
   readonly utility: {
     readonly ping: (message: string) => Promise<UtilityPingResult>;
   };

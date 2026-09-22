@@ -16,6 +16,12 @@ import {
   isStreamServeUrlResult,
   isStringArray,
   isStringOrNull,
+  isSyncDeltasResult,
+  isSyncDevicesResult,
+  isSyncImportDeltaResult,
+  isSyncPairingResult,
+  isSyncStatusResult,
+  isSyncTriggerResult,
   isUndefinedResult,
   isUtilityPingResult,
 } from '../shared/contract.ts';
@@ -28,6 +34,15 @@ import type {
   StorageExecuteResult,
   StorageQueryResult,
   StreamPortLike,
+  SyncDeltasArgs,
+  SyncDeltasResult,
+  SyncDevicesResult,
+  SyncImportDeltaArgs,
+  SyncImportDeltaResult,
+  SyncPairingResult,
+  SyncStatusResult,
+  SyncTriggerResult,
+  SyncUnpairArgs,
   UtilityPingResult,
 } from '../shared/contract.ts';
 import { isPumpServerMessage } from '../shared/pump-protocol.ts';
@@ -244,6 +259,28 @@ const api: AuqwApi = {
       invoke(CHANNELS.storageBackup, { tag }, isUndefinedResult),
     dropBackup: (tag: string): Promise<void> =>
       invoke(CHANNELS.storageDropBackup, { tag }, isUndefinedResult),
+  },
+  sync: {
+    status: (): Promise<SyncStatusResult> =>
+      invoke(CHANNELS.syncStatus, undefined, isSyncStatusResult),
+    pairing: (): Promise<SyncPairingResult> =>
+      invoke(CHANNELS.syncPairing, undefined, isSyncPairingResult),
+    devices: (): Promise<SyncDevicesResult> =>
+      invoke(CHANNELS.syncDevices, undefined, isSyncDevicesResult),
+    unpair: (args: SyncUnpairArgs): Promise<void> =>
+      invoke(CHANNELS.syncUnpair, args, isUndefinedResult),
+    deltas: (args: SyncDeltasArgs): Promise<SyncDeltasResult> =>
+      invoke(CHANNELS.syncDeltas, args, isSyncDeltasResult),
+    importDelta: (
+      args: SyncImportDeltaArgs,
+    ): Promise<SyncImportDeltaResult> =>
+      invoke(
+        CHANNELS.syncImportDelta,
+        args,
+        isSyncImportDeltaResult,
+      ),
+    trigger: (): Promise<SyncTriggerResult> =>
+      invoke(CHANNELS.syncTrigger, undefined, isSyncTriggerResult),
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>

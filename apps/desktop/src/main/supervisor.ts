@@ -1,5 +1,10 @@
-import { shellError } from '../shared/errors.ts';
+import {
+  fromUnknown,
+  isShellError,
+  shellError,
+} from '../shared/errors.ts';
 import type { UtilityRequest } from '../utility/envelope.ts';
+import { isServiceCall } from '../utility/service.ts';
 import {
   hasRequestId,
   isUtilityResponse,
@@ -29,6 +34,16 @@ export type SupervisorOptions = {
    * keep climbing the backoff instead of restarting every base interval.
    */
   readonly stableAfterMs?: number;
+  /**
+   * Utility→main service channels: the child can call INTO main on a
+   * whitelisted channel name using the same request envelope, e.g.
+   * `sync:keys` for safeStorage custody it cannot reach itself. Any
+   * channel not registered here is refused `invalid-request` — the
+   * child gets no ambient main-process reach.
+   */
+  readonly services?: Readonly<
+    Record<string, (args: unknown) => Promise<unknown>>
+  >;
 };
 
 export interface UtilitySupervisor {
@@ -121,29 +136,65 @@ export function createSupervisor(
   }
 
   function onMessage(raw: unknown): void {
-    if (!isUtilityResponse(raw)) {
-      // A malformed reply that still names a pending request settles it —
-      // otherwise the renderer would wait forever on a broken answer.
-      if (hasRequestId(raw)) {
-        const slot = pending.get(raw.id);
-        if (slot !== undefined) {
-          pending.delete(raw.id);
-          slot.reject(
-            shellError('invalid-response', 'malformed utility reply'),
-          );
-        }
+    if (isUtilityResponse(raw)) {
+      const slot = pending.get(raw.id);
+      if (slot === undefined) {
+        return;
+      }
+      pending.delete(raw.id);
+      if (raw.ok) {
+        slot.resolve(raw.result);
+      } else {
+        slot.reject(raw.error);
       }
       return;
     }
-    const slot = pending.get(raw.id);
-    if (slot === undefined) {
+    if (isServiceCall(raw)) {
+      // Utility→main service call — same envelope, other direction.
+      // The channel must be whitelisted; handler failures answer typed.
+      const handler = opts.services?.[raw.channel];
+      const target = child;
+      const reply = (message: unknown): void => {
+        try {
+          target?.postMessage(message);
+        } catch {
+          // The child died mid-call — its own timeout settles it.
+        }
+      };
+      if (handler === undefined || target === null) {
+        reply({
+          id: raw.id,
+          ok: false,
+          error: shellError(
+            'invalid-request',
+            `unknown service channel ${raw.channel}`,
+          ),
+        });
+        return;
+      }
+      void Promise.resolve()
+        .then(() => handler(raw.args))
+        .then(
+          (result) => reply({ id: raw.id, ok: true, result }),
+          (thrown: unknown) =>
+            reply({
+              id: raw.id,
+              ok: false,
+              error: isShellError(thrown) ? thrown : fromUnknown(thrown),
+            }),
+        );
       return;
     }
-    pending.delete(raw.id);
-    if (raw.ok) {
-      slot.resolve(raw.result);
-    } else {
-      slot.reject(raw.error);
+    if (hasRequestId(raw)) {
+      // A malformed reply that still names a pending request settles it —
+      // otherwise the renderer would wait forever on a broken answer.
+      const slot = pending.get(raw.id);
+      if (slot !== undefined) {
+        pending.delete(raw.id);
+        slot.reject(
+          shellError('invalid-response', 'malformed utility reply'),
+        );
+      }
     }
   }
 

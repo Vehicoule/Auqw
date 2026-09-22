@@ -5,6 +5,7 @@ export * from './ports/provider.ts';
 export * from './ports/player.ts';
 export * from './ports/storage.ts';
 export * from './ports/media-transfer.ts';
+export * from './ports/sync-engine.ts';
 export * from './ports/tag-reader.ts';
 export * from './ports/connectivity.ts';
 export * from './downloads/transfer-policy.ts';

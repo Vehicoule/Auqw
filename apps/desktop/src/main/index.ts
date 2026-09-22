@@ -17,6 +17,7 @@ import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
+import { createSyncKeysHandler } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -61,6 +62,11 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_REPO_ROOT',
     'AUQW_DEV_GATE',
     'AUQW_DB_PATH',
+    'AUQW_SYNC_HOST',
+    'AUQW_SYNC_PORT',
+    'AUQW_SYNC_DISABLED',
+    'AUQW_SYNC_NAME',
+    'AUQW_SYNC_NO_MDNS',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -116,6 +122,15 @@ async function main(): Promise<void> {
         // into a process that loads native artifacts).
         env: utilityEnv(userDataPath),
       }),
+    // Utility→main service calls: safeStorage lives only in main, so
+    // sync identity + device key material rides `sync:keys` up to the
+    // SecureStore. The child gets no other main-process reach.
+    services: {
+      'sync:keys': createSyncKeysHandler({
+        secure,
+        dir: join(userDataPath, 'secure'),
+      }),
+    },
   });
 
   registerChannels(ipcMain, {
