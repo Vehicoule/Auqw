@@ -653,6 +653,68 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A stale attach's failed outcome must not emit `failed` on the
+  // attempt that replaced it — the session would tear down live
+  // playback on another op's verdict.
+  {
+    const audio = fakeAudio();
+    let resolveFirst:
+      | ((o: PrepareOutcomePayload) => void)
+      | undefined;
+    const stream = fakeStream({
+      prepare: (args) => {
+        const { requestId } = args as { requestId: string };
+        if (requestId === 'watt-1') {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve({
+          type: 'prepared',
+          stream: { handle: 'h-2', mime: 'audio/mp4' },
+        });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    // A newer play supersedes the pending attach — its outcome belongs
+    // to a dead op now.
+    await player.play({
+      handle: 'h-b',
+      identity: { ...identity, attemptId: 'a2' },
+    });
+    events.length = 0;
+    resolveFirst?.({
+      type: 'failed',
+      kind: 'transient',
+      message: 'upstream wobble',
+      attempt: {
+        requestId: 'watt-1',
+        steps: 0,
+        httpCalls: 0,
+        bytes: 0,
+        fuelUsed: 0,
+        elapsedMs: 0,
+        httpTrace: [],
+        guestLog: [],
+      },
+    });
+    await settle();
+    assert(
+      !events.some((e) => e.type === 'status' && e.state === 'failed'),
+      'stale attach failure never emits failed on the live stream',
+    );
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/tok',
+      'live stream keeps the element',
+    );
+  }
+
   // remote-next at the queue tail stops the element — a null target
   // while audio is live must not leave playback running.
   {

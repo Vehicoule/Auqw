@@ -288,11 +288,14 @@ function isAttemptSummaryPayload(
     isSafeNonNegativeInt(value['bytes']) &&
     isSafeNonNegativeInt(value['fuelUsed']) &&
     isSafeNonNegativeInt(value['elapsedMs']) &&
+    // Caps mirror `isAttemptTrace` in packages/application — the
+    // boundary must never accept a trace the port would reject on
+    // persistence, nor drop one the port considers valid.
     Array.isArray(value['httpTrace']) &&
-    value['httpTrace'].length <= 64 &&
+    value['httpTrace'].length <= 32 &&
     value['httpTrace'].every(isHttpTracePayload) &&
     Array.isArray(value['guestLog']) &&
-    value['guestLog'].length <= 64 &&
+    value['guestLog'].length <= 128 &&
     value['guestLog'].every(isGuestLogPayload)
   );
 }

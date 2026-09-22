@@ -307,12 +307,16 @@ export function createWebPlayerPort(deps: {
         requestId,
       });
       if (outcome.type !== 'prepared' || outcome.stream === undefined) {
-        const kind =
-          outcome.type === 'superseded' ? 'superseded' : toKind(outcome.kind);
-        status(
-          'failed',
-          appError(kind, outcome.message ?? 'successor prepare failed'),
-        );
+        // A stale op's failure is not the live attempt's — suppress it
+        // rather than label the stream the session already moved to.
+        if (gen === opGen && projection === p) {
+          const kind =
+            outcome.type === 'superseded' ? 'superseded' : toKind(outcome.kind);
+          status(
+            'failed',
+            appError(kind, outcome.message ?? 'successor prepare failed'),
+          );
+        }
         return;
       }
       handle = outcome.stream.handle;
@@ -346,7 +350,11 @@ export function createWebPlayerPort(deps: {
       if (handle !== undefined) {
         void stream.release({ handle }).catch(() => undefined);
       }
-      status('failed', toError(thrown));
+      // A stale op's rejection must not label the live attempt — its
+      // outcome belongs to the op the session already replaced.
+      if (gen === opGen && projection === p) {
+        status('failed', toError(thrown));
+      }
     }
   }
 
