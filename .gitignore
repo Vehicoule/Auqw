@@ -27,3 +27,6 @@ apps/mobile/assets/plugins/
 
 # Local env
 .envrc
+
+# Electron bundles (rebuild via `pnpm --filter auqw-desktop build`)
+apps/desktop/dist/
