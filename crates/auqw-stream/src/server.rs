@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -35,6 +35,9 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// gives up. Loopback clients answer promptly; this is only a leak
 /// bound for a stalled socket.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Concurrent connection threads — an accept flood can't exhaust the
+/// process, the accept loop just waits for a slot to drain.
+const MAX_CONN_THREADS: usize = 64;
 
 /// A served handle as reported to connections.
 struct Grant {
@@ -68,6 +71,8 @@ struct Shared {
     registry: Arc<StreamRegistry>,
     grants: Mutex<HashMap<String, Grant>>,
     shutdown: AtomicBool,
+    /// Live conn-thread count + slot-free signal (`Mutex`, `Condvar`).
+    conn_slots: Arc<(Mutex<usize>, Condvar)>,
 }
 
 /// The bound loopback adapter. `Drop` stops the accept loop; live
@@ -102,6 +107,7 @@ impl StreamServer {
             registry,
             grants: Mutex::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
+            conn_slots: Arc::new((Mutex::new(0), Condvar::new())),
         });
         let accept = {
             let shared = Arc::clone(&shared);
@@ -172,16 +178,61 @@ impl Drop for StreamServer {
     }
 }
 
+/// A held conn-thread slot; `Drop` frees it for the accept loop.
+struct ConnPermit {
+    slots: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl Drop for ConnPermit {
+    fn drop(&mut self) {
+        if let Ok(mut n) = self.slots.0.lock() {
+            *n = n.saturating_sub(1);
+        }
+        self.slots.1.notify_one();
+    }
+}
+
+/// Take a conn-thread slot, parking while the pool is full. `None`
+/// means the slot counter is poisoned or the server is shutting
+/// down — the caller drops the conn and the client retries.
+fn conn_permit(shared: &Shared) -> Option<ConnPermit> {
+    let mut n = shared.conn_slots.0.lock().ok()?;
+    loop {
+        if *n < MAX_CONN_THREADS {
+            *n += 1;
+            return Some(ConnPermit {
+                slots: Arc::clone(&shared.conn_slots),
+            });
+        }
+        if shared.shutdown.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (guard, _) = match shared.conn_slots.1.wait_timeout(n, ACCEPT_POLL) {
+            Ok(r) => r,
+            Err(p) => p.into_inner(),
+        };
+        n = guard;
+    }
+}
+
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
     loop {
         match listener.accept() {
             Ok((conn, _)) => {
-                let shared = Arc::clone(&shared);
                 // A connection we cannot service is closed by dropping
-                // it — the client retries.
+                // it — the client retries. A full conn pool just parks
+                // the accept loop until a slot drains (or shutdown).
+                let Some(permit) = conn_permit(&shared) else {
+                    if shared.shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    continue;
+                };
+                let shared = Arc::clone(&shared);
                 let _ = thread::Builder::new()
                     .name("auqw-stream-conn".into())
                     .spawn(move || {
+                        let _permit = permit;
                         let _ = serve_conn(conn, &shared);
                     });
             }
@@ -255,14 +306,18 @@ fn write_status(out: &mut TcpStream, status: u16, extra: &[(String, String)]) {
     let _ = write_head(out, status, &headers);
 }
 
-/// One bounded line read: a NUL or an oversized head is malformed.
+/// One bounded line read: the `take` cap means a newline-free client
+/// cannot make the buffer allocate past the head cap it never
+/// reaches; a NUL or an oversized head is malformed.
 fn read_line(
     reader: &mut BufReader<TcpStream>,
     total: &mut usize,
     lines: &mut usize,
 ) -> Result<String, StreamError> {
     let mut line = String::new();
-    let n = reader
+    let headroom = (MAX_HEAD_BYTES + 1).saturating_sub(*total) as u64;
+    let n = Read::by_ref(reader)
+        .take(headroom)
         .read_line(&mut line)
         .map_err(|e| StreamError::InvalidResponse {
             message: format!("request head: {e}"),
@@ -280,7 +335,12 @@ fn read_line(
 fn parse_range(value: &str) -> Option<RangeSpec> {
     // A unit other than `bytes` is uninterpretable — RFC 9110 lets a
     // server ignore it entirely, which answers with a normal `200`.
-    let spec = value.strip_prefix("bytes=")?.trim();
+    // Range units are ASCII tokens and case-insensitive.
+    let (unit, spec) = value.split_once('=')?;
+    if !unit.trim().eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let spec = spec.trim();
     if spec.contains(',') {
         return Some(RangeSpec::Invalid);
     }
@@ -382,6 +442,25 @@ fn graceful_close(reader: &mut BufReader<TcpStream>) {
     }
 }
 
+/// Detaches the session a request attached when the connection ends
+/// — the DataSource-close semantic. Without it a served conn pins
+/// the session attached forever, invisible to detached reaping and
+/// immune to supersede.
+struct AttachClose<'a> {
+    registry: &'a StreamRegistry,
+    handle: Option<String>,
+}
+
+impl Drop for AttachClose<'_> {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            // A session that ended mid-request returns NotFound —
+            // the detach still ran while it was live.
+            let _ = self.registry.close(&h);
+        }
+    }
+}
+
 /// Resolve `(start, end_inclusive)` for the request's range against
 /// the session's best-known total; `None` end = serve until EOF.
 fn resolve_range(range: &RangeSpec, total: Option<u64>) -> Result<(u64, Option<u64>), u16> {
@@ -399,6 +478,8 @@ fn resolve_range(range: &RangeSpec, total: Option<u64>) -> Result<(u64, Option<u
             None => Err(416),
         },
         RangeSpec::Suffix(n) => match total {
+            // A suffix range on an empty resource satisfies nothing.
+            Some(0) => Err(416),
             Some(t) => {
                 let n = n.min(t);
                 Ok((t - n, Some(t - 1)))
@@ -406,6 +487,41 @@ fn resolve_range(range: &RangeSpec, total: Option<u64>) -> Result<(u64, Option<u
             None => Err(416),
         },
         RangeSpec::Invalid => Err(416),
+    }
+}
+
+/// Write the response head for a GET/HEAD: `206` + `Content-Range`
+/// when the request was ranged, else `200` — no `Content-Length`
+/// when no bound exists (the body is then close-delimited).
+fn write_reply_head(
+    out: &mut TcpStream,
+    mime: &str,
+    ranged: bool,
+    start: u64,
+    end: Option<u64>,
+    total: Option<u64>,
+) -> Result<(), StreamError> {
+    let mut headers = vec![
+        ("Content-Type".to_string(), mime.to_string()),
+        ("Accept-Ranges".to_string(), "bytes".to_string()),
+        ("Cache-Control".to_string(), "no-store".to_string()),
+    ];
+    if let Some(len) = end.and_then(|e| e.checked_sub(start).map(|d| d + 1)) {
+        headers.push(("Content-Length".to_string(), len.to_string()));
+    }
+    if ranged {
+        // `resolve_range` guarantees both bounds when it returns Ok.
+        let e = end.unwrap_or(start);
+        let t = total.unwrap_or(0);
+        headers.push((
+            "Content-Range".to_string(),
+            format!("bytes {start}-{e}/{t}"),
+        ));
+        write_head(out, 206, &headers)
+    } else {
+        // Unknown total: no Content-Length, the body is delimited by
+        // the connection closing.
+        write_head(out, 200, &headers)
     }
 }
 
@@ -432,13 +548,34 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
         write_status(out, 404, &[]);
         return Ok(());
     };
-    let total = shared.registry.effective_total(&handle)?;
+    // The session detaches on conn end — a parked attachment would
+    // shield the session from detached reaping and supersede forever.
+    let mut detach = AttachClose {
+        registry: &shared.registry,
+        handle: None,
+    };
+    let total = match shared.registry.effective_total(&handle) {
+        Ok(t) => t,
+        Err(e) => {
+            write_status(out, status_for(&e), &[]);
+            return Ok(());
+        }
+    };
+    // A session that already ended answers its typed terminal error —
+    // not a range-coherence verdict computed for a dead stream.
+    match shared.registry.terminal_err(&handle) {
+        Ok(None) => {}
+        Ok(Some(e)) | Err(e) => {
+            write_status(out, status_for(&e), &[]);
+            return Ok(());
+        }
+    }
     // A ranged request whose bounds can't be resolved — past EOF,
     // malformed, or an unknown total where no `last-byte-pos` exists
     // to report — answers `416` (RFC 9110's only honest range
     // failure); a `200` that starts mid-resource would lie.
     let Some((start, end)) = (match &req.range {
-        None => Some((0u64, total.map(|t| t.saturating_sub(1)))),
+        None => Some((0u64, total.and_then(|t| t.checked_sub(1)))),
         Some(spec) => match resolve_range(spec, total) {
             Ok(r) => Some(r),
             Err(status) => {
@@ -464,6 +601,12 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
         write_status(out, status_for(&e), &[]);
         return Ok(());
     }
+    detach.handle = Some(handle.clone());
+    if req.head_only {
+        // HEAD proves liveness and reports bounds — no body bytes are
+        // spent on it.
+        return write_reply_head(out, &mime, req.range.is_some(), start, end, total);
+    }
     // One read before headers: an immediate terminal error still maps
     // to an honest status; a healthy session starts the body.
     let first_want = end.map_or(READ_CHUNK, |e| (e - start + 1).min(READ_CHUNK));
@@ -474,32 +617,29 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
             return Ok(());
         }
     };
-    let ranged = req.range.is_some();
-    let mut headers = vec![
-        ("Content-Type".to_string(), mime),
-        ("Accept-Ranges".to_string(), "bytes".to_string()),
-        ("Cache-Control".to_string(), "no-store".to_string()),
-    ];
-    if let Some(len) = end.map(|e| e - start + 1) {
-        headers.push(("Content-Length".to_string(), len.to_string()));
+    // The probe read can advance upstream discovery — re-anchor the
+    // reported bounds on the freshest total instead of the stale
+    // hint; a range that collapsed under it answers honest 416
+    // while headers are still unsent.
+    let fresh = shared.registry.effective_total(&handle).ok().flatten();
+    let total = fresh.or(total);
+    if req.range.is_some() {
+        if let Some(t) = total {
+            if start >= t {
+                write_status(
+                    out,
+                    416,
+                    &[("Content-Range".into(), format!("bytes */{t}"))],
+                );
+                return Ok(());
+            }
+        }
     }
-    if ranged {
-        // `resolve_range` guarantees both bounds when it returns Ok.
-        let e = end.unwrap_or(start);
-        let t = total.unwrap_or(0);
-        headers.push((
-            "Content-Range".to_string(),
-            format!("bytes {start}-{e}/{t}"),
-        ));
-        write_head(out, 206, &headers)?;
-    } else {
-        // Unknown total: no Content-Length, the body is delimited by
-        // the connection closing.
-        write_head(out, 200, &headers)?;
-    }
-    if req.head_only {
-        return Ok(());
-    }
+    let end = match (end, fresh) {
+        (Some(e), Some(t)) => t.checked_sub(1).map(|last| e.min(last)),
+        (e, _) => e,
+    };
+    write_reply_head(out, &mime, req.range.is_some(), start, end, total)?;
     // The body walks seam reads; a mid-body failure can only close
     // the connection truncated — the status is already out.
     out.write_all(&first).map_err(|e| StreamError::Internal {
@@ -793,6 +933,117 @@ mod tests {
         let ranged = http(&url, "GET", &[("Range", "bytes=0-9")]);
         assert_eq!(ranged.status, 416);
         assert_eq!(ranged.header("content-range"), Some("bytes */*"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ranged_request_on_ended_session_answers_410_not_416() {
+        // The terminal probe runs before range resolution — a dead
+        // session answers its honest error, never a range verdict
+        // computed for a stream that cannot serve.
+        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024));
+        reg.release(&handle)
+            .unwrap_or_else(|e| panic!("release: {e}"));
+        let r = http(&url, "GET", &[("Range", "bytes=0-9")]);
+        assert_eq!(r.status, 410);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn case_insensitive_bytes_unit_ranges() {
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let r = http(&url, "GET", &[("Range", "Bytes=4-131")]);
+        assert_eq!(r.status, 206);
+        assert_eq!(r.header("content-range"), Some("bytes 4-131/1024"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn suffix_range_on_empty_resource_answers_416() {
+        // total 0 — `t - 1` must never underflow; the honest answer
+        // is unsatisfiable.
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(0));
+        let r = http(&url, "GET", &[("Range", "bytes=-64")]);
+        assert_eq!(r.status, 416);
+        assert_eq!(r.header("content-range"), Some("bytes */0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conn_end_detaches_the_session() {
+        // After the response finishes, the session must be
+        // unattached again — detached-close lets an intent-flip
+        // cancel reach it; without it the session is shielded
+        // forever.
+        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024));
+        let r = http(&url, "GET", &[("Range", "bytes=0-63")]);
+        assert_eq!(r.status, 206);
+        reg.cancel_if_unattached(&handle)
+            .unwrap_or_else(|e| panic!("cancel: {e}"));
+        let r = http(&url, "GET", &[]);
+        assert_eq!(r.status, 410, "cancelled session must answer 410");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn head_reports_bounds_without_spending_a_read() {
+        // Upstream dead past the cached head — a HEAD still answers
+        // 206 headers because no body read is spent on it.
+        let mut steps = vec![Step::Reply(resp(206, 0, 64, 1024))];
+        steps.extend((0..16).map(|_| {
+            Step::Fail(StreamError::Transient {
+                message: "upstream dead".into(),
+            })
+        }));
+        let dir = TestDir::new("srv-head");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 64;
+        cfg.read_ahead = 64;
+        cfg.stall = Duration::from_millis(50);
+        cfg.read_deadline = Duration::from_millis(400);
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let info = reg
+            .prepare(source(), Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "HEAD", &[("Range", "bytes=64-127")]);
+        assert_eq!(r.status, 206);
+        assert_eq!(r.header("content-range"), Some("bytes 64-127/1024"));
+        assert_eq!(r.header("content-length"), Some("64"));
+        assert_eq!(r.body.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wire_total_reanchors_the_hinted_bounds() {
+        // Hint says 1024 but the wire reports 512 — headers must
+        // carry the freshly discovered total, not the stale hint.
+        let steps: Vec<Step> = (0..512)
+            .step_by(128)
+            .map(|off| Step::Reply(resp(206, off, 128, 512)))
+            .collect();
+        let dir = TestDir::new("srv-fresh");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 512;
+        cfg.read_ahead = 512;
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = Some(1024);
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "GET", &[("Range", "bytes=500-")]);
+        assert_eq!(r.status, 206);
+        assert_eq!(r.header("content-range"), Some("bytes 500-511/512"));
+        assert_eq!(r.header("content-length"), Some("12"));
+        assert_eq!(r.body.len(), 12);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
