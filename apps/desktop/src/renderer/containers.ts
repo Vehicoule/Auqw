@@ -364,6 +364,7 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
     if (box.type === 'moof') {
       sawMoof = true;
       boundaries.push(pendingStyp >= 0 ? pendingStyp : pos);
+      pendingStyp = -1;
     }
     if (box.type === 'mdat' && !sawMoof) {
       // Every media-data box in a fragmented file is preceded by its
@@ -371,7 +372,11 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
       // whatever order moov arrives in.
       return { kind: 'non-fragmented' };
     }
-    pendingStyp = box.type === 'styp' ? pos : -1;
+    if (box.type === 'styp') {
+      // Segment-level boxes (sidx, prft, ...) may sit between the styp
+      // and its moof — the anchor persists until a moof claims it.
+      pendingStyp = pos;
+    }
     pos += box.size;
   }
   // `ftyp`/`moov` alone prove nothing — only a moof (fragmented) or an
@@ -472,8 +477,11 @@ export function boundaryScan(
     }
     if (box.type === 'moof') {
       boundaries.push(pendingStyp >= 0 ? pendingStyp : pos);
+      pendingStyp = -1;
     }
-    pendingStyp = box.type === 'styp' ? pos : -1;
+    if (box.type === 'styp') {
+      pendingStyp = pos;
+    }
     pos += box.size;
   }
   return { boundaries, cues };

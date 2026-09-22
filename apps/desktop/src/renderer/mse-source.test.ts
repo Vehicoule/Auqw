@@ -63,6 +63,9 @@ class FakeSourceBuffer implements SourceBufferLike {
   /** Append indexes that produce no buffered range — init segments
    * land no media, so these model header-only appends. */
   rangelessAppends = new Set<number>();
+  /** When true, appends EXTEND the last range instead of adding one —
+   * Chromium merges adjacent appended media into a single TimeRange. */
+  mergeAppends = false;
   private listeners = new Map<string, Array<() => void>>();
 
   appendBuffer(data: Uint8Array): void {
@@ -77,7 +80,15 @@ class FakeSourceBuffer implements SourceBufferLike {
     // Each appended unit maps to 10s of media in this fake.
     const i = this.appends.length - 1;
     if (!this.rangelessAppends.has(i)) {
-      this.buffered.list.push([i * 10, i * 10 + 10]);
+      const last = this.buffered.list[this.buffered.list.length - 1];
+      if (this.mergeAppends && last !== undefined) {
+        this.buffered.list[this.buffered.list.length - 1] = [
+          last[0],
+          last[1] + 10,
+        ];
+      } else {
+        this.buffered.list.push([i * 10, i * 10 + 10]);
+      }
     }
     queueMicrotask(() => {
       this.updating = false;
@@ -407,6 +418,102 @@ export async function run(): Promise<void> {
       `grants stayed inside the window: ${port.grantedBytes()}`,
     );
     void attach;
+  }
+
+  // A media segment bigger than the credit window still completes:
+  // the open unit doesn't count against grant accounting (its
+  // terminating boundary is upstream), so the pump keeps pulling
+  // credit until it closes — bounded only by MAX_UNIT_BYTES.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4c0',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    // EBML head + Segment header (reused from the fixture) + one
+    // ~10MiB Cluster + a closing Cluster. Had credit counted the open
+    // unit, the pump would stall at the 8MiB window with the second
+    // boundary never arriving.
+    const payload = 10 * 1024 * 1024;
+    const big = new Uint8Array(17 + 8 + payload + 9);
+    big.set(webmFixture().subarray(0, 17), 0);
+    big.set([0x1f, 0x43, 0xb6, 0x75, 0x10, 0xa0, 0x00, 0x00], 17);
+    big.set(
+      [0x1f, 0x43, 0xb6, 0x75, 0x85, 0, 0, 0, 0],
+      17 + 8 + payload,
+    );
+    feedData(port, big, 0, 0, 1024 * 1024);
+    await settle();
+    assert(
+      port.grantedBytes() > 8 * 1024 * 1024,
+      'credit flowed past the window while the unit was open',
+    );
+    const sb = media.sourceBuffer;
+    assert(sb !== null && sb.appends.length >= 2, 'the big unit appended');
+    void attach;
+  }
+
+  // A segment past the 64MiB cap is refused — the open unit is exempt
+  // from the credit window but not unbounded.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const mse = factories(media);
+    const attach = attachMseSource({
+      handle: 'h-4c1',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse,
+    });
+    await settle();
+    media.fireSourceopen();
+    const payload = 65 * 1024 * 1024;
+    const big = new Uint8Array(17 + 8 + payload);
+    big.set(webmFixture().subarray(0, 17), 0);
+    big.set([0x1f, 0x43, 0xb6, 0x75, 0x14, 0x01, 0x00, 0x00], 17);
+    feedData(port, big, 0, 0, 2 * 1024 * 1024);
+    await settle();
+    assert(port.closed, 'oversized segment killed the session');
+    assertDeepEqual(mse.revoked, ['blob:fake'], 'session revoked its url');
+    void attach;
+  }
+
+  // The seek estimate reads non-overlapping coverage: with merged
+  // ranges (Chromium coalesces adjacent appends into one TimeRange),
+  // each append journals only the media it added — crediting the whole
+  // merged range per append would double-count durations and push the
+  // estimate's byte too early.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4c2',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    sb.mergeAppends = true;
+    // Bytes 0..47 — two units, no Cues tail (a cue hit would route the
+    // seek before the estimate ever runs).
+    feedData(port, webmFixture().subarray(0, 48), 0);
+    const source = await (await attach).ready;
+    // Coverage: 29B→10s + 10B→10s = 39B/20s. An estimate at 40s must
+    // land 78; the double-counted journal (30s/39B) would land 52.
+    source.seekTo(40_000);
+    const seek = port.sent.find(
+      (m) => (m as { kind?: string }).kind === 'seek',
+    ) as { position: number } | undefined;
+    assert(seek !== undefined, 'estimated seek sent');
+    assertEqual(seek.position, 78, 'estimate from delta coverage');
   }
 
   // Post-attach failure reaches the player: a pump error frame after

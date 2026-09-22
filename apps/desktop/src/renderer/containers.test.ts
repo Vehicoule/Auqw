@@ -174,12 +174,39 @@ export function run(): void {
   }
 
   // carve: styp-headed fmp4 — each boundary anchors the styp that
-  // opens the segment, not the moof after it.
+  // opens the segment, not the moof after it. Segment-level boxes
+  // (sidx) may sit between styp and moof — the anchor persists.
   {
     const result = carve(stypFmp4Fixture());
     assert(result.kind === 'ok', 'styp fmp4 carves');
     if (result.kind !== 'ok') return;
     assertDeepEqual(result.boundaries, [21, 48], 'styp-anchored bounds');
+  }
+
+  // carve: styp + sidx + moof — the boundary still anchors the styp,
+  // or sidx would be absorbed into the previous fragment.
+  {
+    const fix = new Uint8Array([
+      ...mp4Box('ftyp', bytes(0x69, 0x73, 0x6f, 0x36)),
+      ...mp4Box('moov', bytes(0x00)),
+      ...mp4Box('styp', bytes()),
+      ...mp4Box('sidx', bytes(0x11, 0x22)),
+      ...mp4Box('moof', bytes(0x01)),
+      ...mp4Box('mdat', bytes(0x33)),
+      ...mp4Box('styp', bytes()),
+      ...mp4Box('sidx', bytes(0x44)),
+      ...mp4Box('moof', bytes(0x04)),
+      ...mp4Box('mdat', bytes(0x44)),
+    ]);
+    // ftyp 0..11, moov 12..20, styp 21..28, sidx 29..38, moof 39..47,
+    // mdat 48..56, styp 57..64, sidx 65..73, moof 74..81, mdat 82..
+    const result = carve(fix);
+    assert(result.kind === 'ok', 'sidx fmp4 carves');
+    if (result.kind !== 'ok') return;
+    assertDeepEqual(result.boundaries, [21, 57], 'styp anchors past sidx');
+    // boundaryScan steady-state must anchor the same way.
+    const mid = boundaryScan(fix.subarray(57), 'mp4', 0, 1);
+    assertDeepEqual(mid.boundaries, [0], 'mid-stream styp+sidx anchored');
   }
 
   // carve: plain mp4 is refused — the caller falls back to serve-url.

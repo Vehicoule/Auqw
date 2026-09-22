@@ -102,10 +102,41 @@ type JournalEntry = {
 type PendingUnit = { readonly byteStart: number; readonly bytes: Uint8Array };
 
 /**
+ * `[start, end)` minus the `before` coverage — the media interval an
+ * append actually added. `before` is sorted (TimeRanges are by
+ * construction); disjoint pieces come back in order.
+ */
+function uncovered(
+  start: number,
+  end: number,
+  before: ReadonlyArray<readonly [number, number]>,
+): Array<readonly [number, number]> {
+  const pieces: Array<readonly [number, number]> = [];
+  let cursor = start;
+  for (const [bs, be] of before) {
+    if (be <= cursor || bs >= end) {
+      continue;
+    }
+    if (bs > cursor) {
+      pieces.push([cursor, Math.min(bs, end)]);
+    }
+    cursor = Math.max(cursor, be);
+    if (cursor >= end) {
+      break;
+    }
+  }
+  if (cursor < end) {
+    pieces.push([cursor, end]);
+  }
+  return pieces;
+}
+
+/**
  * Outstanding-byte ceiling the renderer tops the pump's credit up to:
- * ingest (unemitted) + pending (emitted, unappended) bytes. Granting
- * only on append completion would stall an open unit bigger than the
- * window — its next boundary can't arrive without more bytes.
+ * pending (emitted, unappended) + in-flight granted bytes. The still-open
+ * unit in ingest is exempt — its terminating boundary is upstream, so
+ * counting it deadlocks any segment bigger than the window (it is
+ * bounded separately by MAX_UNIT_BYTES).
  */
 const HIGH_WATER_BYTES = 8 * 1024 * 1024;
 /** Buffered-media window kept across evictions (seconds). */
@@ -115,6 +146,11 @@ const KEEP_AHEAD_S = 300;
 const SNIFF_LIMIT = 4 * 1024 * 1024;
 /** Resync scan window after an estimated seek. */
 const RESYNC_LIMIT = 2 * 1024 * 1024;
+/** One media segment's byte cap — past this the unit can't complete and
+ * the stream is refused. The credit window excludes the open unit, so
+ * a segment up to this size still flows; anything larger is not a
+ * shape this path can append. (Matches resyncScan's moof sanity bound.) */
+const MAX_UNIT_BYTES = 64 * 1024 * 1024;
 
 export function attachMseSource(deps: {
   readonly handle: string;
@@ -213,11 +249,13 @@ function runSession(
     for (const unit of pending) {
       pendingBytes += unit.bytes.byteLength;
     }
+    // The ingest tail is the OPEN unit — its bytes can't release the
+    // window until its terminating boundary arrives upstream, so
+    // counting them deadlocks any segment bigger than the window. Only
+    // emitted (pending) and in-flight (credit) work counts; the open
+    // unit is bounded separately by MAX_UNIT_BYTES.
     const head =
-      HIGH_WATER_BYTES -
-      ingest.length -
-      pendingBytes -
-      outstandingCredit;
+      HIGH_WATER_BYTES - pendingBytes - outstandingCredit;
     if (head > 0) {
       outstandingCredit += head;
       port.send({ kind: 'grant', bytes: head });
@@ -347,20 +385,48 @@ function runSession(
       cues = scan.cues;
     }
     // Emit units: [cursor .. nextBoundary) for each boundary ahead of
-    // the cursor; the trailing open unit closes only at EOF.
+    // the cursor; the trailing open unit closes only at EOF. The cap
+    // applies to emitted units too — a segment that closes at 65MiB is
+    // just as unappendable as one still open at 64.
     for (const b of scan.boundaries) {
       const end = Math.min(b, ingest.length);
       if (ingestBase + b <= emitCursor) {
         continue;
       }
+      if (end - (emitCursor - ingestBase) > MAX_UNIT_BYTES) {
+        fail(
+          new MseUnsupported(
+            `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
+          ),
+        );
+        return;
+      }
       enqueue(emitCursor - ingestBase, end);
       emitCursor = ingestBase + end;
     }
     if (atEof && emitCursor - ingestBase < ingest.length) {
+      if (ingest.length - (emitCursor - ingestBase) > MAX_UNIT_BYTES) {
+        fail(
+          new MseUnsupported(
+            `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
+          ),
+        );
+        return;
+      }
       enqueue(emitCursor - ingestBase, ingest.length);
       emitCursor = ingestBase + ingest.length;
     }
     trimIngest();
+    // The still-open tail is exempt from the credit window but not
+    // unbounded — a segment past the cap is one this path can't append.
+    if (ingest.length > MAX_UNIT_BYTES) {
+      fail(
+        new MseUnsupported(
+          `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
+        ),
+      );
+      return;
+    }
     drain();
     // Consumed ingest frees window even mid-open-unit — without this a
     // segment bigger than the initial grant could never close (its next
@@ -384,6 +450,12 @@ function runSession(
   // unit is fresh pressure worth evicting for, not a retry loop.
   let retriedUnit: PendingUnit | null = null;
   const evictQueue: Array<readonly [number, number]> = [];
+  // `buffered` snapshot taken right before appendBuffer — the journal
+  // pairs a unit's bytes only with the media interval it ADDED. A
+  // merged range's earlier span belongs to the units that produced it;
+  // crediting the whole range double-counts durations and misplaces
+  // the bitrate estimate.
+  let preAppendRanges: Array<readonly [number, number]> = [];
 
   function startEviction(): void {
     const ranges = buffer?.buffered;
@@ -453,6 +525,11 @@ function runSession(
       return;
     }
     lastAppended = unit;
+    preAppendRanges = [];
+    const beforeRanges = buffer.buffered;
+    for (let i = 0; i < beforeRanges.length; i++) {
+      preAppendRanges.push([beforeRanges.start(i), beforeRanges.end(i)]);
+    }
     try {
       buffer.appendBuffer(unit.bytes);
     } catch (thrown) {
@@ -513,26 +590,27 @@ function runSession(
     const unit = lastAppended;
     if (unit !== null && buffer !== null) {
       const ranges = buffer.buffered;
-      // Pair the appended byte span with the media range it produced —
+      // Pair the appended byte span with the media it ADDED —
       // the byte↔time index for seeks, independent of container Cues.
       const duplicated = journal.some(
         (j) => j.byteStart === unit.byteStart,
       );
       if (!duplicated) {
         for (let i = 0; i < ranges.length; i++) {
-          const start = ranges.start(i);
-          const end = ranges.end(i);
-          const known = journal.some(
-            (j) => j.mediaStart === start * 1000 && j.mediaEnd === end * 1000,
-          );
-          if (!known) {
+          for (const [s, e] of uncovered(
+            ranges.start(i),
+            ranges.end(i),
+            preAppendRanges,
+          )) {
+            if (e - s < 0.001) {
+              continue; // sub-millisecond rounding dust
+            }
             journal.push({
               byteStart: unit.byteStart,
               byteEnd: unit.byteStart + unit.bytes.byteLength,
-              mediaStart: start * 1000,
-              mediaEnd: end * 1000,
+              mediaStart: s * 1000,
+              mediaEnd: e * 1000,
             });
-            break;
           }
         }
       }
@@ -609,14 +687,19 @@ function runSession(
     }
     if (byte === null) {
       // Bitrate estimate from journaled coverage, then boundary resync.
-      const journaledBytes = journal.reduce(
-        (acc, j) => acc + (j.byteEnd - j.byteStart),
-        0,
-      );
-      const journaledMs = journal.reduce(
-        (acc, j) => acc + (j.mediaEnd - j.mediaStart),
-        0,
-      );
+      // One unit can yield several media pieces (a delta split by a
+      // gap) — bytes count once per unit, media intervals are disjoint
+      // by construction.
+      const seenUnits = new Set<number>();
+      let journaledBytes = 0;
+      let journaledMs = 0;
+      for (const j of journal) {
+        if (!seenUnits.has(j.byteStart)) {
+          seenUnits.add(j.byteStart);
+          journaledBytes += j.byteEnd - j.byteStart;
+        }
+        journaledMs += j.mediaEnd - j.mediaStart;
+      }
       if (journaledBytes === 0 || journaledMs === 0) {
         return;
       }
