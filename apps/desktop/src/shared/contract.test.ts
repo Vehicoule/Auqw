@@ -204,4 +204,44 @@ export function run(): void {
     isJsonValue(docWithToJsonField),
     'a non-function toJSON field is inert',
   );
+  // Hooks inherited through the prototype chain rewrite the wire doc
+  // the same way — set on the shared protos and always restored.
+  const arrayToJson = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    'toJSON',
+  );
+  try {
+    Object.defineProperty(Array.prototype, 'toJSON', {
+      configurable: true,
+      value: () => ({ replaced: true }),
+    });
+    assert(!isJsonValue([1]), 'inherited Array toJSON rejected');
+  } finally {
+    if (arrayToJson === undefined) {
+      Reflect.deleteProperty(Array.prototype, 'toJSON');
+    } else {
+      Object.defineProperty(Array.prototype, 'toJSON', arrayToJson);
+    }
+  }
+  const objectToJson = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    'toJSON',
+  );
+  try {
+    Object.defineProperty(Object.prototype, 'toJSON', {
+      configurable: true,
+      value: () => ({ replaced: true }),
+    });
+    assert(!isJsonValue({ v: 1 }), 'inherited Object toJSON rejected');
+    assert(
+      isJsonValue({ toJSON: 0, v: 1 }),
+      'an inert own toJSON shadows the inherited hook',
+    );
+  } finally {
+    if (objectToJson === undefined) {
+      Reflect.deleteProperty(Object.prototype, 'toJSON');
+    } else {
+      Object.defineProperty(Object.prototype, 'toJSON', objectToJson);
+    }
+  }
 }

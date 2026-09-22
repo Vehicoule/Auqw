@@ -864,15 +864,29 @@ const MAX_JSON_DEPTH = 64;
  * validation never saw — reject a `toJSON` getter or function value.
  */
 function hasNoEnumerableGetter(value: object): boolean {
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const toJson = descriptors['toJSON'];
-  if (
-    toJson !== undefined &&
-    (toJson.get !== undefined ||
-      ('value' in toJson && typeof toJson.value === 'function'))
+  // `toJSON` is honored wherever it sits on the prototype chain —
+  // Object.prototype/Array.prototype are the allowed protos, and a
+  // hook placed there rewrites the wire doc just like an own prop.
+  // The FIRST descriptor wins the stringify lookup: an inert
+  // non-function value shadows anything deeper and stays legal.
+  for (
+    let level: object | null = value;
+    level !== null;
+    level = Object.getPrototypeOf(level)
   ) {
-    return false;
+    const hook = Object.getOwnPropertyDescriptor(level, 'toJSON');
+    if (hook === undefined) {
+      continue;
+    }
+    if (
+      hook.get !== undefined ||
+      ('value' in hook && typeof hook.value === 'function')
+    ) {
+      return false;
+    }
+    break;
   }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
   return Object.values(descriptors).every(
     (desc) => desc.enumerable !== true || desc.get === undefined,
   );
