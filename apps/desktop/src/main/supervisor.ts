@@ -10,7 +10,7 @@ import {
  * test fakes, so the supervision logic stays electron-free.
  */
 export interface UtilityChildLike {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: unknown[]): void;
   on(event: 'message', listener: (message: unknown) => void): void;
   on(event: 'spawn', listener: () => void): void;
   on(event: 'exit', listener: (code: number) => void): void;
@@ -33,6 +33,13 @@ export type SupervisorOptions = {
 
 export interface UtilitySupervisor {
   request(channel: string, args: unknown): Promise<unknown>;
+  /**
+   * A one-shot non-envelope message (pump attach) — sent only when a
+   * live child exists; unlike `request` it is never queued, since a
+   * transferred port cannot wait through a respawn. `false` = no live
+   * child, caller must retry or fail typed.
+   */
+  sendToHost(message: unknown, transfer?: unknown[]): boolean;
   /** Kill the child, drain every queued and in-flight request. */
   shutdown(): void;
   readonly running: boolean;
@@ -205,6 +212,17 @@ export function createSupervisor(
           ensureChild();
         }
       });
+    },
+    sendToHost(message, transfer) {
+      if (stopped || child === null || !spawned) {
+        return false;
+      }
+      try {
+        child.postMessage(message, transfer);
+        return true;
+      } catch {
+        return false;
+      }
     },
     shutdown() {
       stopped = true;

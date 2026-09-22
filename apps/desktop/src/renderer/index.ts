@@ -1,5 +1,6 @@
 import type { PlaybackIdentity, PlayerEvent } from '@auqw/application';
 import { createWebPlayerPort } from './web-player.ts';
+import type { MediaSourceLike } from './mse-source.ts';
 
 function field(term: string, value: string): void {
   const list = document.getElementById('status');
@@ -85,6 +86,20 @@ async function boot(): Promise<void> {
   const player = createWebPlayerPort({
     stream: window.auqw.stream,
     audio,
+    mse:
+      typeof MediaSource === 'function'
+        ? {
+            // The DOM types are wider than the portable interface
+            // (BufferSource vs Uint8Array) — narrow them here.
+            createSource: () =>
+              new MediaSource() as unknown as MediaSourceLike,
+            createObjectURL: (source: unknown) =>
+              URL.createObjectURL(source as MediaSource),
+            revokeObjectURL: (url: string) => URL.revokeObjectURL(url),
+            isTypeSupported: (mime: string) =>
+              MediaSource.isTypeSupported(mime),
+          }
+        : null,
     mediaSession:
       'mediaSession' in navigator
         ? (navigator.mediaSession as {
@@ -266,6 +281,7 @@ async function boot(): Promise<void> {
           }
           liveIdentity = { ...liveIdentity, attemptId: `boot-${gen}` };
           livePrepareId = `dev-${gen}`;
+          player.noteMime(stream.handle, stream.mime);
           preparedHandle = stream.handle;
           state = 'prepared';
           logEvent(`dev-prepared ${stream.handle} (${stream.mime})`);

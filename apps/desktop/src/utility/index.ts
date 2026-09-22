@@ -1,5 +1,7 @@
 import { shellError } from '../shared/errors.ts';
+import { isRecord } from '../shared/check.ts';
 import type { UtilityResponse } from './envelope.ts';
+import { createStreamPump, type PumpPort } from './bytes.ts';
 import { createHostRuntime } from './host.ts';
 import { createUtilityRouter } from './router.ts';
 import { createStorageService } from './storage.ts';
@@ -15,10 +17,27 @@ type ParentPort = {
   postMessage(message: unknown): void;
   on(
     event: 'message',
-    listener: (event: { data: unknown }) => void,
+    listener: (event: { data: unknown; ports?: unknown[] }) => void,
   ): void;
   start(): void;
 };
+
+/**
+ * `stream-pump` — the non-envelope message main posts when a renderer
+ * asked for a byte channel: `{kind, handle}` plus the transferred
+ * MessagePort in `event.ports`. Everything else is a typed request.
+ */
+function isStreamPumpAttach(
+  raw: unknown,
+): raw is { kind: 'stream-pump'; handle: string } {
+  return (
+    isRecord(raw) &&
+    raw['kind'] === 'stream-pump' &&
+    typeof raw['handle'] === 'string' &&
+    raw['handle'].length > 0 &&
+    raw['handle'].length <= 512
+  );
+}
 
 function parentPort(): ParentPort | null {
   const proc = process as unknown as { parentPort?: ParentPort };
@@ -55,6 +74,18 @@ if (port === null) {
   });
   port.on('message', (event) => {
     const raw: unknown = event.data;
+    if (isStreamPumpAttach(raw)) {
+      const transfer = event.ports?.[0];
+      if (transfer === undefined) {
+        return;
+      }
+      createStreamPump({
+        host: runtime.host,
+        handle: raw.handle,
+        port: transfer as PumpPort,
+      });
+      return;
+    }
     void respond(port, raw, route);
   });
   port.start();

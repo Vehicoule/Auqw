@@ -10,6 +10,7 @@ import type {
   StreamDevPrepareArgs,
   StreamHandleArgs,
   StreamOpenArgs,
+  StreamPortArgs,
   StreamPrepareArgs,
   StreamReadArgs,
   UtilityPingArgs,
@@ -30,6 +31,7 @@ import {
   isStreamDevPrepareArgs,
   isStreamHandleArgs,
   isStreamOpenArgs,
+  isStreamPortArgs,
   isStreamPrepareArgs,
   isStreamReadArgs,
   isUtilityPingArgs,
@@ -92,8 +94,23 @@ export interface ChannelDeps {
   readonly secure: SecureStore;
   readonly utility: {
     readonly request: (channel: string, args: unknown) => Promise<unknown>;
+    readonly sendToHost: (message: unknown, transfer?: unknown[]) => boolean;
   };
+  /** `MessageChannelMain` factory — injected so this module stays electron-free. */
+  readonly messageChannel: () => { port1: unknown; port2: unknown };
 }
+
+/**
+ * Port-delivery capable sender — a real WebContents posts the brokered
+ * pump port over `stream-bytes`; send-only senders can't take ports.
+ */
+type PortSender = NetSender & {
+  postMessage?(
+    channel: string,
+    payload: unknown,
+    transfer?: unknown[],
+  ): void;
+};
 
 type Handler = {
   readonly validate: (value: unknown) => boolean;
@@ -226,6 +243,59 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     channel(isStreamCancelArgs, (args: StreamCancelArgs, deps) =>
       deps.utility.request(CHANNELS.streamCancel, args),
     ),
+  ],
+  // The MSE byte path: broker a MessageChannel — one end rides to the
+  // utility's pump attach (with the transfer), the other to the
+  // renderer (posted on `stream-bytes`, correlated by requestId).
+  [
+    CHANNELS.streamPort,
+    channel(isStreamPortArgs, (args: StreamPortArgs, deps, sender) => {
+      const target = sender as PortSender;
+      if (target.postMessage === undefined) {
+        return Promise.reject(
+          shellError('unavailable', 'sender cannot receive ports'),
+        );
+      }
+      const { port1, port2 } = deps.messageChannel();
+      const attached = deps.utility.sendToHost(
+        { kind: 'stream-pump', handle: args.handle },
+        [port1],
+      );
+      if (!attached) {
+        for (const p of [port1, port2]) {
+          try {
+            (p as { close(): void }).close();
+          } catch {
+            // best effort
+          }
+        }
+        return Promise.reject(
+          shellError('unavailable', 'no live utility process'),
+        );
+      }
+      try {
+        target.postMessage(
+          CHANNELS.streamBytes,
+          { requestId: args.requestId, handle: args.handle },
+          [port2],
+        );
+      } catch {
+        // The renderer died mid-handshake — port1's pump is already
+        // attached on the utility side. port2 is still ours: closing
+        // it fires `close` on the transferred peer, which is the pump's
+        // own detach path. Without this the attach would sit open
+        // holding a stream slot for a receiver that never lands.
+        try {
+          (port2 as { close(): void }).close();
+        } catch {
+          // best effort
+        }
+        return Promise.reject(
+          shellError('unavailable', 'renderer port delivery failed'),
+        );
+      }
+      return Promise.resolve(undefined);
+    }),
   ],
   // Storage channels forward verbatim to the utility process — it
   // re-validates args against the same contract before touching the db.
