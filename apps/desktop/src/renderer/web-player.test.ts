@@ -1222,6 +1222,38 @@ export async function run(): Promise<void> {
     assert((await playing).ok, 'aborted play resolves quietly');
   }
 
+  // A new prepare supersedes the in-flight play op — the opGen bump
+  // already kills its generation; its pending attach must die with
+  // it or a stalled stream keeps its pump lease forever.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    // Attach registered, settle pending — the next prepare kills it.
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:8',
+      identity,
+    });
+    assert(port.closed, 'prepare aborted the pending attach');
+    assert((await playing).ok, 'aborted play resolves quietly');
+  }
+
   // A resume position (or a seek issued while the attach was in
   // flight) must reach the MSE source after install — the pump always
   // opens at byte 0, so without the handoff the element waits on the

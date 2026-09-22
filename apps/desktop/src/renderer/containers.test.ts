@@ -82,6 +82,24 @@ function webmLiveFixture(): Uint8Array {
   return new Uint8Array([...head, ...openSegment, ...openCluster, ...cluster2]);
 }
 
+/** Open-ended cluster whose payload embeds a magic-looking byte run:
+ * `1f 43 b6 75 85 00 ...` — cluster id + parseable vint, but the byte
+ * after the vint (0x00) can't start an element id, so a header-shaped
+ * check must reject it while the real sibling still resyncs. */
+function webmPoisonedLiveFixture(): Uint8Array {
+  const head = ebmlEl(EBML_ID, [0x42, 0x82, 0x84, 0x77]);
+  const openSegment = [...SEGMENT, 0xff];
+  const openCluster = [
+    ...CLUSTER,
+    0xff,
+    ...bytes(0xe7, 0x81, 0x00, 0xdd),
+    // the poisoned run — magic + valid vint + invalid element id
+    ...bytes(0x1f, 0x43, 0xb6, 0x75, 0x85, 0x00, 0x99, 0x88),
+  ];
+  const cluster2 = ebmlEl(CLUSTER, bytes(0xe7, 0x81, 0x05));
+  return new Uint8Array([...head, ...openSegment, ...openCluster, ...cluster2]);
+}
+
 function mp4Box(type: string, payload: number[]): number[] {
   return [
     ((8 + payload.length) >>> 24) & 0xff,
@@ -162,6 +180,26 @@ export function run(): void {
     assert(result.kind === 'ok', 'live webm carves');
     if (result.kind !== 'ok') return;
     assertDeepEqual(result.boundaries, [14, 23]);
+  }
+
+  // carve: a magic-looking run inside an open-ended element's payload
+  // is NOT a boundary — isClusterAt requires an element id after the
+  // size vint, which the embedded run's 0x00 fails.
+  {
+    const result = carve(webmPoisonedLiveFixture());
+    assert(result.kind === 'ok', 'poisoned live webm carves');
+    if (result.kind !== 'ok') return;
+    // open cluster at 14; poisoned run at 23 (skipped); real sibling 31.
+    assertDeepEqual(result.boundaries, [14, 31], 'payload magic skipped');
+  }
+
+  // resyncScan: the same poisoned run mid-buffer is skipped while the
+  // real cluster header still anchors.
+  {
+    const fix = webmPoisonedLiveFixture();
+    // start inside the open cluster's payload → poisoned run at off 5.
+    const off = resyncScan(fix.subarray(18), 'webm');
+    assertEqual(off, 13, 'resync lands on the real cluster');
   }
 
   // carve: fmp4 boundaries land on each moof.

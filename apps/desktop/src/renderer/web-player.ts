@@ -804,6 +804,11 @@ export function createWebPlayerPort(deps: {
       // as a `prepare` event, so a session-side deadline can reach
       // `cancelPrepare` while the utility is still resolving.
       opGen++;
+      // The bump already kills every in-flight playback op's
+      // generation — kill their in-flight attaches too, or a stalled
+      // stream keeps its pump lease for a settle that will never be
+      // accepted.
+      abortPendingAttaches();
       void stream
         .prepare({
           pluginId: input.provider,

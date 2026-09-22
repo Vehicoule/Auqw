@@ -208,6 +208,24 @@ function parseCues(
 }
 
 /**
+ * Cluster-id signature check used by every raw scan. Encoded media
+ * payload can legitimately contain the four magic bytes (unknown-size
+ * masters store arbitrary bytes), so a candidate must also parse as an
+ * element header: a valid size vint AND a parseable element id right
+ * after it (a real Cluster's first child — Timecode, SimpleBlock, ...).
+ */
+function isClusterAt(buf: Uint8Array, off: number): boolean {
+  if (u32be(buf, off) !== WEBM_CLUSTER) {
+    return false;
+  }
+  const size = readVint(buf, off + 4);
+  if (size === null) {
+    return false;
+  }
+  return readElementId(buf, off + 4 + size.length) !== null;
+}
+
+/**
  * Top-level EBML walk inside the Segment: each element is
  * `id(vint) + size(vint) + payload`. A Cluster's start offsets are
  * media-segment boundaries; a Cues element is parsed for the seek index.
@@ -289,14 +307,11 @@ function webmWalk(buf: Uint8Array): WebmWalk | null {
     if (size.unknown) {
       // An open-ended element runs to its parent's end — a Cluster's
       // terminator is the next sibling Cluster. Rescan forward for the
-      // next cluster id that parses as a well-formed element header.
+      // next header-shaped cluster signature.
       let scan = dataStart;
       let found = -1;
       while (scan + 4 <= buf.length) {
-        if (
-          u32be(buf, scan) === WEBM_CLUSTER &&
-          readVint(buf, scan + 4) !== null
-        ) {
+        if (isClusterAt(buf, scan)) {
           found = scan;
           break;
         }
@@ -462,10 +477,7 @@ export function boundaryScan(
         let scan = dataStart;
         let found = -1;
         while (scan + 4 <= buf.length) {
-          if (
-            u32be(buf, scan) === WEBM_CLUSTER &&
-            readVint(buf, scan + 4) !== null
-          ) {
+          if (isClusterAt(buf, scan)) {
             found = scan;
             break;
           }
@@ -509,10 +521,7 @@ export function resyncScan(
 ): number {
   if (container === 'webm') {
     for (let i = 0; i + 4 <= buf.length; i++) {
-      if (
-        u32be(buf, i) === WEBM_CLUSTER &&
-        readVint(buf, i + 4) !== null
-      ) {
+      if (isClusterAt(buf, i)) {
         return i;
       }
     }
