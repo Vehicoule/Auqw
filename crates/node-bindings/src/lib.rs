@@ -55,17 +55,22 @@ pub struct HostConfig {
     pub auth_token: Option<String>,
 }
 
-impl From<HostConfig> for surface::HostConfig {
-    fn from(c: HostConfig) -> Self {
-        Self {
-            fuel_per_entry: c.fuel_per_entry as u64,
-            fuel_total: c.fuel_total as u64,
+impl TryFrom<HostConfig> for surface::HostConfig {
+    type Error = Error;
+
+    fn try_from(c: HostConfig) -> Result<Self> {
+        Ok(Self {
+            // Fuel of zero starves every guest entry — a budget is
+            // meaningful only when positive, and a JS number must be
+            // a safe integer before it can be a u64.
+            fuel_per_entry: u64_field(c.fuel_per_entry, "fuelPerEntry", 1)?,
+            fuel_total: u64_field(c.fuel_total, "fuelTotal", 1)?,
             pot_provider_url: c.pot_provider_url,
             state_path: c.state_path,
             stream_path: c.stream_path,
             prefer: c.prefer,
             auth_token: c.auth_token,
-        }
+        })
     }
 }
 
@@ -458,12 +463,98 @@ impl From<surface::StreamPhaseMarks> for StreamPhaseMarks {
     }
 }
 
+/// Machine-readable boundary rejection. napi's `Status` is a fixed
+/// enum — the taxonomy slug and the variant's fields can't ride in
+/// `code`, so they go in `cause`: `err.cause` is a nested `Error`
+/// whose `message` is the JSON `{"code": slug, ...fields}`. Callers
+/// that need to distinguish failure kinds read it instead of parsing
+/// prose; `err.code` stays the napi status (`InvalidArg` for boundary
+/// validation, `GenericFailure` otherwise) and `err.message` the
+/// human-readable detail.
+fn typed_err(code: &str, reason: String, fields: serde_json::Value) -> Error {
+    let mut payload = match fields {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    payload.insert("code".to_string(), serde_json::json!(code));
+    let mut e = Error::new(Status::GenericFailure, reason);
+    e.set_cause(Error::new(
+        Status::GenericFailure,
+        serde_json::Value::Object(payload).to_string(),
+    ));
+    e
+}
+
+/// Rejection for a number that can't be the field's u64 — non-finite,
+/// fractional, negative, or past the JS safe-integer bound (which is
+/// stricter than `u64::MAX`, so it covers both).
+fn invalid_arg(field: &str, detail: String) -> Error {
+    let mut e = typed_err(
+        "invalid-argument",
+        format!("{field}: {detail}"),
+        serde_json::json!({"field": field, "detail": detail}),
+    );
+    e.status = Status::InvalidArg;
+    e
+}
+
+/// Validate a JS number as an integer in `[min, 2^53-1]` before the
+/// u64 cast — `as` saturates `NaN`/negatives to 0 and truncates
+/// fractions, which would silently masquerade as EOF, offset zero,
+/// or a zero budget.
+fn u64_field(value: f64, field: &str, min: u64) -> Result<u64> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value < min as f64
+        || value > 9_007_199_254_740_991.0
+    {
+        return Err(invalid_arg(
+            field,
+            format!("expected an integer in [{min}, 2^53-1], got {value}"),
+        ));
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    Ok(value as u64)
+}
+
 fn host_err(e: surface::HostError) -> Error {
-    Error::from_reason(e.to_string())
+    match e {
+        surface::HostError::Load { detail } => typed_err(
+            "load",
+            format!("plugin load failed: {detail}"),
+            serde_json::json!({"detail": detail}),
+        ),
+        surface::HostError::UnknownPlugin { id } => typed_err(
+            "unknown-plugin",
+            format!("unknown plugin {id}"),
+            serde_json::json!({"id": id}),
+        ),
+        surface::HostError::RequestInFlight { id } => typed_err(
+            "request-in-flight",
+            format!("request id {id} still in flight"),
+            serde_json::json!({"id": id}),
+        ),
+        surface::HostError::Runtime { detail } => typed_err(
+            "runtime",
+            format!("host runtime: {detail}"),
+            serde_json::json!({"detail": detail}),
+        ),
+    }
 }
 
 fn stream_err(e: surface::StreamError) -> Error {
-    Error::from_reason(e.to_string())
+    match e {
+        surface::StreamError::Unavailable => typed_err(
+            "unavailable",
+            e.to_string(),
+            serde_json::json!({"detail": e.to_string()}),
+        ),
+        surface::StreamError::Failed { kind, detail } => typed_err(
+            &kind,
+            format!("{kind}: {detail}"),
+            serde_json::json!({"kind": kind, "detail": detail}),
+        ),
+    }
 }
 
 /// Await one outcome delivered through a oneshot: `spawn` registers
@@ -502,7 +593,7 @@ impl JsPluginHost {
     /// Create a host with a two-worker tokio runtime.
     #[napi(constructor)]
     pub fn new(config: HostConfig) -> Result<Self> {
-        let inner = surface::PluginHost::new(config.into()).map_err(host_err)?;
+        let inner = surface::PluginHost::new(config.try_into()?).map_err(host_err)?;
         Ok(Self {
             inner: Arc::new(inner),
             counter: AtomicU64::new(0),
@@ -640,7 +731,7 @@ impl JsPluginHost {
     #[napi(js_name = "streamOpen")]
     pub fn stream_open(&self, handle: String, position: f64) -> Result<Option<f64>> {
         self.inner
-            .stream_open(handle, position as u64)
+            .stream_open(handle, u64_field(position, "position", 0)?)
             .map(|v| v.map(|n| n as f64))
             .map_err(stream_err)
     }
@@ -651,10 +742,14 @@ impl JsPluginHost {
     /// reject with their typed error.
     #[napi(js_name = "streamRead")]
     pub async fn stream_read(&self, handle: String, position: f64, max_len: f64) -> Result<Buffer> {
+        // Validation stays on the caller's thread — a bad `max_len`
+        // must reject as `invalid-argument`, never masquerade as EOF.
+        let position = u64_field(position, "position", 0)?;
+        let max_len = u64_field(max_len, "maxLen", 1)?;
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             inner
-                .stream_read(handle, position as u64, max_len as u64)
+                .stream_read(handle, position, max_len)
                 .map(Buffer::from)
                 .map_err(stream_err)
         })
@@ -702,7 +797,14 @@ impl JsPluginHost {
         remintable: bool,
     ) -> Result<PreparedStream> {
         self.inner
-            .dev_prepare_url(url, mime, content_length.map(|v| v as u64), remintable)
+            .dev_prepare_url(
+                url,
+                mime,
+                content_length
+                    .map(|v| u64_field(v, "contentLength", 1))
+                    .transpose()?,
+                remintable,
+            )
             .map(PreparedStream::from)
             .map_err(stream_err)
     }

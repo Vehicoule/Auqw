@@ -3,21 +3,20 @@
 // surface (typed rejections, tagged outcomes, id echo, id reuse).
 //
 //   cargo build -p auqw-node-bindings
-//   cp target/debug/libauqw_node_bindings.so /tmp/auqw_node_bindings.node
 //   node crates/node-bindings/test/smoke.mjs
 //
-// Run from the repo root. Uses the debug artifact — CI/release
-// packaging is the desktop app's concern (slice 4 phase 1b).
+// Run from the repo root. The debug artifact is copied to a fresh
+// location on every run so a stale binary can never pass for a
+// broken build. CI/release packaging is the desktop app's concern
+// (slice 4 phase 1b).
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, readFileSync } from 'node:fs';
+import { copyFileSync, readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
 const SO = 'target/debug/libauqw_node_bindings.so';
-const NODE = '/tmp/auqw_node_bindings.node';
-if (!existsSync(NODE) || process.env.REBUILD === '1') {
-  copyFileSync(SO, NODE);
-}
+const NODE = `/tmp/auqw_node_bindings-${process.pid}.node`;
+copyFileSync(SO, NODE);
 const host_ = await import(NODE);
 const bindings = host_.default ?? host_;
 
@@ -34,6 +33,11 @@ const manifest = JSON.stringify({
 
 const host = new bindings.PluginHost({ fuelPerEntry: 200e6, fuelTotal: 2e9 });
 
+// Every rejection carries a machine-readable `cause`: a nested Error
+// whose message is JSON `{"code": slug, ...fields}` — napi's fixed
+// Status set can't express the taxonomy, so the slug rides the cause.
+const codeOf = (err) => JSON.parse(err.cause?.message ?? '{}').code;
+
 assert.equal(host.mintRequestId(), 'req-0');
 assert.equal(host.mintRequestId(), 'req-1');
 
@@ -48,13 +52,45 @@ assert.equal(outcome.type, 'failed');
 assert.equal(outcome.kind, 'invalid-response');
 assert.equal(outcome.attempt.requestId, rid);
 
-// Synchronous rejections still throw: unknown plugin, seam absent.
-await assert.rejects(host.startResolve('nope', 'x', host.mintRequestId()), /unknown plugin nope/);
-assert.throws(() => host.streamOpen('st-0', 0), /stream seam unavailable/);
-await assert.rejects(host.streamRead('st-0', 0, 64), /stream seam unavailable/);
+// Synchronous rejections still throw with a machine-readable code:
+// unknown plugin, seam absent, invalid arguments.
+await assert.rejects(host.startResolve('nope', 'x', host.mintRequestId()), (err) => {
+  assert.equal(codeOf(err), 'unknown-plugin');
+  return true;
+});
+assert.throws(() => host.streamOpen('st-0', 0), (err) => {
+  assert.equal(codeOf(err), 'unavailable');
+  return true;
+});
+await assert.rejects(host.streamRead('st-0', 0, 64), (err) => {
+  assert.equal(codeOf(err), 'unavailable');
+  return true;
+});
+
+// Boundary validation: a negative read length must reject as
+// `invalid-argument` (err.code = InvalidArg), never masquerade as EOF.
+await assert.rejects(host.streamRead('st-0', 0, -1), (err) => {
+  assert.equal(codeOf(err), 'invalid-argument');
+  assert.equal(err.code, 'InvalidArg');
+  return true;
+});
+assert.throws(() => host.streamOpen('st-0', Number.NaN), (err) => {
+  assert.equal(codeOf(err), 'invalid-argument');
+  return true;
+});
+
+// Invalid budgets fail construction — a zero or NaN fuel grant would
+// silently starve every guest entry as budget-exceeded.
+assert.throws(() => new bindings.PluginHost({ fuelPerEntry: Number.NaN, fuelTotal: 2e9 }), (err) => {
+  assert.equal(codeOf(err), 'invalid-argument');
+  return true;
+});
 
 // An id is reusable once its request has settled.
-await assert.rejects(host.startResolve('nope', 'x', rid), /unknown plugin nope/);
+await assert.rejects(host.startResolve('nope', 'x', rid), (err) => {
+  assert.equal(codeOf(err), 'unknown-plugin');
+  return true;
+});
 
 // A second in-flight call with the same id is rejected with the
 // typed in-flight error (caller-minted ids must be unique while live).
@@ -71,7 +107,10 @@ const spinManifest = JSON.stringify({
 host.loadPlugin(spin, spinManifest);
 const dupRid = host.mintRequestId();
 const first = host.startResolve('spin', 'x', dupRid);
-await assert.rejects(host.startResolve('spin', 'x', dupRid), /still in flight/);
+await assert.rejects(host.startResolve('spin', 'x', dupRid), (err) => {
+  assert.equal(codeOf(err), 'request-in-flight');
+  return true;
+});
 host.cancel(dupRid);
 await first;
 
