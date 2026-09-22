@@ -124,6 +124,7 @@ function openJson(codec: SessionCodec, frame: Buffer): unknown {
 
 type PairingPayload = {
   endpoint: string;
+  endpoints: string[];
   code: string;
   fp: string;
   expiresAt: number;
@@ -155,6 +156,9 @@ async function pairingCode(service: SyncService): Promise<PairingPayload> {
   assert(isRecord(payload));
   return {
     endpoint: String(payload['endpoint']),
+    endpoints: Array.isArray(payload['endpoints'])
+      ? (payload['endpoints'] as unknown[]).map(String)
+      : [],
     code: String(result['code']),
     fp: String(payload['fp']),
     expiresAt: Number(result['expiresAt']),
@@ -262,6 +266,11 @@ export async function run(): Promise<void> {
     try {
       const pairing = await pairingCode(service);
       assertEqual(pairing.endpoint, `127.0.0.1:${port}`);
+      assertDeepEqual(
+        pairing.endpoints,
+        [`127.0.0.1:${port}`],
+        'pairing payload ships every LAN candidate',
+      );
       assert(/^[0-9]{6}$/.test(pairing.code));
       const { client, codec } = await pairPhone({
         port,
@@ -1059,6 +1068,63 @@ export async function run(): Promise<void> {
       const { client } = await pairPhone({
         port,
         deviceId: 'phone-afterlock',
+        code: pairing2.code,
+        fp: pairing2.fp,
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Shared ceiling: misses can't scale with source addresses ——
+  // Loopback can't alias IPs, so the per-IP budget (10) stays far
+  // away: locking at the 3rd attempt proves the shared counter.
+  {
+    const { service, port } = await startService({
+      maxCodeAttempts: 10,
+      maxTotalCodeAttempts: 3,
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const wrong = pairing.code === '000000' ? '000001' : '000000';
+      for (let i = 0; i < 3; i += 1) {
+        const c = await dial(port);
+        const p = createTestPeer({
+          deviceId: `phone-spray${i}`,
+          name: 'spray',
+        });
+        const { codec } = await phoneHandshake(c, p, pairing.fp);
+        c.send(sealJson(codec, { t: 'pair', code: wrong }));
+        const reply = (await openJson(codec, await c.recv())) as {
+          reason?: string;
+        };
+        assertEqual(
+          reply.reason,
+          i < 2 ? 'bad-code' : 'pairing-attempts',
+          `attempt ${i} reason`,
+        );
+        c.close();
+      }
+      // The shared budget also gates a fresh source — the pending
+      // code can't be pried further from any address.
+      const c = await dial(port);
+      const p = createTestPeer({
+        deviceId: 'phone-after-cap',
+        name: 'aftercap',
+      });
+      const { codec } = await phoneHandshake(c, p, pairing.fp);
+      c.send(sealJson(codec, { t: 'pair', code: pairing.code }));
+      assertDeepEqual(await openJson(codec, await c.recv()), {
+        t: 'reject',
+        reason: 'pairing-attempts',
+      });
+      await c.closed;
+      // A fresh mint restores the window — the code space re-opens.
+      const pairing2 = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'phone-recap',
         code: pairing2.code,
         fp: pairing2.fp,
       });

@@ -122,6 +122,12 @@ export type SyncServiceDeps = {
   readonly idleMs?: number;
   readonly codeTtlMs?: number;
   readonly maxCodeAttempts?: number;
+  /**
+   * Shared miss ceiling per pending code — bounds total brute-force
+   * space regardless of how many source addresses an attacker can
+   * alias. Defaults to 3× `maxCodeAttempts`.
+   */
+  readonly maxTotalCodeAttempts?: number;
 };
 
 export interface SyncService {
@@ -289,23 +295,35 @@ function isPrivateLanIp(ip: string): boolean {
   );
 }
 
-function pickLanIpv4(): string | null {
-  let fallback: string | null = null;
+/**
+ * Every non-internal IPv4 a phone could reach — private LAN first,
+ * deduped. A multi-homed host can carry VPN/tunnel/public addresses
+ * the phone can't reach: advertising only the first candidate would
+ * publish an endpoint that never answers, so the pairing payload
+ * ships the whole list and lets the client pick whichever responds.
+ */
+function lanIpv4s(): string[] {
+  const privateIps: string[] = [];
+  const otherIps: string[] = [];
+  const seen = new Set<string>();
   for (const list of Object.values(networkInterfaces())) {
     for (const iface of list ?? []) {
-      if (iface.family !== 'IPv4' || iface.internal) {
+      if (
+        iface.family !== 'IPv4' ||
+        iface.internal ||
+        seen.has(iface.address)
+      ) {
         continue;
       }
-      // Prefer a private LAN address — a VPN/tunnel/public interface
-      // may be unreachable for the phone; keep it as fallback anyway
-      // (a reachable non-LAN setup is better than an honest null).
+      seen.add(iface.address);
       if (isPrivateLanIp(iface.address)) {
-        return iface.address;
+        privateIps.push(iface.address);
+      } else {
+        otherIps.push(iface.address);
       }
-      fallback ??= iface.address;
     }
   }
-  return fallback;
+  return [...privateIps, ...otherIps];
 }
 
 /** '::ffff:a.b.c.d' is the same peer as 'a.b.c.d' — fold before keying. */
@@ -332,12 +350,16 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     nowMs,
     ttlMs: deps.codeTtlMs ?? 90_000,
   });
-  // Wrong-code budget per remote address: an attacking peer exhausts
-  // its own guesses while the pending code stays valid for every other
-  // address — the legit phone's window can't be DoS'd away. Cleared on
-  // each fresh mint and on successful pairing.
+  // Wrong-code budget, two layers: per remote address (an attacker
+  // exhausts only its own guesses — the legit phone's window can't be
+  // DoS'd away) and one shared ceiling per pending code (address
+  // aliases can't split the attacker's budget into unbounded total
+  // tries). Both cleared on each fresh mint; per-IP also on success.
   const maxCodeAttempts = deps.maxCodeAttempts ?? 5;
+  const maxTotalCodeAttempts =
+    deps.maxTotalCodeAttempts ?? maxCodeAttempts * 3;
   const badAttempts = new Map<string, number>();
+  let totalBadAttempts = 0;
   // The pair path's peek → put → consume is one logical transaction:
   // serialized here so a losing session sees the consumed code at
   // peek — never writes its key into the registry at all. (Custody
@@ -373,16 +395,25 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     resolveReady = resolve;
   });
 
-  function endpoint(): string | null {
+  /**
+   * Every `ip:port` a phone could try, best first — `endpoint()`
+   * stays the canonical primary for status display, the pairing
+   * payload carries the full list.
+   */
+  function endpoints(): string[] {
     if (boundPort === null) {
-      return null;
+      return [];
     }
-    const ip = deps.endpointHost ?? pickLanIpv4();
-    if (ip === null) {
-      return null;
-    }
-    const formatted = ip.includes(':') ? `[${ip}]` : ip;
-    return `${formatted}:${boundPort}`;
+    const hosts =
+      deps.endpointHost !== undefined ? [deps.endpointHost] : lanIpv4s();
+    return hosts.map((ip) => {
+      const formatted = ip.includes(':') ? `[${ip}]` : ip;
+      return `${formatted}:${boundPort}`;
+    });
+  }
+
+  function endpoint(): string | null {
+    return endpoints()[0] ?? null;
   }
 
   // Propagates custody failures — a dead registry is NOT an empty
@@ -525,18 +556,22 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         // A peer that already blew its code budget never reaches the
         // checker — a correct guess after the cap can't quietly pair.
         const misses = badAttempts.get(session.remoteIp) ?? 0;
-        if (misses >= maxCodeAttempts) {
+        if (
+          misses >= maxCodeAttempts ||
+          totalBadAttempts >= maxTotalCodeAttempts
+        ) {
           return { ok: false, reason: 'pairing-attempts' };
         }
         const check = pairing.peek(msg.code);
         if (check === 'bad-code') {
           badAttempts.set(session.remoteIp, misses + 1);
+          totalBadAttempts += 1;
+          const locked =
+            misses + 1 >= maxCodeAttempts ||
+            totalBadAttempts >= maxTotalCodeAttempts;
           return {
             ok: false,
-            reason:
-              misses + 1 >= maxCodeAttempts
-                ? 'pairing-attempts'
-                : 'bad-code',
+            reason: locked ? 'pairing-attempts' : 'bad-code',
           };
         }
         if (check !== 'ok') {
@@ -997,9 +1032,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
       const { code, expiresAt } = pairing.mint();
       badAttempts.clear(); // a fresh code means a fresh budget
+      totalBadAttempts = 0;
       const payload = JSON.stringify({
         v: 1,
         endpoint: ep,
+        // All LAN candidates, best first — a multi-homed host's
+        // unreachable first interface can't strand the phone.
+        endpoints: endpoints(),
         code,
         fp: fingerprint,
       });
