@@ -27,6 +27,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -115,9 +116,23 @@ mkdirSync(OUT, { recursive: true });
 // copy, and mkdtemp-named so a reused PID can never resurrect a killed
 // run's leftovers into the live set. The exit hook cleans the live
 // stage on every path — a failed sync leaves the previous set
-// byte-identical. A SIGKILLed run's stage is left behind: it is hidden,
-// gitignored, and never read by a later run (no sweep — it could not
-// tell an abandoned dir from a concurrent invocation's live one).
+// byte-identical. SIGKILLed stages are reclaimed by age, not blindly:
+// a live stage is seconds old, so only residue far past any plausible
+// sync duration is removed — a concurrent invocation's stage is safe.
+const STAGE_STALE_MS = 60 * 60 * 1000;
+for (const entry of readdirSync(dirname(OUT))) {
+  if (!entry.startsWith('.sync-stage-')) continue;
+  try {
+    const stale =
+      Date.now() - statSync(join(dirname(OUT), entry)).mtimeMs >
+      STAGE_STALE_MS;
+    if (stale) {
+      rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
+    }
+  } catch {
+    // vanished mid-loop — nothing to reclaim
+  }
+}
 const STAGE = mkdtempSync(join(dirname(OUT), '.sync-stage-'));
 process.on('exit', () => {
   rmSync(STAGE, { recursive: true, force: true });
