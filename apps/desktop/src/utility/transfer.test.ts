@@ -202,6 +202,15 @@ export async function run(): Promise<void> {
       !escaped.ok && escaped.error?.kind === 'invalid-request',
       'path escape refused',
     );
+    // The internal `.replace` namespace can't be claimed publicly.
+    const reserved = await call(CHANNELS.transferBegin, {
+      destPath: 'song.replace',
+      resumeAtBytes: 0,
+    });
+    assert(
+      !reserved.ok && reserved.error?.kind === 'invalid-request',
+      'reserved backup suffix refused',
+    );
 
     // Unknown sink ids are typed, not raw.
     const unknown = await call(CHANNELS.transferCommit, {
@@ -359,12 +368,35 @@ export async function run(): Promise<void> {
       mediaDir: media2,
       database: () => db,
     });
+    // `.replace` recovery: a backup with no live destination is the
+    // parked incumbent of a crashed publish — restore it. One beside
+    // a live destination is the stale half of a landed publish —
+    // delete it.
+    await writeFile(join(media2, 'crashed.mp4.replace'), 'old bytes');
+    await writeFile(join(media2, 'stale.mp4'), 'new bytes');
+    await writeFile(join(media2, 'stale.mp4.replace'), 'old bytes');
     const swept = await sweeping.sweepOrphans();
     assertEqual(swept, 1, 'only the unclaimed stale partial reaped');
     const keptRow = await readFile(
       join(media2, 'keep.mp4.part'),
     ).catch(() => null);
     assert(keptRow !== null, 'resumable ledger row kept its partial');
+    const restored = await readFile(join(media2, 'crashed.mp4'));
+    assertEqual(
+      restored.toString(),
+      'old bytes',
+      'parked incumbent restored after a crashed publish',
+    );
+    const restoredBackup = await readFile(
+      join(media2, 'crashed.mp4.replace'),
+    ).catch(() => null);
+    assert(restoredBackup === null, 'restored backup is gone');
+    const staleBackup = await readFile(
+      join(media2, 'stale.mp4.replace'),
+    ).catch(() => null);
+    assert(staleBackup === null, 'stale backup reaped');
+    const landedDest = await readFile(join(media2, 'stale.mp4'));
+    assertEqual(landedDest.toString(), 'new bytes', 'live dest kept');
     sweeping.close();
     db.close();
   } finally {

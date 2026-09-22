@@ -93,6 +93,9 @@ const DEFAULT_MAX_SINKS = 4;
 const DEFAULT_MAX_WAITERS = 32;
 const PART_SUFFIX = '.part';
 const RECONCILE_SUFFIX = '.reconcile.part';
+/** Reserved finalize-internal namespace: the parked incumbent of an
+ * in-flight destination replace. */
+const REPLACE_SUFFIX = '.replace';
 const CHUNK = 1024 * 1024;
 /** Orphans must be older than this to sweep — a just-minted `.part` is not an orphan. */
 const ORPHAN_MIN_AGE_MS = 60_000;
@@ -112,6 +115,7 @@ export function isBareName(name: string): boolean {
     !name.includes('\0') &&
     !name.endsWith(PART_SUFFIX) &&
     !name.endsWith('.reconcile') &&
+    !name.endsWith(REPLACE_SUFFIX) &&
     name !== '.' &&
     name !== '..'
   );
@@ -390,20 +394,33 @@ export function createTransferService(
         await rename(sink.partAbs, sink.destAbs);
       } catch {
         // POSIX rename overwrites; Windows refuses to replace an
-        // existing destination. Park the incumbent under a same-dir
-        // backup name, publish the partial, and restore the backup
-        // if the publish fails — the completed file is never
-        // deleted before its replacement is in place.
-        const backupAbs = join(dir(), `${sink.destPath}.replace`);
-        await rm(backupAbs, { force: true });
-        await rename(sink.destAbs, backupAbs);
-        try {
+        // existing destination. Park the incumbent under the reserved
+        // `.replace` name, publish the partial, then drop the backup;
+        // a failed publish restores it, so a completed download is
+        // never deleted before its replacement lands. The suffix is
+        // refused by `isBareName`, so no public destination can
+        // collide with it.
+        const backupAbs = join(dir(), `${sink.destPath}${REPLACE_SUFFIX}`);
+        const incumbent = await stat(sink.destAbs).catch(() => null);
+        if (incumbent === null) {
+          // No live destination — a stranded backup is whatever a
+          // crashed publish parked, and the verified `.part` outranks
+          // it. Publish directly; no incumbent needs preserving.
+          await rm(backupAbs, { force: true });
           await rename(sink.partAbs, sink.destAbs);
-        } catch (thrown) {
-          await rename(backupAbs, sink.destAbs).catch(() => undefined);
-          asIo('transfer finalize rename failed', thrown);
+        } else {
+          // A leftover backup beside a live destination can only be
+          // the stale half of a crashed publish — drop it, then swap.
+          await rm(backupAbs, { force: true });
+          await rename(sink.destAbs, backupAbs);
+          try {
+            await rename(sink.partAbs, sink.destAbs);
+          } catch (thrown) {
+            await rename(backupAbs, sink.destAbs).catch(() => undefined);
+            asIo('transfer finalize rename failed', thrown);
+          }
+          await rm(backupAbs, { force: true });
         }
-        await rm(backupAbs, { force: true });
       }
       return { digest };
     } finally {
@@ -546,6 +563,27 @@ export function createTransferService(
     } catch {
       return 0;
     }
+    // Resolve `.replace` backups before any publish work this boot:
+    // a live destination means the crashed publish landed and the
+    // backup is stale; a missing one means the incumbent was parked
+    // and never restored — put it back.
+    for (const name of entries) {
+      if (!name.endsWith(REPLACE_SUFFIX)) {
+        continue;
+      }
+      const backupAbs = join(dir(), name);
+      const baseAbs = join(dir(), name.slice(0, -REPLACE_SUFFIX.length));
+      try {
+        const base = await stat(baseAbs).catch(() => null);
+        if (base === null) {
+          await rename(backupAbs, baseAbs);
+        } else {
+          await rm(backupAbs, { force: true });
+        }
+      } catch {
+        // Best-effort — a stuck backup is retried next boot.
+      }
+    }
     const cutoff = Date.now() - ORPHAN_MIN_AGE_MS;
     let swept = 0;
     for (const name of entries) {
@@ -574,7 +612,7 @@ export function createTransferService(
     try {
       const entries = await readdir(dir());
       for (const name of entries) {
-        if (name.endsWith(PART_SUFFIX)) {
+        if (name.endsWith(PART_SUFFIX) || name.endsWith(REPLACE_SUFFIX)) {
           continue;
         }
         const info = await stat(join(dir(), name)).catch(() => null);
@@ -603,7 +641,7 @@ export function createTransferService(
           continue;
         }
         bytes += info.size;
-        if (name.endsWith(PART_SUFFIX)) {
+        if (name.endsWith(PART_SUFFIX) || name.endsWith(REPLACE_SUFFIX)) {
           partials += 1;
         } else {
           files += 1;
