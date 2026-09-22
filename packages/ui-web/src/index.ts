@@ -31,7 +31,6 @@ export {
     LinearScrubber,
     SQUARED_RING_LENGTH,
     SQUARED_RING_PATH,
-    ringVariantFor,
     WaveformSeek,
 } from './progress.tsx';
 export type {
@@ -40,8 +39,8 @@ export type {
     WaveformSeekProps,
 } from './progress.tsx';
 
-export { TrackRow } from './track-row.tsx';
-export type { TrackRowProps } from './track-row.tsx';
+export { TrackRow, useTrackList } from './track-row.tsx';
+export type { TrackListController, TrackRowProps } from './track-row.tsx';
 
 export {
     EmptyState,
@@ -51,30 +50,48 @@ export {
 } from './states.tsx';
 export type { StateViewProps } from './states.tsx';
 
-export { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
-export type { AppNavbarProps, NavbarProps } from './navbar.tsx';
+export { DesktopChrome, DesktopHeader, DesktopSidebar } from './chrome.tsx';
+export type {
+    DesktopChromeProps,
+    DesktopHeaderProps,
+    DesktopSidebarProps,
+} from './chrome.tsx';
 
-// Extensionless specifiers for platform-split modules: an explicit
-// '.tsx' resolves to the shared file literally under Metro and the
-// '.native.tsx' variant is never considered.
-export { PlatformTabs } from './platform-tabs';
-export type { PlatformTabsProps } from './platform-tabs';
-export { AppStack, PushScreen, SheetScreen, StackItem } from './stack';
+export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
 export type {
   AppStackProps,
   PushScreenProps,
   SheetScreenProps,
   StackItemProps,
-} from './stack';
+} from './stack.tsx';
 
 export { MiniPlayer } from './mini-player.tsx';
 export type { MiniPlayerProps } from './mini-player.tsx';
 
-export { ModeSegment, StageSheet, TransportControls } from './stage-sheet.tsx';
-export type { StageSheetProps, TransportProps } from './stage-sheet.tsx';
+export {
+    ModeSegment,
+    NowPlayingScreen,
+    StageSheet,
+    TransportControls,
+} from './now-playing-screen.tsx';
+export type {
+    NowPlayingScreenProps,
+    StageSheetProps,
+    TransportProps,
+} from './now-playing-screen.tsx';
 
-export { QueueList } from './queue-list';
-export type { QueueListProps } from './queue-list';
+export { QueueList } from './queue-list.tsx';
+export type { QueueListProps } from './queue-list.tsx';
+
+export {
+    globalKeyAction,
+    initialRovingIndex,
+    isEditableTarget,
+    rowKeyAction,
+    seekStepMs,
+    sheetKeyAction,
+} from './keyboard.ts';
+export type { GlobalKeyAction, RowKeyAction } from './keyboard.ts';
 
 export { SearchScreen } from './search-screen.tsx';
 export type { SearchScreenProps } from './search-screen.tsx';
@@ -96,6 +113,8 @@ export {
     NameField,
     ProviderPickerSheet,
     RowActionsSheet,
+    Sheet,
+    SheetScaffold,
 } from './sheets.tsx';
 export type {
     PlaylistPickerItem,
@@ -119,5 +138,15 @@ export { HomeScreen } from './home-screen.tsx';
 export type { HomeScreenProps } from './home-screen.tsx';
 
 export { GalleryScreen } from './gallery.tsx';
+
+export {
+    PLAY_LEFT,
+    PLAY_RIGHT,
+    PAUSE_LEFT,
+    PAUSE_RIGHT,
+    quadPath,
+    progressPathState,
+} from './motion.ts';
+export type { Quad } from './motion.ts';
 
 export * as fixtures from '@auqw/ui-shared/fixtures';

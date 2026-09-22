@@ -1,7 +1,6 @@
-import { FlatList, TextInput, View } from 'react-native';
-import { useTheme } from './theme.tsx';
+import { useRef } from 'react';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import {
   EmptyState,
   ErrorState,
@@ -19,7 +18,6 @@ export type SearchScreenProps = {
    * fixtures still render filled.
    */
   readonly query?: string | undefined;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onQueryChange?: ((query: string) => void) | undefined;
   readonly onSubmit?: (() => void) | undefined;
@@ -31,12 +29,13 @@ export type SearchScreenProps = {
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
   readonly onRecentPress?: ((query: string) => void) | undefined;
+  /** Focus the input on mount — the '/' global shortcut lands here. */
+  readonly autoFocus?: boolean | undefined;
 };
 
 export function SearchScreen({
   state,
   query,
-  topInset = 0,
   scrollEnabled = true,
   onQueryChange,
   onSubmit,
@@ -47,61 +46,66 @@ export function SearchScreen({
   onContext,
   recents = [],
   onRecentPress,
+  autoFocus = false,
 }: SearchScreenProps) {
-  const theme = useTheme();
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const list = useTrackList({
+    count: state.results.length,
+    onActivate:
+      onResultPress === undefined
+        ? undefined
+        : (index) => {
+            const row = state.results[index];
+            if (row !== undefined) {
+              onResultPress(row);
+            }
+          },
+    onContext:
+      onContext === undefined
+        ? undefined
+        : (index) => {
+            const row = state.results[index];
+            if (row !== undefined) {
+              onContext(row);
+            }
+          },
+  });
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset,
-      }}
-    >
-      <View
-        style={{
-          marginHorizontal: theme.spacing.screen,
-          marginTop: theme.spacing.xxs,
-          marginBottom: 10,
-          backgroundColor: theme.colors.fg08,
-          borderRadius: 20,
-          paddingHorizontal: 11,
-          minHeight: theme.sizes.touch,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-        }}
-      >
-        <Icon name="search" size={14} color={theme.colors.textSecondary} />
-        <TextInput
-          value={query ?? state.query}
-          onChangeText={onQueryChange}
-          onSubmitEditing={onSubmit}
+    <div className="uw-screen uw-search">
+      <div className="uw-search__field">
+        <Icon name="search" size={14} color="var(--text-secondary)" />
+        <input
+          ref={inputRef}
+          type="search"
+          className="uw-search__input"
+          aria-label="search"
           placeholder="search"
-          placeholderTextColor={theme.colors.textSecondary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          accessibilityLabel="search"
-          style={[
-            theme.typography.body,
-            {
-              flex: 1,
-              color: theme.colors.textPrimary,
-              paddingVertical: theme.spacing.sm,
-            },
-          ]}
+          autoComplete="off"
+          spellCheck={false}
+          autoFocus={autoFocus}
+          value={editing}
+          onChange={
+            onQueryChange === undefined
+              ? undefined
+              : (event) => onQueryChange(event.currentTarget.value)
+          }
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              onSubmit?.();
+            }
+          }}
+          readOnly={onQueryChange === undefined}
         />
         {loading && (
           <>
             <Spinner size={14} />
             {onCancel !== undefined && (
               <Pressable
-                compact
                 onPress={onCancel}
-                accessibilityLabel="cancel search"
-                style={{ paddingHorizontal: theme.spacing.xs }}
+                ariaLabel="cancel search"
+                className="uw-search__cancel"
               >
                 <Text variant="metadata" color="accent">
                   cancel
@@ -112,83 +116,53 @@ export function SearchScreen({
         )}
         {!loading && editing !== '' && onQueryChange !== undefined && (
           <Pressable
-            compact
             onPress={() => onQueryChange('')}
-            accessibilityLabel="clear search"
-            style={{ padding: theme.spacing.xs }}
+            ariaLabel="clear search"
+            className="uw-search__clear"
           >
-            <Icon name="close" size={12} color={theme.colors.textSecondary} />
+            <Icon name="close" size={12} color="var(--text-secondary)" />
           </Pressable>
         )}
-      </View>
+      </div>
       {state.phase === 'ready' && (
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'baseline',
-            paddingHorizontal: theme.spacing.screen,
-            marginBottom: theme.spacing.sm,
-          }}
-        >
+        <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
             results
           </Text>
-          <Text
-            variant="metadata"
-            color="secondary"
-            style={{ marginLeft: 10 }}
-          >
+          <Text variant="metadata" color="secondary" className="uw-search__count">
             {state.providerId ?? 'catalog'} · {state.results.length} matches
           </Text>
-        </View>
+        </div>
       )}
       {state.phase === 'idle' &&
         (recents.length > 0 ? (
-          <View>
+          <div>
             <Text
               variant="label"
               color="secondary"
               uppercase
-              style={{
-                paddingHorizontal: theme.spacing.screen,
-                marginBottom: theme.spacing.xs,
-              }}
+              className="uw-search__recents-label"
             >
               recent searches
             </Text>
             {recents.map((recent) => (
               <Pressable
                 key={recent}
-                compact
                 onPress={
                   onRecentPress === undefined
                     ? undefined
                     : () => onRecentPress(recent)
                 }
-                accessibilityLabel={`search again for ${recent}`}
-                style={({ pressed }) => [
-                  {
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: theme.spacing.md,
-                    minHeight: theme.sizes.touch,
-                    paddingHorizontal: theme.spacing.screen,
-                    borderRadius: theme.radius.control,
-                  },
-                  pressed && { backgroundColor: theme.colors.fg08 },
-                ]}
+                ariaLabel={`search again for ${recent}`}
+                className="uw-search__recent"
               >
-                <Icon
-                  name="clock"
-                  size={14}
-                  color={theme.colors.textSecondary}
-                />
+                <Icon name="clock" size={14} color="var(--text-secondary)" />
                 <Text variant="body" color="primary" numberOfLines={1}>
                   {recent}
                 </Text>
               </Pressable>
             ))}
-          </View>
+          </div>
         ) : (
           <EmptyState
             title="search the catalog"
@@ -221,31 +195,36 @@ export function SearchScreen({
       )}
       {(state.phase === 'ready' || state.phase === 'loading') &&
         state.results.length > 0 && (
-          <FlatList
-            data={state.results}
-            keyExtractor={(row) => row.key}
-            scrollEnabled={scrollEnabled}
-            contentContainerStyle={{ paddingHorizontal: 6 }}
-            renderItem={({ item }) => (
+          <div
+            role="list"
+            aria-label="search results"
+            className="uw-list"
+            data-scroll={scrollEnabled ? 'true' : 'false'}
+            onKeyDown={list.listProps.onKeyDown}
+          >
+            {state.results.map((row, index) => (
               <TrackRow
-                row={item}
+                key={row.key}
+                row={row}
+                tabIndex={list.rowTabIndex(index)}
+                onFocusRow={() => list.onRowFocus(index)}
                 onPress={
                   onResultPress === undefined
                     ? undefined
-                    : () => onResultPress(item)
+                    : () => onResultPress(row)
                 }
                 onToggleLike={
                   onToggleLike === undefined
                     ? undefined
-                    : () => onToggleLike(item)
+                    : () => onToggleLike(row)
                 }
                 onContext={
-                  onContext === undefined ? undefined : () => onContext(item)
+                  onContext === undefined ? undefined : () => onContext(row)
                 }
               />
-            )}
-          />
+            ))}
+          </div>
         )}
-    </View>
+    </div>
   );
 }

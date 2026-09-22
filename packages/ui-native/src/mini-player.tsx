@@ -13,7 +13,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { ArtworkRing } from './progress.tsx';
-import type { PlatformVariant, PlayerModel } from './view-models.ts';
+import type { PlatformVariant, PlayerModel } from '@auqw/ui-shared';
 
 export type MiniPlayerProps = {
   readonly player: PlayerModel;

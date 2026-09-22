@@ -8,7 +8,7 @@ import { useTheme } from './theme.tsx';
 import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { QueueItemModel, QueueModel } from './view-models.ts';
+import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 
 // Reorder mode swaps the FlatList for a DraggableFlatList: rows get a
 // drag handle, the lift animation comes from ScaleDecorator, and a

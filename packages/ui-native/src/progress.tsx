@@ -17,8 +17,8 @@ import { scheduleOnRN } from 'react-native-worklets';
 import Svg, { Path } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import { Artwork, Text } from './primitives.tsx';
-import { formatClock, formatRemaining } from './view-models.ts';
-import type { PlatformVariant } from './view-models.ts';
+import { formatClock, formatRemaining } from '@auqw/ui-shared';
+import type { PlatformVariant } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);

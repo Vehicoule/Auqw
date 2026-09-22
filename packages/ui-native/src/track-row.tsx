@@ -8,8 +8,8 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { formatClock } from './view-models.ts';
-import type { TrackRowModel } from './view-models.ts';
+import { formatClock } from '@auqw/ui-shared';
+import type { TrackRowModel } from '@auqw/ui-shared';
 
 const DRAG_HANDLE_SLOP = { top: 8, bottom: 8, left: 10, right: 10 };
 

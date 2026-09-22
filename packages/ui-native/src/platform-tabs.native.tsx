@@ -3,7 +3,7 @@ import TabView from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
-import type { NavItemModel } from './view-models.ts';
+import type { NavItemModel } from '@auqw/ui-shared';
 import iconHome from '../assets/tab-icons/home.png';
 import iconExplore from '../assets/tab-icons/explore.png';
 import iconLibrary from '../assets/tab-icons/library.png';

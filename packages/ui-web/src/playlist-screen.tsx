@@ -1,6 +1,4 @@
 import { useState } from 'react';
-import { FlatList, View } from 'react-native';
-import { useTheme } from './theme.tsx';
 import {
   Artwork,
   Icon,
@@ -8,7 +6,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import type { PlaylistEntryModel, PlaylistModel } from '@auqw/ui-shared';
@@ -20,7 +18,6 @@ export type PlaylistScreenProps = {
    * instead of fabricating a header.
    */
   readonly model: PlaylistModel | null;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onPlayAll?: (() => void) | undefined;
@@ -38,8 +35,8 @@ export type PlaylistScreenProps = {
   readonly onContext?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onRemoveEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onMoveEntry?:
-  | ((entry: PlaylistEntryModel, direction: -1 | 1) => void)
-  | undefined;
+    | ((entry: PlaylistEntryModel, direction: -1 | 1) => void)
+    | undefined;
 };
 
 function HeaderButton({
@@ -51,19 +48,11 @@ function HeaderButton({
   readonly warn?: boolean | undefined;
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   return (
     <Pressable
-      compact
       onPress={onPress}
-      accessibilityLabel={label}
-      style={{
-        paddingHorizontal: theme.spacing.md,
-        minHeight: 30,
-        justifyContent: 'center',
-        borderRadius: theme.radius.pill,
-        backgroundColor: theme.colors.fg08,
-      }}
+      ariaLabel={label}
+      className={`uw-headbtn${warn ? ' uw-headbtn--warn' : ''}`}
     >
       <Text variant="metadata" color={warn ? 'warn' : 'primary'}>
         {label}
@@ -74,7 +63,6 @@ function HeaderButton({
 
 export function PlaylistScreen({
   model,
-  topInset = 0,
   scrollEnabled = true,
   onBack,
   onPlayAll,
@@ -88,61 +76,57 @@ export function PlaylistScreen({
   onRemoveEntry,
   onMoveEntry,
 }: PlaylistScreenProps) {
-  const theme = useTheme();
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const entries = model?.entries ?? [];
+  const list = useTrackList({
+    count: entries.length,
+    onActivate:
+      onPressEntry === undefined
+        ? undefined
+        : (index) => {
+            const entry = entries[index];
+            if (entry !== undefined) {
+              onPressEntry(entry);
+            }
+          },
+    onContext:
+      onContext === undefined
+        ? undefined
+        : (index) => {
+            const entry = entries[index];
+            if (entry !== undefined) {
+              onContext(entry);
+            }
+          },
+  });
   if (model === null) {
     return (
-      <View
-        style={{
-          flex: 1,
-          backgroundColor: theme.colors.canvas,
-          paddingTop: topInset,
-        }}
-      >
+      <div className="uw-screen uw-playlist">
         <UnavailableState
           title="playlist not found"
           hint="it may have been deleted"
         />
         {onBack !== undefined && (
-          <View style={{ alignItems: 'center', paddingBottom: theme.spacing.xl }}>
+          <div className="uw-playlist__back">
             <HeaderButton label="back" onPress={onBack} />
-          </View>
+          </div>
         )}
-      </View>
+      </div>
     );
   }
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
-      }}
+    <div
+      className="uw-screen uw-playlist"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-        }}
-      >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel="back"
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
+      <div className="uw-playlist__head">
+        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Artwork url={model.artworkUrl} size={56} />
-        <View style={{ flex: 1, minWidth: 0 }}>
+        <div className="uw-playlist__head-text">
           <Text variant="heading" color="bright" numberOfLines={1}>
             {model.name}
           </Text>
@@ -150,26 +134,18 @@ export function PlaylistScreen({
             user playlist · {model.count}{' '}
             {model.count === 1 ? 'track' : 'tracks'}
           </Text>
-        </View>
+        </div>
         <IconButton
           icon="play"
           size={34}
           iconSize={14}
-          color={theme.colors.textBright}
-          accessibilityLabel={`play ${model.name}`}
+          color="var(--text-bright)"
+          ariaLabel={`play ${model.name}`}
           onPress={model.count === 0 ? undefined : onPlayAll}
         />
-      </View>
+      </div>
 
-      <View
-        style={{
-          flexDirection: 'row',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginTop: theme.spacing.md,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
+      <div className="uw-playlist__actions">
         {onDownloadAll !== undefined && (
           <HeaderButton
             label={
@@ -192,10 +168,10 @@ export function PlaylistScreen({
             onRename === undefined
               ? undefined
               : () => {
-                setDraft(model.name);
-                setRenaming(true);
-                setConfirming(false);
-              }
+                  setDraft(model.name);
+                  setRenaming(true);
+                  setConfirming(false);
+                }
           }
         />
         {/* Two-step confirm: 'delete' arms, 'confirm delete' commits. */}
@@ -208,9 +184,9 @@ export function PlaylistScreen({
                 onDelete === undefined
                   ? undefined
                   : () => {
-                    setConfirming(false);
-                    onDelete();
-                  }
+                      setConfirming(false);
+                      onDelete();
+                    }
               }
             />
             <HeaderButton
@@ -227,15 +203,10 @@ export function PlaylistScreen({
             }
           />
         )}
-      </View>
+      </div>
 
       {renaming && (
-        <View
-          style={{
-            paddingHorizontal: theme.spacing.lg,
-            marginBottom: theme.spacing.sm,
-          }}
-        >
+        <div className="uw-playlist__rename">
           <NameField
             value={draft}
             placeholder="playlist name"
@@ -246,13 +217,13 @@ export function PlaylistScreen({
               onRename === undefined
                 ? undefined
                 : (name) => {
-                  onRename(name);
-                  setRenaming(false);
-                }
+                    onRename(name);
+                    setRenaming(false);
+                  }
             }
             onCancel={() => setRenaming(false)}
           />
-        </View>
+        </div>
       )}
 
       {model.entries.length === 0 ? (
@@ -262,53 +233,52 @@ export function PlaylistScreen({
           icon="list-plus"
         />
       ) : (
-        <FlatList
-          data={model.entries}
-          // entryId keys: a duplicated recording keeps distinct rows.
-          keyExtractor={(entry) => entry.entryId}
-          scrollEnabled={scrollEnabled}
-          contentContainerStyle={{
-            paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
-          }}
-          renderItem={({ item, index }) => (
+        <div
+          role="list"
+          aria-label={model.name}
+          className="uw-list"
+          onKeyDown={list.listProps.onKeyDown}
+        >
+          {model.entries.map((entry, index) => (
             <TrackRow
-              row={item.row}
-              badge={item.duplicate ? 'repeat' : null}
+              key={entry.entryId}
+              row={entry.row}
+              badge={entry.duplicate ? 'repeat' : null}
               reorderControls="buttons"
+              tabIndex={list.rowTabIndex(index)}
+              onFocusRow={() => list.onRowFocus(index)}
               onMoveUp={
                 index > 0 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(item, -1)
+                  ? () => onMoveEntry(entry, -1)
                   : undefined
               }
               onMoveDown={
-                index < model.entries.length - 1 &&
-                  onMoveEntry !== undefined
-                  ? () => onMoveEntry(item, 1)
+                index < model.entries.length - 1 && onMoveEntry !== undefined
+                  ? () => onMoveEntry(entry, 1)
                   : undefined
               }
               onPress={
                 onPressEntry === undefined
                   ? undefined
-                  : () => onPressEntry(item)
+                  : () => onPressEntry(entry)
               }
               onToggleLike={
                 onToggleLike === undefined
                   ? undefined
-                  : () => onToggleLike(item)
+                  : () => onToggleLike(entry)
               }
               onContext={
-                onContext === undefined ? undefined : () => onContext(item)
+                onContext === undefined ? undefined : () => onContext(entry)
               }
               onRemove={
                 onRemoveEntry === undefined
                   ? undefined
-                  : () => onRemoveEntry(item)
+                  : () => onRemoveEntry(entry)
               }
             />
-          )}
-        />
+          ))}
+        </div>
       )}
-    </View>
+    </div>
   );
 }

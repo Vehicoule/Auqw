@@ -30,9 +30,9 @@ import type {
   QueueModel,
   RadioModel,
   StageMode,
-} from './view-models.ts';
+} from '@auqw/ui-shared';
 
-export type { LyricsModel, StageMode } from './view-models.ts';
+export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
 export type TransportProps = {
   readonly variant?: 'm3e' | 'ios' | undefined;
@@ -45,7 +45,7 @@ export type TransportProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   /** Owned-bytes state of the current track; null hides the button. */
-  readonly download?: import('./view-models.ts').DownloadChip | null | undefined;
+  readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
 };
 
@@ -298,7 +298,7 @@ export type StageSheetProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  readonly download?: import('./view-models.ts').DownloadChip | null | undefined;
+  readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
