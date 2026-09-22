@@ -331,6 +331,9 @@ fn parse_request(reader: &mut BufReader<TcpStream>) -> Result<Request, StreamErr
 }
 
 fn serve_conn(conn: TcpStream, shared: &Shared) -> Result<(), StreamError> {
+    // Accepted sockets inherit nonblocking mode from the listener on
+    // Windows; the conn protocol assumes blocking-with-timeout I/O.
+    conn.set_nonblocking(false).ok();
     conn.set_read_timeout(Some(HEAD_TIMEOUT)).ok();
     let mut out = conn.try_clone().map_err(|e| StreamError::Internal {
         message: format!("conn clone: {e}"),
