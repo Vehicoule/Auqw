@@ -1294,6 +1294,40 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Two sessions racing one code: only the winner registers ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      const pairing = await pairingCode(service);
+      const mk = async (deviceId: string) => {
+        const client = await dial(port);
+        const peer = createTestPeer({ deviceId, name: 'racer' });
+        const h = await phoneHandshake(client, peer, pairing.fp);
+        return { client, codec: h.codec };
+      };
+      const a = await mk('phone-race-a1');
+      const b = await mk('phone-race-b1');
+      a.client.send(sealJson(a.codec, { t: 'pair', code: pairing.code }));
+      b.client.send(sealJson(b.codec, { t: 'pair', code: pairing.code }));
+      const ra = openJson(a.codec, await a.client.recv());
+      const rb = openJson(b.codec, await b.client.recv());
+      const types = [ra, rb].map((m) =>
+        isRecord(m) ? m['t'] : '?',
+      );
+      assert(
+        types.includes('welcome') && types.includes('reject'),
+        `one winner + one reject, got ${JSON.stringify([ra, rb])}`,
+      );
+      // The rejected client's key never enters the registry — it can
+      // not resume later off a silently persisted record.
+      assertEqual(keys.records.size, 1, 'only the winner registers');
+      a.client.close();
+      b.client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Custody failure propagates: sync:status fails typed ——
   {
     const keys = createMemoryKeys();

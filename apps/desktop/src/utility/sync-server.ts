@@ -41,7 +41,11 @@ import {
   type SyncCipher,
   type SyncIdentity,
 } from './sync-crypto.ts';
-import { isDeviceId, type SyncKeys } from './sync-keys.ts';
+import {
+  isDeviceId,
+  type SyncDeviceRecord,
+  type SyncKeys,
+} from './sync-keys.ts';
 import {
   attachWirePump,
   type WirePump,
@@ -325,6 +329,21 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   // each fresh mint and on successful pairing.
   const maxCodeAttempts = deps.maxCodeAttempts ?? 5;
   const badAttempts = new Map<string, number>();
+  // The pair path's peek → put → consume is one logical transaction:
+  // serialized here so a losing session sees the consumed code at
+  // peek — never writes its key into the registry at all. (Custody
+  // serializes too, but a consume lost AFTER a write can't unwrite
+  // the sibling's record without a rollback that could hit a legit
+  // same-fp record.)
+  let pairChain: Promise<void> = Promise.resolve();
+  function withPairLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = pairChain.then(fn);
+    pairChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
   const sessions = new Set<Session>();
   const pendingSync = new Set<string>();
@@ -490,55 +509,64 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     };
     const now = nowMs();
     if (isPairMsg(msg)) {
-      // A peer that already blew its code budget never reaches the
-      // checker — a correct guess after the cap can't quietly pair.
-      const misses = badAttempts.get(session.remoteIp) ?? 0;
-      if (misses >= maxCodeAttempts) {
-        reject('pairing-attempts');
+      type Outcome =
+        | { readonly ok: true; readonly record: SyncDeviceRecord }
+        | { readonly ok: false; readonly reason: string };
+      const outcome = await withPairLock(async (): Promise<Outcome> => {
+        // A peer that already blew its code budget never reaches the
+        // checker — a correct guess after the cap can't quietly pair.
+        const misses = badAttempts.get(session.remoteIp) ?? 0;
+        if (misses >= maxCodeAttempts) {
+          return { ok: false, reason: 'pairing-attempts' };
+        }
+        const check = pairing.peek(msg.code);
+        if (check === 'bad-code') {
+          badAttempts.set(session.remoteIp, misses + 1);
+          return {
+            ok: false,
+            reason:
+              misses + 1 >= maxCodeAttempts
+                ? 'pairing-attempts'
+                : 'bad-code',
+          };
+        }
+        if (check !== 'ok') {
+          return { ok: false, reason: check };
+        }
+        const record = {
+          id: session.deviceId ?? '',
+          name: session.name,
+          pub: session.devPub,
+          fp: session.devFp ?? '',
+          pairedAt: now,
+          lastSeenAt: now,
+        };
+        try {
+          await deps.keys.devicePut(record);
+        } catch (thrown) {
+          // Consume only AFTER the registry write — a transient
+          // custody failure leaves the still-valid code open for
+          // retry.
+          return {
+            ok: false,
+            reason: isShellError(thrown) ? thrown.kind : 'internal',
+          };
+        }
+        if (!pairing.consume(msg.code)) {
+          // Defensive: inside the lock a peek-ok always consumes —
+          // this can only mean state was cleared out-of-band.
+          return { ok: false, reason: 'no-pairing' };
+        }
+        badAttempts.delete(session.remoteIp);
+        return { ok: true, record };
+      });
+      if (!outcome.ok) {
+        reject(outcome.reason);
         return;
       }
-      const check = pairing.peek(msg.code);
-      if (check === 'bad-code') {
-        badAttempts.set(session.remoteIp, misses + 1);
-        reject(
-          misses + 1 >= maxCodeAttempts
-            ? 'pairing-attempts'
-            : 'bad-code',
-        );
-        return;
-      }
-      if (check !== 'ok') {
-        reject(check);
-        return;
-      }
-      const record = {
-        id: session.deviceId,
-        name: session.name,
-        pub: session.devPub,
-        fp: session.devFp ?? '',
-        pairedAt: now,
-        lastSeenAt: now,
-      };
-      try {
-        await deps.keys.devicePut(record);
-      } catch (thrown) {
-        // Consume only AFTER the registry write — a transient custody
-        // failure leaves the still-valid code open for retry.
-        reject(
-          isShellError(thrown) ? thrown.kind : 'internal',
-        );
-        return;
-      }
-      if (!pairing.consume(msg.code)) {
-        // A racing session consumed it — the device is registered but
-        // this connection never authenticates; it can resume instead.
-        reject('no-pairing');
-        return;
-      }
-      badAttempts.delete(session.remoteIp);
       sendSealed(session, {
         t: 'welcome',
-        device: record,
+        device: outcome.record,
         name: deviceName,
       });
       await enterOpen(session);
