@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -112,6 +112,7 @@ export function QueueList({
   const lastItems = useRef<QueueModel['items'] | null>(null);
   const lastAuthIds = useRef<readonly string[] | null>(null);
   const trackFocusId = useRef<string | null>(null);
+  const [, setPendingTick] = useState(0);
   const list = useTrackList({
     count: queue.items.length,
     onActivate:
@@ -163,6 +164,27 @@ export function QueueList({
     queuedOps.current = [];
     pendingIds.current = null;
   }
+  // The TTL must fire even while the component idles: an expiry
+  // timer re-arms on every render, clears the pending refs, and
+  // bumps state so the rollback actually paints.
+  useEffect(() => {
+    if (pendingIds.current === null) {
+      return;
+    }
+    const remaining = PENDING_TTL_MS - (Date.now() - pendingSince.current);
+    const expire = () => {
+      pendingOps.current = [];
+      queuedOps.current = [];
+      pendingIds.current = null;
+      setPendingTick((tick) => tick + 1);
+    };
+    if (remaining <= 0) {
+      expire();
+      return;
+    }
+    const timer = setTimeout(expire, remaining);
+    return () => clearTimeout(timer);
+  });
   // Focus follows the moved row through publishes: once the
   // authoritative order lands, point the roving index at it again.
   // Also where serialized relative moves flush: a queued op ships
