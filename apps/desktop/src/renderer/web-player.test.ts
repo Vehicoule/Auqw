@@ -675,6 +675,7 @@ export async function run(): Promise<void> {
       },
     });
     const player = createWebPlayerPort({ stream, audio, mediaSession });
+    const events = collect(player);
     await player.setQueueProjection(twoItemProjection());
     const pendingA = player.play({ handle: 'h-a', identity });
     mediaSession.actions.get('pause')?.();
@@ -683,6 +684,55 @@ export async function run(): Promise<void> {
     await settle();
     assertEqual(audio.src, '', 'late play cannot attach after media pause');
     assertEqual(audio.paused, true, 'element stays paused');
+    // The killed attempt reports paused so the session reconciles —
+    // play() resolving quietly would strand it in buffering.
+    assert(
+      events.some(
+        (e) =>
+          e.type === 'status' &&
+          e.state === 'paused' &&
+          e.identity.attemptId === identity.attemptId,
+      ),
+      'media pause reports the killed attempt paused',
+    );
+  }
+
+  // The session re-keys the live attempt's queueRev on every queue
+  // mutation — a seek issued under the newer revision while play is
+  // still pending must land on that play's token.
+  {
+    const audio = fakeAudio();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({ handle: 'h-a', identity });
+    // Queue mutation bumps the revision — the same trigger that
+    // re-keys `current` must move the pending play's token.
+    await player.setQueueProjection(twoItemProjection({ queueRev: 5 }));
+    const seeked = await player.seekTo({
+      positionMs: 45_000,
+      identity: { ...identity, queueRev: 5 },
+    });
+    assertEqual(seeked.ok, true, 're-keyed seek succeeds');
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      45,
+      're-keyed seek position lands on the late play',
+    );
   }
 
   // Two cursor moves in flight — the superseded attach releases its

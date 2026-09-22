@@ -222,7 +222,12 @@ export function createWebPlayerPort(deps: {
    * resolve isn't overwritten by the play's older start position. */
   const pendingPlayGens = new Map<
     string,
-    { gen: number; identity: PlaybackIdentity; positionMs: number }
+    {
+      gen: number;
+      identity: PlaybackIdentity;
+      positionMs: number;
+      occurrenceId: string | null;
+    }
   >();
 
   /** Drop pending plays — `identity` matches the same contract `stale`
@@ -540,9 +545,22 @@ export function createWebPlayerPort(deps: {
     ms.setActionHandler('pause', () => {
       // A media-key pause is transport-wide — a pending play's late
       // serveUrl must not start audio after it, whatever attempt the
-      // op belongs to.
+      // op belongs to. Each killed op is reported paused with its own
+      // identity so the session reconciles the attempt — otherwise
+      // play() resolving with no attach and no event strands it in
+      // buffering.
+      const killed = [...pendingPlayGens.entries()];
       invalidatePendingPlays(null);
       audio.pause();
+      for (const [handle, pending] of killed) {
+        emit({
+          type: 'status',
+          handle,
+          identity: pending.identity,
+          state: 'paused',
+          positionMs: pending.positionMs,
+        });
+      }
     });
     ms.setActionHandler('nexttrack', () => advanceQueue('remote-next'));
     ms.setActionHandler('previoustrack', () =>
@@ -635,8 +653,9 @@ export function createWebPlayerPort(deps: {
       const gen = ++opGen;
       pendingPlayGens.set(input.handle, {
         gen,
-        identity: input.identity,
+        identity: { ...input.identity },
         positionMs: input.positionMs ?? 0,
+        occurrenceId: projection?.currentOccurrenceId ?? null,
       });
       return guard(async () => {
         try {
@@ -765,6 +784,20 @@ export function createWebPlayerPort(deps: {
             queueRev: next.queueRev,
           },
         };
+      }
+      // Pending plays pinned to the same occurrence ride the same
+      // re-key — the session re-issues pause/seek under the new
+      // revision, so a stale queueRev here would strand their
+      // identity match the way an un-re-keyed `current` would.
+      if (next !== null && next.currentOccurrenceId !== null) {
+        for (const pending of pendingPlayGens.values()) {
+          if (pending.occurrenceId === next.currentOccurrenceId) {
+            pending.identity = {
+              ...pending.identity,
+              queueRev: next.queueRev,
+            };
+          }
+        }
       }
       installMediaActions();
       return ok(undefined);
