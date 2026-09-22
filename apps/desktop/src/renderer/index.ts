@@ -105,6 +105,37 @@ async function boot(): Promise<void> {
   let liveIdentity: PlaybackIdentity = identity;
   let livePrepareId: string | null = null;
   let prepSeq = 0;
+  /** Prepared outcomes arriving before their requestId registers (an
+   * adapter may emit synchronously) — replayed on registration, or
+   * released when the owning generation ends. */
+  const earlyPrepares = new Map<string, PlayerEvent>();
+
+  function applyPrepareOutcome(event: PlayerEvent): void {
+    if (event.type !== 'prepare') {
+      return;
+    }
+    if (event.outcome.type === 'prepared' && event.outcome.stream !== undefined) {
+      preparedHandle = event.outcome.stream.handle;
+      state = 'prepared';
+      logEvent(`prepared ${event.outcome.stream.handle} (${event.outcome.stream.mime})`);
+    } else if (event.outcome.type !== 'prepared') {
+      state = 'failed';
+      logEvent(`prepare failed — ${event.outcome.error.kind}: ${event.outcome.error.message}`);
+    }
+  }
+
+  /** Superseded/orphaned buffered outcomes — release their handles. */
+  function drainEarlyPrepares(): void {
+    for (const event of earlyPrepares.values()) {
+      if (event.type === 'prepare' && event.outcome.type === 'prepared') {
+        void player.release({
+          handle: event.outcome.stream.handle,
+          identity: liveIdentity,
+        });
+      }
+    }
+    earlyPrepares.clear();
+  }
 
   function renderState(): void {
     const el = document.getElementById('player-state');
@@ -122,25 +153,15 @@ async function boot(): Promise<void> {
       // A superseded request's outcome is ignored — its handle would
       // otherwise clobber the newer selection.
       if (event.requestId !== livePrepareId) {
-        if (
-          event.outcome.type === 'prepared' &&
-          event.outcome.stream !== undefined
-        ) {
-          void player.release({
-            handle: event.outcome.stream.handle,
-            identity: liveIdentity,
-          });
+        // Early (id not yet registered) or superseded — buffer prepared
+        // outcomes for replay on registration; drainEarlyPrepares
+        // releases whatever stays unmatched.
+        if (event.outcome.type === 'prepared') {
+          earlyPrepares.set(event.requestId, event);
         }
         return;
       }
-      if (event.outcome.type === 'prepared') {
-        preparedHandle = event.outcome.stream.handle;
-        state = 'prepared';
-        logEvent(`prepared ${event.outcome.stream.handle} (${event.outcome.stream.mime})`);
-      } else {
-        state = 'failed';
-        logEvent(`prepare failed — ${event.outcome.error.kind}: ${event.outcome.error.message}`);
-      }
+      applyPrepareOutcome(event);
     } else if (event.type === 'status') {
       state = event.state;
       if (event.state === 'failed') {
@@ -150,6 +171,8 @@ async function boot(): Promise<void> {
       }
     } else if (event.type === 'queue-transition') {
       logEvent(`queue ${event.reason}: ${event.fromOccurrenceId} → ${event.toOccurrenceId}`);
+    } else if (event.type === 'phase') {
+      logEvent(`phase ${event.name} +${event.sinceStartMs}ms`);
     }
     renderState();
   });
@@ -193,7 +216,14 @@ async function boot(): Promise<void> {
       renderState();
       const gen = ++prepSeq;
       livePrepareId = null;
+      // A re-prepare must release the stream it replaces — otherwise
+      // its pump stays owned and playing audio keeps running.
+      const replacedHandle = preparedHandle;
       preparedHandle = null;
+      if (replacedHandle !== null) {
+        void player.release({ handle: replacedHandle, identity: liveIdentity });
+      }
+      drainEarlyPrepares();
       if (devGate instanceof HTMLInputElement && devGate.checked) {
         try {
           const stream = await window.auqw.stream.devPrepare({
@@ -246,6 +276,14 @@ async function boot(): Promise<void> {
       if (res.ok) {
         livePrepareId = res.value;
         liveIdentity = attemptIdentity;
+        // An already-emitted outcome for this request was buffered —
+        // replay it now that the id is registered.
+        const early = earlyPrepares.get(res.value);
+        if (early !== undefined) {
+          earlyPrepares.delete(res.value);
+          applyPrepareOutcome(early);
+          renderState();
+        }
       } else {
         state = 'failed';
         logEvent(`prepare failed — ${res.error.kind}: ${res.error.message}`);
@@ -272,7 +310,13 @@ async function boot(): Promise<void> {
     void player.pause(liveIdentity);
   });
   stopButton?.addEventListener('click', () => {
+    // Bumping the generation invalidates any in-flight prepare — a
+    // late outcome can't restore a handle after Stop ran.
+    const gen = ++prepSeq;
+    livePrepareId = null;
     const handle = preparedHandle;
+    preparedHandle = null;
+    drainEarlyPrepares();
     void (async () => {
       await player.stop(liveIdentity);
       // Stop only detaches the element — the stream session still owns
@@ -280,8 +324,13 @@ async function boot(): Promise<void> {
       if (handle !== null) {
         await player.release({ handle, identity: liveIdentity });
       }
-      preparedHandle = null;
-      livePrepareId = null;
+      // A newer prepare may have landed while we awaited — its state
+      // belongs to the new generation, not to this stop.
+      if (gen !== prepSeq) {
+        return;
+      }
+      state = 'idle';
+      renderState();
     })();
   });
   setInterval(renderState, 500);
