@@ -852,7 +852,13 @@ export function isSyncUnpairArgs(
  * rewrites or drops; accepting them here would validate one document
  * while the sync engine receives a different one.
  */
-export function isJsonValue(value: unknown): boolean {
+const MAX_JSON_DEPTH = 64;
+
+function isJsonValueInner(
+  value: unknown,
+  active: WeakSet<object>,
+  depth: number,
+): boolean {
   if (value === null || typeof value === 'boolean') {
     return true;
   }
@@ -862,25 +868,56 @@ export function isJsonValue(value: unknown): boolean {
   if (typeof value === 'string') {
     return true;
   }
+  if (depth > MAX_JSON_DEPTH) {
+    return false;
+  }
   if (Array.isArray(value)) {
     // `length` counts holes; keys enumerate real slots — a sparse
     // array serializes to nulls it doesn't actually contain.
-    return (
-      Object.keys(value).length === value.length &&
-      value.every(isJsonValue)
-    );
+    if (
+      Object.keys(value).length !== value.length ||
+      active.has(value)
+    ) {
+      return false;
+    }
+    active.add(value);
+    try {
+      return value.every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
   }
   if (isRecord(value)) {
     // Only plain objects — a Date, Map, or class instance carries no
     // own enumerable slots yet serializes to a different domain (a
     // Date becomes a string, a Map becomes {}).
     const proto: unknown = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
+    if (
+      (proto !== Object.prototype && proto !== null) ||
+      active.has(value)
+    ) {
       return false;
     }
-    return Object.values(value).every(isJsonValue);
+    active.add(value);
+    try {
+      return Object.values(value).every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
   }
   return false;
+}
+
+export function isJsonValue(value: unknown): boolean {
+  // `active` marks the CURRENT path only — deleted on unwind — so a
+  // diamond of shared references still passes while a true cycle
+  // returns false instead of overflowing the stack. The depth cap
+  // bounds the recursion a hostile object graph can provoke.
+  return isJsonValueInner(value, new WeakSet<object>(), 0);
 }
 
 /**
@@ -889,10 +926,13 @@ export function isJsonValue(value: unknown): boolean {
  * non-ASCII payloads are measured with TextEncoder.
  */
 function isBoundedJson(value: unknown, maxBytes: number): boolean {
-  if (!isJsonValue(value)) {
-    return false;
-  }
+  // The whole validation sits inside the exception boundary — a
+  // malformed graph (proxy, throwing accessor) answers false, never
+  // an internal throw that lands as the wrong error kind.
   try {
+    if (!isJsonValue(value)) {
+      return false;
+    }
     const encoded = JSON.stringify(value);
     return (
       typeof encoded === 'string' &&

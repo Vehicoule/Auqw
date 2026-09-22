@@ -1,5 +1,6 @@
 import { assert } from '@auqw/application/testing';
 import {
+  isJsonValue,
   isStorageBackupArgs,
   isStorageBeginArgs,
   isStorageBeginResult,
@@ -7,6 +8,7 @@ import {
   isStorageExecuteResult,
   isStorageQueryResult,
   isStorageTxArgs,
+  isSyncDeltaDoc,
 } from './contract.ts';
 
 export function run(): void {
@@ -142,4 +144,32 @@ export function run(): void {
   assert(!isStorageBackupArgs({ tag: '../walk' }), 'path tag rejected');
   assert(!isStorageBackupArgs({ tag: 'a'.repeat(65) }), 'long tag rejected');
   assert(!isStorageBackupArgs({ tag: 12 }), 'numeric tag rejected');
+
+  // strict-JSON domain — malformed graphs reject, never overflow
+  const cyclic: Record<string, unknown> = {};
+  cyclic['self'] = cyclic;
+  assert(!isJsonValue(cyclic), 'cyclic object rejected, not a crash');
+  const cyclicArr: unknown[] = [];
+  cyclicArr.push(cyclicArr);
+  assert(!isJsonValue(cyclicArr), 'cyclic array rejected');
+  let deep: unknown = { v: 1 };
+  for (let i = 0; i < 80; i += 1) {
+    deep = { next: deep };
+  }
+  assert(!isJsonValue(deep), 'over-depth graph rejected');
+  // A shared (non-cyclic) reference is a diamond, not a cycle.
+  const shared = { k: 1 };
+  assert(isJsonValue({ a: shared, b: shared }), 'diamond refs pass');
+  const sparse = new Array(3);
+  sparse[0] = 1;
+  assert(!isJsonValue(sparse), 'sparse array rejected');
+  assert(!isJsonValue(NaN), 'NaN rejected');
+  assert(
+    isJsonValue({ ok: [1, 'x', null, true] }),
+    'plain document passes',
+  );
+  assert(
+    !isSyncDeltaDoc(cyclic),
+    'cyclic delta doc rejected instead of throwing',
+  );
 }

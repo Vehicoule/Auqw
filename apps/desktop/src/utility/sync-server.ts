@@ -806,6 +806,18 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             });
             return;
           }
+          // The engine returns `unknown` — the wire carries only the
+          // strict JSON domain, and JSON.stringify silently rewrites
+          // anything outside it (undefined drops, NaN→null, sparse
+          // slots→null). A doc that would arrive different from what
+          // the engine produced is a typed error, never a mutation.
+          if (!isSyncDeltaDoc(exported.value)) {
+            sendSealed(session, {
+              t: 'error',
+              code: 'invalid-response',
+            });
+            return;
+          }
           lastSyncAt = nowMs();
           sendSealed(session, { t: 'delta', delta: exported.value });
         } catch {

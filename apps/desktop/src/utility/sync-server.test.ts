@@ -629,6 +629,45 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A malformed engine export is a typed error, not a mutation ——
+  {
+    const { service, port } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          // `undefined` silently drops on serialize — the wire must
+          // refuse instead of delivering a rewritten document.
+          return Promise.resolve(
+            ok({ puts: [{ id: 'a', value: undefined }] }),
+          );
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(null));
+        },
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-00016',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.send(sealJson(codec, { t: 'sync', since: 's1' }));
+      assertDeepEqual(await openJson(codec, await client.recv()), {
+        t: 'error',
+        code: 'invalid-response',
+      });
+      client.send(sealJson(codec, { t: 'ping' }));
+      assertDeepEqual(await openJson(codec, await client.recv()), {
+        t: 'pong',
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Corrupt custody identity regenerates instead of bricking ——
   {
     const keys = createMemoryKeys();
