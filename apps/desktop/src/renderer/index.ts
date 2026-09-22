@@ -99,6 +99,12 @@ async function boot(): Promise<void> {
 
   let preparedHandle: string | null = null;
   let state: string = 'idle';
+  /** Page-level attempt ownership: a click sequence mints a fresh
+   * attemptId + request/generation id; only the live one's outcome may
+   * write `preparedHandle`, and stale handles get released. */
+  let liveIdentity: PlaybackIdentity = identity;
+  let livePrepareId: string | null = null;
+  let prepSeq = 0;
 
   function renderState(): void {
     const el = document.getElementById('player-state');
@@ -113,6 +119,20 @@ async function boot(): Promise<void> {
 
   player.subscribe((event: PlayerEvent) => {
     if (event.type === 'prepare') {
+      // A superseded request's outcome is ignored — its handle would
+      // otherwise clobber the newer selection.
+      if (event.requestId !== livePrepareId) {
+        if (
+          event.outcome.type === 'prepared' &&
+          event.outcome.stream !== undefined
+        ) {
+          void player.release({
+            handle: event.outcome.stream.handle,
+            identity: liveIdentity,
+          });
+        }
+        return;
+      }
       if (event.outcome.type === 'prepared') {
         preparedHandle = event.outcome.stream.handle;
         state = 'prepared';
@@ -171,18 +191,32 @@ async function boot(): Promise<void> {
     void (async () => {
       state = 'preparing';
       renderState();
+      const gen = ++prepSeq;
+      livePrepareId = null;
+      preparedHandle = null;
       if (devGate instanceof HTMLInputElement && devGate.checked) {
         try {
           const stream = await window.auqw.stream.devPrepare({
             url: ref,
             mime: mimeFor(ref),
           });
+          if (gen !== prepSeq) {
+            void player.release({
+              handle: stream.handle,
+              identity: liveIdentity,
+            });
+            return;
+          }
+          liveIdentity = { ...liveIdentity, attemptId: `boot-${gen}` };
+          livePrepareId = `dev-${gen}`;
           preparedHandle = stream.handle;
           state = 'prepared';
           logEvent(`dev-prepared ${stream.handle} (${stream.mime})`);
         } catch (thrown) {
-          state = 'failed';
-          logEvent(`dev-prepare failed — ${describe(thrown)}`);
+          if (gen === prepSeq) {
+            state = 'failed';
+            logEvent(`dev-prepare failed — ${describe(thrown)}`);
+          }
         }
         renderState();
         return;
@@ -197,12 +231,22 @@ async function boot(): Promise<void> {
         renderState();
         return;
       }
+      const attemptIdentity: PlaybackIdentity = {
+        ...identity,
+        attemptId: `boot-${gen}`,
+      };
       const res = await player.prepare({
         provider,
         sourceRef: ref,
-        identity,
+        identity: attemptIdentity,
       });
-      if (!res.ok) {
+      if (gen !== prepSeq) {
+        return;
+      }
+      if (res.ok) {
+        livePrepareId = res.value;
+        liveIdentity = attemptIdentity;
+      } else {
         state = 'failed';
         logEvent(`prepare failed — ${res.error.kind}: ${res.error.message}`);
         renderState();
@@ -215,7 +259,7 @@ async function boot(): Promise<void> {
       return;
     }
     void player
-      .play({ handle: preparedHandle, identity })
+      .play({ handle: preparedHandle, identity: liveIdentity })
       .then((res) => {
         if (!res.ok) {
           state = 'failed';
@@ -225,12 +269,20 @@ async function boot(): Promise<void> {
       });
   });
   pauseButton?.addEventListener('click', () => {
-    void player.pause(identity);
+    void player.pause(liveIdentity);
   });
   stopButton?.addEventListener('click', () => {
-    void player.stop(identity).then(() => {
+    const handle = preparedHandle;
+    void (async () => {
+      await player.stop(liveIdentity);
+      // Stop only detaches the element — the stream session still owns
+      // the handle; release it so the pump + partial cache are reaped.
+      if (handle !== null) {
+        await player.release({ handle, identity: liveIdentity });
+      }
       preparedHandle = null;
-    });
+      livePrepareId = null;
+    })();
   });
   setInterval(renderState, 500);
 }
