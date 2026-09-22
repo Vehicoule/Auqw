@@ -824,7 +824,11 @@ function runSession(
         }
         break;
       case 'error':
-        fail(new Error(`pump ${raw.code}: ${raw.message}`));
+        // Same epoch gate as EOF: a queued error from before a seek
+        // must not kill the re-anchored session.
+        if (raw.epoch === epoch) {
+          fail(new Error(`pump ${raw.code}: ${raw.message}`));
+        }
         break;
       case 'ready':
         break;

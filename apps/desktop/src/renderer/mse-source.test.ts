@@ -673,6 +673,46 @@ export async function run(): Promise<void> {
     assert(port.closed, 'dead session closed its port');
   }
 
+  // A pump error frame from before a seek is stale — its epoch no
+  // longer names the live session, so it must not fail the re-anchored
+  // source the way a current-epoch error does.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4b2',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    let failed: unknown = null;
+    source.onFail((error) => {
+      failed = error;
+    });
+    // Bump the epoch exactly like the h-2 seek case: evicted media
+    // under journaled coverage routes seekTo into a pump seek frame.
+    sb.buffered.list = [[30, 40]];
+    source.seekTo(5_000);
+    const seek = port.sent.find(
+      (m) => (m as { kind?: string }).kind === 'seek',
+    ) as { epoch: number } | undefined;
+    assertEqual(seek?.epoch, 1, 'seek re-anchored the session at epoch 1');
+    port.feed({ kind: 'error', epoch: 0, code: 'io-error', message: 'stale' });
+    await settle();
+    assertEqual(failed, null, 'stale-epoch error ignored');
+    assert(!port.closed, 'stale error did not close the port');
+    port.feed({ kind: 'error', epoch: 1, code: 'io-error', message: 'dead' });
+    await settle();
+    assert(failed instanceof Error, 'current-epoch error still fails');
+    assert(port.closed, 'dead session closed its port');
+  }
+
   // The attach resolves only once media lands — an init-segment append
   // produces no `buffered` range, so a head-only stream stays pending
   // and can still fall back; the first media-bearing append resolves.

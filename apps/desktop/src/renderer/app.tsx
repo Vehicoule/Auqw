@@ -733,6 +733,18 @@ function Main({
       }),
     [state, searchState],
   );
+  // Suggestion cards key by `${provider}:${id}` — provider refs, not
+  // materialized recording ids — so a press needs the TrackMetadata
+  // back (same contract as the search-result and entity maps).
+  const suggestionMeta = useMemo(() => {
+    const map = new Map<string, TrackMetadata>();
+    if (searchState.type === 'content') {
+      for (const meta of searchState.page.items.slice(0, 12)) {
+        map.set(`${meta.sourceRef.provider}:${meta.sourceRef.id}`, meta);
+      }
+    }
+    return map;
+  }, [searchState]);
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
       providerIds: controller.providers.map((p) => p.id),
@@ -987,15 +999,23 @@ function Main({
   // ---- radio (session.radio tail — start from the playing ref) ---
 
   const radioModel = useMemo(() => toRadioModel(state.radio), [state.radio]);
-  const radioCapable = useMemo(
-    () =>
-      controller.providers.some((p) =>
-        p.capabilities.includes('radio.seed'),
+  // Radio seeds route by the seed reference's own provider — a track
+  // is only seedable when THAT provider declares radio.seed, not just
+  // any loaded one.
+  const radioSeedable = useCallback(
+    (ref: SourceRef | null): boolean =>
+      ref !== null &&
+      controller.providers.some(
+        (p) => p.id === ref.provider && p.capabilities.includes('radio.seed'),
       ),
     [controller],
   );
 
-  const onStartRadio = useCallback(() => {
+  // The stage radio control seeds from the playing occurrence's
+  // selected ref, falling back to the recording's first source ref —
+  // the same derivation the seed op uses, kept shared so the gate
+  // mirrors the action exactly.
+  const radioSeedRef = useMemo((): SourceRef | null => {
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
     );
@@ -1003,14 +1023,29 @@ function Main({
       currentRecordingId === null
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
-    const ref: SourceRef | null =
-      current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-    if (ref !== null) {
+    return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
+  }, [state, currentRecordingId]);
+
+  // The row-action seed: a metadata row seeds its own ref; a library
+  // row seeds its first source ref. Gate matches the op's target.
+  const actionRadioRef = useMemo((): SourceRef | null => {
+    if (actionsFor === null) {
+      return null;
+    }
+    return actionsFor.kind === 'metadata'
+      ? actionsFor.meta.sourceRef
+      : (state.recordings.find((r) => r.id === actionsFor.recordingId)
+          ?.sourceRefs[0] ?? null);
+  }, [actionsFor, state.recordings]);
+
+  const onStartRadio = useCallback(() => {
+    const ref = radioSeedRef;
+    if (ref !== null && radioSeedable(ref)) {
       void session
         .startRadio(ref)
         .then((r) => reportResult('start radio', r));
     }
-  }, [session, state, currentRecordingId]);
+  }, [session, radioSeedRef, radioSeedable]);
 
   const onStopRadio = useCallback(() => {
     reportResult('stop radio', session.stopRadio());
@@ -1521,14 +1556,15 @@ function Main({
           break;
         case 'radio': {
           // Track-seeded at this release: a metadata row seeds its own
-          // ref; a library row seeds its first source ref. No ref
-          // means no seed — the row action simply doesn't fire.
+          // ref; a library row seeds its first source ref. The action
+          // only renders when the seed's provider declares radio.seed,
+          // but guard the op too — state may shift between the two.
           const ref =
             target.kind === 'metadata'
               ? target.meta.sourceRef
               : (state.recordings.find((r) => r.id === target.recordingId)
                   ?.sourceRefs[0] ?? null);
-          if (ref !== null) {
+          if (ref !== null && radioSeedable(ref)) {
             void session
               .startRadio(ref)
               .then((r) => reportResult('start radio', r));
@@ -1549,7 +1585,7 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity, state.recordings],
+    [actionsFor, session, openEntity, state.recordings, radioSeedable],
   );
 
   const onOpenCard = useCallback(
@@ -1648,7 +1684,17 @@ function Main({
         return (
           <HomeScreen
             model={homeModel}
-            onPressCard={(card) => void playRecording(card.key)}
+            onPressCard={(card) => {
+              const meta = suggestionMeta.get(card.key);
+              if (meta !== undefined) {
+                if (canPlayMeta(meta)) {
+                  recordRecentSearch(query);
+                  void session.addAndPlay(meta);
+                }
+                return;
+              }
+              void playRecording(card.key);
+            }}
             onResume={onPlayPause}
           />
         );
@@ -1900,7 +1946,9 @@ function Main({
               onToggleLike={onToggleLike}
               onSeek={(ms) => void session.seekTo(ms)}
               onRetryLyrics={onRetryLyrics}
-              onStartRadio={radioCapable ? onStartRadio : undefined}
+              onStartRadio={
+                radioSeedable(radioSeedRef) ? onStartRadio : undefined
+              }
               onStopRadio={onStopRadio}
               onPressQueueItem={playQueueOccurrence}
               onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
@@ -1982,10 +2030,10 @@ function Main({
                   label: 'add to playlist',
                   icon: 'list-plus' as const,
                 },
-                // Only offer the seed affordance when a loaded
-                // provider declares radio.seed — an unsupported start
-                // is a dead end.
-                ...(radioCapable
+                // Only offer the seed affordance when the seed's own
+                // provider declares radio.seed — routing is ref-scoped,
+                // so another provider's support is a dead end.
+                ...(radioSeedable(actionRadioRef)
                   ? [
                       {
                         key: 'radio',
