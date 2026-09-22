@@ -73,7 +73,10 @@ export function SearchScreen({
           },
   });
   return (
-    <div className="uw-screen uw-search">
+    <div
+      className="uw-screen uw-search"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
+    >
       <div className="uw-search__field">
         <Icon name="search" size={14} color="var(--text-secondary)" />
         <input

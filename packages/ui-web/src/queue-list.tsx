@@ -104,47 +104,84 @@ export function QueueList({
     onContext: undefined,
   });
   // Optimistic reorder bookkeeping: queue.items is controlled by the
-  // caller, so each dispatched move is kept as a pending op. Publishes
-  // acknowledge the ops in order — a partial publish keeps the tail,
-  // an incompatible update rebases the whole pending state.
+  // caller, so each intended move is kept as a pending op. Publishes
+  // acknowledge dispatched ops in order — a partial publish keeps the
+  // tail, a republished-unchanged order counts as rejection, and an
+  // incompatible update rebases the whole pending state. With only a
+  // relative callback, one op stays in flight per publish round-trip;
+  // the rest queue locally so a stale-order read can't collapse moves.
   const pendingOps = useRef<readonly PendingMove[]>([]);
+  const queuedOps = useRef<readonly PendingMove[]>([]);
   const pendingIds = useRef<readonly string[] | null>(null);
+  const lastItems = useRef<QueueModel['items'] | null>(null);
   const lastAuthIds = useRef<readonly string[] | null>(null);
   const trackFocusId = useRef<string | null>(null);
   const authIds = queue.items.map((item) => item.occurrenceId);
-  if (lastAuthIds.current === null) {
+  const useAbsolute = onMoveItemTo !== undefined;
+  if (lastItems.current !== queue.items) {
+    const prevAuth = lastAuthIds.current;
+    lastItems.current = queue.items;
     lastAuthIds.current = authIds;
-  } else if (pendingIds.current !== null) {
-    const res = reconcilePendingOps(lastAuthIds.current, pendingOps.current, authIds);
-    if (res === null) {
-      pendingOps.current = [];
-      pendingIds.current = null;
-    } else {
-      pendingOps.current = res.ops;
-      pendingIds.current = res.ops.length === 0 ? null : res.ids;
+    if (prevAuth !== null && pendingIds.current !== null) {
+      if (idsEqual(prevAuth, authIds)) {
+        // Republished the same order — outstanding moves were
+        // rejected or never applied; drop the optimistic state.
+        pendingOps.current = [];
+        queuedOps.current = [];
+        pendingIds.current = null;
+      } else {
+        const res = reconcilePendingOps(prevAuth, pendingOps.current, authIds);
+        if (res === null) {
+          pendingOps.current = [];
+          queuedOps.current = [];
+          pendingIds.current = null;
+        } else {
+          pendingOps.current = res.ops;
+          const tail = [...res.ops, ...queuedOps.current];
+          pendingIds.current = tail.length === 0 ? null : applyMoves(authIds, tail);
+        }
+      }
     }
-    lastAuthIds.current = authIds;
-  } else if (!idsEqual(lastAuthIds.current, authIds)) {
-    lastAuthIds.current = authIds;
   }
   // Focus follows the moved row through publishes: once the
   // authoritative order lands, point the roving index at it again.
+  // Also where serialized relative moves flush: a queued op ships
+  // only when no dispatched op is still unacknowledged.
   useEffect(() => {
     const id = trackFocusId.current;
-    if (id === null) {
-      return;
+    if (id !== null) {
+      trackFocusId.current = null;
+      const index = queue.items.findIndex((item) => item.occurrenceId === id);
+      if (index >= 0) {
+        list.onRowFocus(index);
+      }
     }
-    trackFocusId.current = null;
-    const index = queue.items.findIndex((item) => item.occurrenceId === id);
-    if (index >= 0) {
-      list.onRowFocus(index);
+    if (
+      !useAbsolute &&
+      onMoveItem !== undefined &&
+      pendingOps.current.length === 0 &&
+      queuedOps.current.length > 0
+    ) {
+      const [head, ...rest] = queuedOps.current;
+      queuedOps.current = rest;
+      if (head !== undefined) {
+        pendingOps.current = [...pendingOps.current, head];
+        onMoveItem(head.id, head.dir);
+      }
     }
-  }, [queue.items, list]);
+  }, [queue.items, list, useAbsolute, onMoveItem]);
   if (queue.items.length === 0) {
     return <EmptyState title="queue is empty" icon="queue" />;
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
   const orderedIds = pendingIds.current ?? authIds;
+  // Rows render in the optimistic order too, so the roving index and
+  // DOM focus never index into different sequences mid-persist.
+  const itemById = new Map(queue.items.map((item) => [item.occurrenceId, item]));
+  const orderedItems = orderedIds.flatMap((id) => {
+    const item = itemById.get(id);
+    return item === undefined ? [] : [item];
+  });
   const moveItem = (occurrenceId: string, direction: -1 | 1) => {
     const from = orderedIds.indexOf(occurrenceId);
     const to = from + direction;
@@ -152,12 +189,21 @@ export function QueueList({
       return;
     }
     const op: PendingMove = { id: occurrenceId, dir: direction };
-    pendingOps.current = [...pendingOps.current, op];
     pendingIds.current = applyPendingMove(orderedIds, op);
-    if (onMoveItem !== undefined) {
+    if (useAbsolute) {
+      // Absolute destinations carry the optimistic intent — the
+      // caller applies them in order, no stale-index collapse.
+      pendingOps.current = [...pendingOps.current, op];
+      onMoveItemTo(occurrenceId, to);
+    } else if (
+      onMoveItem !== undefined &&
+      pendingOps.current.length === 0 &&
+      queuedOps.current.length === 0
+    ) {
+      pendingOps.current = [op];
       onMoveItem(occurrenceId, direction);
     } else {
-      onMoveItemTo?.(occurrenceId, to);
+      queuedOps.current = [...queuedOps.current, op];
     }
     // The moved row keeps DOM focus — point the roving index at its
     // destination so the next move or arrow press starts from it.
@@ -188,7 +234,7 @@ export function QueueList({
       data-scroll={scrollEnabled ? 'true' : 'false'}
       onKeyDown={onKeyDown}
     >
-      {queue.items.map((item, index) => (
+      {orderedItems.map((item, index) => (
         <div key={item.occurrenceId}>
           {item.current && (
             <Text

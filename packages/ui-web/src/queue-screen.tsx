@@ -31,7 +31,10 @@ export function QueueScreen({
   onMoveItemTo,
 }: QueueScreenProps) {
   return (
-    <div className="uw-screen uw-queue">
+    <div
+      className="uw-screen uw-queue"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
+    >
       <div className="uw-queue__head">
         <Text variant="heading" color="bright">
           queue
