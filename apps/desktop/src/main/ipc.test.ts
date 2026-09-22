@@ -35,8 +35,22 @@ class FakeIpcMain implements IpcMainLike {
 
 class FakeSender implements NetSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
+  private readonly listeners = new Map<string, Array<() => void>>();
   send(channel: string, payload: unknown): void {
     this.sent.push({ channel, payload });
+  }
+  on(
+    event: 'destroyed' | 'render-process-gone' | 'did-navigate',
+    listener: () => void,
+  ): void {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+  }
+  emit(event: 'destroyed' | 'render-process-gone' | 'did-navigate'): void {
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener();
+    }
   }
 }
 
@@ -66,6 +80,8 @@ export async function run(): Promise<void> {
   try {
     let online = true;
     const net = createNetService({ readOnline: () => online, pollMs: 5 });
+    const utilityCalls: Array<{ channel: string; args: unknown }> = [];
+    let txSeq = 0;
     const deps: ChannelDeps = {
       meta: () => ({
         version: '0.1.0',
@@ -77,8 +93,14 @@ export async function run(): Promise<void> {
       net,
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {
-        request: (channel, args) =>
-          Promise.resolve({ routed: channel, args }),
+        request: (channel, args) => {
+          utilityCalls.push({ channel, args });
+          return Promise.resolve(
+            channel === CHANNELS.storageBegin
+              ? { txId: `tx-${++txSeq}` }
+              : { routed: channel, args },
+          );
+        },
       },
     };
     const ipc = new FakeIpcMain();
@@ -182,10 +204,12 @@ export async function run(): Promise<void> {
     });
 
     // storage channels forward to the utility with their args intact
+    utilityCalls.length = 0;
     const begin = await invoke(CHANNELS.storageBegin, undefined);
     assert(begin.ok);
-    assertDeepEqual(begin.result, {
-      routed: 'storage:begin',
+    assertDeepEqual(begin.result, { txId: 'tx-1' });
+    assertDeepEqual(utilityCalls[0], {
+      channel: 'storage:begin',
       args: undefined,
     });
     const execArgs = { txId: 'tx-1', sql: 'SELECT 1', params: [1, 'a', null] };
@@ -213,6 +237,50 @@ export async function run(): Promise<void> {
     assert(!badCommit.ok && badCommit.error.kind === 'invalid-request');
     const badBackup = await invoke(CHANNELS.storageBackup, { tag: '../x' });
     assert(!badBackup.ok && badBackup.error.kind === 'invalid-request');
+
+    // a renderer that dies mid-tx abandons it — main rolls it back so
+    // the utility's single tx slot frees up
+    utilityCalls.length = 0;
+    sender.emit('did-navigate');
+    await sleep(0);
+    assertDeepEqual(utilityCalls, [
+      { channel: 'storage:rollback', args: { txId: 'tx-1' } },
+    ]);
+
+    // a committed tx is no longer tracked — later lifecycle events
+    // roll back nothing
+    utilityCalls.length = 0;
+    const begin2 = await invoke(CHANNELS.storageBegin, undefined);
+    assert(begin2.ok && begin2.result !== undefined);
+    const committed = await invoke(CHANNELS.storageCommit, {
+      txId: 'tx-2',
+    });
+    assert(committed.ok);
+    sender.emit('destroyed');
+    await sleep(0);
+    assertDeepEqual(utilityCalls, [
+      { channel: 'storage:begin', args: undefined },
+      { channel: 'storage:commit', args: { txId: 'tx-2' } },
+    ]);
+
+    // multiple open txs on one sender all roll back together
+    utilityCalls.length = 0;
+    await invoke(CHANNELS.storageBegin, undefined);
+    await invoke(CHANNELS.storageBegin, undefined);
+    sender.emit('render-process-gone');
+    await sleep(0);
+    assertDeepEqual(utilityCalls.slice(2), [
+      { channel: 'storage:rollback', args: { txId: 'tx-3' } },
+      { channel: 'storage:rollback', args: { txId: 'tx-4' } },
+    ]);
+
+    // senders without lifecycle events never wedge registration
+    const plainSender = { send: () => undefined };
+    const plainBegin = await ipc.handlers.get(CHANNELS.storageBegin)?.(
+      { sender: plainSender },
+      undefined,
+    );
+    assert(plainBegin !== undefined && plainBegin.ok);
 
     // every handler rejection still produces a well-formed envelope
     const depsThrow: ChannelDeps = {
