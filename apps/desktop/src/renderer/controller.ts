@@ -81,6 +81,12 @@ export type SessionController = {
   readonly player: PlayerPort;
   /** The session's synchronous connectivity read — kept by net events. */
   readonly isOnline: () => boolean;
+  /**
+   * UI-side edges for the same value — the session snapshot does not
+   * carry connectivity, so the offline banner and play gates read
+   * this stream instead of the session's subscribe.
+   */
+  readonly subscribeOnline: (listener: (online: boolean) => void) => () => void;
   dispose(): Promise<void>;
 };
 
@@ -165,9 +171,19 @@ export async function createSessionController(
     isOnline: () => lastOnline,
   });
   let edged = false;
+  const onlineListeners = new Set<(online: boolean) => void>();
   const applyOnline = (online: boolean): void => {
     lastOnline = online;
     session.connectivityChanged();
+    for (const listener of onlineListeners) {
+      listener(online);
+    }
+  };
+  const subscribeOnline = (listener: (online: boolean) => void): (() => void) => {
+    onlineListeners.add(listener);
+    return () => {
+      onlineListeners.delete(listener);
+    };
   };
   let unsubscribeNet: () => void = () => {};
   try {
@@ -201,6 +217,7 @@ export async function createSessionController(
     providers,
     player,
     isOnline: () => lastOnline,
+    subscribeOnline,
     async dispose() {
       unsubscribeNet();
       await session.dispose();
