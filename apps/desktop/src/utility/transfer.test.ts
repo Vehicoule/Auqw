@@ -312,6 +312,69 @@ export async function run(): Promise<void> {
       'kept partial survives abort',
     );
 
+    // A terminal op queues behind the one in flight on the same
+    // sink — finalize publishes, then the queued abort lands on the
+    // closed sink and fails typed instead of racing mid-publish.
+    const chainedBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'chained.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(chainedBegin.ok, 'chained begin resolves');
+    const chainSink = (chainedBegin.result as { sinkId: string }).sinkId;
+    await call(CHANNELS.transferWrite, {
+      sinkId: chainSink,
+      data: payload.toString('base64'),
+    });
+    const finInFlight = call(CHANNELS.transferFinalize, {
+      sinkId: chainSink,
+      expected: digest,
+    });
+    const abortQueued = call(CHANNELS.transferAbort, {
+      sinkId: chainSink,
+      keep: false,
+    });
+    const [finRes, abortRes] = await Promise.all([
+      finInFlight,
+      abortQueued,
+    ]);
+    assert(finRes.ok, 'in-flight finalize completes at the boundary');
+    assert(
+      !abortRes.ok && abortRes.error?.kind === 'invalid-request',
+      'abort queued behind the close fails typed',
+    );
+    assertEqual(
+      (await readFile(join(mediaDir, 'chained.mp4'))).toString(),
+      payload.toString(),
+      'finalize-before-abort publishes the file',
+    );
+    const lateWrite = await call(CHANNELS.transferWrite, {
+      sinkId: chainSink,
+      data: payload.toString('base64'),
+    });
+    assert(
+      !lateWrite.ok && lateWrite.error?.kind === 'invalid-request',
+      'post-close write fails typed',
+    );
+
+    // A decoded 4MiB frame encodes to exactly 5,592,408 base64 chars —
+    // the cap must admit the maximum frame the chunker can emit.
+    const maxFrame = Buffer.alloc(4 * 1024 * 1024, 0x61);
+    const frameBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'frame.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(frameBegin.ok, 'frame begin resolves');
+    const frameSink = (frameBegin.result as { sinkId: string }).sinkId;
+    const maxWrite = await call(CHANNELS.transferWrite, {
+      sinkId: frameSink,
+      data: maxFrame.toString('base64'),
+    });
+    assert(maxWrite.ok, 'max-size frame passes the write cap');
+    await call(CHANNELS.transferAbort, {
+      sinkId: frameSink,
+      keep: false,
+    });
+
     service.close();
     const afterClose = await call(CHANNELS.transferBegin, {
       destPath: 'late.mp4',

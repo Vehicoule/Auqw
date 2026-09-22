@@ -121,6 +121,32 @@ export function isBareName(name: string): boolean {
   );
 }
 
+/**
+ * `FileHandle.write` reports `bytesWritten` — it does not promise to
+ * consume the whole requested range. Loop until the buffer lands or
+ * the handle stops making progress, so a short write can never
+ * inflate the committed offset a later resume trusts.
+ */
+async function writeAll(
+  handle: FileHandle,
+  buf: Buffer,
+  offset: number,
+  length: number,
+): Promise<void> {
+  let done = 0;
+  while (done < length) {
+    const { bytesWritten } = await handle.write(
+      buf,
+      offset + done,
+      length - done,
+    );
+    if (bytesWritten === 0) {
+      throw shellError('io-error', 'file write made no progress');
+    }
+    done += bytesWritten;
+  }
+}
+
 /** Maps a thrown fs failure to a typed shell error — ENOSPC preserves its storage-full semantics. */
 function asIo(message: string, thrown: unknown): never {
   if (isShellError(thrown)) {
@@ -210,6 +236,47 @@ export function createTransferService(
     return sink;
   }
 
+  /**
+   * Exactly-once close+release: whichever terminal path reaches the
+   * sink first frees its slot — a finalize-then-abort pair (or any
+   * later terminal op) can never release it twice.
+   */
+  function closeSink(sink: Sink): void {
+    if (sink.closed) {
+      return;
+    }
+    sink.closed = true;
+    sinks.delete(sink.id);
+    releaseSlot();
+  }
+
+  /**
+   * Per-sink op chain — every stateful handler on a sinkId queues
+   * behind the one in flight. A cancel-fired abort therefore lands at
+   * a defined boundary (after the current op), never mid-write or
+   * mid-publish: no finalize-after-abort publishes, no deleted
+   * partial resurrects under a stale handle, and the sink lookup runs
+   * inside the turn so an op dequeued behind a close fails typed.
+   */
+  const chains = new Map<string, Promise<void>>();
+  function chained<T>(sinkId: string, run: () => Promise<T>): Promise<T> {
+    const prev = chains.get(sinkId) ?? Promise.resolve();
+    const next = prev.then(run);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    chains.set(sinkId, settled);
+    // Chains stop growing once the sink is gone — drop the drained
+    // tail so the map is bounded by live sinks, not history.
+    void settled.then(() => {
+      if (chains.get(sinkId) === settled) {
+        chains.delete(sinkId);
+      }
+    });
+    return next;
+  }
+
   function sinkInfo(sink: Sink): TransferSinkInfo {
     return {
       sinkId: sink.id,
@@ -264,7 +331,7 @@ export function createTransferService(
             if (bytesRead === 0) {
               break;
             }
-            await dst.write(buf, 0, bytesRead);
+            await writeAll(dst, buf, 0, bytesRead);
             remaining -= bytesRead;
             position += bytesRead;
           }
@@ -347,7 +414,7 @@ export function createTransferService(
       if (sink.handle === null) {
         sink.handle = await open(sink.partAbs, 'a');
       }
-      await sink.handle.write(bytes, 0, bytes.length);
+      await writeAll(sink.handle, bytes, 0, bytes.length);
       sink.committed += bytes.length;
     } catch (thrown) {
       asIo('transfer write failed', thrown);
@@ -424,9 +491,7 @@ export function createTransferService(
       }
       return { digest };
     } finally {
-      sink.closed = true;
-      sinks.delete(sink.id);
-      releaseSlot();
+      closeSink(sink);
     }
   }
 
@@ -444,9 +509,7 @@ export function createTransferService(
     } catch (thrown) {
       asIo('transfer abort failed', thrown);
     } finally {
-      sink.closed = true;
-      sinks.delete(sink.id);
-      releaseSlot();
+      closeSink(sink);
     }
   }
 
@@ -696,22 +759,22 @@ export function createTransferService(
       [CHANNELS.transferWrite]: guarded(
         CHANNELS.transferWrite,
         isTransferWriteArgs,
-        write,
+        (args) => chained(args.sinkId, () => write(args)),
       ),
       [CHANNELS.transferCommit]: guarded(
         CHANNELS.transferCommit,
         isTransferSinkArgs,
-        commit,
+        (args) => chained(args.sinkId, () => commit(args)),
       ),
       [CHANNELS.transferFinalize]: guarded(
         CHANNELS.transferFinalize,
         isTransferFinalizeArgs,
-        finalize,
+        (args) => chained(args.sinkId, () => finalize(args)),
       ),
       [CHANNELS.transferAbort]: guarded(
         CHANNELS.transferAbort,
         isTransferAbortArgs,
-        abort,
+        (args) => chained(args.sinkId, () => abort(args)),
       ),
       [CHANNELS.transferStat]: guarded(
         CHANNELS.transferStat,

@@ -46,14 +46,20 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     #signal: CancellationSignal;
     #closed = false;
     #cancelled = false;
+    #unsubscribe: () => void;
 
     constructor(id: string, signal: CancellationSignal) {
       this.#id = id;
       this.#signal = signal;
       // A cancel while the sink is live aborts the utility side —
       // the engine may not issue another call for the signal to ride.
-      const unsubscribe = signal.subscribe(() => {
-        unsubscribe();
+      // The subscription drops when the sink closes: a finalized sink
+      // must not fire a stray abort on a later cancel. The field is a
+      // no-op until subscribe returns so a synchronously-fired
+      // (already-cancelled) signal can't hit an unassigned member.
+      this.#unsubscribe = () => undefined;
+      this.#unsubscribe = signal.subscribe(() => {
+        this.#unsubscribe();
         this.#cancelled = true;
         this.#closed = true;
         void api.transfer
@@ -61,7 +67,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
           .catch(() => undefined);
       });
       if (this.#closed) {
-        unsubscribe();
+        this.#unsubscribe();
       }
     }
 
@@ -139,6 +145,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         this.#signal,
       );
       this.#closed = true;
+      this.#unsubscribe();
       if (result.t === 'cancelled') {
         return err(appError('cancelled', 'cancelled'));
       }
@@ -154,6 +161,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         this.#signal,
       );
       this.#closed = true;
+      this.#unsubscribe();
       if (result.t === 'cancelled') {
         return err(appError('cancelled', 'cancelled'));
       }

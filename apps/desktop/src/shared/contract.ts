@@ -725,7 +725,8 @@ export type AuqwStorage = {
  * dir under userData is the only writable surface.
  */
 export const MAX_TRANSFER_NAME = 512;
-export const MAX_TRANSFER_WRITE_BASE64 = 5_592_405;
+// 4MiB decoded → ceil(4194304/3)*4 = 5,592,408 base64 chars.
+export const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
 export const MAX_SWEEP_KEEP = 65_536;
 export const MAX_LIST_ENTRIES = 65_536;
 
