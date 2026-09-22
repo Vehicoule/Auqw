@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -91,6 +91,24 @@ export async function run(): Promise<void> {
         (statBad.result as { exists: boolean }).exists === false,
       'mismatched partial is deleted, not finalized',
     );
+
+    // A stat failure is not absence — exists:false would let
+    // DownloadManager remove a live file with its ledger row.
+    // POSIX-only: EACCES needs DAC bits on the managed dir.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      await chmod(mediaDir, 0o000);
+      try {
+        const denied = await call(CHANNELS.transferStat, {
+          name: 'track.mp4',
+        });
+        assert(
+          !denied.ok && denied.error?.kind === 'permission-denied',
+          'an unreadable dir fails typed, never exists:false',
+        );
+      } finally {
+        await chmod(mediaDir, 0o700);
+      }
+    }
 
     // Resume: a .part matching resumeAtBytes appends in place.
     await writeFile(join(mediaDir, 'part.mp4.part'), payload.subarray(0, 8));

@@ -33,6 +33,7 @@ import {
   isTransferSweepArgs,
   isTransferWriteArgs,
 } from '../shared/contract.ts';
+import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import type { UtilityHandler } from './router.ts';
 
@@ -518,7 +519,19 @@ export function createTransferService(
       throw shellError('invalid-request', 'not a managed file name');
     }
     const abs = join(dir(), args.name);
-    const info = await stat(abs).catch(() => null);
+    // Only a genuinely-absent name reports exists:false — any other
+    // stat failure would let DownloadManager read a live file as
+    // missing and remove it with its ledger row.
+    const info = await stat(abs).catch((thrown) => {
+      const code = errorCode(thrown);
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        return null;
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw shellError('permission-denied', 'stat failed — not readable');
+      }
+      throw shellError('io-error', 'stat failed');
+    });
     if (info === null) {
       return { exists: false, bytes: null };
     }

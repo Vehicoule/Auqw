@@ -59,13 +59,14 @@ export type TagService = {
 const FINGERPRINT_SAMPLE = 4096;
 
 /**
- * Root-level fs outcome: a genuinely-gone path enumerates empty, but a
- * permission or I/O failure at the tree root must not answer
- * `entries: []` — LocalFileSource diffs a "successful" empty scan into
- * removing every indexed document under the tree. Nested dirs still
- * skip-and-continue; only the root is typed.
+ * Enumeration fs outcome: a genuinely-gone path enumerates empty (or
+ * skips itself when it vanished mid-scan), but a permission or I/O
+ * failure must not answer a partial listing — LocalFileSource diffs a
+ * "successful" scan against the index, so every silently-omitted file
+ * reads as deleted. There is no partial-scan marker in the port, so
+ * any unreadable entry fails the whole enumeration typed.
  */
-function rootFailure(thrown: unknown): 'gone' | ShellError {
+function scanFailure(thrown: unknown): 'gone' | ShellError {
   const code = errorCode(thrown);
   if (code === 'ENOENT' || code === 'ENOTDIR') {
     return 'gone';
@@ -298,7 +299,7 @@ export function createTagService(options: TagServiceOptions): TagService {
     }
     if (tree.kind === 'file') {
       const info = await stat(tree.absPath).catch((thrown) => {
-        const outcome = rootFailure(thrown);
+        const outcome = scanFailure(thrown);
         if (outcome !== 'gone') {
           throw outcome;
         }
@@ -315,15 +316,19 @@ export function createTagService(options: TagServiceOptions): TagService {
             name,
             size: info.size,
             mime: mimeForPath(name) ?? 'application/octet-stream',
-            modifiedMs: Number.isSafeInteger(info.mtimeMs)
-              ? Math.floor(info.mtimeMs)
-              : null,
+            // mtimeMs is fractional; floor to the contract's integer.
+            // Pre-epoch timestamps emit null — the wire type only
+            // accepts nonnegative values.
+            modifiedMs:
+              Number.isFinite(info.mtimeMs) && info.mtimeMs >= 0
+                ? Math.floor(info.mtimeMs)
+                : null,
           },
         ],
       };
     }
     const rootReal = await realpath(tree.absPath).catch((thrown) => {
-      const outcome = rootFailure(thrown);
+      const outcome = scanFailure(thrown);
       if (outcome !== 'gone') {
         throw outcome;
       }
@@ -339,8 +344,10 @@ export function createTagService(options: TagServiceOptions): TagService {
       mime: string;
       modifiedMs: number | null;
     }[] = [];
-    // Iterative walk — one unreadable subdirectory skips itself rather
-    // than failing the whole scan, and depth never risks the stack.
+    // Iterative walk — depth never risks the stack, and any failed
+    // dir fails the scan typed rather than returning a partial list
+    // that diffs into index removals. Only a dir that vanished
+    // mid-scan (ENOENT/ENOTDIR) skips itself.
     const stack: string[] = [rootReal];
     while (stack.length > 0) {
       const current = stack.pop();
@@ -350,13 +357,9 @@ export function createTagService(options: TagServiceOptions): TagService {
       const dirents = await readdir(current, {
         withFileTypes: true,
       }).catch((thrown) => {
-        // A nested unreadable dir skips itself; a failed ROOT means
-        // the scan is suspect — "empty" would read as mass-removal.
-        if (current === rootReal) {
-          const outcome = rootFailure(thrown);
-          if (outcome !== 'gone') {
-            throw outcome;
-          }
+        const outcome = scanFailure(thrown);
+        if (outcome !== 'gone') {
+          throw outcome;
         }
         return null;
       });
@@ -377,7 +380,13 @@ export function createTagService(options: TagServiceOptions): TagService {
           continue;
         }
         const docId = relative(rootReal, abs).split(sep).join('/');
-        const info = await stat(abs).catch(() => null);
+        const info = await stat(abs).catch((thrown) => {
+          const outcome = scanFailure(thrown);
+          if (outcome !== 'gone') {
+            throw outcome;
+          }
+          return null;
+        });
         if (info === null || !info.isFile()) {
           continue;
         }
@@ -386,9 +395,10 @@ export function createTagService(options: TagServiceOptions): TagService {
           name: entry.name,
           size: info.size,
           mime,
-          modifiedMs: Number.isSafeInteger(info.mtimeMs)
-            ? Math.floor(info.mtimeMs)
-            : null,
+          modifiedMs:
+            Number.isFinite(info.mtimeMs) && info.mtimeMs >= 0
+              ? Math.floor(info.mtimeMs)
+              : null,
         });
         if (entries.length > MAX_ENUM_ENTRIES) {
           throw shellError(

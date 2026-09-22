@@ -1,8 +1,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import {
+  chmod,
   mkdir,
   rename,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -306,6 +308,63 @@ export async function run(): Promise<void> {
           0,
       'a genuinely-gone root enumerates empty',
     );
+
+    // A nested unreadable dir fails the whole scan typed — a partial
+    // listing reads as deletion to LocalFileSource (no partial-scan
+    // marker exists in the port). POSIX-only: EACCES needs DAC bits.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const nested = join(root, 'scanme');
+      await mkdir(nested);
+      await mkdir(join(nested, 'locked'));
+      await writeFile(join(nested, 'a.wav'), wavFixture({}));
+      grant(dirTreeUri(nested));
+      await chmod(join(nested, 'locked'), 0o000);
+      try {
+        const denied = await call(CHANNELS.tagreadEnumerate, {
+          treeUri: dirTreeUri(nested),
+        });
+        assert(
+          !denied.ok && denied.error?.kind === 'permission-denied',
+          'an unreadable nested dir fails the scan typed',
+        );
+      } finally {
+        await chmod(join(nested, 'locked'), 0o700);
+      }
+    }
+
+    // Real mtimes flow floored; pre-epoch mtimes emit null — the wire
+    // type only accepts nonnegative integers.
+    if (process.platform !== 'win32') {
+      const epochDir = join(root, 'epoch');
+      await mkdir(epochDir);
+      const oldFile = join(epochDir, 'old.wav');
+      const freshFile = join(epochDir, 'fresh.wav');
+      await writeFile(oldFile, wavFixture({}));
+      await writeFile(freshFile, wavFixture({}));
+      await utimes(oldFile, new Date(-1000), new Date(-1000));
+      grant(dirTreeUri(epochDir));
+      const scanned = await call(CHANNELS.tagreadEnumerate, {
+        treeUri: dirTreeUri(epochDir),
+      });
+      assert(scanned.ok, 'pre-epoch scan resolves');
+      const scannedEntries = (scanned.result as {
+        entries: { docId: string; modifiedMs: number | null }[];
+      }).entries;
+      const oldEntry = scannedEntries.find((e) => e.docId === 'old.wav');
+      const freshEntry = scannedEntries.find(
+        (e) => e.docId === 'fresh.wav',
+      );
+      assertEqual(
+        oldEntry?.modifiedMs,
+        null,
+        'negative mtime normalizes to null',
+      );
+      assert(
+        typeof freshEntry?.modifiedMs === 'number' &&
+          freshEntry.modifiedMs > 0,
+        'a normal mtime survives floored, not nulled',
+      );
+    }
   } finally {
     service.close();
     db.close();
