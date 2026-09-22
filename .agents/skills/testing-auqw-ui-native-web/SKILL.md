@@ -70,5 +70,20 @@ When you only need `packages/ui-native` components — not the session/download 
 - CorrectionsScreen's `onRetry` prop isn't wired in the gallery fixtures, so the corrections "error" frame shows no retry button — expected coverage gap, not a bug.
 - Token/colour assertions: use `getComputedStyle` in the browser console (e.g. secondary text = `rgb(143, 153, 194)` for `#8f99c2`).
 
+## Merge-shell (post `main` merge) notes — verified on s3/schema-domain
+
+- **Navigation is an overlay stack**: library collections/entity pages are `PushScreen`s (press the 'back' chevron), action sheets are `SheetScreen` modals (dismiss via the backdrop's `dismiss` button), mini-player lives in the PlatformTabs accessory, StageSheet inside the root item.
+- **TrackRow context = long-press** (`onLongPress`, hint "long-press for more actions"): `mouse_move` → `left_mouse_down` → wait ~1s → `left_mouse_up`. No 'more actions' button in the DOM.
+- **Catalog/search rows have NO download action** — the sheet only offers download when `recordFor()`/`downloadRefFor()` resolves (persisted recordings). Like a track first, then use 'recently liked'/collection rows.
+- **Local recordings surface ONLY via search** (key `local:<id>`) — search the title, not a library list.
+- **StageSheet**: player/lyrics/queue tabs and transport buttons ARE pressable; the transport 'download' button works. Pan-down collapse is NOT exercisable — synthetic drags only select text (RNGH pan doesn't track mouse on web). Expand it last; F5 resets.
+- **Coordinate calibration**: the computer-tool space ≠ CSS px (Chrome window is ~560x1140 real on a 1600x1200 display; scale ≈0.64 with ~65-72px Y offset — it drifts). Instrument once: `document.addEventListener('pointerdown', e => log(e.clientX,e.clientY), true)`, click, read the actual CSS point, then nudge.
+- **Fake TagReader entries need every field** (`fp`, `docId`, `modifiedMs`, `size`, `title`, `artist`, `album`, `durationMs`, `genre`) — a malformed entry makes `tagEnumerate` emit a decode failure that `local.rescan` swallows silently (`scanned.ok` guard → no log, no UI feedback). If a scan click does nothing, inspect the fake entries, not the click.
+- **Fake fs pitfalls** (fixed in local copies — keep them): `dirs` store must live on `globalThis.__auqwFsDirs` (separately-bundled module instances disagree otherwise); `norm()` must add a `file:/`→`file:///` case; `list()` must compare the remainder after the dir prefix (a dir uri's trailing slash gives children the same token depth — a token-count check returns [] forever → `usage()` always 0 kb).
+- **Catalog search items need `artwork: []`** — `isTrackMetadata` requires an array; `null` → 'plugin result failed validation'.
+- **Mid-flight download states**: add a `/harness/latency?ms=N` delay knob on the media endpoint so transfers stay in flight long enough to toggle metered/offline mid-transfer (eligibility re-eval demotes active transfers to resumable).
+- **Known stale-display bug** (real app bug, reported): after a successful library import, wiped downloads can still render as stored until the next download-ledger emit — `init()` only emits 'removing' on the failure path.
+- Expected harness noise: `queue projection failed` warns (expo-audio provisional player → diagnostics `persistence: failed`), `downloads: … file vanished — degrading to streaming` on reload (in-memory fs + integrity sweep).
+
 ## Devin Secrets Needed
 - none

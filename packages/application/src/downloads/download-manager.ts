@@ -227,10 +227,21 @@ export class DownloadManager {
         return failed(persisted);
       }
     }
-    // Verified — publish the staged ledger.
+    // Verified — publish the staged ledger, then emit so subscribers
+    // re-read it. A re-init can DROP rows (post-import wipe, integrity
+    // sweep): without an emit the UI keeps showing wiped downloads
+    // until the next unrelated ledger change.
     for (const row of staged.values()) {
       this.#rows.set(row.downloadId, row);
       this.#persistedOffset.set(row.downloadId, row.committedOffset);
+    }
+    for (const row of dropped) {
+      if (!staged.has(row.downloadId)) {
+        this.#emit({ ...row, state: 'removing' });
+      }
+    }
+    for (const row of staged.values()) {
+      this.#emit(row);
     }
 
     // Connectivity edges re-run the scheduler (offline → online, or
