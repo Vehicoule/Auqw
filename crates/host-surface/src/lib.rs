@@ -23,6 +23,7 @@
 //!   it must never be logged at any layer.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::Instant;
 
@@ -275,6 +276,16 @@ pub struct SpinReport {
 struct LiveRequest {
     token: CancellationToken,
     is_prepare: bool,
+    /// Flipped right before `deliver` runs: a settled generic entry is
+    /// re-admissible — the invocation ended, so its id is free even
+    /// while the outcome callback is still on the wire. A settled
+    /// prepare is NOT evictable: its delivery registers the
+    /// `prepared_handles` slot that owns the id until release.
+    settled: bool,
+    /// Unique per admission — the post-delivery cleanup removes only
+    /// the entry this task inserted, never a next generation that
+    /// claimed the id mid-delivery.
+    generation: u64,
 }
 
 /// A produced session slot in `prepared_handles`. `delivered` flips
@@ -367,6 +378,9 @@ pub struct PluginHost {
     stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, LiveRequest>>>,
+    /// Per-admission generation counter — lets the post-delivery
+    /// cleanup remove only the entry its own task inserted.
+    request_generation: AtomicU64,
     /// `prepare` request id → produced session slot, so a
     /// `cancelPrepare` landing after `prepared` can abandon the session
     /// (only while still unattached AND already delivered — see
@@ -500,6 +514,7 @@ impl PluginHost {
             stream,
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            request_generation: AtomicU64::new(0),
             prepared_handles: Arc::new(Mutex::new(HashMap::new())),
             cancelled_requests: Arc::new(Mutex::new(HashMap::new())),
             prepared_delivery: Arc::new(PrepareDelivery::default()),
@@ -666,11 +681,21 @@ impl PluginHost {
     pub fn cancel(&self, request_id: String) {
         let mut live_found = false;
         let mut live_was_prepare = false;
+        // A settled generic entry is a completed request whose delivery
+        // is still on the wire — a cancel now is indistinguishable from
+        // one that landed before admission, but tombstoning it would
+        // pre-cancel the NEXT generation of this id. Treat it as spent:
+        // no token to spend, nothing to stone.
+        let mut completed_generic = false;
         if let Ok(m) = self.cancels.lock() {
             if let Some(req) = m.get(&request_id) {
-                req.token.cancel();
-                live_found = true;
-                live_was_prepare = req.is_prepare;
+                if req.settled && !req.is_prepare {
+                    completed_generic = true;
+                } else {
+                    req.token.cancel();
+                    live_found = true;
+                    live_was_prepare = req.is_prepare;
+                }
             }
         }
         // Coalesced prepares hand one session handle to several
@@ -712,10 +737,12 @@ impl PluginHost {
         // still exists: a never-admitted id (cancel-before-start),
         // or a live prepare whose `Prepared` is mid-registration.
         // A spent generic request (`live_found && !is_prepare`)
-        // tombstones nothing — its delivery can't orphan a handle.
-        // Tombstones expire: arbitrary ids can't fill the cap and
-        // starve a real race.
-        if !delivered && (!live_found || live_was_prepare) {
+        // tombstones nothing — its delivery can't orphan a handle;
+        // a settled generic (`completed_generic`) is already past
+        // delivery-adjacent state and stoning it would poison the
+        // next generation. Tombstones expire: arbitrary ids can't
+        // fill the cap and starve a real race.
+        if !delivered && !completed_generic && (!live_found || live_was_prepare) {
             if let Ok(mut m) = self.cancelled_requests.lock() {
                 // Sweep expired tombstones before the cap check — a
                 // stale set must not masquerade as a full one.
@@ -767,12 +794,13 @@ impl PluginHost {
     /// on a worker thread — `deliver` returns a future so callers can
     /// offload blocking work with `spawn_blocking` instead of stalling
     /// a runtime worker.
-    /// `is_prepare` also drives when the `cancels` entry is freed: a
-    /// non-prepare request's slot is removed BEFORE `deliver` runs, so
-    /// a caller whose promise just settled may reuse the id
-    /// immediately. Prepare keeps the entry until after delivery — the
-    /// delivery registers the `prepared_handles` ownership slot that
-    /// then guards the id itself.
+    /// `is_prepare` also gates re-admission: a request flips
+    /// `settled` right before `deliver` runs, and a settled GENERIC
+    /// entry no longer blocks its id — the next admission evicts it,
+    /// so a caller whose promise just settled may reuse the id
+    /// immediately. A settled prepare keeps blocking: its delivery
+    /// registers the `prepared_handles` ownership slot that then
+    /// guards the id itself.
     fn start_typed<F, Fut>(
         &self,
         plugin_id: String,
@@ -832,8 +860,16 @@ impl PluginHost {
                 return Err(HostError::RequestInFlight { id: request_id });
             }
         }
-        {
+        let generation = {
             let mut m = lock(&self.cancels)?;
+            // A settled generic entry no longer blocks its id — the
+            // invocation ended; evict it so this generation owns the
+            // id even while the previous outcome is still on the wire.
+            if m.get(&request_id)
+                .is_some_and(|r| r.settled && !r.is_prepare)
+            {
+                m.remove(&request_id);
+            }
             if m.contains_key(&request_id) {
                 return Err(HostError::RequestInFlight { id: request_id });
             }
@@ -856,14 +892,18 @@ impl PluginHost {
             {
                 token.cancel();
             }
+            let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
             m.insert(
                 request_id.clone(),
                 LiveRequest {
                     token: token.clone(),
                     is_prepare,
+                    settled: false,
+                    generation,
                 },
             );
-        }
+            generation
+        };
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -886,14 +926,24 @@ impl PluginHost {
                 },
             )
             .await;
-            if !is_prepare {
-                if let Ok(mut m) = cancels.lock() {
-                    m.remove(&rid);
+            // Settled before `deliver`: the invocation ended, so a
+            // generic id is free even while its outcome is still on
+            // the wire (admission evicts this entry). A prepare's
+            // entry stays — its delivery registers the ownership
+            // slot that then guards the id.
+            if let Ok(mut m) = cancels.lock() {
+                if let Some(req) = m.get_mut(&rid) {
+                    req.settled = true;
                 }
             }
             deliver(rid.clone(), invocation).await;
+            // Generation-aware cleanup: remove only the entry this
+            // task inserted — a next generation may already own the
+            // id if this one was settled-generic and got evicted.
             if let Ok(mut m) = cancels.lock() {
-                m.remove(&rid);
+                if m.get(&rid).is_some_and(|r| r.generation == generation) {
+                    m.remove(&rid);
+                }
             }
         });
         Ok(())
@@ -1191,6 +1241,94 @@ mod tests {
             Err(e) => panic!("outcome: {e}"),
         };
         assert_eq!(kind, "budget-exceeded");
+    }
+
+    #[test]
+    fn settled_generic_id_is_readmissible_and_cleanup_is_generation_aware() {
+        // Contract: once a generic invocation ends, its id is free —
+        // a caller whose outcome just settled may reuse it while the
+        // previous delivery is still on the wire. The old generation's
+        // post-delivery cleanup must then not delete the NEW entry
+        // (that would strand a live request: uncancellable, and a
+        // third generation could double-admit).
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let kind_of = |_: String, o: ResolveOutcome| match o {
+            ResolveOutcome::Failed { kind, .. } => kind,
+            ResolveOutcome::Resolved { .. } => "resolved".to_string(),
+        };
+        // Gen A: its delivery parks on a gate so `settled` is already
+        // flipped while the callback is still mid-wire.
+        let (tx_a, rx_a) = std::sync::mpsc::channel::<String>();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        match host.start_resolve(id.clone(), "x".into(), "gen".into(), move |id, o| {
+            let _ = tx_a.send(kind_of(id, o));
+            async move {
+                let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(60));
+                let _ = done_tx.send(());
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start A: {e}"),
+        }
+        match rx_a.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(_) => {}
+            Err(e) => panic!("gen A outcome: {e}"),
+        }
+
+        // A cancel landing while A's delivery is still parked targets
+        // a COMPLETED request — it must not tombstone the id, or the
+        // next generation would start pre-cancelled.
+        host.cancel("gen".to_string());
+
+        // A's delivery is still parked on the gate — yet the id must
+        // already admit a new generation.
+        let (tx_b, rx_b) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id.clone(), "x".into(), "gen".into(), move |id, o| {
+            let _ = tx_b.send(kind_of(id, o));
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("re-admission of a settled id: {e}"),
+        }
+
+        // Let A's delivery finish; its cleanup must leave B's entry.
+        let _ = gate_tx.send(());
+        match done_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) => {}
+            Err(e) => panic!("gen A delivery: {e}"),
+        }
+        // The cleanup runs right after the deliver future returns —
+        // yield a beat so it can commit (or, on a regression, erase B).
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // A third generation must still hit `RequestInFlight` — B's
+        // entry is live and unsettled. If A's cleanup erased it, this
+        // admission would double-admit on a burning request.
+        let deliver = |_: String, _: ResolveOutcome| async move {};
+        match host.start_resolve(id.clone(), "x".into(), "gen".into(), deliver) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "gen"),
+            other => panic!("expected RequestInFlight for third generation, got {other:?}"),
+        }
+
+        // B is live: cancel must find ITS entry — under an
+        // unconditional removal it would already be gone. And since
+        // the parked-delivery cancel left no tombstone, B ran as a
+        // normal generation until now.
+        host.cancel("gen".to_string());
+        let kind = match rx_b.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("gen B outcome: {e}"),
+        };
+        assert_eq!(kind, "cancelled");
     }
 
     #[test]
