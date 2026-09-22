@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 
 // The debug artifact name is platform-shaped (cdylib conventions);
@@ -34,7 +35,10 @@ process.on('exit', () => {
     rmSync(NODE, { force: true });
   } catch {}
 });
-const host_ = await import(NODE);
+// ESM takes a specifier, not a path: on Windows a bare absolute path
+// parses as the `c:` URL scheme, so the import must go through a
+// file:// URL.
+const host_ = await import(pathToFileURL(NODE).href);
 const bindings = host_.default ?? host_;
 
 const wasm = readFileSync('sdk/conformance/echo/echo.wasm');
