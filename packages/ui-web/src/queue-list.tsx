@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -48,15 +49,36 @@ export function QueueList({
     return <EmptyState title="queue is empty" icon="queue" />;
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
-  const moveItem = (occurrenceId: string, fromIndex: number, direction: -1 | 1) => {
+  // Optimistic reorder bookkeeping: queue.items is controlled by the
+  // caller, so rapid repeated moves resolve against a pending order
+  // until the published items catch up — otherwise a second Alt+Arrow
+  // fired mid-persist moves the row that slid into the focused slot.
+  const pendingIds = useRef<readonly string[] | null>(null);
+  const lastItems = useRef(queue.items);
+  if (lastItems.current !== queue.items) {
+    lastItems.current = queue.items;
+    pendingIds.current = null;
+  }
+  const orderedIds = pendingIds.current ?? queue.items.map((i) => i.occurrenceId);
+  const moveItem = (occurrenceId: string, direction: -1 | 1) => {
+    const from = orderedIds.indexOf(occurrenceId);
+    const to = from + direction;
+    const swapped = orderedIds[to];
+    if (from < 0 || swapped === undefined) {
+      return;
+    }
+    const next = orderedIds.slice();
+    next[from] = swapped;
+    next[to] = occurrenceId;
+    pendingIds.current = next;
     if (onMoveItem !== undefined) {
       onMoveItem(occurrenceId, direction);
     } else {
-      onMoveItemTo?.(occurrenceId, fromIndex + direction);
+      onMoveItemTo?.(occurrenceId, to);
     }
     // The moved row keeps DOM focus — point the roving index at its
     // destination so the next move or arrow press starts from it.
-    list.onRowFocus(fromIndex + direction);
+    list.onRowFocus(to);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
@@ -65,12 +87,10 @@ export function QueueList({
       event.altKey &&
       (event.key === 'ArrowUp' || event.key === 'ArrowDown')
     ) {
-      const direction: -1 | 1 = event.key === 'ArrowUp' ? -1 : 1;
-      const next = list.focusIndex + direction;
-      const item = queue.items[list.focusIndex];
-      if (item !== undefined && next >= 0 && next < queue.items.length) {
+      const focusedId = orderedIds[list.focusIndex];
+      if (focusedId !== undefined) {
         event.preventDefault();
-        moveItem(item.occurrenceId, list.focusIndex, direction);
+        moveItem(focusedId, event.key === 'ArrowUp' ? -1 : 1);
         return;
       }
     }
@@ -114,12 +134,12 @@ export function QueueList({
             }
             onMoveUp={
               reordering && index > 0 && canReorder
-                ? () => moveItem(item.occurrenceId, index, -1)
+                ? () => moveItem(item.occurrenceId, -1)
                 : undefined
             }
             onMoveDown={
               reordering && index < queue.items.length - 1 && canReorder
-                ? () => moveItem(item.occurrenceId, index, 1)
+                ? () => moveItem(item.occurrenceId, 1)
                 : undefined
             }
           />
