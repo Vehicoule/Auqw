@@ -715,6 +715,7 @@ export async function run(): Promise<void> {
       },
     });
     const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
     await player.setQueueProjection(twoItemProjection());
     const pendingA = player.play({ handle: 'h-a', identity });
     // Queue mutation bumps the revision — the same trigger that
@@ -732,6 +733,22 @@ export async function run(): Promise<void> {
       audio.currentTime,
       45,
       're-keyed seek position lands on the late play',
+    );
+    // And the attach carries the re-keyed revision, not the play's
+    // captured one — every later control would read stale otherwise.
+    assert(
+      events.some(
+        (e) =>
+          e.type === 'status' &&
+          e.identity.attemptId === identity.attemptId &&
+          e.identity.queueRev === 5,
+      ),
+      'late play installs the re-keyed identity',
+    );
+    // Later controls under the new revision are honoured, not stale.
+    assert(
+      (await player.pause({ ...identity, queueRev: 5 })).ok,
+      'pause under the re-keyed revision succeeds',
     );
   }
 

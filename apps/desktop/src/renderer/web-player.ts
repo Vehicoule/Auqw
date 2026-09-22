@@ -667,17 +667,21 @@ export function createWebPlayerPort(deps: {
           if (gen !== opGen) {
             return;
           }
-          const identity = input.identity;
+          // The surviving token is authoritative — a queue mutation may
+          // have re-keyed its queueRev since this op was issued, and
+          // attaching the caller's stale revision would fail every
+          // later control as `invalid-message`.
+          const pending = pendingPlayGens.get(input.handle);
+          const identity = pending?.identity ?? input.identity;
           current = {
             handle: input.handle,
             identity,
-            occurrenceId: projection?.currentOccurrenceId ?? null,
+            occurrenceId:
+              pending?.occurrenceId ?? projection?.currentOccurrenceId ?? null,
           };
           audio.src = url;
           audio.currentTime =
-            (pendingPlayGens.get(input.handle)?.positionMs ??
-              input.positionMs ??
-              0) / 1000;
+            (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
           status('buffering');
           emitMarks(input.handle, identity);
           await audio.play();
