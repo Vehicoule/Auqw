@@ -376,6 +376,10 @@ pub struct PluginHost {
     /// reaches re-mints.
     auth_token: Arc<RwLock<Option<String>>>,
     stream: Option<Arc<StreamRegistry>>,
+    /// The 127.0.0.1 range adapter — lazily bound on the first
+    /// `stream_serve_url`; the fallback/relay leg of the seam
+    /// (desktop MSE-unable containers, the web LAN relay).
+    stream_server: Mutex<Option<Arc<auqw_stream::StreamServer>>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, LiveRequest>>>,
     /// Per-admission generation counter — lets the post-delivery
@@ -512,6 +516,7 @@ impl PluginHost {
             prefer: sanitize_prefer(config.prefer),
             auth_token: Arc::new(RwLock::new(valid_auth_token(config.auth_token))),
             stream,
+            stream_server: Mutex::new(None),
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             request_generation: AtomicU64::new(0),

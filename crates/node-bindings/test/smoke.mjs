@@ -161,6 +161,20 @@ const marks = streamHost.streamPhaseMarks(stream.handle);
 assert.ok(marks.prepareStartedMs > 0);
 assert.ok(marks.attachMs > 0);
 
+// The loopback adapter answers real HTTP over the seam: the served
+// URL has an unguessable grant token and a range read on the dead
+// upstream surfaces as the seam's transient status (503), not a
+// hang or a bogus 200.
+const serveUrl = streamHost.streamServeUrl(stream.handle);
+assert.match(serveUrl, /^http:\/\/127\.0\.0\.1:\d+\/s\/[0-9a-f]{32}$/);
+const res = await fetch(serveUrl, { headers: { Range: 'bytes=0-63' } });
+assert.equal(res.status, 503);
+await res.arrayBuffer().catch(() => {});
+// An unknown grant is a straight 404.
+const bad = await fetch(serveUrl.replace(/[0-9a-f]{32}$/, 'f'.repeat(32)));
+assert.equal(bad.status, 404);
+await bad.arrayBuffer().catch(() => {});
+
 streamHost.streamClose(stream.handle);
 streamHost.streamRelease(stream.handle);
 // A released handle answers every seam call with a typed rejection.

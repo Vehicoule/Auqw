@@ -861,6 +861,16 @@ impl JsPluginHost {
             .and_then(StreamPhaseMarks::try_from)
     }
 
+    /// Serve a prepared session over the loopback range adapter and
+    /// return its `http://127.0.0.1:{port}/s/{token}` URL — the
+    /// desktop PlayerPort's fallback leg for containers renderer MSE
+    /// can't take. The token is unguessable; the grant dies with the
+    /// session.
+    #[napi(js_name = "streamServeUrl")]
+    pub fn stream_serve_url(&self, handle: String) -> Result<String> {
+        self.inner.stream_serve_url(handle).map_err(stream_err)
+    }
+
     /// Dev-gate entry: register a session for a bare URL, skipping
     /// the guest `playback.resolve` (same convention as the mobile
     /// `devAttachFile`). Everything downstream of resolve is the real

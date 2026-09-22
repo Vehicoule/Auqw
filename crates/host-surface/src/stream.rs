@@ -669,6 +669,39 @@ impl PluginHost {
     fn stream_registry(&self) -> Result<&StreamRegistry, StreamError> {
         self.stream.as_deref().ok_or(StreamError::Unavailable)
     }
+
+    /// Serve a prepared session over the loopback range adapter —
+    /// the seam's fallback/relay leg for players that can't take the
+    /// random-access byte seam (desktop MSE rejecting a
+    /// non-fragmented container; the web LAN relay). The listener
+    /// binds on first use and dies with the host.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] without a configured stream path;
+    /// the seam's errors otherwise.
+    pub fn stream_serve_url(&self, handle: String) -> Result<String, StreamError> {
+        let Some(registry) = &self.stream else {
+            return Err(StreamError::Unavailable);
+        };
+        let server = {
+            let mut slot = self.stream_server.lock().map_err(|_| {
+                seam_err(auqw_stream::StreamError::Internal {
+                    message: "stream server slot poisoned".into(),
+                })
+            })?;
+            match &*slot {
+                Some(s) => Arc::clone(s),
+                None => {
+                    let s = Arc::new(
+                        auqw_stream::StreamServer::start(Arc::clone(registry)).map_err(seam_err)?,
+                    );
+                    *slot = Some(Arc::clone(&s));
+                    s
+                }
+            }
+        };
+        server.serve(&handle).map_err(seam_err)
+    }
 }
 
 #[cfg(test)]

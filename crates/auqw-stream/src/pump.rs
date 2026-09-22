@@ -590,73 +590,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    fn stream_body(body: Vec<u8>) -> crate::fetch::BodyStream {
-        Box::pin(futures_util::stream::once(async move { Ok(body) }))
-    }
-
-    fn resp(status: u16, offset: u64, len: u64, total: u64) -> FetchResponse {
-        let end = offset + len - 1;
-        let body = vec![1u8; usize::try_from(len).unwrap_or(0)];
-        FetchResponse {
-            status,
-            content_range: Some(format!("bytes {offset}-{end}/{total}")),
-            body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
-        }
-    }
-
-    /// A fetch whose every call is answered from a script; requests are
-    /// recorded so tests can assert range requests at exact offsets.
-    struct ScriptedFetch {
-        steps: Mutex<std::collections::VecDeque<Step>>,
-        requests: Mutex<Vec<(u64, u64)>>,
-    }
-
-    enum Step {
-        Reply(FetchResponse),
-        Fail(StreamError),
-        Hang,
-    }
-
-    impl ScriptedFetch {
-        fn new(steps: Vec<Step>) -> Self {
-            Self {
-                steps: Mutex::new(steps.into()),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Fetch for ScriptedFetch {
-        fn get_range<'a>(
-            &'a self,
-            _url: &'a str,
-            offset: u64,
-            max_len: u64,
-            _stall: Duration,
-            _deadline: Duration,
-            _cancel: tokio_util::sync::CancellationToken,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>,
-        > {
-            if let Ok(mut r) = self.requests.lock() {
-                r.push((offset, max_len));
-            }
-            let step = self
-                .steps
-                .lock()
-                .ok()
-                .and_then(|mut s| s.pop_front())
-                .unwrap_or(Step::Hang);
-            Box::pin(async move {
-                match step {
-                    Step::Reply(r) => Ok(r),
-                    Step::Fail(e) => Err(e),
-                    Step::Hang => std::future::pending().await,
-                }
-            })
-        }
-    }
-
     /// A re-mint that counts calls and yields a canned source.
     struct CountingRemint {
         calls: AtomicU32,
@@ -690,19 +623,6 @@ mod tests {
                     provider: "test".into(),
                 })
             })
-        }
-    }
-
-    fn source() -> PreparedSource {
-        PreparedSource {
-            url: "https://signed.example/s?sig=SECRET".into(),
-            mime: "audio/mp4".into(),
-            itag: Some(140),
-            bitrate_kbps: Some(129),
-            content_length: Some(1024),
-            expires_at_ms: None,
-            source_ref: "vid".into(),
-            provider: "test".into(),
         }
     }
 
