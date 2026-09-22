@@ -1,6 +1,9 @@
 import { shellError } from '../shared/errors.ts';
 import type { UtilityRequest } from '../utility/envelope.ts';
-import { isUtilityResponse } from '../utility/validators.ts';
+import {
+  hasRequestId,
+  isUtilityResponse,
+} from '../utility/validators.ts';
 
 /**
  * Minimal child handle — satisfied by Electron's `UtilityProcess` and by
@@ -112,7 +115,17 @@ export function createSupervisor(
 
   function onMessage(raw: unknown): void {
     if (!isUtilityResponse(raw)) {
-      // Malformed envelope — cannot be correlated; drop it.
+      // A malformed reply that still names a pending request settles it —
+      // otherwise the renderer would wait forever on a broken answer.
+      if (hasRequestId(raw)) {
+        const slot = pending.get(raw.id);
+        if (slot !== undefined) {
+          pending.delete(raw.id);
+          slot.reject(
+            shellError('invalid-response', 'malformed utility reply'),
+          );
+        }
+      }
       return;
     }
     const slot = pending.get(raw.id);

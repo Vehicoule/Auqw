@@ -67,8 +67,8 @@ export async function run(): Promise<void> {
     args: { message: 'a' },
   });
 
-  // Malformed replies are dropped; unknown ids are ignored.
-  child.emit('message', { id: 1, ok: true });
+  // Malformed replies with no live id are dropped; unknown ids are ignored.
+  child.emit('message', { id: 998, ok: true });
   child.emit('message', { not: 'an envelope' });
   child.emit('message', { id: 999, ok: true, result: 0 });
   child.emit('message', { id: 1, ok: true, result: { reply: 'pong' } });
@@ -111,6 +111,12 @@ export async function run(): Promise<void> {
   assert(third !== undefined);
   third.emit('spawn');
   assertEqual(third.posted.length, 1, 'queued request posted on respawn');
+
+  // A malformed reply that still carries a pending id settles the
+  // request instead of leaving it hanging forever.
+  const malformed = supervisor.request('utility:ping', { message: 'g' });
+  third.emit('message', { id: 6, ok: true });
+  await assertRejectsKind(malformed, 'invalid-response');
 
   // Shutdown drains queued + in-flight, kills the child, stops respawn.
   supervisor.shutdown();
