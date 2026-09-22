@@ -147,6 +147,14 @@ export function createSyncKeysHandler(deps: {
         await secure.set(IDENTITY_KEY, JSON.stringify(op.identity));
         return null;
       }
+      case 'identity-replace':
+        // Recovery/rotation path — deliberately bypasses the
+        // create-once preflight (which would itself trip on the broken
+        // record it's replacing). Device pairings hold the devices'
+        // own keys, so they survive a desktop-identity rotation; a
+        // phone that pinned our old fingerprint re-pairs.
+        await secure.set(IDENTITY_KEY, JSON.stringify(op.identity));
+        return null;
       case 'device-list':
         return deviceList();
       case 'device-put':

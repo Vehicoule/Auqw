@@ -157,6 +157,20 @@ if (port === null) {
     void respond(port, raw, route);
   });
   port.start();
+  // The supervisor kills the child outright on shutdown; when the
+  // platform delivers SIGTERM first, drain what this entry owns — the
+  // listener, sessions, and the mDNS announce — instead of letting
+  // forced teardown drop them. (On Windows utilityProcess.kill is
+  // TerminateProcess: no signal, forced teardown stands.)
+  process.on('SIGTERM', () => {
+    serviceClient.close();
+    void syncService
+      .close()
+      .catch(() => undefined)
+      .then(() => {
+        process.exit(0);
+      });
+  });
 }
 
 async function respond(

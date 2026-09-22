@@ -18,6 +18,11 @@ export type WireSocketLike = {
   on(event: 'close', listener: (hadError: boolean) => void): unknown;
   on(event: 'error', listener: (error: Error) => void): unknown;
   on(event: 'end', listener: () => void): unknown;
+  /**
+   * Graceful half-close: FINs after queued writes flush (net.Socket).
+   * Optional — a test double may only model destroy().
+   */
+  end?(): unknown;
   destroy(): void;
 };
 
@@ -35,7 +40,17 @@ export type WirePump = {
   /** The cap a single declared frame length may not exceed. */
   readonly maxPayload: number;
   readonly closed: boolean;
+  /**
+   * Immediate teardown — queued writes are discarded. For a reply the
+   * peer must see (a typed reject), use `end` instead.
+   */
   close(): void;
+  /**
+   * Close only after already-queued writes flush — FIN ordering means
+   * the peer reads the final frame instead of a mute EOF. Falls back
+   * to destroy() on sockets without end().
+   */
+  end(): void;
 };
 
 const HEADER_BYTES = 4;
@@ -124,6 +139,25 @@ export function attachWirePump(opts: {
         socket.destroy();
       } catch {
         // Best effort — the peer may already be gone.
+      }
+      finish('local');
+    },
+    end(): void {
+      if (closed) {
+        return;
+      }
+      try {
+        if (socket.end !== undefined) {
+          socket.end();
+        } else {
+          socket.destroy();
+        }
+      } catch {
+        try {
+          socket.destroy();
+        } catch {
+          // Best effort — the peer may already be gone.
+        }
       }
       finish('local');
     },

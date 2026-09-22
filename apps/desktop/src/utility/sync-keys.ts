@@ -64,6 +64,7 @@ export function isSyncDeviceRecord(
 export type SyncKeysOp =
   | { readonly op: 'identity-get' }
   | { readonly op: 'identity-set'; readonly identity: SyncIdentity }
+  | { readonly op: 'identity-replace'; readonly identity: SyncIdentity }
   | { readonly op: 'device-list' }
   | { readonly op: 'device-put'; readonly record: SyncDeviceRecord }
   | { readonly op: 'device-delete'; readonly id: string };
@@ -76,7 +77,15 @@ export type SyncKeysResult =
 /** The custody surface the sync server uses — client or in-memory fake. */
 export interface SyncKeys {
   identityGet(): Promise<SyncIdentity | null>;
+  /** Create-once — refuses over an existing record. */
   identitySet(identity: SyncIdentity): Promise<void>;
+  /**
+   * Unconditional overwrite — the corrupt/unusable-identity recovery
+   * path. Distinct from `identitySet` so routine init keeps its
+   * create-once guarantee; replacing the desktop identity orphans
+   * nothing on this side (device records hold the devices' own keys).
+   */
+  identityReplace(identity: SyncIdentity): Promise<void>;
   deviceList(): Promise<{
     devices: readonly SyncDeviceRecord[];
     skipped: number;
@@ -94,6 +103,7 @@ export function isSyncKeysOp(value: unknown): value is SyncKeysOp {
     case 'device-list':
       return hasOnlyKeys(value, ['op']);
     case 'identity-set':
+    case 'identity-replace':
       return (
         hasOnlyKeys(value, ['op', 'identity']) &&
         isSyncIdentity(value['identity'])
@@ -128,6 +138,17 @@ export function createMemoryKeys(): SyncKeys & {
       return identity;
     },
     async identitySet(next) {
+      // Faithful to custody: create-once — a second install is an
+      // invalid-request, never a silent swap.
+      if (identity !== null) {
+        throw shellError(
+          'invalid-request',
+          'sync identity already installed',
+        );
+      }
+      identity = next;
+    },
+    async identityReplace(next) {
       identity = next;
     },
     async deviceList() {
@@ -200,6 +221,13 @@ export function createServiceKeys(
     },
     async identitySet(identity) {
       await call({ op: 'identity-set', identity }, isEmptyResult, 'identity-set');
+    },
+    async identityReplace(identity) {
+      await call(
+        { op: 'identity-replace', identity },
+        isEmptyResult,
+        'identity-replace',
+      );
     },
     async deviceList() {
       return call({ op: 'device-list' }, isDeviceListResult, 'device-list');

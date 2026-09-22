@@ -14,10 +14,14 @@ import {
   type Result,
   type SyncEngine,
 } from '@auqw/application';
-import { isShellError } from '../shared/errors.ts';
+import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { createTestPeer, type SessionCodec } from './sync-crypto.ts';
-import { createMemoryKeys } from './sync-keys.ts';
+import {
+  createMemoryKeys,
+  type SyncDeviceRecord,
+  type SyncKeys,
+} from './sync-keys.ts';
 import { createSyncService, type SyncService } from './sync-server.ts';
 import { attachWirePump } from './sync-wire.ts';
 
@@ -714,6 +718,10 @@ export async function run(): Promise<void> {
         id: 'phone-00003',
       });
       assert(unpair.ok, 'unpair answers ok');
+      assert(
+        unpair.ok && unpair.value === undefined,
+        'void result is undefined — the preload boundary requires it',
+      );
       assertEqual(keys.records.size, 0, 'device record gone');
       await client.closed;
       const status = await service.status();
@@ -964,6 +972,274 @@ export async function run(): Promise<void> {
       assert(isRecord(reply) && reply['t'] === 'error');
       assertEqual(reply['code'], 'storage-full');
       client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A brute-forced source is locked out even holding the code ——
+  {
+    const { service, keys, port } = await startService({
+      maxCodeAttempts: 2,
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const wrong = pairing.code === '000000' ? '000001' : '000000';
+      for (let i = 0; i < 2; i += 1) {
+        const c = await dial(port);
+        const p = createTestPeer({
+          deviceId: `phone-guess0${i}`,
+          name: 'guess',
+        });
+        const { codec } = await phoneHandshake(c, p, pairing.fp);
+        c.send(sealJson(codec, { t: 'pair', code: wrong }));
+        await openJson(codec, await c.recv());
+        c.close();
+      }
+      // Same source (loopback can't alias addresses) with the CORRECT
+      // code: the lockout refuses before the code is ever evaluated.
+      const c = await dial(port);
+      const p = createTestPeer({
+        deviceId: 'phone-lucky-01',
+        name: 'lucky',
+      });
+      const { codec } = await phoneHandshake(c, p, pairing.fp);
+      c.send(sealJson(codec, { t: 'pair', code: pairing.code }));
+      assertDeepEqual(await openJson(codec, await c.recv()), {
+        t: 'reject',
+        reason: 'pairing-attempts',
+      });
+      await c.closed;
+      assertEqual(
+        keys.records.size,
+        0,
+        'a locked-out source can never register',
+      );
+      // A fresh mint resets the window — the operator keeps control.
+      const pairing2 = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'phone-afterlock',
+        code: pairing2.code,
+        fp: pairing2.fp,
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A transient registry failure never burns the pending code ——
+  {
+    const inner = createMemoryKeys();
+    let failPut = true;
+    const flakyKeys: SyncKeys & {
+      records: Map<string, SyncDeviceRecord>;
+    } = {
+      ...inner,
+      records: inner.records,
+      async devicePut(record) {
+        if (failPut) {
+          failPut = false;
+          throw shellError('io-error', 'transient custody failure');
+        }
+        await inner.devicePut(record);
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: flakyKeys,
+      endpointHost: '127.0.0.1',
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assert(status.boundPort !== null);
+      const pairing = await pairingCode(service);
+      const c1 = await dial(status.boundPort);
+      const p1 = createTestPeer({
+        deviceId: 'phone-flaky-1',
+        name: 'flaky',
+      });
+      const hs1 = await phoneHandshake(c1, p1, pairing.fp);
+      c1.send(sealJson(hs1.codec, { t: 'pair', code: pairing.code }));
+      assertDeepEqual(await openJson(hs1.codec, await c1.recv()), {
+        t: 'reject',
+        reason: 'io-error',
+      });
+      await c1.closed;
+      // Retrying the same code inside its window pairs — the failed
+      // registry write left it pending instead of consuming it.
+      const c2 = await dial(status.boundPort);
+      const p2 = createTestPeer({
+        deviceId: 'phone-flaky-1',
+        name: 'flaky',
+      });
+      const hs2 = await phoneHandshake(c2, p2, pairing.fp);
+      c2.send(sealJson(hs2.codec, { t: 'pair', code: pairing.code }));
+      const welcome = await openJson(hs2.codec, await c2.recv());
+      assert(
+        isRecord(welcome) && welcome['t'] === 'welcome',
+        'retry after transient failure completes pairing',
+      );
+      c2.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A second hello mid-handshake dies, never a corrupted session ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      await pairingCode(service);
+      const client = await dial(port);
+      const peer = createTestPeer({
+        deviceId: 'phone-2hello',
+        name: 'twice',
+      });
+      const hello = Buffer.from(JSON.stringify(peer.hello()), 'utf8');
+      client.send(hello);
+      client.send(hello); // back-to-back — protocol violation
+      // The server kills the session: no codec/identity mashup, no
+      // registered device, and the socket ends instead of hanging.
+      await client.closed;
+      assertEqual(keys.records.size, 0, 'stray hello registered nothing');
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— The wire `devices` reply is scoped to the caller's own record ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      let pairing = await pairingCode(service);
+      const first = await pairPhone({
+        port,
+        deviceId: 'phone-alpha1',
+        code: pairing.code,
+        fp: pairing.fp,
+        name: 'alpha',
+      });
+      pairing = await pairingCode(service);
+      const second = await pairPhone({
+        port,
+        deviceId: 'phone-beta-02',
+        code: pairing.code,
+        fp: pairing.fp,
+        name: 'beta',
+      });
+      assertEqual(keys.records.size, 2);
+      second.client.send(sealJson(second.codec, { t: 'devices' }));
+      const reply = await openJson(second.codec, await second.client.recv());
+      assert(isRecord(reply) && reply['t'] === 'devices');
+      const list = reply['devices'];
+      assert(
+        Array.isArray(list) && list.length === 1,
+        'a paired peer sees only its own record',
+      );
+      const entry = list[0];
+      assert(isRecord(entry) && entry['id'] === 'phone-beta-02');
+      first.client.close();
+      second.client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Unparseable custody → the identity is replaced, not wedged ——
+  {
+    const keys = createMemoryKeys();
+    let corrupted = true;
+    const broken: SyncKeys & {
+      records: Map<string, SyncDeviceRecord>;
+    } = {
+      ...keys,
+      records: keys.records,
+      async identityGet() {
+        if (corrupted) {
+          corrupted = false;
+          throw shellError('corrupt-state', 'identity is not json');
+        }
+        return keys.identityGet();
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: broken,
+      endpointHost: '127.0.0.1',
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assertEqual(
+        status.listener,
+        'listening',
+        'a corrupt record is replaced at startup',
+      );
+      const identity = await broken.identityGet();
+      assert(identity !== null, 'replacement persisted');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Non-JSON deltas are rejected at the contract ——
+  {
+    const { service } = await startService();
+    try {
+      const undefMember = await invokeHandler(service, 'sync:importDelta', {
+        delta: { gone: undefined },
+      });
+      assert(
+        !undefMember.ok && undefMember.error.kind === 'invalid-request',
+        'an undefined member is outside the JSON domain',
+      );
+      const sparse = await invokeHandler(service, 'sync:importDelta', {
+        delta: [1, , 2],
+      });
+      assert(
+        !sparse.ok && sparse.error.kind === 'invalid-request',
+        'a sparse array is outside the JSON domain',
+      );
+      const nan = await invokeHandler(service, 'sync:importDelta', {
+        delta: { v: Number.NaN },
+      });
+      assert(
+        !nan.ok && nan.error.kind === 'invalid-request',
+        'NaN is outside the JSON domain',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A primitive applyDelta receipt is a legal import result ——
+  {
+    const { service } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok({}));
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(null));
+        },
+      },
+    });
+    try {
+      const reply = await invokeHandler(service, 'sync:importDelta', {
+        delta: { a: 1 },
+      });
+      assert(
+        reply.ok &&
+          isRecord(reply.value) &&
+          reply.value['result'] === null,
+        'ok(null) is a valid receipt, not invalid-response',
+      );
     } finally {
       await service.close();
     }

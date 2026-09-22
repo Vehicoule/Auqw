@@ -39,6 +39,7 @@ import {
   isUsableIdentity,
   type SessionCodec,
   type SyncCipher,
+  type SyncIdentity,
 } from './sync-crypto.ts';
 import { isDeviceId, type SyncKeys } from './sync-keys.ts';
 import {
@@ -149,7 +150,13 @@ function createPairing(opts: {
   ttlMs: number;
 }): {
   mint(): { code: string; expiresAt: number };
-  check(code: string): PairCheck;
+  /** Validate without consuming — the registry write must land first. */
+  peek(code: string): PairCheck;
+  /**
+   * Consume iff the same code is still pending — one winner only, so a
+   * racing session can't double-register off one mint.
+   */
+  consume(code: string): boolean;
   expire(): void;
 } {
   let current: PairingState | null = null;
@@ -162,7 +169,7 @@ function createPairing(opts: {
       };
       return { code, expiresAt: current.expiresAt };
     },
-    check(code) {
+    peek(code) {
       if (current === null) {
         return 'no-pairing';
       }
@@ -170,11 +177,18 @@ function createPairing(opts: {
         current = null;
         return 'pairing-expired';
       }
-      if (code === current.code) {
-        current = null; // consume — a code pairs exactly once
-        return 'ok';
+      return code === current.code ? 'ok' : 'bad-code';
+    },
+    consume(code) {
+      if (
+        current === null ||
+        current.code !== code ||
+        opts.nowMs() >= current.expiresAt
+      ) {
+        return false;
       }
-      return 'bad-code';
+      current = null; // a code pairs exactly once
+      return true;
     },
     expire() {
       current = null;
@@ -256,15 +270,40 @@ type Session = {
   ops: Promise<void>;
 };
 
+/** RFC1918 — the address class a phone on the same LAN can reach. */
+function isPrivateLanIp(ip: string): boolean {
+  const parts = ip.split('.');
+  const a = Number(parts[0]);
+  const b = Number(parts[1]);
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
 function pickLanIpv4(): string | null {
+  let fallback: string | null = null;
   for (const list of Object.values(networkInterfaces())) {
     for (const iface of list ?? []) {
-      if (iface.family === 'IPv4' && !iface.internal) {
+      if (iface.family !== 'IPv4' || iface.internal) {
+        continue;
+      }
+      // Prefer a private LAN address — a VPN/tunnel/public interface
+      // may be unreachable for the phone; keep it as fallback anyway
+      // (a reachable non-LAN setup is better than an honest null).
+      if (isPrivateLanIp(iface.address)) {
         return iface.address;
       }
+      fallback ??= iface.address;
     }
   }
-  return null;
+  return fallback;
+}
+
+/** '::ffff:a.b.c.d' is the same peer as 'a.b.c.d' — fold before keying. */
+function normalizeIp(ip: string): string {
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
 }
 
 export function createSyncService(deps: SyncServiceDeps): SyncService {
@@ -441,16 +480,27 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     const reject = (reason: string): void => {
       sendSealed(session, { t: 'reject', reason });
-      killSession(session);
+      // Flush the reject frame before the socket dies — destroy()
+      // would discard queued output and leave the phone with a mute
+      // EOF. killSession stays the path where no reply is owed.
+      session.pump.end();
     };
     const now = nowMs();
     if (isPairMsg(msg)) {
-      const check = pairing.check(msg.code);
+      // A peer that already blew its code budget never reaches the
+      // checker — a correct guess after the cap can't quietly pair.
+      const misses = badAttempts.get(session.remoteIp) ?? 0;
+      if (misses >= maxCodeAttempts) {
+        reject('pairing-attempts');
+        return;
+      }
+      const check = pairing.peek(msg.code);
       if (check === 'bad-code') {
-        const misses = (badAttempts.get(session.remoteIp) ?? 0) + 1;
-        badAttempts.set(session.remoteIp, misses);
+        badAttempts.set(session.remoteIp, misses + 1);
         reject(
-          misses >= maxCodeAttempts ? 'pairing-attempts' : 'bad-code',
+          misses + 1 >= maxCodeAttempts
+            ? 'pairing-attempts'
+            : 'bad-code',
         );
         return;
       }
@@ -458,7 +508,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         reject(check);
         return;
       }
-      badAttempts.clear();
       const record = {
         id: session.deviceId,
         name: session.name,
@@ -470,11 +519,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       try {
         await deps.keys.devicePut(record);
       } catch (thrown) {
+        // Consume only AFTER the registry write — a transient custody
+        // failure leaves the still-valid code open for retry.
         reject(
           isShellError(thrown) ? thrown.kind : 'internal',
         );
         return;
       }
+      if (!pairing.consume(msg.code)) {
+        // A racing session consumed it — the device is registered but
+        // this connection never authenticates; it can resume instead.
+        reject('no-pairing');
+        return;
+      }
+      badAttempts.delete(session.remoteIp);
       sendSealed(session, {
         t: 'welcome',
         device: record,
@@ -518,6 +576,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   async function onHello(session: Session, payload: Uint8Array) {
+    // Advance the phase BEFORE the first await: a second hello frame
+    // while registry lookup/DH is in flight would otherwise run this
+    // body concurrently and overwrite codec + peer identity. Now the
+    // stray frame routes to onAuthFrame, which kills on a null codec.
+    session.phase = 'auth';
     let msg: unknown;
     try {
       msg = parseJson(payload);
@@ -562,7 +625,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     session.registered = registered;
     session.registeredId = registeredId;
     session.pairedAtMs = pairedAt ?? null;
-    session.phase = 'auth';
     session.pump.upgrade(sessionCap);
     session.pump.send(accepted.challenge);
   }
@@ -597,14 +659,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       case 'devices': {
         try {
           const { devices } = await deps.keys.deviceList();
+          // The wire exposes only the caller's own record — every
+          // other device's id, name, and activity stays renderer-local
+          // (api.sync.devices), not a free registry dump for any key
+          // holder.
           sendSealed(session, {
             t: 'devices',
-            devices: devices.map((d) => ({
-              id: d.id,
-              name: d.name,
-              pairedAt: d.pairedAt,
-              lastSeenAt: d.lastSeenAt,
-            })),
+            devices: devices
+              .filter((d) => d.id === session.deviceId)
+              .map((d) => ({
+                id: d.id,
+                name: d.name,
+                pairedAt: d.pairedAt,
+                lastSeenAt: d.lastSeenAt,
+              })),
           });
         } catch {
           sendSealed(session, { t: 'error', code: 'unavailable' });
@@ -683,7 +751,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         },
         onClose: () => dropSession(session),
       }),
-      remoteIp: socket.remoteAddress ?? '',
+      remoteIp: normalizeIp(socket.remoteAddress ?? ''),
       cancel: new CancellationSource(),
       phase: 'hello',
       codec: null,
@@ -723,13 +791,33 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return status();
     }
     // Custody keeps shape-valid records; usable is stronger — the
-    // material must load as X25519 keys. A corrupt read regenerates
-    // rather than listening with an identity no peer can complete DH
-    // against.
-    let identity = await deps.keys.identityGet();
-    if (identity === null || !isUsableIdentity(identity)) {
+    // material must load as X25519 keys. A corrupt or unusable read
+    // must REPLACE the stored record: create-once identity-set would
+    // refuse over it and wedge sync on every later launch.
+    let identity: SyncIdentity | null = null;
+    let replace = false;
+    try {
+      identity = await deps.keys.identityGet();
+    } catch (thrown) {
+      // A record that can't even parse is replaced below; every other
+      // custody failure (no safeStorage backend etc.) fails startup.
+      if (isShellError(thrown) && thrown.kind === 'corrupt-state') {
+        replace = true;
+      } else {
+        throw thrown;
+      }
+    }
+    if (identity !== null && !isUsableIdentity(identity)) {
+      identity = null;
+      replace = true;
+    }
+    if (identity === null) {
       identity = generateIdentity();
-      await deps.keys.identitySet(identity);
+      if (replace) {
+        await deps.keys.identityReplace(identity);
+      } else {
+        await deps.keys.identitySet(identity);
+      }
     }
     syncCipher = deps.cipher ?? createNoiseV1Cipher(identity);
     fingerprint = fingerprintOf(identity.pub);
@@ -874,7 +962,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       pendingSync.delete(args.id);
       kickDevice(args.id);
       // Library data stays — unpair revokes the key, nothing more.
-      return null;
+      // undefined, not null — the preload boundary validates void as
+      // strictly undefined.
+      return undefined;
     },
 
     'sync:deltas': async (args) => {

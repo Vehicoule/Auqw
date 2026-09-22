@@ -846,23 +846,65 @@ export function isSyncUnpairArgs(
 }
 
 /**
- * Opaque delta document: any JSON structure that stays inside the cap.
- * The cap is UTF-8 BYTES on the wire — `encoded.length` counts UTF-16
- * code units, so non-ASCII docs are measured with TextEncoder.
+ * The strict JSON domain — values that survive a serialize/parse round
+ * trip unchanged. Electron IPC preserves `undefined` properties, sparse
+ * array slots, `NaN`, and ±Infinity that `JSON.stringify` silently
+ * rewrites or drops; accepting them here would validate one document
+ * while the sync engine receives a different one.
  */
-export function isSyncDeltaDoc(value: unknown): boolean {
-  if (!(isRecord(value) || Array.isArray(value))) {
+export function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === 'boolean') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+  if (typeof value === 'string') {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    // `length` counts holes; keys enumerate real slots — a sparse
+    // array serializes to nulls it doesn't actually contain.
+    return (
+      Object.keys(value).length === value.length &&
+      value.every(isJsonValue)
+    );
+  }
+  if (isRecord(value)) {
+    return Object.values(value).every(isJsonValue);
+  }
+  return false;
+}
+
+/**
+ * A JSON value whose serialized UTF-8 form fits `maxBytes`. The cap is
+ * BYTES on the wire — `encoded.length` counts UTF-16 code units, so
+ * non-ASCII payloads are measured with TextEncoder.
+ */
+function isBoundedJson(value: unknown, maxBytes: number): boolean {
+  if (!isJsonValue(value)) {
     return false;
   }
   try {
     const encoded = JSON.stringify(value);
     return (
       typeof encoded === 'string' &&
-      new TextEncoder().encode(encoded).length <= MAX_SYNC_DOC_BYTES
+      new TextEncoder().encode(encoded).length <= maxBytes
     );
   } catch {
     return false;
   }
+}
+
+/**
+ * Opaque delta document: a JSON object or array that stays inside the
+ * cap — deltas are documents, not bare primitives.
+ */
+export function isSyncDeltaDoc(value: unknown): boolean {
+  return (
+    (isRecord(value) || Array.isArray(value)) &&
+    isBoundedJson(value, MAX_SYNC_DOC_BYTES)
+  );
 }
 
 export type SyncDeltasArgs = { readonly since: string };
@@ -916,7 +958,9 @@ export function isSyncImportDeltaResult(
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ['result']) &&
-    isSyncDeltaDoc(value['result'])
+    // The engine's apply receipt is `unknown` — any bounded JSON value
+    // (including `null`) is a valid result, not just full documents.
+    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
   );
 }
 
