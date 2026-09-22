@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/auqw-stream",
+    "crates/host-surface",
     "crates/integration-runner",
     "crates/mobile-bindings",
     "crates/plugin-host",

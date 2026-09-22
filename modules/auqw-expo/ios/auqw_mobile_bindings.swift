@@ -398,7 +398,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that SWIFT handles always have the lowest bit set
 fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
 fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
@@ -608,19 +608,26 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 public protocol PluginHostProtocol: AnyObject, Sendable {
-    
+
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */
-    func cancel(requestId: String) 
-    
+    func cancel(requestId: String)
+
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -628,7 +635,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::Load`] on any contract or policy violation.
      */
     func loadPlugin(wasm: Data, manifestJson: String) throws  -> String
-    
+
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -637,16 +644,19 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::Load`] if the artifact fails validation.
      */
     func runSpin(wasm: Data, manifestJson: String) throws  -> SpinReport
-    
+
     /**
      * Set or clear the OAuth access token merged as `access_token`
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */
-    func setAuthToken(token: String?) 
-    
+    func setAuthToken(token: String?)
+
     /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
@@ -656,7 +666,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
      */
     func startRequest(pluginId: String, capability: String, payloadJson: String, listener: RequestListener) throws  -> String
-    
+
     /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
@@ -665,7 +675,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded.
      */
     func startResolve(pluginId: String, sourceRef: String, listener: ResolveListener) throws  -> String
-    
+
     /**
      * Dev-gate entry: register a session for a bare URL, skipping the
      * guest `playback.resolve` (same convention as the Kotlin
@@ -683,7 +693,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
     func devPrepareUrl(url: String, mime: String, contentLength: UInt64?, remintable: Bool) throws  -> PreparedStream
-    
+
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -694,7 +704,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`HostError::Runtime`] when the seam is not configured.
      */
     func startPrepare(pluginId: String, sourceRef: String, listener: PrepareListener) throws  -> String
-    
+
     /**
      * DataSource close: detaches the consumer; the session stays live
      * for re-attach.
@@ -703,8 +713,8 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`StreamError::Unavailable`] when the seam is not configured;
      * [`StreamError::Failed`] for an unknown handle.
      */
-    func streamClose(handle: String) throws 
-    
+    func streamClose(handle: String) throws
+
     /**
      * Attach a consumer at `position` (DataSource open). Returns
      * `content_length - position` when the stream total is known.
@@ -714,7 +724,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`StreamError::Failed`] with the session's kind otherwise.
      */
     func streamOpen(handle: String, position: UInt64) throws  -> UInt64?
-    
+
     /**
      * The session's lifecycle marks — available even after terminal
      * states.
@@ -724,7 +734,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`StreamError::Failed`] for an unknown handle.
      */
     func streamPhaseMarks(handle: String) throws  -> StreamPhaseMarks
-    
+
     /**
      * Blocking read — **foreign (JNI/DataSource) threads only**;
      * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
@@ -736,7 +746,7 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * [`StreamError::Failed`] with the session's kind otherwise.
      */
     func streamRead(handle: String, position: UInt64, maxLen: UInt64) throws  -> Data
-    
+
     /**
      * Terminal release: parked readers unwind `released`, in-flight
      * work aborts, the partial file is evicted. Idempotent.
@@ -744,12 +754,13 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * # Errors
      * [`StreamError::Unavailable`] when the seam is not configured.
      */
-    func streamRelease(handle: String) throws 
-    
+    func streamRelease(handle: String) throws
+
 }
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 open class PluginHost: PluginHostProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -816,14 +827,20 @@ public convenience init(config: HostConfig)throws  {
         try! rustCall { uniffi_auqw_mobile_bindings_fn_free_pluginhost(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */
 open func cancel(requestId: String)  {try! rustCall() {
         uniffiCallStatus in
@@ -833,7 +850,7 @@ open func cancel(requestId: String)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -850,7 +867,7 @@ open func loadPlugin(wasm: Data, manifestJson: String)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -868,13 +885,16 @@ open func runSpin(wasm: Data, manifestJson: String)throws  -> SpinReport  {
     )
 })
 }
-    
+
     /**
      * Set or clear the OAuth access token merged as `access_token`
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */
 open func setAuthToken(token: String?)  {try! rustCall() {
         uniffiCallStatus in
@@ -884,7 +904,7 @@ open func setAuthToken(token: String?)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
@@ -905,7 +925,7 @@ open func startRequest(pluginId: String, capability: String, payloadJson: String
     )
 })
 }
-    
+
     /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
@@ -924,7 +944,7 @@ open func startResolve(pluginId: String, sourceRef: String, listener: ResolveLis
     )
 })
 }
-    
+
     /**
      * Dev-gate entry: register a session for a bare URL, skipping the
      * guest `playback.resolve` (same convention as the Kotlin
@@ -953,7 +973,7 @@ open func devPrepareUrl(url: String, mime: String, contentLength: UInt64?, remin
     )
 })
 }
-    
+
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -974,7 +994,7 @@ open func startPrepare(pluginId: String, sourceRef: String, listener: PrepareLis
     )
 })
 }
-    
+
     /**
      * DataSource close: detaches the consumer; the session stays live
      * for re-attach.
@@ -991,7 +1011,7 @@ open func streamClose(handle: String)throws   {try rustCallWithError(FfiConverte
     )
 }
 }
-    
+
     /**
      * Attach a consumer at `position` (DataSource open). Returns
      * `content_length - position` when the stream total is known.
@@ -1010,7 +1030,7 @@ open func streamOpen(handle: String, position: UInt64)throws  -> UInt64?  {
     )
 })
 }
-    
+
     /**
      * The session's lifecycle marks — available even after terminal
      * states.
@@ -1028,7 +1048,7 @@ open func streamPhaseMarks(handle: String)throws  -> StreamPhaseMarks  {
     )
 })
 }
-    
+
     /**
      * Blocking read — **foreign (JNI/DataSource) threads only**;
      * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
@@ -1050,7 +1070,7 @@ open func streamRead(handle: String, position: UInt64, maxLen: UInt64)throws  ->
     )
 })
 }
-    
+
     /**
      * Terminal release: parked readers unwind `released`, in-flight
      * work aborts, the partial file is evicted. Idempotent.
@@ -1066,9 +1086,9 @@ open func streamRelease(handle: String)throws   {try rustCallWithError(FfiConver
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -1157,25 +1177,25 @@ public struct AttemptSummary: Equatable, Hashable {
     public init(
         /**
          * Host-generated request id.
-         */requestId: String, 
+         */requestId: String,
         /**
          * `handle` steps executed.
-         */steps: UInt32, 
+         */steps: UInt32,
         /**
          * HTTP requests performed for the guest.
-         */httpCalls: UInt32, 
+         */httpCalls: UInt32,
         /**
          * HTTP bytes moved, in and out.
-         */bytes: UInt64, 
+         */bytes: UInt64,
         /**
          * Fuel consumed across all guest entries.
-         */fuelUsed: UInt64, 
+         */fuelUsed: UInt64,
         /**
          * Wall-clock elapsed.
-         */elapsedMs: UInt64, 
+         */elapsedMs: UInt64,
         /**
          * Sanitized HTTP trace entries.
-         */httpTrace: [HttpTraceSummary], 
+         */httpTrace: [HttpTraceSummary],
         /**
          * Guest log entries.
          */guestLog: [GuestLogSummary]) {
@@ -1189,9 +1209,9 @@ public struct AttemptSummary: Equatable, Hashable {
         self.guestLog = guestLog
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1205,13 +1225,13 @@ public struct FfiConverterTypeAttemptSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AttemptSummary {
         return
             try AttemptSummary(
-                requestId: FfiConverterString.read(from: &buf), 
-                steps: FfiConverterUInt32.read(from: &buf), 
-                httpCalls: FfiConverterUInt32.read(from: &buf), 
-                bytes: FfiConverterUInt64.read(from: &buf), 
-                fuelUsed: FfiConverterUInt64.read(from: &buf), 
-                elapsedMs: FfiConverterUInt64.read(from: &buf), 
-                httpTrace: FfiConverterSequenceTypeHttpTraceSummary.read(from: &buf), 
+                requestId: FfiConverterString.read(from: &buf),
+                steps: FfiConverterUInt32.read(from: &buf),
+                httpCalls: FfiConverterUInt32.read(from: &buf),
+                bytes: FfiConverterUInt64.read(from: &buf),
+                fuelUsed: FfiConverterUInt64.read(from: &buf),
+                elapsedMs: FfiConverterUInt64.read(from: &buf),
+                httpTrace: FfiConverterSequenceTypeHttpTraceSummary.read(from: &buf),
                 guestLog: FfiConverterSequenceTypeGuestLogSummary.read(from: &buf)
         )
     }
@@ -1262,7 +1282,7 @@ public struct GuestLogSummary: Equatable, Hashable {
     public init(
         /**
          * `debug` | `info` | `warn` | `error`.
-         */level: String, 
+         */level: String,
         /**
          * Redacted message text.
          */message: String) {
@@ -1270,9 +1290,9 @@ public struct GuestLogSummary: Equatable, Hashable {
         self.message = message
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1286,7 +1306,7 @@ public struct FfiConverterTypeGuestLogSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GuestLogSummary {
         return
             try GuestLogSummary(
-                level: FfiConverterString.read(from: &buf), 
+                level: FfiConverterString.read(from: &buf),
                 message: FfiConverterString.read(from: &buf)
         )
     }
@@ -1352,7 +1372,9 @@ public struct HostConfig: Equatable, Hashable {
     /**
      * Initial OAuth access token for session-trust `Authorization:
      * Bearer` on InnerTube calls. `None` starts anonymous; update it
-     * later with [`PluginHost::set_auth_token`]. Never logged.
+     * later with [`PluginHost::set_auth_token`]. Never logged. Values
+     * outside the contract (`minLength: 1`, `maxLength: 8192`) are
+     * treated as unset.
      */
     public var authToken: String?
 
@@ -1361,33 +1383,35 @@ public struct HostConfig: Equatable, Hashable {
     public init(
         /**
          * Fuel granted to each guest entry.
-         */fuelPerEntry: UInt64, 
+         */fuelPerEntry: UInt64,
         /**
          * Total fuel across one invocation.
-         */fuelTotal: UInt64, 
+         */fuelTotal: UInt64,
         /**
          * Base URL of a bgutil-compatible PO-token service
          * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
-         */potProviderUrl: String?, 
+         */potProviderUrl: String?,
         /**
          * Path of the on-disk KV store the native shell supplies;
          * `None` keeps plugin state volatile.
-         */statePath: String?, 
+         */statePath: String?,
         /**
          * Directory for the sparse stream cache; `None` disables the
          * streaming seam — every `stream_*` call then fails
          * [`StreamError::Unavailable`] and `start_prepare` fails
          * synchronously.
-         */streamPath: String?, 
+         */streamPath: String?,
         /**
          * Container preference order sent on `playback.resolve` — the
          * surface's `prefer` hint (webm-first on Android+desktop, mp4-only
          * on iOS). `None` leaves the guest's own default order.
-         */prefer: [String]?, 
+         */prefer: [String]?,
         /**
          * Initial OAuth access token for session-trust `Authorization:
          * Bearer` on InnerTube calls. `None` starts anonymous; update it
-         * later with [`PluginHost::set_auth_token`]. Never logged.
+         * later with [`PluginHost::set_auth_token`]. Never logged. Values
+         * outside the contract (`minLength: 1`, `maxLength: 8192`) are
+         * treated as unset.
          */authToken: String?) {
         self.fuelPerEntry = fuelPerEntry
         self.fuelTotal = fuelTotal
@@ -1398,9 +1422,9 @@ public struct HostConfig: Equatable, Hashable {
         self.authToken = authToken
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1414,12 +1438,12 @@ public struct FfiConverterTypeHostConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostConfig {
         return
             try HostConfig(
-                fuelPerEntry: FfiConverterUInt64.read(from: &buf), 
-                fuelTotal: FfiConverterUInt64.read(from: &buf), 
-                potProviderUrl: FfiConverterOptionString.read(from: &buf), 
-                statePath: FfiConverterOptionString.read(from: &buf), 
-                streamPath: FfiConverterOptionString.read(from: &buf), 
-                prefer: FfiConverterOptionSequenceString.read(from: &buf), 
+                fuelPerEntry: FfiConverterUInt64.read(from: &buf),
+                fuelTotal: FfiConverterUInt64.read(from: &buf),
+                potProviderUrl: FfiConverterOptionString.read(from: &buf),
+                statePath: FfiConverterOptionString.read(from: &buf),
+                streamPath: FfiConverterOptionString.read(from: &buf),
+                prefer: FfiConverterOptionSequenceString.read(from: &buf),
                 authToken: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -1483,16 +1507,16 @@ public struct HttpTraceSummary: Equatable, Hashable {
     public init(
         /**
          * HTTP method.
-         */method: String, 
+         */method: String,
         /**
          * URL without query or fragment.
-         */url: String, 
+         */url: String,
         /**
          * Response status when one was received.
-         */status: UInt16?, 
+         */status: UInt16?,
         /**
          * Body bytes received.
-         */bytes: UInt64, 
+         */bytes: UInt64,
         /**
          * Round-trip milliseconds.
          */elapsedMs: UInt64) {
@@ -1503,9 +1527,9 @@ public struct HttpTraceSummary: Equatable, Hashable {
         self.elapsedMs = elapsedMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1519,10 +1543,10 @@ public struct FfiConverterTypeHttpTraceSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HttpTraceSummary {
         return
             try HttpTraceSummary(
-                method: FfiConverterString.read(from: &buf), 
-                url: FfiConverterString.read(from: &buf), 
-                status: FfiConverterOptionUInt16.read(from: &buf), 
-                bytes: FfiConverterUInt64.read(from: &buf), 
+                method: FfiConverterString.read(from: &buf),
+                url: FfiConverterString.read(from: &buf),
+                status: FfiConverterOptionUInt16.read(from: &buf),
+                bytes: FfiConverterUInt64.read(from: &buf),
                 elapsedMs: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -1587,19 +1611,19 @@ public struct PreparedStream: Equatable, Hashable {
     public init(
         /**
          * Opaque session handle for `stream_open`/`stream_read`/...
-         */handle: String, 
+         */handle: String,
         /**
          * MIME type; pinned across re-mints.
-         */mime: String, 
+         */mime: String,
         /**
          * Format itag when reported.
-         */itag: UInt32?, 
+         */itag: UInt32?,
         /**
          * Bitrate hint in kbps.
-         */bitrateKbps: UInt32?, 
+         */bitrateKbps: UInt32?,
         /**
          * Reported length in bytes, when known.
-         */contentLength: UInt64?, 
+         */contentLength: UInt64?,
         /**
          * URL expiry, epoch ms.
          */expiresAtMs: UInt64?) {
@@ -1611,9 +1635,9 @@ public struct PreparedStream: Equatable, Hashable {
         self.expiresAtMs = expiresAtMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1627,11 +1651,11 @@ public struct FfiConverterTypePreparedStream: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreparedStream {
         return
             try PreparedStream(
-                handle: FfiConverterString.read(from: &buf), 
-                mime: FfiConverterString.read(from: &buf), 
-                itag: FfiConverterOptionUInt32.read(from: &buf), 
-                bitrateKbps: FfiConverterOptionUInt32.read(from: &buf), 
-                contentLength: FfiConverterOptionUInt64.read(from: &buf), 
+                handle: FfiConverterString.read(from: &buf),
+                mime: FfiConverterString.read(from: &buf),
+                itag: FfiConverterOptionUInt32.read(from: &buf),
+                bitrateKbps: FfiConverterOptionUInt32.read(from: &buf),
+                contentLength: FfiConverterOptionUInt64.read(from: &buf),
                 expiresAtMs: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
@@ -1700,22 +1724,22 @@ public struct ResolvedResource: Equatable, Hashable {
     public init(
         /**
          * Direct stream URL (signed; redact everywhere).
-         */url: String, 
+         */url: String,
         /**
          * MIME type, e.g. `audio/mp4`.
-         */mime: String, 
+         */mime: String,
         /**
          * Bitrate in kbps when the guest reported one.
-         */bitrateKbps: UInt32?, 
+         */bitrateKbps: UInt32?,
         /**
          * `expire=` converted to epoch milliseconds.
-         */expiresAtMs: UInt64?, 
+         */expiresAtMs: UInt64?,
         /**
          * Ladder rung that produced the URL.
-         */client: String, 
+         */client: String,
         /**
          * Reported `contentLength` of the picked format in bytes.
-         */contentLength: UInt64?, 
+         */contentLength: UInt64?,
         /**
          * Provider format itag when the guest reported one.
          */itag: UInt32?) {
@@ -1728,9 +1752,9 @@ public struct ResolvedResource: Equatable, Hashable {
         self.itag = itag
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1744,12 +1768,12 @@ public struct FfiConverterTypeResolvedResource: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ResolvedResource {
         return
             try ResolvedResource(
-                url: FfiConverterString.read(from: &buf), 
-                mime: FfiConverterString.read(from: &buf), 
-                bitrateKbps: FfiConverterOptionUInt32.read(from: &buf), 
-                expiresAtMs: FfiConverterOptionUInt64.read(from: &buf), 
-                client: FfiConverterString.read(from: &buf), 
-                contentLength: FfiConverterOptionUInt64.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf),
+                mime: FfiConverterString.read(from: &buf),
+                bitrateKbps: FfiConverterOptionUInt32.read(from: &buf),
+                expiresAtMs: FfiConverterOptionUInt64.read(from: &buf),
+                client: FfiConverterString.read(from: &buf),
+                contentLength: FfiConverterOptionUInt64.read(from: &buf),
                 itag: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
@@ -1803,10 +1827,10 @@ public struct SpinReport: Equatable, Hashable {
     public init(
         /**
          * Wall-clock time until the trap.
-         */elapsedMs: UInt64, 
+         */elapsedMs: UInt64,
         /**
          * Fuel consumed before the trap.
-         */fuelUsed: UInt64, 
+         */fuelUsed: UInt64,
         /**
          * Terminal error kind (`budget-exceeded` expected).
          */kind: String) {
@@ -1815,9 +1839,9 @@ public struct SpinReport: Equatable, Hashable {
         self.kind = kind
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1831,8 +1855,8 @@ public struct FfiConverterTypeSpinReport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpinReport {
         return
             try SpinReport(
-                elapsedMs: FfiConverterUInt64.read(from: &buf), 
-                fuelUsed: FfiConverterUInt64.read(from: &buf), 
+                elapsedMs: FfiConverterUInt64.read(from: &buf),
+                fuelUsed: FfiConverterUInt64.read(from: &buf),
                 kind: FfiConverterString.read(from: &buf)
         )
     }
@@ -1895,19 +1919,19 @@ public struct StreamPhaseMarks: Equatable, Hashable {
     public init(
         /**
          * Epoch ms when `prepare` registered the session.
-         */prepareStartedMs: UInt64, 
+         */prepareStartedMs: UInt64,
         /**
          * Duration of the minting `playback.resolve`, when known.
-         */resolveMs: UInt64?, 
+         */resolveMs: UInt64?,
         /**
          * Duration of the most recent re-mint, when one ran.
-         */mintMs: UInt64?, 
+         */mintMs: UInt64?,
         /**
          * Epoch ms when the first byte landed.
-         */firstByteMs: UInt64?, 
+         */firstByteMs: UInt64?,
         /**
          * Epoch ms when the head-fill bound was covered.
-         */headReadyMs: UInt64?, 
+         */headReadyMs: UInt64?,
         /**
          * Epoch ms of the first attach.
          */attachMs: UInt64?) {
@@ -1919,9 +1943,9 @@ public struct StreamPhaseMarks: Equatable, Hashable {
         self.attachMs = attachMs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -1935,11 +1959,11 @@ public struct FfiConverterTypeStreamPhaseMarks: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamPhaseMarks {
         return
             try StreamPhaseMarks(
-                prepareStartedMs: FfiConverterUInt64.read(from: &buf), 
-                resolveMs: FfiConverterOptionUInt64.read(from: &buf), 
-                mintMs: FfiConverterOptionUInt64.read(from: &buf), 
-                firstByteMs: FfiConverterOptionUInt64.read(from: &buf), 
-                headReadyMs: FfiConverterOptionUInt64.read(from: &buf), 
+                prepareStartedMs: FfiConverterUInt64.read(from: &buf),
+                resolveMs: FfiConverterOptionUInt64.read(from: &buf),
+                mintMs: FfiConverterOptionUInt64.read(from: &buf),
+                firstByteMs: FfiConverterOptionUInt64.read(from: &buf),
+                headReadyMs: FfiConverterOptionUInt64.read(from: &buf),
                 attachMs: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
@@ -1976,11 +2000,11 @@ public func FfiConverterTypeStreamPhaseMarks_lower(_ value: StreamPhaseMarks) ->
  * Field names avoid `message`: in the Kotlin binding an exception
  * property named `message` collides with `Throwable.message`.
  */
-public 
+public
 enum HostError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     /**
      * Artifact or manifest rejected at load.
      */
@@ -2005,16 +2029,27 @@ enum HostError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
          * Detail.
          */detail: String
     )
+    /**
+     * The caller-minted request id is still owned by a live
+     * invocation or an unreleased prepared session — ids must be
+     * unique while live. Kept last so the original discriminants
+     * (Load, Unknown, Runtime) don't shift for stale decoders.
+     */
+    case RequestInFlight(
+        /**
+         * The colliding request id.
+         */id: String
+    )
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -2031,9 +2066,9 @@ public struct FfiConverterTypeHostError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Load(
             detail: try FfiConverterString.read(from: &buf)
             )
@@ -2043,6 +2078,9 @@ public struct FfiConverterTypeHostError: FfiConverterRustBuffer {
         case 3: return .Runtime(
             detail: try FfiConverterString.read(from: &buf)
             )
+        case 4: return .RequestInFlight(
+            id: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2051,24 +2089,29 @@ public struct FfiConverterTypeHostError: FfiConverterRustBuffer {
     public static func write(_ value: HostError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case let .Load(detail):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(detail, into: &buf)
-            
-        
+
+
         case let .UnknownPlugin(id):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(id, into: &buf)
-            
-        
+
+
         case let .Runtime(detail):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(detail, into: &buf)
-            
+
+
+        case let .RequestInFlight(id):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(id, into: &buf)
+
         }
     }
 }
@@ -2094,19 +2137,19 @@ public func FfiConverterTypeHostError_lower(_ value: HostError) -> RustBuffer {
  */
 
 public enum PrepareOutcome: Equatable, Hashable {
-    
+
     /**
      * The resolve produced a source and the seam registered it.
      */
     case prepared(
         /**
          * The prepared session handle + metadata.
-         */stream: PreparedStream, 
+         */stream: PreparedStream,
         /**
          * Handles this prepare superseded or pruned — the caller's
          * handle routing must drop these so a dead session's entry
          * can never serve a later attach.
-         */superseded: [String], 
+         */superseded: [String],
         /**
          * Invocation accounting for the resolve.
          */attempt: AttemptSummary
@@ -2117,10 +2160,10 @@ public enum PrepareOutcome: Equatable, Hashable {
     case failed(
         /**
          * Taxonomy kind (`no-result`, `cancelled`, ...).
-         */kind: String, 
+         */kind: String,
         /**
          * Human-readable detail (never contains the URL).
-         */message: String, 
+         */message: String,
         /**
          * Invocation accounting for the resolve.
          */attempt: AttemptSummary
@@ -2145,34 +2188,34 @@ public struct FfiConverterTypePrepareOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrepareOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .prepared(stream: try FfiConverterTypePreparedStream.read(from: &buf), superseded: try FfiConverterSequenceString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: PrepareOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .prepared(stream,superseded,attempt):
             writeInt(&buf, Int32(1))
             FfiConverterTypePreparedStream.write(stream, into: &buf)
             FfiConverterSequenceString.write(superseded, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
-        
+
+
         case let .failed(kind,message,attempt):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(kind, into: &buf)
             FfiConverterString.write(message, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
+
         }
     }
 }
@@ -2200,14 +2243,14 @@ public func FfiConverterTypePrepareOutcome_lower(_ value: PrepareOutcome) -> Rus
  */
 
 public enum RequestOutcome: Equatable, Hashable {
-    
+
     /**
      * The invocation produced a `done` result.
      */
     case succeeded(
         /**
          * `done.result` serialized to JSON.
-         */resultJson: String, 
+         */resultJson: String,
         /**
          * Invocation accounting.
          */attempt: AttemptSummary
@@ -2218,10 +2261,10 @@ public enum RequestOutcome: Equatable, Hashable {
     case failed(
         /**
          * Taxonomy kind.
-         */kind: String, 
+         */kind: String,
         /**
          * Human-readable detail (never contains signed URLs).
-         */message: String, 
+         */message: String,
         /**
          * Invocation accounting.
          */attempt: AttemptSummary
@@ -2246,33 +2289,33 @@ public struct FfiConverterTypeRequestOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .succeeded(resultJson: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: RequestOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .succeeded(resultJson,attempt):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(resultJson, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
-        
+
+
         case let .failed(kind,message,attempt):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(kind, into: &buf)
             FfiConverterString.write(message, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
+
         }
     }
 }
@@ -2299,14 +2342,14 @@ public func FfiConverterTypeRequestOutcome_lower(_ value: RequestOutcome) -> Rus
  */
 
 public enum ResolveOutcome: Equatable, Hashable {
-    
+
     /**
      * A plain audio URL was produced.
      */
     case resolved(
         /**
          * The stream.
-         */resource: ResolvedResource, 
+         */resource: ResolvedResource,
         /**
          * Invocation accounting.
          */attempt: AttemptSummary
@@ -2317,10 +2360,10 @@ public enum ResolveOutcome: Equatable, Hashable {
     case failed(
         /**
          * Taxonomy kind (`no-result`, `cancelled`, ...).
-         */kind: String, 
+         */kind: String,
         /**
          * Human-readable detail (never contains the URL).
-         */message: String, 
+         */message: String,
         /**
          * Invocation accounting.
          */attempt: AttemptSummary
@@ -2345,33 +2388,33 @@ public struct FfiConverterTypeResolveOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ResolveOutcome {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .resolved(resource: try FfiConverterTypeResolvedResource.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         case 2: return .failed(kind: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf), attempt: try FfiConverterTypeAttemptSummary.read(from: &buf)
         )
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: ResolveOutcome, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case let .resolved(resource,attempt):
             writeInt(&buf, Int32(1))
             FfiConverterTypeResolvedResource.write(resource, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
-        
+
+
         case let .failed(kind,message,attempt):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(kind, into: &buf)
             FfiConverterString.write(message, into: &buf)
             FfiConverterTypeAttemptSummary.write(attempt, into: &buf)
-            
+
         }
     }
 }
@@ -2398,11 +2441,11 @@ public func FfiConverterTypeResolveOutcome_lower(_ value: ResolveOutcome) -> Rus
  *
  * Field names avoid `message` for the same reason as [`HostError`].
  */
-public 
+public
 enum StreamError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     /**
      * `HostConfig.stream_path` was unset — the seam is not running.
      */
@@ -2413,21 +2456,21 @@ enum StreamError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Failed(
         /**
          * Kebab-case error kind.
-         */kind: String, 
+         */kind: String,
         /**
          * Failure detail (never contains the signed URL).
          */detail: String
     )
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -2444,12 +2487,12 @@ public struct FfiConverterTypeStreamError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Unavailable
         case 2: return .Failed(
-            kind: try FfiConverterString.read(from: &buf), 
+            kind: try FfiConverterString.read(from: &buf),
             detail: try FfiConverterString.read(from: &buf)
             )
 
@@ -2460,19 +2503,19 @@ public struct FfiConverterTypeStreamError: FfiConverterRustBuffer {
     public static func write(_ value: StreamError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case .Unavailable:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case let .Failed(kind,detail):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(kind, into: &buf)
             FfiConverterString.write(detail, into: &buf)
-            
+
         }
     }
 }
@@ -2499,12 +2542,12 @@ public func FfiConverterTypeStreamError_lower(_ value: StreamError) -> RustBuffe
  * Receives the terminal outcome of [`PluginHost::start_prepare`].
  */
 public protocol PrepareListener: AnyObject, Sendable {
-    
+
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
-    func onOutcome(requestId: String, outcome: PrepareOutcome) 
-    
+    func onOutcome(requestId: String, outcome: PrepareOutcome)
+
 }
 
 
@@ -2548,7 +2591,7 @@ fileprivate struct UniffiCallbackInterfacePrepareListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -2643,12 +2686,12 @@ public func FfiConverterCallbackInterfacePrepareListener_lower(_ v: PrepareListe
  * [`PluginHost::start_request`].
  */
 public protocol RequestListener: AnyObject, Sendable {
-    
+
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
-    func onOutcome(requestId: String, outcome: RequestOutcome) 
-    
+    func onOutcome(requestId: String, outcome: RequestOutcome)
+
 }
 
 
@@ -2692,7 +2735,7 @@ fileprivate struct UniffiCallbackInterfaceRequestListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -2787,12 +2830,12 @@ public func FfiConverterCallbackInterfaceRequestListener_lower(_ v: RequestListe
  * [`PluginHost::start_resolve`].
  */
 public protocol ResolveListener: AnyObject, Sendable {
-    
+
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
-    func onOutcome(requestId: String, outcome: ResolveOutcome) 
-    
+    func onOutcome(requestId: String, outcome: ResolveOutcome)
+
 }
 
 
@@ -2836,7 +2879,7 @@ fileprivate struct UniffiCallbackInterfaceResolveListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -3133,7 +3176,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 26661) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 11660) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin() != 41359) {
@@ -3142,7 +3185,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() != 34269) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() != 14712) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() != 44159) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() != 7187) {
