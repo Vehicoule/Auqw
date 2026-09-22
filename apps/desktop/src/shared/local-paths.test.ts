@@ -92,4 +92,8 @@ export function run(): void {
   assert(!pathConfined('/root', '/root'), 'root is not inside itself');
   assert(!pathConfined('/root', '/root/../other'), 'escape refused');
   assert(!pathConfined('/root', '/roots/x'), 'sibling-prefix refused');
+  assert(
+    pathConfined('/root', '/root/..hidden/song.wav'),
+    'a ..-named folder inside the tree stays confined',
+  );
 }

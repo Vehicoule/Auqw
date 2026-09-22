@@ -36,7 +36,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         unsubscribe();
         this.#closed = true;
         void api.transfer
-          .abort({ sinkId: this.#id, keep: false })
+          .abort({ sinkId: this.#id, keep: true })
           .catch(() => undefined);
       });
       if (this.#closed) {

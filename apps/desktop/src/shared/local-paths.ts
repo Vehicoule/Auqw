@@ -1,5 +1,5 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 /**
  * Local-files URI math shared by renderer and utility: how a picked
@@ -113,5 +113,12 @@ export function docIdConfined(docId: string): boolean {
  */
 export function pathConfined(rootAbs: string, childAbs: string): boolean {
   const rel = relative(rootAbs, childAbs);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  // `..` only escapes as a leading path *segment* — an ordinary name
+  // like `..hidden` inside the tree must stay confined.
+  return (
+    rel !== '' &&
+    rel !== '..' &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  );
 }

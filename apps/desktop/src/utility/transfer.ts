@@ -248,30 +248,33 @@ export function createTransferService(
         `${destPath}.reconcile${PART_SUFFIX}`,
       );
       const src = await open(partAbs, 'r');
-      const dst = await open(reconcileAbs, 'w');
       try {
-        let remaining = resumeAtBytes;
-        let position = 0;
-        const buf = Buffer.alloc(Math.min(CHUNK, remaining));
-        while (remaining > 0) {
-          const take = Math.min(remaining, buf.length);
-          const { bytesRead } = await src.read(buf, 0, take, position);
-          if (bytesRead === 0) {
-            break;
+        const dst = await open(reconcileAbs, 'w');
+        try {
+          let remaining = resumeAtBytes;
+          let position = 0;
+          const buf = Buffer.alloc(Math.min(CHUNK, remaining));
+          while (remaining > 0) {
+            const take = Math.min(remaining, buf.length);
+            const { bytesRead } = await src.read(buf, 0, take, position);
+            if (bytesRead === 0) {
+              break;
+            }
+            await dst.write(buf, 0, bytesRead);
+            remaining -= bytesRead;
+            position += bytesRead;
           }
-          await dst.write(buf, 0, bytesRead);
-          remaining -= bytesRead;
-          position += bytesRead;
-        }
-        if (remaining > 0) {
-          throw shellError(
-            'invalid-response',
-            'stored partial shrank during reconcile',
-          );
+          if (remaining > 0) {
+            throw shellError(
+              'invalid-response',
+              'stored partial shrank during reconcile',
+            );
+          }
+        } finally {
+          await dst.close();
         }
       } finally {
         await src.close();
-        await dst.close();
       }
       await rename(reconcileAbs, partAbs);
       return;
@@ -386,14 +389,21 @@ export function createTransferService(
       try {
         await rename(sink.partAbs, sink.destAbs);
       } catch {
-        // POSIX rename overwrites; Windows refuses — fall back to an
-        // unlink + rename pair (same-dir, still atomic per file).
+        // POSIX rename overwrites; Windows refuses to replace an
+        // existing destination. Park the incumbent under a same-dir
+        // backup name, publish the partial, and restore the backup
+        // if the publish fails — the completed file is never
+        // deleted before its replacement is in place.
+        const backupAbs = join(dir(), `${sink.destPath}.replace`);
+        await rm(backupAbs, { force: true });
+        await rename(sink.destAbs, backupAbs);
         try {
-          await rm(sink.destAbs, { force: true });
           await rename(sink.partAbs, sink.destAbs);
         } catch (thrown) {
+          await rename(backupAbs, sink.destAbs).catch(() => undefined);
           asIo('transfer finalize rename failed', thrown);
         }
+        await rm(backupAbs, { force: true });
       }
       return { digest };
     } finally {
@@ -434,7 +444,7 @@ export function createTransferService(
     }
     return info.isFile()
       ? { exists: true, bytes: info.size }
-      : { exists: true, bytes: null };
+      : { exists: false, bytes: null };
   }
 
   async function removeName(args: TransferNameArgs): Promise<unknown> {

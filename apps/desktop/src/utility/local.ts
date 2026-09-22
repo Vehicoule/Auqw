@@ -196,21 +196,23 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       return { uri: null };
     }
     try {
-      const download = db
+      const downloads = db
         .prepare(
           `SELECT file_path AS filePath FROM downloads
-           WHERE recording_id = ? AND state = 'available' LIMIT 1`,
+           WHERE recording_id = ? AND state = 'available'`,
         )
-        .get(args.recordingId) as { filePath?: unknown } | undefined;
+        .all(args.recordingId) as { filePath?: unknown }[];
       // file_path is a managed-dir name by the port convention — a
       // row carrying separators would escape the media dir, so a
       // non-bare value is treated as no playable bytes (never joined).
-      if (
-        download !== undefined &&
-        typeof download.filePath === 'string' &&
-        options.mediaDir !== undefined &&
-        isBareName(download.filePath)
-      ) {
+      for (const download of downloads) {
+        if (
+          typeof download.filePath !== 'string' ||
+          options.mediaDir === undefined ||
+          !isBareName(download.filePath)
+        ) {
+          continue;
+        }
         const abs = join(options.mediaDir, download.filePath);
         const info = await stat(abs).catch(() => null);
         if (info !== null && info.isFile()) {
@@ -222,7 +224,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           `SELECT f.doc_id AS docId, s.tree_uri AS treeUri
            FROM local_files f
            JOIN local_sources s ON s.source_id = f.source_id
-           WHERE f.recording_id = ? LIMIT 1`,
+           WHERE f.recording_id = ?`,
         )
         .all(args.recordingId) as { docId?: unknown; treeUri?: unknown }[];
       for (const row of rows) {
