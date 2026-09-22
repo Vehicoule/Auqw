@@ -22,6 +22,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -109,12 +110,18 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
-// Stage inside OUT: every artifact is verified and copied before OUT's
-// current set is touched, so a failed sync leaves the last good set
-// exactly as it was. The stage dir never matches the artifact patterns
-// the swap prunes; the exit hook cleans it on any failure path.
-const STAGE = join(OUT, `.stage-${process.pid}`);
-mkdirSync(STAGE, { recursive: true });
+// Stage next to OUT: same filesystem so the swap's renames stay atomic,
+// outside OUT so an abandoned stage can't enter a packaged recursive
+// copy, and mkdtemp-named so a reused PID can never resurrect a killed
+// run's leftovers into the live set. Sweep leftovers first (SIGKILL
+// bypasses the exit hook), then clean our own on every exit path — a
+// failed sync leaves the previous set byte-identical.
+for (const entry of readdirSync(dirname(OUT))) {
+  if (entry.startsWith('.sync-stage-')) {
+    rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
+  }
+}
+const STAGE = mkdtempSync(join(dirname(OUT), '.sync-stage-'));
 process.on('exit', () => {
   rmSync(STAGE, { recursive: true, force: true });
 });
