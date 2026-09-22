@@ -27,7 +27,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -116,24 +115,22 @@ mkdirSync(OUT, { recursive: true });
 // copy, and mkdtemp-named so a reused PID can never resurrect a killed
 // run's leftovers into the live set. The exit hook cleans the live
 // stage on every path — a failed sync leaves the previous set
-// byte-identical. SIGKILLed stages are reclaimed by age, not blindly:
-// a live stage is seconds old, so only residue far past any plausible
-// sync duration is removed — a concurrent invocation's stage is safe.
-const STAGE_STALE_MS = 60 * 60 * 1000;
+// byte-identical. Stages abandoned by SIGKILL are reclaimed only when
+// the owner PID encoded in the name is provably dead — a suspended or
+// merely old stage is never touched, and PID reuse errs toward keeping
+// (inert residue, not lost work).
 for (const entry of readdirSync(dirname(OUT))) {
-  if (!entry.startsWith('.sync-stage-')) continue;
+  const owner = /^\.sync-stage-(\d+)-/.exec(entry)?.[1];
+  if (!owner) continue;
   try {
-    const stale =
-      Date.now() - statSync(join(dirname(OUT), entry)).mtimeMs >
-      STAGE_STALE_MS;
-    if (stale) {
+    process.kill(Number(owner), 0);
+  } catch (err) {
+    if (err.code === 'ESRCH') {
       rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
     }
-  } catch {
-    // vanished mid-loop — nothing to reclaim
   }
 }
-const STAGE = mkdtempSync(join(dirname(OUT), '.sync-stage-'));
+const STAGE = mkdtempSync(join(dirname(OUT), `.sync-stage-${process.pid}-`));
 process.on('exit', () => {
   rmSync(STAGE, { recursive: true, force: true });
 });
