@@ -57,7 +57,7 @@ export type {
     DesktopSidebarProps,
 } from './chrome.tsx';
 
-export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
+export { AppStack, PushScreen, SheetScreen, StackItem, useOverlayDismiss } from './stack.tsx';
 export type {
   AppStackProps,
   PushScreenProps,
@@ -87,6 +87,7 @@ export {
     globalKeyAction,
     initialRovingIndex,
     isEditableTarget,
+    reconcileFocusIndex,
     rowKeyAction,
     seekStepMs,
     sheetKeyAction,

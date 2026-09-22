@@ -59,6 +59,18 @@ export function initialRovingIndex(currentIndex: number, count: number): number 
   return clampIndex(currentIndex < 0 ? 0 : currentIndex, count);
 }
 
+/**
+ * Keep the roving index inside a list that shrank — a removed focused
+ * row would otherwise leave every survivor at tabIndex -1 and the list
+ * unreachable by keyboard. -1 when the list is empty.
+ */
+export function reconcileFocusIndex(focusIndex: number, count: number): number {
+  if (count <= 0) {
+    return -1;
+  }
+  return Math.min(focusIndex, count - 1);
+}
+
 /** Escape is the only key a sheet owns; everything else falls through. */
 export function sheetKeyAction(key: string): 'close' | null {
   return key === 'Escape' ? 'close' : null;

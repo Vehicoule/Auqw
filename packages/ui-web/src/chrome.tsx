@@ -1,6 +1,8 @@
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { globalKeyAction } from './keyboard.ts';
 import type { NavItemModel } from '@auqw/ui-shared';
 
 const NAV_ICONS: Record<string, IconName> = {
@@ -108,6 +110,12 @@ export type DesktopChromeProps = {
   readonly onSelect: (key: string) => void;
   readonly header?: ReactNode | undefined;
   readonly miniPlayer?: ReactNode | undefined;
+  /**
+   * '/' targets the search field app-wide — the chrome owns the global
+   * keydown so screens never duplicate it. Editable elements keep
+   * their keys (isEditableTarget guards inside globalKeyAction).
+   */
+  readonly onFocusSearch?: (() => void) | undefined;
   readonly children: ReactNode;
 };
 
@@ -118,8 +126,22 @@ export function DesktopChrome({
   onSelect,
   header,
   miniPlayer,
+  onFocusSearch,
   children,
 }: DesktopChromeProps) {
+  useEffect(() => {
+    if (onFocusSearch === undefined) {
+      return;
+    }
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (globalKeyAction(event.key, event.target) === 'focus-search') {
+        event.preventDefault();
+        onFocusSearch();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onFocusSearch]);
   return (
     <div className="uw-chrome">
       <DesktopSidebar items={items} activeKey={activeKey} onSelect={onSelect} />

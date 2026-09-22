@@ -10,7 +10,7 @@ import {
 } from './primitives.tsx';
 import { formatClock } from '@auqw/ui-shared';
 import type { TrackRowModel } from '@auqw/ui-shared';
-import { rowKeyAction } from './keyboard.ts';
+import { reconcileFocusIndex, rowKeyAction } from './keyboard.ts';
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
@@ -221,9 +221,23 @@ export function useTrackList({
   readonly onActivate?: ((index: number) => void) | undefined;
   readonly onContext?: ((index: number) => void) | undefined;
 }): TrackListController {
-  const [focusIndex, setFocusIndex] = useState(-1);
+  const [rawFocusIndex, setFocusIndex] = useState(-1);
+  // A shrunk list can strand the stored index past the end — reconcile
+  // before any read so a surviving row always owns the Tab slot.
+  const focusIndex = reconcileFocusIndex(rawFocusIndex, count);
   const listRef = useRef<HTMLDivElement | null>(null);
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Keys the list owns belong to the row's main action only — nested
+    // buttons (like, menu, chevrons) keep their own Enter/Space so a
+    // bubbling keypress can't double-fire the row's play callback.
+    const target = event.target;
+    if (
+      typeof HTMLElement === 'undefined' ||
+      !(target instanceof HTMLElement) ||
+      !target.classList.contains('uw-track-row__main')
+    ) {
+      return;
+    }
     const action = rowKeyAction(event.key, focusIndex < 0 ? 0 : focusIndex, count);
     if (action === null) {
       return;

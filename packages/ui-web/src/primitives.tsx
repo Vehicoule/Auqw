@@ -475,7 +475,7 @@ export function Icon({
       fill="none"
       aria-hidden="true"
       focusable="false"
-      className={className}
+      className={`uw-icon${className ? ` ${className}` : ''}`}
     >
       {glyph.shapes.map((shape, i) => {
         switch (shape.kind) {

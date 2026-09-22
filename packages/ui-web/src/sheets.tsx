@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { useOverlayDismiss } from './stack.tsx';
 import { sheetKeyAction } from './keyboard.ts';
 
 /**
@@ -63,18 +64,10 @@ export function Sheet({
   readonly onDismiss?: (() => void) | undefined;
   readonly children: ReactNode;
 }) {
-  useEffect(() => {
-    if (!open || onDismiss === undefined) {
-      return;
-    }
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (sheetKeyAction(event.key) === 'close') {
-        onDismiss();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open, onDismiss]);
+  // Escape ownership comes from the stack when mounted inside one —
+  // a push under this sheet keeps its listener silent until the sheet
+  // unregisters on close.
+  useOverlayDismiss(open ? onDismiss : undefined);
   if (!open) {
     return null;
   }

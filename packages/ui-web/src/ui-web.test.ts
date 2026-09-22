@@ -55,6 +55,7 @@ const {
   isEditableTarget,
   progressPathState,
   quadPath,
+  reconcileFocusIndex,
   rowKeyAction,
   seekStepMs,
   sheetKeyAction,
@@ -102,6 +103,9 @@ function render(node: ReactNode): string {
   check('initialRovingIndex starts at 0', initialRovingIndex(-1, 4) === 0);
   check('initialRovingIndex empty', initialRovingIndex(-1, 0) === -1);
   check('initialRovingIndex clamps', initialRovingIndex(99, 4) === 3);
+  check('reconcileFocusIndex keeps valid index', reconcileFocusIndex(2, 5) === 2);
+  check('reconcileFocusIndex clamps shrunk list', reconcileFocusIndex(4, 3) === 2);
+  check('reconcileFocusIndex empties at 0', reconcileFocusIndex(4, 0) === -1);
 }
 {
   check('sheetKeyAction Escape closes', sheetKeyAction('Escape') === 'close');

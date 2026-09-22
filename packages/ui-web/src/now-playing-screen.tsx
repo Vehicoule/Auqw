@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   Artwork,
   Icon,
@@ -10,9 +10,9 @@ import {
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
+import { useOverlayDismiss } from './stack.tsx';
 import { QueueList } from './queue-list.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import { sheetKeyAction } from './keyboard.ts';
 import type {
   DownloadChip,
   LyricsModel,
@@ -463,18 +463,11 @@ export type StageSheetProps = NowPlayingScreenProps & {
  * collapse like every other sheet).
  */
 export function StageSheet({ expanded, onExpandChange, ...rest }: StageSheetProps) {
-  useEffect(() => {
-    if (!expanded || onExpandChange === undefined) {
-      return;
-    }
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (sheetKeyAction(event.key) === 'close') {
-        onExpandChange(false);
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [expanded, onExpandChange]);
+  const dismiss = useCallback(
+    () => onExpandChange?.(false),
+    [onExpandChange],
+  );
+  useOverlayDismiss(expanded && onExpandChange !== undefined ? dismiss : undefined);
   if (!expanded) {
     return null;
   }
