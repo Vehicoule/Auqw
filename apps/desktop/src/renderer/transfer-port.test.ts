@@ -191,4 +191,55 @@ export async function run(): Promise<void> {
     aborts[0] !== undefined && aborts[0].keep === false,
     'reaped sink dropped, not kept',
   );
+
+  // A cancelled op settles only AFTER the shared teardown lands —
+  // DownloadManager removes the file on 'cancelled'; reporting it
+  // while the utility still holds the handle races the removal on
+  // Windows and strands the row in `removing`.
+  const holdSrc = new CancellationSource();
+  const holdApi = fakeApi();
+  const writeReleases: (() => void)[] = [];
+  let abortDone = false;
+  const abortReleases: (() => void)[] = [];
+  (holdApi.transfer as Record<string, unknown>)['write'] = () =>
+    new Promise<void>((resolve) => {
+      writeReleases.push(resolve);
+    });
+  (holdApi.transfer as Record<string, unknown>)['abort'] = () =>
+    new Promise<void>((resolve) => {
+      abortReleases.push(() => {
+        abortDone = true;
+        resolve();
+      });
+    });
+  const holdPort = createDesktopTransfer(holdApi);
+  const holdBegan = await holdPort.begin(
+    { destPath: 'd.mp4', resumeAtBytes: 0 },
+    holdSrc.signal,
+  );
+  assert(holdBegan.ok, 'teardown begin resolves');
+  const pendingWrite = holdBegan.value.write(new Uint8Array([9]));
+  await Promise.resolve();
+  holdSrc.cancel();
+  const fired = await Promise.race([
+    pendingWrite.then(() => 'write-settled' as const),
+    Promise.resolve().then(() => 'still-parked' as const),
+  ]);
+  assertEqual(
+    fired,
+    'still-parked',
+    'cancelled op waits on the utility-side teardown',
+  );
+  const releaseAbort = abortReleases[0];
+  assert(releaseAbort !== undefined, 'teardown armed by the cancel');
+  const releaseParked = writeReleases[0];
+  assert(releaseParked !== undefined, 'write parked inside the fake');
+  releaseParked();
+  releaseAbort();
+  const heldWrite = await pendingWrite;
+  assert(
+    !heldWrite.ok && heldWrite.error.kind === 'cancelled',
+    'write settles cancelled only after teardown lands',
+  );
+  assert(abortDone, 'utility-side abort landed before the settle');
 }

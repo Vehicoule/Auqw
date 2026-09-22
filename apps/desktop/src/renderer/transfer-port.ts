@@ -20,7 +20,10 @@ import { raced } from './race.ts';
  * every IPC call races the signal so a cancel doesn't out-wait a
  * parked utility op, a sink minted after a mid-`begin` cancel is
  * reaped, and a live sink subscribes so a cancel aborts it
- * utility-side even while the engine isn't driving a call.
+ * utility-side even while the engine isn't driving a call. An op
+ * reporting `cancelled` settles only after the shared teardown lands,
+ * so callers never learn "cancelled" while the utility still owns the
+ * file handle.
  */
 export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
   const ifCancelled = (signal: CancellationSignal): Result<never> | null =>
@@ -47,6 +50,15 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     #closed = false;
     #cancelled = false;
     #unsubscribe: () => void;
+    /**
+     * The one utility-side teardown: the signal listener, an explicit
+     * `abort()`, and every op that reports `cancelled` share it — an
+     * op settles only after it resolves, so a caller never learns
+     * "cancelled" while the utility still holds the file handle (a
+     * `removeFile` racing an open handle fails on Windows and strands
+     * the download row in `removing`). The first armer's `keep` wins.
+     */
+    #teardown: Promise<Result<void>> | null = null;
 
     constructor(id: string, signal: CancellationSignal) {
       this.#id = id;
@@ -62,12 +74,31 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         this.#unsubscribe();
         this.#cancelled = true;
         this.#closed = true;
-        void api.transfer
-          .abort({ sinkId: this.#id, keep: true })
-          .catch(() => undefined);
+        // Armed, not awaited — the promise is what cancelled ops
+        // settle behind; utility-side it queues behind the in-flight
+        // op on the sink's chain.
+        void this.#remoteAbort(true);
       });
       if (this.#closed) {
         this.#unsubscribe();
+      }
+    }
+
+    /** Arm or join the shared utility-side abort. */
+    #remoteAbort(keep: boolean): Promise<Result<void>> {
+      this.#teardown ??= api.transfer
+        .abort({ sinkId: this.#id, keep })
+        .then(
+          () => ok(undefined),
+          (thrown) => this.#settleError(thrown),
+        );
+      return this.#teardown;
+    }
+
+    /** Cancelled paths settle only after teardown lands. */
+    async #afterTeardown(): Promise<void> {
+      if (this.#teardown !== null) {
+        await this.#teardown;
       }
     }
 
@@ -90,6 +121,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
 
     async write(bytes: Uint8Array): Promise<Result<void>> {
       if (this.#closed) {
+        await this.#afterTeardown();
         return this.#closedResult();
       }
       try {
@@ -99,6 +131,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         // of writing on against the dead handle.
         for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
           if (this.#cancelled) {
+            await this.#afterTeardown();
             return err(appError('cancelled', 'cancelled'));
           }
           const chunk = bytes.subarray(
@@ -113,14 +146,17 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
             this.#signal,
           );
           if (sent.t === 'cancelled') {
+            await this.#afterTeardown();
             return err(appError('cancelled', 'cancelled'));
           }
           if (sent.t === 'failed') {
+            await this.#afterTeardown();
             return this.#settleError(sent.thrown);
           }
         }
         return ok(undefined);
       } catch (thrown) {
+        await this.#afterTeardown();
         return this.#settleError(thrown);
       }
     }
@@ -131,9 +167,11 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         this.#signal,
       );
       if (result.t === 'cancelled') {
+        await this.#afterTeardown();
         return err(appError('cancelled', 'cancelled'));
       }
       if (result.t === 'failed') {
+        await this.#afterTeardown();
         return this.#settleError(result.thrown);
       }
       return ok(result.value.offset);
@@ -147,28 +185,24 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       this.#closed = true;
       this.#unsubscribe();
       if (result.t === 'cancelled') {
+        await this.#afterTeardown();
         return err(appError('cancelled', 'cancelled'));
       }
       if (result.t === 'failed') {
+        await this.#afterTeardown();
         return this.#settleError(result.thrown);
       }
       return ok(result.value.digest);
     }
 
     async abort(keep: boolean): Promise<Result<void>> {
-      const result = await raced(
-        api.transfer.abort({ sinkId: this.#id, keep }),
-        this.#signal,
-      );
+      // Shares the signal-armed teardown — never races the cancelled
+      // signal, so the caller settles only after the utility released
+      // the sink. On a still-open sink this IS the arming call.
+      const result = await this.#remoteAbort(keep);
       this.#closed = true;
       this.#unsubscribe();
-      if (result.t === 'cancelled') {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      if (result.t === 'failed') {
-        return err(shellToAppError(result.thrown));
-      }
-      return ok(undefined);
+      return result;
     }
   }
 

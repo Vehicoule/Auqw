@@ -1,5 +1,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  rename,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -271,6 +276,35 @@ export async function run(): Promise<void> {
     assert(
       !foreignDoc.ok && foreignDoc.error?.kind === 'invalid-request',
       'foreign docId refused on picked-file trees',
+    );
+
+    // Root failures are typed — an empty scan must not masquerade as
+    // success and diff into mass-removal (EACCES can't be driven as
+    // root; ELOOP exercises the same io-error arm).
+    const loopA = join(root, 'loop-a');
+    const loopB = join(root, 'loop-b');
+    await symlink('loop-b', loopA);
+    await symlink('loop-a', loopB);
+    grant(dirTreeUri(loopA));
+    const looped = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: dirTreeUri(loopA),
+    });
+    assert(
+      !looped.ok && looped.error?.kind === 'io-error',
+      'a symlink loop reads io-error, never an empty scan',
+    );
+
+    const dangling = join(root, 'dangling');
+    await symlink(join(root, 'gone-nowhere'), dangling);
+    grant(dirTreeUri(dangling));
+    const vanished = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: dirTreeUri(dangling),
+    });
+    assert(
+      vanished.ok &&
+        (vanished.result as { entries: unknown[] }).entries.length ===
+          0,
+      'a genuinely-gone root enumerates empty',
     );
   } finally {
     service.close();

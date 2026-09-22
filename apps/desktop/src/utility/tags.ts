@@ -20,7 +20,12 @@ import {
   MAX_ENUM_ENTRIES,
   MAX_TAG_FIELD,
 } from '../shared/contract.ts';
-import { isShellError, shellError } from '../shared/errors.ts';
+import { errorCode } from '../shared/check.ts';
+import {
+  isShellError,
+  shellError,
+} from '../shared/errors.ts';
+import type { ShellError } from '../shared/errors.ts';
 import {
   docIdConfined,
   parseTree,
@@ -52,6 +57,24 @@ export type TagService = {
 };
 
 const FINGERPRINT_SAMPLE = 4096;
+
+/**
+ * Root-level fs outcome: a genuinely-gone path enumerates empty, but a
+ * permission or I/O failure at the tree root must not answer
+ * `entries: []` — LocalFileSource diffs a "successful" empty scan into
+ * removing every indexed document under the tree. Nested dirs still
+ * skip-and-continue; only the root is typed.
+ */
+function rootFailure(thrown: unknown): 'gone' | ShellError {
+  const code = errorCode(thrown);
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return 'gone';
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return shellError('permission-denied', 'path is not readable');
+  }
+  return shellError('io-error', 'path could not be read');
+}
 
 /** Extension → mime for the formats `music-metadata` covers. */
 const AUDIO_MIME: Readonly<Record<string, string>> = {
@@ -274,7 +297,13 @@ export function createTagService(options: TagServiceOptions): TagService {
       throw shellError('invalid-request', 'not a desktop treeUri');
     }
     if (tree.kind === 'file') {
-      const info = await stat(tree.absPath).catch(() => null);
+      const info = await stat(tree.absPath).catch((thrown) => {
+        const outcome = rootFailure(thrown);
+        if (outcome !== 'gone') {
+          throw outcome;
+        }
+        return null;
+      });
       if (info === null || !info.isFile()) {
         return { entries: [] };
       }
@@ -293,7 +322,13 @@ export function createTagService(options: TagServiceOptions): TagService {
         ],
       };
     }
-    const rootReal = await realpath(tree.absPath).catch(() => null);
+    const rootReal = await realpath(tree.absPath).catch((thrown) => {
+      const outcome = rootFailure(thrown);
+      if (outcome !== 'gone') {
+        throw outcome;
+      }
+      return null;
+    });
     if (rootReal === null) {
       return { entries: [] };
     }
@@ -314,7 +349,17 @@ export function createTagService(options: TagServiceOptions): TagService {
       }
       const dirents = await readdir(current, {
         withFileTypes: true,
-      }).catch(() => null);
+      }).catch((thrown) => {
+        // A nested unreadable dir skips itself; a failed ROOT means
+        // the scan is suspect — "empty" would read as mass-removal.
+        if (current === rootReal) {
+          const outcome = rootFailure(thrown);
+          if (outcome !== 'gone') {
+            throw outcome;
+          }
+        }
+        return null;
+      });
       if (dirents === null) {
         continue;
       }
