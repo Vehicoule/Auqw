@@ -30,3 +30,6 @@ apps/mobile/assets/plugins/
 
 # Electron bundles (rebuild via `pnpm --filter auqw-desktop build`)
 apps/desktop/dist/
+
+# electron-builder package output (rebuild via `pnpm --filter auqw-desktop dist`)
+apps/desktop/dist-packages/

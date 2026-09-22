@@ -1,0 +1,154 @@
+# Android packaging plan
+
+Current state: `app.config.ts` pins `com.vehicoule.auqw` / `version: 0.1.0`;
+no `eas.json`, no checked-in `android/` (CNG — `expo prebuild` regenerates
+it, gitignored). A debug APK already builds locally per `README.md`
+(`build-android-bindings.sh` → `pnpm install` → `pnpm sync-plugins` →
+`expo prebuild` → `./android/gradlew assembleDebug`). This doc is the
+path from there to a signed installable artifact. iOS is post-release —
+the provisional `expo-audio` path stays until the native seam lands, and
+App Store signing needs an Apple Developer account anyway; not covered
+here.
+
+## Build inputs (unchanged by signing choice)
+
+Every Android artifact needs, in order:
+
+1. `./tooling/build-android-bindings.sh` — UniFFI Kotlin + `jniLibs` `.so`
+   (arm64-v8a + x86_64; release profile).
+2. `pnpm install` + `pnpm sync-plugins` — provider wasm manifests land in
+   `assets/plugins/`.
+3. `npx expo prebuild --platform android` — generates `android/` with
+   `com.vehicoule.auqw`, the Media3 service manifest entries, adaptive
+   icons.
+
+## Path A — EAS Build (recommended for distribution)
+
+Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
+`app.config.ts`). Drop in `apps/mobile/eas.json`:
+
+```json
+{
+  "cli": { "appVersionSource": "remote" },
+  "build": {
+    "preview": {
+      "android": { "buildType": "apk" },
+      "distribution": "internal"
+    },
+    "production": {
+      "android": { "buildType": "aab" },
+      "autoIncrement": true
+    }
+  }
+}
+```
+
+- `eas build -p android --profile preview` → signed APK, installable
+  via `adb install` or the internal-distribution link — this is what the
+  two-device gate consumes.
+- `eas build -p android --profile production` → AAB for Play Console.
+- EAS-managed credentials: `eas build` generates and stores an **upload
+  key** server-side on first run; nothing key-shaped ever enters the
+  repo. Play App Signing holds the real app-signing key at Google, so
+  the upload key stays rotatable.
+- `appVersionSource: remote` + `autoIncrement` makes EAS own
+  `versionCode`; alternatively keep explicit `android.versionCode` in
+  `app.config.ts` (see versioning below).
+
+## Path B — fully local (no EAS account)
+
+`./gradlew assembleRelease` on the prebuilt project is unsigned by
+default — Gradle's release signing config must come from somewhere.
+Because `android/` is regenerated, signing config lives in a **config
+plugin**, not a hand-edit:
+
+1. One-time, outside the repo:
+
+   ```sh
+   keytool -genkeypair -v -storetype PKCS12 \
+     -keystore ~/.android/auqw-upload.keystore \
+     -alias auqw-upload -keyalg RSA -keysize 2048 -validity 10950
+   ```
+
+   The upload key + its passwords live in the team secret store /
+   Devin org secrets — never in the repo, never in CI logs.
+
+2. `apps/mobile/keystore.properties` (add to `.gitignore` before first
+   commit):
+
+   ```properties
+   storeFile=/absolute/path/auqw-upload.keystore
+   storePassword=...
+   keyAlias=auqw-upload
+   keyPassword=...
+   ```
+
+3. A `plugins/withReleaseSigning.js` config-plugin mod appended to
+   `app.config.ts`'s `plugins` array injects into
+   `android/app/build.gradle`:
+
+   ```gradle
+   def kp = new Properties()
+   def kf = rootProject.file('../../keystore.properties')
+   if (kf.exists()) { kf.withInputStream { kp.load(it) } }
+   android.signingConfigs.release {
+       if (kp.storeFile != null) {
+           storeFile file(kp.storeFile)
+           storePassword kp.storePassword
+           keyAlias kp.keyAlias
+           keyPassword kp.keyPassword
+       }
+   }
+   android.buildTypes.release.signingConfig = android.signingConfigs.release
+   ```
+
+   (Equivalent shape via `gradle.properties` `MYAPP_UPLOAD_*` vars —
+   the standard AGP recipe — also works; either way secrets stay out of
+   git.)
+
+4. `./android/gradlew -p android assembleRelease` →
+   `android/app/build/outputs/apk/release/app-release.apk` (signed,
+   installable); `bundleRelease` → `app-release.aab` for Play.
+
+## Signing strategy — what to ratify
+
+- **Upload key, not a shared "release" key**: Play App Signing holds the
+  app-signing key at Google; our keystore is only the upload key — one
+  generated key, stored outside the repo (EAS-managed or
+  `~/.android/`), rotatable via Play Console if it ever leaks.
+- **Debug keystore**: AGP's auto-generated `debug.keystore` under
+  `android/` is disposable and never committed (already covered — the
+  whole `android/` dir is gitignored).
+- **Same identity desktop↔mobile**: the signing question is orthogonal
+  to the sync pairing identity — pairing derives per-device X25519
+  keys at first launch (`utility/sync-keys`, sealed-auth QR + 6-digit),
+  not from APK signatures.
+
+## Versioning
+
+- `version` (semver, user-facing): `app.config.ts` `version` is the
+  single source of truth (kept in step with `package.json`
+  `"version"`).
+- `versionCode` (integer, Play-facing): today absent → prebuild emits
+  `1`. Add `android.versionCode` to `app.config.ts` for the local path,
+  or let EAS own it (`appVersionSource: remote`, `autoIncrement`).
+
+## APK vs AAB
+
+- **APK** (`assembleRelease`, EAS `buildType: apk`): directly
+  installable — `adb install`, file share. Required for the two-device
+  gate and any dogfood build.
+- **AAB** (`bundleRelease`, EAS `buildType: aab`): Play Console only —
+  Play re-signs per-device. Not sideloadable.
+
+## What the two-device gate needs from the artifact
+
+1. A signed APK installed on two physical devices (emulator evidence is
+   provisional only — LAN multicast + real radios are the point).
+2. First-launch pairing: one device shows the QR payload, the other
+   scans (or enters the 6-digit code), then sealed-auth session over
+   LAN — the `_auqw._tcp.local` mDNS service advertised by
+   `utility/sync-mdns` must be reachable, so both devices on the same
+   LAN with multicast unfiltered.
+3. Evidence: delta push/pull applied between the two installs, `ping`/
+   `devices`/`sync-request` typed results — not log claims.
