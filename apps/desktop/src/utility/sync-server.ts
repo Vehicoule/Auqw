@@ -328,6 +328,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   const sessions = new Set<Session>();
   const pendingSync = new Set<string>();
+  // Renderer-originated engine ops bind to the service's lifetime —
+  // there is no per-request cancel on the IPC boundary, so close() is
+  // the cancellation edge (sessions use their own per-socket source).
+  const serviceCancel = new CancellationSource();
   let server: Server | null = null;
   let advertiser: SyncAdvertiser | null = null;
   let listener: SyncStatusResult['listener'] = 'starting';
@@ -975,7 +979,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (engine === undefined) {
         throw shellError('unavailable', 'sync engine not installed');
       }
-      const result = await engine.exportDelta(args.since);
+      const result = await engine.exportDelta(
+        args.since,
+        serviceCancel.signal,
+      );
       if (!result.ok) {
         throw engineError(result.error);
       }
@@ -998,6 +1005,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       const applied = await engine.applyDelta(
         args.delta,
         args.deviceId ?? 'local-import',
+        serviceCancel.signal,
       );
       if (!applied.ok) {
         throw engineError(applied.error);
@@ -1056,6 +1064,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         return;
       }
       closing = true;
+      serviceCancel.cancel();
       await started.catch(() => undefined);
       for (const session of [...sessions]) {
         killSession(session);
