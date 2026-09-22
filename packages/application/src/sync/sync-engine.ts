@@ -732,6 +732,11 @@ export function isChangeEntry(value: unknown): value is ChangeEntry {
   ) {
     return false;
   }
+  // The settings record is a declared singleton — an entry under any
+  // other id materializes a shadow record no reader looks at.
+  if (kind === 'settings' && recordId !== SETTINGS_RECORD_ID) {
+    return false;
+  }
   if (tombstone) {
     return field === TOMBSTONE_FIELD && value['value'] === null;
   }
@@ -866,7 +871,18 @@ function divergenceKey(
   field: string,
   loser: DivergenceSide,
 ): string {
-  return `${kind}${KEY_SEP}${recordId}${KEY_SEP}${field}${KEY_SEP}${loser.deviceId}${KEY_SEP}${loser.hlc.l}${KEY_SEP}${loser.hlc.c}`;
+  // Injective encoding: recordId/field/deviceId may all carry the
+  // KEY_SEP byte, so delimiter joins would let distinct losers
+  // collide and get deduped away. JSON is unambiguous over a
+  // fixed-arity tuple of strings and numbers.
+  return JSON.stringify([
+    kind,
+    recordId,
+    field,
+    loser.deviceId,
+    loser.hlc.l,
+    loser.hlc.c,
+  ]);
 }
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -977,6 +993,28 @@ export async function createSyncEngine(
       () => undefined,
     );
     return work;
+  }
+
+  /**
+   * First-settle-wins against the queue: an op still waiting behind a
+   * held serialized turn settles `cancelled` now instead of parking
+   * until the in-flight store op finishes. The queued body still runs
+   * and exits at its own signal check, so ordering is unchanged —
+   * racing only unblocks the caller.
+   */
+  function cancellable<T>(
+    work: Promise<Result<T>>,
+    signal: CancellationSignal,
+  ): Promise<Result<T>> {
+    return Promise.race([
+      work,
+      new Promise<Result<T>>((resolve) => {
+        const unsubscribe = signal.subscribe(() => {
+          unsubscribe();
+          resolve(err(appError('cancelled', 'cancelled')));
+        });
+      }),
+    ]);
   }
 
   function now(): number | null {
@@ -1554,6 +1592,14 @@ export async function createSyncEngine(
     if (!isString(input.recordId, MAX_RECORD_ID)) {
       return err(appError('invalid-response', 'invalid record id'));
     }
+    if (
+      input.kind === 'settings' &&
+      input.recordId !== SETTINGS_RECORD_ID
+    ) {
+      return err(
+        appError('invalid-response', 'settings is a singleton record'),
+      );
+    }
     if ('tombstone' in input) {
       if (input.tombstone !== true) {
         return err(appError('invalid-response', 'invalid tombstone write'));
@@ -1600,9 +1646,12 @@ export async function createSyncEngine(
         return err(checked.error);
       }
     }
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
+    const { signal: sig } = resolveSignal(signal);
+    if (sig.cancelled) {
+      return err(appError('cancelled', 'cancelled'));
+    }
+    const work = serialized(async () => {
+      if (sig.cancelled) {
         return err(appError('cancelled', 'cancelled'));
       }
       const at = now();
@@ -1670,6 +1719,7 @@ export async function createSyncEngine(
       await appendDivergence(divs, sig, deadlineMs);
       return ok(results);
     });
+    return cancellable(work, sig);
   }
 
   async function localChange(
@@ -1706,9 +1756,12 @@ export async function createSyncEngine(
       return err(appError('invalid-response', 'invalid delta limit'));
     }
     const bound = Math.min(limit, MAX_DELTA_ENTRIES);
-    return serialized(async () => {
-      const { cancelled } = resolveSignal(signal);
-      if (cancelled) {
+    const { signal: sig } = resolveSignal(signal);
+    if (sig.cancelled) {
+      return err(appError('cancelled', 'cancelled'));
+    }
+    const work = serialized(async () => {
+      if (sig.cancelled) {
         return err(appError('cancelled', 'cancelled'));
       }
       const at = now();
@@ -1815,6 +1868,7 @@ export async function createSyncEngine(
       };
       return ok(doc);
     });
+    return cancellable(work, sig);
   }
 
   async function applyDelta(
@@ -1824,9 +1878,12 @@ export async function createSyncEngine(
     if (!isSyncDelta(doc)) {
       return err(appError('invalid-message', 'malformed sync delta'));
     }
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
+    const { signal: sig } = resolveSignal(signal);
+    if (sig.cancelled) {
+      return err(appError('cancelled', 'cancelled'));
+    }
+    const work = serialized(async () => {
+      if (sig.cancelled) {
         return err(appError('cancelled', 'cancelled'));
       }
       const at = now();
@@ -1922,6 +1979,7 @@ export async function createSyncEngine(
       };
       return ok(result);
     });
+    return cancellable(work, sig);
   }
 
   function divergenceHistory(
@@ -2047,10 +2105,16 @@ export async function createSyncEngine(
       repairs.push(row),
     );
   }
-  // The log alone rebuilds cursor state — stored watermarks are
-  // derived data and deliberately not read back into `contiguous`:
-  // claiming a mark the entries cannot prove would reintroduce the
-  // silent gap a contiguous cursor exists to prevent.
+  // Stored watermarks merge back on top of the log-derived marks: a
+  // mark may ride on `skipped` folds — seqs an exporter claimed
+  // permanently absent that never entered the log — and persisting
+  // them is what the watermark field exists for. The write was atomic
+  // with the entries, so a stored mark can't claim progress the
+  // durable state didn't witness; max() keeps whichever side proves
+  // more.
+  for (const [dev, mark] of Object.entries(snapshot.watermarks)) {
+    contiguous.set(dev, Math.max(mark, contiguous.get(dev) ?? 0));
+  }
   hlc = new HybridClock(highest);
   // Best-effort repair write: divergence rows rebuilt from the log
   // that the store is missing (e.g. a prior divergence append that

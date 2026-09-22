@@ -23,7 +23,7 @@ import { compareStamp } from './hlc.ts';
 import type { HlcStamp } from './hlc.ts';
 import { PLAY_HISTORY_RETENTION_MS } from '../library/history.ts';
 import { CancellationSource } from '../cancellation.ts';
-import { appError } from '../errors.ts';
+import { appError, ok } from '../errors.ts';
 import { assert, assertEqual, assertDeepEqual } from '../testing/assert.ts';
 import {
   FakeClock,
@@ -1602,6 +1602,166 @@ async function unclaimedHoleNotExported(): Promise<void> {
   assertEqual(c.engine.cursor()['a'], 0);
 }
 
+async function restartedRelayKeepsSkippedMarks(): Promise<void> {
+  // A restarted relay must not regress below marks it learned via
+  // `skipped` folds — those seqs never entered the log, so the
+  // persisted watermarks are the only durable record of the claim.
+  const b = await makeEngine('b', 1_000);
+  await mustApply(
+    b.engine,
+    delta(
+      [
+        {
+          ...rawEntry('recording', 'r2', 'title', 'x', { l: 2, c: 0 }, 'a'),
+          seq: 2,
+        },
+        {
+          ...rawEntry('recording', 'r3', 'title', 'y', { l: 3, c: 0 }, 'a'),
+          seq: 3,
+        },
+      ],
+      'a',
+      { a: [1] },
+    ),
+  );
+  assertEqual(b.engine.cursor()['a'], 3);
+  // Restart: the log alone can only prove seqs 2-3 (hole at 1) — the
+  // restored watermark is what keeps contiguous at 3.
+  const b2 = await makeEngine('b', 2_000, b.store);
+  assertEqual(b2.engine.cursor()['a'], 3);
+  const relayed = await b2.engine.exportDelta(undefined, 10);
+  assert(relayed.ok);
+  assertDeepEqual(relayed.value.skipped, { a: [1] });
+  const c = await makeEngine('c');
+  await mustApply(c.engine, relayed.value);
+  assertEqual(c.engine.cursor()['a'], 3);
+}
+
+async function settingsIsSingleton(): Promise<void> {
+  // kind 'settings' merges under the declared singleton id — a write
+  // under any other recordId would materialize a shadow record no
+  // reader looks at.
+  const { engine } = await makeEngine('a');
+  const write = await engine.localChange({
+    kind: 'settings',
+    recordId: 'other',
+    field: 'theme',
+    value: 'dark',
+  });
+  assert(!write.ok, 'non-singleton settings id must be rejected');
+  const tomb = await engine.localChange({
+    kind: 'settings',
+    recordId: 'other',
+    tombstone: true,
+  });
+  assert(!tomb.ok, 'tombstone under a foreign id must be rejected');
+  const applied = await engine.applyDelta(
+    JSON.parse(
+      JSON.stringify(
+        delta([
+          rawEntry(
+            'settings',
+            'other',
+            'theme',
+            'dark',
+            { l: 5, c: 0 },
+            'peer',
+          ),
+        ]),
+      ),
+    ) as unknown,
+  );
+  assert(applied.ok);
+  assertEqual(applied.value.outcomes[0]?.type, 'rejected');
+  // The declared id still works on both paths.
+  await mustWrite(engine, {
+    kind: 'settings',
+    recordId: SETTINGS_RECORD_ID,
+    field: 'theme',
+    value: 'light',
+  });
+  assertDeepEqual(materialized(engine, 'settings', SETTINGS_RECORD_ID), {
+    theme: 'light',
+  });
+}
+
+async function divergenceKeysAreInjective(): Promise<void> {
+  // Two losers whose components alias under a delimiter join must
+  // both survive — a dropped row is a lost value nobody can restore
+  // or even see.
+  const b = await makeEngine('b');
+  // Winners get distinct (l, c) stamps — a (deviceId, l, c) triple IS
+  // the entry identity, so reusing one would be a true duplicate.
+  const winner = (
+    recordId: string,
+    field: string,
+    value: string,
+    c: number,
+  ) => rawEntry('recording', recordId, field, value, { l: 20, c }, 'w');
+  await mustApply(
+    b.engine,
+    delta([
+      rawEntry(
+        'recording',
+        'r',
+        'title',
+        'loser-1',
+        { l: 10, c: 0 },
+        'genre\u001fpeer',
+      ),
+      winner('r', 'title', 'w1', 0),
+      rawEntry(
+        'recording',
+        'r\u001ftitle',
+        'genre',
+        'loser-2',
+        { l: 10, c: 0 },
+        'peer',
+      ),
+      winner('r\u001ftitle', 'genre', 'w2', 1),
+    ]),
+  );
+  const losers = b.engine
+    .divergenceHistory()
+    .map((row) => row.loser.value)
+    .sort();
+  assertDeepEqual(losers, ['loser-1', 'loser-2']);
+}
+
+async function queuedCancelSettlesEarly(): Promise<void> {
+  // A call parked behind a held append settles `cancelled` when its
+  // signal fires — it does not out-wait the in-flight store op.
+  const { engine, store } = await makeEngine('a');
+  store.holdNextAppend();
+  const first = engine.localChange({
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'x',
+  });
+  // Reach the held append: a bounded microtask yield loop — no
+  // timers exist in this lib (ES2023, no DOM/node globals).
+  for (let i = 0; i < 200 && store.pendingAppends === 0; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(store.pendingAppends, 1);
+  const source = new CancellationSource();
+  const queued = engine.localChange(
+    { kind: 'recording', recordId: 'r2', field: 'title', value: 'y' },
+    source.signal,
+  );
+  source.cancel();
+  const result = await queued;
+  assert(!result.ok, 'queued call must settle on cancel');
+  assertEqual(result.ok ? '' : result.error.kind, 'cancelled');
+  // The queued body still runs at its turn — exits at its own signal
+  // check without consuming the held append or writing a second row.
+  assert(store.settleAppend(ok(undefined)), 'held append still pending');
+  const settled = await first;
+  assert(settled.ok);
+  assertEqual(store.entries.length, 1);
+}
+
 async function terminalRemoteStamp(): Promise<void> {
   // A valid-but-terminal remote stamp must fail BEFORE anything is
   // durable — a post-append failure would leave the entry durable and
@@ -1844,6 +2004,10 @@ export async function run(): Promise<void> {
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();
+  await restartedRelayKeepsSkippedMarks();
+  await settingsIsSingleton();
+  await divergenceKeysAreInjective();
+  await queuedCancelSettlesEarly();
   await terminalRemoteStamp();
   await localFreezeImmunity();
   await exportLimitZero();
