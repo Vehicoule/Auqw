@@ -759,7 +759,24 @@ impl JsPluginHost {
             )
         })
         .await
-        .and_then(PrepareOutcome::try_from)
+        .and_then(|o| {
+            // A conversion failure still owes the host the session it
+            // just registered — release it before rejecting, or the
+            // handle never reaches JS and leaks live.
+            let handle = match &o {
+                surface::PrepareOutcome::Prepared { stream, .. } => Some(stream.handle.clone()),
+                surface::PrepareOutcome::Failed { .. } => None,
+            };
+            match o.try_into() {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    if let Some(h) = handle {
+                        let _ = self.inner.stream_release(h);
+                    }
+                    Err(e)
+                }
+            }
+        })
     }
 
     /// Cancel an in-flight request. Unknown ids are a no-op except a
@@ -858,7 +875,8 @@ impl JsPluginHost {
         content_length: Option<f64>,
         remintable: bool,
     ) -> Result<PreparedStream> {
-        self.inner
+        let stream = self
+            .inner
             .dev_prepare_url(
                 url,
                 mime,
@@ -867,7 +885,17 @@ impl JsPluginHost {
                     .transpose()?,
                 remintable,
             )
-            .map_err(stream_err)
-            .and_then(PreparedStream::try_from)
+            .map_err(stream_err)?;
+        // Same rule as `startPrepare`: a conversion that can't be
+        // represented releases the just-registered session rather
+        // than leaking it without a handle.
+        let handle = stream.handle.clone();
+        match PreparedStream::try_from(stream) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let _ = self.inner.stream_release(handle);
+                Err(e)
+            }
+        }
     }
 }

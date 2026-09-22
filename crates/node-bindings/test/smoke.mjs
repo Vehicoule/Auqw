@@ -11,7 +11,7 @@
 // (slice 4 phase 1b).
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -130,5 +130,37 @@ await assert.rejects(host.startResolve('spin', 'x', dupRid), (err) => {
 });
 host.cancel(dupRid);
 await first;
+
+// The streaming seam: a host with streamPath exercises the session
+// lifecycle end-to-end. The dev URL is unroutable loopback — head
+// fill fails transiently but the boundary calls themselves are the
+// real path (attach, marks, close, release).
+const streamHost = new bindings.PluginHost({
+  fuelPerEntry: 200e6,
+  fuelTotal: 2e9,
+  streamPath: mkdtempSync(join(tmpdir(), 'auqw-stream-')),
+});
+const stream = streamHost.devPrepareUrl('http://127.0.0.1:1/dead.mp4', 'audio/mp4', 1024, false);
+assert.equal(stream.mime, 'audio/mp4');
+assert.match(stream.handle, /^st-/);
+assert.equal(stream.contentLength, 1024);
+
+// Attach at 0 returns the hint length (wire total never lands).
+assert.equal(streamHost.streamOpen(stream.handle, 0), 1024);
+const marks = streamHost.streamPhaseMarks(stream.handle);
+assert.ok(marks.prepareStartedMs > 0);
+assert.ok(marks.attachMs > 0);
+
+streamHost.streamClose(stream.handle);
+streamHost.streamRelease(stream.handle);
+// A released handle answers every seam call with a typed rejection.
+await assert.rejects(streamHost.streamRead(stream.handle, 0, 64), (err) => {
+  assert.ok(codeOf(err), 'expected a machine-readable rejection code');
+  return true;
+});
+assert.throws(() => streamHost.streamOpen(stream.handle, 0), (err) => {
+  assert.ok(codeOf(err), 'expected a machine-readable rejection code');
+  return true;
+});
 
 console.log('node-bindings smoke: OK');
