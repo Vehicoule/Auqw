@@ -299,6 +299,7 @@ export function createWebPlayerPort(deps: {
     }
     const requestId = `watt-${++seq}`;
     const gen = ++opGen;
+    let handle: string | undefined;
     try {
       const outcome = await stream.prepare({
         pluginId: item.provider,
@@ -314,7 +315,7 @@ export function createWebPlayerPort(deps: {
         );
         return;
       }
-      const handle = outcome.stream.handle;
+      handle = outcome.stream.handle;
       const { url } = await stream.serveUrl({ handle });
       // A later play/attach/prepare or a moved projection makes this
       // completion stale — release its minted handle and stay out of
@@ -340,6 +341,11 @@ export function createWebPlayerPort(deps: {
         deps.mediaSession.playbackState = shouldPlay ? 'playing' : 'paused';
       }
     } catch (thrown) {
+      // A minted-but-never-attached handle is ours to reap — repeated
+      // leaks would cap the registry.
+      if (handle !== undefined) {
+        void stream.release({ handle }).catch(() => undefined);
+      }
       status('failed', toError(thrown));
     }
   }
@@ -387,8 +393,20 @@ export function createWebPlayerPort(deps: {
     }
     const successor = idx + 1 < p.items.length ? p.items[idx + 1] : undefined;
     if (successor === undefined) {
+      const tailPositionMs = posMs();
+      if (reason !== 'ended') {
+        // A remote skip at the tail leaves the element live — detach
+        // it so playback stops with the queue, not after it.
+        opGen++;
+        current = null;
+        audio.pause();
+        audio.src = '';
+        if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
+          deps.mediaSession.playbackState = 'none';
+        }
+      }
       // Tail of the queue — a null target means the cursor ran off.
-      emitTransition(p, null, reason, posMs(), null, null);
+      emitTransition(p, null, reason, tailPositionMs, null, null);
       return;
     }
     void attachItem(p, successor, reason);

@@ -31,7 +31,9 @@ const RENDERER = join(here, '../renderer/index.html');
 /** Latest persisted window state — recreated windows reopen where the user left them. */
 type StateRef = { current: WindowState };
 
-/** Env passed to the utility child: platform essentials + AUQW_* only. */
+/** Env passed to the utility child: platform essentials + the exact
+ * AUQW_* knobs the utility reads — an `AUQW_`-prefixed credential in
+ * the launch env must NOT cross the process boundary. */
 function utilityEnv(userDataPath: string): Record<string, string> {
   const passthrough = [
     'PATH',
@@ -50,12 +52,20 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'XDG_DATA_HOME',
     'XDG_CACHE_HOME',
   ];
+  const auqwAllowlist = [
+    'AUQW_NODE_BINDINGS',
+    'AUQW_PLUGIN_DIR',
+    'AUQW_STREAM_DIR',
+    'AUQW_USER_DATA',
+    'AUQW_REPO_ROOT',
+    'AUQW_DEV_GATE',
+  ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (
       value !== undefined &&
       (passthrough.includes(key) ||
-        key.startsWith('AUQW_') ||
+        auqwAllowlist.includes(key) ||
         key.startsWith('LC_'))
     ) {
       env[key] = value;

@@ -617,4 +617,76 @@ export async function run(): Promise<void> {
       'live attach owns the element',
     );
   }
+
+  // serveUrl rejecting after a successful prepare releases the minted
+  // handle — the registry never sees a leak.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream({
+      prepare: () =>
+        Promise.resolve({
+          type: 'prepared',
+          stream: { handle: 'h-2', mime: 'audio/mp4' },
+        }),
+      serveUrl: (args) =>
+        (args as { handle: string }).handle === 'h-2'
+          ? Promise.reject({ kind: 'expired', message: 'gone' })
+          : Promise.resolve({ url: 'http://127.0.0.1:9/s/tok' }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    assert(
+      stream.calls.some(
+        (c) =>
+          c.method === 'release' &&
+          (c.args as { handle: string }).handle === 'h-2',
+      ),
+      'post-attach failure releases the minted handle',
+    );
+    assert(
+      !events.some((e) => e.type === 'queue-transition'),
+      'no transition on a failed attach',
+    );
+  }
+
+  // remote-next at the queue tail stops the element — a null target
+  // while audio is live must not leave playback running.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    const events = collect(player);
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    assert(!audio.paused, 'precondition: playing');
+    mediaSession.actions.get('nexttrack')?.();
+    await settle();
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === null,
+      'tail next emits the null target',
+    );
+    assertEqual(audio.src, '', 'element detached at the tail');
+    assertEqual(mediaSession.playbackState, 'none');
+  }
 }
