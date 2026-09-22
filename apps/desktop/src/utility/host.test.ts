@@ -175,4 +175,32 @@ export async function run(): Promise<void> {
       'cdylib staged to userData .node',
     );
   }
+
+  // A rejected init is retried on the next call — the artifact may
+  // appear after a build; only a successful result is memoized.
+  {
+    let requireCalls = 0;
+    const retryRuntime = createHostRuntime({
+      env: { AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node' },
+      require: () => {
+        requireCalls++;
+        if (requireCalls === 1) {
+          throw new Error('not built yet');
+        }
+        return fakeModule;
+      },
+      fs: {
+        exists: (p) => p === '/b/auqw_node_bindings.node',
+        read: () => Buffer.alloc(0),
+        list: () => [],
+        mkdir: () => {},
+        copy: () => {},
+      },
+    });
+    const first = await retryRuntime.status();
+    assertEqual(first.bindings, 'unavailable');
+    const second = await retryRuntime.status();
+    assertEqual(second.bindings, 'loaded');
+    assertEqual(requireCalls, 2);
+  }
 }

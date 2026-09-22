@@ -250,7 +250,17 @@ export function createHostRuntime(opts: {
   }
 
   async function ready(): Promise<readonly string[]> {
-    pluginsReady ??= loadPluginDir(ensureHost());
+    if (pluginsReady === null) {
+      const pending = loadPluginDir(ensureHost());
+      pluginsReady = pending;
+      // A rejected init stays retriable — the artifact may appear
+      // after a build — while in-flight calls still share `pending`.
+      void pending.catch(() => {
+        if (pluginsReady === pending) {
+          pluginsReady = null;
+        }
+      });
+    }
     return pluginsReady;
   }
 
