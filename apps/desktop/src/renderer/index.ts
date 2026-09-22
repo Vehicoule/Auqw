@@ -1,3 +1,6 @@
+import type { PlaybackIdentity, PlayerEvent } from '@auqw/application';
+import { createWebPlayerPort } from './web-player.ts';
+
 function field(term: string, value: string): void {
   const list = document.getElementById('status');
   if (list === null) {
@@ -8,6 +11,16 @@ function field(term: string, value: string): void {
   const dd = document.createElement('dd');
   dd.textContent = value;
   list.append(dt, dd);
+}
+
+function logEvent(text: string): void {
+  const list = document.getElementById('events');
+  if (list === null) {
+    return;
+  }
+  const li = document.createElement('li');
+  li.textContent = `${new Date().toISOString().slice(11, 19)} ${text}`;
+  list.prepend(li);
 }
 
 function describe(thrown: unknown): string {
@@ -24,6 +37,21 @@ function describe(thrown: unknown): string {
   return 'unknown error';
 }
 
+function mimeFor(url: string): string {
+  const lower = url.split('?')[0]?.toLowerCase() ?? '';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.ogg') || lower.endsWith('.oga')) return 'audio/ogg';
+  if (lower.endsWith('.opus')) return 'audio/ogg; codecs=opus';
+  if (lower.endsWith('.webm')) return 'audio/webm';
+  return 'audio/mp4';
+}
+
+const identity: PlaybackIdentity = {
+  attemptId: `boot-${Math.floor(Math.random() * 1e9)}`,
+  queueRev: 0,
+};
+
 async function boot(): Promise<void> {
   const list = document.getElementById('status');
   if (list !== null) {
@@ -34,27 +62,317 @@ async function boot(): Promise<void> {
     field('version', meta.version);
     field('platform', meta.platform);
     field('userData', meta.userDataPath);
-    console.log('auqw meta', meta.version, meta.platform);
   } catch (thrown) {
     field('app:meta', describe(thrown));
   }
   try {
     const pong = await window.auqw.utility.ping('hello from renderer');
     field('utility:ping', `${pong.reply} (${pong.echo})`);
-    console.log('auqw utility:ping', pong.reply, pong.echo);
   } catch (thrown) {
     field('utility:ping', describe(thrown));
   }
   try {
     const snapshot = await window.auqw.net.snapshot();
     field('net', snapshot.online ? 'online' : 'offline');
-    console.log('auqw net:snapshot', snapshot.online);
   } catch (thrown) {
     field('net:snapshot', describe(thrown));
   }
   window.auqw.net.subscribe((event) => {
     field('net transition', event.online ? 'online' : 'offline');
   });
+
+  const audio = new Audio();
+  const player = createWebPlayerPort({
+    stream: window.auqw.stream,
+    audio,
+    mediaSession:
+      'mediaSession' in navigator
+        ? (navigator.mediaSession as {
+            playbackState: string;
+            setActionHandler(
+              action: 'play' | 'pause' | 'nexttrack' | 'previoustrack',
+              handler: (() => void) | null,
+            ): void;
+          })
+        : null,
+  });
+
+  let preparedHandle: string | null = null;
+  let state: string = 'idle';
+  /** Page-level attempt ownership: a click sequence mints a fresh
+   * attemptId + request/generation id; only the live one's outcome may
+   * write `preparedHandle`, and stale handles get released. */
+  let liveIdentity: PlaybackIdentity = identity;
+  let livePrepareId: string | null = null;
+  let prepSeq = 0;
+  /** Prepared outcomes arriving before their requestId registers (an
+   * adapter may emit synchronously) — replayed on registration, or
+   * released when the owning generation ends. */
+  const earlyPrepares = new Map<string, PlayerEvent>();
+  /** Provider `player.prepare` calls currently in flight — only while
+   * one is pending can an unmatched outcome still be claimed as early;
+   * after the last settles, unmatched outcomes are superseded-gen
+   * stragglers and get released immediately. */
+  let pendingRegistrations = 0;
+
+  function applyPrepareOutcome(event: PlayerEvent): void {
+    if (event.type !== 'prepare') {
+      return;
+    }
+    if (event.outcome.type === 'prepared' && event.outcome.stream !== undefined) {
+      preparedHandle = event.outcome.stream.handle;
+      state = 'prepared';
+      logEvent(`prepared ${event.outcome.stream.handle} (${event.outcome.stream.mime})`);
+    } else if (event.outcome.type !== 'prepared') {
+      state = 'failed';
+      logEvent(`prepare failed — ${event.outcome.error.kind}: ${event.outcome.error.message}`);
+    }
+  }
+
+  /** Superseded/orphaned buffered outcomes — release their handles. */
+  function drainEarlyPrepares(): void {
+    for (const event of earlyPrepares.values()) {
+      if (event.type === 'prepare' && event.outcome.type === 'prepared') {
+        void player.release({
+          handle: event.outcome.stream.handle,
+          identity: liveIdentity,
+        });
+      }
+    }
+    earlyPrepares.clear();
+  }
+
+  function renderState(): void {
+    const el = document.getElementById('player-state');
+    if (el !== null) {
+      el.textContent = `${state} · ${Math.round(audio.currentTime * 1000)}ms${
+        Number.isFinite(audio.duration)
+          ? ` / ${Math.round(audio.duration * 1000)}ms`
+          : ''
+      }`;
+    }
+  }
+
+  player.subscribe((event: PlayerEvent) => {
+    if (event.type === 'prepare') {
+      // A superseded request's outcome is ignored — its handle would
+      // otherwise clobber the newer selection.
+      if (event.requestId !== livePrepareId) {
+        // Early (id not yet registered while a call is pending) or
+        // superseded — buffer only the early case; a prepared outcome
+        // with no pending registration is a superseded-generation
+        // straggler and is released immediately.
+        if (event.outcome.type === 'prepared') {
+          if (pendingRegistrations > 0) {
+            earlyPrepares.set(event.requestId, event);
+          } else {
+            void player.release({
+              handle: event.outcome.stream.handle,
+              identity: liveIdentity,
+            });
+          }
+        }
+        return;
+      }
+      applyPrepareOutcome(event);
+    } else if (event.type === 'status') {
+      state = event.state;
+      if (event.state === 'failed') {
+        logEvent(
+          `status failed — ${event.error?.kind ?? '?'}: ${event.error?.message ?? '?'}`,
+        );
+      }
+    } else if (event.type === 'queue-transition') {
+      logEvent(`queue ${event.reason}: ${event.fromOccurrenceId} → ${event.toOccurrenceId}`);
+    } else if (event.type === 'phase') {
+      logEvent(`phase ${event.name} +${event.sinceStartMs}ms`);
+    }
+    renderState();
+  });
+
+  try {
+    const host = await window.auqw.host.plugins();
+    field(
+      'host:plugins',
+      `${host.bindings}${host.plugins.length > 0 ? ` — ${host.plugins.join(', ')}` : ''}${host.bindingsError !== undefined ? ` — ${host.bindingsError}` : ''}`,
+    );
+    const select = document.getElementById('provider');
+    if (select instanceof HTMLSelectElement) {
+      select.replaceChildren();
+      for (const id of host.plugins) {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id;
+        select.append(option);
+      }
+    }
+  } catch (thrown) {
+    field('host:plugins', describe(thrown));
+  }
+
+  const prepareButton = document.getElementById('prepare');
+  const playButton = document.getElementById('play');
+  const pauseButton = document.getElementById('pause');
+  const stopButton = document.getElementById('stop');
+  const sourceInput = document.getElementById('source');
+  const providerSelect = document.getElementById('provider');
+  const devGate = document.getElementById('dev-gate');
+
+  prepareButton?.addEventListener('click', () => {
+    const ref =
+      sourceInput instanceof HTMLInputElement ? sourceInput.value.trim() : '';
+    if (ref === '') {
+      return;
+    }
+    void (async () => {
+      state = 'preparing';
+      renderState();
+      const gen = ++prepSeq;
+      livePrepareId = null;
+      // A re-prepare must release the stream it replaces — otherwise
+      // its pump stays owned and playing audio keeps running. Stop
+      // first so any in-flight port op (a pending play's late serveUrl
+      // completion) is invalidated before the release lands.
+      const replacedHandle = preparedHandle;
+      preparedHandle = null;
+      if (replacedHandle !== null) {
+        void (async () => {
+          await player.stop(liveIdentity);
+          await player.release({
+            handle: replacedHandle,
+            identity: liveIdentity,
+          });
+        })();
+      }
+      drainEarlyPrepares();
+      // The replacement cleanup's stop may have emitted a transient
+      // idle status — preparation is still the live state.
+      if (gen === prepSeq) {
+        state = 'preparing';
+        renderState();
+      }
+      if (devGate instanceof HTMLInputElement && devGate.checked) {
+        try {
+          const stream = await window.auqw.stream.devPrepare({
+            url: ref,
+            mime: mimeFor(ref),
+          });
+          if (gen !== prepSeq) {
+            void player.release({
+              handle: stream.handle,
+              identity: liveIdentity,
+            });
+            return;
+          }
+          liveIdentity = { ...liveIdentity, attemptId: `boot-${gen}` };
+          livePrepareId = `dev-${gen}`;
+          preparedHandle = stream.handle;
+          state = 'prepared';
+          logEvent(`dev-prepared ${stream.handle} (${stream.mime})`);
+        } catch (thrown) {
+          if (gen === prepSeq) {
+            state = 'failed';
+            logEvent(`dev-prepare failed — ${describe(thrown)}`);
+          }
+        }
+        renderState();
+        return;
+      }
+      const provider =
+        providerSelect instanceof HTMLSelectElement
+          ? providerSelect.value
+          : '';
+      if (provider === '') {
+        state = 'failed';
+        logEvent('prepare failed — no plugins loaded');
+        renderState();
+        return;
+      }
+      const attemptIdentity: PlaybackIdentity = {
+        ...identity,
+        attemptId: `boot-${gen}`,
+      };
+      pendingRegistrations += 1;
+      const res = await player.prepare({
+        provider,
+        sourceRef: ref,
+        identity: attemptIdentity,
+      });
+      pendingRegistrations -= 1;
+      if (gen !== prepSeq) {
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
+        return;
+      }
+      if (res.ok) {
+        livePrepareId = res.value;
+        liveIdentity = attemptIdentity;
+        // An already-emitted outcome for this request was buffered —
+        // replay it now that the id is registered.
+        const early = earlyPrepares.get(res.value);
+        if (early !== undefined) {
+          earlyPrepares.delete(res.value);
+          applyPrepareOutcome(early);
+          renderState();
+        }
+        // Whatever stayed buffered belongs to superseded generations.
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
+      } else {
+        state = 'failed';
+        logEvent(`prepare failed — ${res.error.kind}: ${res.error.message}`);
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
+        renderState();
+      }
+    })();
+  });
+
+  playButton?.addEventListener('click', () => {
+    if (preparedHandle === null) {
+      return;
+    }
+    void player
+      .play({ handle: preparedHandle, identity: liveIdentity })
+      .then((res) => {
+        if (!res.ok) {
+          state = 'failed';
+          logEvent(`play failed — ${res.error.kind}: ${res.error.message}`);
+          renderState();
+        }
+      });
+  });
+  pauseButton?.addEventListener('click', () => {
+    void player.pause(liveIdentity);
+  });
+  stopButton?.addEventListener('click', () => {
+    // Bumping the generation invalidates any in-flight prepare — a
+    // late outcome can't restore a handle after Stop ran.
+    const gen = ++prepSeq;
+    livePrepareId = null;
+    const handle = preparedHandle;
+    preparedHandle = null;
+    drainEarlyPrepares();
+    void (async () => {
+      await player.stop(liveIdentity);
+      // Stop only detaches the element — the stream session still owns
+      // the handle; release it so the pump + partial cache are reaped.
+      if (handle !== null) {
+        await player.release({ handle, identity: liveIdentity });
+      }
+      // A newer prepare may have landed while we awaited — its state
+      // belongs to the new generation, not to this stop.
+      if (gen !== prepSeq) {
+        return;
+      }
+      state = 'idle';
+      renderState();
+    })();
+  });
+  setInterval(renderState, 500);
 }
 
 void boot();
