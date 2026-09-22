@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -165,6 +166,33 @@ export async function run(): Promise<void> {
       keep: false,
     });
 
+    // Concurrent begins on one destPath can't split the check across
+    // the slot wait — the reservation is made before the first await.
+    const race1 = call(CHANNELS.transferBegin, {
+      destPath: 'raced.mp4',
+      resumeAtBytes: 0,
+    });
+    const race2 = call(CHANNELS.transferBegin, {
+      destPath: 'raced.mp4',
+      resumeAtBytes: 0,
+    });
+    const [raceRes1, raceRes2] = await Promise.all([race1, race2]);
+    assert(
+      raceRes1.ok !== raceRes2.ok,
+      'exactly one raced begin wins the destination',
+    );
+    const loser = raceRes1.ok ? raceRes2 : raceRes1;
+    assert(
+      !loser.ok && loser.error?.kind === 'invalid-request',
+      'raced loser fails invalid-request',
+    );
+    const winner = raceRes1.ok ? raceRes1 : raceRes2;
+    assert(winner.ok, 'winner sink is usable');
+    await call(CHANNELS.transferAbort, {
+      sinkId: (winner.result as { sinkId: string }).sinkId,
+      keep: false,
+    });
+
     // Escaping names never reach disk.
     const escaped = await call(CHANNELS.transferBegin, {
       destPath: '../escape.bin',
@@ -287,5 +315,59 @@ export async function run(): Promise<void> {
   } finally {
     service.close();
     rmSync(root, { recursive: true, force: true });
+  }
+
+  // The startup orphan sweep aborts when the ledger can't be read —
+  // an unreadable index must never destroy resumable progress.
+  const root2 = mkdtempSync(join(tmpdir(), 'auqw-sweep-'));
+  const media2 = join(root2, 'media');
+  try {
+    await mkdir(media2, { recursive: true });
+    await writeFile(join(media2, 'old.mp4.part'), 'stale');
+    const staleDate = new Date(Date.now() - 120_000);
+    await utimes(join(media2, 'old.mp4.part'), staleDate, staleDate);
+    const deadDb = createTransferService({
+      mediaDir: media2,
+      database: () => {
+        throw new Error('db is locked');
+      },
+    });
+    const sweptDead = await deadDb.sweepOrphans();
+    assertEqual(sweptDead, 0, 'unreadable ledger aborts the sweep');
+    const survived = await readFile(join(media2, 'old.mp4.part'));
+    assertEqual(
+      survived.toString(),
+      'stale',
+      'a resumable partial survives a dead index',
+    );
+    deadDb.close();
+
+    // A healthy ledger with a resumable row keeps its .part; a stale
+    // unclaimed one is reaped.
+    const db = new DatabaseSync(join(root2, 'auqw.db'));
+    db.exec(
+      'CREATE TABLE downloads (file_path TEXT, state TEXT)',
+    );
+    db.prepare(
+      "INSERT INTO downloads VALUES ('keep.mp4', 'transferring')",
+    ).run();
+    await writeFile(join(media2, 'keep.mp4.part'), 'keep');
+    const stale2 = new Date(Date.now() - 120_000);
+    await utimes(join(media2, 'keep.mp4.part'), stale2, stale2);
+    await utimes(join(media2, 'old.mp4.part'), stale2, stale2);
+    const sweeping = createTransferService({
+      mediaDir: media2,
+      database: () => db,
+    });
+    const swept = await sweeping.sweepOrphans();
+    assertEqual(swept, 1, 'only the unclaimed stale partial reaped');
+    const keptRow = await readFile(
+      join(media2, 'keep.mp4.part'),
+    ).catch(() => null);
+    assert(keptRow !== null, 'resumable ledger row kept its partial');
+    sweeping.close();
+    db.close();
+  } finally {
+    rmSync(root2, { recursive: true, force: true });
   }
 }

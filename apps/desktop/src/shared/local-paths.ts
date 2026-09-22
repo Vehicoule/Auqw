@@ -1,16 +1,23 @@
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isAbsolute, join, relative } from 'node:path';
+
 /**
  * Local-files URI math shared by renderer and utility: how a picked
  * path becomes a `treeUri`, how `(treeUri, docId)` becomes a playable
- * `file://` URI, and how a `file://` URI or managed media name maps
- * back to an absolute path.
+ * `file://` URI, and how confinement back to a grant is checked.
  *
  * treeUri is opaque to the application engines — these schemes are a
- * shell-local convention:
- * - a bare absolute directory path (`/music/rips`) — a picked folder;
- *   docIds are '/'-joined relative paths inside it.
- * - `picked-file:` + absolute file path — a single picked file granted
- *   without its folder; the tree enumerates exactly one doc whose
- *   docId is the file's basename.
+ * shell-local convention, and both are RFC 8089 `file:` URLs so the
+ * stored grant is platform-independent (drive letters and UNC paths
+ * survive the round trip):
+ * - `pathToFileURL(dir).href` (`file:///music/rips`, `file:///C:/Music`)
+ *   — a picked folder; docIds are '/'-joined relative paths inside it.
+ * - `picked-file:` + `pathToFileURL(file).href` — a single picked file
+ *   granted without its folder; the tree enumerates exactly one doc
+ *   whose docId is the file's basename.
+ *
+ * docIds stay POSIX-style ('/'-joined) identifiers inside a tree —
+ * they are abstract doc names, not OS paths.
  */
 
 export const PICKED_FILE_PREFIX = 'picked-file:';
@@ -19,82 +26,92 @@ export type ParsedTree =
   | { readonly kind: 'dir'; readonly absPath: string }
   | { readonly kind: 'file'; readonly absPath: string };
 
-/** Absolute POSIX path inside a picked-file treeUri, else null. */
+/** OS path inside a `file:`-URL treeUri, else null. */
+function fileUrlPath(uri: string): string | null {
+  if (!uri.startsWith('file:')) {
+    return null;
+  }
+  try {
+    const path = fileURLToPath(uri);
+    return isAbsolute(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/** OS path inside a picked-file treeUri, else null. */
 export function pickedFilePath(treeUri: string): string | null {
   if (!treeUri.startsWith(PICKED_FILE_PREFIX)) {
     return null;
   }
-  const path = treeUri.slice(PICKED_FILE_PREFIX.length);
-  return path.startsWith('/') ? path : null;
+  return fileUrlPath(treeUri.slice(PICKED_FILE_PREFIX.length));
 }
 
-/**
- * Parse a stored treeUri back into its filesystem shape. Bare
- * absolute paths are folders; `picked-file:` prefixes are files.
- * Anything else is not a desktop grant and resolves to null.
- */
+/** Mint the dir-tree grant URI for a real OS path. */
+export function dirTreeUri(absPath: string): string {
+  return pathToFileURL(absPath).href;
+}
+
+/** Mint the picked-file grant URI for a real OS path. */
+export function pickedFileTreeUri(absPath: string): string {
+  return `${PICKED_FILE_PREFIX}${pathToFileURL(absPath).href}`;
+}
+
+/** Parse a stored treeUri into its OS path + kind. */
 export function parseTree(treeUri: string): ParsedTree | null {
-  const picked = pickedFilePath(treeUri);
-  if (picked !== null) {
-    return { kind: 'file', absPath: picked };
+  const file = pickedFilePath(treeUri);
+  if (file !== null) {
+    return { kind: 'file', absPath: file };
   }
-  if (treeUri.startsWith('/')) {
-    return { kind: 'dir', absPath: treeUri };
+  const dir = fileUrlPath(treeUri);
+  if (dir !== null) {
+    return { kind: 'dir', absPath: dir };
   }
   return null;
 }
 
-/**
- * RFC-8089 file URI for an absolute path — the same encoding on both
- * sides of IPC so a URI minted by `local:probe` matches one the
- * renderer computes from a `docUri` call. Segments are
- * percent-encoded individually so `/`, `?`, and `#` inside a name
- * can never corrupt the URL structure.
- */
+/** OS path → playable `file://` URI (Windows-aware via node:url). */
 export function toFileUri(absPath: string): string {
-  const posix = absPath.replace(/\\/g, '/');
-  const rooted = posix.startsWith('/') ? posix : `/${posix}`;
-  return `file://${rooted
-    .split('/')
-    .map((segment) => encodeURIComponent(segment))
-    .join('/')}`;
+  return pathToFileURL(absPath).href;
 }
 
 /**
- * The playable URI for one enumerated doc — the port's `docUri`
- * contract realized as pure string math so the renderer's
- * `localPlaybackFor` stays synchronous. A picked-file tree ignores
- * docId (its only doc is the file itself).
+ * (treeUri, docId) → the playable `file://` URI `LocalFileSource.uriFor`
+ * returns. Sync + pure: the renderer computes it with zero IPC.
  */
 export function docUriFor(treeUri: string, docId: string): string | null {
+  if (treeUri.startsWith(PICKED_FILE_PREFIX)) {
+    return treeUri.slice(PICKED_FILE_PREFIX.length);
+  }
   const tree = parseTree(treeUri);
-  if (tree === null) {
+  if (tree === null || tree.kind !== 'dir' || !docIdConfined(docId)) {
     return null;
   }
-  if (tree.kind === 'file') {
-    return toFileUri(tree.absPath);
-  }
-  const root = tree.absPath.endsWith('/')
-    ? tree.absPath.slice(0, -1)
-    : tree.absPath;
-  return toFileUri(`${root}/${docId}`);
+  return toFileUri(join(tree.absPath, ...docId.split('/')));
 }
 
 /**
- * Lexical confinement check for a docId inside a dir tree — rejects
- * absolute ids, wrong-direction separators, NULs, and `..` escapes.
- * The caller still resolves symlinks against the real filesystem;
- * this rejects the shapes that could never be honest.
+ * A docId must be a non-empty '/'-joined relative path with no parent
+ * traversal, no absolute-root trickery, and no NUL — the same shape
+ * `tagread:enumerate` produces.
  */
 export function docIdConfined(docId: string): boolean {
-  return (
-    docId.length > 0 &&
-    !docId.startsWith('/') &&
-    !docId.includes('\\') &&
-    !docId.includes('\0') &&
-    docId !== '..' &&
-    !docId.startsWith('../') &&
-    !docId.endsWith('/..') &&
-    !docId.includes('/../')
-  );
+  if (
+    docId.length === 0 ||
+    docId.includes('\0') ||
+    docId.includes('\\') ||
+    docId.startsWith('/')
+  ) {
+    return false;
+  }
+  return !docId.split('/').some((seg) => seg === '..' || seg === '.');
+}
+
+/**
+ * Is `child` a real path strictly inside `root` (platform-aware —
+ * `relative` handles separators and drive letters)?
+ */
+export function pathConfined(rootAbs: string, childAbs: string): boolean {
+  const rel = relative(rootAbs, childAbs);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }

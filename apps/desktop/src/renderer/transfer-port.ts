@@ -15,9 +15,10 @@ import { shellToAppError } from './ipc-errors.ts';
  * is the sink plumbing underneath it: begin → write* → commit/finalize
  * with the utility owning `.part` staging and the atomic rename.
  *
- * Cancellation is observed, never carried: the signal is polled before
- * each call — a flip mid-flight still lands the IPC, but the engine's
- * own loop stops driving the sink.
+ * Cancellation is observed: the signal is polled before each call,
+ * a sink cancelled mid-`begin` is aborted as soon as it lands, and a
+ * live sink subscribes so a cancel aborts it utility-side even while
+ * the engine isn't driving a call.
  */
 export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
   const ifCancelled = (signal: CancellationSignal): Result<never> | null =>
@@ -27,8 +28,20 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     #id: string;
     #closed = false;
 
-    constructor(id: string) {
+    constructor(id: string, signal: CancellationSignal) {
       this.#id = id;
+      // A cancel while the sink is live aborts the utility side —
+      // the engine may not issue another call for the signal to ride.
+      const unsubscribe = signal.subscribe(() => {
+        unsubscribe();
+        this.#closed = true;
+        void api.transfer
+          .abort({ sinkId: this.#id, keep: false })
+          .catch(() => undefined);
+      });
+      if (this.#closed) {
+        unsubscribe();
+      }
     }
 
     async write(bytes: Uint8Array): Promise<Result<void>> {
@@ -89,6 +102,13 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     }
   }
 
+  function makeSink(
+    sinkId: string,
+    signal: CancellationSignal,
+  ): TransferSink {
+    return new DesktopSink(sinkId, signal);
+  }
+
   return {
     async ensureDir(signal) {
       const cancelled = ifCancelled(signal);
@@ -113,7 +133,15 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
           destPath: input.destPath,
           resumeAtBytes: input.resumeAtBytes,
         });
-        return ok(new DesktopSink(sinkId));
+        if (signal.cancelled) {
+          // Cancellation landed mid-begin (e.g. behind the sink cap):
+          // release the just-minted sink so nothing writes through it.
+          await api.transfer
+            .abort({ sinkId, keep: false })
+            .catch(() => undefined);
+          return err(appError('cancelled', 'cancelled'));
+        }
+        return ok(makeSink(sinkId, signal));
       } catch (thrown) {
         return err(shellToAppError(thrown));
       }

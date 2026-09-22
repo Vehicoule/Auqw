@@ -133,6 +133,24 @@ export async function run(): Promise<void> {
       'a vanished download probes null',
     );
 
+    // A download row carrying a separator can never resolve outside
+    // the media dir — a non-bare file_path yields no playable bytes.
+    insertRecording('rec-4');
+    db.prepare(
+      `INSERT INTO downloads
+       (download_id, recording_id, provider, source_ref_json, file_path,
+        bytes, state, committed_offset, priority, requested_ms)
+       VALUES ('d-3', 'rec-4', 'p', '{}', '../escape', 64, 'available', 64, 0, 0)`,
+    ).run();
+    const probedEscape = await call(CHANNELS.localProbe, {
+      recordingId: 'rec-4',
+    });
+    assert(
+      probedEscape.ok &&
+        (probedEscape.result as { uri: string | null }).uri === null,
+      'a non-bare file_path never escapes the media dir',
+    );
+
     // playback returns every playable recording; sweep counts vanished
     // index rows.
     const playback = await call(CHANNELS.localPlayback);

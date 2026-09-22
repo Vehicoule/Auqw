@@ -9,14 +9,17 @@ import type {
 import { isLocalAddArgs, isLocalProbeArgs } from '../shared/contract.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import {
+  dirTreeUri,
   docIdConfined,
   docUriFor,
   parseTree,
-  PICKED_FILE_PREFIX,
+  pathConfined,
+  pickedFileTreeUri,
   toFileUri,
 } from '../shared/local-paths.ts';
 import type { UtilityHandler } from './router.ts';
 import { mimeForPath } from './tags.ts';
+import { isBareName } from './transfer.ts';
 
 /**
  * `local:*` — the desktop local-files surface the renderer's engines
@@ -82,7 +85,7 @@ async function describePick(path: string): Promise<PickedTree> {
   }
   if (info.isDirectory()) {
     return {
-      treeUri: real,
+      treeUri: dirTreeUri(real),
       label: basename(real) || real,
       kind: 'dir',
     };
@@ -97,7 +100,7 @@ async function describePick(path: string): Promise<PickedTree> {
     throw shellError('permission-denied', 'picked file is not readable');
   });
   return {
-    treeUri: `${PICKED_FILE_PREFIX}${real}`,
+    treeUri: pickedFileTreeUri(real),
     label: basename(real),
     kind: 'file',
   };
@@ -127,9 +130,9 @@ async function probeDocAbs(
   if (rootReal === null) {
     return null;
   }
-  const joined = join(rootReal, docId);
+  const joined = join(rootReal, ...docId.split('/'));
   const real = await realpath(joined).catch(() => null);
-  if (real === null || !real.startsWith(`${rootReal}/`)) {
+  if (real === null || !pathConfined(rootReal, real)) {
     return null;
   }
   const info = await stat(real).catch(() => null);
@@ -199,10 +202,14 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
            WHERE recording_id = ? AND state = 'available' LIMIT 1`,
         )
         .get(args.recordingId) as { filePath?: unknown } | undefined;
+      // file_path is a managed-dir name by the port convention — a
+      // row carrying separators would escape the media dir, so a
+      // non-bare value is treated as no playable bytes (never joined).
       if (
         download !== undefined &&
         typeof download.filePath === 'string' &&
-        options.mediaDir !== undefined
+        options.mediaDir !== undefined &&
+        isBareName(download.filePath)
       ) {
         const abs = join(options.mediaDir, download.filePath);
         const info = await stat(abs).catch(() => null);
@@ -303,7 +310,8 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         for (const row of downloads) {
           if (
             typeof row['recordingId'] !== 'string' ||
-            typeof row['filePath'] !== 'string'
+            typeof row['filePath'] !== 'string' ||
+            !isBareName(row['filePath'])
           ) {
             continue;
           }

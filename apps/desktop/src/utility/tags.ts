@@ -24,6 +24,7 @@ import { isShellError, shellError } from '../shared/errors.ts';
 import {
   docIdConfined,
   parseTree,
+  pathConfined,
 } from '../shared/local-paths.ts';
 import type { UtilityHandler } from './router.ts';
 
@@ -122,12 +123,12 @@ async function resolveDocAbs(
   if (rootReal === null) {
     return null;
   }
-  const joined = join(rootReal, docId);
+  const joined = join(rootReal, ...docId.split('/'));
   const docReal = await realpath(joined).catch(() => null);
   if (docReal === null) {
     return null;
   }
-  if (docReal !== rootReal && !docReal.startsWith(`${rootReal}${sep}`)) {
+  if (!pathConfined(rootReal, docReal)) {
     return null;
   }
   return docReal;

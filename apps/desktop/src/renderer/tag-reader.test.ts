@@ -4,6 +4,7 @@ import {
   assertEqual,
 } from '@auqw/application/testing';
 import type { AuqwApi } from '../shared/contract.ts';
+import { MAX_TAGREAD_BATCH } from '../shared/contract.ts';
 import { shellError } from '../shared/errors.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
 
@@ -17,6 +18,10 @@ function fakeApi(overrides: {
   pickFiles?: () => Promise<readonly string[]>;
   localAdd?: (args: { paths: readonly string[] }) => Promise<unknown>;
   enumerate?: (args: { treeUri: string }) => Promise<unknown>;
+  fingerprint?: (args: {
+    treeUri: string;
+    docIds: readonly string[];
+  }) => Promise<unknown>;
 }): AuqwApi {
   return {
     dialog: {
@@ -31,7 +36,7 @@ function fakeApi(overrides: {
         (() =>
           Promise.resolve({
             picks: [
-              { treeUri: '/music', label: 'music', kind: 'dir' },
+              { treeUri: 'file:///music', label: 'music', kind: 'dir' },
             ],
           })),
     },
@@ -50,7 +55,15 @@ function fakeApi(overrides: {
               },
             ],
           })),
-      fingerprint: () => Promise.resolve({ fingerprints: [] }),
+      fingerprint:
+        overrides.fingerprint ??
+        ((args: { docIds: readonly string[] }) =>
+          Promise.resolve({
+            fingerprints: args.docIds.map((docId) => ({
+              docId,
+              fingerprint: 'fp-'+docId,
+            })),
+          })),
       read: () => Promise.resolve({ tags: [] }),
     },
   } as unknown as AuqwApi;
@@ -62,7 +75,10 @@ export async function run(): Promise<void> {
     fakeApi({ pickFolder: () => Promise.resolve('/music') }),
   );
   const folder = await picked.pickFolder(signal);
-  assert(folder.ok && folder.value.treeUri === '/music', 'dir pick');
+  assert(
+    folder.ok && folder.value.treeUri === 'file:///music',
+    'dir pick',
+  );
 
   // Cancelled picker → no-result (the engine treats it as user bail).
   const cancelled = createDesktopTagReader(fakeApi({}));
@@ -75,10 +91,13 @@ export async function run(): Promise<void> {
       pickFolder: () => Promise.reject(new Error('dialog must not open')),
     }),
   );
-  stagedReader.stagePick({ treeUri: 'picked-file:/a.wav', label: 'a.wav' });
+  stagedReader.stagePick({
+    treeUri: 'picked-file:file:///a.wav',
+    label: 'a.wav',
+  });
   const staged = await stagedReader.pickFolder(signal);
   assert(
-    staged.ok && staged.value.treeUri === 'picked-file:/a.wav',
+    staged.ok && staged.value.treeUri === 'picked-file:file:///a.wav',
     'staged pick consumed first',
   );
 
@@ -89,7 +108,7 @@ export async function run(): Promise<void> {
       localAdd: (args) =>
         Promise.resolve({
           picks: args.paths.map((p) => ({
-            treeUri: `picked-file:${p}`,
+            treeUri: `picked-file:file://${p}`,
             label: p.split('/').pop(),
             kind: 'file' as const,
           })),
@@ -102,13 +121,13 @@ export async function run(): Promise<void> {
   const d1 = await filePicker.pickFolder(signal);
   const d2 = await filePicker.pickFolder(signal);
   assert(
-    d1.ok && d1.value.treeUri === 'picked-file:/a.wav' && d2.ok,
+    d1.ok && d1.value.treeUri === 'picked-file:file:///a.wav' && d2.ok,
     'staged picks drain in order',
   );
 
   // Enumerate maps the payload shape through.
   const reader = createDesktopTagReader(fakeApi({}));
-  const entries = await reader.enumerate('/music', signal);
+  const entries = await reader.enumerate('file:///music', signal);
   assert(
     entries.ok && entries.value[0]?.docId === 'a.wav',
     'enumerate maps entries',
@@ -123,7 +142,7 @@ export async function run(): Promise<void> {
         ),
     }),
   );
-  const denied = await deniedReader.enumerate('/music', signal);
+  const denied = await deniedReader.enumerate('file:///music', signal);
   assert(
     !denied.ok && denied.error.kind === 'permission-denied',
     'shell kind maps to app kind',
@@ -131,14 +150,45 @@ export async function run(): Promise<void> {
 
   // docUri stays sync + pure — same math the utility applies.
   assertEqual(
-    reader.docUri('/music', 'sub/a.wav'),
+    reader.docUri('file:///music', 'sub/a.wav'),
     'file:///music/sub/a.wav',
     'docUri is file:// over the tree',
   );
   assertEqual(
-    reader.docUri('picked-file:/m/a b.wav', 'a b.wav'),
+    reader.docUri('picked-file:file:///m/a%20b.wav', 'a b.wav'),
     'file:///m/a%20b.wav',
     'picked-file docUri encodes',
+  );
+
+  // Over-bound docId sets chunk under the channel's batch cap — the
+  // engine sends them all in one call; results land in request order.
+  const batchSizes: number[] = [];
+  const chunkingReader = createDesktopTagReader(
+    fakeApi({
+      fingerprint: (args) => {
+        batchSizes.push(args.docIds.length);
+        return Promise.resolve({
+          fingerprints: args.docIds.map((docId) => ({
+            docId,
+            fingerprint: 'fp',
+          })),
+        });
+      },
+    }),
+  );
+  const many = await chunkingReader.fingerprint(
+    'file:///music',
+    Array.from({ length: MAX_TAGREAD_BATCH * 2 + 1 }, (_, i) => `d${i}`),
+    signal,
+  );
+  assert(
+    many.ok && many.value.length === MAX_TAGREAD_BATCH * 2 + 1,
+    'over-bound fingerprints resolve in order',
+  );
+  assertEqual(
+    batchSizes.join(','),
+    `${MAX_TAGREAD_BATCH},${MAX_TAGREAD_BATCH},1`,
+    'requests split at the channel bound',
   );
 
   // Cancellation short-circuits before any IPC.
@@ -146,7 +196,7 @@ export async function run(): Promise<void> {
     cancelled: true,
     subscribe: () => () => undefined,
   };
-  const early = await reader.enumerate('/music', cancelledSignal);
+  const early = await reader.enumerate('file:///music', cancelledSignal);
   assert(
     !early.ok && early.error.kind === 'cancelled',
     'cancelled signal short-circuits',

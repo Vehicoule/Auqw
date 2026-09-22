@@ -9,6 +9,7 @@ import type {
 } from '@auqw/application';
 import { appError, err, ok } from '@auqw/application';
 import type { AuqwApi, LocalPickPayload } from '../shared/contract.ts';
+import { MAX_TAGREAD_BATCH } from '../shared/contract.ts';
 import { docUriFor } from '../shared/local-paths.ts';
 import { shellToAppError } from './ipc-errors.ts';
 
@@ -138,22 +139,33 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
       }
     },
 
+    // The engine sends every changed docId in one call — the channel
+    // bound is MAX_TAGREAD_BATCH, so larger sets ride sequential
+    // chunks, in request order, checking cancellation between them.
     async fingerprint(treeUri, docIds, signal) {
       const cancelled = ifCancelled(signal);
       if (cancelled !== null) {
         return cancelled;
       }
       try {
-        const { fingerprints } = await api.tagread.fingerprint({
-          treeUri,
-          docIds: [...docIds],
-        });
-        const mapped: (FileFingerprint | null)[] = fingerprints.map(
-          (fp) =>
-            fp === null
-              ? null
-              : { docId: fp.docId, fingerprint: fp.fingerprint },
-        );
+        const mapped: (FileFingerprint | null)[] = [];
+        for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
+          const between = ifCancelled(signal);
+          if (between !== null) {
+            return between;
+          }
+          const { fingerprints } = await api.tagread.fingerprint({
+            treeUri,
+            docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
+          });
+          for (const fp of fingerprints) {
+            mapped.push(
+              fp === null
+                ? null
+                : { docId: fp.docId, fingerprint: fp.fingerprint },
+            );
+          }
+        }
         return ok(mapped);
       } catch (thrown) {
         return err(shellToAppError(thrown));
@@ -166,22 +178,31 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
         return cancelled;
       }
       try {
-        const { tags } = await api.tagread.read({
-          treeUri,
-          docIds: [...docIds],
-        });
-        const mapped: (LocalTags | null)[] = tags.map((tag) =>
-          tag === null
-            ? null
-            : {
-                docId: tag.docId,
-                title: tag.title,
-                artist: tag.artist,
-                album: tag.album,
-                durationMs: tag.durationMs,
-                genre: tag.genre,
-              },
-        );
+        const mapped: (LocalTags | null)[] = [];
+        for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
+          const between = ifCancelled(signal);
+          if (between !== null) {
+            return between;
+          }
+          const { tags } = await api.tagread.read({
+            treeUri,
+            docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
+          });
+          for (const tag of tags) {
+            mapped.push(
+              tag === null
+                ? null
+                : {
+                    docId: tag.docId,
+                    title: tag.title,
+                    artist: tag.artist,
+                    album: tag.album,
+                    durationMs: tag.durationMs,
+                    genre: tag.genre,
+                  },
+            );
+          }
+        }
         return ok(mapped);
       } catch (thrown) {
         return err(shellToAppError(thrown));

@@ -99,7 +99,12 @@ const ORPHAN_MIN_AGE_MS = 60_000;
 const RESUMABLE_STATES =
   "('requested','transferring','failed_with_retry')";
 
-function isBareName(name: string): boolean {
+/**
+ * A bare managed name: no separators, no NUL, no partial/reconcile
+ * suffix, not a dot-dir — the name form `downloads.file_path` and
+ * `destPath` must both take so nothing escapes the managed dir.
+ */
+export function isBareName(name: string): boolean {
   return (
     name.length > 0 &&
     !name.includes('/') &&
@@ -133,6 +138,11 @@ export function createTransferService(
   const maxSinks = options.maxSinks ?? DEFAULT_MAX_SINKS;
   const maxWaiters = options.maxWaiters ?? DEFAULT_MAX_WAITERS;
   const sinks = new Map<string, Sink>();
+  /**
+   * destPaths claimed between the dup check and sink registration —
+   * concurrent begins can't split the check across the acquire await.
+   */
+  const reserved = new Set<string>();
   let openCount = 0;
   const waiters: { resolve(): void; reject(e: unknown): void }[] = [];
   let shutdown = false;
@@ -285,8 +295,19 @@ export function createTransferService(
         );
       }
     }
-    await acquireSlot();
+    // Reserve before the first await — a racing begin sees the claim
+    // even while this one waits on the sink cap.
+    if (reserved.has(destPath)) {
+      throw shellError(
+        'invalid-request',
+        'destination already has a pending sink',
+      );
+    }
+    reserved.add(destPath);
+    let acquired = false;
     try {
+      await acquireSlot();
+      acquired = true;
       await ensureDir();
       const partAbs = join(dir(), `${destPath}${PART_SUFFIX}`);
       await reconcilePart(partAbs, destPath, resumeAtBytes);
@@ -303,8 +324,12 @@ export function createTransferService(
       sinks.set(sink.id, sink);
       return { sinkId: sink.id };
     } catch (thrown) {
-      releaseSlot();
+      if (acquired) {
+        releaseSlot();
+      }
       throw thrown;
+    } finally {
+      reserved.delete(destPath);
     }
   }
 
@@ -472,9 +497,17 @@ export function createTransferService(
    */
   async function sweepOrphans(): Promise<number> {
     const keep = new Set<string>();
+    let db: DatabaseSync | null = null;
     try {
-      const db = options.database?.() ?? null;
-      if (db !== null) {
+      db = options.database?.() ?? null;
+    } catch {
+      // The index can't even be opened — nothing is provably
+      // orphaned; delete nothing rather than destroying resumable
+      // progress on a transient failure.
+      return 0;
+    }
+    if (db !== null) {
+      try {
         const rows = db
           .prepare(
             `SELECT file_path FROM downloads WHERE state IN ${RESUMABLE_STATES}`,
@@ -485,9 +518,17 @@ export function createTransferService(
             keep.add(`${row.file_path}${PART_SUFFIX}`);
           }
         }
+      } catch (thrown) {
+        const message = thrown instanceof Error ? thrown.message : '';
+        if (message.includes('no such table')) {
+          // Pre-migration database — no resumable owners can exist.
+        } else {
+          // The ledger can't be read: nothing is provably orphaned,
+          // so the sweep deletes nothing rather than destroying
+          // resumable progress on a transient index failure.
+          return 0;
+        }
       }
-    } catch {
-      // No readable index yet — treat every resumable as unclaimed.
     }
     let entries;
     try {

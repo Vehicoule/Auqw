@@ -9,6 +9,7 @@ import {
 } from '@auqw/application/testing';
 import { MIGRATIONS } from '@auqw/storage-sqlite';
 import { CHANNELS } from '../shared/channels.ts';
+import { dirTreeUri, pickedFileTreeUri } from '../shared/local-paths.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createUtilityRouter } from './router.ts';
 import { createTagService } from './tags.ts';
@@ -121,16 +122,16 @@ export async function run(): Promise<void> {
 
     // Ungranted trees refuse before touching disk.
     const denied = await call(CHANNELS.tagreadEnumerate, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
     });
     assert(
       !denied.ok && denied.error?.kind === 'permission-denied',
       'ungranted treeUri is permission-denied',
     );
-    grant(music);
+    grant(dirTreeUri(music));
 
     const listed = await call(CHANNELS.tagreadEnumerate, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
     });
     assert(listed.ok, 'enumerate resolves');
     const entries = (listed.result as { entries: { docId: string; mime: string; size: number }[] })
@@ -144,7 +145,7 @@ export async function run(): Promise<void> {
 
     // docId escapes are refused.
     const escaped = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['../outside.wav'],
     });
     assert(
@@ -154,7 +155,7 @@ export async function run(): Promise<void> {
 
     // Fingerprint is stable, move-stable, and content-sensitive.
     const fp1 = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['sub/track1.wav', 'track2.mp3', 'gone.wav'],
     });
     assert(fp1.ok, 'fingerprint resolves');
@@ -164,7 +165,7 @@ export async function run(): Promise<void> {
     assert(fps[0] !== null && fps[1] !== null, 'known files fingerprint');
     assertEqual(fps[2], null, 'missing file fingerprints null');
     const fpAgain = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['sub/track1.wav'],
     });
     assert(fpAgain.ok, 'second fingerprint resolves');
@@ -179,7 +180,7 @@ export async function run(): Promise<void> {
       join(music, 'renamed.wav'),
     );
     const fpMoved = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['renamed.wav'],
     });
     assert(fpMoved.ok, 'moved fingerprint resolves');
@@ -192,7 +193,7 @@ export async function run(): Promise<void> {
 
     // Tag read pulls the RIFF INFO fields + real duration.
     const read = await call(CHANNELS.tagreadRead, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['renamed.wav', 'track2.mp3'],
     });
     assert(read.ok, 'read resolves');
@@ -224,7 +225,7 @@ export async function run(): Promise<void> {
     );
     // A docId that resolves nowhere still reads null, not an error.
     const gone = await call(CHANNELS.tagreadRead, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: ['renamed.wav', 'vanished.wav'],
     });
     assert(
@@ -235,7 +236,7 @@ export async function run(): Promise<void> {
 
     // The batch bound is enforced at the seam.
     const overBatch = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: music,
+      treeUri: dirTreeUri(music),
       docIds: Array.from({ length: 65 }, (_, i) => `f${i}.wav`),
     });
     assert(
@@ -246,9 +247,9 @@ export async function run(): Promise<void> {
     // A picked-file tree enumerates exactly its one doc.
     const picked = join(root, 'one.wav');
     await writeFile(picked, wavFixture({ title: 'Solo' }));
-    grant(`picked-file:${picked}`);
+    grant(pickedFileTreeUri(picked));
     const single = await call(CHANNELS.tagreadEnumerate, {
-      treeUri: `picked-file:${picked}`,
+      treeUri: pickedFileTreeUri(picked),
     });
     assert(single.ok, 'picked-file enumerate resolves');
     const singleEntries = (single.result as { entries: { docId: string }[] })
@@ -264,7 +265,7 @@ export async function run(): Promise<void> {
       'docId is the basename',
     );
     const foreignDoc = await call(CHANNELS.tagreadFingerprint, {
-      treeUri: `picked-file:${picked}`,
+      treeUri: pickedFileTreeUri(picked),
       docIds: ['other.wav'],
     });
     assert(
