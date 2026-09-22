@@ -1368,7 +1368,13 @@ mod tests {
         let dir = TestDir::new("srv-suffix");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        cfg.read_ahead = 128;
+        // No speculative read-ahead: attach wakes the pump before the
+        // demand read queues, and a fill fetch fired in that gap —
+        // clamped to the stale hinted end — pops the probe's reply
+        // with a `max_len` it exceeds -> InvalidResponse -> 502 (seen
+        // in CI). Demand fetch-through is the only fetch this script
+        // survives.
+        cfg.read_ahead = 0;
         let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
             StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
@@ -1418,7 +1424,10 @@ mod tests {
         let dir = TestDir::new("srv-boundary");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        cfg.read_ahead = 128;
+        // No speculative read-ahead — see stale_hint_suffix above: an
+        // attach-time fill fetch racing the demand probe pops a reply
+        // sized past its `max_len` and dies InvalidResponse -> 502.
+        cfg.read_ahead = 0;
         let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
             StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
