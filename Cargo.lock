@@ -99,6 +99,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "auqw-host-surface"
+version = "0.1.0"
+dependencies = [
+ "auqw-plugin-host",
+ "auqw-stream",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "wat",
+]
+
+[[package]]
 name = "auqw-integration-runner"
 version = "0.1.0"
 dependencies = [
@@ -116,13 +130,10 @@ dependencies = [
 name = "auqw-mobile-bindings"
 version = "0.1.0"
 dependencies = [
- "auqw-plugin-host",
- "auqw-stream",
+ "auqw-host-surface",
  "serde_json",
  "sha2",
  "thiserror",
- "tokio",
- "tokio-util",
  "uniffi",
  "wat",
 ]
