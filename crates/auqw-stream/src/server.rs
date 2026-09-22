@@ -765,6 +765,19 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
             }
         };
     }
+    if first.is_empty() && req.range.is_some() {
+        // The read at the resolved start returned EOF: the hint
+        // claimed the range yet the wire's refusal ends the
+        // resource at or below it — `416` while headers are still
+        // unsent, never a `206` that advertises bytes then sends
+        // none.
+        write_status(
+            out,
+            416,
+            &[("Content-Range".into(), format!("bytes */{}", star(total)))],
+        );
+        return Ok(());
+    }
     write_reply_head(out, &mime, req.range.is_some(), start, end, total)?;
     // The probe read ran unbounded — serve only the resolved span;
     // a mid-body failure can only close the connection truncated —
@@ -1378,9 +1391,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unknown_total_reaches_clean_eof_on_wire_refusal() {
         // Every chunk answers `bytes S-E/*` — the total stays unknown
-        // until a `bytes */*` 416 at the boundary, which is itself
-        // wire EOF evidence: the read past the end returns empty and
-        // the body finishes clean, without spending a re-mint.
+        // until bare `416`s at the boundary: the first refusal buys a
+        // re-mint to disambiguate a dead URL, the second confirms EOF
+        // — the read past the end returns empty and the body finishes
+        // clean.
         let mut steps: Vec<Step> = (0..1024)
             .step_by(128)
             .map(|off| {
@@ -1391,10 +1405,12 @@ mod tests {
                 })
             })
             .collect();
-        steps.push(Step::Reply(FetchResponse {
-            status: 416,
-            content_range: Some("bytes */*".into()),
-            body: stream_body(vec![]),
+        steps.extend((0..2).map(|_| {
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */*".into()),
+                body: stream_body(vec![]),
+            })
         }));
         let dir = TestDir::new("srv-eof");
         let mut cfg = test_config(&dir);
@@ -1417,14 +1433,58 @@ mod tests {
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.body.len(), 1024, "full body must arrive before FIN");
-        // Exactly one refusal at the boundary — the EOF ceiling is
-        // latched from the wire's own answer, no re-mint re-tries it.
+        // Two refusals at the boundary — one across the re-mint that
+        // disambiguates a dead URL — then EOF, never a third attempt.
         let boundary = fetch
             .requests
             .lock()
             .map(|rs| rs.iter().filter(|(o, _)| *o == 1024).count())
             .unwrap_or(0);
-        assert_eq!(boundary, 1, "one 416 fetch proves EOF — no re-mint");
+        assert_eq!(boundary, 2, "refusal pair across one re-mint proves EOF");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_past_the_wire_eof_answers_416_not_false_206() {
+        // The hint claims 2048 but the wire ends the resource below
+        // 1500: the probe's bare refusals latch the EOF ceiling, the
+        // read comes back empty — the adapter must answer
+        // unsatisfiable, never a `206` that advertises bytes then
+        // sends none.
+        let steps: Vec<Step> = vec![
+            Step::Reply(resp(206, 0, 128, 2048)),
+            Step::Reply(resp(206, 128, 128, 2048)),
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */*".into()),
+                body: stream_body(vec![]),
+            }),
+            Step::Reply(FetchResponse {
+                status: 416,
+                content_range: Some("bytes */*".into()),
+                body: stream_body(vec![]),
+            }),
+        ];
+        let dir = TestDir::new("srv-false206");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 256;
+        cfg.read_ahead = 128;
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = Some(2048);
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
+        assert_eq!(r.status, 416);
+        assert_eq!(r.header("content-range"), Some("bytes */2048"));
+        assert_eq!(r.body.len(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

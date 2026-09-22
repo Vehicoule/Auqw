@@ -9,14 +9,14 @@
 //! - the reported total length must stay stable across chunks;
 //! - empty bodies and bodies larger than requested are rejected;
 //! - every request is a range request — full-file GETs throttle;
-//! - `403` re-mints through [`Remint`](crate::Remint) and resumes
+//! - `403`/`416` re-mints through [`Remint`](crate::Remint) and resumes
 //!   at the same offset, bounded by `mint_budget` and the zero-progress
 //!   counter; a re-minted mime that differs from the prepared mime is
 //!   terminal `InvalidResponse` (a silent container swap is a bug);
-//! - a `416` is the wire's own end-of-stream evidence: a range at an
-//!   offset inside the representation stays satisfiable, so refusal
-//!   means the resource ends at or below the offset — `bytes */N`
-//!   also installs its total;
+//! - a `416` declares the requested offset unsatisfiable — wire EOF
+//!   evidence once a fresh mint cannot disprove it: after one re-mint
+//!   still refuses, when the mint is spent, or at/past a known total.
+//!   `bytes */N` on the refusal installs its total outright;
 //! - any other permanent `4xx` is a terminal verdict on this URL —
 //!   `401` is a dead mint (`Expired`), `404`/`410` are `NotFound`, the
 //!   rest `InvalidResponse`; only `408`/`425`/`429` and `5xx` stay
@@ -271,6 +271,7 @@ async fn fetch_chunk(
     len: u64,
     through: bool,
 ) -> Outcome {
+    let mut retried_416 = false;
     let mut transient_left = session.config.fetch_retries;
     loop {
         if let Err(e) = session.check_live() {
@@ -318,12 +319,31 @@ async fn fetch_chunk(
                             ),
                         });
                     }
-                    // `bytes */*` — no total, but the refusal itself
-                    // is wire evidence: a range at `offset` inside the
-                    // representation stays satisfiable, so the resource
-                    // ends at or below `offset`. A re-mint could only
-                    // re-learn what the wire already declared.
-                    return Outcome::Eof(offset);
+                    // Bare refusal: ambiguous between real EOF and a
+                    // dead signed URL — a fresh mint disambiguates.
+                    // Only a refusal under the re-minted URL (or one
+                    // at/past a known total) confirms EOF.
+                    if eof_confirmed(session, offset, retried_416) {
+                        return Outcome::Eof(offset);
+                    }
+                    retried_416 = true;
+                    match remint(session).await {
+                        Err(e) => {
+                            return if stallable(&e) {
+                                Outcome::Stalled(e)
+                            } else {
+                                // The mint is spent, but the wire's
+                                // refusal still stands as EOF evidence
+                                // — a dead URL can neither prove the
+                                // range exists nor justify killing the
+                                // session and reads below the ceiling.
+                                Outcome::Eof(offset)
+                            };
+                        }
+                        // A fresh mint is a fresh attempt — the
+                        // transient budget resets with the URL.
+                        Ok(()) => transient_left = session.config.fetch_retries,
+                    }
                 }
                 403 => match remint(session).await {
                     Err(e) => {
@@ -390,6 +410,19 @@ async fn retry_or_stall(
     } else {
         Outcome::Failed(e)
     })
+}
+
+/// Whether a `416` proves end-of-stream: the offset is at/past a known
+/// total, or the same request already failed `416` once across a
+/// re-mint — a second refusal means the resource ends below `offset`.
+fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> bool {
+    if retried {
+        return true;
+    }
+    session
+        .effective_total()
+        .map(|t| t.is_some_and(|t| offset >= t))
+        .unwrap_or(false)
 }
 
 /// How the retry backoff ended.
@@ -951,16 +984,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bare_416_is_eof_not_error() {
+    async fn repeated_416_is_eof_not_error() {
         let d = TestDir::new("eof416");
         let mut cfg = config(&d);
         cfg.mint_budget = 4;
         let remint = remint_ok();
         let s = session(cfg, remint.clone());
-        // Seek-read lands far past the end: the refusal itself is wire
-        // EOF evidence — a range inside the representation stays
-        // satisfiable — so `eof_below` marks the ceiling immediately,
-        // no re-mint spent re-learning what the wire declared.
+        // Seek-read lands far past the end: 416, remint, 416 again →
+        // eof_below marks the ceiling instead of an error. Bare 416s —
+        // a declared total above the offset is a contradiction, not
+        // EOF evidence.
+        let fetch = Arc::new(ScriptedFetch::new(
+            (0..2)
+                .map(|_| {
+                    Step::Reply(FetchResponse {
+                        status: 416,
+                        content_range: None,
+                        body: stream_body(vec![]),
+                    })
+                })
+                .collect(),
+        ));
+        {
+            let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
+            sh.fetch_through.insert(900, 1);
+        }
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| eof_below(&s).is_some() || s.is_terminal()).await;
+        // The EOF ceiling must prune the demand position — otherwise
+        // the pump refetches it, burns a remint per cycle, and the mint
+        // budget kills the whole session (regression: remint storm).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let reqs = fetch
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            reqs.iter().filter(|(o, _)| *o == 900).count(),
+            2,
+            "demand position refetched past the EOF ceiling: {reqs:?}"
+        );
+        assert!(!s.is_terminal(), "session died on a localized EOF");
+        stop_pump(&s, task).await;
+        assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dead_mint_416_falls_back_to_wire_eof() {
+        // The mint is spent before the second refusal can land: the
+        // wire's `416` still stands as EOF evidence — a dead URL can
+        // neither prove the range exists nor justify killing the
+        // session (and every read below the ceiling) with it.
+        let d = TestDir::new("eofdead");
+        let remint = remint_ok();
+        *remint.fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamError::NotFound);
+        let s = session(config(&d), remint.clone());
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 416,
             content_range: None,
@@ -972,26 +1051,10 @@ mod tests {
         }
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
         wait_until(|| eof_below(&s).is_some() || s.is_terminal()).await;
-        // The EOF ceiling must prune the demand position — otherwise
-        // the pump refetches it forever (regression: refetch storm).
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let reqs = fetch
-            .requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        assert_eq!(
-            reqs.iter().filter(|(o, _)| *o == 900).count(),
-            1,
-            "demand position refetched past the EOF ceiling: {reqs:?}"
-        );
-        assert!(!s.is_terminal(), "session died on a localized EOF");
+        assert_eq!(eof_below(&s), Some(900));
+        assert!(!s.is_terminal(), "dead mint must not kill the session");
         stop_pump(&s, task).await;
-        assert_eq!(
-            remint.calls.load(Ordering::Relaxed),
-            0,
-            "EOF needs no re-mint — the wire's refusal is the evidence"
-        );
+        assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
     }
 
     /// `404` is a terminal verdict; `429` and `5xx` are retriable and
