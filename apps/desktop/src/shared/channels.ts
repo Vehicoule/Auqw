@@ -21,6 +21,8 @@ export const CHANNELS = {
   storageDropBackup: 'storage:dropBackup',
   utilityPing: 'utility:ping',
   hostPlugins: 'host:plugins',
+  hostRequest: 'host:request',
+  hostCancel: 'host:cancel',
   streamPrepare: 'stream:prepare',
   streamDevPrepare: 'stream:dev-prepare',
   streamServeUrl: 'stream:serve-url',
