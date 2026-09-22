@@ -33,6 +33,26 @@ export const CHANNELS = {
   streamPort: 'stream:port',
   /** Main→renderer port delivery — carries the pump's MessagePort. */
   streamBytes: 'stream-bytes',
+  transferEnsureDir: 'transfer:ensureDir',
+  transferBegin: 'transfer:begin',
+  transferWrite: 'transfer:write',
+  transferCommit: 'transfer:commit',
+  transferFinalize: 'transfer:finalize',
+  transferAbort: 'transfer:abort',
+  transferStat: 'transfer:stat',
+  transferRemove: 'transfer:remove',
+  transferSweepPartials: 'transfer:sweepPartials',
+  transferList: 'transfer:list',
+  transferStatus: 'transfer:status',
+  transferStats: 'transfer:stats',
+  tagreadEnumerate: 'tagread:enumerate',
+  tagreadFingerprint: 'tagread:fingerprint',
+  tagreadRead: 'tagread:read',
+  localAdd: 'local:add',
+  localProbe: 'local:probe',
+  localList: 'local:list',
+  localPlayback: 'local:playback',
+  localSweep: 'local:sweep',
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

@@ -17,6 +17,7 @@
     "electron": "44.3.0",
     "electron-builder": "26.16.1",
     "esbuild": "0.28.2",
+    "music-metadata": "11.15.0",
     "typescript": "~6.0.3"
   }
 }

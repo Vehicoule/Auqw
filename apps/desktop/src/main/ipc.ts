@@ -16,6 +16,8 @@ import type {
   UtilityPingArgs,
 } from '../shared/contract.ts';
 import {
+  isLocalAddArgs,
+  isLocalProbeArgs,
   isPickFilesArgs,
   isPickFolderArgs,
   isSecureDeleteArgs,
@@ -34,6 +36,15 @@ import {
   isStreamPortArgs,
   isStreamPrepareArgs,
   isStreamReadArgs,
+  isTagreadBatchArgs,
+  isTagreadEnumerateArgs,
+  isTransferAbortArgs,
+  isTransferBeginArgs,
+  isTransferFinalizeArgs,
+  isTransferNameArgs,
+  isTransferSinkArgs,
+  isTransferSweepArgs,
+  isTransferWriteArgs,
   isUtilityPingArgs,
 } from '../shared/contract.ts';
 import type { ResultEnvelope } from '../shared/envelope.ts';
@@ -345,6 +356,128 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.storageDropBackup,
     channel(isStorageBackupArgs, (args, deps) =>
       deps.utility.request(CHANNELS.storageDropBackup, args),
+    ),
+  ],
+  // The offline file plane — the utility re-validates each payload
+  // against the same contract before touching disk or db.
+  [
+    CHANNELS.transferEnsureDir,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferEnsureDir, args),
+    ),
+  ],
+  [
+    CHANNELS.transferBegin,
+    channel(isTransferBeginArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferBegin, args),
+    ),
+  ],
+  [
+    CHANNELS.transferWrite,
+    channel(isTransferWriteArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferWrite, args),
+    ),
+  ],
+  [
+    CHANNELS.transferCommit,
+    channel(isTransferSinkArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferCommit, args),
+    ),
+  ],
+  [
+    CHANNELS.transferFinalize,
+    channel(isTransferFinalizeArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferFinalize, args),
+    ),
+  ],
+  [
+    CHANNELS.transferAbort,
+    channel(isTransferAbortArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferAbort, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStat,
+    channel(isTransferNameArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStat, args),
+    ),
+  ],
+  [
+    CHANNELS.transferRemove,
+    channel(isTransferNameArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferRemove, args),
+    ),
+  ],
+  [
+    CHANNELS.transferSweepPartials,
+    channel(isTransferSweepArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferSweepPartials, args),
+    ),
+  ],
+  [
+    CHANNELS.transferList,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferList, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStatus,
+    channel(isTransferSinkArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStatus, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStats,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStats, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadEnumerate,
+    channel(isTagreadEnumerateArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadEnumerate, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadFingerprint,
+    channel(isTagreadBatchArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadFingerprint, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadRead,
+    channel(isTagreadBatchArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadRead, args),
+    ),
+  ],
+  [
+    CHANNELS.localAdd,
+    channel(isLocalAddArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localAdd, args),
+    ),
+  ],
+  [
+    CHANNELS.localProbe,
+    channel(isLocalProbeArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localProbe, args),
+    ),
+  ],
+  [
+    CHANNELS.localList,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localList, args),
+    ),
+  ],
+  [
+    CHANNELS.localPlayback,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localPlayback, args),
+    ),
+  ],
+  [
+    CHANNELS.localSweep,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localSweep, args),
     ),
   ],
 ];
