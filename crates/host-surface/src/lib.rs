@@ -14,10 +14,11 @@
 //!   thread. The binding decides how delivery reaches its caller
 //!   (UniFFI listener vs. resolving a promise).
 //! - Request ids are caller-supplied: the UniFFI shim mints `req-N`,
-//!   napi callers pass their own. A `cancel` that finds no delivered
-//!   handle is tombstoned briefly regardless of id shape so a cancel
-//!   that outran the bookkeeping still abandons the session it was
-//!   about to receive (bounded: 64 tombstones, 60 s TTL).
+//!   napi callers pass their own. A `cancel` tombstones only where a
+//!   delivery race can exist — never-admitted ids (consumed at
+//!   admission) and mid-flight prepares — so a cancelled generic
+//!   request leaves nothing for a later generation to trip over
+//!   (bounded: 64 tombstones, 60 s TTL).
 //! - The URL inside [`ResolvedResource`] is a real signed stream URL —
 //!   it must never be logged at any layer.
 
@@ -75,8 +76,8 @@ const SESSION_TRUST_CAPABILITIES: &[&str] =
 /// A cancel tombstone only needs to outlive its race window — the
 /// cancel-to-delivery gap is milliseconds; a minute is far past any
 /// real delivery while still short enough that unconsumed tombstones
-/// (a cancelled resolve, a request that failed on its own) can't pin
-/// the cap forever.
+/// (a cancel that arrived on an id never admitted) can't pin the
+/// cap forever.
 const CANCEL_TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One HTTP call from the attempt trace. `url` is already stripped of
@@ -265,6 +266,17 @@ pub struct SpinReport {
     pub kind: String,
 }
 
+/// A request admitted through `start_typed`: its cancel token plus
+/// whether it drives a `start_prepare`. Only prepares can leave a
+/// mid-delivery handle-registration race, so `cancel` tombstones
+/// prepares and never-admitted ids — a cancelled generic request
+/// (resolve/request) has no handle to orphan and leaves no stone for
+/// a later generation of the same id to trip over.
+struct LiveRequest {
+    token: CancellationToken,
+    is_prepare: bool,
+}
+
 /// A produced session slot in `prepared_handles`. `delivered` flips
 /// once the `Prepared` outcome is on the wire: `cancel` releases a
 /// delivered handle (the app cancelled an unattached session) but
@@ -354,7 +366,7 @@ pub struct PluginHost {
     auth_token: Arc<RwLock<Option<String>>>,
     stream: Option<Arc<StreamRegistry>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
-    cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    cancels: Arc<Mutex<HashMap<String, LiveRequest>>>,
     /// `prepare` request id → produced session slot, so a
     /// `cancelPrepare` landing after `prepared` can abandon the session
     /// (only while still unattached AND already delivered — see
@@ -549,6 +561,7 @@ impl PluginHost {
             "playback.resolve".to_string(),
             Value::Object(payload),
             request_id,
+            false,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let mut summary = AttemptSummary::from(&attempt);
@@ -613,6 +626,7 @@ impl PluginHost {
             capability,
             payload,
             request_id,
+            false,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let mut summary = AttemptSummary::from(&attempt);
@@ -635,11 +649,14 @@ impl PluginHost {
         )
     }
 
-    /// Cancel an in-flight request. Unknown ids are a no-op except
-    /// that every non-delivered id is tombstoned briefly — request ids
-    /// are caller-minted on this surface, so there is no issued-id
-    /// shape to check; the TTL + 64-entry cap bound unconsumed
-    /// tombstones instead. A `cancelPrepare` landing after `prepared`
+    /// Cancel an in-flight request. Tombstones exist only where a
+    /// delivery race is possible: a mid-flight prepare (its `Prepared`
+    /// can be registering while this cancel reads the maps) or an id
+    /// that was never admitted (the cancel-before-start ordering,
+    /// consumed at admission). A cancelled resolve/request has no
+    /// handle to orphan, so its cancel leaves no stone for a later
+    /// generation of the id. The TTL + 64-entry cap bound unconsumed
+    /// tombstones. A `cancelPrepare` landing after `prepared`
     /// also abandons the produced session — but only while it is
     /// still unattached: a playing consumer is never cancelled out
     /// from under playback. And only once the `prepared` outcome is on
@@ -647,9 +664,13 @@ impl PluginHost {
     /// left live, or the listener would get a `Prepared` naming a
     /// released session.
     pub fn cancel(&self, request_id: String) {
+        let mut live_found = false;
+        let mut live_was_prepare = false;
         if let Ok(m) = self.cancels.lock() {
-            if let Some(token) = m.get(&request_id) {
-                token.cancel();
+            if let Some(req) = m.get(&request_id) {
+                req.token.cancel();
+                live_found = true;
+                live_was_prepare = req.is_prepare;
             }
         }
         // Coalesced prepares hand one session handle to several
@@ -687,12 +708,14 @@ impl PluginHost {
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
         }
-        // Tombstone whenever no delivered handle was found — both the
-        // "outran the bookkeeping" window and the delivery window (a
-        // token still present in `cancels` is already spent while
-        // `prepare_outcome` is still registering). Tombstones expire:
-        // arbitrary ids can't fill the cap and starve a real race.
-        if !delivered {
+        // Tombstone when no delivered handle was found AND a race
+        // still exists: a never-admitted id (cancel-before-start),
+        // or a live prepare whose `Prepared` is mid-registration.
+        // A spent generic request (`live_found && !is_prepare`)
+        // tombstones nothing — its delivery can't orphan a handle.
+        // Tombstones expire: arbitrary ids can't fill the cap and
+        // starve a real race.
+        if !delivered && (!live_found || live_was_prepare) {
             if let Ok(mut m) = self.cancelled_requests.lock() {
                 // Sweep expired tombstones before the cap check — a
                 // stale set must not masquerade as a full one.
@@ -750,6 +773,7 @@ impl PluginHost {
         capability: String,
         payload: Value,
         request_id: String,
+        is_prepare: bool,
         deliver: F,
     ) -> Result<(), HostError>
     where
@@ -820,7 +844,13 @@ impl PluginHost {
             {
                 token.cancel();
             }
-            m.insert(request_id.clone(), token.clone());
+            m.insert(
+                request_id.clone(),
+                LiveRequest {
+                    token: token.clone(),
+                    is_prepare,
+                },
+            );
         }
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
@@ -1011,6 +1041,71 @@ mod tests {
             Ok(()) => {}
             Err(e) => panic!("restart: {e}"),
         }
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(kind, "budget-exceeded");
+    }
+
+    #[test]
+    fn midflight_generic_cancel_leaves_no_tombstone() {
+        // A cancel landing while a resolve is still in flight flips
+        // its token — but a generic request has no handle to orphan,
+        // so it must NOT tombstone: a later generation of the same id
+        // runs its own course instead of starting pre-cancelled. The
+        // spin guest keeps the first resolve in flight long enough
+        // for the cancel to land deterministically.
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let kind_of = |_: String, o: ResolveOutcome| match o {
+            ResolveOutcome::Failed { kind, .. } => kind,
+            ResolveOutcome::Resolved { .. } => "resolved".to_string(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id.clone(), "x".into(), "dup".into(), move |id, o| {
+            let _ = tx.send(kind_of(id, o));
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        host.cancel("dup".to_string());
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(kind, "cancelled");
+        // The settled task removes its `cancels` slot a beat after the
+        // outcome is delivered — retry past that cleanup window, then
+        // assert the reused id is not pre-cancelled by a leftover
+        // tombstone.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut admitted = false;
+        for _ in 0..50 {
+            let tx = tx.clone();
+            match host.start_resolve(id.clone(), "x".into(), "dup".into(), move |id, o| {
+                let _ = tx.send(kind_of(id, o));
+                async move {}
+            }) {
+                Ok(()) => {
+                    admitted = true;
+                    break;
+                }
+                Err(HostError::RequestInFlight { .. }) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("restart: {e}"),
+            }
+        }
+        assert!(admitted, "second admission never landed");
         let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(kind) => kind,
             Err(e) => panic!("outcome: {e}"),

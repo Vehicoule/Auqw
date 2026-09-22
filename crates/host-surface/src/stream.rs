@@ -372,6 +372,7 @@ impl PluginHost {
             "playback.resolve".to_string(),
             Value::Object(payload),
             request_id,
+            true,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();
                 let mut summary = AttemptSummary::from(&attempt);
@@ -453,7 +454,7 @@ impl PluginHost {
                         let was_cancelled = cancels
                             .lock()
                             .ok()
-                            .and_then(|c| c.get(&request_id).map(CancellationToken::is_cancelled))
+                            .and_then(|c| c.get(&request_id).map(|r| r.token.is_cancelled()))
                             .unwrap_or(false);
                         if was_cancelled {
                             abandoned = Some(prepared.handle.clone());
