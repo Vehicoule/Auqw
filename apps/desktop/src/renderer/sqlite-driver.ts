@@ -17,9 +17,10 @@ import type { AuqwStorage } from '../shared/contract.ts';
  * per statement, `commit`/`rollback` closing the span.
  *
  * Cancellation is local observation plus a `storage:cancel` flag: the
- * signal is polled before every statement (it cannot cross IPC), and
- * once it flips the flag poisons the open tx so the next pinned
- * statement answers `cancelled` even if the renderer stalls.
+ * signal is polled before every statement (it cannot cross IPC) and
+ * subscribed while the tx is open, so a flip while `work` awaits
+ * unrelated promises still poisons the tx — the next pinned statement
+ * answers `cancelled`.
  */
 export function createSqliteDriver(storage: AuqwStorage): SqliteDriver {
   return {
@@ -69,7 +70,11 @@ export function createSqliteDriver(storage: AuqwStorage): SqliteDriver {
             .then((result) => result.rows as readonly R[]);
         },
       };
+      // Polls only run at statement boundaries — the subscription flags
+      // the tx even when the callback is suspended between them.
+      const unsubscribe = signal?.subscribe(flagCancelled);
       try {
+        check(signal);
         const value = await work(connection);
         check(signal);
         await storage.commit(txId);
@@ -81,6 +86,8 @@ export function createSqliteDriver(storage: AuqwStorage): SqliteDriver {
           // The transaction already ended.
         }
         throw thrown;
+      } finally {
+        unsubscribe?.();
       }
     },
   };

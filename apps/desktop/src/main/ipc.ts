@@ -38,6 +38,10 @@ export interface RendererLifecycle {
     event: 'destroyed' | 'render-process-gone' | 'did-navigate',
     listener: () => void,
   ): void;
+  off?(
+    event: 'destroyed' | 'render-process-gone' | 'did-navigate',
+    listener: () => void,
+  ): void;
 }
 
 export interface IpcEventLike {
@@ -216,10 +220,16 @@ export function registerChannels(
   // A tx is owned by the renderer that began it; the utility survives
   // renderer reloads, so an abandoned tx would hold the single storage
   // slot forever. Txs a dead/navigated/crashed renderer left open are
-  // rolled back through the same channel.
+  // rolled back through the same channel. Each sender's generation
+  // bumps on every lifecycle event, so a `begin` dispatched before the
+  // event but resolving after is rolled back instead of tracking an
+  // owner that's already gone. Weak keys: destroyed senders collect
+  // out instead of being retained for the app's lifetime.
+  const generations = new WeakMap<Sender, number>();
   const openTxs = new Map<Sender, Set<string>>();
-  const watched = new Set<Sender>();
+  const watched = new WeakSet<Sender>();
   const dropSenderTxs = (sender: Sender): void => {
+    generations.set(sender, (generations.get(sender) ?? 0) + 1);
     const txs = openTxs.get(sender);
     if (txs === undefined) {
       return;
@@ -240,7 +250,14 @@ export function registerChannels(
     }
     watched.add(sender);
     const release = (): void => dropSenderTxs(sender);
-    sender.on('destroyed', release);
+    const onDestroyed = (): void => {
+      watched.delete(sender);
+      dropSenderTxs(sender);
+      sender.off?.('destroyed', onDestroyed);
+      sender.off?.('render-process-gone', release);
+      sender.off?.('did-navigate', release);
+    };
+    sender.on('destroyed', onDestroyed);
     sender.on('render-process-gone', release);
     sender.on('did-navigate', release);
   };
@@ -249,8 +266,20 @@ export function registerChannels(
     sender: Sender,
     args: unknown,
     result: unknown,
+    generation: number | null,
   ): void => {
     if (name === CHANNELS.storageBegin && isStorageBeginResult(result)) {
+      if ((generations.get(sender) ?? 0) !== generation) {
+        // The owner navigated or died while the begin waited on the
+        // tx slot — no renderer remains to close it, so close it now.
+        void deps.utility
+          .request(CHANNELS.storageRollback, { txId: result.txId })
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+        return;
+      }
       let txs = openTxs.get(sender);
       if (txs === undefined) {
         txs = new Set();
@@ -286,8 +315,12 @@ export function registerChannels(
         );
       }
       try {
+        const generation =
+          name === CHANNELS.storageBegin
+            ? (generations.get(event.sender) ?? 0)
+            : null;
         const result = await handler.run(args, deps, event.sender);
-        trackTx(name, event.sender, args, result);
+        trackTx(name, event.sender, args, result, generation);
         return ok(result);
       } catch (thrown) {
         return fail(

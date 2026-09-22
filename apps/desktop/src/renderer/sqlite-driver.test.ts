@@ -202,6 +202,35 @@ export async function run(): Promise<void> {
     ]);
   }
 
+  // a cancel landing while work is suspended still flags the tx
+  {
+    const { calls, storage } = fakeStorage();
+    const driver = createSqliteDriver(storage);
+    const source = new CancellationSource();
+    await throwsWith(
+      driver.transaction(async (conn) => {
+        await conn.execute('INSERT INTO t VALUES (?)', [1]);
+        source.cancel();
+        assertDeepEqual(
+          channels(calls),
+          ['begin', 'execute', 'cancel'],
+          'subscription flags the tx before the next statement',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await conn.execute('INSERT INTO t VALUES (?)', [2]);
+        return 'never';
+      }, source.signal),
+      CANCELLED,
+      'cancel while stalled',
+    );
+    assertDeepEqual(channels(calls), [
+      'begin',
+      'execute',
+      'cancel',
+      'rollback',
+    ]);
+  }
+
   // cancellation observed after work skips commit and rolls back
   {
     const { calls, storage } = fakeStorage();

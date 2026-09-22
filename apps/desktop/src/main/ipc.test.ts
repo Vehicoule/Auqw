@@ -47,8 +47,18 @@ class FakeSender implements NetSender {
     list.push(listener);
     this.listeners.set(event, list);
   }
+  off(
+    event: 'destroyed' | 'render-process-gone' | 'did-navigate',
+    listener: () => void,
+  ): void {
+    const list = this.listeners.get(event) ?? [];
+    const index = list.indexOf(listener);
+    if (index >= 0) {
+      list.splice(index, 1);
+    }
+  }
   emit(event: 'destroyed' | 'render-process-gone' | 'did-navigate'): void {
-    for (const listener of this.listeners.get(event) ?? []) {
+    for (const listener of [...(this.listeners.get(event) ?? [])]) {
       listener();
     }
   }
@@ -82,6 +92,7 @@ export async function run(): Promise<void> {
     const net = createNetService({ readOnline: () => online, pollMs: 5 });
     const utilityCalls: Array<{ channel: string; args: unknown }> = [];
     let txSeq = 0;
+    let beginGate: Promise<void> | null = null;
     const deps: ChannelDeps = {
       meta: () => ({
         version: '0.1.0',
@@ -95,11 +106,13 @@ export async function run(): Promise<void> {
       utility: {
         request: (channel, args) => {
           utilityCalls.push({ channel, args });
-          return Promise.resolve(
-            channel === CHANNELS.storageBegin
-              ? { txId: `tx-${++txSeq}` }
-              : { routed: channel, args },
-          );
+          if (channel === CHANNELS.storageBegin) {
+            const open = () => ({ txId: `tx-${++txSeq}` });
+            return beginGate === null
+              ? Promise.resolve(open())
+              : beginGate.then(open);
+          }
+          return Promise.resolve({ routed: channel, args });
         },
       },
     };
@@ -281,6 +294,39 @@ export async function run(): Promise<void> {
       undefined,
     );
     assert(plainBegin !== undefined && plainBegin.ok);
+
+    // a begin that resolves only after its renderer navigated rolls
+    // back its tx instead of tracking a dead owner
+    utilityCalls.length = 0;
+    let releaseBegin: () => void = () => undefined;
+    beginGate = new Promise((resolve) => {
+      releaseBegin = resolve;
+    });
+    const pendingBegin = invoke(CHANNELS.storageBegin, undefined);
+    sender.emit('did-navigate');
+    releaseBegin();
+    const lateBegin = await pendingBegin;
+    assert(lateBegin.ok);
+    assertDeepEqual(lateBegin.result, { txId: 'tx-6' });
+    await sleep(0);
+    assertDeepEqual(utilityCalls, [
+      { channel: 'storage:begin', args: undefined },
+      { channel: 'storage:rollback', args: { txId: 'tx-6' } },
+    ]);
+
+    // navigation does not poison the sender's next generation — a
+    // post-navigation begin tracks normally and releases on destroy
+    utilityCalls.length = 0;
+    const fresh = await invoke(CHANNELS.storageBegin, undefined);
+    assert(fresh.ok);
+    assertDeepEqual(fresh.result, { txId: 'tx-7' });
+    sender.emit('destroyed');
+    await sleep(0);
+    assertDeepEqual(utilityCalls, [
+      { channel: 'storage:begin', args: undefined },
+      { channel: 'storage:rollback', args: { txId: 'tx-7' } },
+    ]);
+    beginGate = null;
 
     // every handler rejection still produces a well-formed envelope
     const depsThrow: ChannelDeps = {
