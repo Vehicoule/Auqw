@@ -236,6 +236,15 @@ pub enum HostError {
         /// The missing plugin id.
         id: String,
     },
+    /// The caller-minted request id is still owned by a live
+    /// invocation or an unreleased prepared session — ids must be
+    /// unique while live or they corrupt cancellation and
+    /// prepared-session ownership.
+    #[error("request id {id} still in flight")]
+    RequestInFlight {
+        /// The colliding request id.
+        id: String,
+    },
     /// Internal runtime failure.
     #[error("runtime: {detail}")]
     Runtime {
@@ -264,50 +273,64 @@ struct PreparedSlot {
     delivered: bool,
 }
 
-/// Counts deliveries inside their insert→wire→flip window so a
-/// `cancel` that finds a not-yet-delivered slot can wait for it
-/// instead of releasing a handle the listener hasn't seen yet.
+/// Counts deliveries inside their insert→wire→flip window per
+/// request id, so a `cancel` that finds a not-yet-delivered slot waits
+/// only for its own request's delivery instead of every in-flight one
+/// — an unrelated slow binding callback can't delay it.
 /// `PreparedSlot { delivered: false }` always implies `in_flight > 0`
 /// for that request's own delivery — the increment precedes the
 /// insert — so `await_idle` lands strictly past the flip.
 #[derive(Default)]
 struct PrepareDelivery {
-    in_flight: Mutex<u64>,
+    in_flight: Mutex<HashMap<String, u64>>,
     done: Condvar,
 }
 
 impl PrepareDelivery {
-    /// Enter the delivery window. The returned ticket decrements the
-    /// count on drop, so a panic mid-callback can't strand waiters.
-    fn track(&self) -> PrepareDeliveryTicket<'_> {
-        if let Ok(mut n) = self.in_flight.lock() {
-            *n += 1;
+    /// Enter the delivery window for `request_id`. The returned
+    /// ticket decrements the count on drop, so a panic mid-callback
+    /// can't strand waiters.
+    fn track(&self, request_id: String) -> PrepareDeliveryTicket<'_> {
+        if let Ok(mut m) = self.in_flight.lock() {
+            *m.entry(request_id.clone()).or_insert(0) += 1;
         }
-        PrepareDeliveryTicket(self)
+        PrepareDeliveryTicket {
+            delivery: self,
+            request_id,
+        }
     }
 
-    /// Block until no delivery is inside its window. Poisoned locks
-    /// degrade to "no wait" — a lost wakeup must not wedge `cancel`.
-    fn await_idle(&self) {
-        let Ok(mut n) = self.in_flight.lock() else {
+    /// Block until `request_id` has no delivery inside its window.
+    /// Poisoned locks degrade to "no wait" — a lost wakeup must not
+    /// wedge `cancel`.
+    fn await_idle(&self, request_id: &str) {
+        let Ok(mut m) = self.in_flight.lock() else {
             return;
         };
-        while *n > 0 {
-            match self.done.wait(n) {
-                Ok(guard) => n = guard,
+        while m.get(request_id).copied().unwrap_or(0) > 0 {
+            match self.done.wait(m) {
+                Ok(guard) => m = guard,
                 Err(_) => return,
             }
         }
     }
 }
 
-struct PrepareDeliveryTicket<'a>(&'a PrepareDelivery);
+struct PrepareDeliveryTicket<'a> {
+    delivery: &'a PrepareDelivery,
+    request_id: String,
+}
 
 impl Drop for PrepareDeliveryTicket<'_> {
     fn drop(&mut self) {
-        if let Ok(mut n) = self.0.in_flight.lock() {
-            *n = n.saturating_sub(1);
-            self.0.done.notify_all();
+        if let Ok(mut m) = self.delivery.in_flight.lock() {
+            if let Some(n) = m.get_mut(&self.request_id) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.request_id);
+                }
+            }
+            self.delivery.done.notify_all();
         }
     }
 }
@@ -643,7 +666,7 @@ impl PluginHost {
             // — released below the same way, since nothing saw it).
             // The map lock is dropped for the wait: the flip needs it.
             drop(m);
-            self.prepared_delivery.await_idle();
+            self.prepared_delivery.await_idle(&request_id);
             match self.prepared_handles.lock() {
                 Ok(again) => m = again,
                 Err(_) => return,
@@ -756,7 +779,24 @@ impl PluginHost {
             payload
         };
         let token = CancellationToken::new();
-        lock(&self.cancels)?.insert(request_id.clone(), token.clone());
+        // Caller-minted ids must be unique while live: a duplicate
+        // would replace the first invocation's token (and, for
+        // prepare, steal the earlier session's ownership slot) —
+        // reject rather than corrupt. The `prepared_handles` check
+        // runs before admission, never nested under `cancels`:
+        // `prepared_handles` is only populated by a request whose
+        // `cancels` entry still exists or has just been delivered, so
+        // the atomic contains+insert below closes the race.
+        if lock(&self.prepared_handles)?.contains_key(&request_id) {
+            return Err(HostError::RequestInFlight { id: request_id });
+        }
+        {
+            let mut m = lock(&self.cancels)?;
+            if m.contains_key(&request_id) {
+                return Err(HostError::RequestInFlight { id: request_id });
+            }
+            m.insert(request_id.clone(), token.clone());
+        }
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -852,6 +892,56 @@ pub use stream::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
+
+    const SPIN_WASM: &[u8] = include_bytes!("../../../sdk/conformance/spin/spin.wasm");
+
+    fn manifest_json(id: &str, wasm: &[u8], permissions: &str) -> String {
+        let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
+        format!(
+            "{{\"id\":\"{id}\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
+             \"capabilities\":[\"playback.resolve\"],\"permissions\":{permissions},\
+             \"artifact\":{{\"path\":\"{id}.wasm\",\"digest\":\"{digest}\"}}}}"
+        )
+    }
+
+    fn config() -> HostConfig {
+        HostConfig {
+            fuel_per_entry: 200_000_000,
+            fuel_total: 2_000_000_000,
+            pot_provider_url: None,
+            state_path: None,
+            stream_path: None,
+            prefer: None,
+            auth_token: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_inflight_request_id_is_rejected() {
+        // Caller-minted ids must be unique while live: a duplicate
+        // would replace the first invocation's cancel token and steal
+        // any prepared-session ownership slot. The spin guest keeps
+        // the first request in flight so the check is deterministic.
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let deliver = |_: String, _: ResolveOutcome| async move {};
+        match host.start_resolve(id.clone(), "x".into(), "dup".into(), deliver) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        match host.start_resolve(id, "x".into(), "dup".into(), deliver) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+    }
 
     #[test]
     fn prefer_config_is_normalized_to_the_contract() {

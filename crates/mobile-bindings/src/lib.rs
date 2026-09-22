@@ -278,6 +278,14 @@ pub enum HostError {
         /// The missing plugin id.
         id: String,
     },
+    /// The caller-minted request id is still owned by a live
+    /// invocation or an unreleased prepared session — ids must be
+    /// unique while live.
+    #[error("request id {id} still in flight")]
+    RequestInFlight {
+        /// The colliding request id.
+        id: String,
+    },
     /// Internal runtime failure.
     #[error("runtime: {detail}")]
     Runtime {
@@ -291,6 +299,7 @@ impl From<surface::HostError> for HostError {
         match e {
             surface::HostError::Load { detail } => Self::Load { detail },
             surface::HostError::UnknownPlugin { id } => Self::UnknownPlugin { id },
+            surface::HostError::RequestInFlight { id } => Self::RequestInFlight { id },
             surface::HostError::Runtime { detail } => Self::Runtime { detail },
         }
     }

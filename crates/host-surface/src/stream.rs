@@ -459,10 +459,10 @@ impl PluginHost {
                             abandoned = Some(prepared.handle.clone());
                         } else {
                             // `track` precedes `insert`: a `Pending`
-                            // slot always implies an in-flight count,
-                            // so a `cancel` that sees one waits for
-                            // this window to close.
-                            delivery_ticket = Some(prepared_delivery.track());
+                            // slot always implies an in-flight count
+                            // for this request, so a `cancel` that
+                            // sees one waits for this window to close.
+                            delivery_ticket = Some(prepared_delivery.track(request_id.clone()));
                             m.insert(
                                 request_id.clone(),
                                 PreparedSlot {
