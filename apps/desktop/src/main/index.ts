@@ -54,7 +54,15 @@ async function main(): Promise<void> {
     readOnline: () => net.isOnline(),
   });
   const supervisor = createSupervisor({
-    fork: () => utilityProcess.fork(UTILITY),
+    // The database lives in the utility child; its path is fork env
+    // because the child owns no app.getPath('userData').
+    fork: () =>
+      utilityProcess.fork(UTILITY, [], {
+        env: {
+          ...process.env,
+          AUQW_DB_PATH: join(userDataPath, 'auqw.db'),
+        },
+      }),
   });
 
   registerChannels(ipcMain, {
