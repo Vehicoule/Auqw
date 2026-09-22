@@ -90,7 +90,12 @@ function fakeStream(overrides: Partial<StreamClient> = {}): StreamClient & {
       return Promise.resolve(undefined);
     },
     marks: () =>
-      Promise.resolve({ resolveMs: 5, mintMs: 8, attachMs: 20 }),
+      Promise.resolve({
+        prepareStartedMs: 1000,
+        resolveMs: 5,
+        mintMs: 8,
+        attachMs: 1020,
+      }),
     cancel: (args) => {
       record('cancel')(args);
       return Promise.resolve(undefined);
@@ -271,6 +276,15 @@ export async function run(): Promise<void> {
         (e) => e.type === 'phase' && e.name === 'mint' && e.sinceStartMs === 8,
       ),
       'phase marks emit as phase events',
+    );
+    // Epoch marks convert through prepareStartedMs — never surface raw
+    // epoch millis as a duration.
+    assert(
+      phases.some(
+        (e) =>
+          e.type === 'phase' && e.name === 'attach' && e.sinceStartMs === 20,
+      ),
+      'epoch marks emit as since-start durations',
     );
     // pause/seek/stop honour the active identity.
     assert((await player.pause(identity)).ok, 'pause resolves');
@@ -565,6 +579,46 @@ export async function run(): Promise<void> {
       audio.src,
       'http://127.0.0.1:9/s/h-b',
       'stale play cannot clobber the live element',
+    );
+  }
+
+  // A pause while play still awaits its serve URL must win — the late
+  // completion must not start audio after pause already succeeded.
+  {
+    const audio = fakeAudio();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const pendingA = player.play({ handle: 'h-a', identity });
+    const paused = await player.pause(identity);
+    assertEqual(paused.ok, true, 'pause succeeds while play is pending');
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(audio.src, '', 'late play cannot attach after pause');
+    assertEqual(audio.paused, true, 'element stays paused');
+    // A mismatched identity's pause does not invalidate the pending
+    // play — the same contract `stale` applies to a live attempt.
+    const identity2 = { ...identity, attemptId: 'other' };
+    const pendingB = player.play({ handle: 'h-b', identity });
+    await player.pause(identity2);
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingB;
+    await settle();
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-b',
+      'stale-identity pause leaves the pending play alone',
     );
   }
 

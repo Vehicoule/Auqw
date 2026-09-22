@@ -336,17 +336,38 @@ export async function run(): Promise<void> {
       { channel: 'storage:rollback', args: { txId: 'tx-6' } },
     ]);
 
-    // navigation does not poison the sender's next generation — a
-    // post-navigation begin tracks normally and releases on destroy
+    // a FIRST-ever pending begin has no earlier tx to have installed
+    // lifecycle listeners — its renderer dying mid-await must still
+    // roll the late tx back or the storage slot is held forever
     utilityCalls.length = 0;
-    const fresh = await invoke(CHANNELS.storageBegin, undefined);
-    assert(fresh.ok);
-    assertDeepEqual(fresh.result, { txId: 'tx-7' });
-    sender.emit('destroyed');
+    const firstSender = new FakeSender();
+    const firstPending = ipc.handlers.get(CHANNELS.storageBegin)?.(
+      { sender: firstSender },
+      undefined,
+    );
+    firstSender.emit('destroyed');
+    releaseBegin();
+    const firstLate = await firstPending;
+    assert(firstLate !== undefined && firstLate.ok);
+    assertDeepEqual(firstLate.result, { txId: 'tx-7' });
     await sleep(0);
     assertDeepEqual(utilityCalls, [
       { channel: 'storage:begin', args: undefined },
       { channel: 'storage:rollback', args: { txId: 'tx-7' } },
+    ]);
+    beginGate = null;
+    utilityCalls.length = 0;
+
+    // navigation does not poison the sender's next generation — a
+    // post-navigation begin tracks normally and releases on destroy
+    const fresh = await invoke(CHANNELS.storageBegin, undefined);
+    assert(fresh.ok);
+    assertDeepEqual(fresh.result, { txId: 'tx-8' });
+    sender.emit('destroyed');
+    await sleep(0);
+    assertDeepEqual(utilityCalls, [
+      { channel: 'storage:begin', args: undefined },
+      { channel: 'storage:rollback', args: { txId: 'tx-8' } },
     ]);
     beginGate = null;
 

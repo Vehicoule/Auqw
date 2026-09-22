@@ -213,11 +213,15 @@ export function createWebPlayerPort(deps: {
   /** Monotonic op generation — a superseded async completion (play,
    * cursor attach) must never touch `current` or the element. */
   let opGen = 0;
-  /** In-flight `play` op generations keyed by handle — the newest
-   * writer wins, each play removes only its own token. A `release`
-   * of a tracked handle invalidates that op (bumps opGen) so its
-   * late serveUrl completion can't start a host-dropped stream. */
-  const pendingPlayGens = new Map<string, number>();
+  /** In-flight `play` ops keyed by handle — the newest writer wins,
+   * each play removes only its own token. A `release` of a tracked
+   * handle or a matching `pause` invalidates that op (bumps opGen) so
+   * its late serveUrl completion can't start a host-dropped stream or
+   * resume audio past a successful pause. */
+  const pendingPlayGens = new Map<
+    string,
+    { gen: number; identity: PlaybackIdentity }
+  >();
 
   const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
@@ -448,24 +452,39 @@ export function createWebPlayerPort(deps: {
         if (current === null || current.handle !== handle) {
           return;
         }
-        const phases: ReadonlyArray<readonly [string, number | undefined]> = [
-          ['resolve', marks.resolveMs],
-          ['mint', marks.mintMs],
-          ['first-byte', marks.firstByteMs],
-          ['head-ready', marks.headReadyMs],
-          ['attach', marks.attachMs],
+        // `resolveMs`/`mintMs` are durations already; the later marks
+        // are wall-clock epochs — convert through `prepareStartedMs`,
+        // skipping any the conversion cannot anchor.
+        const started = marks.prepareStartedMs;
+        const phases: ReadonlyArray<
+          readonly [string, number | undefined, boolean]
+        > = [
+          ['resolve', marks.resolveMs, false],
+          ['mint', marks.mintMs, false],
+          ['first-byte', marks.firstByteMs, true],
+          ['head-ready', marks.headReadyMs, true],
+          ['attach', marks.attachMs, true],
         ];
-        for (const [name, sinceStartMs] of phases) {
-          if (sinceStartMs !== undefined) {
-            emit({
-              type: 'phase',
-              handle,
-              identity,
-              name,
-              atMs: now(),
-              sinceStartMs,
-            });
+        for (const [name, value, epoch] of phases) {
+          if (value === undefined) {
+            continue;
           }
+          const sinceStartMs = epoch
+            ? started === undefined
+              ? undefined
+              : Math.max(0, value - started)
+            : value;
+          if (sinceStartMs === undefined) {
+            continue;
+          }
+          emit({
+            type: 'phase',
+            handle,
+            identity,
+            name,
+            atMs: epoch ? value : now(),
+            sinceStartMs,
+          });
         }
       })
       .catch(() => undefined);
@@ -594,7 +613,7 @@ export function createWebPlayerPort(deps: {
 
     async play(input) {
       const gen = ++opGen;
-      pendingPlayGens.set(input.handle, gen);
+      pendingPlayGens.set(input.handle, { gen, identity: input.identity });
       return guard(async () => {
         try {
           const { url } = await stream.serveUrl({ handle: input.handle });
@@ -622,7 +641,7 @@ export function createWebPlayerPort(deps: {
         } finally {
           // Only this op's own token is removed — a superseded play
           // must not clear the marker of the play that replaced it.
-          if (pendingPlayGens.get(input.handle) === gen) {
+          if (pendingPlayGens.get(input.handle)?.gen === gen) {
             pendingPlayGens.delete(input.handle);
           }
         }
@@ -633,6 +652,16 @@ export function createWebPlayerPort(deps: {
       const bad = stale(identity);
       if (bad !== null) {
         return bad;
+      }
+      // A play still awaiting its serve URL has not attached `current`
+      // yet — without invalidating it, the late completion would start
+      // audio after this pause already succeeded. `stale` can't see it,
+      // so match it by the same identity contract a live attempt uses.
+      for (const [handle, pending] of [...pendingPlayGens]) {
+        if (identityEq(identity, pending.identity)) {
+          pendingPlayGens.delete(handle);
+          opGen++;
+        }
       }
       audio.pause();
       if (deps.mediaSession !== null && deps.mediaSession !== undefined) {

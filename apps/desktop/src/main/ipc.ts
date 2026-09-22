@@ -387,6 +387,13 @@ export function registerChannels(
         );
       }
       try {
+        if (name === CHANNELS.storageBegin) {
+          // Lifecycle listeners must exist BEFORE the begin awaits —
+          // `trackTx` only installs them after a tx lands, so a sender
+          // destroyed during its first pending begin would otherwise
+          // escape the generation check and strand the tx slot.
+          watch(event.sender);
+        }
         const generation =
           name === CHANNELS.storageBegin
             ? (generations.get(event.sender) ?? 0)
