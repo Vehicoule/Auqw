@@ -61,7 +61,7 @@ async function main(): Promise<void> {
           AUQW_USER_DATA: userDataPath,
           // Dev checkouts resolve the bindings artifact + plugin dir
           // from the repo; packaged runs use process.resourcesPath.
-          ...(app.isPackaged ? {} : { AUQW_REPO_ROOT: join(here, '../../..') }),
+          ...(app.isPackaged ? {} : { AUQW_REPO_ROOT: join(here, '../../../..') }),
         },
       }),
   });
