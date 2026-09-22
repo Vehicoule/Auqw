@@ -809,8 +809,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           // The engine returns `unknown` — the wire carries only the
           // strict JSON domain, and JSON.stringify silently rewrites
           // anything outside it (undefined drops, NaN→null, sparse
-          // slots→null). A doc that would arrive different from what
-          // the engine produced is a typed error, never a mutation.
+          // slots→null). The live check rejects those inputs outright.
           if (!isSyncDeltaDoc(exported.value)) {
             sendSealed(session, {
               t: 'error',
@@ -818,8 +817,25 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             });
             return;
           }
+          // Then serialize once and validate the REPARSED document —
+          // a plain graph is what the wire actually carries, so an
+          // exotic survivor (a proxy whose descriptors lied) can only
+          // ever ship the self-consistent form validation approved.
+          let reparsed: unknown = null;
+          try {
+            reparsed = JSON.parse(JSON.stringify(exported.value));
+          } catch {
+            reparsed = null;
+          }
+          if (reparsed === null || !isSyncDeltaDoc(reparsed)) {
+            sendSealed(session, {
+              t: 'error',
+              code: 'invalid-response',
+            });
+            return;
+          }
           lastSyncAt = nowMs();
-          sendSealed(session, { t: 'delta', delta: exported.value });
+          sendSealed(session, { t: 'delta', delta: reparsed });
         } catch {
           sendSealed(session, { t: 'error', code: 'internal' });
         }

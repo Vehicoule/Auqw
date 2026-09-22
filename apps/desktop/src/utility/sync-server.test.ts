@@ -668,6 +668,83 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A doc that mutates between reads is refused too ——
+  {
+    const { service, port } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          let reads = 0;
+          const doc: Record<string, unknown> = {};
+          Object.defineProperty(doc, 'puts', {
+            enumerable: true,
+            get: () => {
+              reads += 1;
+              return reads === 1
+                ? [{ id: 'a', v: 1 }]
+                : [{ id: 'b', v: 1 }];
+            },
+          });
+          return Promise.resolve(ok(doc));
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(null));
+        },
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-00017',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.send(sealJson(codec, { t: 'sync', since: 's1' }));
+      assertDeepEqual(await openJson(codec, await client.recv()), {
+        t: 'error',
+        code: 'invalid-response',
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— An exotic wrapper ships only its canonical wire form ——
+  {
+    const { service, port } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(
+            ok(new Proxy({ puts: [{ id: 'a', v: 1 }] }, {})),
+          );
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(null));
+        },
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-00018',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.send(sealJson(codec, { t: 'sync', since: 's1' }));
+      // What ships is the reparsed plain graph — validation approved
+      // exactly the document the peer receives.
+      assertDeepEqual(await openJson(codec, await client.recv()), {
+        t: 'delta',
+        delta: { puts: [{ id: 'a', v: 1 }] },
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Corrupt custody identity regenerates instead of bricking ——
   {
     const keys = createMemoryKeys();
