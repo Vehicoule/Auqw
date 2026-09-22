@@ -1659,6 +1659,33 @@ async function recordIdsAreInjective(): Promise<void> {
     },
   });
   assert(typeof m === 'string' && m.length > 0);
+  // Worst-case components stay inside the wire's record-id bound.
+  const worst = mappingRecordId('r'.repeat(64), {
+    ref: {
+      provider: 'p'.repeat(64),
+      kind: 'track',
+      id: '"'.repeat(512),
+    },
+    status: 'user-confirmed',
+    matchedAtMs: Number.MAX_SAFE_INTEGER,
+    evidence: {
+      titleSimilarity: 0.9,
+      artistSimilarity: 0.9,
+      durationDeltaMs: 100,
+      exactIsrc: false,
+      score: 85,
+      versionLabels: [],
+    },
+  });
+  assert(
+    worst.length <= 1024,
+    `worst-case mappingRecordId ${worst.length} exceeds MAX_RECORD_ID`,
+  );
+  assert(sourceRefRecordId('r'.repeat(64), {
+    provider: 'p'.repeat(64),
+    kind: 'track',
+    id: '"'.repeat(512),
+  }).length <= 1024);
 }
 
 async function exportedEntriesFrozen(): Promise<void> {

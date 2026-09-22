@@ -136,35 +136,46 @@ const KEY_SEP = '\u001f';
  * (recordingId, provider, kind, id), mapping claims by
  * (recordingId, ref, status, matchedAtMs) — matching the identity
  * `corrections` uses when undo removes a claim.
+ *
+ * Ids are length-prefixed concatenations: `len:component` is
+ * unambiguous to parse, so the encoding is injective — separator or
+ * quote bytes inside component data can never alias two distinct
+ * claims onto one sync record. Unlike JSON it adds ~3 chars per
+ * component, keeping worst-case ids inside MAX_RECORD_ID.
  */
-// Record ids are JSON-encoded tuples: JSON escaping makes the encoding
-// injective — a KEY_SEP inside component data can never alias two
-// distinct claims onto one sync record (a raw-separator join could).
+function encodeRecordId(parts: readonly string[]): string {
+  let out = '';
+  for (const part of parts) {
+    out += `${part.length}:${part}`;
+  }
+  return out;
+}
+
 export function likeRecordId(
   entityKind: LikeEntityKind,
   targetId: string,
 ): string {
-  return JSON.stringify([entityKind, targetId]);
+  return encodeRecordId([entityKind, targetId]);
 }
 
 export function sourceRefRecordId(
   recordingId: string,
   ref: SourceRef,
 ): string {
-  return JSON.stringify([recordingId, ref.provider, ref.kind, ref.id]);
+  return encodeRecordId([recordingId, ref.provider, ref.kind, ref.id]);
 }
 
 export function mappingRecordId(
   recordingId: string,
   mapping: SourceMapping,
 ): string {
-  return JSON.stringify([
+  return encodeRecordId([
     recordingId,
     mapping.ref.provider,
     mapping.ref.kind,
     mapping.ref.id,
     mapping.status,
-    mapping.matchedAtMs,
+    String(mapping.matchedAtMs),
   ]);
 }
 
@@ -172,7 +183,7 @@ export function entitySourceRefRecordId(
   entityId: string,
   provider: string,
 ): string {
-  return JSON.stringify([entityId, provider]);
+  return encodeRecordId([entityId, provider]);
 }
 
 // ---- wire types -----------------------------------------------------------
