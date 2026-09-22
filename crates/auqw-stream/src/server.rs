@@ -917,6 +917,7 @@ mod tests {
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 1024;
         cfg.read_ahead = 2048;
+        let scripted = !steps.is_empty();
         let reg = Arc::new(
             StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
                 .unwrap_or_else(|e| panic!("registry: {e}")),
@@ -931,7 +932,36 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        if scripted {
+            head_ready(&reg, &info.handle);
+        }
         (server, reg, url, info.handle, dir)
+    }
+
+    /// Wait for the head fill to commit — the pump races the first
+    /// conn's attach: a demand or attached fill landing before the
+    /// head replies are spent pops a scripted `206` at the wrong
+    /// offset and the session dies `InvalidResponse` (`502`), while
+    /// the same request arriving after the head commits sees only
+    /// post-head script steps. `head_ready_ms` is stamped by the
+    /// commit that closes the head window.
+    fn head_ready(reg: &StreamRegistry, handle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if reg
+                .phase_marks(handle)
+                .unwrap_or_else(|e| panic!("marks: {e}"))
+                .head_ready_ms
+                .is_some()
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "head fill never covered head_bytes"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// The default script: the head fill fetches `chunk_bytes`-sized
@@ -1161,10 +1191,12 @@ mod tests {
         let info = reg
             .prepare(source(), Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "HEAD", &[("Range", "bytes=64-127")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 64-127/1024"));
@@ -1193,10 +1225,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[("Range", "bytes=500-")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 500-511/512"));
@@ -1270,6 +1304,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("serve: {e}"));
         // Conn B opens a range past the cached head and parks on the
         // hung fetch; conn A completes on cached bytes and ends.
+        head_ready(&reg, &info.handle);
         let (tx, rx) = std::sync::mpsc::channel();
         let b_url = url.clone();
         let b = thread::spawn(move || {
@@ -1322,7 +1357,11 @@ mod tests {
         let dir = TestDir::new("srv-suffix");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        cfg.read_ahead = 128;
+        // No speculative fill once attached — a fill at the stale
+        // `read_pos` could fire between the probe read and the
+        // re-anchor attach and pop the next scripted reply at the
+        // wrong offset. Demand reads alone drive the script order.
+        cfg.read_ahead = 0;
         let reg = Arc::new(
             StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
                 .unwrap_or_else(|e| panic!("registry: {e}")),
@@ -1332,10 +1371,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[("Range", "bytes=-64")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 1984-2047/2048"));
@@ -1370,7 +1411,10 @@ mod tests {
         let dir = TestDir::new("srv-boundary");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        cfg.read_ahead = 128;
+        // Same determinism rule as the suffix re-anchor: attached
+        // speculative fill stays parked so demand reads alone pop the
+        // scripted replies in order.
+        cfg.read_ahead = 0;
         let reg = Arc::new(
             StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
                 .unwrap_or_else(|e| panic!("registry: {e}")),
@@ -1380,10 +1424,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 1500-2047/2048"));
@@ -1440,10 +1486,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.body.len(), 1024, "full body must arrive before FIN");
@@ -1491,10 +1539,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
         assert_eq!(r.status, 416);
         assert_eq!(r.header("content-range"), Some("bytes */2048"));
@@ -1548,10 +1598,12 @@ mod tests {
         let info = reg
             .prepare(source(), Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[("Range", "bytes=128-255")]);
         assert_eq!(r.status, 503);
     }
