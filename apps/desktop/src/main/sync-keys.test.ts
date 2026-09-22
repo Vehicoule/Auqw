@@ -5,7 +5,10 @@ import { assert, assertEqual } from '@auqw/application/testing';
 import { isShellError } from '../shared/errors.ts';
 import { createSecureStore, type SafeStorageLike } from './secure-store.ts';
 import { createSyncKeysHandler } from './sync-keys.ts';
-import { generateIdentity } from '../utility/sync-crypto.ts';
+import {
+  fingerprintOf,
+  generateIdentity,
+} from '../utility/sync-crypto.ts';
 import type { SyncDeviceRecord } from '../utility/sync-keys.ts';
 
 const WORKING: SafeStorageLike = {
@@ -25,8 +28,20 @@ const UNAVAILABLE: SafeStorageLike = {
   isEncryptionAvailable: () => false,
 };
 
-function device(id: string, fp: string, name = 'phone'): SyncDeviceRecord {
-  return { id, name, pub: `pub-${id}`, fp, pairedAt: 1, lastSeenAt: 1 };
+function device(
+  id: string,
+  opts: { pub?: string; fp?: string; name?: string } = {},
+): SyncDeviceRecord {
+  // fp is bound to pub by the validator — fixtures need real keys.
+  const pub = opts.pub ?? generateIdentity().pub;
+  return {
+    id,
+    name: opts.name ?? 'phone',
+    pub,
+    fp: opts.fp ?? fingerprintOf(pub),
+    pairedAt: 1,
+    lastSeenAt: 1,
+  };
 }
 
 async function assertThrowsKind(
@@ -79,7 +94,7 @@ export async function run(): Promise<void> {
     );
 
     // devices: put → list → delete; record content rides the op.
-    const d1 = device('dev-aaaa0001', 'a'.repeat(64));
+    const d1 = device('dev-aaaa0001');
     await handler({ op: 'device-put', record: d1 });
     const listed = (await handler({ op: 'device-list' })) as {
       devices: SyncDeviceRecord[];
@@ -104,9 +119,15 @@ export async function run(): Promise<void> {
     assertEqual(afterDelete.devices.length, 0, 'delete removes the record');
 
     // A re-pair of the same key under a new id evicts the stale id.
-    const fp = 'f'.repeat(64);
-    await handler({ op: 'device-put', record: device('dev-old00001', fp) });
-    await handler({ op: 'device-put', record: device('dev-new00001', fp) });
+    const sharedPub = generateIdentity().pub;
+    await handler({
+      op: 'device-put',
+      record: device('dev-old00001', { pub: sharedPub }),
+    });
+    await handler({
+      op: 'device-put',
+      record: device('dev-new00001', { pub: sharedPub }),
+    });
     const deduped = (await handler({ op: 'device-list' })) as {
       devices: SyncDeviceRecord[];
     };
@@ -126,20 +147,17 @@ export async function run(): Promise<void> {
     for (let i = 0; i < 63; i += 1) {
       await handler({
         op: 'device-put',
-        record: device(
-          `dev-cap-${String(i).padStart(4, '0')}`,
-          `${i.toString(16).padStart(4, '0')}${'0'.repeat(60)}`,
-        ),
+        record: device(`dev-cap-${String(i).padStart(4, '0')}`),
       });
     }
     const raced = await Promise.allSettled([
       handler({
         op: 'device-put',
-        record: device('dev-race-a01', 'a'.repeat(64)),
+        record: device('dev-race-a01'),
       }),
       handler({
         op: 'device-put',
-        record: device('dev-race-b01', 'b'.repeat(64)),
+        record: device('dev-race-b01'),
       }),
     ]);
     const winners = raced.filter((r) => r.status === 'fulfilled');

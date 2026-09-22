@@ -819,6 +819,43 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Disabled + dead custody → still a stable 'disabled' answer ——
+  {
+    const keys = createMemoryKeys();
+    const deadCustody: SyncKeys = {
+      ...keys,
+      deviceList() {
+        return Promise.reject(
+          shellError('unavailable', 'safeStorage backend dead'),
+        );
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      disabled: true,
+      keys: deadCustody,
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assertEqual(status.listener, 'disabled');
+      const queried = await invokeHandler(
+        service,
+        'sync:status',
+        undefined,
+      );
+      assert(
+        queried.ok &&
+          isRecord(queried.value) &&
+          queried.value['listener'] === 'disabled',
+        'disabled status survives a dead custody backend',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Engine-absent: delta channels type 'unavailable' ——
   {
     const keys = createMemoryKeys();
@@ -1323,6 +1360,70 @@ export async function run(): Promise<void> {
       assertEqual(keys.records.size, 1, 'only the winner registers');
       a.client.close();
       b.client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A device that opens mid-trigger still gets the kick ——
+  {
+    const keys = createMemoryKeys();
+    let armNext = false;
+    let release: (() => void) | null = null;
+    const gated: SyncKeys = {
+      ...keys,
+      deviceList() {
+        if (!armNext) {
+          return keys.deviceList();
+        }
+        armNext = false;
+        return new Promise((resolve) => {
+          release = () => {
+            keys.deviceList().then(resolve);
+          };
+        });
+      },
+    };
+    const { service, port } = await startService({ keys: gated });
+    try {
+      const pairing = await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-midtrig1',
+        name: 'midtrigger',
+      });
+      const c1 = await dial(port);
+      const h1 = await phoneHandshake(c1, peer, pairing.fp);
+      c1.send(sealJson(h1.codec, { t: 'pair', code: pairing.code }));
+      await c1.recv();
+      c1.close();
+      // Hold the trigger's registry read; the phone resumes inside the
+      // window — its hello's own deviceList is ungated (arm consumed).
+      armNext = true;
+      const triggerP = invokeHandler(service, 'sync:trigger', undefined);
+      await new Promise((r) => setTimeout(r, 10));
+      const c2 = await dial(port);
+      const h2 = await phoneHandshake(c2, peer, pairing.fp);
+      c2.send(sealJson(h2.codec, { t: 'resume' }));
+      const welcome = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(welcome) && welcome['t'] === 'welcome',
+        'resume lands during the held trigger',
+      );
+      release!();
+      // The final live pass must see the just-opened session.
+      const kick = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(kick) && kick['t'] === 'sync-request',
+        `mid-trigger device gets the kick, got ${JSON.stringify(kick)}`,
+      );
+      const trig = await triggerP;
+      assert(
+        trig.ok &&
+          isRecord(trig.value) &&
+          trig.value['triggered'] === true,
+        'trigger reports the live kick',
+      );
+      c2.close();
     } finally {
       await service.close();
     }

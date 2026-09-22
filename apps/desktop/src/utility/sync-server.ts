@@ -389,7 +389,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       endpoint: endpoint(),
       boundPort,
       advertise: advertiseState,
-      pairedDevices: await deviceCount(),
+      // Disabled is a stable answer, not a custody question — an
+      // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
+      pairedDevices:
+        listener === 'disabled' ? 0 : await deviceCount(),
       sessions: [...sessions].filter((s) => s.phase === 'open').length,
       lastSyncAt,
       engine: deps.engine === undefined ? 'absent' : 'ready',
@@ -1050,17 +1053,18 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:trigger': async () => {
-      let sent = false;
-      const live = new Set<string>();
-      for (const session of sessions) {
-        if (session.phase === 'open' && session.deviceId !== null) {
-          live.add(session.deviceId);
-          sendSealed(session, { t: 'sync-request' });
-          sent = true;
-        }
-      }
+      // Mark offline devices pending FIRST, then do a final live pass
+      // that sends + clears: a device that opened during the registry
+      // await is caught by the pass and never left with a stale mark
+      // (the reverse order would snapshot `live` before the await).
       try {
         const { devices } = await deps.keys.deviceList();
+        const live = new Set<string>();
+        for (const session of sessions) {
+          if (session.phase === 'open' && session.deviceId !== null) {
+            live.add(session.deviceId);
+          }
+        }
         for (const device of devices) {
           if (!live.has(device.id)) {
             pendingSync.add(device.id);
@@ -1068,6 +1072,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         }
       } catch {
         // A dead custody channel doesn't block the live kick.
+      }
+      let sent = false;
+      for (const session of sessions) {
+        if (session.phase === 'open' && session.deviceId !== null) {
+          sendSealed(session, { t: 'sync-request' });
+          sent = true;
+          pendingSync.delete(session.deviceId);
+        }
       }
       return checked(isSyncTriggerResult, 'sync:trigger')({
         triggered: sent,

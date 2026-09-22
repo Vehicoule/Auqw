@@ -5,7 +5,11 @@ import {
   isSafeNonNegativeInt,
 } from '../shared/check.ts';
 import { shellError } from '../shared/errors.ts';
-import { isSyncIdentity, type SyncIdentity } from './sync-crypto.ts';
+import {
+  fingerprintOf,
+  isSyncIdentity,
+  type SyncIdentity,
+} from './sync-crypto.ts';
 
 /**
  * `sync:keys` — the utility→main custody channel. Electron's
@@ -56,6 +60,10 @@ export function isSyncDeviceRecord(
     isBoundedString(value['name'], 128) &&
     isBoundedString(value['pub'], 128) &&
     /^[0-9a-f]{64}$/.test(String(value['fp'])) &&
+    // The fingerprint must be the hash of THIS record's key — a
+    // custody record with an unrelated fp would misbind resume
+    // identity and fp-dedupe, so tampered rows fail validation.
+    fingerprintOf(String(value['pub'])) === value['fp'] &&
     isSafeNonNegativeInt(value['pairedAt']) &&
     isSafeNonNegativeInt(value['lastSeenAt'])
   );
