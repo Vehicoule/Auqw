@@ -63,6 +63,13 @@ export class MseUnsupported extends Error {
 export interface MseSource {
   readonly url: string;
   seekTo(positionMs: number): void;
+  /**
+   * Terminal failure after the attach resolved — pump or SourceBuffer
+   * death. The element keeps the (dead) blob URL with no error event of
+   * its own, so the player uses this to mark the attempt failed instead
+   * of buffering forever.
+   */
+  onFail(listener: (error: Error) => void): void;
   destroy(): void;
 }
 
@@ -190,6 +197,11 @@ function runSession(
   let resync = false;
   let lastAppended: PendingUnit | null = null;
   let resolved = false;
+  // Granted-but-undelivered bytes — the pump may still send this much
+  // under the current epoch, so it counts against the window or grants
+  // accumulate past the ceiling. The pump zeroes its credit on seek;
+  // the counter mirrors that (see `seek`).
+  let outstandingCredit = 0;
   /** Re-grant whatever head-room the byte window freed — consumed
    * ingest drops off the window at trimIngest, so a unit larger than
    * the initial grant still pulls bytes until it closes. */
@@ -201,11 +213,19 @@ function runSession(
     for (const unit of pending) {
       pendingBytes += unit.bytes.byteLength;
     }
-    const head = HIGH_WATER_BYTES - ingest.length - pendingBytes;
+    const head =
+      HIGH_WATER_BYTES -
+      ingest.length -
+      pendingBytes -
+      outstandingCredit;
     if (head > 0) {
+      outstandingCredit += head;
       port.send({ kind: 'grant', bytes: head });
     }
   }
+
+  const failListeners: Array<(error: Error) => void> = [];
+  let terminalError: Error | null = null;
 
   function fail(error: Error): void {
     if (!resolved) {
@@ -214,6 +234,10 @@ function runSession(
       return;
     }
     destroy();
+    terminalError = error;
+    for (const listener of failListeners) {
+      listener(error);
+    }
   }
 
   function destroy(): void {
@@ -356,7 +380,9 @@ function runSession(
   // removes must wait behind it. The queue drains one range at a time;
   // the final updateend hands back to `drain` for the queued retry.
   let evicting = false;
-  let evictedOnce = false;
+  // One eviction retry per appended unit — a later quota hit on a new
+  // unit is fresh pressure worth evicting for, not a retry loop.
+  let retriedUnit: PendingUnit | null = null;
   const evictQueue: Array<readonly [number, number]> = [];
 
   function startEviction(): void {
@@ -373,20 +399,26 @@ function runSession(
     for (let i = 0; i < ranges.length; i++) {
       const start = ranges.start(i);
       const end = ranges.end(i);
-      if (
-        end < anchorS - KEEP_BEHIND_S ||
-        start > anchorS + KEEP_AHEAD_S
-      ) {
-        evictQueue.push([start, end]);
-        journal = journal.filter(
-          (j) =>
-            !(
-              j.mediaStart === start * 1000 &&
-              j.mediaEnd === end * 1000
-            ),
-        );
+      // Clamp to the out-of-window part — adjacent appends surface as
+      // one merged range, and its stale prefix/suffix is evictable even
+      // while the range as a whole overlaps the keep window.
+      const behindEnd = Math.min(end, anchorS - KEEP_BEHIND_S);
+      if (behindEnd > start) {
+        evictQueue.push([start, behindEnd]);
+      }
+      const aheadStart = Math.max(start, anchorS + KEEP_AHEAD_S);
+      if (end > aheadStart) {
+        evictQueue.push([aheadStart, end]);
       }
     }
+    // Journal entries wholly inside an evicted span lose their media;
+    // straddling entries keep mapping the still-buffered coverage.
+    journal = journal.filter(
+      (j) =>
+        !evictQueue.some(
+          ([s, e]) => j.mediaStart >= s * 1000 && j.mediaEnd <= e * 1000,
+        ),
+    );
     evicting = true;
     removeNext();
   }
@@ -424,8 +456,8 @@ function runSession(
     try {
       buffer.appendBuffer(unit.bytes);
     } catch (thrown) {
-      if (isQuotaError(thrown) && !evictedOnce) {
-        evictedOnce = true;
+      if (isQuotaError(thrown) && retriedUnit !== unit) {
+        retriedUnit = unit;
         pending.unshift(unit);
         lastAppended = null;
         startEviction();
@@ -514,6 +546,15 @@ function runSession(
       resolve({
         url,
         seekTo: (ms) => seek(ms),
+        onFail: (listener) => {
+          // A failure that already landed fires immediately — the
+          // caller subscribes a microtask after resolve at the earliest.
+          if (terminalError !== null) {
+            listener(terminalError);
+            return;
+          }
+          failListeners.push(listener);
+        },
         destroy,
       });
     }
@@ -526,6 +567,11 @@ function runSession(
     if (frame.epoch !== epoch) {
       return; // stale-epoch chunk — pump re-anchored while in flight
     }
+    // Its credit is spent whether or not the bytes line up.
+    outstandingCredit = Math.max(
+      0,
+      outstandingCredit - frame.bytes.byteLength,
+    );
     const base = ingestBase + ingest.length;
     if (frame.position !== base) {
       return; // non-contiguous — dropped until the pump resyncs
@@ -583,6 +629,9 @@ function runSession(
     ingestBase = byte;
     emitCursor = byte;
     eof = false;
+    // The pump zeroes its credit on seek — granted-but-undelivered
+    // bytes under the old epoch are gone on both sides.
+    outstandingCredit = 0;
     port.send({ kind: 'seek', position: byte, epoch });
     maybeGrant();
   }

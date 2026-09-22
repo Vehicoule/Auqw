@@ -374,7 +374,13 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
     pendingStyp = box.type === 'styp' ? pos : -1;
     pos += box.size;
   }
-  return { kind: 'fragmented', boundaries };
+  // `ftyp`/`moov` alone prove nothing — only a moof (fragmented) or an
+  // mdat reached without one (non-fragmented, returned above) decides.
+  // Committing 'fragmented' early would lock a plain mp4 into MSE when
+  // its mdat simply hasn't arrived in the ingest buffer yet.
+  return sawMoof
+    ? { kind: 'fragmented', boundaries }
+    : { kind: 'need-more' };
 }
 
 // ---- the ingest carve -----------------------------------------------------

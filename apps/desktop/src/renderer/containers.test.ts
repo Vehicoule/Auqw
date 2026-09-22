@@ -186,6 +186,17 @@ export function run(): void {
   assertDeepEqual(carve(plainMp4Fixture()), { kind: 'unsupported' });
   assertDeepEqual(carve(new Uint8Array([0x1a])), { kind: 'need-more' });
 
+  // carve: an mp4 head that stops after ftyp/moov stays need-more —
+  // only a moof (fragmented) or a bare mdat (non-fragmented) decides,
+  // so a plain mp4 whose mdat hasn't arrived yet isn't locked into
+  // the fragmented path.
+  {
+    const headOnly = fmp4Fixture().subarray(0, 21); // ftyp + moov
+    assertDeepEqual(carve(headOnly), { kind: 'need-more' });
+    const throughMdat = plainMp4Fixture().subarray(0, 29); // + mdat header
+    assertDeepEqual(carve(throughMdat), { kind: 'unsupported' });
+  }
+
   // boundaryScan on a mid-stream head (the fixture's second cluster):
   // sibling walk sees the cluster, then the trailing Cues element.
   {

@@ -231,6 +231,24 @@ export function createWebPlayerPort(deps: {
   /** The live MSE attach, keyed by the handle it serves. */
   let activeMse: { handle: string; source: MseSource } | null = null;
 
+  function installMse(handle: string, source: MseSource | null): void {
+    activeMse = source === null ? null : { handle, source };
+    // Post-attach pump/SourceBuffer death — the element's own error
+    // event never fires for a dead MSE feed (a revoked object URL does
+    // not detach the element), so the session reports it here the same
+    // way the audio error path does.
+    source?.onFail((error) => {
+      // Liveness is `activeMse` itself — a successor op's dropMse
+      // already cleared us, and a play()-installed source has no
+      // `current` entry to compare against.
+      if (activeMse === null || activeMse.source !== source) {
+        return;
+      }
+      dropMse();
+      status('failed', appError('transient', error.message));
+    });
+  }
+
   function dropMse(handle?: string): void {
     if (
       activeMse !== null &&
@@ -491,10 +509,7 @@ export function createWebPlayerPort(deps: {
         void stream.release({ handle }).catch(() => undefined);
         return;
       }
-      activeMse =
-        settled.source === null
-          ? null
-          : { handle, source: settled.source };
+      installMse(handle, settled.source);
       // A mid-stream MSE refusal swaps the element onto the loopback leg.
       if (settled.url !== first.url) {
         audio.src = settled.url;
@@ -826,10 +841,7 @@ export function createWebPlayerPort(deps: {
             settled.source?.destroy();
             return;
           }
-          activeMse =
-            settled.source === null
-              ? null
-              : { handle: input.handle, source: settled.source };
+          installMse(input.handle, settled.source);
           // A mid-stream MSE refusal swaps the element onto the
           // loopback leg.
           if (settled.url !== first.url) {

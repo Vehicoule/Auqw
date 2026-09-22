@@ -1148,6 +1148,46 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A pump death AFTER the MSE source installed surfaces as a failed
+  // status — the element's own error event never fires for a dead MSE
+  // feed (a revoked blob URL does not detach the element).
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    media.fireSourceopen();
+    await settle();
+    await playing;
+    port.feed({
+      kind: 'error',
+      epoch: 0,
+      code: 'io-error',
+      message: 'read died',
+    });
+    await settle();
+    const failed = events.find(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(failed !== undefined, 'pump death emitted a failed status');
+    assert(port.closed, 'dead session closed its port');
+  }
+
   // release destroys the live MSE source — its pump port closes.
   {
     const audio = fakeAudio();

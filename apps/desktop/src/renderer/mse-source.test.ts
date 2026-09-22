@@ -87,9 +87,22 @@ class FakeSourceBuffer implements SourceBufferLike {
 
   remove(start: number, end: number): void {
     this.removes.push([start, end]);
-    this.buffered.list = this.buffered.list.filter(
-      ([s, e]) => !(s === start && e === end),
-    );
+    // Real SourceBuffers split on partial overlap — a remove of the
+    // middle of a merged range leaves the uncovered pieces buffered.
+    const next: Array<[number, number]> = [];
+    for (const [s, e] of this.buffered.list) {
+      if (e <= start || s >= end) {
+        next.push([s, e]);
+        continue;
+      }
+      if (s < start) {
+        next.push([s, start]);
+      }
+      if (e > end) {
+        next.push([end, e]);
+      }
+    }
+    this.buffered.list = next;
     queueMicrotask(() => {
       for (const l of this.listeners.get('updateend') ?? []) l();
     });
@@ -154,6 +167,14 @@ class FakePort implements StreamPortLike {
     return this.sent.filter(
       (m) => (m as { kind?: string }).kind === 'grant',
     ).length;
+  }
+  grantedBytes(): number {
+    return this.sent
+      .filter(
+        (m): m is { bytes: number } =>
+          (m as { kind?: string }).kind === 'grant',
+      )
+      .reduce((acc, m) => acc + m.bytes, 0);
   }
 }
 
@@ -283,8 +304,11 @@ export async function run(): Promise<void> {
     assert(port.closed, 'port closed on refusal');
   }
 
-  // Quota eviction: a QuotaExceededError evicts out-of-window ranges and
-  // the append retries once.
+  // Quota eviction: a QuotaExceededError evicts out-of-window media —
+  // clamped to the stale part of a MERGED range (adjacent appends
+  // surface as one TimeRange in Chromium) — then retries the append.
+  // A second quota hit on a different unit recovers again (retry state
+  // is per-append, not per-session).
   {
     const media = new FakeMediaSource();
     const port = new FakePort();
@@ -296,18 +320,38 @@ export async function run(): Promise<void> {
     });
     await settle();
     media.fireSourceopen();
+    // Enough appends that the journal anchor clears the keep-behind
+    // window (10s of media per append in this fake).
     feedData(port, webmFixture(), 0);
+    for (let i = 1; i < 8; i++) {
+      feedData(port, webmFixture(), i * 63);
+    }
     const source = await (await attach).ready;
+    await settle(); // the emitted queue finishes appending
     const sb = media.sourceBuffer;
     assert(sb !== null);
+    const anchorS = sb.appends.length * 10;
+    assert(anchorS > 120, 'anchor past the keep-behind window');
+    // Chromium merges adjacent buffered media into one range.
+    sb.buffered.list = [[0, anchorS]];
     sb.failNext = true;
-    // Feed a second stream's worth of bytes (contiguous after 63).
-    const more = webmFixture();
-    feedData(port, more, more.byteLength);
-    port.feed({ kind: 'eof', epoch: 0 });
+    feedData(port, webmFixture(), 8 * 63);
     await settle();
-    assert(sb.removes.length >= 0, 'eviction ran without throwing');
-    assert(sb.appends.length > 3, 'retry appended');
+    assertDeepEqual(
+      sb.removes,
+      [[0, anchorS - 120]],
+      'merged range evicted only its out-of-window prefix',
+    );
+    const afterFirst = sb.appends.length;
+    // Second quota hit on a NEW unit — must evict again, not fail.
+    sb.failNext = true;
+    feedData(port, webmFixture(), 9 * 63);
+    await settle();
+    assert(
+      sb.appends.length > afterFirst,
+      'second quota recovery kept appending',
+    );
+    assert(!port.closed, 'session survived a second quota recovery');
     void source;
   }
 
@@ -335,6 +379,64 @@ export async function run(): Promise<void> {
       'credit topped up while the open unit was incomplete',
     );
     void attach;
+  }
+
+  // Outstanding credit bounds the window: granted-but-undelivered
+  // bytes count against HIGH_WATER, so total grants can never exceed
+  // the window plus what the pump already delivered (otherwise every
+  // flush would re-send nearly the whole window — grants are additive
+  // on the pump side and memory would grow unbounded).
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4b0',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    feedData(port, webmFixture(), 63);
+    feedData(port, webmFixture(), 126);
+    await settle();
+    const HIGH_WATER = 8 * 1024 * 1024;
+    assert(
+      port.grantedBytes() <= HIGH_WATER + 3 * 63,
+      `grants stayed inside the window: ${port.grantedBytes()}`,
+    );
+    void attach;
+  }
+
+  // Post-attach failure reaches the player: a pump error frame after
+  // resolution fires the source's onFail listeners (the element's own
+  // error event never fires for a dead MSE feed).
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4b1',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    let failed: unknown = null;
+    source.onFail((error) => {
+      failed = error;
+    });
+    port.feed({ kind: 'error', epoch: 0, code: 'io-error', message: 'dead' });
+    await settle();
+    assert(failed instanceof Error, 'onFail fired on pump death');
+    assert(
+      String(failed).includes('io-error'),
+      'failure carried the pump error',
+    );
+    assert(port.closed, 'dead session closed its port');
   }
 
   // The attach resolves only once media lands — an init-segment append
