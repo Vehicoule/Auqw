@@ -1006,15 +1006,23 @@ export async function createSyncEngine(
     work: Promise<Result<T>>,
     signal: CancellationSignal,
   ): Promise<Result<T>> {
-    return Promise.race([
-      work,
-      new Promise<Result<T>>((resolve) => {
-        const unsubscribe = signal.subscribe(() => {
-          unsubscribe();
-          resolve(err(appError('cancelled', 'cancelled')));
-        });
-      }),
-    ]);
+    return new Promise<Result<T>>((resolve) => {
+      const unsubscribe = signal.subscribe(() => {
+        unsubscribe();
+        resolve(err(appError('cancelled', 'cancelled')));
+      });
+      // The loser unsubscribes: a reused signal never retains one
+      // listener per completed op (Promise.race leaves it parked).
+      const settle = (result: Result<T>): void => {
+        unsubscribe();
+        resolve(result);
+      };
+      if (signal.cancelled) {
+        settle(err(appError('cancelled', 'cancelled')));
+        return;
+      }
+      void work.then(settle);
+    });
   }
 
   function now(): number | null {
@@ -1765,8 +1773,12 @@ export async function createSyncEngine(
         return err(appError('cancelled', 'cancelled'));
       }
       const at = now();
-      const retainedFloor =
-        at === null ? null : at - PLAY_HISTORY_RETENTION_MS;
+      if (at === null) {
+        return err(
+          appError('internal', 'clock returned an unsafe timestamp'),
+        );
+      }
+      const retainedFloor = at - PLAY_HISTORY_RETENTION_MS;
       // Seqs dropped by the retention filter inside this request's
       // window — collected per device so the receiver's contiguous
       // cursor can cross the holes (otherwise a permanently-dropped
@@ -1796,7 +1808,6 @@ export async function createSyncEngine(
           if (
             entry.kind === 'playEvent' &&
             !entry.tombstone &&
-            retainedFloor !== null &&
             isPlayEvent(entry.value) &&
             entry.value.playedMs < retainedFloor
           ) {

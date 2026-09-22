@@ -1728,6 +1728,38 @@ async function divergenceKeysAreInjective(): Promise<void> {
   assertDeepEqual(losers, ['loser-1', 'loser-2']);
 }
 
+async function exportFailsOnClockFault(): Promise<void> {
+  // A clock that turns unsafe mid-run must fail the export — the
+  // retention floor is uncomputable, so shipping 'everything' would
+  // leak expired play history beyond the promised window.
+  let clockNow: number | null = PLAY_HISTORY_RETENTION_MS + 1_000_000;
+  const store = new FakeSyncLogStore();
+  const created = await createSyncEngine({
+    store,
+    clock: {
+      nowMs: () => clockNow ?? -1,
+      sleep: () => Promise.resolve(ok(undefined)),
+    },
+    ids: new SequenceIds(),
+    log: new FakeLog(),
+    deviceId: 'a',
+  });
+  assert(created.ok, 'engine created');
+  const engine = created.value;
+  await mustWrite(engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Song',
+  });
+  clockNow = null;
+  const exported = await engine.exportDelta();
+  assert(
+    !exported.ok && exported.error.kind === 'internal',
+    'broken clock fails the export',
+  );
+}
+
 async function queuedCancelSettlesEarly(): Promise<void> {
   // A call parked behind a held append settles `cancelled` when its
   // signal fires — it does not out-wait the in-flight store op.
@@ -2007,6 +2039,7 @@ export async function run(): Promise<void> {
   await restartedRelayKeepsSkippedMarks();
   await settingsIsSingleton();
   await divergenceKeysAreInjective();
+  await exportFailsOnClockFault();
   await queuedCancelSettlesEarly();
   await terminalRemoteStamp();
   await localFreezeImmunity();
