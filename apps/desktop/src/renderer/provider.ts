@@ -724,25 +724,39 @@ export function createPluginProvider(
       // cancels it: a wedged host request can't outlive it. Expiry
       // aborts utility-side (same path as signal cancel) and settles
       // typed `timeout` — retryable, not the engine's `cancelled`.
-      const remaining = context.deadlineMs - Date.now();
-      if (remaining <= 0) {
-        finish(err(appError('timeout', 'provider request deadline exceeded')));
+      const onDeadline = (): void => {
+        // setTimeout overflows above 2^31-1ms, so a deadline farther
+        // out than that (MAX_SAFE_INTEGER ≈ unbounded) is enforced in
+        // segments: re-arm while time remains, fire only when the
+        // absolute deadline has actually passed.
+        const left = context.deadlineMs - Date.now();
+        if (left > 0) {
+          deadlineTimer = setTimeout(
+            onDeadline,
+            Math.min(left, 2_147_483_647),
+          );
+          return;
+        }
+        if (issued) {
+          void host.cancelRequest({ requestId }).catch(() => undefined);
+        }
+        finish(
+          err(
+            appError('timeout', 'provider request deadline exceeded'),
+          ),
+        );
+      };
+      if (context.deadlineMs - Date.now() <= 0) {
+        finish(
+          err(
+            appError('timeout', 'provider request deadline exceeded'),
+          ),
+        );
         return;
       }
-      // setTimeout overflows above 2^31-1ms — a MAX_SAFE_INTEGER
-      // deadline means "no effective bound", so clamp, never wrap.
       deadlineTimer = setTimeout(
-        () => {
-          if (issued) {
-            void host.cancelRequest({ requestId }).catch(() => undefined);
-          }
-          finish(
-            err(
-              appError('timeout', 'provider request deadline exceeded'),
-            ),
-          );
-        },
-        Math.min(remaining, 2_147_483_647),
+        onDeadline,
+        Math.min(context.deadlineMs - Date.now(), 2_147_483_647),
       );
       // subscribe() fires the listener synchronously when the signal
       // is already cancelled — `done` then suppresses the host call.
