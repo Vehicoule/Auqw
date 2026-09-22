@@ -1,13 +1,9 @@
-import React from 'react';
-import { ScrollView, View } from 'react-native';
-import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
 
 export type TransferScreenProps = {
   readonly model: TransferModel;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onExport?: (() => void) | undefined;
@@ -26,7 +22,6 @@ export type TransferScreenProps = {
  */
 export function TransferScreen({
   model,
-  topInset = 0,
   scrollEnabled = true,
   onBack,
   onExport,
@@ -34,57 +29,29 @@ export function TransferScreen({
   onApplyImport,
   onResetImport,
 }: TransferScreenProps) {
-  const theme = useTheme();
   const exportBusy = model.exportPhase === 'working';
   const importBusy =
     model.importPhase === 'reading' || model.importPhase === 'applying';
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
-      }}
+    <div
+      className="uw-screen uw-transfer"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel="back"
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
+      <div className="uw-collection__head">
+        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
-        <Text variant="display" color="bright" style={{ flex: 1 }}>
+        <Text variant="display" color="bright" className="uw-collection__title">
           library transfer
         </Text>
-      </View>
-      <ScrollView
-        scrollEnabled={scrollEnabled}
-        contentContainerStyle={{
-          paddingHorizontal: theme.spacing.sm,
-          paddingBottom: theme.spacing.xxl,
-          gap: theme.spacing.lg,
-        }}
-      >
-        <View>
+      </div>
+      <div className="uw-transfer__sections">
+        <section>
           <Text
             variant="label"
             color="secondary"
             uppercase
-            style={{ paddingHorizontal: theme.spacing.sm }}
+            className="uw-section-label"
           >
             export
           </Text>
@@ -99,13 +66,13 @@ export function TransferScreen({
             disabled={exportBusy || onExport === undefined}
             onPress={onExport}
           />
-        </View>
-        <View>
+        </section>
+        <section>
           <Text
             variant="label"
             color="secondary"
             uppercase
-            style={{ paddingHorizontal: theme.spacing.sm }}
+            className="uw-section-label"
           >
             import
           </Text>
@@ -121,9 +88,9 @@ export function TransferScreen({
             onApplyImport={onApplyImport}
             onResetImport={onResetImport}
           />
-        </View>
-      </ScrollView>
-    </View>
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -140,30 +107,15 @@ function TransferRow({
   readonly disabled: boolean;
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   return (
     <Pressable
       onPress={onPress}
       disabled={disabled}
-      accessibilityLabel={label}
-      style={({ pressed }) => [
-        {
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          minHeight: theme.sizes.touch,
-          paddingHorizontal: theme.spacing.sm,
-          marginTop: theme.spacing.xs,
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          opacity: disabled ? 0.5 : 1,
-        },
-        pressed && { backgroundColor: theme.colors.fg08 },
-      ]}
+      ariaLabel={label}
+      className={`uw-transfer-row${disabled ? ' uw-off' : ''}`}
     >
-      <Icon name="download" size={14} color={theme.colors.textSecondary} />
-      <View style={{ flex: 1, minWidth: 0 }}>
+      <Icon name="download" size={14} color="var(--text-secondary)" />
+      <span className="uw-transfer-row__text">
         <Text variant="body" color="primary" numberOfLines={1}>
           {label}
         </Text>
@@ -172,8 +124,8 @@ function TransferRow({
             {detail}
           </Text>
         )}
-      </View>
-      <Icon name="chevron-right" size={12} color={theme.colors.textSecondary} />
+      </span>
+      <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
     </Pressable>
   );
 }
@@ -187,131 +139,86 @@ function ImportBody({
   readonly onApplyImport?: (() => void) | undefined;
   readonly onResetImport?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   const preview: ImportPreviewModel | null = model.preview;
   if (preview === null) {
     return null;
   }
   return (
-    <View
-      style={{
-        marginTop: theme.spacing.sm,
-        padding: theme.spacing.sm,
-        borderRadius: theme.radius.control,
-        borderWidth: theme.strokes.hairline,
-        borderColor: theme.colors.hairline,
-      }}
-    >
+    <div className="uw-import-preview" data-phase={model.importPhase}>
       <Text variant="body" color="bright">
         import preview
       </Text>
-      <Text
-        variant="metadata"
-        color="secondary"
-        style={{ marginTop: theme.spacing.xs }}
-      >
+      <Text variant="metadata" color="secondary" className="uw-import-preview__meta">
         format v{preview.formatVersion}
         {preview.exportedLabel === null
           ? ''
           : ` · exported ${preview.exportedLabel}`}
         {` · ${preview.sourceLabel}`}
       </Text>
-      <View style={{ marginTop: theme.spacing.sm, gap: 4 }}>
+      <div className="uw-import-preview__rows">
         {preview.rows.map((row) => (
-          <View
-            key={row.key}
-            style={{ flexDirection: 'row', gap: theme.spacing.sm }}
-          >
-            <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
+          <div key={row.key} className="uw-import-preview__row">
+            <Text variant="metadata" color="secondary" className="uw-diag-row__k">
               {row.label}
             </Text>
             <Text variant="metadata" color="primary">
               {row.count}
             </Text>
-          </View>
+          </div>
         ))}
-      </View>
+      </div>
       {model.importPhase === 'done' ? (
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: theme.spacing.sm,
-            marginTop: theme.spacing.md,
-          }}
-        >
-          <Icon name="check" size={14} color={theme.colors.accent} />
-          <Text variant="metadata" color="accent" style={{ flex: 1 }}>
+        <div className="uw-import-preview__done">
+          <Icon name="check" size={14} color="var(--accent)" />
+          <Text variant="metadata" color="accent" className="uw-diag-row__k">
             {model.importDetail ?? 'import applied'}
           </Text>
           <Pressable
-            compact
             onPress={onResetImport}
-            accessibilityLabel="reset import"
-            style={{ paddingHorizontal: theme.spacing.xs }}
+            ariaLabel="reset import"
+            className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
               done
             </Text>
           </Pressable>
-        </View>
+        </div>
       ) : model.importPhase === 'error' ? (
-        <View style={{ marginTop: theme.spacing.sm }}>
+        <div className="uw-import-preview__error">
           <ErrorState title="import failed" hint={model.importDetail} />
           <Pressable
-            compact
             onPress={onResetImport}
-            accessibilityLabel="reset import"
-            style={{ paddingHorizontal: theme.spacing.sm }}
+            ariaLabel="reset import"
+            className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
               start over
             </Text>
           </Pressable>
-        </View>
+        </div>
       ) : (
-        <View
-          style={{
-            flexDirection: 'row',
-            gap: theme.spacing.md,
-            marginTop: theme.spacing.md,
-          }}
-        >
+        <div className="uw-import-preview__actions">
           <Pressable
-            compact
             onPress={onApplyImport}
             disabled={model.importPhase === 'applying'}
-            accessibilityLabel="apply import"
-            style={{
-              paddingHorizontal: theme.spacing.sm,
-              paddingVertical: theme.spacing.xs,
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.accent,
-              opacity: model.importPhase === 'applying' ? 0.5 : 1,
-            }}
+            ariaLabel="apply import"
+            className="uw-cta"
           >
             <Text variant="metadata" color="canvas">
               {model.importPhase === 'applying' ? 'applying…' : 'apply import'}
             </Text>
           </Pressable>
           <Pressable
-            compact
             onPress={onResetImport}
-            accessibilityLabel="cancel import"
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
+            ariaLabel="cancel import"
+            className="uw-headbtn"
           >
             <Text variant="metadata" color="secondary">
               cancel
             </Text>
           </Pressable>
-        </View>
+        </div>
       )}
-    </View>
+    </div>
   );
 }

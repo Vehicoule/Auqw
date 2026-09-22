@@ -1,9 +1,7 @@
 import { useMemo, useState } from 'react';
-import { ScrollView, View } from 'react-native';
-import { useTheme } from './theme.tsx';
 import { Artwork, Icon, IconButton, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import type {
@@ -15,17 +13,16 @@ import type {
 
 export type LibraryScreenProps = {
   readonly model: LibraryModel;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressItem?: ((recordingId: string) => void) | undefined;
   readonly onToggleLike?: ((recordingId: string) => void) | undefined;
   readonly onContext?: ((recordingId: string) => void) | undefined;
   readonly onOpenCollection?:
-  | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-  | undefined;
+    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
+    | undefined;
   readonly onPlayCollection?:
-  | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-  | undefined;
+    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
+    | undefined;
   readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
   readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;
   readonly onCreatePlaylist?: ((name: string) => void) | undefined;
@@ -42,10 +39,10 @@ const KIND_FILTERS: readonly {
   readonly key: 'playlist' | 'album' | 'artist';
   readonly label: string;
 }[] = [
-    { key: 'playlist', label: 'playlists' },
-    { key: 'album', label: 'albums' },
-    { key: 'artist', label: 'artists' },
-  ];
+  { key: 'playlist', label: 'playlists' },
+  { key: 'album', label: 'albums' },
+  { key: 'artist', label: 'artists' },
+];
 
 function CollectionTile({
   tile,
@@ -56,60 +53,43 @@ function CollectionTile({
   readonly onOpen?: (() => void) | undefined;
   readonly onPlay?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   const enabled = tile.enabled;
   return (
-    <Pressable
-      compact
-      onPress={enabled ? onOpen : undefined}
-      accessibilityLabel={`${tile.label}, ${tile.count} tracks`}
-      accessibilityState={{ disabled: !enabled }}
-      disabled={!enabled}
-      style={{
-        minHeight: 62,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: theme.spacing.sm,
-        padding: theme.spacing.md,
-        borderRadius: theme.radius.control,
-        borderWidth: theme.strokes.hairline,
-        borderColor: enabled ? theme.colors.hairline : theme.colors.fg08,
-        backgroundColor: enabled ? theme.colors.raised : 'transparent',
-        opacity: enabled ? 1 : 0.58,
-      }}
+    <div
+      className={`uw-collection${enabled ? '' : ' uw-off'}`}
+      data-enabled={enabled ? 'true' : 'false'}
     >
-      <Icon
-        name={COLLECTION_ICONS[tile.key]}
-        size={15}
-        color={
-          enabled ? theme.colors.accent : theme.colors.textSecondary
-        }
-      />
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text variant="body" color={enabled ? 'bright' : 'primary'}>
-          {tile.label}
-        </Text>
-        <Text variant="metadata" color="secondary" numberOfLines={2}>
-          {tile.note ??
-            `${tile.count} ${tile.count === 1 ? 'track' : 'tracks'}`}
-        </Text>
-      </View>
-      {/*
-       * Per-tile play affordance: nested pressable wins responder
-       * negotiation, so a play tap never opens the collection.
-       * Empty collections disable honestly.
-       */}
+      <Pressable
+        onPress={enabled ? onOpen : undefined}
+        disabled={!enabled}
+        ariaLabel={`${tile.label}, ${tile.count} tracks`}
+        className="uw-collection__body"
+      >
+        <Icon
+          name={COLLECTION_ICONS[tile.key]}
+          size={15}
+          color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
+        />
+        <span className="uw-collection__text">
+          <Text variant="body" color={enabled ? 'bright' : 'primary'}>
+            {tile.label}
+          </Text>
+          <Text variant="metadata" color="secondary" numberOfLines={2}>
+            {tile.note ?? `${tile.count} ${tile.count === 1 ? 'track' : 'tracks'}`}
+          </Text>
+        </span>
+      </Pressable>
       {enabled && (
         <IconButton
           icon="play"
           size={30}
           iconSize={13}
-          color={theme.colors.textBright}
-          accessibilityLabel={`play ${tile.label}`}
+          color="var(--text-bright)"
+          ariaLabel={`play ${tile.label}`}
           onPress={tile.count === 0 ? undefined : onPlay}
         />
       )}
-    </Pressable>
+    </div>
   );
 }
 
@@ -122,20 +102,12 @@ function ToggleChip({
   readonly active: boolean;
   readonly onPress: () => void;
 }) {
-  const theme = useTheme();
   return (
     <Pressable
-      compact
       onPress={onPress}
-      accessibilityLabel={label}
-      accessibilityState={{ selected: active }}
-      style={{
-        minHeight: 30,
-        justifyContent: 'center',
-        paddingHorizontal: theme.spacing.md,
-        borderRadius: theme.radius.pill,
-        backgroundColor: active ? theme.colors.accentSoft : theme.colors.fg08,
-      }}
+      ariaLabel={label}
+      ariaPressed={active}
+      className={`uw-chip${active ? ' uw-chip--active' : ''}`}
     >
       <Text variant="metadata" color={active ? 'accent' : 'secondary'}>
         {label}
@@ -151,35 +123,16 @@ function NewPlaylistCard({
   readonly view: 'grid' | 'list';
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   if (view === 'list') {
     return (
       <Pressable
-        compact
         onPress={onPress}
-        accessibilityLabel="new playlist"
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.md,
-          minHeight: theme.sizes.trackRow,
-          paddingHorizontal: theme.spacing.sm,
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderStyle: 'dashed',
-          borderColor: theme.colors.fg25,
-        }}
+        ariaLabel="new playlist"
+        className="uw-newpl uw-newpl--row"
       >
-        <View
-          style={{
-            width: 40,
-            height: 40,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Icon name="list-plus" size={15} color={theme.colors.textSecondary} />
-        </View>
+        <span className="uw-newpl__art">
+          <Icon name="list-plus" size={15} color="var(--text-secondary)" />
+        </span>
         <Text variant="body" color="secondary">
           new playlist
         </Text>
@@ -188,27 +141,12 @@ function NewPlaylistCard({
   }
   return (
     <Pressable
-      compact
       onPress={onPress}
-      accessibilityLabel="new playlist"
-      style={{
-        width: 104,
-        minHeight: 140,
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: theme.spacing.sm,
-        borderRadius: theme.radius.thumb,
-        borderWidth: theme.strokes.progress,
-        borderStyle: 'dashed',
-        borderColor: theme.colors.fg25,
-      }}
+      ariaLabel="new playlist"
+      className="uw-newpl uw-newpl--grid"
     >
-      <Icon name="list-plus" size={16} color={theme.colors.textSecondary} />
-      <Text
-        variant="metadata"
-        color="secondary"
-        style={{ textAlign: 'center' }}
-      >
+      <Icon name="list-plus" size={16} color="var(--text-secondary)" />
+      <Text variant="metadata" color="secondary" className="uw-newpl__label">
         new playlist
       </Text>
     </Pressable>
@@ -224,51 +162,36 @@ function LibraryCard({
   readonly view: 'grid' | 'list';
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
-  const openable =
-    card.playlistId !== null || card.entityRef !== null;
+  const openable = card.playlistId !== null || card.entityRef !== null;
   const press = openable ? onPress : undefined;
   const label = `${card.title}, ${card.subtitle}`;
   if (view === 'list') {
     return (
       <Pressable
-        compact
         onPress={press}
-        accessibilityLabel={label}
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.md,
-          minHeight: theme.sizes.trackRow,
-          paddingHorizontal: theme.spacing.sm,
-          borderRadius: theme.radius.control,
-        }}
+        ariaLabel={label}
+        className="uw-libcard uw-libcard--row"
       >
         <Artwork url={card.artworkUrl} size={40} dimmed={!openable} />
-        <View style={{ flex: 1, minWidth: 0 }}>
+        <span className="uw-libcard__text">
           <Text variant="body" color="primary" numberOfLines={1}>
             {card.title}
           </Text>
           <Text variant="metadata" color="secondary" numberOfLines={1}>
             {card.subtitle}
           </Text>
-        </View>
+        </span>
         {openable && (
-          <Icon
-            name="chevron-right"
-            size={12}
-            color={theme.colors.textSecondary}
-          />
+          <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
         )}
       </Pressable>
     );
   }
   return (
     <Pressable
-      compact
       onPress={press}
-      accessibilityLabel={label}
-      style={{ width: 104 }}
+      ariaLabel={label}
+      className="uw-libcard uw-libcard--grid"
     >
       <Artwork url={card.artworkUrl} size={104} dimmed={!openable} />
       <Text variant="body" color="primary" numberOfLines={1}>
@@ -283,7 +206,6 @@ function LibraryCard({
 
 export function LibraryScreen({
   model,
-  topInset = 0,
   scrollEnabled = true,
   onPressItem,
   onToggleLike,
@@ -294,7 +216,6 @@ export function LibraryScreen({
   onOpenArtist,
   onCreatePlaylist,
 }: LibraryScreenProps) {
-  const theme = useTheme();
   const [filter, setFilter] = useState<'all' | 'playlist' | 'album' | 'artist'>(
     'all',
   );
@@ -318,35 +239,43 @@ export function LibraryScreen({
       : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
   }, [filter, model.cards, sort]);
 
+  const list = useTrackList({
+    count: model.recentlyAdded.length,
+    onActivate:
+      onPressItem === undefined
+        ? undefined
+        : (index) => {
+            const item = model.recentlyAdded[index];
+            if (item !== undefined) {
+              onPressItem(item.key);
+            }
+          },
+    onContext:
+      onContext === undefined
+        ? undefined
+        : (index) => {
+            const item = model.recentlyAdded[index];
+            if (item !== undefined) {
+              onContext(item.key);
+            }
+          },
+  });
+
   return (
-    <ScrollView
-      scrollEnabled={scrollEnabled}
-      contentInsetAdjustmentBehavior="automatic"
-      style={{ flex: 1, backgroundColor: theme.colors.canvas }}
-      contentContainerStyle={{
-        paddingTop: topInset + theme.spacing.sm,
-        paddingHorizontal: theme.spacing.lg,
-        paddingBottom: theme.spacing.xxl,
-        gap: theme.spacing.lg,
-      }}
+    <div
+      className="uw-screen uw-library"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <Text variant="display" color="bright">
         library
       </Text>
 
-      {/* collections 2×2 — liked · downloads · top 50 · history */}
-      <View
-        style={{
-          flexDirection: 'row',
-          flexWrap: 'wrap',
-          rowGap: theme.spacing.sm,
-          justifyContent: 'space-between',
-        }}
-      >
+      {/* collections — liked · downloads · top 50 · history */}
+      <div className="uw-collections" role="list">
         {model.collections.map((tile) => {
           const key = tile.key;
           return (
-            <View key={tile.key} style={{ flexBasis: '48.5%', flexGrow: 1 }}>
+            <div key={tile.key} role="listitem" className="uw-collections__cell">
               <CollectionTile
                 tile={tile}
                 onOpen={
@@ -360,23 +289,16 @@ export function LibraryScreen({
                     : () => onPlayCollection(key)
                 }
               />
-            </View>
+            </div>
           );
         })}
-      </View>
+      </div>
 
-      <View style={{ gap: theme.spacing.sm }}>
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: theme.spacing.sm,
-          }}
-        >
+      <div className="uw-library__controls">
+        <div className="uw-library__controls-row">
           <Text variant="heading" color="bright">
             your library
           </Text>
-          <View style={{ flex: 1 }} />
           <ToggleChip
             label={sort}
             active={false}
@@ -387,14 +309,8 @@ export function LibraryScreen({
             active={false}
             onPress={() => setView(view === 'grid' ? 'list' : 'grid')}
           />
-        </View>
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: theme.spacing.sm,
-          }}
-        >
+        </div>
+        <div className="uw-library__filters" role="toolbar" aria-label="kind filter">
           <ToggleChip
             label="all"
             active={filter === 'all'}
@@ -408,8 +324,8 @@ export function LibraryScreen({
               onPress={() => setFilter(f.key)}
             />
           ))}
-        </View>
-      </View>
+        </div>
+      </div>
 
       {creating && (
         <NameField
@@ -421,10 +337,10 @@ export function LibraryScreen({
             onCreatePlaylist === undefined
               ? undefined
               : (name) => {
-                onCreatePlaylist(name);
-                setDraft('');
-                setCreating(false);
-              }
+                  onCreatePlaylist(name);
+                  setDraft('');
+                  setCreating(false);
+                }
           }
           onCancel={() => {
             setDraft('');
@@ -434,31 +350,23 @@ export function LibraryScreen({
       )}
 
       {cards.length === 0 && !creating ? (
-        <View style={{ gap: theme.spacing.lg }}>
+        <div className="uw-library__empty">
           <EmptyState
             title="nothing here yet"
             hint="playlists and liked albums land here"
             icon="list-plus"
           />
-          <View style={{ alignItems: 'center' }}>
-            <NewPlaylistCard
-              view="grid"
-              onPress={
-                onCreatePlaylist === undefined
-                  ? undefined
-                  : () => setCreating(true)
-              }
-            />
-          </View>
-        </View>
+          <NewPlaylistCard
+            view="grid"
+            onPress={
+              onCreatePlaylist === undefined
+                ? undefined
+                : () => setCreating(true)
+            }
+          />
+        </div>
       ) : view === 'grid' ? (
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: theme.spacing.lg,
-          }}
-        >
+        <div className="uw-libcards uw-libcards--grid" role="list">
           {cards.map((card) => (
             <LibraryCard
               key={card.key}
@@ -479,9 +387,9 @@ export function LibraryScreen({
               }
             />
           )}
-        </View>
+        </div>
       ) : (
-        <View style={{ marginHorizontal: -theme.spacing.sm, gap: 2 }}>
+        <div className="uw-libcards uw-libcards--list" role="list">
           {cards.map((card) => (
             <LibraryCard
               key={card.key}
@@ -502,63 +410,58 @@ export function LibraryScreen({
               }
             />
           )}
-        </View>
+        </div>
       )}
 
       {model.artists.length > 0 && (
-        <View style={{ gap: theme.spacing.sm }}>
+        <div className="uw-library__section">
           <Text variant="heading" color="bright">
             artists
           </Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <View style={{ flexDirection: 'row', gap: theme.spacing.lg }}>
-              {model.artists.map((artist) => {
-                const openable =
-                  artist.entityRef !== null && onOpenArtist !== undefined;
-                return (
-                  <Pressable
-                    key={artist.key}
-                    compact
-                    onPress={
-                      openable ? () => onOpenArtist(artist) : undefined
-                    }
-                    accessibilityLabel={artist.name}
-                    style={{ width: 76, alignItems: 'center' }}
+          <div className="uw-artist-rail" role="list">
+            {model.artists.map((artist) => {
+              const openable =
+                artist.entityRef !== null && onOpenArtist !== undefined;
+              return (
+                <Pressable
+                  key={artist.key}
+                  onPress={openable ? () => onOpenArtist(artist) : undefined}
+                  ariaLabel={artist.name}
+                  className="uw-artist"
+                >
+                  <Artwork url={artist.artworkUrl} size={76} cornerRadius={38} />
+                  <Text
+                    variant="metadata"
+                    color="secondary"
+                    numberOfLines={2}
+                    className="uw-artist__name"
                   >
-                    <Artwork
-                      url={artist.artworkUrl}
-                      size={76}
-                      cornerRadius={38}
-                    />
-                    <Text
-                      variant="metadata"
-                      color="secondary"
-                      numberOfLines={2}
-                      style={{
-                        marginTop: theme.spacing.xs,
-                        textAlign: 'center',
-                      }}
-                    >
-                      {artist.name}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </ScrollView>
-        </View>
+                    {artist.name}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       {model.recentlyAdded.length > 0 && (
-        <View style={{ gap: theme.spacing.sm }}>
+        <div className="uw-library__section">
           <Text variant="heading" color="bright">
             recently liked
           </Text>
-          <View style={{ marginHorizontal: -theme.spacing.sm }}>
-            {model.recentlyAdded.map((item) => (
+          <div
+            role="list"
+            aria-label="recently liked"
+            className="uw-list"
+            onKeyDown={list.listProps.onKeyDown}
+          >
+            {model.recentlyAdded.map((item, index) => (
               <TrackRow
                 key={`recent-${item.key}`}
                 row={item}
+                tabIndex={list.rowTabIndex(index)}
+                onFocusRow={() => list.onRowFocus(index)}
                 onPress={
                   onPressItem === undefined
                     ? undefined
@@ -570,15 +473,13 @@ export function LibraryScreen({
                     : () => onToggleLike(item.key)
                 }
                 onContext={
-                  onContext === undefined
-                    ? undefined
-                    : () => onContext(item.key)
+                  onContext === undefined ? undefined : () => onContext(item.key)
                 }
               />
             ))}
-          </View>
-        </View>
+          </div>
+        </div>
       )}
-    </ScrollView>
+    </div>
   );
 }

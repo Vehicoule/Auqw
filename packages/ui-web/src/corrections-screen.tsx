@@ -1,6 +1,3 @@
-import React from 'react';
-import { ScrollView, View } from 'react-native';
-import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
@@ -17,13 +14,12 @@ const FILTERS: readonly { value: CorrectionsFilter; label: string }[] = [
 
 export type CorrectionsScreenProps = {
   readonly model: CorrectionsModel;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onFilter?: ((filter: CorrectionsFilter) => void) | undefined;
   readonly onConfirm?:
-  | ((reviewId: string, candidateIndex: number) => void)
-  | undefined;
+    | ((reviewId: string, candidateIndex: number) => void)
+    | undefined;
   readonly onReject?: ((reviewId: string) => void) | undefined;
   readonly onUndo?: ((reviewId: string) => void) | undefined;
   readonly onRetry?: (() => void) | undefined;
@@ -38,7 +34,6 @@ export type CorrectionsScreenProps = {
  */
 export function CorrectionsScreen({
   model,
-  topInset = 0,
   scrollEnabled = true,
   onBack,
   onFilter,
@@ -47,68 +42,32 @@ export function CorrectionsScreen({
   onUndo,
   onRetry,
 }: CorrectionsScreenProps) {
-  const theme = useTheme();
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
-      }}
+    <div
+      className="uw-screen uw-corrections"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel="back"
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
+      <div className="uw-collection__head">
+        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
-        <Text variant="display" color="bright" style={{ flex: 1 }}>
+        <Text variant="display" color="bright" className="uw-collection__title">
           corrections
         </Text>
         <Text variant="metadata" color="secondary">
           {model.pendingCount} pending · {model.resolvedCount} resolved
         </Text>
-      </View>
-      <View
-        style={{
-          flexDirection: 'row',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.xs,
-        }}
-      >
+      </div>
+      <div className="uw-corrections__filters" role="toolbar" aria-label="status filter">
         {FILTERS.map((filter) => (
           <Pressable
             key={filter.value}
-            compact
             onPress={
               onFilter === undefined ? undefined : () => onFilter(filter.value)
             }
-            accessibilityLabel={`show ${filter.label}`}
-            accessibilityState={{ selected: model.filter === filter.value }}
-            style={{
-              paddingHorizontal: theme.spacing.sm,
-              paddingVertical: theme.spacing.xs,
-              borderRadius: theme.radius.pill,
-              borderWidth:
-                model.filter === filter.value ? theme.strokes.hairline : 0,
-              borderColor: theme.colors.hairline,
-            }}
+            ariaLabel={`show ${filter.label}`}
+            ariaSelected={model.filter === filter.value}
+            className={`uw-chip${model.filter === filter.value ? ' uw-chip--active' : ''}`}
           >
             <Text
               variant="metadata"
@@ -118,7 +77,7 @@ export function CorrectionsScreen({
             </Text>
           </Pressable>
         ))}
-      </View>
+      </div>
       {model.state === 'loading' ? (
         <LoadingState title="loading reviews" />
       ) : model.state === 'error' ? (
@@ -138,10 +97,7 @@ export function CorrectionsScreen({
           icon="check"
         />
       ) : (
-        <ScrollView
-          scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
-        >
+        <div role="list" aria-label="match reviews">
           {model.rows.map((row) => (
             <ReviewRow
               key={row.reviewId}
@@ -151,9 +107,9 @@ export function CorrectionsScreen({
               onUndo={onUndo}
             />
           ))}
-        </ScrollView>
+        </div>
       )}
-    </View>
+    </div>
   );
 }
 
@@ -165,84 +121,52 @@ function ReviewRow({
 }: {
   readonly row: ReviewRowModel;
   readonly onConfirm?:
-  | ((reviewId: string, candidateIndex: number) => void)
-  | undefined;
+    | ((reviewId: string, candidateIndex: number) => void)
+    | undefined;
   readonly onReject?: ((reviewId: string) => void) | undefined;
   readonly onUndo?: ((reviewId: string) => void) | undefined;
 }) {
-  const theme = useTheme();
   const pending = row.status === 'pending';
   return (
-    <View
-      style={{
-        paddingHorizontal: theme.spacing.sm,
-        paddingVertical: theme.spacing.sm,
-        borderBottomWidth: theme.strokes.hairline,
-        borderBottomColor: theme.colors.fg08,
-      }}
-    >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-        }}
-      >
+    <div className="uw-review" role="listitem" data-status={row.status}>
+      <div className="uw-review__head">
         <Text
           variant="body"
           color="bright"
           numberOfLines={1}
-          style={{ flex: 1 }}
+          className="uw-review__title"
         >
           {row.title}
         </Text>
         <Text variant="metadata" color={pending ? 'warn' : 'secondary'}>
           {row.statusLabel}
         </Text>
-      </View>
+      </div>
       {row.artist === null ? null : (
-        <Text
-          variant="metadata"
-          color="secondary"
-          numberOfLines={1}
-          style={{ marginTop: 3 }}
-        >
+        <Text variant="metadata" color="secondary" numberOfLines={1}>
           {row.artist}
         </Text>
       )}
       {row.candidates.map((candidate) => (
         <Pressable
           key={candidate.index}
-          compact
           onPress={
             pending && onConfirm !== undefined
               ? () => onConfirm(row.reviewId, candidate.index)
               : undefined
           }
           disabled={!pending || onConfirm === undefined}
-          accessibilityLabel={`confirm ${candidate.title}`}
-          style={({ pressed }) => [
-            {
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.sm,
-              marginTop: theme.spacing.xs,
-              paddingVertical: theme.spacing.xs,
-              paddingHorizontal: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-              opacity: pending ? 1 : 0.6,
-            },
-            pressed && pending && { backgroundColor: theme.colors.fg08 },
-          ]}
+          ariaLabel={`confirm ${candidate.title}`}
+          className={`uw-review__candidate${pending ? '' : ' uw-off'}`}
         >
           {pending && (
             <Icon
               name="chevron-right"
               size={12}
-              color={theme.colors.textSecondary}
+              color="var(--text-secondary)"
             />
           )}
-          <View style={{ flex: 1, minWidth: 0 }}>
+          <span className="uw-review__candidate-text">
             <Text
               variant="metadata"
               color={pending ? 'primary' : 'secondary'}
@@ -253,30 +177,17 @@ function ReviewRow({
             <Text variant="metadata" color="secondary" numberOfLines={1}>
               {candidate.subtitle}
             </Text>
-          </View>
+          </span>
         </Pressable>
       ))}
-      <View
-        style={{
-          flexDirection: 'row',
-          gap: theme.spacing.md,
-          marginTop: theme.spacing.xs,
-        }}
-      >
+      <div className="uw-review__actions">
         {pending ? (
           <Pressable
-            compact
             onPress={
               onReject === undefined ? undefined : () => onReject(row.reviewId)
             }
-            accessibilityLabel={`reject ${row.title}`}
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
+            ariaLabel={`reject ${row.title}`}
+            className="uw-review__action"
           >
             <Text variant="metadata" color="warn">
               reject all
@@ -284,25 +195,18 @@ function ReviewRow({
           </Pressable>
         ) : (
           <Pressable
-            compact
             onPress={
               onUndo === undefined ? undefined : () => onUndo(row.reviewId)
             }
-            accessibilityLabel={`undo ${row.title}`}
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
+            ariaLabel={`undo ${row.title}`}
+            className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
               undo
             </Text>
           </Pressable>
         )}
-      </View>
-    </View>
+      </div>
+    </div>
   );
 }

@@ -10,7 +10,7 @@ import {
 } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import type { EntityScreenModel, TrackRowModel } from './view-models.ts';
+import type { EntityScreenModel, TrackRowModel } from '@auqw/ui-shared';
 import type { IconName } from './primitives.tsx';
 
 export type EntityScreenProps = {

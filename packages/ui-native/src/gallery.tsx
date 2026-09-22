@@ -78,7 +78,7 @@ import {
   fixtureSearchStates,
   fixtureSettingsModel,
   fixtureSettingsModelDegraded,
-} from './fixtures.ts';
+} from '@auqw/ui-shared/fixtures';
 import type { ThemeName } from '@auqw/design-tokens';
 
 function noop() { }

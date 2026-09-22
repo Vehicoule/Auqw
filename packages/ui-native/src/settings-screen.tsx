@@ -1,7 +1,7 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
-import type { SettingsModel, SettingsRowModel } from './view-models.ts';
+import type { SettingsModel, SettingsRowModel } from '@auqw/ui-shared';
 
 export type SettingsScreenProps = {
   readonly model: SettingsModel;

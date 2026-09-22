@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { View } from 'react-native';
 import { AppNavbar } from './navbar.tsx';
 import { useTheme } from './theme.tsx';
-import type { NavItemModel } from './view-models.ts';
+import type { NavItemModel } from '@auqw/ui-shared';
 
 export type PlatformTabsProps = {
   readonly items: readonly NavItemModel[];

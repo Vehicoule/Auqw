@@ -18,12 +18,12 @@ import {
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
-} from './view-models.ts';
+} from '@auqw/ui-shared';
 import type { LyricsSheet } from '@auqw/application';
 import type {
   QueueModel,
   TrackRowModel,
-} from './view-models.ts';
+} from '@auqw/ui-shared';
 import {
   fixtureDiagnostics,
   fixtureEntities,
@@ -73,7 +73,7 @@ import {
   fixtureSettings,
   fixtureSettingsModel,
   galleryCoverage,
-} from './fixtures.ts';
+} from '@auqw/ui-shared/fixtures';
 import {
   quadPath,
   morphPlayPause,

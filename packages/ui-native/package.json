@@ -13,6 +13,7 @@
   "dependencies": {
     "@auqw/application": "workspace:*",
     "@auqw/design-tokens": "workspace:*",
+    "@auqw/ui-shared": "workspace:*",
     "react-native-draggable-flatlist": "4.0.3"
   },
   "peerDependencies": {

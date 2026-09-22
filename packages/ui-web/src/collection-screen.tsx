@@ -1,13 +1,10 @@
-import { FlatList, View } from 'react-native';
-import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type { CollectionModel, CollectionRowModel } from '@auqw/ui-shared';
 
 export type CollectionScreenProps = {
   readonly model: CollectionModel;
-  readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onPlayAll?: (() => void) | undefined;
@@ -25,7 +22,6 @@ const EMPTY_HINTS = {
 
 export function CollectionScreen({
   model,
-  topInset = 0,
   scrollEnabled = true,
   onBack,
   onPlayAll,
@@ -33,57 +29,46 @@ export function CollectionScreen({
   onToggleLike,
   onContext,
 }: CollectionScreenProps) {
-  const theme = useTheme();
+  const list = useTrackList({
+    count: model.rows.length,
+    onActivate:
+      onPressItem === undefined
+        ? undefined
+        : (index) => {
+            const row = model.rows[index];
+            if (row !== undefined) {
+              onPressItem(row);
+            }
+          },
+    onContext:
+      onContext === undefined
+        ? undefined
+        : (index) => {
+            const row = model.rows[index];
+            if (row !== undefined) {
+              onContext(row);
+            }
+          },
+  });
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
-      }}
+    <div
+      className="uw-screen uw-collection-screen"
+      data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel="back"
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
+      <div className="uw-collection-screen__head">
+        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
-        <Text variant="display" color="bright" style={{ flex: 1 }}>
+        <Text variant="display" color="bright" className="uw-collection-screen__title">
           {model.title}
         </Text>
         <Text variant="metadata" color="secondary">
           {model.rows.length} {model.rows.length === 1 ? 'track' : 'tracks'}
         </Text>
         <Pressable
-          compact
           onPress={model.rows.length === 0 ? undefined : onPlayAll}
-          accessibilityLabel={`play ${model.title}`}
-          accessibilityState={{ disabled: model.rows.length === 0 }}
-          style={{
-            paddingHorizontal: theme.spacing.md,
-            minHeight: 30,
-            justifyContent: 'center',
-            borderRadius: theme.radius.pill,
-            backgroundColor:
-              model.rows.length === 0
-                ? theme.colors.fg08
-                : theme.colors.accentSoft,
-          }}
+          ariaLabel={`play ${model.title}`}
+          className={`uw-playall${model.rows.length === 0 ? ' uw-off' : ''}`}
         >
           <Text
             variant="metadata"
@@ -92,7 +77,7 @@ export function CollectionScreen({
             play all
           </Text>
         </Pressable>
-      </View>
+      </div>
       {model.rows.length === 0 ? (
         <EmptyState
           title={`${model.title} is empty`}
@@ -100,18 +85,19 @@ export function CollectionScreen({
           icon={model.key === 'history' ? 'clock' : 'note'}
         />
       ) : (
-        <FlatList
-          data={model.rows}
-          keyExtractor={(row) => row.key}
-          scrollEnabled={scrollEnabled}
-          contentContainerStyle={{
-            paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
-          }}
-          renderItem={({ item }) => (
+        <div
+          role="list"
+          aria-label={model.title}
+          className="uw-list"
+          onKeyDown={list.listProps.onKeyDown}
+        >
+          {model.rows.map((item, index) => (
             <TrackRow
+              key={item.key}
               row={item.row}
               badge={item.badge}
+              tabIndex={list.rowTabIndex(index)}
+              onFocusRow={() => list.onRowFocus(index)}
               onPress={
                 onPressItem === undefined
                   ? undefined
@@ -126,9 +112,9 @@ export function CollectionScreen({
                 onContext === undefined ? undefined : () => onContext(item)
               }
             />
-          )}
-        />
+          ))}
+        </div>
       )}
-    </View>
+    </div>
   );
 }
