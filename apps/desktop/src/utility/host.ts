@@ -1,5 +1,11 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { shellError } from '../shared/errors.ts';
 import type { HostPluginsResult } from '../shared/contract.ts';
@@ -77,12 +83,19 @@ type FsLike = {
   exists(path: string): boolean;
   read(path: string): Buffer;
   list(dir: string): string[];
+  mkdir(dir: string): void;
+  copy(src: string, dst: string): void;
 };
 
 const defaultFs: FsLike = {
   exists: existsSync,
   read: readFileSync,
   list: (dir) => (existsSync(dir) ? readdirSync(dir) : []),
+  mkdir: (dir) => mkdirSync(dir, { recursive: true }),
+  copy: (src, dst) => {
+    mkdirSync(dirname(dst), { recursive: true });
+    copyFileSync(src, dst);
+  },
 };
 
 /**
@@ -157,7 +170,7 @@ export function createHostRuntime(opts: {
       );
     }
     try {
-      const mod = requireFn(found);
+      const mod = requireFn(stageArtifact(found));
       const userData = opts.env.AUQW_USER_DATA ?? process.cwd();
       host = new mod.PluginHost({
         fuelPerEntry: FUEL_PER_ENTRY,
@@ -175,6 +188,28 @@ export function createHostRuntime(opts: {
         `node bindings load failed: ${bindingsError}`,
       );
     }
+  }
+
+  /**
+   * `require()` only dlopens `.node` files — a platform-named cdylib
+   * (`lib*.so`/`*.dylib`/`*.dll`, what cargo emits) is staged under
+   * userData first, same convention as `crates/node-bindings`' smoke
+   * test. The copy is unconditional so a rebuilt artifact can never
+   * serve a stale module.
+   */
+  function stageArtifact(src: string): string {
+    if (src.endsWith('.node')) {
+      return src;
+    }
+    const userData = opts.env.AUQW_USER_DATA ?? process.cwd();
+    const dst = join(
+      userData,
+      'node-bindings',
+      `${BINDINGS_BASENAME}.node`,
+    );
+    fs.mkdir(dirname(dst));
+    fs.copy(src, dst);
+    return dst;
   }
 
   function ensureHost(): PluginHostLike {

@@ -28,7 +28,13 @@ export async function run(): Promise<void> {
     require: () => {
       throw new Error('unreachable');
     },
-    fs: { exists: () => false, read: () => Buffer.alloc(0), list: () => [] },
+    fs: {
+      exists: () => false,
+      read: () => Buffer.alloc(0),
+      list: () => [],
+      mkdir: () => {},
+      copy: () => {},
+    },
   });
   const unavailable = await missing.status();
   assertEqual(unavailable.bindings, 'unavailable');
@@ -108,6 +114,8 @@ export async function run(): Promise<void> {
         d === '/plugins'
           ? ['deezer.manifest.json', 'deezer.wasm', 'lyrics.manifest.json']
           : [],
+      mkdir: () => {},
+      copy: () => {},
     },
   });
 
@@ -130,4 +138,41 @@ export async function run(): Promise<void> {
   const loaded = await runtime.status();
   assertEqual(loaded.bindings, 'loaded');
   assertEqual(loaded.plugins.length, 1);
+
+  // A platform-named cdylib (what cargo emits) is staged to a .node
+  // copy under userData before require — direct .node paths are not.
+  {
+    const staged: Array<{ src: string; dst: string }> = [];
+    const dirs: string[] = [];
+    const soRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/repo/target/debug/libauqw_node_bindings.so',
+        AUQW_USER_DATA: '/ud',
+      },
+      require: (path) => {
+        assertEqual(path, '/ud/node-bindings/auqw_node_bindings.node');
+        return fakeModule;
+      },
+      fs: {
+        exists: (p) => p === '/repo/target/debug/libauqw_node_bindings.so',
+        read: () => Buffer.alloc(0),
+        list: () => [],
+        mkdir: (d) => {
+          dirs.push(d);
+        },
+        copy: (src, dst) => {
+          staged.push({ src, dst });
+        },
+      },
+    });
+    const soStatus = await soRuntime.status();
+    assertEqual(soStatus.bindings, 'loaded');
+    assert(
+      staged.length === 1 &&
+        staged[0]?.src === '/repo/target/debug/libauqw_node_bindings.so' &&
+        staged[0]?.dst === '/ud/node-bindings/auqw_node_bindings.node' &&
+        dirs.includes('/ud/node-bindings'),
+      'cdylib staged to userData .node',
+    );
+  }
 }
