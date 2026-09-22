@@ -171,6 +171,29 @@ export type ClientHello = {
   readonly dev: string;
 };
 
+/**
+ * base64 SPKI DER that actually loads as an X25519 public key — the
+ * hello's key material is cryptographically validated here, never
+ * trusted into a DH call (or a fingerprint/registry slot) on shape
+ * alone.
+ */
+export function isX25519PubKeyB64(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 128
+  ) {
+    return false;
+  }
+  try {
+    return (
+      createPublicKey(pubKey(value)).asymmetricKeyType === 'x25519'
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function isClientHello(value: unknown): value is ClientHello {
   return (
     isRecord(value) &&
@@ -180,8 +203,8 @@ export function isClientHello(value: unknown): value is ClientHello {
     // deviceId feeds the secure-file name — the pattern is the wall.
     /^[a-z0-9][a-z0-9._-]{7,63}$/.test(String(value['deviceId'])) &&
     isBoundedString(value['name'], 128) &&
-    isBoundedString(value['eph'], 128) &&
-    isBoundedString(value['dev'], 128)
+    isX25519PubKeyB64(value['eph']) &&
+    isX25519PubKeyB64(value['dev'])
   );
 }
 

@@ -120,6 +120,43 @@ export async function run(): Promise<void> {
       'invalid-request',
     );
 
+    // Concurrent puts serialize: fill to cap-1, race two new fps —
+    // exactly one wins, the registry never overshoots the cap.
+    await handler({ op: 'device-delete', id: 'dev-new00001' });
+    for (let i = 0; i < 63; i += 1) {
+      await handler({
+        op: 'device-put',
+        record: device(
+          `dev-cap-${String(i).padStart(4, '0')}`,
+          `${i.toString(16).padStart(4, '0')}${'0'.repeat(60)}`,
+        ),
+      });
+    }
+    const raced = await Promise.allSettled([
+      handler({
+        op: 'device-put',
+        record: device('dev-race-a01', 'a'.repeat(64)),
+      }),
+      handler({
+        op: 'device-put',
+        record: device('dev-race-b01', 'b'.repeat(64)),
+      }),
+    ]);
+    const winners = raced.filter((r) => r.status === 'fulfilled');
+    const losers = raced.filter((r) => r.status === 'rejected');
+    assertEqual(winners.length, 1, 'exactly one racing put wins');
+    assertEqual(losers.length, 1);
+    assert(
+      isShellError((losers[0] as PromiseRejectedResult).reason) &&
+        (losers[0] as PromiseRejectedResult).reason.kind ===
+          'unavailable',
+      'the loser is a typed cap reject',
+    );
+    const capped = (await handler({ op: 'device-list' })) as {
+      devices: SyncDeviceRecord[];
+    };
+    assertEqual(capped.devices.length, 64, 'registry stays inside cap');
+
     // safeStorage down → every op unavailable, nothing plaintext.
     const sealedDir = join(root, 'sealed');
     mkdirSync(join(sealedDir), { recursive: true });

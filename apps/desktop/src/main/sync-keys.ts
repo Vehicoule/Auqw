@@ -106,6 +106,21 @@ export function createSyncKeysHandler(deps: {
     return { devices, skipped };
   }
 
+  // Registry mutations serialize behind one promise chain: the
+  // cap-check → fp-dedupe → write sequence is a single logical
+  // transaction, and two concurrent puts must not both observe room
+  // for a 65th record (an oversized list then fails its own boundary
+  // validator and breaks every deviceList call).
+  let registryChain: Promise<void> = Promise.resolve();
+  function serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const next = registryChain.then(fn);
+    registryChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
   async function devicePut(record: SyncDeviceRecord): Promise<void> {
     const existing = await secure.get(deviceKey(record.id));
     if (existing === null) {
@@ -158,11 +173,15 @@ export function createSyncKeysHandler(deps: {
       case 'device-list':
         return deviceList();
       case 'device-put':
-        await devicePut(op.record);
-        return null;
+        return serialized(async () => {
+          await devicePut(op.record);
+          return null;
+        });
       case 'device-delete':
-        await secure.delete(deviceKey(op.id));
-        return null;
+        return serialized(async () => {
+          await secure.delete(deviceKey(op.id));
+          return null;
+        });
     }
   };
 }

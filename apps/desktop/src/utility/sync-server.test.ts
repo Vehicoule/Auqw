@@ -3,6 +3,7 @@ import {
   createConnection,
   type Socket,
 } from 'node:net';
+import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
 import {
   assert,
@@ -1213,6 +1214,66 @@ export async function run(): Promise<void> {
         !nan.ok && nan.error.kind === 'invalid-request',
         'NaN is outside the JSON domain',
       );
+      const date = await invokeHandler(service, 'sync:importDelta', {
+        delta: { at: new Date(0) },
+      });
+      assert(
+        !date.ok && date.error.kind === 'invalid-request',
+        'a Date serializes differently than it validates',
+      );
+      const mapped = await invokeHandler(service, 'sync:importDelta', {
+        delta: { m: new Map() },
+      });
+      assert(
+        !mapped.ok && mapped.error.kind === 'invalid-request',
+        'a Map is outside the JSON domain',
+      );
+      const bare = Object.create(null) as Record<string, unknown>;
+      bare['x'] = 1;
+      const plain = await invokeHandler(service, 'sync:importDelta', {
+        delta: bare,
+      });
+      assert(plain.ok, 'null-prototype records stay inside the domain');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A hello carrying non-X25519 key material dies pre-challenge ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-badkey',
+        name: 'badkey',
+      });
+      // Valid base64, wrong curve — an ed25519 key can't join a
+      // noise-v1 handshake no matter how well-formed it looks.
+      const wrongCurve = generateKeyPairSync('ed25519')
+        .publicKey.export({ format: 'der', type: 'spki' })
+        .toString('base64');
+      for (const mutate of [
+        (h: Record<string, unknown>) => {
+          h['eph'] = 'not-base64!!!';
+        },
+        (h: Record<string, unknown>) => {
+          h['dev'] = wrongCurve;
+        },
+      ]) {
+        const client = await dial(port);
+        const hello = peer.hello() as unknown as Record<string, unknown>;
+        mutate(hello);
+        client.send(Buffer.from(JSON.stringify(hello), 'utf8'));
+        // Killed at the shape gate — no challenge is ever written.
+        const sawFrame = await client.recv().then(
+          () => true,
+          () => false,
+        );
+        assertEqual(sawFrame, false, 'a bad key dies pre-challenge');
+        client.close();
+      }
+      assertEqual(keys.records.size, 0);
     } finally {
       await service.close();
     }

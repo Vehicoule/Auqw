@@ -54,15 +54,17 @@ export function run(): void {
   }
   assertEqual(d.open(f2).toString('utf8'), 'second', 'stream continues');
 
-  // isClientHello boundary validation.
+  // isClientHello boundary validation — key fields must actually
+  // load as X25519 SPKI, not just look like strings.
+  const pub = identity.pub;
   assert(
     isClientHello({
       v: 1,
       kind: 'hello',
       deviceId: 'dev-00000001',
       name: 'pixel',
-      eph: 'AAAA',
-      dev: 'BBBB',
+      eph: pub,
+      dev: pub,
     }),
     'valid hello passes',
   );
@@ -72,8 +74,8 @@ export function run(): void {
       kind: 'hello',
       deviceId: 'dev-00000001',
       name: 'pixel',
-      eph: 'AAAA',
-      dev: 'BBBB',
+      eph: pub,
+      dev: pub,
     }),
     'wrong version rejected',
   );
@@ -83,10 +85,21 @@ export function run(): void {
       kind: 'hello',
       deviceId: '../escape',
       name: 'x',
-      eph: 'AAAA',
-      dev: 'BBBB',
+      eph: pub,
+      dev: pub,
     }),
     'hostile deviceId rejected',
+  );
+  assert(
+    !isClientHello({
+      v: 1,
+      kind: 'hello',
+      deviceId: 'dev-00000001',
+      name: 'pixel',
+      eph: 'AAAA',
+      dev: pub,
+    }),
+    'non-key eph rejected at the shape gate',
   );
 
   // Full handshake: a server accept completes against the test peer's

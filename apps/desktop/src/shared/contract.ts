@@ -871,6 +871,13 @@ export function isJsonValue(value: unknown): boolean {
     );
   }
   if (isRecord(value)) {
+    // Only plain objects — a Date, Map, or class instance carries no
+    // own enumerable slots yet serializes to a different domain (a
+    // Date becomes a string, a Map becomes {}).
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      return false;
+    }
     return Object.values(value).every(isJsonValue);
   }
   return false;
