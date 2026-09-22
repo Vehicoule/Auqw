@@ -54,7 +54,16 @@ async function main(): Promise<void> {
     readOnline: () => net.isOnline(),
   });
   const supervisor = createSupervisor({
-    fork: () => utilityProcess.fork(UTILITY),
+    fork: () =>
+      utilityProcess.fork(UTILITY, [], {
+        env: {
+          ...process.env,
+          AUQW_USER_DATA: userDataPath,
+          // Dev checkouts resolve the bindings artifact + plugin dir
+          // from the repo; packaged runs use process.resourcesPath.
+          ...(app.isPackaged ? {} : { AUQW_REPO_ROOT: join(here, '../../..') }),
+        },
+      }),
   });
 
   registerChannels(ipcMain, {

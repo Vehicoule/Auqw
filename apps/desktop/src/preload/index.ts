@@ -3,7 +3,14 @@ import type { IpcRendererEvent } from 'electron';
 import { CHANNELS } from '../shared/channels.ts';
 import {
   isAppMeta,
+  isHostPluginsResult,
   isNetEvent,
+  isPrepareOutcomePayload,
+  isPreparedStreamPayload,
+  isStreamMarksResult,
+  isStreamOpenResult,
+  isStreamReadResult,
+  isStreamServeUrlResult,
   isStringArray,
   isStringOrNull,
   isUndefinedResult,
@@ -102,6 +109,29 @@ const api: AuqwApi = {
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>
       invoke(CHANNELS.utilityPing, { message }, isUtilityPingResult),
+  },
+  host: {
+    plugins: () => invoke(CHANNELS.hostPlugins, undefined, isHostPluginsResult),
+  },
+  stream: {
+    prepare: (args) =>
+      invoke(CHANNELS.streamPrepare, args, isPrepareOutcomePayload),
+    devPrepare: (args) =>
+      invoke(CHANNELS.streamDevPrepare, args, isPreparedStreamPayload),
+    serveUrl: (args) =>
+      invoke(CHANNELS.streamServeUrl, args, isStreamServeUrlResult),
+    open: (args) =>
+      invoke(CHANNELS.streamOpen, args, isStreamOpenResult),
+    read: (args) =>
+      invoke(CHANNELS.streamRead, args, isStreamReadResult),
+    close: (args) =>
+      invoke(CHANNELS.streamClose, args, isUndefinedResult),
+    release: (args) =>
+      invoke(CHANNELS.streamRelease, args, isUndefinedResult),
+    marks: (args) =>
+      invoke(CHANNELS.streamMarks, args, isStreamMarksResult),
+    cancel: (args) =>
+      invoke(CHANNELS.streamCancel, args, isUndefinedResult),
   },
 };
 

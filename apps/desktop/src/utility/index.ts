@@ -1,6 +1,8 @@
 import { shellError } from '../shared/errors.ts';
 import type { UtilityResponse } from './envelope.ts';
+import { createHostRuntime } from './host.ts';
 import { createUtilityRouter } from './router.ts';
+import { createStreamHandlers } from './stream.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
 
 /**
@@ -28,7 +30,15 @@ if (port === null) {
   // entry any other way is a wiring bug, not a usable mode.
   process.exitCode = 1;
 } else {
-  const route = createUtilityRouter();
+  const runtime = createHostRuntime({
+    env: process.env,
+    resourcesPath:
+      typeof process.resourcesPath === 'string'
+        ? process.resourcesPath
+        : undefined,
+    repoRoot: process.env.AUQW_REPO_ROOT,
+  });
+  const route = createUtilityRouter(createStreamHandlers(runtime));
   port.on('message', (event) => {
     const raw: unknown = event.data;
     void respond(port, raw, route);

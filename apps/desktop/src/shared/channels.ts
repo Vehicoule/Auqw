@@ -12,6 +12,16 @@ export const CHANNELS = {
   secureSet: 'secure:set',
   secureDelete: 'secure:delete',
   utilityPing: 'utility:ping',
+  hostPlugins: 'host:plugins',
+  streamPrepare: 'stream:prepare',
+  streamDevPrepare: 'stream:dev-prepare',
+  streamServeUrl: 'stream:serve-url',
+  streamOpen: 'stream:open',
+  streamRead: 'stream:read',
+  streamClose: 'stream:close',
+  streamRelease: 'stream:release',
+  streamMarks: 'stream:marks',
+  streamCancel: 'stream:cancel',
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

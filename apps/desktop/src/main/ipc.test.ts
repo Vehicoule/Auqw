@@ -181,6 +181,28 @@ export async function run(): Promise<void> {
       args: { message: 'probe' },
     });
 
+    // stream + host channels forward to the utility after validation
+    const served = await invoke(CHANNELS.streamServeUrl, { handle: 'h-1' });
+    assert(served.ok);
+    assertDeepEqual(served.result, {
+      routed: 'stream:serve-url',
+      args: { handle: 'h-1' },
+    });
+    const plugins = await invoke(CHANNELS.hostPlugins, undefined);
+    assert(plugins.ok);
+    assertDeepEqual(plugins.result, {
+      routed: 'host:plugins',
+      args: undefined,
+    });
+    const badRead = await invoke(CHANNELS.streamRead, {
+      handle: 'h-1',
+      position: 0,
+      maxLen: 8 * 1024 * 1024,
+    });
+    assert(!badRead.ok && badRead.error.kind === 'invalid-request');
+    const badPrepare = await invoke(CHANNELS.streamPrepare, { pluginId: 1 });
+    assert(!badPrepare.ok && badPrepare.error.kind === 'invalid-request');
+
     // every handler rejection still produces a well-formed envelope
     const depsThrow: ChannelDeps = {
       ...deps,
