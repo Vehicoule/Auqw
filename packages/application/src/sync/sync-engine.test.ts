@@ -12,6 +12,7 @@ import type {
   LocalWrite,
   SyncDelta,
   SyncEngine,
+  SyncLogSnapshot,
 } from './sync-engine.ts';
 import { compareStamp } from './hlc.ts';
 import type { HlcStamp } from './hlc.ts';
@@ -70,6 +71,8 @@ async function mustApply(
   return applied.value;
 }
 
+let wireSeq = 0;
+
 /** Hand-built wire entry for precise stamp control. */
 function rawEntry(
   kind: ChangeEntry['kind'],
@@ -79,7 +82,17 @@ function rawEntry(
   hlc: HlcStamp,
   deviceId = 'peer',
 ): ChangeEntry {
-  return { kind, recordId, field, value, tombstone: false, hlc, deviceId };
+  wireSeq += 1;
+  return {
+    kind,
+    recordId,
+    field,
+    value,
+    tombstone: false,
+    hlc,
+    deviceId,
+    seq: wireSeq,
+  };
 }
 
 function rawTombstone(
@@ -88,6 +101,7 @@ function rawTombstone(
   hlc: HlcStamp,
   deviceId = 'peer',
 ): ChangeEntry {
+  wireSeq += 1;
   return {
     kind,
     recordId,
@@ -96,6 +110,7 @@ function rawTombstone(
     tombstone: true,
     hlc,
     deviceId,
+    seq: wireSeq,
   };
 }
 
@@ -108,6 +123,7 @@ function delta(
     senderDeviceId,
     cursor: {},
     entries,
+    more: false,
   };
 }
 
@@ -445,6 +461,7 @@ async function whitelistOnApply(): Promise<void> {
     senderDeviceId: 'x',
     cursor: {},
     entries: [],
+    more: false,
   });
   assert(!badVersion.ok, 'unknown formatVersion rejected');
 }
@@ -523,9 +540,9 @@ async function duplicatesAndWatermarks(): Promise<void> {
     field: 'title',
     value: 'From A',
   });
-  const bStamp = appliedRelayed.entries[0]?.hlc;
-  assert(bStamp !== undefined);
-  const partial = await a.engine.exportDelta({ b: bStamp });
+  const bSeq = appliedRelayed.entries[0]?.seq;
+  assert(bSeq !== undefined);
+  const partial = await a.engine.exportDelta({ b: bSeq });
   assert(partial.ok);
   assertEqual(partial.value.entries.length, 1);
   assertEqual(partial.value.entries[0]?.deviceId, 'a');
@@ -778,6 +795,214 @@ async function divergenceCap(): Promise<void> {
   assertEqual(rows[0]?.loser.value, `loser-${DIVERGENCE_HISTORY_LIMIT + 24}`);
 }
 
+
+// ---- regression: review findings -----------------------------------------
+
+/**
+ * max-merge x tombstone must converge regardless of arrival order:
+ * count=10@(100,0), tombstone@(50,0), count=20@(40,0). The live-set
+ * answer is {count:10}: the 20-value is dead on arrival AND the 10
+ * postdates the delete — a live newer write revives the field.
+ */
+async function maxFieldTombstoneOrders(): Promise<void> {
+  const mk = () => [
+    rawEntry('playCount', 'r1', 'count', 10, { l: 100, c: 0 }),
+    rawTombstone('playCount', 'r1', { l: 50, c: 0 }),
+    rawEntry('playCount', 'r1', 'count', 20, { l: 40, c: 0 }),
+  ];
+  const orders: number[][] = [
+    [0, 1, 2],
+    [2, 1, 0],
+    [1, 0, 2],
+    [1, 2, 0],
+    [0, 2, 1],
+    [2, 0, 1],
+  ];
+  const seen = new Set<string>();
+  for (const order of orders) {
+    const b = await makeEngine('b', 500);
+    const entries = mk();
+    const picked = order
+      .map((i) => entries[i])
+      .filter((e): e is ChangeEntry => e !== undefined);
+    await mustApply(b.engine, delta(picked));
+    const fields = materialized(b.engine, 'playCount', 'r1');
+    seen.add(JSON.stringify(fields));
+    assertDeepEqual(fields, { count: 10 });
+  }
+  assertEqual(seen.size, 1, 'all orders converge to one state');
+}
+
+/**
+ * A larger-but-dead playCount value must still displace the smaller
+ * live winner inside the register — order [10@100, tomb@50, 20@40]
+ * previously left count=10 materialized while order [20@40, tomb@50,
+ * 10@100] gave {} — under live-set semantics both give {count:10},
+ * and the 20 loser is preserved in divergence rows.
+ */
+async function maxFieldResurface(): Promise<void> {
+  const b = await makeEngine('b', 500);
+  await mustApply(
+    b.engine,
+    delta([
+      rawEntry('playCount', 'r1', 'count', 10, { l: 100, c: 0 }),
+      rawTombstone('playCount', 'r1', { l: 50, c: 0 }),
+      rawEntry('playCount', 'r1', 'count', 20, { l: 40, c: 0 }),
+      // A newer tombstone kills the live 10 — now nothing lives.
+      rawTombstone('playCount', 'r1', { l: 200, c: 0 }),
+      // An even newer write revives the field again.
+      rawEntry('playCount', 'r1', 'count', 3, { l: 300, c: 0 }),
+    ]),
+  );
+  assertDeepEqual(materialized(b.engine, 'playCount', 'r1'), {
+    count: 3,
+  });
+  const rows = b.engine.divergenceHistory({ recordId: 'r1' });
+  // 20 (dead-on-arrival) and 10 (killed by tomb@200) both preserved.
+  const loserValues = rows.map((r) => r.loser.value);
+  assert(loserValues.includes(20));
+  assert(loserValues.includes(10));
+}
+
+/** Failed appends never advance the cursor. */
+async function cursorAfterFailedAppend(): Promise<void> {
+  const store = new FakeSyncLogStore();
+  const a = await makeEngine('a', 100, store);
+  const b = await makeEngine('b', 200);
+  await mustWrite(b.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'From B',
+  });
+  const doc = await b.engine.exportDelta();
+  assert(doc.ok);
+  store.failNextAppend(appError('unavailable', 'disk'));
+  const failed = await a.engine.applyDelta(doc.value);
+  assert(!failed.ok);
+  // The cursor must not claim the rejected entry.
+  assertDeepEqual(a.engine.cursor(), {});
+  const exported = await a.engine.exportDelta();
+  assert(exported.ok);
+  assertEqual(exported.value.entries.length, 0);
+}
+
+/** Entries relayed out of order keep the cursor behind the hole. */
+async function cursorGapsAreConservative(): Promise<void> {
+  const b = await makeEngine('b', 100);
+  const a = await makeEngine('a', 200);
+  await mustWrite(b.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'B early',
+  });
+  await mustWrite(b.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'B late',
+  });
+  const full = await b.engine.exportDelta();
+  assert(full.ok);
+  const late = full.value.entries[1];
+  const early = full.value.entries[0];
+  assert(late !== undefined && early !== undefined);
+  // A relay ships ONLY the later entry: contiguous mark stays at 0 —
+  // it must not claim the missing earlier seq.
+  await mustApply(a.engine, delta([late]));
+  assertDeepEqual(a.engine.cursor(), { b: 0 });
+  // Re-export with that cursor returns the missing entry (and the
+  // dup'd late one is suppressed sender-side as a re-ship candidate).
+  const reexport = await b.engine.exportDelta({ b: 0 });
+  assert(reexport.ok);
+  assertEqual(reexport.value.entries.length, 2);
+  // Once the earlier entry lands, the mark fills through.
+  await mustApply(a.engine, delta([early]));
+  assertDeepEqual(a.engine.cursor(), { b: late.seq });
+}
+
+/** Export never emits a doc its own validator would reject. */
+async function exportPagination(): Promise<void> {
+  const a = await makeEngine('a', 100);
+  const writes = Array.from({ length: 5 }, (_, i) => ({
+    kind: 'recording' as const,
+    recordId: `r${i}`,
+    field: 'title',
+    value: `Song ${i}`,
+  }));
+  await a.engine.localChangeBatch(writes);
+  const first = await a.engine.exportDelta(undefined, 2);
+  assert(first.ok);
+  assertEqual(first.value.entries.length, 2);
+  assert(first.value.more);
+  assert(isSyncDelta(first.value));
+  // The receiver's cursor after applying page 1 drives page 2.
+  const b = await makeEngine('b', 200);
+  await mustApply(b.engine, first.value);
+  const second = await a.engine.exportDelta(b.engine.cursor(), 2);
+  assert(second.ok);
+  assertEqual(second.value.entries.length, 2);
+  assert(second.value.more);
+  await mustApply(b.engine, second.value);
+  const third = await a.engine.exportDelta(b.engine.cursor(), 2);
+  assert(third.ok);
+  assertEqual(third.value.entries.length, 1);
+  assert(!third.value.more);
+  await mustApply(b.engine, third.value);
+  assertEqual(materialized(b.engine, 'recording', 'r4')?.['title'], 'Song 4');
+}
+
+/** Mutating the caller's delta after apply cannot rewrite merged state. */
+async function remoteMutationImmunity(): Promise<void> {
+  const a = await makeEngine('a', 100);
+  const artwork = [
+    { url: 'https://img/a.png', width: 1, height: 1 },
+  ];
+  const doc = delta([
+    rawEntry('entity', 'artist:x', 'artwork', artwork, { l: 10, c: 0 }),
+  ]);
+  await mustApply(a.engine, doc);
+  (artwork as unknown[]).push({
+    url: 'https://img/evil.png',
+    width: 2,
+    height: 2,
+  });
+  const fields = materialized(a.engine, 'entity', 'artist:x');
+  const list = fields?.['artwork'] as unknown[] | undefined;
+  assertEqual(list?.length, 1);
+}
+
+/**
+ * A divergence row lost to a failed append is rebuilt from the
+ * durable log on the next boot — hydration replays entries and
+ * repairs any loser row the store is missing.
+ */
+async function hydrateRepairsDivergence(): Promise<void> {
+  const store = new FakeSyncLogStore();
+  const a = await makeEngine('a', 100, store);
+  await mustApply(
+    a.engine,
+    delta([
+      rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }),
+      rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }),
+    ]),
+  );
+  assertEqual(a.engine.divergenceHistory().length, 1);
+  // Simulate the lost row: drop it from the stored snapshot.
+  const repaired: SyncLogSnapshot = {
+    entries: store.entries,
+    divergence: [],
+    watermarks: store.storedWatermarks,
+  };
+  const store2 = new FakeSyncLogStore(repaired);
+  const b = await makeEngine('a', 100, store2);
+  // Rebuilt by hydrate repair — present in memory AND persisted.
+  assertEqual(b.engine.divergenceHistory().length, 1);
+  assertEqual(store2.divergenceRows.length, 1);
+}
+
+
 // ---- property harness -------------------------------------------------------
 
 // Deterministic xorshift32.
@@ -835,29 +1060,59 @@ function entryLess(a: ChangeEntry, b: ChangeEntry): boolean {
 }
 
 /** Canonical field winners: per (kind,recordId,field), the max entry. */
-function expectedWinners(
+/**
+ * Reference winner per field slot — computed over each entry's LIVE
+ * subset (entries stamped newer than the slot's winning tombstone),
+ * matching the engine's field-cell model: a dead entry never wins but
+ * also cannot poison the slot for newer live writes.
+ */
+function expectedLiveWinners(
   entries: readonly ChangeEntry[],
 ): Map<string, ChangeEntry> {
-  const winners = new Map<string, ChangeEntry>();
+  const tombs = expectedTombstones(entries);
+  const slots = new Map<string, ChangeEntry[]>();
   for (const e of entries) {
     if (e.tombstone) {
       continue;
     }
+    const tomb = tombs.get(recordKey(e));
+    if (tomb !== undefined && !entryLess(tomb, e)) {
+      continue; // predates the winning delete — dead at read time
+    }
     const slot = slotKey(e);
-    const cur = winners.get(slot);
-    if (e.kind === 'playCount') {
-      // 'max' semilattice: larger value wins; exact tie → later stamp.
-      if (
-        cur === undefined ||
-        (typeof e.value === 'number' &&
-          typeof cur.value === 'number' &&
-          (e.value > cur.value ||
-            (e.value === cur.value && entryLess(cur, e))))
-      ) {
-        winners.set(slot, e);
+    const live = slots.get(slot);
+    if (live === undefined) {
+      slots.set(slot, [e]);
+    } else {
+      live.push(e);
+    }
+  }
+  const winners = new Map<string, ChangeEntry>();
+  for (const [slot, live] of slots) {
+    let winner = live[0];
+    for (const e of live) {
+      if (winner === undefined) {
+        winner = e;
+        continue;
       }
-    } else if (cur === undefined || entryLess(cur, e)) {
-      winners.set(slot, e);
+      if (
+        e.kind === 'playCount' &&
+        typeof e.value === 'number' &&
+        typeof winner.value === 'number'
+      ) {
+        // 'max' semilattice: larger value wins; exact tie → later stamp.
+        if (
+          e.value > winner.value ||
+          (e.value === winner.value && entryLess(winner, e))
+        ) {
+          winner = e;
+        }
+      } else if (entryLess(winner, e)) {
+        winner = e;
+      }
+    }
+    if (winner !== undefined) {
+      winners.set(slot, winner);
     }
   }
   return winners;
@@ -885,8 +1140,7 @@ function expectedTombstones(
 function expectedMaterialize(
   entries: readonly ChangeEntry[],
 ): { kind: string; recordId: string; fields: Record<string, unknown> }[] {
-  const fieldWinners = expectedWinners(entries);
-  const tombs = expectedTombstones(entries);
+  const fieldWinners = expectedLiveWinners(entries);
   const byRecord = new Map<
     string,
     { kind: string; recordId: string; fields: Record<string, unknown> }
@@ -894,10 +1148,6 @@ function expectedMaterialize(
   for (const e of entries) {
     if (e.tombstone || fieldWinners.get(slotKey(e)) !== e) {
       continue;
-    }
-    const tomb = tombs.get(recordKey(e));
-    if (tomb !== undefined && !entryLess(tomb, e)) {
-      continue; // field predates the winning delete — dead at read time
     }
     const key = recordKey(e);
     let rec = byRecord.get(key);
@@ -948,7 +1198,16 @@ async function propertyHarness(): Promise<void> {
         const p = rand() % 10;
         let input: LocalWrite;
         if (p < 2) {
-          input = { kind: 'recording', recordId, tombstone: true };
+          // Tombstones span kinds so the max-merge × delete
+          // interaction (a larger-but-dead playCount must still
+          // displace the smaller live winner) is exercised.
+          input = rand() % 3 === 0
+            ? { kind: 'playlistEntry', recordId: 'e1', tombstone: true }
+            : {
+              kind: pick(rand, ['recording', 'playCount']),
+              recordId,
+              tombstone: true,
+            };
         } else if (p < 4) {
           input = {
             kind: 'playCount',
@@ -1065,7 +1324,7 @@ async function propertyHarness(): Promise<void> {
 
     // NO-LOSS: every losing value is recoverable — it either survived
     // verbatim as the slot winner, or sits in divergence history.
-    const fieldWinners = expectedWinners(universe);
+    const fieldWinners = expectedLiveWinners(universe);
     const tombs = expectedTombstones(universe);
     devices.forEach((d, i) => {
       const rows = d.divergenceHistory();
@@ -1131,5 +1390,12 @@ export async function run(): Promise<void> {
   await batchAndCancel();
   await storeFailures();
   await divergenceCap();
+  await maxFieldTombstoneOrders();
+  await maxFieldResurface();
+  await cursorAfterFailedAppend();
+  await cursorGapsAreConservative();
+  await exportPagination();
+  await remoteMutationImmunity();
+  await hydrateRepairsDivergence();
   await propertyHarness();
 }

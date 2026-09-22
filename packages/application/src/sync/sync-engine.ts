@@ -42,13 +42,19 @@ import type { HlcStamp } from './hlc.ts';
  * Pure TypeScript — no transport, pairing, or platform concerns.
  *
  * Model: every client keeps an append-only change log of
- * `{kind, recordId, field, value, hlc, deviceId, tombstone}` entries.
- * Each record is a set of independently merged fields; each field is
- * an LWW register ordered by the entry's hybrid-logical-clock stamp
- * (see hlc.ts). A record-level tombstone entry (field '*') competes
- * against the newest field stamp on that record: a delete beats every
- * older write and loses to any newer one, so order of arrival never
- * changes the outcome.
+ * `{kind, recordId, field, value, hlc, deviceId, tombstone, seq}`
+ * entries. Each record is a set of independently merged fields; each
+ * field holds its live candidates — entries stamped newer than the
+ * record's winning tombstone — and the merge rule picks the winner
+ * over that set ('lww' newest stamp; 'max' largest numeric value —
+ * see hlc.ts for the stamp scheme). A record-level tombstone entry
+ * (field '*') kills every live candidate stamped at or below it and
+ * loses to newer tombstones; a dead entry never resurfaces, but a
+ * live one always can for 'max' fields, which is what keeps the merge
+ * convergent under any arrival order. `seq` is the emitting device's
+ * own emission ordinal — it exists so receivers can track contiguous
+ * per-device progress (a scalar stamp watermark would falsely claim
+ * knowledge below relay gaps; see SyncCursor).
  *
  * Predictable over clever: whenever an entry displaces a live value or
  * loses to a newer one, the loser is preserved in a bounded divergence
@@ -170,6 +176,16 @@ export type ChangeEntry = {
   readonly tombstone: boolean;
   readonly hlc: HlcStamp;
   readonly deviceId: string;
+  /**
+   * Emission ordinal of the emitting device — 1-based position in its
+   * own emitted stream, assigned only after the entry lands durably in
+   * the origin's own log (a failed append burns nothing). Because the
+   * origin emits every seq it mints, seqs form a gap-free stream:
+   * receivers can track a *contiguous* per-device watermark instead of
+   * a scalar high-water mark, which is the only cursor that is safe
+   * under arbitrary relay subsets and retention-filtered exports.
+   */
+  readonly seq: number;
 };
 
 /** A local write: one field set, or a record-wide delete. */
@@ -187,20 +203,33 @@ export type LocalWrite =
   };
 
 /**
- * Per-source-device high-water mark: `cursor[device]` is the largest
- * (l, c) stamp the holder has observed from that device. A delta
- * exports entries strictly above the requester's cursor per source
- * device, so relayed entries never re-ship.
+ * Per-source-device contiguous watermark: `cursor[device]` is the
+ * largest emission seq the holder has observed *without gaps* from
+ * that device — i.e. it has every entry the device emitted up to it.
+ * A delta exports entries with `seq` strictly above the requester's
+ * cursor per source device. A scalar high-water mark is unsafe under
+ * relay: a relayed subset (or a retention-dropped playEvent) would
+ * advance the mark past entries the holder never saw, and later
+ * exports would suppress them forever. Contiguity costs a stalled
+ * cursor while a hole is unfilled — chattier, never lossy.
  */
-export type SyncCursor = Readonly<Record<string, HlcStamp>>;
+export type SyncCursor = Readonly<Record<string, number>>;
 
 /** The versioned, JSON-serializable delta document on the wire. */
 export type SyncDelta = {
   readonly formatVersion: 1;
   readonly senderDeviceId: string;
-  /** The sender's full watermark at export time. */
+  /** The sender's full contiguous watermark at export time. */
   readonly cursor: SyncCursor;
   readonly entries: readonly ChangeEntry[];
+  /**
+   * True when entries remained above the request cursor beyond this
+   * doc's bound — the receiver keeps re-requesting with its own
+   * (newly advanced) cursor until a doc arrives with `more: false`.
+   * Export is always bounded so an emitted doc can never be rejected
+   * by its own envelope validator.
+   */
+  readonly more: boolean;
 };
 
 // ---- divergence history ---------------------------------------------------
@@ -292,14 +321,14 @@ export type SyncLogSnapshot = {
   /** Every change entry this device has accepted, in append order. */
   readonly entries: readonly ChangeEntry[];
   readonly divergence: readonly DivergenceEntry[];
-  readonly watermarks: Readonly<Record<string, HlcStamp>>;
+  readonly watermarks: Readonly<Record<string, number>>;
 };
 
 export type SyncLogWrite = {
   readonly entries?: readonly ChangeEntry[];
   readonly divergence?: readonly DivergenceEntry[];
   /** Merged into the stored watermark map (per-device max). */
-  readonly watermarks?: Readonly<Record<string, HlcStamp>>;
+  readonly watermarks?: Readonly<Record<string, number>>;
   /** Drops stored divergence rows with seq strictly below this floor. */
   readonly dropDivergenceBefore?: number;
 };
@@ -344,9 +373,16 @@ export interface SyncEngine {
     inputs: readonly LocalWrite[],
     signal?: CancellationSignal,
   ): Promise<Result<readonly LocalChangeResult[]>>;
-  /** The delta document of every logged entry above `since`. */
+  /**
+   * The delta document of every logged entry above `since`, bounded
+   * to `limit` entries (default the wire cap). `more` reports whether
+   * a follow-up export with the receiver's advanced cursor would
+   * still have entries — the doc is never emitted in a shape its own
+   * validator would reject.
+   */
   exportDelta(
     since?: SyncCursor,
+    limit?: number,
     signal?: CancellationSignal,
   ): Promise<Result<SyncDelta>>;
   /**
@@ -625,6 +661,7 @@ export function isChangeEntry(value: unknown): value is ChangeEntry {
       'tombstone',
       'hlc',
       'deviceId',
+      'seq',
     ])
   ) {
     return false;
@@ -636,7 +673,8 @@ export function isChangeEntry(value: unknown): value is ChangeEntry {
     !isString(field, MAX_FIELD) ||
     typeof tombstone !== 'boolean' ||
     !isHlcStamp(hlc) ||
-    !isString(deviceId, MAX_DEVICE_ID)
+    !isString(deviceId, MAX_DEVICE_ID) ||
+    !isEmissionSeq(value['seq'])
   ) {
     return false;
   }
@@ -651,7 +689,7 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
   return (
     isRecord(value) &&
     Object.keys(value).length <= MAX_CURSOR_DEVICES &&
-    Object.values(value).every(isHlcStamp)
+    Object.values(value).every(isSafeNonNegative)
   );
 }
 
@@ -664,12 +702,14 @@ export function isSyncDelta(value: unknown): value is SyncDelta {
       'senderDeviceId',
       'cursor',
       'entries',
+      'more',
     ]) &&
     value['formatVersion'] === 1 &&
     isString(value['senderDeviceId'], MAX_DEVICE_ID) &&
     isSyncCursor(value['cursor']) &&
     Array.isArray(value['entries']) &&
-    value['entries'].length <= MAX_DELTA_ENTRIES
+    value['entries'].length <= MAX_DELTA_ENTRIES &&
+    typeof value['more'] === 'boolean'
   );
 }
 
@@ -713,11 +753,31 @@ export function isDivergenceEntry(
 
 // ---- merge internals ------------------------------------------------------
 
+type FieldCell = {
+  /**
+   * The entry whose value a reader would see: the merge rule's max
+   * over `live`.
+   */
+  winner: ChangeEntry;
+  /**
+   * Candidates newer than the record tombstone. A dead entry never
+   * resurfaces (tombstones only advance), so it is dropped on death —
+   * 'live' holds exactly the entries that could still win. For 'lww'
+   * this is always `[winner]`: if the max-stamp entry ever dies, every
+   * smaller-stamped candidate is dead too, so runner-ups cannot
+   * resurface. For 'max' runner-ups must stay: a larger-but-dead
+   * value must not poison the slot — after a tombstone kills it, the
+   * smaller-but-newer write still wins, which is what makes the
+   * max-merge convergent under reorder.
+   */
+  live: ChangeEntry[];
+};
+
 type RecordState = {
   readonly kind: SyncRecordKind;
   readonly recordId: string;
-  /** Winning entry per field — losers never live here. */
-  readonly fields: Map<string, ChangeEntry>;
+  /** Live candidates + winner per field. */
+  readonly fields: Map<string, FieldCell>;
   /** The winning tombstone, if the record was ever deleted. */
   tombstone: ChangeEntry | undefined;
 };
@@ -749,6 +809,11 @@ function divergenceKey(
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return isRecord(value);
+}
+
+/** Emission ordinals are 1-based: 0 means "nothing observed". */
+function isEmissionSeq(value: unknown): value is number {
+  return isSafeNonNegative(value) && value >= 1;
 }
 
 function jsonEquals(a: unknown, b: unknown): boolean {
@@ -886,23 +951,90 @@ export async function createSyncEngine(
   /** All accepted entries (winners and losers alike), append order. */
   const changeLog: ChangeEntry[] = [];
   const seen = new Set<string>();
-  const watermarks = new Map<string, HlcStamp>();
+  /**
+   * Per-device emission observation: `seenSeqs[d]` holds every seq
+   * observed from device d (including our own); `contiguous[d]` is the
+   * largest seq with no gap below it. Memory is proportional to the
+   * log — same order as `changeLog` itself.
+   */
+  const seenSeqs = new Map<string, Set<number>>();
+  const contiguous = new Map<string, number>();
+  /** Emission ordinal of this device's own next entry (appended only). */
+  let localSeq = 0;
   const divergence: DivergenceEntry[] = [];
   const divergenceSeen = new Set<string>();
   let divergenceSeq = 0;
   let hlc = new HybridClock();
 
-  function noteStamp(source: string, stamp: HlcStamp): void {
-    const current = watermarks.get(source);
-    if (current === undefined || compareStamp(stamp, current) > 0) {
-      watermarks.set(source, stamp);
+  /**
+   * Fold one entry's emission seq into the observed set and advance
+   * the device's contiguous mark while buffered successors exist.
+   */
+  function foldSeq(source: string, seq: number): void {
+    let set = seenSeqs.get(source);
+    if (set === undefined) {
+      set = new Set<number>();
+      seenSeqs.set(source, set);
+    }
+    set.add(seq);
+    let mark = contiguous.get(source) ?? 0;
+    while (set.has(mark + 1)) {
+      mark += 1;
+    }
+    contiguous.set(source, mark);
+  }
+
+  /**
+   * The watermark map an append of `entries` would produce — computed
+   * without touching engine state so a failed append can never
+   * advance the cursor (the store folds these marks on its side).
+   */
+  function prospectiveMarks(
+    entries: readonly ChangeEntry[],
+  ): Record<string, number> {
+    const marks: Record<string, number> = {};
+    const buffers = new Map<string, Set<number>>();
+    for (const entry of entries) {
+      const dev = entry.deviceId;
+      let buffer = buffers.get(dev);
+      if (buffer === undefined) {
+        buffer = new Set<number>();
+        const prior = seenSeqs.get(dev);
+        if (prior !== undefined) {
+          for (const seq of prior) {
+            buffer.add(seq);
+          }
+        }
+        buffers.set(dev, buffer);
+        marks[dev] = contiguous.get(dev) ?? 0;
+      }
+      let mark = marks[dev] ?? 0;
+      if (entry.seq > mark) {
+        buffer.add(entry.seq);
+        while (buffer.delete(mark + 1)) {
+          mark += 1;
+        }
+        marks[dev] = mark;
+      }
+    }
+    return marks;
+  }
+
+  function commitSeqs(entries: readonly ChangeEntry[]): void {
+    for (const entry of entries) {
+      foldSeq(entry.deviceId, entry.seq);
     }
   }
 
   function cursorSnapshot(): SyncCursor {
-    const out: Record<string, HlcStamp> = {};
-    for (const [device, stamp] of watermarks) {
-      out[device] = { ...stamp };
+    // The wire caps a cursor at MAX_CURSOR_DEVICES; keep the devices
+    // with the most progress so a trimmed mark only costs re-shipped
+    // (deduped) entries, never a wrong claim.
+    const pairs = [...contiguous.entries()];
+    pairs.sort((a, b) => b[1] - a[1]);
+    const out: Record<string, number> = {};
+    for (const [device, mark] of pairs.slice(0, MAX_CURSOR_DEVICES)) {
+      out[device] = mark;
     }
     return out;
   }
@@ -916,11 +1048,21 @@ export async function createSyncEngine(
     };
   }
 
+  /**
+   * `emit`:
+   * - true — a live merge: every new loser materializes a row.
+   * - 'repair' — hydrate replay of the durable log: a row is
+   *   materialized only when no stored row covers the same loser key.
+   *   This is what heals a dropped divergence append: the durable
+   *   change log re-derives every loser deterministically, so a row
+   *   that never reached the store is rebuilt on next boot instead of
+   *   being suppressed as seen-but-absent.
+   */
   function recordDivergence(
     out: DivergenceEntry[],
     loser: ChangeEntry,
     winner: ChangeEntry,
-    emit: boolean,
+    emit: boolean | 'repair',
   ): void {
     const key = divergenceKey(
       loser.kind,
@@ -928,13 +1070,10 @@ export async function createSyncEngine(
       loser.field,
       toSide(loser),
     );
-    if (divergenceSeen.has(key)) {
+    if (emit === false || divergenceSeen.has(key)) {
       return;
     }
     divergenceSeen.add(key);
-    if (!emit) {
-      return;
-    }
     divergenceSeq += 1;
     const at = now() ?? loser.hlc.l;
     const entry: DivergenceEntry = {
@@ -960,9 +1099,46 @@ export async function createSyncEngine(
    * against the field's current winner (or by value for 'max' rules),
    * then against the tombstone. Every loser lands in divergence.
    */
+  /**
+   * The merge rule's winner over a set of live candidates: 'lww'
+   * takes the newest stamp; 'max' takes the largest numeric value
+   * (stamps break exact ties deterministically).
+   */
+  function pickWinner(
+    rule: FieldRule | undefined,
+    candidates: readonly ChangeEntry[],
+  ): ChangeEntry {
+    let winner = candidates[0];
+    for (const candidate of candidates) {
+      if (winner === undefined) {
+        winner = candidate;
+        continue;
+      }
+      if (
+        rule?.merge === 'max' &&
+        typeof candidate.value === 'number' &&
+        typeof winner.value === 'number'
+      ) {
+        if (
+          candidate.value > winner.value ||
+          (candidate.value === winner.value &&
+            compareEntryTs(candidate, winner) > 0)
+        ) {
+          winner = candidate;
+        }
+      } else if (compareEntryTs(candidate, winner) > 0) {
+        winner = candidate;
+      }
+    }
+    if (winner === undefined) {
+      throw new RangeError('empty candidate set');
+    }
+    return winner;
+  }
+
   function reduce(
     entry: ChangeEntry,
-    emit: boolean,
+    emit: boolean | 'repair',
   ): { outcome: MergeOutcome; divergences: DivergenceEntry[] } {
     const key = `${entry.kind}${KEY_SEP}${entry.recordId}`;
     let record = records.get(key);
@@ -970,7 +1146,7 @@ export async function createSyncEngine(
       record = {
         kind: entry.kind,
         recordId: entry.recordId,
-        fields: new Map<string, ChangeEntry>(),
+        fields: new Map<string, FieldCell>(),
         tombstone: undefined,
       };
       records.set(key, record);
@@ -989,11 +1165,30 @@ export async function createSyncEngine(
       if (current !== undefined) {
         recordDivergence(divs, current, entry, emit);
       }
+      // The newer tombstone kills every live candidate stamped at or
+      // below it. A killed winner is displaced; a killed runner-up
+      // only gets a divergence row when it has none yet (dedupe).
       const killed: ChangeEntry[] = [];
-      for (const field of record.fields.values()) {
-        if (compareEntryTs(field, entry) < 0) {
-          killed.push(field);
-          recordDivergence(divs, field, entry, emit);
+      for (const [field, cell] of record.fields) {
+        const rule = syncFieldRule(record.kind, field);
+        const survivors: ChangeEntry[] = [];
+        for (const candidate of cell.live) {
+          if (compareEntryTs(candidate, entry) <= 0) {
+            recordDivergence(divs, candidate, entry, emit);
+          } else {
+            survivors.push(candidate);
+          }
+        }
+        if (survivors.length === 0) {
+          record.fields.delete(field);
+        } else {
+          record.fields.set(field, {
+            winner: pickWinner(rule, survivors),
+            live: survivors,
+          });
+        }
+        if (compareEntryTs(cell.winner, entry) <= 0) {
+          killed.push(cell.winner);
         }
       }
       record.tombstone = entry;
@@ -1003,45 +1198,13 @@ export async function createSyncEngine(
       };
     }
 
-    const current = record.fields.get(entry.field);
-    const fieldRule = syncFieldRule(entry.kind, entry.field);
-    let winner: ChangeEntry;
-    if (current === undefined) {
-      winner = entry;
-    } else if (
-      fieldRule?.merge === 'max' &&
-      typeof entry.value === 'number' &&
-      typeof current.value === 'number'
-    ) {
-      // 'max' is a numeric semilattice: the larger value wins, stamps
-      // break exact ties deterministically.
-      winner =
-        entry.value > current.value ||
-        (entry.value === current.value &&
-          compareEntryTs(entry, current) > 0)
-          ? entry
-          : current;
-    } else {
-      winner = compareEntryTs(entry, current) > 0 ? entry : current;
-    }
-
-    if (winner !== entry) {
-      if (
-        !jsonEquals(current?.value, entry.value)
-      ) {
-        recordDivergence(divs, entry, current ?? entry, emit);
-      }
-      return {
-        outcome: {
-          type: 'superseded',
-          entry,
-          winner: current ?? entry,
-        },
-        divergences: divs,
-      };
-    }
-
+    const rule = syncFieldRule(entry.kind, entry.field);
+    const cell = record.fields.get(entry.field);
     const tomb = record.tombstone;
+
+    // Dead on arrival: stamped at or below the winning tombstone. It
+    // can never resurface, so it does not join the candidates — but
+    // the losing value is preserved in history like any other loser.
     if (tomb !== undefined && compareEntryTs(entry, tomb) <= 0) {
       recordDivergence(divs, entry, tomb, emit);
       return {
@@ -1050,42 +1213,53 @@ export async function createSyncEngine(
       };
     }
 
-    const displaced: ChangeEntry[] = [];
-    if (current !== undefined) {
-      displaced.push(current);
-      if (!jsonEquals(current.value, entry.value)) {
-        recordDivergence(divs, current, entry, emit);
-      }
+    const live = cell === undefined ? [entry] : [...cell.live, entry];
+    const prevWinner = cell?.winner;
+    const winner = pickWinner(rule, live);
+    // A displaced winner loses its slot to the new winner; an entry
+    // that arrived live but does not win loses to the same. Both are
+    // recorded — equal-value supersessions are not a loss.
+    if (
+      prevWinner !== undefined &&
+      prevWinner !== winner &&
+      !jsonEquals(prevWinner.value, winner.value)
+    ) {
+      recordDivergence(divs, prevWinner, winner, emit);
     }
-    record.fields.set(entry.field, entry);
+    if (winner !== entry && !jsonEquals(entry.value, winner.value)) {
+      recordDivergence(divs, entry, winner, emit);
+    }
+    record.fields.set(entry.field, {
+      winner,
+      live: rule?.merge === 'max' ? live : [winner],
+    });
+
+    if (prevWinner === winner) {
+      return {
+        outcome: { type: 'superseded', entry, winner },
+        divergences: divs,
+      };
+    }
     return {
-      outcome: { type: 'applied', entry, displaced },
+      outcome: {
+        type: 'applied',
+        entry,
+        displaced: prevWinner === undefined ? [] : [prevWinner],
+      },
       divergences: divs,
     };
   }
 
   // ---- persistence --------------------------------------------------------
 
-  function watermarkOf(
-    entries: readonly ChangeEntry[],
-  ): Record<string, HlcStamp> {
-    const merged: Record<string, HlcStamp> = {};
-    for (const entry of entries) {
-      noteStamp(entry.deviceId, entry.hlc);
-      merged[entry.deviceId] = watermarks.get(entry.deviceId) ?? entry.hlc;
-    }
-    return merged;
-  }
-
   async function appendLog(
     entries: readonly ChangeEntry[],
     signal: CancellationSignal,
     deadlineMs: number,
   ): Promise<Result<void>> {
-    const merged = watermarkOf(entries);
     const write: SyncLogWrite = {
       entries,
-      watermarks: merged,
+      watermarks: prospectiveMarks(entries),
     };
     const appended = await call(() =>
       store.append(write, context('sync-app', deadlineMs, signal)),
@@ -1093,6 +1267,9 @@ export async function createSyncEngine(
     if (!appended.ok) {
       return err(appended.error);
     }
+    // Cursor state commits only once the write is durable — a failed
+    // append must never advertise entries this device never accepted.
+    commitSeqs(entries);
     for (const entry of entries) {
       changeLog.push(entry);
       seen.add(entryKey(entry));
@@ -1207,37 +1384,48 @@ export async function createSyncEngine(
         at + OP_DEADLINE_MS,
         Number.MAX_SAFE_INTEGER,
       );
-      const entries: ChangeEntry[] = inputs.map((input) => {
-        const stamp = hlc.tick(at);
-        const entry: ChangeEntry =
-          'tombstone' in input
-            ? {
-              kind: input.kind,
-              recordId: input.recordId,
-              field: TOMBSTONE_FIELD,
-              value: null,
-              tombstone: true,
-              hlc: stamp,
-              deviceId,
-            }
-            : {
-              kind: input.kind,
-              recordId: input.recordId,
-              field: input.field,
-              value: input.value,
-              tombstone: false,
-              hlc: stamp,
-              deviceId,
-            };
-        deepFreezeValue(entry.value);
-        return Object.freeze(entry);
-      });
+      let entries: ChangeEntry[];
+      try {
+        entries = inputs.map((input, index) => {
+          const stamp = hlc.tick(at);
+          const entry: ChangeEntry =
+            'tombstone' in input
+              ? {
+                kind: input.kind,
+                recordId: input.recordId,
+                field: TOMBSTONE_FIELD,
+                value: null,
+                tombstone: true,
+                hlc: stamp,
+                deviceId,
+                seq: localSeq + index + 1,
+              }
+              : {
+                kind: input.kind,
+                recordId: input.recordId,
+                field: input.field,
+                value: input.value,
+                tombstone: false,
+                hlc: stamp,
+                deviceId,
+                seq: localSeq + index + 1,
+              };
+          deepFreezeValue(entry.value);
+          return Object.freeze(entry);
+        });
+      } catch (thrown) {
+        return err(fromUnknown(thrown));
+      }
       // Durable first: the change log is the source of truth; merge
       // state is derived from it.
       const appended = await appendLog(entries, sig, deadlineMs);
       if (!appended.ok) {
         return err(appended.error);
       }
+      // Emission ordinals commit only for durably appended entries —
+      // a failed write burns no seq, so the emitted stream stays
+      // gap-free.
+      localSeq += entries.length;
       const results: LocalChangeResult[] = [];
       const divs: DivergenceEntry[] = [];
       for (const entry of entries) {
@@ -1274,11 +1462,16 @@ export async function createSyncEngine(
 
   async function exportDelta(
     since?: SyncCursor,
+    limit = MAX_DELTA_ENTRIES,
     signal?: CancellationSignal,
   ): Promise<Result<SyncDelta>> {
     if (since !== undefined && !isSyncCursor(since)) {
       return err(appError('invalid-response', 'invalid sync cursor'));
     }
+    if (!isSafeNonNegative(limit)) {
+      return err(appError('invalid-response', 'invalid delta limit'));
+    }
+    const bound = Math.min(limit, MAX_DELTA_ENTRIES);
     return serialized(async () => {
       const { cancelled } = resolveSignal(signal);
       if (cancelled) {
@@ -1287,20 +1480,22 @@ export async function createSyncEngine(
       const at = now();
       const retainedFloor =
         at === null ? null : at - PLAY_HISTORY_RETENTION_MS;
-      const entries = changeLog
+      const eligible = changeLog
         .filter((entry) => {
           if (since !== undefined) {
-            const seenUpTo = since[entry.deviceId];
-            if (
-              seenUpTo !== undefined &&
-              compareStamp(entry.hlc, seenUpTo) <= 0
-            ) {
+            // Per-source contiguous seq: entries at or below the
+            // requester's mark are known-observed and never re-ship.
+            const seenUpTo = since[entry.deviceId] ?? 0;
+            if (entry.seq <= seenUpTo) {
               return false;
             }
           }
           // History is a bounded window (data.md): a play event
           // beyond the retention window would be pruned on the
-          // receiver's next write anyway, so it never ships.
+          // receiver's next write anyway, so it never ships. Such a
+          // drop leaves a seq hole for the requester — its contiguous
+          // cursor stays before the hole until another peer fills it,
+          // which costs re-shipped (deduped) entries, never loss.
           if (
             entry.kind === 'playEvent' &&
             !entry.tombstone &&
@@ -1313,11 +1508,13 @@ export async function createSyncEngine(
           return true;
         })
         .sort(compareEntryTs);
+      const entries = eligible.slice(0, bound);
       const doc: SyncDelta = {
         formatVersion: 1,
         senderDeviceId: deviceId,
         cursor: cursorSnapshot(),
         entries,
+        more: eligible.length > entries.length,
       };
       return ok(doc);
     });
@@ -1369,11 +1566,15 @@ export async function createSyncEngine(
           return;
         }
         inDoc.add(key);
-        valid.push(raw);
+        // Own the wire bytes: the caller's doc stays mutable after we
+        // return, so accepted entries are deep-cloned then frozen —
+        // the log, winners map, and divergence sides never alias
+        // caller-owned objects. Values are JSON-shaped by the
+        // whitelist contract, so a JSON clone is exact.
+        const owned = JSON.parse(JSON.stringify(raw)) as ChangeEntry;
+        deepFreezeValue(owned.value);
+        valid.push(Object.freeze(owned));
       });
-      for (const entry of valid) {
-        noteStamp(entry.deviceId, entry.hlc);
-      }
       // Canonical order: every device that receives the same set of
       // entries merges them identically, divergence included.
       valid.sort(compareEntryTs);
@@ -1393,11 +1594,15 @@ export async function createSyncEngine(
       // Once fresh entries are durable the merge runs to completion —
       // bailing here would leave the log ahead of the in-memory merge.
       const divs: DivergenceEntry[] = [];
-      for (const entry of fresh) {
-        hlc.receive(entry.hlc, at);
-        const merged = reduce(entry, true);
-        divs.push(...merged.divergences);
-        outcomes.push(merged.outcome);
+      try {
+        for (const entry of fresh) {
+          hlc.receive(entry.hlc, at);
+          const merged = reduce(entry, true);
+          divs.push(...merged.divergences);
+          outcomes.push(merged.outcome);
+        }
+      } catch (thrown) {
+        return err(fromUnknown(thrown));
       }
       await appendDivergence(divs, sig, deadlineMs);
       const result: ApplyResult = {
@@ -1451,13 +1656,8 @@ export async function createSyncEngine(
     const out: MaterializedRecord[] = [];
     for (const record of records.values()) {
       const fields: Record<string, unknown> = {};
-      for (const [field, entry] of record.fields) {
-        if (
-          record.tombstone === undefined ||
-          compareEntryTs(entry, record.tombstone) > 0
-        ) {
-          fields[field] = entry.value;
-        }
+      for (const [field, cell] of record.fields) {
+        fields[field] = cell.winner.value;
       }
       if (Object.keys(fields).length > 0) {
         out.push({
@@ -1507,12 +1707,8 @@ export async function createSyncEngine(
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
-  for (const entry of snapshot.entries) {
-    changeLog.push(entry);
-    seen.add(entryKey(entry));
-    noteStamp(entry.deviceId, entry.hlc);
-    reduce(entry, false);
-  }
+  // Stored divergence rows seed the dedupe set BEFORE replay, so
+  // 'repair' emit materializes exactly the rows the store is missing.
   for (const row of snapshot.divergence) {
     divergence.push(row);
     divergenceSeen.add(
@@ -1520,16 +1716,72 @@ export async function createSyncEngine(
     );
     divergenceSeq = Math.max(divergenceSeq, row.seq);
   }
-  for (const [device, stamp] of Object.entries(snapshot.watermarks)) {
-    noteStamp(device, stamp);
-  }
+  const repairs: DivergenceEntry[] = [];
   let highest: HlcStamp | undefined;
-  for (const stamp of watermarks.values()) {
-    if (highest === undefined || compareStamp(stamp, highest) > 0) {
-      highest = stamp;
+  for (const entry of snapshot.entries) {
+    deepFreezeValue(entry.value);
+    changeLog.push(entry);
+    seen.add(entryKey(entry));
+    foldSeq(entry.deviceId, entry.seq);
+    if (
+      entry.deviceId === deviceId &&
+      entry.seq > localSeq
+    ) {
+      localSeq = entry.seq;
+    }
+    if (highest === undefined || compareStamp(entry.hlc, highest) > 0) {
+      highest = entry.hlc;
+    }
+    reduce(entry, 'repair').divergences.forEach((row) =>
+      repairs.push(row),
+    );
+  }
+  // The log alone rebuilds cursor state — stored watermarks are
+  // derived data and deliberately not read back into `contiguous`:
+  // claiming a mark the entries cannot prove would reintroduce the
+  // silent gap a contiguous cursor exists to prevent.
+  hlc = new HybridClock(highest);
+  // Best-effort repair write: divergence rows rebuilt from the log
+  // that the store is missing (e.g. a prior divergence append that
+  // failed). Bounded by the same cap as live writes.
+  if (repairs.length > 0) {
+    let dropBefore: number | undefined;
+    if (divergence.length > DIVERGENCE_HISTORY_LIMIT) {
+      const floorRow =
+        divergence[divergence.length - DIVERGENCE_HISTORY_LIMIT];
+      if (floorRow !== undefined) {
+        dropBefore = floorRow.seq;
+        divergence.splice(
+          0,
+          divergence.length - DIVERGENCE_HISTORY_LIMIT,
+        );
+      }
+    }
+    const write: SyncLogWrite = {
+      divergence: repairs,
+      ...(dropBefore === undefined
+        ? {}
+        : { dropDivergenceBefore: dropBefore }),
+    };
+    const repaired = await call(() =>
+      store.append(
+        write,
+        context(
+          'sync-repair',
+          Math.min(
+            loadAt + OP_DEADLINE_MS,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          emptySignal.signal,
+        ),
+      ),
+    );
+    if (!repaired.ok) {
+      warn(
+        `sync divergence repair append failed: ${repaired.error.kind}`,
+      );
     }
   }
-  hlc = new HybridClock(highest);
 
   const engine: SyncEngine = {
     deviceId,

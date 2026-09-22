@@ -77,13 +77,16 @@ export class HybridClock {
     if (nowMs > this.#l) {
       this.#l = nowMs;
       this.#c = 0;
-    } else if (
-      this.#c === Number.MAX_SAFE_INTEGER &&
-      this.#l < Number.MAX_SAFE_INTEGER
-    ) {
+    } else if (this.#c === Number.MAX_SAFE_INTEGER) {
+      // Terminal stamp: both components saturated. A repeated stamp
+      // would alias two distinct events to one entry key — a clock
+      // that cannot order must say so rather than mint a duplicate.
+      if (this.#l === Number.MAX_SAFE_INTEGER) {
+        throw new RangeError('hlc exhausted');
+      }
       this.#l += 1;
       this.#c = 0;
-    } else if (this.#c < Number.MAX_SAFE_INTEGER) {
+    } else {
       this.#c += 1;
     }
     return { l: this.#l, c: this.#c };
@@ -113,12 +116,15 @@ export class HybridClock {
     } else {
       c = 0;
     }
-    if (c > Number.MAX_SAFE_INTEGER && l < Number.MAX_SAFE_INTEGER) {
+    if (c > Number.MAX_SAFE_INTEGER) {
+      if (l === Number.MAX_SAFE_INTEGER) {
+        throw new RangeError('hlc exhausted');
+      }
       this.#l = l + 1;
       this.#c = 0;
     } else {
       this.#l = l;
-      this.#c = Math.min(c, Number.MAX_SAFE_INTEGER);
+      this.#c = c;
     }
     return { l: this.#l, c: this.#c };
   }

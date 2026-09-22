@@ -62,8 +62,7 @@ import {
   isDivergenceEntry,
   isSyncCursor,
 } from '../sync/sync-engine.ts';
-import { compareStamp } from '../sync/hlc.ts';
-import type { HlcStamp } from '../sync/hlc.ts';
+
 import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
 
@@ -1257,7 +1256,7 @@ export class FakeConnectivity implements ConnectivityPort {
 export class FakeSyncLogStore implements SyncLogStore {
   #entries: ChangeEntry[] = [];
   #divergence: DivergenceEntry[] = [];
-  #watermarks: Record<string, HlcStamp> = {};
+  #watermarks: Record<string, number> = {};
   #failNextAppend: AppError | null = null;
   #deferNextAppend = false;
   #appendDeferreds: Deferred<Result<void>>[] = [];
@@ -1308,7 +1307,7 @@ export class FakeSyncLogStore implements SyncLogStore {
     return this.#clone(this.#divergence);
   }
 
-  get storedWatermarks(): Readonly<Record<string, HlcStamp>> {
+  get storedWatermarks(): Readonly<Record<string, number>> {
     return this.#clone(this.#watermarks);
   }
 
@@ -1386,10 +1385,10 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#divergence.push(...this.#clone(write.divergence));
     }
     if (write.watermarks !== undefined) {
-      for (const [device, stamp] of Object.entries(write.watermarks)) {
+      for (const [device, mark] of Object.entries(write.watermarks)) {
         const current = this.#watermarks[device];
-        if (current === undefined || compareStamp(stamp, current) > 0) {
-          this.#watermarks[device] = { ...stamp };
+        if (current === undefined || mark > current) {
+          this.#watermarks[device] = mark;
         }
       }
     }

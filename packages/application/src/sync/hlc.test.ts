@@ -133,6 +133,24 @@ function validation(): void {
   assertDeepEqual(seeded.tick(10), { l: 33, c: 5 });
 }
 
+function tickSaturationThrows(): void {
+  const max = Number.MAX_SAFE_INTEGER;
+  const clock = new HybridClock({ l: max, c: max });
+  // The terminal stamp cannot mint another distinct event — a
+  // repeated stamp would alias two entries to one key, so the clock
+  // reports exhaustion instead.
+  assert(throws(() => clock.tick(max)), 'saturated tick must throw');
+}
+
+function receiveSaturationThrows(): void {
+  const max = Number.MAX_SAFE_INTEGER;
+  const clock = new HybridClock({ l: max, c: max - 1 });
+  assert(
+    throws(() => clock.receive({ l: max, c: max }, max)),
+    'saturated receive must throw',
+  );
+}
+
 export function run(): void {
   stampShape();
   ordering();
@@ -140,5 +158,7 @@ export function run(): void {
   tickOverflowEscape();
   receiveSkew();
   receiveOverflowEscape();
+  tickSaturationThrows();
+  receiveSaturationThrows();
   validation();
 }
