@@ -24,6 +24,8 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -33,6 +35,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,9 +47,15 @@ const outArg = process.argv[2];
 const OUT = outArg === undefined ? join(ROOT, 'apps/mobile/assets/plugins') : resolve(ROOT, outArg);
 // relative() (not a string prefix check): a sibling named with the repo
 // prefix (Auqw-fake) starts with ROOT textually but resolves to '..',
-// and the repo root itself is never a valid output dir.
+// and the repo root itself is never a valid output dir. '..' is matched
+// as a whole segment so an in-repo name like '..plugins' stays valid.
 const outRel = relative(ROOT, OUT);
-if (outRel === '' || outRel.startsWith('..') || isAbsolute(outRel)) {
+if (
+  outRel === '' ||
+  outRel === '..' ||
+  outRel.startsWith(`..${sep}`) ||
+  isAbsolute(outRel)
+) {
   throw new Error(`sync-plugins: output dir must stay inside the repo: ${outArg}`);
 }
 // The spin conformance guest is a fuel-gate test plugin — ship it only
@@ -100,15 +109,15 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
-// Prune the previous synced set: the lock is the desired state, so a
-// provider dropped from it must not linger (a packaged build copies
-// OUT wholesale — stale files would ship and load). Only artifact
-// names are touched; anything else in the dir is left alone.
-for (const entry of readdirSync(OUT)) {
-  if (entry.endsWith('.wasm') || entry.endsWith('.manifest.json')) {
-    unlinkSync(join(OUT, entry));
-  }
-}
+// Stage inside OUT: every artifact is verified and copied before OUT's
+// current set is touched, so a failed sync leaves the last good set
+// exactly as it was. The stage dir never matches the artifact patterns
+// the swap prunes; the exit hook cleans it on any failure path.
+const STAGE = join(OUT, `.stage-${process.pid}`);
+mkdirSync(STAGE, { recursive: true });
+process.on('exit', () => {
+  rmSync(STAGE, { recursive: true, force: true });
+});
 
 const keyIdOf = (publicPem) =>
   createHash('sha256')
@@ -232,9 +241,9 @@ for (const plugin of lock.plugins) {
   }
   copyFileSync(
     wasmPath ?? join(releaseDir, `${plugin.id}-${plugin.version}.wasm`),
-    join(OUT, `${plugin.id}.wasm`),
+    join(STAGE, `${plugin.id}.wasm`),
   );
-  writeFileSync(join(OUT, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
+  writeFileSync(join(STAGE, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
   console.log(`synced ${plugin.id} ${plugin.version} ${plugin.digest.slice(0, 19)}…`);
 }
 
@@ -250,7 +259,20 @@ if (syncSpin) {
     permissions: [],
     artifact: { path: 'spin.wasm', digest: sha256(spin) },
   };
-  copyFileSync(spinPath, join(OUT, 'spin.wasm'));
-  writeFileSync(join(OUT, 'spin.manifest.json'), JSON.stringify(spinManifest));
+  copyFileSync(spinPath, join(STAGE, 'spin.wasm'));
+  writeFileSync(join(STAGE, 'spin.manifest.json'), JSON.stringify(spinManifest));
   console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
+}
+
+// Swap the verified set into OUT: prune stale artifacts (a provider
+// dropped from the lock must not linger — packaged builds copy OUT
+// wholesale and load everything they find), then move the staged files
+// in. Non-artifact files in OUT are left alone.
+for (const entry of readdirSync(OUT)) {
+  if (entry.endsWith('.wasm') || entry.endsWith('.manifest.json')) {
+    unlinkSync(join(OUT, entry));
+  }
+}
+for (const entry of readdirSync(STAGE)) {
+  renameSync(join(STAGE, entry), join(OUT, entry));
 }
