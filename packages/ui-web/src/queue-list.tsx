@@ -112,6 +112,7 @@ export function QueueList({
   const lastItems = useRef<QueueModel['items'] | null>(null);
   const lastAuthIds = useRef<readonly string[] | null>(null);
   const trackFocusId = useRef<string | null>(null);
+  const seenItems = useRef<QueueModel['items'] | null>(null);
   const [, setPendingTick] = useState(0);
   const list = useTrackList({
     count: queue.items.length,
@@ -188,8 +189,14 @@ export function QueueList({
   // Focus follows the moved row through publishes: once the
   // authoritative order lands, point the roving index at it again.
   // Also where serialized relative moves flush: a queued op ships
-  // only when no dispatched op is still unacknowledged.
+  // only when no dispatched op is still unacknowledged. Both arms
+  // are gated on a real queue.items change — a pending-tick render
+  // must not resolve trackFocusId against the pre-move order.
   useEffect(() => {
+    if (seenItems.current === queue.items) {
+      return;
+    }
+    seenItems.current = queue.items;
     const id = trackFocusId.current;
     if (id !== null) {
       trackFocusId.current = null;
