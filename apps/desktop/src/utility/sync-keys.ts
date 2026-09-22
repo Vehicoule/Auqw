@@ -67,6 +67,7 @@ export type SyncKeysOp =
   | { readonly op: 'identity-replace'; readonly identity: SyncIdentity }
   | { readonly op: 'device-list' }
   | { readonly op: 'device-put'; readonly record: SyncDeviceRecord }
+  | { readonly op: 'device-touch'; readonly record: SyncDeviceRecord }
   | { readonly op: 'device-delete'; readonly id: string };
 
 export type SyncKeysResult =
@@ -91,6 +92,13 @@ export interface SyncKeys {
     skipped: number;
   }>;
   devicePut(record: SyncDeviceRecord): Promise<void>;
+  /**
+   * Update iff a record with this id AND fp is still registered —
+   * false means it vanished (e.g. an unpair landed mid-handshake), so
+   * the caller must NOT recreate it. Atomic inside custody's
+   * serialized registry section.
+   */
+  deviceTouch(record: SyncDeviceRecord): Promise<boolean>;
   deviceDelete(id: string): Promise<void>;
 }
 
@@ -109,6 +117,7 @@ export function isSyncKeysOp(value: unknown): value is SyncKeysOp {
         isSyncIdentity(value['identity'])
       );
     case 'device-put':
+    case 'device-touch':
       return (
         hasOnlyKeys(value, ['op', 'record']) &&
         isSyncDeviceRecord(value['record'])
@@ -157,6 +166,14 @@ export function createMemoryKeys(): SyncKeys & {
     async devicePut(record) {
       records.set(record.id, record);
     },
+    async deviceTouch(record) {
+      const existing = records.get(record.id);
+      if (existing === undefined || existing.fp !== record.fp) {
+        return false;
+      }
+      records.set(record.id, record);
+      return true;
+    },
     async deviceDelete(id) {
       records.delete(id);
     },
@@ -189,6 +206,14 @@ function isDeviceListResult(
 
 function isEmptyResult(value: unknown): value is null {
   return value === null;
+}
+
+function isTouchResult(value: unknown): value is { updated: boolean } {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['updated']) &&
+    typeof value['updated'] === 'boolean'
+  );
 }
 
 /**
@@ -234,6 +259,15 @@ export function createServiceKeys(
     },
     async devicePut(record) {
       await call({ op: 'device-put', record }, isEmptyResult, 'device-put');
+    },
+    async deviceTouch(record) {
+      return (
+        await call(
+          { op: 'device-touch', record },
+          isTouchResult,
+          'device-touch',
+        )
+      ).updated;
     },
     async deviceDelete(id) {
       await call({ op: 'device-delete', id }, isEmptyResult, 'device-delete');

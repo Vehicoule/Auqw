@@ -1239,6 +1239,97 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Unpair mid-handshake: resume must NOT resurrect the record ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      const pairing = await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-zombie1',
+        name: 'zombie',
+      });
+      const c1 = await dial(port);
+      const h1 = await phoneHandshake(c1, peer, pairing.fp);
+      c1.send(sealJson(h1.codec, { t: 'pair', code: pairing.code }));
+      const welcome = openJson(h1.codec, await c1.recv());
+      assert(
+        isRecord(welcome) && welcome['t'] === 'welcome',
+        'first pairing lands',
+      );
+      assertEqual(keys.records.size, 1);
+      c1.close();
+      // The second connection presents the SAME device key but claims
+      // a different deviceId — the canonical registry id stays
+      // 'phone-zombie1'. Unpairing that id can't kick this session
+      // (kickDevice matches the claimed id), so the conditional touch
+      // is the only guard against resurrecting the revoked record.
+      const peer2 = createTestPeer({
+        deviceId: 'phone-alias9x',
+        name: 'zombie-alias',
+        identity: peer.identity,
+      });
+      const c2 = await dial(port);
+      const h2 = await phoneHandshake(c2, peer2, pairing.fp);
+      const unpair = await invokeHandler(service, 'sync:unpair', {
+        id: 'phone-zombie1',
+      });
+      assert(unpair.ok, 'unpair lands mid-handshake');
+      assertEqual(keys.records.size, 0);
+      c2.send(sealJson(h2.codec, { t: 'resume' }));
+      const reply = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(reply) &&
+          reply['t'] === 'reject' &&
+          reply['reason'] === 'unpaired',
+        `expected unpaired reject, got ${JSON.stringify(reply)}`,
+      );
+      assertEqual(
+        keys.records.size,
+        0,
+        'a revoked device is not resurrected',
+      );
+      c2.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Custody failure propagates: sync:status fails typed ——
+  {
+    const keys = createMemoryKeys();
+    let custodyDead = false;
+    const flaky: SyncKeys = {
+      ...keys,
+      async deviceList() {
+        if (custodyDead) {
+          throw shellError('unavailable', 'safeStorage backend dead');
+        }
+        return keys.deviceList();
+      },
+    };
+    const { service } = await startService({ keys: flaky });
+    try {
+      const healthy = await invokeHandler(
+        service,
+        'sync:status',
+        undefined,
+      );
+      assert(healthy.ok, 'status healthy while custody lives');
+      custodyDead = true;
+      const degraded = await invokeHandler(
+        service,
+        'sync:status',
+        undefined,
+      );
+      assert(
+        !degraded.ok && degraded.error.kind === 'unavailable',
+        'sync:status fails typed, not a fake empty registry',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— A hello carrying non-X25519 key material dies pre-challenge ——
   {
     const { service, keys, port } = await startService();

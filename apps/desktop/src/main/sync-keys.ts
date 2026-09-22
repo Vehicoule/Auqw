@@ -177,6 +177,33 @@ export function createSyncKeysHandler(deps: {
           await devicePut(op.record);
           return null;
         });
+      case 'device-touch':
+        // Update iff the record still exists with the same fp —
+        // check-and-write inside the serialized section is the atomic
+        // guard against a concurrent unpair.
+        return serialized(async () => {
+          const text = await secure.get(deviceKey(op.record.id));
+          if (text === null) {
+            return { updated: false };
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            return { updated: false };
+          }
+          if (
+            !isSyncDeviceRecord(parsed) ||
+            parsed.fp !== op.record.fp
+          ) {
+            return { updated: false };
+          }
+          await secure.set(
+            deviceKey(op.record.id),
+            JSON.stringify(op.record),
+          );
+          return { updated: true };
+        });
       case 'device-delete':
         return serialized(async () => {
           await secure.delete(deviceKey(op.id));

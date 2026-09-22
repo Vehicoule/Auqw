@@ -357,12 +357,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     return `${formatted}:${boundPort}`;
   }
 
+  // Propagates custody failures — a dead registry is NOT an empty
+  // one, and sync:status fails typed instead of reporting a healthy
+  // pairedDevices: 0 that contradicts sync:devices.
   async function deviceCount(): Promise<number> {
-    try {
-      return (await deps.keys.deviceList()).devices.length;
-    } catch {
-      return 0;
-    }
+    return (await deps.keys.deviceList()).devices.length;
   }
 
   async function status(): Promise<SyncStatusResult> {
@@ -563,7 +562,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         lastSeenAt: now,
       };
       try {
-        await deps.keys.devicePut(record);
+        // Update iff still registered — the hello-time registry read
+        // races a concurrent unpair, and an unconditional put would
+        // resurrect a revoked device.
+        const updated = await deps.keys.deviceTouch(record);
+        if (!updated) {
+          reject('unpaired');
+          return;
+        }
       } catch {
         reject('unavailable');
         return;
@@ -1047,12 +1053,32 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       resolveReady(status);
       return status;
     })
-    .catch(() => {
+    .catch(async () => {
       listener = 'unavailable';
-      return status().then((status) => {
+      try {
+        const status = await status();
         resolveReady(status);
         return status;
-      });
+      } catch {
+        // Custody is down — status() can't assemble the count, but
+        // ready must still resolve or the wiring hangs. listener:
+        // 'unavailable' is the honest dominant signal; sync:status
+        // calls keep failing typed against the same custody error.
+        const degraded: SyncStatusResult = {
+          listener,
+          endpoint: endpoint(),
+          boundPort,
+          advertise: advertiseState,
+          pairedDevices: 0,
+          sessions: 0,
+          lastSyncAt,
+          engine: deps.engine === undefined ? 'absent' : 'ready',
+          name: deviceName,
+          fingerprint,
+        };
+        resolveReady(degraded);
+        return degraded;
+      }
     });
 
   return {
