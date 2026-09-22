@@ -63,6 +63,15 @@ Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
 - `appVersionSource: remote` + `autoIncrement` makes EAS own
   `versionCode`; alternatively keep explicit `android.versionCode` in
   `app.config.ts` (see versioning below).
+- **Prebuilt inputs must reach the upload archive.** With no
+  `.easignore`, EAS derives upload exclusions from `.gitignore`, and both
+  `modules/auqw-expo/android/src/main/jniLibs/` and
+  `apps/mobile/assets/plugins/` are ignored — so a clean upload arrives
+  without either input and no hook regenerates them (the `.so`s need the
+  Rust + NDK toolchain EAS builders don't carry). `.easignore` *replaces*
+  `.gitignore` for the upload, so ship one (copy `.gitignore`, drop those
+  two lines) and build inputs locally before `eas build`. Open —
+  verify on the first real `eas build` run.
 
 ## Path B — fully local (no EAS account)
 
@@ -98,7 +107,9 @@ plugin**, not a hand-edit:
 
    ```gradle
    def kp = new Properties()
-   def kf = rootProject.file('../../keystore.properties')
+   // rootProject is apps/mobile/android — ../ resolves to
+   // apps/mobile/keystore.properties.
+   def kf = rootProject.file('../keystore.properties')
    if (kf.exists()) { kf.withInputStream { kp.load(it) } }
    android.signingConfigs.release {
        if (kp.storeFile != null) {
