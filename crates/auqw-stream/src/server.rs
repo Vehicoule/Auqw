@@ -35,6 +35,12 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// gives up. Loopback clients answer promptly; this is only a leak
 /// bound for a stalled socket.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A body write blocks only this long on client backpressure — a
+/// stalled or dead reader holds a conn slot (and the session's
+/// attach) only up to the timeout, then the conn reaps like any
+/// client-gone end.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Concurrent connection threads — an accept flood can't exhaust the
 /// process, the accept loop just waits for a slot to drain.
 const MAX_CONN_THREADS: usize = 64;
@@ -406,6 +412,7 @@ fn serve_conn(conn: TcpStream, shared: &Shared) -> Result<(), StreamError> {
     // Windows; the conn protocol assumes blocking-with-timeout I/O.
     conn.set_nonblocking(false).ok();
     conn.set_read_timeout(Some(HEAD_TIMEOUT)).ok();
+    conn.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
     let mut out = conn.try_clone().map_err(|e| StreamError::Internal {
         message: format!("conn clone: {e}"),
     })?;
@@ -555,7 +562,10 @@ fn write_reply_head(
         ("Accept-Ranges".to_string(), "bytes".to_string()),
         ("Cache-Control".to_string(), "no-store".to_string()),
     ];
-    if let Some(len) = end.and_then(|e| e.checked_sub(start).map(|d| d + 1)) {
+    if let Some(len) = end
+        .and_then(|e| e.checked_sub(start).map(|d| d + 1))
+        .or_else(|| (total == Some(0)).then_some(0))
+    {
         headers.push(("Content-Length".to_string(), len.to_string()));
     }
     if ranged {
@@ -631,6 +641,19 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
             416,
             &[("Content-Range".into(), format!("bytes */{}", star(hinted)))],
         );
+        return Ok(());
+    }
+    if hinted == Some(0) {
+        // An empty representation: every range is unsatisfiable and
+        // an unranged reply is `Content-Length: 0`. No attach or
+        // probe read can learn more — a read at 0 is already at the
+        // hinted end and declared EOF, so a wire-discovered total is
+        // unreachable for a hint-zero stream regardless.
+        if req.range.is_some() {
+            write_status(out, 416, &[("Content-Range".into(), "bytes */0".into())]);
+        } else {
+            write_reply_head(out, &mime, false, 0, None, Some(0))?;
+        }
         return Ok(());
     }
     if req.head_only {
@@ -1335,6 +1358,69 @@ mod tests {
         assert_eq!(r.header("content-range"), Some("bytes 1500-2047/2048"));
         assert_eq!(r.header("content-length"), Some("548"));
         assert_eq!(r.body.len(), 548);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_resource_answers_content_length_zero() {
+        // total 0 — an unranged GET is `200 Content-Length: 0` with
+        // no body, not a close-delimited unknown-length reply.
+        let (_srv, _reg, url, _h, _dir) = served(vec![], Some(0));
+        let r = http(&url, "GET", &[]);
+        assert_eq!(r.status, 200);
+        assert_eq!(r.header("content-length"), Some("0"));
+        assert_eq!(r.body.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_total_reaches_clean_eof_on_wire_refusal() {
+        // Every chunk answers `bytes S-E/*` — the total stays unknown
+        // until a `bytes */*` 416 at the boundary, which is itself
+        // wire EOF evidence: the read past the end returns empty and
+        // the body finishes clean, without spending a re-mint.
+        let mut steps: Vec<Step> = (0..1024)
+            .step_by(128)
+            .map(|off| {
+                Step::Reply(FetchResponse {
+                    status: 206,
+                    content_range: Some(format!("bytes {off}-{}/*", off + 127)),
+                    body: stream_body(vec![0xABu8; 128]),
+                })
+            })
+            .collect();
+        steps.push(Step::Reply(FetchResponse {
+            status: 416,
+            content_range: Some("bytes */*".into()),
+            body: stream_body(vec![]),
+        }));
+        let dir = TestDir::new("srv-eof");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 128;
+        cfg.read_ahead = 128;
+        let fetch = Arc::new(ScriptedFetch::new(steps));
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = None;
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "GET", &[]);
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body.len(), 1024, "full body must arrive before FIN");
+        // Exactly one refusal at the boundary — the EOF ceiling is
+        // latched from the wire's own answer, no re-mint re-tries it.
+        let boundary = fetch
+            .requests
+            .lock()
+            .map(|rs| rs.iter().filter(|(o, _)| *o == 1024).count())
+            .unwrap_or(0);
+        assert_eq!(boundary, 1, "one 416 fetch proves EOF — no re-mint");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

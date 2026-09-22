@@ -957,29 +957,21 @@ async fn malformed_content_range_never_echoes_server_text() {
     assert!(!e.to_string().contains("SECRET"), "{e}");
 }
 
-/// A double-`416` confirms the resource ends below the demand offset:
+/// A bare `416` confirms the resource ends below the demand offset:
 /// the reader gets EOF, later reads above the ceiling are EOF too,
-/// and the pruned demand position is never refetched (the remint-storm
-/// regression at seam level). Bare 416s — no declared total — so the
-/// retried-refusal rule is what confirms EOF.
+/// and the pruned demand position is never refetched — the refusal
+/// itself is the wire's EOF evidence, no re-mint re-learns it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eof_ceiling_serves_reads_and_prunes_demand() {
     let d = TestDir::new("eofdemand");
     let mut pages = HashMap::new();
     pages.insert(
         900u64,
-        VecDeque::from([
-            Step::Reply(FetchResponse {
-                status: 416,
-                content_range: None,
-                body: stream_body(vec![]),
-            }),
-            Step::Reply(FetchResponse {
-                status: 416,
-                content_range: None,
-                body: stream_body(vec![]),
-            }),
-        ]),
+        VecDeque::from([Step::Reply(FetchResponse {
+            status: 416,
+            content_range: None,
+            body: stream_body(vec![]),
+        })]),
     );
     let fetch = Arc::new(MapFetch::new(pages));
     let reg = StreamRegistry::with_fetch(
@@ -1011,7 +1003,7 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         fetch.count_at(900),
-        2,
+        1,
         "demand position refetched past the EOF ceiling"
     );
     assert_eq!(fetch.count_at(950), 0);
