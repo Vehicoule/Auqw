@@ -5,6 +5,7 @@
   "description": "auqw desktop shell — plugin-resolved audio client",
   "type": "module",
   "main": "dist/main/index.js",
+  "desktopName": "auqw",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "pnpm build && electron .",

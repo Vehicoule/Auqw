@@ -35,6 +35,9 @@ artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
 linux:
   executableName: auqw
+  # WM_CLASS tracks the .desktop filename so desktops associate the
+  # running window with the entry (taskbar icon, rules).
+  syncDesktopName: true
   category: Audio
   maintainer: Vehicoule
   target:
