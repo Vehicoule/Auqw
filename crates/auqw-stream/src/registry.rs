@@ -395,6 +395,41 @@ impl StreamRegistry {
         Ok(lock(&self.session(handle)?.shared)?.marks.clone())
     }
 
+    /// The session's terminal error if it has ended — the loopback
+    /// adapter refuses to mint a URL for a dead handle, and a request
+    /// that lands after termination maps this error to its status.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn terminal_err(&self, handle: &str) -> Result<Option<StreamError>, StreamError> {
+        Ok(self.session(handle)?.terminal_err())
+    }
+
+    /// `(mime, content_length)` of the session's pinned source — the
+    /// `Content-Type` and resolve-time length hint the loopback
+    /// adapter reports. The wire `Content-Range` wins over the hint
+    /// once bytes land; [`Self::effective_total`] has the freshest
+    /// total.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn source_meta(&self, handle: &str) -> Result<(String, Option<u64>), StreamError> {
+        let session = self.session(handle)?;
+        let core = lock(&session.core)?;
+        Ok((core.source.mime.clone(), core.source.content_length))
+    }
+
+    /// The session's best-known total length — the wire
+    /// `Content-Range` total when bytes have landed, else the
+    /// resolve-time hint — the loopback adapter's `Content-Range`
+    /// bookkeeping.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn effective_total(&self, handle: &str) -> Result<Option<u64>, StreamError> {
+        self.session(handle)?.effective_total()
+    }
+
     /// Look up a live-or-terminal session by handle.
     fn session(&self, handle: &str) -> Result<Arc<SessionInner>, StreamError> {
         self.lookup(handle)?.ok_or(StreamError::NotFound)

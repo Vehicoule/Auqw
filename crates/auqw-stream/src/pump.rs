@@ -13,8 +13,10 @@
 //!   at the same offset, bounded by `mint_budget` and the zero-progress
 //!   counter; a re-minted mime that differs from the prepared mime is
 //!   terminal `InvalidResponse` (a silent container swap is a bug);
-//! - a second consecutive `416` (or a `416` at/past a known total) is
-//!   honest end-of-stream evidence, not an error;
+//! - a `416` declares the requested offset unsatisfiable — wire EOF
+//!   evidence once a fresh mint cannot disprove it: after one re-mint
+//!   still refuses, when the mint is spent, or at/past a known total.
+//!   `bytes */N` on the refusal installs its total outright;
 //! - any other permanent `4xx` is a terminal verdict on this URL —
 //!   `401` is a dead mint (`Expired`), `404`/`410` are `NotFound`, the
 //!   rest `InvalidResponse`; only `408`/`425`/`429` and `5xx` stay
@@ -317,6 +319,10 @@ async fn fetch_chunk(
                             ),
                         });
                     }
+                    // Bare refusal: ambiguous between real EOF and a
+                    // dead signed URL — a fresh mint disambiguates.
+                    // Only a refusal under the re-minted URL (or one
+                    // at/past a known total) confirms EOF.
                     if eof_confirmed(session, offset, retried_416) {
                         return Outcome::Eof(offset);
                     }
@@ -401,6 +407,19 @@ async fn retry_or_stall(
     })
 }
 
+/// Whether a `416` proves end-of-stream: the offset is at/past a known
+/// total, or the same request already failed `416` once across a
+/// re-mint — a second refusal means the resource ends below `offset`.
+fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> bool {
+    if retried {
+        return true;
+    }
+    session
+        .effective_total()
+        .map(|t| t.is_some_and(|t| offset >= t))
+        .unwrap_or(false)
+}
+
 /// How the retry backoff ended.
 enum Backoff {
     /// The sleep elapsed.
@@ -428,19 +447,6 @@ async fn retry_backoff(session: &Arc<SessionInner>, through: bool) -> Backoff {
             () = session.cancel.cancelled() => Backoff::Cancelled,
         }
     }
-}
-
-/// Whether a `416` proves end-of-stream: the offset is at/past a known
-/// total, or the same request already failed `416` once across a
-/// re-mint — a second refusal means the resource ends below `offset`.
-fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> bool {
-    if retried {
-        return true;
-    }
-    session
-        .effective_total()
-        .map(|t| t.is_some_and(|t| offset >= t))
-        .unwrap_or(false)
 }
 
 /// Re-resolve the source through the host's [`Remint`]; budgets and
@@ -590,73 +596,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    fn stream_body(body: Vec<u8>) -> crate::fetch::BodyStream {
-        Box::pin(futures_util::stream::once(async move { Ok(body) }))
-    }
-
-    fn resp(status: u16, offset: u64, len: u64, total: u64) -> FetchResponse {
-        let end = offset + len - 1;
-        let body = vec![1u8; usize::try_from(len).unwrap_or(0)];
-        FetchResponse {
-            status,
-            content_range: Some(format!("bytes {offset}-{end}/{total}")),
-            body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
-        }
-    }
-
-    /// A fetch whose every call is answered from a script; requests are
-    /// recorded so tests can assert range requests at exact offsets.
-    struct ScriptedFetch {
-        steps: Mutex<std::collections::VecDeque<Step>>,
-        requests: Mutex<Vec<(u64, u64)>>,
-    }
-
-    enum Step {
-        Reply(FetchResponse),
-        Fail(StreamError),
-        Hang,
-    }
-
-    impl ScriptedFetch {
-        fn new(steps: Vec<Step>) -> Self {
-            Self {
-                steps: Mutex::new(steps.into()),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Fetch for ScriptedFetch {
-        fn get_range<'a>(
-            &'a self,
-            _url: &'a str,
-            offset: u64,
-            max_len: u64,
-            _stall: Duration,
-            _deadline: Duration,
-            _cancel: tokio_util::sync::CancellationToken,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>,
-        > {
-            if let Ok(mut r) = self.requests.lock() {
-                r.push((offset, max_len));
-            }
-            let step = self
-                .steps
-                .lock()
-                .ok()
-                .and_then(|mut s| s.pop_front())
-                .unwrap_or(Step::Hang);
-            Box::pin(async move {
-                match step {
-                    Step::Reply(r) => Ok(r),
-                    Step::Fail(e) => Err(e),
-                    Step::Hang => std::future::pending().await,
-                }
-            })
-        }
-    }
-
     /// A re-mint that counts calls and yields a canned source.
     struct CountingRemint {
         calls: AtomicU32,
@@ -690,19 +629,6 @@ mod tests {
                     provider: "test".into(),
                 })
             })
-        }
-    }
-
-    fn source() -> PreparedSource {
-        PreparedSource {
-            url: "https://signed.example/s?sig=SECRET".into(),
-            mime: "audio/mp4".into(),
-            itag: Some(140),
-            bitrate_kbps: Some(129),
-            content_length: Some(1024),
-            expires_at_ms: None,
-            source_ref: "vid".into(),
-            provider: "test".into(),
         }
     }
 
@@ -1095,6 +1021,36 @@ mod tests {
             "demand position refetched past the EOF ceiling: {reqs:?}"
         );
         assert!(!s.is_terminal(), "session died on a localized EOF");
+        stop_pump(&s, task).await;
+        assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_remint_after_416_surfaces_typed_error() {
+        // A terminal remint error after a bare `416` is the session's
+        // own verdict, not end-of-stream: a dead URL that fails to
+        // re-mint reports `NotFound`, never a fabricated EOF that
+        // truncates the media silently.
+        let d = TestDir::new("remintdead");
+        let remint = remint_ok();
+        *remint.fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamError::NotFound);
+        let s = session(config(&d), remint.clone());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 416,
+            content_range: None,
+            body: stream_body(vec![]),
+        })]));
+        {
+            let mut sh = lock(&s.shared).unwrap_or_else(|e| panic!("{e}"));
+            sh.fetch_through.insert(900, 1);
+        }
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        wait_until(|| s.is_terminal()).await;
+        assert_eq!(eof_below(&s), None);
+        assert!(
+            s.is_terminal(),
+            "a terminal remint error must end the session typed, not as EOF"
+        );
         stop_pump(&s, task).await;
         assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
     }

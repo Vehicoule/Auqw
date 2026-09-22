@@ -31,6 +31,7 @@ mod fetch;
 mod marks;
 mod pump;
 mod registry;
+mod server;
 mod session;
 mod store;
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub use error::StreamError;
 pub use fetch::{BodyStream, Fetch, FetchResponse, ReqwestFetch};
 pub use marks::PhaseMarks;
 pub use registry::{PrepareInfo, StreamRegistry, SweepReport};
+pub use server::StreamServer;
 
 use std::path::PathBuf;
 use std::pin::Pin;

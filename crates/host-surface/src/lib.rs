@@ -376,6 +376,10 @@ pub struct PluginHost {
     /// reaches re-mints.
     auth_token: Arc<RwLock<Option<String>>>,
     stream: Option<Arc<StreamRegistry>>,
+    /// The 127.0.0.1 range adapter — lazily bound on the first
+    /// `stream_serve_url`; the fallback/relay leg of the seam
+    /// (desktop MSE-unable containers, the web LAN relay).
+    stream_server: Mutex<Option<Arc<auqw_stream::StreamServer>>>,
     plugins: Mutex<HashMap<String, Arc<LoadedPlugin>>>,
     cancels: Arc<Mutex<HashMap<String, LiveRequest>>>,
     /// Per-admission generation counter — lets the post-delivery
@@ -512,6 +516,7 @@ impl PluginHost {
             prefer: sanitize_prefer(config.prefer),
             auth_token: Arc::new(RwLock::new(valid_auth_token(config.auth_token))),
             stream,
+            stream_server: Mutex::new(None),
             plugins: Mutex::new(HashMap::new()),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             request_generation: AtomicU64::new(0),
@@ -1114,10 +1119,9 @@ mod tests {
         };
         assert_eq!(kind, "cancelled");
         // Same id again: no stone left, so this admission is clean.
-        // The settled task removes its `cancels` slot a beat after the
-        // outcome is delivered — retry past that cleanup window (the
-        // same race `midflight_generic_cancel_leaves_no_tombstone`
-        // retries past).
+        // The settled non-prepare task frees its `cancels` slot before
+        // delivery, so the retry is only a guard against a regression
+        // back to post-delivery cleanup.
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let mut admitted = false;
         for _ in 0..50 {
@@ -1221,9 +1225,10 @@ mod tests {
             Err(e) => panic!("outcome: {e}"),
         };
         assert_eq!(kind, "cancelled");
-        // The settled task removes its `cancels` slot a beat after the
-        // outcome is delivered — retry past that cleanup window, then
-        // assert the reused id is not pre-cancelled by a leftover
+        // The settled non-prepare task frees its `cancels` slot before
+        // delivery, so the next admission lands on the first try — the
+        // retry only guards a regression back to post-delivery cleanup.
+        // Assert the reused id is not pre-cancelled by a leftover
         // tombstone.
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let mut admitted = false;
@@ -1244,7 +1249,10 @@ mod tests {
             }
         }
         assert!(admitted, "second admission never landed");
-        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        // The burn reports `budget-exceeded` at fuel-out or at the
+        // invocation's own 30s deadline on a slow runner, so the wait
+        // must clear that deadline with margin.
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(60)) {
             Ok(kind) => kind,
             Err(e) => panic!("outcome: {e}"),
         };
