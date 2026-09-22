@@ -59,6 +59,7 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_USER_DATA',
     'AUQW_REPO_ROOT',
     'AUQW_DEV_GATE',
+    'AUQW_DB_PATH',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -72,6 +73,9 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     }
   }
   env['AUQW_USER_DATA'] = userDataPath;
+  // The database lives in the utility child; its path is fork env
+  // because the child owns no app.getPath('userData').
+  env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
   if (!app.isPackaged) {
     // Dev checkouts resolve the bindings artifact from the repo and
     // may arm the dev-gate channel; packaged runs use resourcesPath.

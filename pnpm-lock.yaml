@@ -118,6 +118,9 @@ importers:
       '@auqw/application':
         specifier: workspace:*
         version: link:../../packages/application
+      '@auqw/storage-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/storage-sqlite
       '@types/node':
         specifier: 26.6.1
         version: 26.6.1

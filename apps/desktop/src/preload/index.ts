@@ -7,6 +7,9 @@ import {
   isNetEvent,
   isPrepareOutcomePayload,
   isPreparedStreamPayload,
+  isStorageBeginResult,
+  isStorageExecuteResult,
+  isStorageQueryResult,
   isStreamMarksResult,
   isStreamOpenResult,
   isStreamReadResult,
@@ -21,8 +24,12 @@ import type {
   AuqwApi,
   NetEvent,
   NetSnapshot,
+  StorageBeginResult,
+  StorageExecuteResult,
+  StorageQueryResult,
   UtilityPingResult,
 } from '../shared/contract.ts';
+import type { SqlValue } from '@auqw/storage-sqlite';
 import { isResultEnvelope } from '../shared/envelope.ts';
 import { shellError } from '../shared/errors.ts';
 
@@ -105,6 +112,40 @@ const api: AuqwApi = {
       invoke(CHANNELS.secureSet, { key, value }, isUndefinedResult),
     delete: (key: string): Promise<void> =>
       invoke(CHANNELS.secureDelete, { key }, isUndefinedResult),
+  },
+  storage: {
+    begin: (): Promise<StorageBeginResult> =>
+      invoke(CHANNELS.storageBegin, undefined, isStorageBeginResult),
+    commit: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageCommit, { txId }, isUndefinedResult),
+    rollback: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageRollback, { txId }, isUndefinedResult),
+    cancel: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageCancel, { txId }, isUndefinedResult),
+    execute: (
+      txId: string,
+      sql: string,
+      params: readonly SqlValue[] = [],
+    ): Promise<StorageExecuteResult> =>
+      invoke(
+        CHANNELS.storageExecute,
+        { txId, sql, params },
+        isStorageExecuteResult,
+      ),
+    query: (
+      txId: string,
+      sql: string,
+      params: readonly SqlValue[] = [],
+    ): Promise<StorageQueryResult> =>
+      invoke(
+        CHANNELS.storageQuery,
+        { txId, sql, params },
+        isStorageQueryResult,
+      ),
+    backup: (tag: string): Promise<void> =>
+      invoke(CHANNELS.storageBackup, { tag }, isUndefinedResult),
+    dropBackup: (tag: string): Promise<void> =>
+      invoke(CHANNELS.storageDropBackup, { tag }, isUndefinedResult),
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>

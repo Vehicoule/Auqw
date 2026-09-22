@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@auqw/application": "workspace:*",
+    "@auqw/storage-sqlite": "workspace:*",
     "@types/node": "26.6.1",
     "electron": "44.3.0",
     "electron-builder": "26.16.1",

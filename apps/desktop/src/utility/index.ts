@@ -2,6 +2,7 @@ import { shellError } from '../shared/errors.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createHostRuntime } from './host.ts';
 import { createUtilityRouter } from './router.ts';
+import { createStorageService } from './storage.ts';
 import { createStreamHandlers } from './stream.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
 
@@ -38,12 +39,20 @@ if (port === null) {
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
   });
-  const route = createUtilityRouter(
-    createStreamHandlers({
+  // The database path arrives from main in the fork environment —
+  // `AUQW_DB_PATH` points under userData; the service opens lazily on
+  // the first storage request so a missing path is a typed
+  // `unavailable`, not a crashed child.
+  const storage = createStorageService({
+    dbPath: process.env['AUQW_DB_PATH'],
+  });
+  const route = createUtilityRouter({
+    ...createStreamHandlers({
       ...runtime,
       devGateEnabled: process.env.AUQW_DEV_GATE === '1',
     }),
-  );
+    ...storage.handlers,
+  });
   port.on('message', (event) => {
     const raw: unknown = event.data;
     void respond(port, raw, route);
