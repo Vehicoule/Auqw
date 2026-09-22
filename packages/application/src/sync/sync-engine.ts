@@ -137,32 +137,42 @@ const KEY_SEP = '\u001f';
  * (recordingId, ref, status, matchedAtMs) — matching the identity
  * `corrections` uses when undo removes a claim.
  */
+// Record ids are JSON-encoded tuples: JSON escaping makes the encoding
+// injective — a KEY_SEP inside component data can never alias two
+// distinct claims onto one sync record (a raw-separator join could).
 export function likeRecordId(
   entityKind: LikeEntityKind,
   targetId: string,
 ): string {
-  return `${entityKind}${KEY_SEP}${targetId}`;
+  return JSON.stringify([entityKind, targetId]);
 }
 
 export function sourceRefRecordId(
   recordingId: string,
   ref: SourceRef,
 ): string {
-  return `${recordingId}${KEY_SEP}${ref.provider}${KEY_SEP}${ref.kind}${KEY_SEP}${ref.id}`;
+  return JSON.stringify([recordingId, ref.provider, ref.kind, ref.id]);
 }
 
 export function mappingRecordId(
   recordingId: string,
   mapping: SourceMapping,
 ): string {
-  return `${sourceRefRecordId(recordingId, mapping.ref)}${KEY_SEP}${mapping.status}${KEY_SEP}${mapping.matchedAtMs}`;
+  return JSON.stringify([
+    recordingId,
+    mapping.ref.provider,
+    mapping.ref.kind,
+    mapping.ref.id,
+    mapping.status,
+    mapping.matchedAtMs,
+  ]);
 }
 
 export function entitySourceRefRecordId(
   entityId: string,
   provider: string,
 ): string {
-  return `${entityId}${KEY_SEP}${provider}`;
+  return JSON.stringify([entityId, provider]);
 }
 
 // ---- wire types -----------------------------------------------------------
@@ -904,7 +914,11 @@ function jsonEquals(a: unknown, b: unknown): boolean {
   );
 }
 
-/** Snapshot values freeze so caller mutation can't corrupt the log. */
+/**
+ * Engine-owned entries are fully frozen — top level, `hlc`, `value`:
+ * a caller mutating a delta's entry cannot corrupt ordering, dedupe
+ * keys, or later merges. Hydrated entries freeze on load too.
+ */
 function deepFreezeValue(value: unknown): void {
   if (typeof value !== 'object' || value === null) {
     return;
@@ -1271,7 +1285,12 @@ export async function createSyncEngine(
     return best;
   }
 
-  /** The materialized 'sum' value: Σ over per-device live components. */
+  /**
+   * The materialized 'sum' value: Σ over per-device live components,
+   * saturated at MAX_SAFE_INTEGER — safe-integer input domains are not
+   * closed under addition, and the cap keeps the merged view inside
+   * the wire's own contract identically on every replica.
+   */
   function sumValue(live: readonly ChangeEntry[]): number {
     let total = 0;
     const devs = new Set<string>();
@@ -1282,6 +1301,9 @@ export async function createSyncEngine(
       const component = componentWinner(live, dev);
       if (typeof component?.value === 'number') {
         total += component.value;
+        if (total > Number.MAX_SAFE_INTEGER) {
+          return Number.MAX_SAFE_INTEGER;
+        }
       }
     }
     return total;
@@ -1611,8 +1633,8 @@ export async function createSyncEngine(
                 deviceId,
                 seq: localSeq + index + 1,
               };
-          deepFreezeValue(entry.value);
-          return Object.freeze(entry);
+          deepFreezeValue(entry);
+          return entry;
         });
       } catch (thrown) {
         return err(fromUnknown(thrown));
@@ -1808,8 +1830,8 @@ export async function createSyncEngine(
         // caller-owned objects. Values are JSON-shaped by the
         // whitelist contract, so a JSON clone is exact.
         const owned = JSON.parse(JSON.stringify(raw)) as ChangeEntry;
-        deepFreezeValue(owned.value);
-        valid.push(Object.freeze(owned));
+        deepFreezeValue(owned);
+        valid.push(owned);
       });
       // Canonical order: every device that receives the same set of
       // entries merges them identically, divergence included.
@@ -1969,7 +1991,7 @@ export async function createSyncEngine(
   const repairs: DivergenceEntry[] = [];
   let highest: HlcStamp | undefined;
   for (const entry of snapshot.entries) {
-    deepFreezeValue(entry.value);
+    deepFreezeValue(entry);
     changeLog.push(entry);
     seen.add(entryKey(entry));
     foldSeq(entry.deviceId, entry.seq);

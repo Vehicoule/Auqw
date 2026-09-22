@@ -5,6 +5,9 @@ import {
   createSyncEngine,
   isSyncDelta,
   likeRecordId,
+  entitySourceRefRecordId,
+  mappingRecordId,
+  sourceRefRecordId,
   syncFieldRule,
 } from './sync-engine.ts';
 import type {
@@ -1619,6 +1622,93 @@ async function prunedDivergenceNotResurrected(): Promise<void> {
   assertEqual(partial.divergenceRows[0]?.loser.value, 'v1');
 }
 
+
+async function recordIdsAreInjective(): Promise<void> {
+  // Separator-bearing components must not alias distinct claims.
+  const a = likeRecordId('track', 'a');
+  const b = likeRecordId('track', 'a');
+  assertEqual(a, b);
+  const x = sourceRefRecordId('a\u001fb', {
+    provider: 'c',
+    kind: 'track',
+    id: 'd',
+  });
+  const y = sourceRefRecordId('a', {
+    provider: 'b\u001fc',
+    kind: 'track',
+    id: 'd',
+  });
+  assert(
+    x !== y,
+    'separator in component data must not collide record ids',
+  );
+  const e1 = entitySourceRefRecordId('p\u001fq', 'r');
+  const e2 = entitySourceRefRecordId('p', 'q\u001fr');
+  assert(e1 !== e2);
+  const m = mappingRecordId('r1', {
+    ref: { provider: 'p', kind: 'track', id: 'i' },
+    status: 'automatic',
+    matchedAtMs: 7,
+    evidence: {
+      titleSimilarity: 0.9,
+      artistSimilarity: 0.9,
+      durationDeltaMs: 100,
+      exactIsrc: false,
+      score: 85,
+      versionLabels: [],
+    },
+  });
+  assert(typeof m === 'string' && m.length > 0);
+}
+
+async function exportedEntriesFrozen(): Promise<void> {
+  const { engine } = await makeEngine('a');
+  await mustWrite(engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'x',
+  });
+  const doc = await engine.exportDelta();
+  assert(doc.ok);
+  const entry = doc.value.entries[0];
+  assert(entry !== undefined);
+  assert(Object.isFrozen(entry), 'exported entry is frozen');
+  assert(Object.isFrozen(entry.hlc), 'hlc stamp is frozen');
+  // Hydrated entries freeze too: reload from the store and check.
+  const { engine: fresh } = await makeEngine(
+    'a',
+    1_000,
+    new FakeSyncLogStore({
+      entries: [entry],
+      divergence: [],
+      watermarks: {},
+    }),
+  );
+  const doc2 = await fresh.exportDelta();
+  assert(doc2.ok);
+  assert(
+    Object.isFrozen(doc2.value.entries[0]?.hlc),
+    'hydrated entry stamp is frozen',
+  );
+}
+
+async function sumSaturation(): Promise<void> {
+  const b = await makeEngine('b');
+  await mustApply(
+    b.engine,
+    delta([
+      rawEntry('playCount', 'r1', 'count', Number.MAX_SAFE_INTEGER, {
+        l: 10,
+        c: 0,
+      }, 'x'),
+      rawEntry('playCount', 'r1', 'count', 9, { l: 11, c: 0 }, 'y'),
+    ]),
+  );
+  const fields = materialized(b.engine, 'playCount', 'r1');
+  assertEqual(fields?.['count'], Number.MAX_SAFE_INTEGER);
+}
+
 export async function run(): Promise<void> {
   await basicWrites();
   await localWriteValidation();
@@ -1650,5 +1740,8 @@ export async function run(): Promise<void> {
   await localFreezeImmunity();
   await exportLimitZero();
   await prunedDivergenceNotResurrected();
+  await recordIdsAreInjective();
+  await exportedEntriesFrozen();
+  await sumSaturation();
   await propertyHarness();
 }
