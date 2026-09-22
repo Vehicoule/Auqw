@@ -13,7 +13,7 @@
 //! request and keep-alive buys nothing on loopback.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -336,14 +336,47 @@ fn serve_conn(conn: TcpStream, shared: &Shared) -> Result<(), StreamError> {
         message: format!("conn clone: {e}"),
     })?;
     let mut reader = BufReader::new(conn);
-    let req = match parse_request(&mut reader) {
-        Ok(r) => r,
+    let result = match parse_request(&mut reader) {
+        Ok(req) => respond(&mut out, shared, &req),
         Err(e) => {
             write_status(&mut out, 400, &[]);
-            return Err(e);
+            Err(e)
         }
     };
-    respond(&mut out, shared, &req)
+    graceful_close(&mut reader);
+    result
+}
+
+/// Windows RSTs a socket closed with unread inbound data, which can
+/// erase the just-written reply before the client's next `recv`.
+/// `Connection: close` semantics only need a FIN: shut the write
+/// side, drain whatever the client still had buffered (bounded — a
+/// chatty client cannot stall the thread), then let the drop close
+/// an empty receive buffer cleanly.
+fn graceful_close(reader: &mut BufReader<TcpStream>) {
+    let conn = reader.get_ref();
+    if conn.shutdown(std::net::Shutdown::Write).is_err() {
+        return;
+    }
+    if conn
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .is_err()
+    {
+        return;
+    }
+    let mut sink = [0u8; 8192];
+    let mut drained = 0usize;
+    loop {
+        match reader.read(&mut sink) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                drained += n;
+                if drained > 64 * 1024 {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Resolve `(start, end_inclusive)` for the request's range against
