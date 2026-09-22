@@ -245,6 +245,12 @@ async function boot(): Promise<void> {
         })();
       }
       drainEarlyPrepares();
+      // The replacement cleanup's stop may have emitted a transient
+      // idle status — preparation is still the live state.
+      if (gen === prepSeq) {
+        state = 'preparing';
+        renderState();
+      }
       if (devGate instanceof HTMLInputElement && devGate.checked) {
         try {
           const stream = await window.auqw.stream.devPrepare({
