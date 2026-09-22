@@ -10,6 +10,11 @@ import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 
 export type PendingMove = { readonly id: string; readonly dir: -1 | 1 };
 
+// Unacknowledged pending ops expire after this window: the caller
+// contract carries no reject signal, so a bounded TTL is the honest
+// way to bound how long a truly-failed move can ghost the order.
+export const PENDING_TTL_MS = 30_000;
+
 export function idsEqual(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, i) => id === b[i]);
 }
@@ -90,45 +95,55 @@ export function QueueList({
   onMoveItem,
   onMoveItemTo,
 }: QueueListProps) {
+  // Optimistic reorder bookkeeping: queue.items is controlled by the
+  // caller, so each intended move is kept as a pending op. Publishes
+  // acknowledge dispatched ops in order — a partial publish keeps the
+  // tail; an incompatible update (external reorder, membership change)
+  // rebases the whole pending state. An unchanged-order republish is
+  // NOT read as rejection - callers send no explicit reject signal -
+  // so a bounded TTL clears ops that stay unacknowledged too long.
+  // With only a relative callback, one op stays in flight per publish
+  // round-trip; the rest queue locally so a stale-order read can't
+  // collapse repeated moves of the same row.
+  const pendingOps = useRef<readonly PendingMove[]>([]);
+  const queuedOps = useRef<readonly PendingMove[]>([]);
+  const pendingIds = useRef<readonly string[] | null>(null);
+  const pendingSince = useRef(0);
+  const lastItems = useRef<QueueModel['items'] | null>(null);
+  const lastAuthIds = useRef<readonly string[] | null>(null);
+  const trackFocusId = useRef<string | null>(null);
   const list = useTrackList({
     count: queue.items.length,
     onActivate:
       onPressItem === undefined || reordering
         ? undefined
         : (index) => {
-            const item = queue.items[index];
+            // Resolve against the live optimistic order — rendered
+            // rows and keyboard activation must see one sequence.
+            const ids = pendingIds.current ?? queue.items.map((i) => i.occurrenceId);
+            const id = ids[index];
+            const item =
+              id === undefined
+                ? undefined
+                : queue.items.find((i) => i.occurrenceId === id);
             if (item !== undefined) {
               onPressItem(item.occurrenceId);
             }
           },
     onContext: undefined,
   });
-  // Optimistic reorder bookkeeping: queue.items is controlled by the
-  // caller, so each intended move is kept as a pending op. Publishes
-  // acknowledge dispatched ops in order — a partial publish keeps the
-  // tail, a republished-unchanged order counts as rejection, and an
-  // incompatible update rebases the whole pending state. With only a
-  // relative callback, one op stays in flight per publish round-trip;
-  // the rest queue locally so a stale-order read can't collapse moves.
-  const pendingOps = useRef<readonly PendingMove[]>([]);
-  const queuedOps = useRef<readonly PendingMove[]>([]);
-  const pendingIds = useRef<readonly string[] | null>(null);
-  const lastItems = useRef<QueueModel['items'] | null>(null);
-  const lastAuthIds = useRef<readonly string[] | null>(null);
-  const trackFocusId = useRef<string | null>(null);
   const authIds = queue.items.map((item) => item.occurrenceId);
   const useAbsolute = onMoveItemTo !== undefined;
+  const stale =
+    pendingIds.current !== null && Date.now() - pendingSince.current > PENDING_TTL_MS;
   if (lastItems.current !== queue.items) {
     const prevAuth = lastAuthIds.current;
     lastItems.current = queue.items;
     lastAuthIds.current = authIds;
     if (prevAuth !== null && pendingIds.current !== null) {
       if (idsEqual(prevAuth, authIds)) {
-        // Republished the same order — outstanding moves were
-        // rejected or never applied; drop the optimistic state.
-        pendingOps.current = [];
-        queuedOps.current = [];
-        pendingIds.current = null;
+        // Unchanged order — not proof of rejection, keep pending
+        // (the TTL bounds how long an unacked op can linger).
       } else {
         const res = reconcilePendingOps(prevAuth, pendingOps.current, authIds);
         if (res === null) {
@@ -142,6 +157,11 @@ export function QueueList({
         }
       }
     }
+  }
+  if (stale) {
+    pendingOps.current = [];
+    queuedOps.current = [];
+    pendingIds.current = null;
   }
   // Focus follows the moved row through publishes: once the
   // authoritative order lands, point the roving index at it again.
@@ -190,6 +210,7 @@ export function QueueList({
     }
     const op: PendingMove = { id: occurrenceId, dir: direction };
     pendingIds.current = applyPendingMove(orderedIds, op);
+    pendingSince.current = Date.now();
     if (useAbsolute) {
       // Absolute destinations carry the optimistic intent — the
       // caller applies them in order, no stale-index collapse.
