@@ -244,4 +244,16 @@ export function run(): void {
       Object.defineProperty(Object.prototype, 'toJSON', objectToJson);
     }
   }
+  // A cyclic or unbounded prototype chain must reject, not hang —
+  // a proxy getPrototypeOf trap can answer with itself or a fresh
+  // proxy forever.
+  const selfProto: object[] = [];
+  const cycProxy: object = new Proxy(selfProto, {
+    getPrototypeOf: (): object => cycProxy,
+  });
+  assert(!isJsonValue(cycProxy), 'self-returning proto rejected');
+  function endlessProto(): object {
+    return new Proxy([], { getPrototypeOf: endlessProto });
+  }
+  assert(!isJsonValue(endlessProto()), 'unbounded proto chain rejected');
 }

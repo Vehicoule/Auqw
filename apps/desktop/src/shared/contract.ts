@@ -869,11 +869,20 @@ function hasNoEnumerableGetter(value: object): boolean {
   // hook placed there rewrites the wire doc just like an own prop.
   // The FIRST descriptor wins the stringify lookup: an inert
   // non-function value shadows anything deeper and stays legal.
+  // The walk is cycle-marked and bounded — a proxy answering
+  // getPrototypeOf with itself or a fresh proxy would otherwise loop
+  // forever, and this cap is not covered by the value-depth bound.
+  const seen = new WeakSet<object>();
+  const MAX_PROTO_DEPTH = 16;
   for (
-    let level: object | null = value;
+    let level: object | null = value, depth = 0;
     level !== null;
-    level = Object.getPrototypeOf(level)
+    level = Object.getPrototypeOf(level), depth += 1
   ) {
+    if (depth > MAX_PROTO_DEPTH || seen.has(level)) {
+      return false;
+    }
+    seen.add(level);
     const hook = Object.getOwnPropertyDescriptor(level, 'toJSON');
     if (hook === undefined) {
       continue;
