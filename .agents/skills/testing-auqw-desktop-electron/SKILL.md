@@ -18,11 +18,19 @@ those merge, this skill has nothing to run against.
   `export PATH="$HOME/.nvm/versions/node/v24.19.0/bin:$PATH"`). Building on a
   different branch overwrites `apps/desktop/dist` — always rebuild after
   switching, or test on the branch the dist was built from.
+- If `node_modules/electron/dist/electron` is missing (Electron 44 ships no
+  binary in the npm tarball): `cd node_modules/electron && node install.js`.
+  Warm `~/.cache/electron/*.zip` makes it instant; cold it downloads ~230 MB.
 - Kill stale instances first or the single-instance lock silently quits the
   new one: `pgrep -f "dist/electron \." | xargs -r kill` (the npm wrapper PID
-  differs from the real binary — match the binary path pattern).
+  differs from the real binary — match the binary path pattern). FOOTGUN:
+  never put that kill inside a compound shell command whose own cmdline
+  contains `dist/electron .` — pgrep matches the shell itself and xargs kills
+  it mid-run. Run the kill as its own command, or use a self-immunizing
+  pattern like `"[d]ist/electron"`.
 - Launch on the visible desktop, in a pollable shell:
-  `cd apps/desktop && env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so /tmp/dshell/node_modules/electron/dist/electron .`
+  `cd apps/desktop && env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so <repo>/node_modules/electron/dist/electron .`
+  (electron lives at the repo-root node_modules).
 - `AUQW_NODE_BINDINGS` matters: `AUQW_REPO_ROOT` only points at the launch
   checkout's `target/debug`, which may lack the artifact — pass the absolute
   path of a real `libauqw_node_bindings.so` (cargo debug build). The host
@@ -54,6 +62,19 @@ those merge, this skill has nothing to run against.
 - Status union has NO `stopped`: after stop the state reads `idle · 0ms`.
   Playback states observed: `prepared`, `buffering`, `ready`, `playing`,
   `paused`, `ended`, `failed`, `idle`.
+- `phase <name> +<N>ms` event-log lines render the stream's phase marks,
+  but `crates/auqw-stream/src/marks.rs` defines `first_byte_ms`/`head_ready_ms`
+  /`attach_ms` as wall-clock EPOCH ms (only `resolve_ms`/`mint_ms` are
+  durations) — so those lines print `+1.7e12ms`-style values. Cosmetic
+  mislabel when reading the log, not a playback failure.
+- `window.auqw.storage.*` (`storage:begin/commit/execute/query/backup…`,
+  utility-side node:sqlite) is exposed via preload but NO UI control drives
+  it — untestable from the page; probe via IPC only if a test needs it.
+- Utility supervision: the app forks one `--utility-sub-type=node.mojom.
+  NodeService` child lazily on the first `utility:*` request. Respawn-storm
+  check: `ps -eo pid,cmd | grep utility-sub-type=node.mojom | grep -v grep`
+  must stay a single stable PID across the run, and the launch log must show
+  no respawn/crash lines (dbus + ALSA noise is normal on this box).
 
 ## Proving sound on a VM with no audio hardware
 

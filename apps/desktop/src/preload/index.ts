@@ -3,7 +3,17 @@ import type { IpcRendererEvent } from 'electron';
 import { CHANNELS } from '../shared/channels.ts';
 import {
   isAppMeta,
+  isHostPluginsResult,
   isNetEvent,
+  isPrepareOutcomePayload,
+  isPreparedStreamPayload,
+  isStorageBeginResult,
+  isStorageExecuteResult,
+  isStorageQueryResult,
+  isStreamMarksResult,
+  isStreamOpenResult,
+  isStreamReadResult,
+  isStreamServeUrlResult,
   isStringArray,
   isStringOrNull,
   isUndefinedResult,
@@ -14,8 +24,12 @@ import type {
   AuqwApi,
   NetEvent,
   NetSnapshot,
+  StorageBeginResult,
+  StorageExecuteResult,
+  StorageQueryResult,
   UtilityPingResult,
 } from '../shared/contract.ts';
+import type { SqlValue } from '@auqw/storage-sqlite';
 import { isResultEnvelope } from '../shared/envelope.ts';
 import { shellError } from '../shared/errors.ts';
 
@@ -99,9 +113,66 @@ const api: AuqwApi = {
     delete: (key: string): Promise<void> =>
       invoke(CHANNELS.secureDelete, { key }, isUndefinedResult),
   },
+  storage: {
+    begin: (): Promise<StorageBeginResult> =>
+      invoke(CHANNELS.storageBegin, undefined, isStorageBeginResult),
+    commit: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageCommit, { txId }, isUndefinedResult),
+    rollback: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageRollback, { txId }, isUndefinedResult),
+    cancel: (txId: string): Promise<void> =>
+      invoke(CHANNELS.storageCancel, { txId }, isUndefinedResult),
+    execute: (
+      txId: string,
+      sql: string,
+      params: readonly SqlValue[] = [],
+    ): Promise<StorageExecuteResult> =>
+      invoke(
+        CHANNELS.storageExecute,
+        { txId, sql, params },
+        isStorageExecuteResult,
+      ),
+    query: (
+      txId: string,
+      sql: string,
+      params: readonly SqlValue[] = [],
+    ): Promise<StorageQueryResult> =>
+      invoke(
+        CHANNELS.storageQuery,
+        { txId, sql, params },
+        isStorageQueryResult,
+      ),
+    backup: (tag: string): Promise<void> =>
+      invoke(CHANNELS.storageBackup, { tag }, isUndefinedResult),
+    dropBackup: (tag: string): Promise<void> =>
+      invoke(CHANNELS.storageDropBackup, { tag }, isUndefinedResult),
+  },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>
       invoke(CHANNELS.utilityPing, { message }, isUtilityPingResult),
+  },
+  host: {
+    plugins: () => invoke(CHANNELS.hostPlugins, undefined, isHostPluginsResult),
+  },
+  stream: {
+    prepare: (args) =>
+      invoke(CHANNELS.streamPrepare, args, isPrepareOutcomePayload),
+    devPrepare: (args) =>
+      invoke(CHANNELS.streamDevPrepare, args, isPreparedStreamPayload),
+    serveUrl: (args) =>
+      invoke(CHANNELS.streamServeUrl, args, isStreamServeUrlResult),
+    open: (args) =>
+      invoke(CHANNELS.streamOpen, args, isStreamOpenResult),
+    read: (args) =>
+      invoke(CHANNELS.streamRead, args, isStreamReadResult),
+    close: (args) =>
+      invoke(CHANNELS.streamClose, args, isUndefinedResult),
+    release: (args) =>
+      invoke(CHANNELS.streamRelease, args, isUndefinedResult),
+    marks: (args) =>
+      invoke(CHANNELS.streamMarks, args, isStreamMarksResult),
+    cancel: (args) =>
+      invoke(CHANNELS.streamCancel, args, isUndefinedResult),
   },
 };
 

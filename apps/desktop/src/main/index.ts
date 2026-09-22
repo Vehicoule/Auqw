@@ -31,6 +31,60 @@ const RENDERER = join(here, '../renderer/index.html');
 /** Latest persisted window state — recreated windows reopen where the user left them. */
 type StateRef = { current: WindowState };
 
+/** Env passed to the utility child: platform essentials + the exact
+ * AUQW_* knobs the utility reads — an `AUQW_`-prefixed credential in
+ * the launch env must NOT cross the process boundary. */
+function utilityEnv(userDataPath: string): Record<string, string> {
+  const passthrough = [
+    'PATH',
+    'HOME',
+    'LANG',
+    'LC_ALL',
+    'TMPDIR',
+    'TMP',
+    'TEMP',
+    'USERPROFILE',
+    'APPDATA',
+    'SYSTEMROOT',
+    'COMSPEC',
+    'XDG_RUNTIME_DIR',
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+    'XDG_CACHE_HOME',
+  ];
+  const auqwAllowlist = [
+    'AUQW_NODE_BINDINGS',
+    'AUQW_PLUGIN_DIR',
+    'AUQW_STREAM_DIR',
+    'AUQW_USER_DATA',
+    'AUQW_REPO_ROOT',
+    'AUQW_DEV_GATE',
+    'AUQW_DB_PATH',
+  ];
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      value !== undefined &&
+      (passthrough.includes(key) ||
+        auqwAllowlist.includes(key) ||
+        key.startsWith('LC_'))
+    ) {
+      env[key] = value;
+    }
+  }
+  env['AUQW_USER_DATA'] = userDataPath;
+  // The database lives in the utility child; its path is fork env
+  // because the child owns no app.getPath('userData').
+  env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
+  if (!app.isPackaged) {
+    // Dev checkouts resolve the bindings artifact from the repo and
+    // may arm the dev-gate channel; packaged runs use resourcesPath.
+    env['AUQW_REPO_ROOT'] = join(here, '../../../..');
+    env['AUQW_DEV_GATE'] = '1';
+  }
+  return env;
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -54,7 +108,13 @@ async function main(): Promise<void> {
     readOnline: () => net.isOnline(),
   });
   const supervisor = createSupervisor({
-    fork: () => utilityProcess.fork(UTILITY),
+    fork: () =>
+      utilityProcess.fork(UTILITY, [], {
+        // The utility needs only platform essentials plus the AUQW_*
+        // knobs — never the parent's full env (credentials would leak
+        // into a process that loads native artifacts).
+        env: utilityEnv(userDataPath),
+      }),
   });
 
   registerChannels(ipcMain, {
