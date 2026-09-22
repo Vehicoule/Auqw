@@ -1021,7 +1021,12 @@ export async function createSyncEngine(
         settle(err(appError('cancelled', 'cancelled')));
         return;
       }
-      void work.then(settle);
+      // A rejecting op (a dep throwing past the op's own catches) must
+      // settle typed too — a fulfillment-only handler would leave the
+      // caller and the signal listener parked forever.
+      void work.then(settle, (thrown: unknown) =>
+        settle(err(fromUnknown(thrown))),
+      );
     });
   }
 

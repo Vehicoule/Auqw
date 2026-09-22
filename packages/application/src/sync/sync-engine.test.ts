@@ -1794,6 +1794,48 @@ async function queuedCancelSettlesEarly(): Promise<void> {
   assertEqual(store.entries.length, 1);
 }
 
+async function rejectingOpSettlesTyped(): Promise<void> {
+  // A dep throwing past the op's own catches must settle a typed
+  // error — a fulfillment-only `.then` on the queued work would leave
+  // the caller (and the signal listener) parked forever. The reachable
+  // unguarded dep is `ids.next('div')` inside recordDivergence, which
+  // runs AFTER the change append (durable write, then loser record).
+  const store = new FakeSyncLogStore();
+  const created = await createSyncEngine({
+    store,
+    clock: new FakeClock(1_000),
+    ids: {
+      next: (prefix: string) => {
+        if (prefix === 'div') {
+          throw new Error('ids dead');
+        }
+        return `${prefix}-1`;
+      },
+    },
+    log: new FakeLog(),
+    deviceId: 'a',
+  });
+  assert(created.ok);
+  const engine = created.value;
+  await mustWrite(engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'x',
+  });
+  // The second write supersedes the first — recording its loser calls
+  // the throwing IdPort after the append already landed.
+  const result = await engine.localChange({
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'y',
+  });
+  assert(!result.ok, 'throwing dep must surface a typed error');
+  assertEqual(result.ok ? '' : result.error.kind, 'internal');
+  assertEqual(store.entries.length, 2);
+}
+
 async function terminalRemoteStamp(): Promise<void> {
   // A valid-but-terminal remote stamp must fail BEFORE anything is
   // durable — a post-append failure would leave the entry durable and
@@ -2041,6 +2083,7 @@ export async function run(): Promise<void> {
   await divergenceKeysAreInjective();
   await exportFailsOnClockFault();
   await queuedCancelSettlesEarly();
+  await rejectingOpSettlesTyped();
   await terminalRemoteStamp();
   await localFreezeImmunity();
   await exportLimitZero();
