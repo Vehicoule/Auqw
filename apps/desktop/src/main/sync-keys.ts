@@ -123,23 +123,29 @@ export function createSyncKeysHandler(deps: {
 
   async function devicePut(record: SyncDeviceRecord): Promise<void> {
     const existing = await secure.get(deviceKey(record.id));
-    if (existing === null) {
-      const { devices } = await deviceList();
-      const isNewFp = !devices.some((d) => d.fp === record.fp);
-      if (devices.length >= MAX_SYNC_DEVICES && isNewFp) {
-        throw shellError(
-          'unavailable',
-          'paired device registry is full',
-        );
-      }
-      // Same key re-pairing under a new id (reinstall) — drop stale ids.
-      for (const d of devices) {
-        if (d.fp === record.fp && d.id !== record.id) {
-          await secure.delete(deviceKey(d.id));
-        }
+    if (existing !== null) {
+      await secure.set(deviceKey(record.id), JSON.stringify(record));
+      return;
+    }
+    const { devices } = await deviceList();
+    const isNewFp = !devices.some((d) => d.fp === record.fp);
+    if (devices.length >= MAX_SYNC_DEVICES && isNewFp) {
+      throw shellError(
+        'unavailable',
+        'paired device registry is full',
+      );
+    }
+    // Write the new record BEFORE evicting stale-fp ids: a failed
+    // write must not leave the still-valid old registration deleted
+    // (the device would be unpaired for good). A failed delete is
+    // recoverable — the next list surfaces a same-fp duplicate.
+    await secure.set(deviceKey(record.id), JSON.stringify(record));
+    // Same key re-pairing under a new id (reinstall) — drop stale ids.
+    for (const d of devices) {
+      if (d.fp === record.fp && d.id !== record.id) {
+        await secure.delete(deviceKey(d.id));
       }
     }
-    await secure.set(deviceKey(record.id), JSON.stringify(record));
   }
 
   return async (args: unknown) => {

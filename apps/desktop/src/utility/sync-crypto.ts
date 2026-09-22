@@ -77,11 +77,18 @@ export function isSyncIdentity(value: unknown): value is SyncIdentity {
  */
 export function isUsableIdentity(identity: SyncIdentity): boolean {
   try {
+    const loaded = createPrivateKey(privKey(identity.priv));
+    // Each key loading as X25519 is not enough — the stored pair must
+    // match, or the challenge advertises one key while DH uses the
+    // other and every sealed frame fails to open.
+    const derived = createPublicKey(loaded);
     return (
       createPublicKey(pubKey(identity.pub)).asymmetricKeyType ===
         'x25519' &&
-      createPrivateKey(privKey(identity.priv)).asymmetricKeyType ===
-        'x25519'
+      derived.asymmetricKeyType === 'x25519' &&
+      derived
+        .export({ format: 'der', type: 'spki' })
+        .equals(Buffer.from(identity.pub, 'base64'))
     );
   } catch {
     return false;

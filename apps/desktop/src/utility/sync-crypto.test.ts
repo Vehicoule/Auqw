@@ -7,12 +7,14 @@ import {
   generateIdentity,
   isClientHello,
   isSyncIdentity,
+  isUsableIdentity,
 } from './sync-crypto.ts';
 
 export function run(): void {
   // Identity generation and fingerprint stability.
   const identity = generateIdentity();
   assert(isSyncIdentity(identity), 'identity validates');
+  assert(isUsableIdentity(identity), 'a fresh identity is usable');
   const fp = fingerprintOf(identity.pub);
   assertEqual(fp.length, 64, 'sha256 hex');
   assertEqual(fp, fingerprintOf(identity.pub), 'fingerprint is stable');
@@ -20,6 +22,17 @@ export function run(): void {
   assert(
     fingerprintOf(other.pub) !== fp,
     'distinct identities fingerprint differently',
+  );
+
+  // isUsableIdentity also binds pub↔priv: a spliced pair whose keys
+  // each load as X25519 but don't correspond is corrupt, not usable.
+  assert(
+    !isUsableIdentity({ pub: other.pub, priv: identity.priv }),
+    'mismatched stored pair is unusable',
+  );
+  assert(
+    !isUsableIdentity({ pub: identity.pub, priv: '!!!!' }),
+    'garbage priv is unusable',
   );
 
   // Codec round trip + tamper + sequence binding.

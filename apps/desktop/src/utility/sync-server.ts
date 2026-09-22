@@ -88,6 +88,8 @@ export interface SyncAdvertiser {
 export type SyncAdvertise = (opts: {
   port: number;
   name: string;
+  /** Async announce failure — flips status to 'unavailable', no throw. */
+  onError?: () => void;
 }) => SyncAdvertiser;
 
 export type SyncServiceDeps = {
@@ -903,7 +905,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     listener = 'listening';
     if (deps.advertise !== undefined && deps.advertise !== null) {
       try {
-        advertiser = deps.advertise({ port: bound, name: deviceName });
+        advertiser = deps.advertise({
+          port: bound,
+          name: deviceName,
+          onError: () => {
+            // An async mdns failure after startup degrades the
+            // advertise state — the listener itself is unaffected.
+            advertiseState = 'unavailable';
+            try {
+              advertiser?.close();
+            } catch {
+              // best effort
+            }
+          },
+        });
         advertiseState = 'announcing';
       } catch {
         // mDNS is best-effort: pairing still works via the typed code.
@@ -1069,6 +1084,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       // that sends + clears: a device that opened during the registry
       // await is caught by the pass and never left with a stale mark
       // (the reverse order would snapshot `live` before the await).
+      let registryError: unknown;
       try {
         const { devices } = await deps.keys.deviceList();
         const live = new Set<string>();
@@ -1082,8 +1098,8 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             pendingSync.add(device.id);
           }
         }
-      } catch {
-        // A dead custody channel doesn't block the live kick.
+      } catch (thrown) {
+        registryError = thrown;
       }
       let sent = false;
       for (const session of sessions) {
@@ -1092,6 +1108,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           sent = true;
           pendingSync.delete(session.deviceId);
         }
+      }
+      // A dead registry is NOT an empty one — after the live kick the
+      // custody error still surfaces typed, never a false `pending`.
+      if (registryError !== undefined) {
+        throw isShellError(registryError)
+          ? registryError
+          : shellError('internal', 'sync:trigger registry read failed');
       }
       return checked(isSyncTriggerResult, 'sync:trigger')({
         triggered: sent,

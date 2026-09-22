@@ -10,8 +10,15 @@ import type { SyncAdvertise } from './sync-server.ts';
  * `unavailable` rather than a fake "discoverable".
  */
 export const createBonjourAdvertise = (): SyncAdvertise => {
-  const bonjour = new Bonjour();
-  return ({ port, name }) => {
+  let onError: (() => void) | undefined;
+  // The second ctor arg is the async-error callback — WITHOUT it the
+  // mdns server throws inside the shared utility process on a socket
+  // error and kills storage + streaming with it. Degrade, never exit.
+  const bonjour = new Bonjour({}, () => {
+    onError?.();
+  });
+  return ({ port, name, onError: hook }) => {
+    onError = hook;
     const service: Service = bonjour.publish({
       name,
       type: 'auqw',

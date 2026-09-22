@@ -1573,6 +1573,15 @@ export async function run(): Promise<void> {
         !degraded.ok && degraded.error.kind === 'unavailable',
         'sync:status fails typed, not a fake empty registry',
       );
+      const trig = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(
+        !trig.ok && trig.error.kind === 'unavailable',
+        'sync:trigger fails typed, not a false pending:false',
+      );
     } finally {
       await service.close();
     }
