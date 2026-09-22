@@ -278,19 +278,20 @@ pub enum HostError {
         /// The missing plugin id.
         id: String,
     },
-    /// The caller-minted request id is still owned by a live
-    /// invocation or an unreleased prepared session — ids must be
-    /// unique while live.
-    #[error("request id {id} still in flight")]
-    RequestInFlight {
-        /// The colliding request id.
-        id: String,
-    },
     /// Internal runtime failure.
     #[error("runtime: {detail}")]
     Runtime {
         /// Detail.
         detail: String,
+    },
+    /// The caller-minted request id is still owned by a live
+    /// invocation or an unreleased prepared session — ids must be
+    /// unique while live. Kept last so the original discriminants
+    /// (Load, Unknown, Runtime) don't shift for stale decoders.
+    #[error("request id {id} still in flight")]
+    RequestInFlight {
+        /// The colliding request id.
+        id: String,
     },
 }
 

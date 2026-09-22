@@ -951,7 +951,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() and 0xFFFF) != 26661) {
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() and 0xFFFF) != 11660) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin() and 0xFFFF) != 41359) {
@@ -960,7 +960,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() and 0xFFFF) != 34269) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() and 0xFFFF) != 14712) {
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() and 0xFFFF) != 44159) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() and 0xFFFF) != 7187) {
@@ -1459,16 +1459,23 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 public interface PluginHostInterface {
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */
     fun `cancel`(`requestId`: kotlin.String)
     
@@ -1494,7 +1501,10 @@ public interface PluginHostInterface {
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */
     fun `setAuthToken`(`token`: kotlin.String?)
     
@@ -1601,8 +1611,9 @@ public interface PluginHostInterface {
 }
 
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
 {
@@ -1722,10 +1733,16 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
 
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */override fun `cancel`(`requestId`: kotlin.String)
         = 
     callWithHandle {
@@ -1790,7 +1807,10 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */override fun `setAuthToken`(`token`: kotlin.String?)
         = 
     callWithHandle {
@@ -2258,7 +2278,9 @@ data class HostConfig (
     /**
      * Initial OAuth access token for session-trust `Authorization:
      * Bearer` on InnerTube calls. `None` starts anonymous; update it
-     * later with [`PluginHost::set_auth_token`]. Never logged.
+     * later with [`PluginHost::set_auth_token`]. Never logged. Values
+     * outside the contract (`minLength: 1`, `maxLength: 8192`) are
+     * treated as unset.
      */
     var `authToken`: kotlin.String?
     
@@ -2737,6 +2759,23 @@ sealed class HostException: kotlin.Exception() {
             get() = "detail=${ `detail` }"
     }
     
+    /**
+     * The caller-minted request id is still owned by a live
+     * invocation or an unreleased prepared session — ids must be
+     * unique while live. Kept last so the original discriminants
+     * (Load, Unknown, Runtime) don't shift for stale decoders.
+     */
+    class RequestInFlight(
+        
+        /**
+         * The colliding request id.
+         */
+        val `id`: kotlin.String
+        ) : HostException() {
+        override val message
+            get() = "id=${ `id` }"
+    }
+    
 
     
 
@@ -2765,6 +2804,9 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
             3 -> HostException.Runtime(
                 FfiConverterString.read(buf),
                 )
+            4 -> HostException.RequestInFlight(
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -2786,6 +2828,11 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
                 4UL
                 + FfiConverterString.allocationSize(value.`detail`)
             )
+            is HostException.RequestInFlight -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+            )
         }
     }
 
@@ -2804,6 +2851,11 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
             is HostException.Runtime -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is HostException.RequestInFlight -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`id`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

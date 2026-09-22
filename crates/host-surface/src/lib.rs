@@ -236,20 +236,22 @@ pub enum HostError {
         /// The missing plugin id.
         id: String,
     },
-    /// The caller-minted request id is still owned by a live
-    /// invocation or an unreleased prepared session — ids must be
-    /// unique while live or they corrupt cancellation and
-    /// prepared-session ownership.
-    #[error("request id {id} still in flight")]
-    RequestInFlight {
-        /// The colliding request id.
-        id: String,
-    },
     /// Internal runtime failure.
     #[error("runtime: {detail}")]
     Runtime {
         /// Detail.
         detail: String,
+    },
+    /// The caller-minted request id is still owned by a live
+    /// invocation or an unreleased prepared session — ids must be
+    /// unique while live or they corrupt cancellation and
+    /// prepared-session ownership. Kept last: it was added after the
+    /// original three, so stable discriminant order (Load, Unknown,
+    /// Runtime) doesn't shift for stale generated decoders.
+    #[error("request id {id} still in flight")]
+    RequestInFlight {
+        /// The colliding request id.
+        id: String,
     },
 }
 
@@ -787,13 +789,36 @@ impl PluginHost {
         // `prepared_handles` is only populated by a request whose
         // `cancels` entry still exists or has just been delivered, so
         // the atomic contains+insert below closes the race.
-        if lock(&self.prepared_handles)?.contains_key(&request_id) {
-            return Err(HostError::RequestInFlight { id: request_id });
+        {
+            let mut m = lock(&self.prepared_handles)?;
+            // A slot can outlive its registry entry once the
+            // abandoned-session reaper evicts the stream — prune
+            // slots whose sessions are no longer live first, or a
+            // dead session still blocks the id's reuse.
+            if let Some(stream) = &self.stream {
+                m.retain(|_, s| stream.is_live(&s.handle));
+            }
+            if m.contains_key(&request_id) {
+                return Err(HostError::RequestInFlight { id: request_id });
+            }
         }
         {
             let mut m = lock(&self.cancels)?;
             if m.contains_key(&request_id) {
                 return Err(HostError::RequestInFlight { id: request_id });
+            }
+            // Admission consumes a tombstone for this id: a cancel
+            // that outran the bookkeeping still lands on the request
+            // it was meant for (the token starts cancelled), but a
+            // stone left by an earlier, settled generation can't
+            // poison a later reuse — it dies with this admission.
+            if self
+                .cancelled_requests
+                .lock()
+                .map(|mut c| c.remove(&request_id).is_some())
+                .unwrap_or(false)
+            {
+                token.cancel();
             }
             m.insert(request_id.clone(), token.clone());
         }
@@ -941,6 +966,56 @@ mod tests {
             Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
             other => panic!("expected RequestInFlight, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tombstoned_id_is_consumed_at_admission() {
+        // A cancel that outran admission still lands on the request it
+        // targeted — the token starts cancelled and the outcome reports
+        // `cancelled`. But the tombstone is spent by that admission, so
+        // a later reuse of the same id is clean (the spin guest then
+        // burns through its fuel instead of reporting cancelled).
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let kind_of = |_: String, o: ResolveOutcome| match o {
+            ResolveOutcome::Failed { kind, .. } => kind,
+            ResolveOutcome::Resolved { .. } => "resolved".to_string(),
+        };
+        host.cancel("pre".to_string());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id.clone(), "x".into(), "pre".into(), move |id, o| {
+            let _ = tx.send(kind_of(id, o));
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(kind, "cancelled");
+        // Same id again: no stone left, so this admission is clean.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id, "x".into(), "pre".into(), move |id, o| {
+            let _ = tx.send(kind_of(id, o));
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("restart: {e}"),
+        }
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(kind, "budget-exceeded");
     }
 
     #[test]
