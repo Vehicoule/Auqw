@@ -836,10 +836,16 @@ impl PluginHost {
             // it was meant for (the token starts cancelled), but a
             // stone left by an earlier, settled generation can't
             // poison a later reuse — it dies with this admission.
+            // An EXPIRED stone dies without cancelling: the TTL
+            // bounds the race window, so it is honored on the consume
+            // side too, not only on insert.
             if self
                 .cancelled_requests
                 .lock()
-                .map(|mut c| c.remove(&request_id).is_some())
+                .map(|mut c| {
+                    c.remove(&request_id)
+                        .is_some_and(|t| t.elapsed() < CANCEL_TOMBSTONE_TTL)
+                })
                 .unwrap_or(false)
             {
                 token.cancel();
@@ -1062,6 +1068,48 @@ mod tests {
             }
         }
         assert!(admitted, "second admission never landed");
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(kind, "budget-exceeded");
+    }
+
+    #[test]
+    fn expired_tombstone_does_not_precancel_admission() {
+        // The TTL bounds the race window on the consume side too: a
+        // stone older than the TTL must not pre-cancel the reused id —
+        // admission still removes it, but the token starts fresh.
+        let host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        match host.cancelled_requests.lock() {
+            Ok(mut c) => {
+                c.insert(
+                    "stale".to_string(),
+                    Instant::now() - std::time::Duration::from_secs(120),
+                );
+            }
+            Err(e) => panic!("tombstones: {e}"),
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id, "x".into(), "stale".into(), move |_id, o| {
+            let kind = match o {
+                ResolveOutcome::Failed { kind, .. } => kind,
+                ResolveOutcome::Resolved { .. } => "resolved".to_string(),
+            };
+            let _ = tx.send(kind);
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
         let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(kind) => kind,
             Err(e) => panic!("outcome: {e}"),

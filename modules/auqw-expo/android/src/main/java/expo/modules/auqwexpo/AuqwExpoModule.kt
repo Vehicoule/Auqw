@@ -1873,5 +1873,6 @@ class AuqwExpoModule : Module() {
     is HostException.Load -> CodedException("ERR_LOAD", e.message, e)
     is HostException.UnknownPlugin -> CodedException("ERR_UNKNOWN_PLUGIN", e.message, e)
     is HostException.Runtime -> CodedException("ERR_RUNTIME", e.message, e)
+    is HostException.RequestInFlight -> CodedException("ERR_REQUEST_IN_FLIGHT", e.message, e)
   }
 }
