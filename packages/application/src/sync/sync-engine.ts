@@ -46,15 +46,20 @@ import type { HlcStamp } from './hlc.ts';
  * entries. Each record is a set of independently merged fields; each
  * field holds its live candidates — entries stamped newer than the
  * record's winning tombstone — and the merge rule picks the winner
- * over that set ('lww' newest stamp; 'max' largest numeric value —
- * see hlc.ts for the stamp scheme). A record-level tombstone entry
+ * over that set ('lww' newest stamp; 'max' largest numeric value;
+ * 'sum' a per-device component counter — play counts, where taking
+ * the max would silently lose concurrent increments — see
+ * hlc.ts for the stamp scheme). A record-level tombstone entry
  * (field '*') kills every live candidate stamped at or below it and
  * loses to newer tombstones; a dead entry never resurfaces, but a
- * live one always can for 'max' fields, which is what keeps the merge
- * convergent under any arrival order. `seq` is the emitting device's
- * own emission ordinal — it exists so receivers can track contiguous
- * per-device progress (a scalar stamp watermark would falsely claim
- * knowledge below relay gaps; see SyncCursor).
+ * live one always can for 'max'/'sum' fields, which is what keeps
+ * the merge convergent under any arrival order. `seq` is the
+ * emitting device's own emission ordinal — it exists so receivers
+ * can track contiguous per-device progress (a scalar stamp watermark
+ * would falsely claim knowledge below relay gaps; see SyncCursor).
+ * A seq the exporter drops for retention is listed in the delta's
+ * `skipped` map so receivers can fold it as known-absent — without
+ * it a permanently-filtered seq would stall every later page.
  *
  * Predictable over clever: whenever an entry displaces a live value or
  * loses to a newer one, the loser is preserved in a bounded divergence
@@ -230,6 +235,17 @@ export type SyncDelta = {
    * by its own envelope validator.
    */
   readonly more: boolean;
+  /**
+   * Retention-dropped emission seqs per source device — the seqs the
+   * exporter filtered out for being beyond the play-history window,
+   * up to the largest seq this doc ships for that device. Receivers
+   * fold them as known-absent so their contiguous cursor can cross
+   * the hole: without them a permanently-dropped seq would stall
+   * every later page forever. A skipped seq is the exporter's claim,
+   * not data — if the entry arrives later via another peer it still
+   * applies normally.
+   */
+  readonly skipped: Record<string, readonly number[]>;
 };
 
 // ---- divergence history ---------------------------------------------------
@@ -322,6 +338,16 @@ export type SyncLogSnapshot = {
   readonly entries: readonly ChangeEntry[];
   readonly divergence: readonly DivergenceEntry[];
   readonly watermarks: Readonly<Record<string, number>>;
+  /**
+   * Cumulative divergence prune floor: the largest boundary ever
+   * passed to `dropDivergenceBefore` — rows below it were dropped
+   * *intentionally*. Hydration replays the log to repair rows a
+   * failed append lost, but must not rebuild losers whose emit
+   * position sits below this floor (rebuilding them would resurrect
+   * pruned history with fresh seqs and churn the retained window on
+   * every restart).
+   */
+  readonly divergenceFloor?: number;
 };
 
 export type SyncLogWrite = {
@@ -429,17 +455,24 @@ export const DIVERGENCE_HISTORY_LIMIT = 500;
 type FieldRule = {
   readonly valid: (value: unknown) => boolean;
   /**
-   * 'lww' — the higher stamp wins. 'max' — the larger value wins
-   * (numeric semilattice): used by playCount so a merged count never
-   * regresses below what any one device observed. A losing 'max'
-   * write still lands in divergence like any other loser.
+   * 'lww' — the higher stamp wins.
+   * 'max' — the larger value wins (numeric semilattice): used by
+   *   playCount.lastMs so the merged "most recent play" never
+   *   regresses.
+   * 'sum' — a per-device grow-only counter: each device's entries form
+   *   its own component (component = the device's largest live value),
+   *   and the materialized value is the sum of components. Used by
+   *   playCount.count because a scalar max silently loses concurrent
+   *   increments (two devices at 5 that each log a play both publish 6
+   *   — merged: 6, but 7 plays happened). Losers within a component
+   *   (a device's own superseded writes) still land in divergence.
    */
-  readonly merge: 'lww' | 'max';
+  readonly merge: 'lww' | 'max' | 'sum';
 };
 
 function rule(
   valid: (value: unknown) => boolean,
-  merge: 'lww' | 'max' = 'lww',
+  merge: 'lww' | 'max' | 'sum' = 'lww',
 ): FieldRule {
   return { valid, merge };
 }
@@ -621,7 +654,7 @@ export const SYNC_FIELD_RULES: Readonly<
     event: rule(isPlayEvent),
   },
   playCount: {
-    count: rule(isSafeNonNegative, 'max'),
+    count: rule(isSafeNonNegative, 'sum'),
     lastMs: rule(isSafeNonNegative, 'max'),
   },
   matchReview: {
@@ -703,13 +736,15 @@ export function isSyncDelta(value: unknown): value is SyncDelta {
       'cursor',
       'entries',
       'more',
+      'skipped',
     ]) &&
     value['formatVersion'] === 1 &&
     isString(value['senderDeviceId'], MAX_DEVICE_ID) &&
     isSyncCursor(value['cursor']) &&
     Array.isArray(value['entries']) &&
     value['entries'].length <= MAX_DELTA_ENTRIES &&
-    typeof value['more'] === 'boolean'
+    typeof value['more'] === 'boolean' &&
+    isSkippedMap(value['skipped'])
   );
 }
 
@@ -755,10 +790,16 @@ export function isDivergenceEntry(
 
 type FieldCell = {
   /**
-   * The entry whose value a reader would see: the merge rule's max
-   * over `live`.
+   * The decisive entry for outcome/divergence reporting: the merge
+   * rule's winner over `live` — for 'sum', the largest single live
+   * contribution.
    */
   winner: ChangeEntry;
+  /**
+   * The materialized field value: `winner.value` for 'lww'/'max', the
+   * per-device component sum for 'sum'.
+   */
+  value: unknown;
   /**
    * Candidates newer than the record tombstone. A dead entry never
    * resurfaces (tombstones only advance), so it is dropped on death —
@@ -814,6 +855,21 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 /** Emission ordinals are 1-based: 0 means "nothing observed". */
 function isEmissionSeq(value: unknown): value is number {
   return isSafeNonNegative(value) && value >= 1;
+}
+
+function isSkippedMap(
+  value: unknown,
+): value is Record<string, readonly number[]> {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= MAX_CURSOR_DEVICES &&
+    Object.values(value).every(
+      (seqs) =>
+        Array.isArray(seqs) &&
+        seqs.length <= MAX_DELTA_ENTRIES &&
+        seqs.every(isSafeNonNegative),
+    )
+  );
 }
 
 function jsonEquals(a: unknown, b: unknown): boolean {
@@ -964,6 +1020,17 @@ export async function createSyncEngine(
   const divergence: DivergenceEntry[] = [];
   const divergenceSeen = new Set<string>();
   let divergenceSeq = 0;
+  /**
+   * Hydrate-replay bookkeeping: `replaySeen` + `repairPos` re-derive
+   * the original emit order so positions line up 1:1 with row seqs;
+   * `divergenceFloor` is the store's cumulative prune frontier —
+   * losers with emit positions below it were intentionally capped
+   * away and must not be rebuilt (that would resurrect pruned history
+   * with fresh seqs and churn the retained window on every restart).
+   */
+  const replaySeen = new Set<string>();
+  let repairPos = 0;
+  let divergenceFloor = 0;
   let hlc = new HybridClock();
 
   /**
@@ -991,38 +1058,58 @@ export async function createSyncEngine(
    */
   function prospectiveMarks(
     entries: readonly ChangeEntry[],
+    skipped: Record<string, readonly number[]> | undefined,
   ): Record<string, number> {
     const marks: Record<string, number> = {};
     const buffers = new Map<string, Set<number>>();
-    for (const entry of entries) {
-      const dev = entry.deviceId;
+    const foldHypothetical = (dev: string, seq: number): void => {
       let buffer = buffers.get(dev);
       if (buffer === undefined) {
         buffer = new Set<number>();
         const prior = seenSeqs.get(dev);
         if (prior !== undefined) {
-          for (const seq of prior) {
-            buffer.add(seq);
+          for (const existing of prior) {
+            buffer.add(existing);
           }
         }
         buffers.set(dev, buffer);
         marks[dev] = contiguous.get(dev) ?? 0;
       }
       let mark = marks[dev] ?? 0;
-      if (entry.seq > mark) {
-        buffer.add(entry.seq);
+      if (seq > mark) {
+        buffer.add(seq);
         while (buffer.delete(mark + 1)) {
           mark += 1;
         }
         marks[dev] = mark;
       }
+    };
+    if (skipped !== undefined) {
+      for (const [dev, seqs] of Object.entries(skipped)) {
+        for (const seq of seqs) {
+          foldHypothetical(dev, seq);
+        }
+      }
+    }
+    for (const entry of entries) {
+      foldHypothetical(entry.deviceId, entry.seq);
     }
     return marks;
   }
 
-  function commitSeqs(entries: readonly ChangeEntry[]): void {
+  function commitSeqs(
+    entries: readonly ChangeEntry[],
+    skipped: Record<string, readonly number[]> | undefined,
+  ): void {
     for (const entry of entries) {
       foldSeq(entry.deviceId, entry.seq);
+    }
+    if (skipped !== undefined) {
+      for (const [dev, seqs] of Object.entries(skipped)) {
+        for (const seq of seqs) {
+          foldSeq(dev, seq);
+        }
+      }
     }
   }
 
@@ -1070,10 +1157,34 @@ export async function createSyncEngine(
       loser.field,
       toSide(loser),
     );
-    if (emit === false || divergenceSeen.has(key)) {
+    if (emit === false) {
       return;
     }
-    divergenceSeen.add(key);
+    if (emit === 'repair') {
+      // Replay emits the same distinct-loser sequence the original
+      // merges produced, so each new position equals the row seq the
+      // event would have received. Stored rows still exist (dedupe);
+      // positions below the floor were intentionally pruned —
+      // mark them seen so they are never rebuilt; anything missing
+      // above the floor is a lost append worth repairing.
+      if (replaySeen.has(key)) {
+        return;
+      }
+      replaySeen.add(key);
+      repairPos += 1;
+      if (divergenceSeen.has(key)) {
+        return;
+      }
+      divergenceSeen.add(key);
+      if (repairPos < divergenceFloor) {
+        return;
+      }
+    } else {
+      if (divergenceSeen.has(key)) {
+        return;
+      }
+      divergenceSeen.add(key);
+    }
     divergenceSeq += 1;
     const at = now() ?? loser.hlc.l;
     const entry: DivergenceEntry = {
@@ -1115,7 +1226,7 @@ export async function createSyncEngine(
         continue;
       }
       if (
-        rule?.merge === 'max' &&
+        (rule?.merge === 'max' || rule?.merge === 'sum') &&
         typeof candidate.value === 'number' &&
         typeof winner.value === 'number'
       ) {
@@ -1134,6 +1245,70 @@ export async function createSyncEngine(
       throw new RangeError('empty candidate set');
     }
     return winner;
+  }
+
+  /** One device's live component winner inside a 'sum' field. */
+  function componentWinner(
+    live: readonly ChangeEntry[],
+    dev: string,
+  ): ChangeEntry | undefined {
+    let best: ChangeEntry | undefined;
+    for (const candidate of live) {
+      if (candidate.deviceId !== dev) {
+        continue;
+      }
+      if (
+        best === undefined ||
+        (typeof candidate.value === 'number' &&
+          typeof best.value === 'number' &&
+          (candidate.value > best.value ||
+            (candidate.value === best.value &&
+              compareEntryTs(candidate, best) > 0)))
+      ) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  /** The materialized 'sum' value: Σ over per-device live components. */
+  function sumValue(live: readonly ChangeEntry[]): number {
+    let total = 0;
+    const devs = new Set<string>();
+    for (const candidate of live) {
+      devs.add(candidate.deviceId);
+    }
+    for (const dev of devs) {
+      const component = componentWinner(live, dev);
+      if (typeof component?.value === 'number') {
+        total += component.value;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Does `candidate` beat `rival` under the merge rule? 'lww' —
+   * newer stamp. 'max'/'sum' — larger numeric value, ties broken by
+   * stamp.
+   */
+  function beats(
+    candidate: ChangeEntry,
+    rival: ChangeEntry,
+    rule: FieldRule | undefined,
+  ): boolean {
+    if (
+      (rule?.merge === 'max' || rule?.merge === 'sum') &&
+      typeof candidate.value === 'number' &&
+      typeof rival.value === 'number'
+    ) {
+      return (
+        candidate.value > rival.value ||
+        (candidate.value === rival.value &&
+          compareEntryTs(candidate, rival) > 0)
+      );
+    }
+    return compareEntryTs(candidate, rival) > 0;
   }
 
   function reduce(
@@ -1182,9 +1357,14 @@ export async function createSyncEngine(
         if (survivors.length === 0) {
           record.fields.delete(field);
         } else {
+          const winner = pickWinner(rule, survivors);
           record.fields.set(field, {
-            winner: pickWinner(rule, survivors),
+            winner,
             live: survivors,
+            value:
+              rule?.merge === 'sum'
+                ? sumValue(survivors)
+                : winner.value,
           });
         }
         if (compareEntryTs(cell.winner, entry) <= 0) {
@@ -1213,39 +1393,56 @@ export async function createSyncEngine(
       };
     }
 
-    const live = cell === undefined ? [entry] : [...cell.live, entry];
-    const prevWinner = cell?.winner;
-    const winner = pickWinner(rule, live);
-    // A displaced winner loses its slot to the new winner; an entry
-    // that arrived live but does not win loses to the same. Both are
-    // recorded — equal-value supersessions are not a loss.
-    if (
-      prevWinner !== undefined &&
-      prevWinner !== winner &&
-      !jsonEquals(prevWinner.value, winner.value)
-    ) {
-      recordDivergence(divs, prevWinner, winner, emit);
-    }
-    if (winner !== entry && !jsonEquals(entry.value, winner.value)) {
-      recordDivergence(divs, entry, winner, emit);
-    }
-    record.fields.set(entry.field, {
-      winner,
-      live: rule?.merge === 'max' ? live : [winner],
-    });
+    // The entry's contest: a 'sum' entry competes only within its own
+    // device's component — cross-device counts accumulate rather than
+    // displace; everything else competes for the whole slot.
+    const rival =
+      rule?.merge === 'sum'
+        ? componentWinner(cell?.live ?? [], entry.deviceId)
+        : cell?.winner;
 
-    if (prevWinner === winner) {
+    if (rival !== undefined && !beats(entry, rival, rule)) {
+      if (!jsonEquals(entry.value, rival.value)) {
+        recordDivergence(divs, entry, rival, emit);
+      }
+      // A live loser still joins the candidates for 'max'/'sum' — it
+      // resurfaces if its rival dies to a later tombstone.
+      if (
+        cell !== undefined &&
+        (rule?.merge === 'max' || rule?.merge === 'sum')
+      ) {
+        const live = [...cell.live, entry];
+        const winner = pickWinner(rule, live);
+        cell.live = live;
+        cell.winner = winner;
+        cell.value =
+          rule.merge === 'sum' ? sumValue(live) : winner.value;
+      }
       return {
-        outcome: { type: 'superseded', entry, winner },
+        outcome: { type: 'superseded', entry, winner: rival },
         divergences: divs,
       };
     }
+
+    // Entry won its contest: the rival (if any) is displaced — for
+    // 'sum' that is only the device's own previous component winner.
+    const displaced: ChangeEntry[] = [];
+    if (rival !== undefined) {
+      displaced.push(rival);
+      if (!jsonEquals(rival.value, entry.value)) {
+        recordDivergence(divs, rival, entry, emit);
+      }
+    }
+    const live = [...(cell?.live ?? []), entry];
+    const winner = pickWinner(rule, live);
+    record.fields.set(entry.field, {
+      winner,
+      live:
+        rule === undefined || rule.merge === 'lww' ? [entry] : live,
+      value: rule?.merge === 'sum' ? sumValue(live) : winner.value,
+    });
     return {
-      outcome: {
-        type: 'applied',
-        entry,
-        displaced: prevWinner === undefined ? [] : [prevWinner],
-      },
+      outcome: { type: 'applied', entry, displaced },
       divergences: divs,
     };
   }
@@ -1254,12 +1451,13 @@ export async function createSyncEngine(
 
   async function appendLog(
     entries: readonly ChangeEntry[],
+    skipped: Record<string, readonly number[]> | undefined,
     signal: CancellationSignal,
     deadlineMs: number,
   ): Promise<Result<void>> {
     const write: SyncLogWrite = {
       entries,
-      watermarks: prospectiveMarks(entries),
+      watermarks: prospectiveMarks(entries, skipped),
     };
     const appended = await call(() =>
       store.append(write, context('sync-app', deadlineMs, signal)),
@@ -1269,7 +1467,7 @@ export async function createSyncEngine(
     }
     // Cursor state commits only once the write is durable — a failed
     // append must never advertise entries this device never accepted.
-    commitSeqs(entries);
+    commitSeqs(entries, skipped);
     for (const entry of entries) {
       changeLog.push(entry);
       seen.add(entryKey(entry));
@@ -1404,7 +1602,10 @@ export async function createSyncEngine(
                 kind: input.kind,
                 recordId: input.recordId,
                 field: input.field,
-                value: input.value,
+                // Own the value: the caller keeps its mutable object,
+                // the engine freezes its clone — same ownership rule
+                // as accepted wire entries.
+                value: JSON.parse(JSON.stringify(input.value)) as unknown,
                 tombstone: false,
                 hlc: stamp,
                 deviceId,
@@ -1418,7 +1619,7 @@ export async function createSyncEngine(
       }
       // Durable first: the change log is the source of truth; merge
       // state is derived from it.
-      const appended = await appendLog(entries, sig, deadlineMs);
+      const appended = await appendLog(entries, undefined, sig, deadlineMs);
       if (!appended.ok) {
         return err(appended.error);
       }
@@ -1468,7 +1669,7 @@ export async function createSyncEngine(
     if (since !== undefined && !isSyncCursor(since)) {
       return err(appError('invalid-response', 'invalid sync cursor'));
     }
-    if (!isSafeNonNegative(limit)) {
+    if (!isSafeNonNegative(limit) || limit < 1) {
       return err(appError('invalid-response', 'invalid delta limit'));
     }
     const bound = Math.min(limit, MAX_DELTA_ENTRIES);
@@ -1480,6 +1681,11 @@ export async function createSyncEngine(
       const at = now();
       const retainedFloor =
         at === null ? null : at - PLAY_HISTORY_RETENTION_MS;
+      // Seqs dropped by the retention filter inside this request's
+      // window — collected per device so the receiver's contiguous
+      // cursor can cross the holes (otherwise a permanently-dropped
+      // seq stalls every later page forever).
+      const retired = new Map<string, number[]>();
       const eligible = changeLog
         .filter((entry) => {
           if (since !== undefined) {
@@ -1492,10 +1698,7 @@ export async function createSyncEngine(
           }
           // History is a bounded window (data.md): a play event
           // beyond the retention window would be pruned on the
-          // receiver's next write anyway, so it never ships. Such a
-          // drop leaves a seq hole for the requester — its contiguous
-          // cursor stays before the hole until another peer fills it,
-          // which costs re-shipped (deduped) entries, never loss.
+          // receiver's next write anyway, so it never ships.
           if (
             entry.kind === 'playEvent' &&
             !entry.tombstone &&
@@ -1503,18 +1706,51 @@ export async function createSyncEngine(
             isPlayEvent(entry.value) &&
             entry.value.playedMs < retainedFloor
           ) {
+            const mark = since?.[entry.deviceId] ?? 0;
+            if (entry.seq > mark) {
+              const list = retired.get(entry.deviceId);
+              if (list === undefined) {
+                retired.set(entry.deviceId, [entry.seq]);
+              } else {
+                list.push(entry.seq);
+              }
+            }
             return false;
           }
           return true;
         })
         .sort(compareEntryTs);
       const entries = eligible.slice(0, bound);
+      // Skipped seqs are listed only up to the largest seq this page
+      // ships for that device — beyond-page holes are listed by the
+      // page that reaches them. If nothing ships for a device its
+      // retired tail needs no listing: an empty window stalls nothing.
+      const shippedMax = new Map<string, number>();
+      for (const entry of entries) {
+        const current = shippedMax.get(entry.deviceId) ?? 0;
+        if (entry.seq > current) {
+          shippedMax.set(entry.deviceId, entry.seq);
+        }
+      }
+      const skipped: Record<string, readonly number[]> = {};
+      for (const [dev, seqs] of retired) {
+        const bound = shippedMax.get(dev);
+        if (bound === undefined) {
+          continue;
+        }
+        const mark = since?.[dev] ?? 0;
+        const listed = seqs.filter((seq) => seq > mark && seq <= bound);
+        if (listed.length > 0) {
+          skipped[dev] = listed;
+        }
+      }
       const doc: SyncDelta = {
         formatVersion: 1,
         senderDeviceId: deviceId,
         cursor: cursorSnapshot(),
         entries,
         more: eligible.length > entries.length,
+        skipped,
       };
       return ok(doc);
     });
@@ -1578,6 +1814,17 @@ export async function createSyncEngine(
       // Canonical order: every device that receives the same set of
       // entries merges them identically, divergence included.
       valid.sort(compareEntryTs);
+      // Preflight the clock fold on a shadow: a terminal remote stamp
+      // must fail BEFORE anything is durable — a post-append throw
+      // would leave entries durable-but-unmerged until restart.
+      try {
+        const shadow = new HybridClock(hlc.stamp());
+        for (const entry of valid) {
+          shadow.receive(entry.hlc, at);
+        }
+      } catch (thrown) {
+        return err(fromUnknown(thrown));
+      }
       const fresh: ChangeEntry[] = [];
       for (const entry of valid) {
         if (seen.has(entryKey(entry))) {
@@ -1587,7 +1834,7 @@ export async function createSyncEngine(
         }
       }
 
-      const appended = await appendLog(fresh, sig, deadlineMs);
+      const appended = await appendLog(fresh, doc.skipped, sig, deadlineMs);
       if (!appended.ok) {
         return err(appended.error);
       }
@@ -1657,7 +1904,7 @@ export async function createSyncEngine(
     for (const record of records.values()) {
       const fields: Record<string, unknown> = {};
       for (const [field, cell] of record.fields) {
-        fields[field] = cell.winner.value;
+        fields[field] = cell.value;
       }
       if (Object.keys(fields).length > 0) {
         out.push({
@@ -1703,10 +1950,13 @@ export async function createSyncEngine(
     !Array.isArray(snapshot.divergence) ||
     !snapshot.divergence.every(isDivergenceEntry) ||
     !isRecord(snapshot.watermarks) ||
-    !isSyncCursor(snapshot.watermarks)
+    !isSyncCursor(snapshot.watermarks) ||
+    (snapshot.divergenceFloor !== undefined &&
+      !isOptSafeNonNegative(snapshot.divergenceFloor))
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
+  divergenceFloor = snapshot.divergenceFloor ?? 0;
   // Stored divergence rows seed the dedupe set BEFORE replay, so
   // 'repair' emit materializes exactly the rows the store is missing.
   for (const row of snapshot.divergence) {

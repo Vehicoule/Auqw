@@ -1257,6 +1257,8 @@ export class FakeSyncLogStore implements SyncLogStore {
   #entries: ChangeEntry[] = [];
   #divergence: DivergenceEntry[] = [];
   #watermarks: Record<string, number> = {};
+  /** Cumulative prune frontier — the largest seq ever capped away. */
+  #divergenceFloor = 0;
   #failNextAppend: AppError | null = null;
   #deferNextAppend = false;
   #appendDeferreds: Deferred<Result<void>>[] = [];
@@ -1268,6 +1270,7 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#entries = [...initial.entries];
       this.#divergence = [...initial.divergence];
       this.#watermarks = { ...initial.watermarks };
+      this.#divergenceFloor = initial.divergenceFloor ?? 0;
     }
   }
 
@@ -1311,6 +1314,10 @@ export class FakeSyncLogStore implements SyncLogStore {
     return this.#clone(this.#watermarks);
   }
 
+  get storedDivergenceFloor(): number {
+    return this.#divergenceFloor;
+  }
+
   load(context: OperationContext): Promise<Result<SyncLogSnapshot>> {
     this.loads.push(context);
     if (context.signal.cancelled) {
@@ -1325,6 +1332,7 @@ export class FakeSyncLogStore implements SyncLogStore {
           entries: this.#entries,
           divergence: this.#divergence,
           watermarks: this.#watermarks,
+          divergenceFloor: this.#divergenceFloor,
         }),
       ),
     );
@@ -1397,6 +1405,9 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#divergence = this.#divergence.filter(
         (row) => row.seq >= floor,
       );
+      if (floor > this.#divergenceFloor) {
+        this.#divergenceFloor = floor;
+      }
     }
     return ok(undefined);
   }

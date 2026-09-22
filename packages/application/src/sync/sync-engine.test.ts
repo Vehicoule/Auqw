@@ -5,11 +5,13 @@ import {
   createSyncEngine,
   isSyncDelta,
   likeRecordId,
+  syncFieldRule,
 } from './sync-engine.ts';
 import type {
   ApplyResult,
   ChangeEntry,
   LocalWrite,
+  SyncCursor,
   SyncDelta,
   SyncEngine,
   SyncLogSnapshot,
@@ -117,6 +119,7 @@ function rawTombstone(
 function delta(
   entries: readonly ChangeEntry[],
   senderDeviceId = 'peer',
+  skipped: Record<string, readonly number[]> = {},
 ): SyncDelta {
   return {
     formatVersion: 1,
@@ -124,6 +127,7 @@ function delta(
     cursor: {},
     entries,
     more: false,
+    skipped,
   };
 }
 
@@ -330,10 +334,10 @@ async function playlistOccurrenceOrder(): Promise<void> {
 
 async function playCountMerge(): Promise<void> {
   const b = await makeEngine('b');
-  // PlayCount fields merge as max: a higher count with an *older*
-  // stamp still wins — a merged count never regresses (sync.md: the
-  // merge must never destroy observed plays; exact per-device splits
-  // stay recoverable through the playEvent entries themselves).
+  // PlayCount.count merges as a per-device grow-only counter ('sum'):
+  // each device's own writes form its component, whose winner is the
+  // largest value — within one device a lower count never regresses
+  // the component. lastMs stays a plain max register.
   await mustApply(
     b.engine,
     delta([
@@ -551,11 +555,15 @@ async function duplicatesAndWatermarks(): Promise<void> {
 async function divergenceHistoryOps(): Promise<void> {
   const a = await makeEngine('a', 100);
   const b = await makeEngine('b', 200);
-  // Local loser: 'max' merge makes a local count lose to a synced one.
-  await mustApply(
-    a.engine,
-    delta([rawEntry('playCount', 'r1', 'count', 9, { l: 10, c: 0 })]),
-  );
+  // Local loser: a lower own-component count loses to the device's
+  // own newer write ('sum' partitions by device — a local write can
+  // never lose to a remote device's component, only to its own).
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 9,
+  });
   const localLoser = await a.engine.localChange({
     kind: 'playCount',
     recordId: 'r1',
@@ -1059,9 +1067,18 @@ function entryLess(a: ChangeEntry, b: ChangeEntry): boolean {
   return a.deviceId < b.deviceId;
 }
 
-/** Canonical field winners: per (kind,recordId,field), the max entry. */
 /**
- * Reference winner per field slot — computed over each entry's LIVE
+ * The merge partition a 'sum' entry competes in is its own device's
+ * component (slot+device); every other merge competes for the slot.
+ */
+function partitionKey(e: ChangeEntry): string {
+  return syncFieldRule(e.kind, e.field)?.merge === 'sum'
+    ? JSON.stringify([e.kind, e.recordId, e.field, e.deviceId])
+    : slotKey(e);
+}
+
+/**
+ * Reference winner per partition — computed over each entry's LIVE
  * subset (entries stamped newer than the slot's winning tombstone),
  * matching the engine's field-cell model: a dead entry never wins but
  * also cannot poison the slot for newer live writes.
@@ -1070,7 +1087,7 @@ function expectedLiveWinners(
   entries: readonly ChangeEntry[],
 ): Map<string, ChangeEntry> {
   const tombs = expectedTombstones(entries);
-  const slots = new Map<string, ChangeEntry[]>();
+  const partitions = new Map<string, ChangeEntry[]>();
   for (const e of entries) {
     if (e.tombstone) {
       continue;
@@ -1079,28 +1096,29 @@ function expectedLiveWinners(
     if (tomb !== undefined && !entryLess(tomb, e)) {
       continue; // predates the winning delete — dead at read time
     }
-    const slot = slotKey(e);
-    const live = slots.get(slot);
+    const partition = partitionKey(e);
+    const live = partitions.get(partition);
     if (live === undefined) {
-      slots.set(slot, [e]);
+      partitions.set(partition, [e]);
     } else {
       live.push(e);
     }
   }
   const winners = new Map<string, ChangeEntry>();
-  for (const [slot, live] of slots) {
+  for (const [partition, live] of partitions) {
     let winner = live[0];
     for (const e of live) {
       if (winner === undefined) {
         winner = e;
         continue;
       }
+      const merge = syncFieldRule(e.kind, e.field)?.merge;
       if (
-        e.kind === 'playCount' &&
+        (merge === 'max' || merge === 'sum') &&
         typeof e.value === 'number' &&
         typeof winner.value === 'number'
       ) {
-        // 'max' semilattice: larger value wins; exact tie → later stamp.
+        // Numeric register: larger value wins; exact tie → later stamp.
         if (
           e.value > winner.value ||
           (e.value === winner.value && entryLess(winner, e))
@@ -1112,7 +1130,7 @@ function expectedLiveWinners(
       }
     }
     if (winner !== undefined) {
-      winners.set(slot, winner);
+      winners.set(partition, winner);
     }
   }
   return winners;
@@ -1140,22 +1158,41 @@ function expectedTombstones(
 function expectedMaterialize(
   entries: readonly ChangeEntry[],
 ): { kind: string; recordId: string; fields: Record<string, unknown> }[] {
-  const fieldWinners = expectedLiveWinners(entries);
+  const partitionWinners = expectedLiveWinners(entries);
+  const slotWinners = new Map<string, ChangeEntry[]>();
+  for (const winner of partitionWinners.values()) {
+    const slot = slotKey(winner);
+    const list = slotWinners.get(slot);
+    if (list === undefined) {
+      slotWinners.set(slot, [winner]);
+    } else {
+      list.push(winner);
+    }
+  }
   const byRecord = new Map<
     string,
     { kind: string; recordId: string; fields: Record<string, unknown> }
   >();
-  for (const e of entries) {
-    if (e.tombstone || fieldWinners.get(slotKey(e)) !== e) {
+  for (const parts of slotWinners.values()) {
+    const first = parts[0];
+    if (first === undefined) {
       continue;
     }
-    const key = recordKey(e);
+    const merge = syncFieldRule(first.kind, first.field)?.merge;
+    const value =
+      merge === 'sum'
+        ? parts.reduce<number>(
+          (total, winner) => total + (winner.value as number),
+          0,
+        )
+        : first.value;
+    const key = recordKey(first);
     let rec = byRecord.get(key);
     if (rec === undefined) {
-      rec = { kind: e.kind, recordId: e.recordId, fields: {} };
+      rec = { kind: first.kind, recordId: first.recordId, fields: {} };
       byRecord.set(key, rec);
     }
-    rec.fields[e.field] = e.value;
+    rec.fields[first.field] = value;
   }
   const out = [...byRecord.values()];
   out.sort((a, b) => {
@@ -1347,7 +1384,7 @@ async function propertyHarness(): Promise<void> {
           continue;
         }
         const slot = slotKey(e);
-        const winner = fieldWinners.get(slot);
+        const winner = fieldWinners.get(partitionKey(e));
         if (winner === e) {
           continue; // live
         }
@@ -1370,6 +1407,216 @@ async function propertyHarness(): Promise<void> {
       }
     });
   }
+}
+
+
+async function concurrentPlayCounts(): Promise<void> {
+  // 'sum' merge: a count is a cumulative aggregate — a scalar max
+  // silently loses concurrent increments (two devices at 5 each log
+  // a play → both publish 6 → max keeps 6 although 7 plays happened).
+  // The write convention is the device's OWN counter; the merge sums
+  // per-device components.
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  const baseline = await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  await mustApply(b.engine, delta([baseline]));
+  // A plays once (own total 6); B plays for the first time (own total 1).
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 6,
+  });
+  await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 1,
+  });
+  const aToB = await a.engine.exportDelta();
+  const bToA = await b.engine.exportDelta();
+  assert(aToB.ok && bToA.ok);
+  await mustApply(b.engine, aToB.value);
+  await mustApply(a.engine, bToA.value);
+  assertDeepEqual(materialized(a.engine, 'playCount', 'r1'), {
+    count: 7,
+  });
+  assertDeepEqual(materialized(b.engine, 'playCount', 'r1'), {
+    count: 7,
+  });
+  // The displaced own-component (a:5 superseded by a:6) is preserved.
+  const rows = a.engine.divergenceHistory();
+  assert(
+    rows.some(
+      (r) =>
+        r.field === 'count' && r.loser.value === 5 && !r.loser.tombstone,
+    ),
+    'own-component loser preserved',
+  );
+}
+
+async function expiredHistoryPagination(): Promise<void> {
+  // A permanently-filtered seq (expired playEvent) must not stall the
+  // receiver's cursor: the delta's `skipped` map lists retired seqs so
+  // contiguous marks cross the hole and later pages arrive.
+  const a = await makeEngine('a', PLAY_HISTORY_RETENTION_MS + 1_000_000);
+  const b = await makeEngine('b', PLAY_HISTORY_RETENTION_MS + 1_000_000);
+  await mustWrite(a.engine, {
+    kind: 'playEvent',
+    recordId: 'ev-old',
+    field: 'event',
+    value: {
+      eventId: 'ev-old',
+      recordingId: 'r1',
+      occurrenceId: null,
+      playedMs: 1, // ancient — past the retention window
+      listenedMs: 5,
+    },
+  });
+  for (let i = 0; i < 11; i += 1) {
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId: `r${i}`,
+      field: 'title',
+      value: `t${i}`,
+    });
+  }
+  // Paginate at limit 5: page 1 ships seqs 2-6 plus skipped {a:[1]} —
+  // the cursor crosses the hole instead of looping on the same page.
+  let cursor: SyncCursor | undefined;
+  const got = new Set<number>();
+  let pages = 0;
+  for (;;) {
+    const doc = await a.engine.exportDelta(cursor, 5);
+    assert(doc.ok, `page ${pages} export failed`);
+    if (pages === 0) {
+      assertDeepEqual(doc.value.skipped, { a: [1] });
+      assert(doc.value.more, 'page 1 reports more');
+    }
+    const applied = await mustApply(b.engine, doc.value);
+    for (const entry of applied.entries) {
+      got.add(entry.seq);
+    }
+    cursor = applied.cursor;
+    pages += 1;
+    if (!doc.value.more) {
+      break;
+    }
+    assert(pages < 10, 'pagination did not terminate');
+  }
+  assertEqual(got.size, 11);
+  assert(
+    (b.engine.cursor()['a'] ?? 0) >= 12,
+    `cursor must cross the skipped seq, got ${JSON.stringify(b.engine.cursor())}`,
+  );
+  assertEqual(
+    b.engine.materialize().filter((r) => r.kind === 'recording').length,
+    11,
+  );
+}
+
+async function terminalRemoteStamp(): Promise<void> {
+  // A valid-but-terminal remote stamp must fail BEFORE anything is
+  // durable — a post-append failure would leave the entry durable and
+  // deduped but never merged until restart.
+  const b = await makeEngine('b');
+  const terminal = rawEntry('recording', 'r1', 'title', 'x', {
+    l: Number.MAX_SAFE_INTEGER,
+    c: Number.MAX_SAFE_INTEGER,
+  });
+  const applied = await b.engine.applyDelta(
+    JSON.parse(JSON.stringify(delta([terminal]))) as unknown,
+  );
+  assert(!applied.ok, 'terminal stamp must return a typed error');
+  assertEqual(b.store.entries.length, 0, 'nothing may append');
+  assertEqual(b.engine.materialize().length, 0);
+  assertDeepEqual(b.engine.cursor(), {});
+  // The engine keeps working after the rejected doc.
+  await mustWrite(b.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'ok',
+  });
+  assertDeepEqual(materialized(b.engine, 'recording', 'r2'), {
+    title: 'ok',
+  });
+}
+
+async function localFreezeImmunity(): Promise<void> {
+  // The engine owns a clone: caller objects must stay mutable after
+  // localChange — including on a failed append.
+  const { engine, store } = await makeEngine('a');
+  const artwork = [{ url: 'https://a/x', width: 1, height: 1 }];
+  await mustWrite(engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'artwork',
+    value: artwork,
+  });
+  artwork.push({ url: 'https://a/y', width: 2, height: 2 });
+  assertEqual(artwork.length, 2);
+  assertEqual(
+    materialized(engine, 'recording', 'r1')?.['artwork'] !== undefined
+      ? (materialized(engine, 'recording', 'r1')?.['artwork'] as unknown[]).length
+      : -1,
+    1,
+  );
+  store.failNextAppend(appError('unavailable', 'full'));
+  const second = { url: 'https://a/z', width: 3, height: 3 };
+  const failed = await engine.localChange({
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'artwork',
+    value: [second],
+  });
+  assert(!failed.ok, 'append failure surfaces');
+  second.width = 99; // caller mutation still safe post-failure
+  assertEqual(second.width, 99);
+}
+
+async function exportLimitZero(): Promise<void> {
+  const { engine } = await makeEngine('a');
+  const doc = await engine.exportDelta(undefined, 0);
+  assert(!doc.ok, 'limit 0 must be rejected — it can never progress');
+}
+
+async function prunedDivergenceNotResurrected(): Promise<void> {
+  // A loser whose row was intentionally capped must NOT be rebuilt on
+  // restart — only positions the floor did not cover are repaired.
+  const peerEntries = [
+    rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+    rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v1', { l: 30, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+  ];
+  // Replay emits two loser positions: seq1 ('old' loses on r1),
+  // seq2 ('v1' loses on r2). Floor 3 means rows below seq 3 were
+  // intentionally pruned → nothing is rebuilt.
+  const capped = new FakeSyncLogStore({
+    entries: peerEntries,
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 3,
+  });
+  await makeEngine('a', 1_000, capped);
+  assertEqual(capped.divergenceRows.length, 0);
+  // Floor 2 says position 1 was pruned but position 2's row should
+  // exist — it is missing → exactly one repair lands.
+  const partial = new FakeSyncLogStore({
+    entries: peerEntries,
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 2,
+  });
+  await makeEngine('a', 1_000, partial);
+  assertEqual(partial.divergenceRows.length, 1);
+  assertEqual(partial.divergenceRows[0]?.loser.value, 'v1');
 }
 
 export async function run(): Promise<void> {
@@ -1397,5 +1644,11 @@ export async function run(): Promise<void> {
   await exportPagination();
   await remoteMutationImmunity();
   await hydrateRepairsDivergence();
+  await concurrentPlayCounts();
+  await expiredHistoryPagination();
+  await terminalRemoteStamp();
+  await localFreezeImmunity();
+  await exportLimitZero();
+  await prunedDivergenceNotResurrected();
   await propertyHarness();
 }
