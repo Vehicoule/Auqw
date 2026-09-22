@@ -41,6 +41,12 @@ export interface IpcMainLike {
   on(channel: string, listener: (event: IpcEventLike) => void): void;
 }
 
+/**
+ * The channels are invoke/response — cancellation is deliberately not
+ * carried across this boundary yet. Long-running work (storage, streams,
+ * sync, transfer) lands on the utility-process contract where the
+ * CancellationSignal from `packages/application` ships with its ports.
+ */
 export interface ChannelDeps {
   readonly meta: () => AppMeta;
   readonly pickFolder: (

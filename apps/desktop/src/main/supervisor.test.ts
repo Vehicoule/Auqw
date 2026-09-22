@@ -122,4 +122,77 @@ export async function run(): Promise<void> {
     supervisor.request('utility:ping', { message: 'f' }),
     'released',
   );
+
+  // Backoff escalates across a crash loop: spawn must NOT reset the
+  // counter — only a child that stays up past stableAfterMs does.
+  const looped: FakeChild[] = [];
+  const storm = createSupervisor({
+    fork: () => {
+      const next = new FakeChild();
+      looped.push(next);
+      return next;
+    },
+    baseBackoffMs: 10,
+    maxBackoffMs: 60,
+    stableAfterMs: 5_000,
+  });
+  try {
+    const x = storm.request('utility:ping', { message: 'x' });
+    assertEqual(looped.length, 1);
+    looped[0]?.emit('spawn');
+    looped[0]?.emit('exit', 1);
+    await assertRejectsKind(x, 'process-crashed');
+    await sleep(18);
+    assertEqual(looped.length, 2, 'first respawn after ~base delay');
+    looped[1]?.emit('spawn');
+    looped[1]?.emit('exit', 1);
+    await sleep(12);
+    assertEqual(looped.length, 2, 'second respawn still waiting (>base)');
+    await sleep(30);
+    assertEqual(looped.length, 3, 'second respawn after doubled delay');
+    looped[2]?.emit('spawn');
+    looped[2]?.emit('exit', 1);
+    await sleep(15);
+    assertEqual(looped.length, 3, 'third respawn backed off further');
+    await sleep(60);
+    assertEqual(looped.length, 4, 'third respawn eventually lands');
+  } finally {
+    storm.shutdown();
+  }
+
+  // A child that stays up past stableAfterMs resets the counter — the
+  // next crash goes back to the base delay instead of doubling further.
+  const stable: FakeChild[] = [];
+  const recovered = createSupervisor({
+    fork: () => {
+      const next = new FakeChild();
+      stable.push(next);
+      return next;
+    },
+    baseBackoffMs: 20,
+    maxBackoffMs: 200,
+    stableAfterMs: 40,
+  });
+  try {
+    const y = recovered.request('utility:ping', { message: 'y' });
+    stable[0]?.emit('spawn');
+    await sleep(60);
+    stable[0]?.emit('exit', 1);
+    await assertRejectsKind(y, 'process-crashed');
+    await sleep(35);
+    assertEqual(stable.length, 2, 'healthy child respawns at base delay');
+    stable[1]?.emit('spawn');
+    await sleep(60);
+    const z = recovered.request('utility:ping', { message: 'z' });
+    stable[1]?.emit('exit', 1);
+    await assertRejectsKind(z, 'process-crashed');
+    await sleep(30);
+    assertEqual(
+      stable.length,
+      3,
+      'crash counter reset — delay is base, not doubled',
+    );
+  } finally {
+    recovered.shutdown();
+  }
 }

@@ -5,11 +5,13 @@ import {
   ipcMain,
   net,
   safeStorage,
+  screen,
   utilityProcess,
 } from 'electron';
 import type { BrowserWindowConstructorOptions, WebContents } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ShellError } from '../shared/errors.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
@@ -26,11 +28,17 @@ const PRELOAD = join(here, '../preload/index.cjs');
 const UTILITY = join(here, '../utility/index.cjs');
 const RENDERER = join(here, '../renderer/index.html');
 
+/** Latest persisted window state — recreated windows reopen where the user left them. */
+type StateRef = { current: WindowState };
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  void main();
+  main().catch((thrown: unknown) => {
+    console.error('fatal startup failure:', thrown);
+    app.exit(1);
+  });
 }
 
 async function main(): Promise<void> {
@@ -86,19 +94,29 @@ async function main(): Promise<void> {
   });
 
   const { state } = await loadWindowState(statePath);
-  let win = createWindow(state, statePath);
+  const stateRef: StateRef = { current: state };
+  let win: BrowserWindow | null = null;
+  const openWindow = (): void => {
+    win = createWindow(stateRef, statePath);
+    win.on('closed', () => {
+      win = null;
+    });
+  };
+  openWindow();
 
   app.on('second-instance', () => {
-    if (win !== null) {
-      if (win.isMinimized()) {
-        win.restore();
-      }
-      win.focus();
+    if (win === null) {
+      openWindow();
+      return;
     }
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    win.focus();
   });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      win = createWindow(state, statePath);
+      openWindow();
     }
   });
   app.on('window-all-closed', () => {
@@ -112,10 +130,8 @@ async function main(): Promise<void> {
   });
 }
 
-function createWindow(
-  state: WindowState,
-  statePath: string,
-): BrowserWindow {
+function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
+  const state = stateRef.current;
   const options: BrowserWindowConstructorOptions = {
     width: state.width,
     height: state.height,
@@ -133,7 +149,11 @@ function createWindow(
       nodeIntegration: false,
     },
   };
-  if (state.x !== undefined && state.y !== undefined) {
+  if (
+    state.x !== undefined &&
+    state.y !== undefined &&
+    intersectsDisplay(state.x, state.y, state.width, state.height)
+  ) {
     options.x = state.x;
     options.y = state.y;
   }
@@ -142,30 +162,70 @@ function createWindow(
     win.maximize();
   }
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  trackWindowState(win, statePath);
+  trackWindowState(win, statePath, stateRef);
   void win.loadFile(RENDERER);
   return win;
 }
 
-function trackWindowState(win: BrowserWindow, statePath: string): void {
+/**
+ * True when the saved bounds are still at least partially visible on some
+ * connected display. A stale position (monitor unplugged, resolution
+ * changed) drops the coordinates and lets the window manager place it.
+ */
+function intersectsDisplay(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): boolean {
+  const rect = { left: x, right: x + width, top: y, bottom: y + height };
+  return screen.getAllDisplays().some((display) => {
+    const area = display.workArea;
+    return (
+      rect.left < area.x + area.width &&
+      rect.right > area.x &&
+      rect.top < area.y + area.height &&
+      rect.bottom > area.y
+    );
+  });
+}
+
+function trackWindowState(
+  win: BrowserWindow,
+  statePath: string,
+  stateRef: StateRef,
+): void {
   const capture = (): WindowState => {
     const bounds = win.getNormalBounds();
-    return {
+    stateRef.current = {
       width: bounds.width,
       height: bounds.height,
       x: bounds.x,
       y: bounds.y,
       maximized: win.isMaximized(),
     };
+    return stateRef.current;
   };
   let timer: NodeJS.Timeout | null = null;
+  // In-flight debounced write — the final close write chains after it, so
+  // a slower earlier snapshot can never overwrite the closing state.
+  let inflight: Promise<void> | null = null;
+  const report = (error: ShellError | null): void => {
+    if (error !== null) {
+      console.error(`window-state save failed: ${error.kind}`);
+    }
+  };
   const schedule = (): void => {
     if (timer !== null) {
       clearTimeout(timer);
     }
     timer = setTimeout(() => {
       timer = null;
-      void saveWindowState(statePath, capture());
+      inflight = saveWindowState(statePath, capture())
+        .then(report)
+        .finally(() => {
+          inflight = null;
+        });
     }, 400);
   };
   win.on('resize', schedule);
@@ -177,6 +237,15 @@ function trackWindowState(win: BrowserWindow, statePath: string): void {
       clearTimeout(timer);
       timer = null;
     }
-    saveWindowStateSync(statePath, capture());
+    capture();
+    const writeFinal = (): void => {
+      report(saveWindowStateSync(statePath, stateRef.current));
+    };
+    const pending = inflight;
+    if (pending === null) {
+      writeFinal();
+    } else {
+      void pending.finally(writeFinal);
+    }
   });
 }

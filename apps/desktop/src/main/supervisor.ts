@@ -20,6 +20,12 @@ export type SupervisorOptions = {
   readonly baseBackoffMs?: number;
   /** Cap for the respawn delay — backoff is bounded, retry is not. */
   readonly maxBackoffMs?: number;
+  /**
+   * Time a spawned child must stay up before the crash counter resets.
+   * A child that exits before this window never resets it, so crash loops
+   * keep climbing the backoff instead of restarting every base interval.
+   */
+  readonly stableAfterMs?: number;
 };
 
 export interface UtilitySupervisor {
@@ -45,6 +51,7 @@ export function createSupervisor(
 ): UtilitySupervisor {
   const baseBackoffMs = opts.baseBackoffMs ?? 100;
   const maxBackoffMs = opts.maxBackoffMs ?? 4_000;
+  const stableAfterMs = opts.stableAfterMs ?? 10_000;
 
   let child: UtilityChildLike | null = null;
   let spawned = false;
@@ -52,6 +59,7 @@ export function createSupervisor(
   let consecutiveCrashes = 0;
   let nextId = 1;
   let respawnTimer: NodeJS.Timeout | null = null;
+  let stabilityTimer: NodeJS.Timeout | null = null;
 
   const pending = new Map<number, Pending>();
   const queued: Queued[] = [];
@@ -82,7 +90,13 @@ export function createSupervisor(
 
   function onSpawn(): void {
     spawned = true;
-    consecutiveCrashes = 0;
+    // The crash counter resets only once the child has stayed up for
+    // `stableAfterMs`; a crash loop therefore keeps doubling the delay.
+    stabilityTimer = setTimeout(() => {
+      stabilityTimer = null;
+      consecutiveCrashes = 0;
+    }, stableAfterMs);
+    stabilityTimer.unref();
     for (const entry of queued.splice(0)) {
       pending.set(entry.id, entry);
       try {
@@ -116,6 +130,10 @@ export function createSupervisor(
   function onExit(): void {
     child = null;
     spawned = false;
+    if (stabilityTimer !== null) {
+      clearTimeout(stabilityTimer);
+      stabilityTimer = null;
+    }
     const error = shellError(
       'process-crashed',
       'utility process exited',
@@ -180,6 +198,10 @@ export function createSupervisor(
       if (respawnTimer !== null) {
         clearTimeout(respawnTimer);
         respawnTimer = null;
+      }
+      if (stabilityTimer !== null) {
+        clearTimeout(stabilityTimer);
+        stabilityTimer = null;
       }
       const error = shellError('released', 'supervisor shut down');
       for (const slot of pending.values()) {
