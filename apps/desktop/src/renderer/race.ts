@@ -19,20 +19,25 @@ export function raced<T>(
   call: Promise<T>,
   signal: CancellationSignal,
 ): Promise<Raced<T>> {
-  return Promise.race([
-    call.then(
-      (value) => ({ t: 'value' as const, value }),
-      (thrown: unknown) => ({ t: 'failed' as const, thrown }),
-    ),
-    new Promise<Raced<T>>((resolve) => {
-      if (signal.cancelled) {
-        resolve({ t: 'cancelled' });
-        return;
-      }
-      const unsubscribe = signal.subscribe(() => {
-        unsubscribe();
-        resolve({ t: 'cancelled' });
-      });
-    }),
-  ]);
+  return new Promise<Raced<T>>((resolve) => {
+    const unsubscribe = signal.subscribe(() => {
+      unsubscribe();
+      resolve({ t: 'cancelled' });
+    });
+    // The loser unsubscribes: a signal reused across many calls never
+    // retains one listener per completed op (a plain Promise.race
+    // leaves the losing subscription parked forever).
+    const settle = (outcome: Raced<T>): void => {
+      unsubscribe();
+      resolve(outcome);
+    };
+    if (signal.cancelled) {
+      settle({ t: 'cancelled' });
+      return;
+    }
+    void call.then(
+      (value) => settle({ t: 'value', value }),
+      (thrown: unknown) => settle({ t: 'failed', thrown }),
+    );
+  });
 }
