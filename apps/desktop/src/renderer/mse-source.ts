@@ -60,6 +60,16 @@ export class MseUnsupported extends Error {
   }
 }
 
+/** `abort()` settles `ready` with this — a cancelled attach must NOT
+ * fall back to the serve-url leg (that would mint a stream for a dead
+ * playback), so callers treat it as quiet teardown, not failure. */
+export class MseAborted extends Error {
+  constructor() {
+    super('mse attach aborted');
+    this.name = 'MseAborted';
+  }
+}
+
 export interface MseSource {
   readonly url: string;
   seekTo(positionMs: number): void;
@@ -91,9 +101,9 @@ export interface MseAttach {
   readonly ready: Promise<MseSource>;
   /**
    * Abandon the attach before its URL reaches an element: closes the
-   * pump/port and revokes the object URL, and leaves `ready` unsettled
-   * — callers on a stale op must not let it fall through to the
-   * serve-url arm and mint a stream for a dead playback.
+   * pump/port, revokes the object URL, and rejects `ready` with
+   * `MseAborted` — callers on a stale op must not let it fall through
+   * to the serve-url arm and mint a stream for a dead playback.
    */
   abort(): void;
 }
@@ -175,7 +185,9 @@ export function attachMseSource(deps: {
   const media = deps.mse.createSource();
   const url = deps.mse.createObjectURL(media);
   let revoked = false;
+  let aborted = false;
   let sessionDestroy: (() => void) | null = null;
+  let readyReject: ((error: Error) => void) | null = null;
   const revoke = (): void => {
     if (!revoked) {
       revoked = true;
@@ -183,13 +195,30 @@ export function attachMseSource(deps: {
     }
   };
   const abort = (): void => {
+    aborted = true;
     sessionDestroy?.();
     revoke();
+    // `ready` must settle — a caller awaiting it inside a killed op
+    // would otherwise stay suspended forever.
+    readyReject?.(new MseAborted());
   };
   return deps
     .channel({ handle: deps.handle })
     .then((port) => {
+      if (aborted) {
+        // Aborted while the channel was resolving — close the fresh
+        // port so the pump detaches and reject ready outright.
+        try {
+          port.close();
+        } catch {
+          // best effort
+        }
+        const ready = Promise.reject<MseSource>(new MseAborted());
+        ready.catch(() => undefined);
+        return { url, ready, abort };
+      }
       const ready = new Promise<MseSource>((resolve, reject) => {
+        readyReject = reject;
         sessionDestroy = runSession(
           deps.mime,
           deps.mse,

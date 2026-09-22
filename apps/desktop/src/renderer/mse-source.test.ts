@@ -3,7 +3,11 @@ import {
   assertDeepEqual,
   assertEqual,
 } from '@auqw/application/testing';
-import { attachMseSource, MseUnsupported } from './mse-source.ts';
+import {
+  attachMseSource,
+  MseAborted,
+  MseUnsupported,
+} from './mse-source.ts';
 import type {
   MediaSourceLike,
   MseFactories,
@@ -617,6 +621,26 @@ export async function run(): Promise<void> {
     feedData(port, webmFixture(), webmFixture().length);
     await settle();
     assertDeepEqual(sb.removes, [[0, 180]], 'eviction kept the playhead window');
+  }
+
+  // abort() settles `ready` with MseAborted — a killed attach must
+  // not leave a caller suspended on first.settle forever.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = await attachMseSource({
+      handle: 'h-4e',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    attach.abort();
+    const outcome = await attach.ready.then(
+      () => 'resolved',
+      (thrown: unknown) => thrown,
+    );
+    assert(outcome instanceof MseAborted, 'abort rejects ready');
+    assert(port.closed, 'abort closed the pump port');
   }
 
   // Post-attach failure reaches the player: a pump error frame after

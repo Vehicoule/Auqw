@@ -273,11 +273,27 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
           shellError('unavailable', 'no live utility process'),
         );
       }
-      target.postMessage(
-        CHANNELS.streamBytes,
-        { requestId: args.requestId, handle: args.handle },
-        [port2],
-      );
+      try {
+        target.postMessage(
+          CHANNELS.streamBytes,
+          { requestId: args.requestId, handle: args.handle },
+          [port2],
+        );
+      } catch {
+        // The renderer died mid-handshake — port1's pump is already
+        // attached on the utility side. port2 is still ours: closing
+        // it fires `close` on the transferred peer, which is the pump's
+        // own detach path. Without this the attach would sit open
+        // holding a stream slot for a receiver that never lands.
+        try {
+          (port2 as { close(): void }).close();
+        } catch {
+          // best effort
+        }
+        return Promise.reject(
+          shellError('unavailable', 'renderer port delivery failed'),
+        );
+      }
       return Promise.resolve(undefined);
     }),
   ],

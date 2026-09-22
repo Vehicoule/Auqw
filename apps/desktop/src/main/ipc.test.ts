@@ -52,11 +52,15 @@ class FakeSender implements NetSender {
     payload: unknown;
     transfer: unknown[] | undefined;
   }> = [];
+  failPost = false;
   postMessage(
     channel: string,
     payload: unknown,
     transfer?: unknown[],
   ): void {
+    if (this.failPost) {
+      throw new Error('renderer gone');
+    }
     this.posted.push({ channel, payload, transfer });
   }
   off(
@@ -269,6 +273,34 @@ export async function run(): Promise<void> {
       requestId: 4,
     });
     assert(!badPort.ok && badPort.error.kind === 'invalid-request');
+
+    // Renderer dies mid-handshake: postMessage throws after port1
+    // already attached the utility pump. The still-owned peer must be
+    // closed — the peer 'close' is the pump's own detach path, so
+    // nothing keeps the stream slot alive for a dead receiver.
+    let port2Closed = false;
+    const deadDeps: ChannelDeps = {
+      ...deps,
+      messageChannel: () => ({
+        port1: { p: 1 },
+        port2: {
+          close() {
+            port2Closed = true;
+          },
+        },
+      }),
+    };
+    const deadIpc = new FakeIpcMain();
+    registerChannels(deadIpc, deadDeps);
+    const deadSender = new FakeSender();
+    deadSender.failPost = true;
+    const dead = await deadIpc.handlers.get(CHANNELS.streamPort)?.(
+      { sender: deadSender },
+      { handle: 'h-9', requestId: 'prt-2' },
+    );
+    assert(dead !== undefined && isResultEnvelope(dead));
+    assert(!dead.ok && dead.error.kind === 'unavailable');
+    assert(port2Closed, 'still-owned peer closes → pump detaches');
 
     // storage channels forward to the utility with their args intact
     utilityCalls.length = 0;

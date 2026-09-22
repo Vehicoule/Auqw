@@ -1215,10 +1215,51 @@ export async function run(): Promise<void> {
     });
     const playing = player.play({ handle: 'h-1', identity });
     await settle();
-    // No sourceopen, no feed — first.settle never resolves.
-    void playing;
+    // No sourceopen, no feed — first.settle stays pending until the
+    // abort settles it with MseAborted and play finishes quietly.
     await player.stop(identity);
     assert(port.closed, 'stop aborted the pending attach');
+    assert((await playing).ok, 'aborted play resolves quietly');
+  }
+
+  // A resume position (or a seek issued while the attach was in
+  // flight) must reach the MSE source after install — the pump always
+  // opens at byte 0, so without the handoff the element waits on the
+  // whole stream head downloading first.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({
+      handle: 'h-1',
+      identity,
+      positionMs: 40_000,
+    });
+    await settle();
+    media.fireSourceopen();
+    await settle();
+    await playing;
+    assert(
+      port.sent.some(
+        (m) =>
+          (m as { kind?: string }).kind === 'seek' &&
+          (m as { epoch?: number }).epoch === 1,
+      ),
+      'initial position re-anchored the pump after install',
+    );
   }
 
   // remote-previous restart routes through the MSE source — an

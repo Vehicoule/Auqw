@@ -213,6 +213,24 @@ export function run(): void {
   assertDeepEqual(carve(plainMp4Fixture()), { kind: 'unsupported' });
   assertDeepEqual(carve(new Uint8Array([0x1a])), { kind: 'need-more' });
 
+  // carve: a truncated webm head stays need-more until the init region
+  // completes — committing early would freeze segDataStart/scaleMs
+  // before Info parsed, corrupting every later Cue offset.
+  {
+    const fix = webmFixture();
+    // Through mid-Info (Info spans 17..28): still need-more.
+    assertDeepEqual(carve(fix.subarray(0, 25)), { kind: 'need-more' });
+    // Info complete but no Cluster walked yet: head commits with the
+    // scale final; boundaries keep arriving via boundaryScan.
+    const head = carve(fix.subarray(0, 29));
+    assert(head.kind === 'ok' && head.container === 'webm');
+    assertDeepEqual(head.boundaries, [], 'init complete pre-cluster');
+    // Cluster header parseable → its start is the first boundary.
+    const grown = carve(fix.subarray(0, 34));
+    assert(grown.kind === 'ok');
+    assertDeepEqual(grown.boundaries, [29]);
+  }
+
   // Property-ish: every truncation of the fixtures yields a verdict —
   // never a throw, never a hang — and emitted boundaries stay
   // strictly ascending and inside the buffer.

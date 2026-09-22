@@ -211,34 +211,33 @@ function parseCues(
  * Top-level EBML walk inside the Segment: each element is
  * `id(vint) + size(vint) + payload`. A Cluster's start offsets are
  * media-segment boundaries; a Cues element is parsed for the seek index.
+ * `null` = the init region isn't complete yet — `carve` commits the
+ * returned `segDataStart`/`scaleMs` for the life of the session, so the
+ * walk must not resolve until either Info was fully parsed (the scale
+ * is final) or the first Cluster boundary was walked (everything
+ * before it, Info included or provably absent, was consumed).
  */
-function webmWalk(buf: Uint8Array): WebmWalk {
+function webmWalk(buf: Uint8Array): WebmWalk | null {
   const boundaries: number[] = [];
   const cues: WebmCue[] = [];
-  const empty: WebmWalk = {
-    boundaries,
-    segDataStart: 0,
-    scaleMs: 1,
-    cues,
-  };
   // Skip the EBML header element; the Segment contains the rest.
   const head = readElementId(buf, 0);
   if (head === null || head.id !== EBML_ID) {
-    return empty;
+    return null;
   }
   const headSize = readVint(buf, head.length);
   if (headSize === null || headSize.unknown) {
-    return empty;
+    return null;
   }
   let pos = head.length + headSize.length + headSize.value;
   const seg = readElementId(buf, pos);
   if (seg === null || seg.id !== WEBM_SEGMENT) {
-    return empty;
+    return null;
   }
   pos += seg.length;
   const segSize = readVint(buf, pos);
   if (segSize === null) {
-    return empty;
+    return null;
   }
   const segDataStart = pos + segSize.length;
   const segEnd =
@@ -248,6 +247,7 @@ function webmWalk(buf: Uint8Array): WebmWalk {
   pos = segDataStart;
 
   let scaleMs = 1;
+  let initStable = false;
   while (pos < segEnd && pos < buf.length) {
     const element = readElementId(buf, pos);
     if (element === null) {
@@ -260,6 +260,10 @@ function webmWalk(buf: Uint8Array): WebmWalk {
     const dataStart = pos + element.length + size.length;
     if (element.id === WEBM_CLUSTER) {
       boundaries.push(pos);
+      // The sequential walk reached the first media element — every
+      // preceding element (Info included or provably absent) is
+      // complete, so the committed metadata is final.
+      initStable = true;
     }
     if (element.id === WEBM_INFO && !size.unknown) {
       eachChild(buf, dataStart, dataStart + size.value, (cid, cs, cl) => {
@@ -271,6 +275,11 @@ function webmWalk(buf: Uint8Array): WebmWalk {
           }
         }
       });
+      // Info fully inside the buffer → the timecode scale is final
+      // even if nothing after it has arrived yet.
+      if (dataStart + size.value <= buf.length) {
+        initStable = true;
+      }
     }
     if (element.id === WEBM_CUES && !size.unknown) {
       cues.push(
@@ -300,6 +309,9 @@ function webmWalk(buf: Uint8Array): WebmWalk {
       continue;
     }
     pos = dataStart + size.value;
+  }
+  if (!initStable) {
+    return null;
   }
   return {
     boundaries,
@@ -534,6 +546,9 @@ export function carve(buf: Uint8Array): CarveResult {
   }
   if (sn.container === 'webm') {
     const walk = webmWalk(buf);
+    if (walk === null) {
+      return { kind: 'need-more' };
+    }
     return {
       kind: 'ok',
       container: 'webm',

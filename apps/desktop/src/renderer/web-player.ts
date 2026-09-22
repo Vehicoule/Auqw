@@ -23,6 +23,7 @@ import { isRecord } from '../shared/check.ts';
 import type { ShellError } from '../shared/errors.ts';
 import {
   attachMseSource,
+  MseAborted,
   type MseFactories,
   type MseSource,
 } from './mse-source.ts';
@@ -313,7 +314,14 @@ export function createWebPlayerPort(deps: {
         });
         const settle = attach.ready.then(
           (source) => ({ url: attach.url, source }),
-          async (): Promise<{ url: string; source: MseSource | null }> => {
+          async (
+            thrown,
+          ): Promise<{ url: string; source: MseSource | null }> => {
+            // An aborted attach is a killed op, not a refusal — the
+            // serve-url leg would mint a stream for a dead playback.
+            if (thrown instanceof MseAborted) {
+              throw thrown;
+            }
             const served = await stream.serveUrl({ handle });
             return { url: served.url, source: null };
           },
@@ -501,7 +509,9 @@ export function createWebPlayerPort(deps: {
       if (gen !== opGen || projection !== p) {
         pendingAttaches.delete(gen);
         first.abort();
-        void first.settle.then((s) => s.source?.destroy());
+        void first.settle
+          .then((s) => s.source?.destroy())
+          .catch(() => undefined);
         void stream.release({ handle }).catch(() => undefined);
         return;
       }
@@ -519,7 +529,15 @@ export function createWebPlayerPort(deps: {
       audio.currentTime = 0;
       emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
       emitMarks(handle, identity);
-      const settled = await first.settle;
+      const settled = await first.settle.catch((thrown) => {
+        if (thrown instanceof MseAborted) {
+          return null;
+        }
+        throw thrown;
+      });
+      if (settled === null) {
+        return;
+      }
       // Liveness past the element install is the handle match —
       // our own emitTransition already swapped the `projection`
       // reference, so `projection === p` can no longer prove this op
@@ -859,7 +877,9 @@ export function createWebPlayerPort(deps: {
           if (gen !== opGen) {
             pendingAttaches.delete(gen);
             first.abort();
-            void first.settle.then((s) => s.source?.destroy());
+            void first.settle
+              .then((s) => s.source?.destroy())
+              .catch(() => undefined);
             return;
           }
           // The surviving token is authoritative — a queue mutation may
@@ -880,7 +900,17 @@ export function createWebPlayerPort(deps: {
             (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
           status('buffering');
           emitMarks(input.handle, identity);
-          const settled = await first.settle;
+          const settled = await first.settle.catch((thrown) => {
+            // The op's own teardown aborted the attach — finish
+            // quietly rather than surfacing a spurious failure.
+            if (thrown instanceof MseAborted) {
+              return null;
+            }
+            throw thrown;
+          });
+          if (settled === null) {
+            return;
+          }
           // Superseded while the MSE attach settled — whatever source
           // it produced belongs to a dead op.
           if (gen !== opGen) {
@@ -896,6 +926,14 @@ export function createWebPlayerPort(deps: {
             audio.src = settled.url;
             audio.currentTime =
               (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
+          }
+          // The pump always opens at byte 0 — a resume position (or a
+          // seek issued while this attach was in flight, which only
+          // updated the pending slot) must re-anchor the source or the
+          // element waits on the whole stream head downloading first.
+          const startMs = pending?.positionMs ?? input.positionMs ?? 0;
+          if (startMs > 0) {
+            settled.source?.seekTo(startMs);
           }
           await audio.play();
           if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
