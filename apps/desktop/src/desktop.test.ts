@@ -1,0 +1,16 @@
+import { run as runEnvelope } from './utility/envelope.test.ts';
+import { run as runRouter } from './utility/router.test.ts';
+import { run as runSupervisor } from './main/supervisor.test.ts';
+import { run as runIpc } from './main/ipc.test.ts';
+import { run as runWindowState } from './main/window-state.test.ts';
+import { run as runSecureStore } from './main/secure-store.test.ts';
+import { run as runNetMonitor } from './main/net-monitor.test.ts';
+
+runEnvelope();
+await runRouter();
+await runSupervisor();
+await runIpc();
+await runWindowState();
+await runSecureStore();
+await runNetMonitor();
+console.log('desktop shell tests passed');

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>auqw</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        background: #131418;
+        color: #e8e8ea;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+      }
+      main {
+        max-width: 40rem;
+      }
+      h1 {
+        font-size: 1.1rem;
+        font-weight: 500;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.35rem 1rem;
+        font-size: 0.8rem;
+        color: #a8abb3;
+      }
+      dt::after {
+        content: ":";
+      }
+      dd {
+        margin: 0;
+        color: #e8e8ea;
+        word-break: break-all;
+      }
+      .error {
+        color: #e8837a;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>auqw — desktop shell up</h1>
+      <dl id="status">
+        <dt>ipc</dt>
+        <dd>connecting…</dd>
+      </dl>
+    </main>
+    <script src="./index.js"></script>
+  </body>
+</html>
