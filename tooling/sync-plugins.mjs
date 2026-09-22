@@ -113,14 +113,11 @@ mkdirSync(OUT, { recursive: true });
 // Stage next to OUT: same filesystem so the swap's renames stay atomic,
 // outside OUT so an abandoned stage can't enter a packaged recursive
 // copy, and mkdtemp-named so a reused PID can never resurrect a killed
-// run's leftovers into the live set. Sweep leftovers first (SIGKILL
-// bypasses the exit hook), then clean our own on every exit path — a
-// failed sync leaves the previous set byte-identical.
-for (const entry of readdirSync(dirname(OUT))) {
-  if (entry.startsWith('.sync-stage-')) {
-    rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
-  }
-}
+// run's leftovers into the live set. The exit hook cleans the live
+// stage on every path — a failed sync leaves the previous set
+// byte-identical. A SIGKILLed run's stage is left behind: it is hidden,
+// gitignored, and never read by a later run (no sweep — it could not
+// tell an abandoned dir from a concurrent invocation's live one).
 const STAGE = mkdtempSync(join(dirname(OUT), '.sync-stage-'));
 process.on('exit', () => {
   rmSync(STAGE, { recursive: true, force: true });
