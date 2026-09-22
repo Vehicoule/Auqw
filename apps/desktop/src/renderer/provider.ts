@@ -665,6 +665,7 @@ export function createPluginProvider(
       let done = false;
       let issued = false;
       let unsubscribe: () => void = () => { };
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (result: Result<T>): void => {
         // First-settle-wins: a late outcome landing after a cancel (or
         // a dispose) must not overwrite the settled Result.
@@ -672,6 +673,9 @@ export function createPluginProvider(
           return;
         }
         done = true;
+        if (deadlineTimer !== undefined) {
+          clearTimeout(deadlineTimer);
+        }
         unsubscribe();
         inFlight.delete(requestId);
         resolve(result);
@@ -716,6 +720,30 @@ export function createPluginProvider(
         finish(err(cancelledError()));
       };
       inFlight.set(requestId, cancelInFlight);
+      // The context's own deadline bounds the call even when nothing
+      // cancels it: a wedged host request can't outlive it. Expiry
+      // aborts utility-side (same path as signal cancel) and settles
+      // typed `timeout` — retryable, not the engine's `cancelled`.
+      const remaining = context.deadlineMs - Date.now();
+      if (remaining <= 0) {
+        finish(err(appError('timeout', 'provider request deadline exceeded')));
+        return;
+      }
+      // setTimeout overflows above 2^31-1ms — a MAX_SAFE_INTEGER
+      // deadline means "no effective bound", so clamp, never wrap.
+      deadlineTimer = setTimeout(
+        () => {
+          if (issued) {
+            void host.cancelRequest({ requestId }).catch(() => undefined);
+          }
+          finish(
+            err(
+              appError('timeout', 'provider request deadline exceeded'),
+            ),
+          );
+        },
+        Math.min(remaining, 2_147_483_647),
+      );
       // subscribe() fires the listener synchronously when the signal
       // is already cancelled — `done` then suppresses the host call.
       unsubscribe = signal.subscribe(cancelInFlight);

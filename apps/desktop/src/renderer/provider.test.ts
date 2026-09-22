@@ -507,7 +507,35 @@ async function requestRejection(): Promise<void> {
   assert(!plain.ok && plain.error.kind === 'internal');
 }
 
-// 9. catalog.entity decodes entity + items + continuation honestly.
+// 9. The context deadline bounds a host call even when nothing
+// cancels it: expiry aborts the request utility-side and settles
+// typed `timeout`; a deadline already spent never issues at all.
+async function deadlineBoundsRequest(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const call = p.search(
+    { query: 'x', limit: 1, storefront: null },
+    { ...ctx().context, deadlineMs: Date.now() + 15 },
+  );
+  await flush();
+  const reqId = host.requests[0]!.requestId;
+  const result = await call;
+  assert(!result.ok && result.error.kind === 'timeout');
+  assertDeepEqual(host.cancelled, [reqId]);
+  // A late terminal outcome can't clobber the timeout settle.
+  host.succeed(reqId, { items: [WIRE_TRACK], storefront: null });
+  await flush();
+
+  const spent = await p.search(
+    { query: 'y', limit: 1, storefront: null },
+    { ...ctx().context, deadlineMs: Date.now() - 1 },
+  );
+  assert(!spent.ok && spent.error.kind === 'timeout');
+  assertEqual(host.requests.length, 1);
+  assertEqual(host.cancelled.length, 1); // never issued → no cancel
+}
+
+// 10. catalog.entity decodes entity + items + continuation honestly.
 async function entityOp(): Promise<void> {
   const host = new FakeHost();
   const p = provider(host);
@@ -543,7 +571,7 @@ async function entityOp(): Promise<void> {
   assertEqual(result.value.complete, true);
 }
 
-// 10. A mismatched artwork source_ref is a protocol violation, not
+// 11. A mismatched artwork source_ref is a protocol violation, not
 // a different track's artwork.
 async function artworkRefMismatch(): Promise<void> {
   const host = new FakeHost();
@@ -558,7 +586,7 @@ async function artworkRefMismatch(): Promise<void> {
   assert(!result.ok && result.error.kind === 'invalid-response');
 }
 
-// 11. An op outside the declared set is unsupported without a host call.
+// 12. An op outside the declared set is unsupported without a host call.
 async function undeclaredCapability(): Promise<void> {
   const host = new FakeHost();
   const p = provider(host, ['catalog.search']);
@@ -600,7 +628,7 @@ async function undeclaredCapability(): Promise<void> {
   assertEqual(host.requests.length, 0, 'no host request started');
 }
 
-// 12. radio.seed dual payload and continuation=null honest end.
+// 13. radio.seed dual payload and continuation=null honest end.
 async function radioOps(): Promise<void> {
   const host = new FakeHost();
   const p = provider(host);
@@ -640,7 +668,7 @@ async function radioOps(): Promise<void> {
   });
 }
 
-// 13. Lyrics prefer routing: synced when declared, plain otherwise;
+// 14. Lyrics prefer routing: synced when declared, plain otherwise;
 // honesty states decode (plain never presents as synced).
 async function lyricsOps(): Promise<void> {
   const host = new FakeHost();
@@ -688,6 +716,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['preCancelled', preCancelled],
   ['dispose', dispose],
   ['requestRejection', requestRejection],
+  ['deadlineBoundsRequest', deadlineBoundsRequest],
   ['entityOp', entityOp],
   ['artworkRefMismatch', artworkRefMismatch],
   ['undeclaredCapability', undeclaredCapability],
