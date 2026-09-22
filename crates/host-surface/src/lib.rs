@@ -962,8 +962,14 @@ mod tests {
 
     fn config() -> HostConfig {
         HostConfig {
-            fuel_per_entry: 200_000_000,
-            fuel_total: 2_000_000_000,
+            // Fuel sized so a spin burn finishes in ~seconds: the
+            // global entry-permit pool serializes guest entries to
+            // the core count, and a cancelled entry detaches and
+            // keeps burning while holding its permit — on a 2-core
+            // runner two full-budget burns can queue a third well
+            // past a 30 s outcome wait.
+            fuel_per_entry: 20_000_000,
+            fuel_total: 200_000_000,
             pot_provider_url: None,
             state_path: None,
             stream_path: None,
@@ -1033,14 +1039,29 @@ mod tests {
         };
         assert_eq!(kind, "cancelled");
         // Same id again: no stone left, so this admission is clean.
+        // The settled task removes its `cancels` slot a beat after the
+        // outcome is delivered — retry past that cleanup window (the
+        // same race `midflight_generic_cancel_leaves_no_tombstone`
+        // retries past).
         let (tx, rx) = std::sync::mpsc::channel::<String>();
-        match host.start_resolve(id, "x".into(), "pre".into(), move |id, o| {
-            let _ = tx.send(kind_of(id, o));
-            async move {}
-        }) {
-            Ok(()) => {}
-            Err(e) => panic!("restart: {e}"),
+        let mut admitted = false;
+        for _ in 0..50 {
+            let tx = tx.clone();
+            match host.start_resolve(id.clone(), "x".into(), "pre".into(), move |id, o| {
+                let _ = tx.send(kind_of(id, o));
+                async move {}
+            }) {
+                Ok(()) => {
+                    admitted = true;
+                    break;
+                }
+                Err(HostError::RequestInFlight { .. }) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("restart: {e}"),
+            }
         }
+        assert!(admitted, "second admission never landed");
         let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(kind) => kind,
             Err(e) => panic!("outcome: {e}"),
