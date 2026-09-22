@@ -635,8 +635,29 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
             }
         }
     }
+    // The probe read can advance upstream discovery — re-anchor the
+    // reported bounds on the freshest total instead of the stale
+    // hint; a range that collapsed under it answers honest 416
+    // while headers are still unsent. A wire-proven total also
+    // bounds a previously unbounded body, so truncation shows up as
+    // a byte-count shortfall rather than a clean FIN.
+    let fresh = shared.registry.effective_total(&handle).ok().flatten();
+    let total = fresh.or(total);
+    if req.range.is_some() {
+        if let Some(t) = total {
+            if start >= t {
+                write_status(
+                    out,
+                    416,
+                    &[("Content-Range".into(), format!("bytes */{t}"))],
+                );
+                return Ok(());
+            }
+        }
+    }
     let end = match (end, fresh) {
         (Some(e), Some(t)) => t.checked_sub(1).map(|last| e.min(last)),
+        (None, Some(t)) => t.checked_sub(1),
         (e, _) => e,
     };
     write_reply_head(out, &mime, req.range.is_some(), start, end, total)?;
@@ -1044,6 +1065,13 @@ mod tests {
         assert_eq!(r.header("content-range"), Some("bytes 500-511/512"));
         assert_eq!(r.header("content-length"), Some("12"));
         assert_eq!(r.body.len(), 12);
+        // An unranged GET on the same handle also bounds itself once
+        // the wire total is known — truncation can then surface as a
+        // byte shortfall instead of a clean EOF.
+        let r = http(&url, "GET", &[]);
+        assert_eq!(r.status, 200);
+        assert_eq!(r.header("content-length"), Some("512"));
+        assert_eq!(r.body.len(), 512);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
