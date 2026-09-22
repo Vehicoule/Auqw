@@ -172,4 +172,23 @@ export function run(): void {
     !isSyncDeltaDoc(cyclic),
     'cyclic delta doc rejected instead of throwing',
   );
+  // A getter can answer differently per read — validation could never
+  // vouch for the serialized wire document, so accessors reject.
+  let getterReads = 0;
+  const getterDoc = {
+    get value() {
+      getterReads += 1;
+      return getterReads === 1 ? 1 : undefined;
+    },
+  };
+  assert(!isJsonValue(getterDoc), 'enumerable getter rejected');
+  const getterArr = [
+    1,
+    {
+      get v() {
+        return 2;
+      },
+    },
+  ];
+  assert(!isJsonValue(getterArr), 'nested getter rejected');
 }

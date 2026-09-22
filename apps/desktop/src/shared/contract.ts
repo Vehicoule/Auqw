@@ -854,6 +854,18 @@ export function isSyncUnpairArgs(
  */
 const MAX_JSON_DEPTH = 64;
 
+/**
+ * A getter answers per-read — validation and serialization would
+ * observe different documents (a value accepted now can vanish or
+ * change on the wire). Only own enumerable DATA properties are stable
+ * enough to validate and then send.
+ */
+function hasNoEnumerableGetter(value: object): boolean {
+  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
+    (desc) => desc.enumerable !== true || desc.get === undefined,
+  );
+}
+
 function isJsonValueInner(
   value: unknown,
   active: WeakSet<object>,
@@ -876,7 +888,8 @@ function isJsonValueInner(
     // array serializes to nulls it doesn't actually contain.
     if (
       Object.keys(value).length !== value.length ||
-      active.has(value)
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
     ) {
       return false;
     }
@@ -896,7 +909,8 @@ function isJsonValueInner(
     const proto: unknown = Object.getPrototypeOf(value);
     if (
       (proto !== Object.prototype && proto !== null) ||
-      active.has(value)
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
     ) {
       return false;
     }
