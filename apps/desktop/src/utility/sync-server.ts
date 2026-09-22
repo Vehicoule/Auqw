@@ -1056,9 +1056,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     .catch(async () => {
       listener = 'unavailable';
       try {
-        const status = await status();
-        resolveReady(status);
-        return status;
+        const assembled = await status();
+        resolveReady(assembled);
+        return assembled;
       } catch {
         // Custody is down — status() can't assemble the count, but
         // ready must still resolve or the wiring hangs. listener:
