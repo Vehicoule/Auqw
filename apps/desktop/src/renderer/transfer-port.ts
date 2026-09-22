@@ -27,6 +27,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
   class DesktopSink implements TransferSink {
     #id: string;
     #closed = false;
+    #cancelled = false;
 
     constructor(id: string, signal: CancellationSignal) {
       this.#id = id;
@@ -34,6 +35,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       // the engine may not issue another call for the signal to ride.
       const unsubscribe = signal.subscribe(() => {
         unsubscribe();
+        this.#cancelled = true;
         this.#closed = true;
         void api.transfer
           .abort({ sinkId: this.#id, keep: true })
@@ -44,14 +46,36 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       }
     }
 
+    /** The signal's own error beats the released/raw-shell shape. */
+    #closedResult(): Result<never> {
+      return err(
+        this.#cancelled
+          ? appError('cancelled', 'cancelled')
+          : appError('released', 'sink is closed'),
+      );
+    }
+
+    #settleError(thrown: unknown): Result<never> {
+      return err(
+        this.#cancelled
+          ? appError('cancelled', 'cancelled')
+          : shellToAppError(thrown),
+      );
+    }
+
     async write(bytes: Uint8Array): Promise<Result<void>> {
       if (this.#closed) {
-        return err(appError('released', 'sink is closed'));
+        return this.#closedResult();
       }
       try {
         // Bytes cross as base64 — `transfer:write` caps the frame at
-        // 4MiB decoded; larger writes split at the seam.
+        // 4MiB decoded; larger writes split at the seam. A cancel
+        // mid-loop aborts the sink utility-side; bail typed instead
+        // of writing on against the dead handle.
         for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
+          if (this.#cancelled) {
+            return err(appError('cancelled', 'cancelled'));
+          }
           const chunk = bytes.subarray(
             off,
             Math.min(off + WRITE_CHUNK, bytes.length),
@@ -63,7 +87,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         }
         return ok(undefined);
       } catch (thrown) {
-        return err(shellToAppError(thrown));
+        return this.#settleError(thrown);
       }
     }
 
@@ -72,7 +96,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         const result = await api.transfer.commit({ sinkId: this.#id });
         return ok(result.offset);
       } catch (thrown) {
-        return err(shellToAppError(thrown));
+        return this.#settleError(thrown);
       }
     }
 
@@ -86,7 +110,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         return ok(result.digest);
       } catch (thrown) {
         this.#closed = true;
-        return err(shellToAppError(thrown));
+        return this.#settleError(thrown);
       }
     }
 

@@ -1,4 +1,5 @@
 import type { CancellationSignal } from '@auqw/application';
+import { CancellationSource } from '@auqw/application';
 import {
   assert,
   assertEqual,
@@ -115,4 +116,37 @@ export async function run(): Promise<void> {
     !aborted.ok && aborted.error.kind === 'cancelled',
     'cancelled begin short-circuits',
   );
+
+  // A cancel landing mid-write settles typed `cancelled` — not the
+  // dead-sink shell error the utility-side abort races against — and
+  // the remaining chunks never issue.
+  const src = new CancellationSource();
+  const midApi = fakeApi();
+  const origWrite = midApi.transfer.write.bind(midApi.transfer);
+  let midWrites = 0;
+  (midApi.transfer as Record<string, unknown>)['write'] = (args: {
+    sinkId: string;
+    data: string;
+  }) => {
+    midWrites += 1;
+    const sent = origWrite(args);
+    src.cancel(); // the signal fires while the sink is live
+    return sent;
+  };
+  const midPort = createDesktopTransfer(midApi);
+  const midBegan = await midPort.begin(
+    { destPath: 'b.mp4', resumeAtBytes: 0 },
+    src.signal,
+  );
+  assert(midBegan.ok, 'mid begin resolves');
+  // > 4MiB so the write splits into two frames — the cancel lands
+  // between them.
+  const midWrite = await midBegan.value.write(
+    new Uint8Array(4 * 1024 * 1024 + 1),
+  );
+  assert(
+    !midWrite.ok && midWrite.error.kind === 'cancelled',
+    'mid-write cancel settles cancelled, not the dead-sink error',
+  );
+  assertEqual(midWrites, 1, 'remaining chunks never issue');
 }
