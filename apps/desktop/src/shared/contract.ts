@@ -858,10 +858,22 @@ const MAX_JSON_DEPTH = 64;
  * A getter answers per-read — validation and serialization would
  * observe different documents (a value accepted now can vanish or
  * change on the wire). Only own enumerable DATA properties are stable
- * enough to validate and then send.
+ * enough to validate and then send. `toJSON` is the exception that
+ * escapes an enumerable-only scan: JSON.stringify invokes it whatever
+ * its enumerability, so a hidden hook would serialize a document
+ * validation never saw — reject a `toJSON` getter or function value.
  */
 function hasNoEnumerableGetter(value: object): boolean {
-  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const toJson = descriptors['toJSON'];
+  if (
+    toJson !== undefined &&
+    (toJson.get !== undefined ||
+      ('value' in toJson && typeof toJson.value === 'function'))
+  ) {
+    return false;
+  }
+  return Object.values(descriptors).every(
     (desc) => desc.enumerable !== true || desc.get === undefined,
   );
 }

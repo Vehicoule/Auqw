@@ -191,4 +191,17 @@ export function run(): void {
     },
   ];
   assert(!isJsonValue(getterArr), 'nested getter rejected');
+  // `toJSON` is honored by JSON.stringify regardless of enumerability —
+  // a hidden hook would serialize a document validation never saw.
+  const hooked = { value: 1 };
+  Object.defineProperty(hooked, 'toJSON', {
+    enumerable: false,
+    value: () => ({ value: 2 }),
+  });
+  assert(!isJsonValue(hooked), 'hidden toJSON hook rejected');
+  const docWithToJsonField = { toJSON: 'name', v: 1 };
+  assert(
+    isJsonValue(docWithToJsonField),
+    'a non-function toJSON field is inert',
+  );
 }
