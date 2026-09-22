@@ -524,22 +524,36 @@ async fn reap_loop(
             })
             .unwrap_or_default();
         for (handle, s) in doomed {
-            // Recheck under `shared`: an attach landing between the
-            // filter and here clears `detached_since`, so the recheck
-            // fails and the attach wins — never an evict on a session
-            // a consumer just reconnected to.
-            if s.terminate_if(StreamError::Evicted, |sh| {
-                sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
-            }) {
-                // The evicted session can never attach or serve again —
-                // keeping its entry only grows the map on every
-                // abandoned prepare, and callers routing by handle drop
-                // it on the `not-found` answer anyway. Entries killed
-                // by other paths keep their typed terminal error until
-                // the next supersede prunes them.
-                if let Ok(mut m) = sessions.lock() {
-                    m.remove(&handle);
+            // Terminate and remove under the map guard so the pair is
+            // atomic for callers: an `attach` either lands first —
+            // clearing `detached_since`, so the `shared` recheck spares
+            // the session — or it finds the handle already gone and
+            // answers `not-found`. No lookup can observe the
+            // evicted-but-still-mapped gap. `sessions` is the outermost
+            // lock, so `persist_lock`/`shared` nest inside it in the
+            // sanctioned order.
+            match sessions.lock() {
+                Ok(mut m) => {
+                    // Recheck under `shared`: an attach landing between
+                    // the filter and here clears `detached_since`, so
+                    // the recheck fails and the attach wins — never an
+                    // evict on a session a consumer just reconnected to.
+                    if s.terminate_if(StreamError::Evicted, |sh| {
+                        sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
+                    }) {
+                        // The evicted session can never attach or serve
+                        // again — keeping its entry only grows the map
+                        // on every abandoned prepare, and callers
+                        // routing by handle drop it on the `not-found`
+                        // answer anyway. Entries killed by other paths
+                        // keep their typed terminal error until the
+                        // next supersede prunes them.
+                        m.remove(&handle);
+                    }
                 }
+                // A poisoned map must not veto termination — a session
+                // that cannot end leaks its pump and readers forever.
+                Err(_) => s.terminate(StreamError::Evicted),
             }
         }
     }
