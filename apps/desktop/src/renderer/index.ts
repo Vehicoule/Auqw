@@ -109,6 +109,11 @@ async function boot(): Promise<void> {
    * adapter may emit synchronously) — replayed on registration, or
    * released when the owning generation ends. */
   const earlyPrepares = new Map<string, PlayerEvent>();
+  /** Provider `player.prepare` calls currently in flight — only while
+   * one is pending can an unmatched outcome still be claimed as early;
+   * after the last settles, unmatched outcomes are superseded-gen
+   * stragglers and get released immediately. */
+  let pendingRegistrations = 0;
 
   function applyPrepareOutcome(event: PlayerEvent): void {
     if (event.type !== 'prepare') {
@@ -153,11 +158,19 @@ async function boot(): Promise<void> {
       // A superseded request's outcome is ignored — its handle would
       // otherwise clobber the newer selection.
       if (event.requestId !== livePrepareId) {
-        // Early (id not yet registered) or superseded — buffer prepared
-        // outcomes for replay on registration; drainEarlyPrepares
-        // releases whatever stays unmatched.
+        // Early (id not yet registered while a call is pending) or
+        // superseded — buffer only the early case; a prepared outcome
+        // with no pending registration is a superseded-generation
+        // straggler and is released immediately.
         if (event.outcome.type === 'prepared') {
-          earlyPrepares.set(event.requestId, event);
+          if (pendingRegistrations > 0) {
+            earlyPrepares.set(event.requestId, event);
+          } else {
+            void player.release({
+              handle: event.outcome.stream.handle,
+              identity: liveIdentity,
+            });
+          }
         }
         return;
       }
@@ -217,11 +230,19 @@ async function boot(): Promise<void> {
       const gen = ++prepSeq;
       livePrepareId = null;
       // A re-prepare must release the stream it replaces — otherwise
-      // its pump stays owned and playing audio keeps running.
+      // its pump stays owned and playing audio keeps running. Stop
+      // first so any in-flight port op (a pending play's late serveUrl
+      // completion) is invalidated before the release lands.
       const replacedHandle = preparedHandle;
       preparedHandle = null;
       if (replacedHandle !== null) {
-        void player.release({ handle: replacedHandle, identity: liveIdentity });
+        void (async () => {
+          await player.stop(liveIdentity);
+          await player.release({
+            handle: replacedHandle,
+            identity: liveIdentity,
+          });
+        })();
       }
       drainEarlyPrepares();
       if (devGate instanceof HTMLInputElement && devGate.checked) {
@@ -265,12 +286,17 @@ async function boot(): Promise<void> {
         ...identity,
         attemptId: `boot-${gen}`,
       };
+      pendingRegistrations += 1;
       const res = await player.prepare({
         provider,
         sourceRef: ref,
         identity: attemptIdentity,
       });
+      pendingRegistrations -= 1;
       if (gen !== prepSeq) {
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
         return;
       }
       if (res.ok) {
@@ -284,9 +310,16 @@ async function boot(): Promise<void> {
           applyPrepareOutcome(early);
           renderState();
         }
+        // Whatever stayed buffered belongs to superseded generations.
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
       } else {
         state = 'failed';
         logEvent(`prepare failed — ${res.error.kind}: ${res.error.message}`);
+        if (pendingRegistrations === 0) {
+          drainEarlyPrepares();
+        }
         renderState();
       }
     })();
