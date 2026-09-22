@@ -256,9 +256,13 @@ export function QueueList({
               list.onRowFocus(index);
             }}
             onPress={
-              onPressItem === undefined || reordering
-                ? undefined
-                : () => onPressItem(item.occurrenceId)
+              reordering
+                ? // Stay enabled + focusable in reorder mode — Alt+Arrow
+                  // owns moves and list activation is already suppressed.
+                  () => undefined
+                : onPressItem === undefined
+                  ? undefined
+                  : () => onPressItem(item.occurrenceId)
             }
             onRemove={
               onRemoveItem === undefined || item.current || reordering
