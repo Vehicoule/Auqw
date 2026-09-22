@@ -233,6 +233,10 @@ export function QueueList({
     const op: PendingMove = { id: occurrenceId, dir: direction };
     pendingIds.current = applyPendingMove(orderedIds, op);
     pendingSince.current = Date.now();
+    // Ref-only updates are invisible to React: bump the pending tick
+    // so the optimistic order paints even when onRowFocus no-ops and
+    // the expiry timer re-arms against the new deadline.
+    setPendingTick((tick) => tick + 1);
     if (useAbsolute) {
       // Absolute destinations carry the optimistic intent — the
       // caller applies them in order, no stale-index collapse.
