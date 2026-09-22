@@ -246,6 +246,10 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                     continue;
                 };
                 let shared = Arc::clone(&shared);
+                // A failed spawn drops the unstarted closure (std
+                // does not return it in the `Err`), so the permit
+                // and socket inside are freed with it — taking the
+                // slot *before* spawn bounds unserviced conns.
                 let _ = thread::Builder::new()
                     .name("auqw-stream-conn".into())
                     .spawn(move || {
