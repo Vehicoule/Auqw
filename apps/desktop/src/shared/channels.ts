@@ -11,6 +11,14 @@ export const CHANNELS = {
   secureGet: 'secure:get',
   secureSet: 'secure:set',
   secureDelete: 'secure:delete',
+  storageBegin: 'storage:begin',
+  storageCommit: 'storage:commit',
+  storageRollback: 'storage:rollback',
+  storageCancel: 'storage:cancel',
+  storageExecute: 'storage:execute',
+  storageQuery: 'storage:query',
+  storageBackup: 'storage:backup',
+  storageDropBackup: 'storage:dropBackup',
   utilityPing: 'utility:ping',
 } as const;
 

@@ -181,6 +181,39 @@ export async function run(): Promise<void> {
       args: { message: 'probe' },
     });
 
+    // storage channels forward to the utility with their args intact
+    const begin = await invoke(CHANNELS.storageBegin, undefined);
+    assert(begin.ok);
+    assertDeepEqual(begin.result, {
+      routed: 'storage:begin',
+      args: undefined,
+    });
+    const execArgs = { txId: 'tx-1', sql: 'SELECT 1', params: [1, 'a', null] };
+    const exec = await invoke(CHANNELS.storageExecute, execArgs);
+    assert(exec.ok);
+    assertDeepEqual(exec.result, {
+      routed: 'storage:execute',
+      args: execArgs,
+    });
+    const backup = await invoke(CHANNELS.storageBackup, { tag: 'v1' });
+    assert(backup.ok);
+    assertDeepEqual(backup.result, {
+      routed: 'storage:backup',
+      args: { tag: 'v1' },
+    });
+
+    // malformed storage args are rejected at the boundary
+    const badExec = await invoke(CHANNELS.storageExecute, {
+      txId: 'tx-1',
+      sql: 'SELECT 1',
+      params: [true],
+    });
+    assert(!badExec.ok && badExec.error.kind === 'invalid-request');
+    const badCommit = await invoke(CHANNELS.storageCommit, { txId: '' });
+    assert(!badCommit.ok && badCommit.error.kind === 'invalid-request');
+    const badBackup = await invoke(CHANNELS.storageBackup, { tag: '../x' });
+    assert(!badBackup.ok && badBackup.error.kind === 'invalid-request');
+
     // every handler rejection still produces a well-formed envelope
     const depsThrow: ChannelDeps = {
       ...deps,

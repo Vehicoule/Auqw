@@ -14,6 +14,11 @@ import {
   isSecureDeleteArgs,
   isSecureGetArgs,
   isSecureSetArgs,
+  isStorageBackupArgs,
+  isStorageBeginArgs,
+  isStorageExecuteArgs,
+  isStorageQueryArgs,
+  isStorageTxArgs,
   isUtilityPingArgs,
 } from '../shared/contract.ts';
 import type { ResultEnvelope } from '../shared/envelope.ts';
@@ -134,6 +139,56 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.utilityPing,
     channel(isUtilityPingArgs, (args: UtilityPingArgs, deps) =>
       deps.utility.request(CHANNELS.utilityPing, args),
+    ),
+  ],
+  // Storage channels forward verbatim to the utility process — it
+  // re-validates args against the same contract before touching the db.
+  [
+    CHANNELS.storageBegin,
+    channel(isStorageBeginArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageBegin, args),
+    ),
+  ],
+  [
+    CHANNELS.storageCommit,
+    channel(isStorageTxArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageCommit, args),
+    ),
+  ],
+  [
+    CHANNELS.storageRollback,
+    channel(isStorageTxArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageRollback, args),
+    ),
+  ],
+  [
+    CHANNELS.storageCancel,
+    channel(isStorageTxArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageCancel, args),
+    ),
+  ],
+  [
+    CHANNELS.storageExecute,
+    channel(isStorageExecuteArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageExecute, args),
+    ),
+  ],
+  [
+    CHANNELS.storageQuery,
+    channel(isStorageQueryArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageQuery, args),
+    ),
+  ],
+  [
+    CHANNELS.storageBackup,
+    channel(isStorageBackupArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageBackup, args),
+    ),
+  ],
+  [
+    CHANNELS.storageDropBackup,
+    channel(isStorageBackupArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageDropBackup, args),
     ),
   ],
 ];

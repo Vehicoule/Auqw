@@ -1,6 +1,7 @@
 import { shellError } from '../shared/errors.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createUtilityRouter } from './router.ts';
+import { createStorageService } from './storage.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
 
 /**
@@ -28,7 +29,14 @@ if (port === null) {
   // entry any other way is a wiring bug, not a usable mode.
   process.exitCode = 1;
 } else {
-  const route = createUtilityRouter();
+  // The database path arrives from main in the fork environment —
+  // `AUQW_DB_PATH` points under userData; the service opens lazily on
+  // the first storage request so a missing path is a typed
+  // `unavailable`, not a crashed child.
+  const storage = createStorageService({
+    dbPath: process.env['AUQW_DB_PATH'],
+  });
+  const route = createUtilityRouter(storage.handlers);
   port.on('message', (event) => {
     const raw: unknown = event.data;
     void respond(port, raw, route);
