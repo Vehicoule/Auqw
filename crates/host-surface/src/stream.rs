@@ -372,6 +372,9 @@ impl PluginHost {
             "playback.resolve".to_string(),
             Value::Object(payload),
             request_id,
+            // The delivery registers the `prepared_handles` slot that
+            // owns this id until release — freeing `cancels` first
+            // would open a re-admission gap before the slot lands.
             true,
             move |request_id, invocation| async move {
                 let (result, attempt) = invocation.into_parts();

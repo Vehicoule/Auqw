@@ -7,7 +7,8 @@
 //! once per request; `requestId` is caller-minted so `cancel` can
 //! land before the promise resolves. `streamRead` is deliberately a
 //! promise — the seam's blocking read parks a runtime worker, never
-//! the libuv main thread. The URL inside `ResolvedResource.url` is a
+//! the libuv main thread; it parks a `spawn_blocking` worker instead.
+//! The URL inside `ResolvedResource.url` is a
 //! real signed stream URL — it must never be logged at any layer.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -789,7 +790,7 @@ impl JsPluginHost {
     }
 
     /// Run the spin conformance guest to measure the fuel trap
-    /// latency on-device. Blocks a libuv worker on the runtime.
+    /// latency on-device. Parks a Tokio `spawn_blocking` worker.
     #[napi(js_name = "runSpin")]
     pub async fn run_spin(&self, wasm: Buffer, manifest_json: String) -> Result<SpinReport> {
         let inner = Arc::clone(&self.inner);
@@ -816,7 +817,7 @@ impl JsPluginHost {
     }
 
     /// Blocking read — deliberately a promise so the seam parks a
-    /// runtime worker, never the libuv main thread. Empty buffer =
+    /// runtime's blocking pool, never the libuv main thread. Empty buffer =
     /// EOF. Bounded by the seam's read deadline; terminal transitions
     /// reject with their typed error.
     #[napi(js_name = "streamRead")]

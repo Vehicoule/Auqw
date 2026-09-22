@@ -767,6 +767,12 @@ impl PluginHost {
     /// on a worker thread — `deliver` returns a future so callers can
     /// offload blocking work with `spawn_blocking` instead of stalling
     /// a runtime worker.
+    /// `is_prepare` also drives when the `cancels` entry is freed: a
+    /// non-prepare request's slot is removed BEFORE `deliver` runs, so
+    /// a caller whose promise just settled may reuse the id
+    /// immediately. Prepare keeps the entry until after delivery — the
+    /// delivery registers the `prepared_handles` ownership slot that
+    /// then guards the id itself.
     fn start_typed<F, Fut>(
         &self,
         plugin_id: String,
@@ -880,6 +886,11 @@ impl PluginHost {
                 },
             )
             .await;
+            if !is_prepare {
+                if let Ok(mut m) = cancels.lock() {
+                    m.remove(&rid);
+                }
+            }
             deliver(rid.clone(), invocation).await;
             if let Ok(mut m) = cancels.lock() {
                 m.remove(&rid);

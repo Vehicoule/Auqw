@@ -107,11 +107,14 @@ assert.throws(() => new bindings.PluginHost({ fuelPerEntry: Number.NaN, fuelTota
   return true;
 });
 
-// An id is reusable once its request has settled.
-await assert.rejects(host.startResolve('nope', 'x', rid), (err) => {
-  assert.equal(codeOf(err), 'unknown-plugin');
-  return true;
-});
+// An id is reusable immediately once its request has settled — the
+// surface releases admission state before the outcome promise resolves,
+// so the very next call on the same plugin cannot lose a stale
+// `request-in-flight` race.
+const reuse = await host.startResolve(id, 'vid12345678', rid);
+assert.equal(reuse.type, 'failed');
+assert.equal(reuse.kind, 'invalid-response');
+assert.equal(reuse.attempt.requestId, rid);
 
 // A second in-flight call with the same id is rejected with the
 // typed in-flight error (caller-minted ids must be unique while live).
@@ -128,12 +131,15 @@ const spinManifest = JSON.stringify({
 host.loadPlugin(spin, spinManifest);
 const dupRid = host.mintRequestId();
 const first = host.startResolve('spin', 'x', dupRid);
-await assert.rejects(host.startResolve('spin', 'x', dupRid), (err) => {
-  assert.equal(codeOf(err), 'request-in-flight');
-  return true;
-});
+const second = host.startResolve('spin', 'x', dupRid);
 host.cancel(dupRid);
-await first;
+// Registration order across the async worker queue isn't call-ordered:
+// either call may win the id. The contract — exactly one call settles
+// an outcome, the other is rejected `request-in-flight`.
+const results = await Promise.allSettled([first, second]);
+const rejections = results.filter((r) => r.status === 'rejected');
+assert.equal(rejections.length, 1, 'exactly one duplicate loses');
+assert.equal(codeOf(rejections[0].reason), 'request-in-flight');
 
 // The streaming seam: a host with streamPath exercises the session
 // lifecycle end-to-end. The dev URL is unroutable loopback — head
