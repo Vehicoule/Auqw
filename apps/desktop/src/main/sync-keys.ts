@@ -123,24 +123,34 @@ export function createSyncKeysHandler(deps: {
 
   async function devicePut(record: SyncDeviceRecord): Promise<void> {
     const existing = await secure.get(deviceKey(record.id));
-    if (existing !== null) {
-      await secure.set(deviceKey(record.id), JSON.stringify(record));
-      return;
-    }
     const { devices } = await deviceList();
-    const isNewFp = !devices.some((d) => d.fp === record.fp);
-    if (devices.length >= MAX_SYNC_DEVICES && isNewFp) {
-      throw shellError(
-        'unavailable',
-        'paired device registry is full',
-      );
+    if (existing === null) {
+      const isNewFp = !devices.some((d) => d.fp === record.fp);
+      if (devices.length >= MAX_SYNC_DEVICES) {
+        if (isNewFp) {
+          throw shellError(
+            'unavailable',
+            'paired device registry is full',
+          );
+        }
+        // At capacity a same-fp migration must evict BEFORE writing —
+        // a transient 65th file would trip the device-list bound and
+        // wedge the registry. A failed write after the evict leaves the
+        // phone needing a re-pair, which is recoverable; a wedged
+        // registry is not.
+        for (const d of devices) {
+          if (d.fp === record.fp && d.id !== record.id) {
+            await secure.delete(deviceKey(d.id));
+          }
+        }
+      }
     }
-    // Write the new record BEFORE evicting stale-fp ids: a failed
-    // write must not leave the still-valid old registration deleted
-    // (the device would be unpaired for good). A failed delete is
-    // recoverable — the next list surfaces a same-fp duplicate.
+    // Below capacity, write BEFORE evicting stale-fp ids: a failed
+    // write must not delete the only valid registration. And dedupe
+    // runs on EVERY put — including update-path retries — so a failed
+    // cleanup converges on the next call instead of leaving same-fp
+    // duplicates forever.
     await secure.set(deviceKey(record.id), JSON.stringify(record));
-    // Same key re-pairing under a new id (reinstall) — drop stale ids.
     for (const d of devices) {
       if (d.fp === record.fp && d.id !== record.id) {
         await secure.delete(deviceKey(d.id));
