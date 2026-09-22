@@ -845,7 +845,11 @@ export function isSyncUnpairArgs(
   );
 }
 
-/** Opaque delta document: any JSON structure that stays inside the cap. */
+/**
+ * Opaque delta document: any JSON structure that stays inside the cap.
+ * The cap is UTF-8 BYTES on the wire — `encoded.length` counts UTF-16
+ * code units, so non-ASCII docs are measured with TextEncoder.
+ */
 export function isSyncDeltaDoc(value: unknown): boolean {
   if (!(isRecord(value) || Array.isArray(value))) {
     return false;
@@ -854,7 +858,7 @@ export function isSyncDeltaDoc(value: unknown): boolean {
     const encoded = JSON.stringify(value);
     return (
       typeof encoded === 'string' &&
-      encoded.length <= MAX_SYNC_DOC_BYTES
+      new TextEncoder().encode(encoded).length <= MAX_SYNC_DOC_BYTES
     );
   } catch {
     return false;

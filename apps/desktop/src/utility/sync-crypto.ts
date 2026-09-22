@@ -2,6 +2,8 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createPrivateKey,
+  createPublicKey,
   diffieHellman,
   generateKeyPairSync,
   hkdfSync,
@@ -66,6 +68,24 @@ export function isSyncIdentity(value: unknown): value is SyncIdentity {
     isBoundedString(value['pub'], 128) &&
     isBoundedString(value['priv'], 256)
   );
+}
+
+/**
+ * Shape validation says a record LOOKS like an identity; this proves
+ * the material actually loads as X25519 keys — a corrupt custody read
+ * regenerates instead of silently breaking every handshake.
+ */
+export function isUsableIdentity(identity: SyncIdentity): boolean {
+  try {
+    return (
+      createPublicKey(pubKey(identity.pub)).asymmetricKeyType ===
+        'x25519' &&
+      createPrivateKey(privKey(identity.priv)).asymmetricKeyType ===
+        'x25519'
+    );
+  } catch {
+    return false;
+  }
 }
 
 function pubKey(spkiB64: string) {
@@ -279,8 +299,10 @@ export type TestPeer = {
 export function createTestPeer(opts: {
   deviceId: string;
   name: string;
+  /** Reuse a device key across connections — alias/resume tests. */
+  identity?: SyncIdentity;
 }): TestPeer {
-  const identity = generateIdentity();
+  const identity = opts.identity ?? generateIdentity();
   const eph = generateKeyPairSync('x25519');
   const ephPub = eph.publicKey
     .export({ format: 'der', type: 'spki' })

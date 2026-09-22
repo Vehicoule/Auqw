@@ -112,6 +112,14 @@ if (port === null) {
   const syncName = process.env['AUQW_SYNC_NAME'];
   const syncService = createSyncService({
     ...(syncHost !== undefined ? { host: syncHost } : {}),
+    // A specific bind address is the only address the listener can be
+    // reached at — pairing payloads must advertise it, not the first
+    // LAN interface. Wildcard binds keep automatic selection.
+    ...(syncHost !== undefined &&
+    syncHost !== '0.0.0.0' &&
+    syncHost !== '::'
+      ? { endpointHost: syncHost }
+      : {}),
     ...(syncPort !== undefined ? { port: syncPort } : {}),
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),

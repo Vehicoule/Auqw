@@ -1,7 +1,11 @@
 import { randomInt } from 'node:crypto';
 import { createServer, type Server } from 'node:net';
 import { networkInterfaces } from 'node:os';
-import type { SyncEngine } from '@auqw/application';
+import {
+  CancellationSource,
+  type AppError,
+  type SyncEngine,
+} from '@auqw/application';
 import {
   hasOnlyKeys,
   isBoundedString,
@@ -20,13 +24,19 @@ import {
   isSyncUnpairArgs,
   type SyncStatusResult,
 } from '../shared/contract.ts';
-import { isShellError, shellError } from '../shared/errors.ts';
+import {
+  isShellError,
+  shellError,
+  type ShellError,
+  type ShellErrorKind,
+} from '../shared/errors.ts';
 import type { UtilityHandler } from './router.ts';
 import {
   createNoiseV1Cipher,
   fingerprintOf,
   generateIdentity,
   isClientHello,
+  isUsableIdentity,
   type SessionCodec,
   type SyncCipher,
 } from './sync-crypto.ts';
@@ -119,20 +129,24 @@ export interface SyncService {
 type PairingState = {
   readonly code: string;
   readonly expiresAt: number;
-  attempts: number;
 };
 
 type PairCheck =
   | 'ok'
   | 'bad-code'
   | 'pairing-expired'
-  | 'pairing-attempts'
   | 'no-pairing';
 
+/**
+ * The pending pairing code: minted per `sync:pairing` call, expires on
+ * TTL, consumed exactly once on success. Wrong-code attempts do NOT
+ * burn the code — rate limiting is per remote address (see the
+ * service's bad-attempt map) so a hostile LAN peer can't invalidate a
+ * code the legitimate phone is about to type.
+ */
 function createPairing(opts: {
   nowMs: () => number;
   ttlMs: number;
-  maxAttempts: number;
 }): {
   mint(): { code: string; expiresAt: number };
   check(code: string): PairCheck;
@@ -145,7 +159,6 @@ function createPairing(opts: {
       current = {
         code,
         expiresAt: opts.nowMs() + opts.ttlMs,
-        attempts: 0,
       };
       return { code, expiresAt: current.expiresAt };
     },
@@ -160,11 +173,6 @@ function createPairing(opts: {
       if (code === current.code) {
         current = null; // consume — a code pairs exactly once
         return 'ok';
-      }
-      current.attempts += 1;
-      if (current.attempts >= opts.maxAttempts) {
-        current = null;
-        return 'pairing-attempts';
       }
       return 'bad-code';
     },
@@ -225,6 +233,10 @@ type SessionPhase = 'hello' | 'auth' | 'open';
 
 type Session = {
   readonly pump: WirePump;
+  /** Source address for per-peer pairing rate limiting ('' = unknown). */
+  readonly remoteIp: string;
+  /** Cancelled when the session dies — engine ops can stop mid-flight. */
+  readonly cancel: CancellationSource;
   phase: SessionPhase;
   codec: SessionCodec | null;
   deviceId: string | null;
@@ -233,6 +245,8 @@ type Session = {
   devPub: string;
   /** Registry lookup result from accept() — echoed, not trusted. */
   registered: boolean;
+  /** The id the registry already binds to this key — resume pins it. */
+  registeredId: string | null;
   /** Registry pairedAt for resume, when known. */
   pairedAtMs: number | null;
   name: string;
@@ -265,8 +279,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const pairing = createPairing({
     nowMs,
     ttlMs: deps.codeTtlMs ?? 90_000,
-    maxAttempts: deps.maxCodeAttempts ?? 5,
   });
+  // Wrong-code budget per remote address: an attacking peer exhausts
+  // its own guesses while the pending code stays valid for every other
+  // address — the legit phone's window can't be DoS'd away. Cleared on
+  // each fresh mint and on successful pairing.
+  const maxCodeAttempts = deps.maxCodeAttempts ?? 5;
+  const badAttempts = new Map<string, number>();
 
   const sessions = new Set<Session>();
   const pendingSync = new Set<string>();
@@ -288,7 +307,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return null;
     }
     const ip = deps.endpointHost ?? pickLanIpv4();
-    return ip === null ? null : `${ip}:${boundPort}`;
+    if (ip === null) {
+      return null;
+    }
+    const formatted = ip.includes(':') ? `[${ip}]` : ip;
+    return `${formatted}:${boundPort}`;
   }
 
   async function deviceCount(): Promise<number> {
@@ -319,6 +342,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return;
     }
     sessions.delete(session);
+    session.cancel.cancel();
     if (session.handshakeTimer !== null) {
       clearTimeout(session.handshakeTimer);
       session.handshakeTimer = null;
@@ -329,13 +353,28 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
   }
 
+  /** AEAD overhead per frame: 12-byte iv + 16-byte auth tag. */
+  const SEAL_OVERHEAD = 28;
+
   function sendSealed(session: Session, msg: unknown): void {
-    if (session.codec === null) {
+    const codec = session.codec;
+    if (codec === null) {
       return;
     }
-    session.pump.send(
-      session.codec.seal(Buffer.from(JSON.stringify(msg), 'utf8')),
-    );
+    const plain = Buffer.from(JSON.stringify(msg), 'utf8');
+    if (plain.length + SEAL_OVERHEAD > session.pump.maxPayload) {
+      // Never silently drop a response: a document that fits the
+      // contract but overflows the sealed frame gets a typed error
+      // instead — and the codec seals that (small) reply, so the
+      // sequence stays contiguous for the peer.
+      const err = Buffer.from(
+        JSON.stringify({ t: 'error', code: 'too-large' }),
+        'utf8',
+      );
+      session.pump.send(codec.seal(err));
+      return;
+    }
+    session.pump.send(codec.seal(plain));
   }
 
   function killSession(session: Session): void {
@@ -405,22 +444,31 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       killSession(session);
     };
     const now = nowMs();
-    const record = {
-      id: session.deviceId,
-      name: session.name,
-      pub: session.devPub,
-      fp: session.devFp ?? '',
-      pairedAt: session.pairedAtMs ?? now,
-      lastSeenAt: now,
-    };
     if (isPairMsg(msg)) {
       const check = pairing.check(msg.code);
+      if (check === 'bad-code') {
+        const misses = (badAttempts.get(session.remoteIp) ?? 0) + 1;
+        badAttempts.set(session.remoteIp, misses);
+        reject(
+          misses >= maxCodeAttempts ? 'pairing-attempts' : 'bad-code',
+        );
+        return;
+      }
       if (check !== 'ok') {
         reject(check);
         return;
       }
+      badAttempts.clear();
+      const record = {
+        id: session.deviceId,
+        name: session.name,
+        pub: session.devPub,
+        fp: session.devFp ?? '',
+        pairedAt: now,
+        lastSeenAt: now,
+      };
       try {
-        await deps.keys.devicePut({ ...record, pairedAt: now });
+        await deps.keys.devicePut(record);
       } catch (thrown) {
         reject(
           isShellError(thrown) ? thrown.kind : 'internal',
@@ -429,17 +477,29 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
       sendSealed(session, {
         t: 'welcome',
-        device: { ...record, pairedAt: now },
+        device: record,
         name: deviceName,
       });
       await enterOpen(session);
       return;
     }
     if (isResumeMsg(msg)) {
-      if (!session.registered) {
+      // The registry — not the client's claimed id — names a resumed
+      // device. A paired key presenting a foreign deviceId cannot take
+      // that id's slot: the canonical id is pinned to the stored key.
+      if (!session.registered || session.registeredId === null) {
         reject('unpaired');
         return;
       }
+      session.deviceId = session.registeredId;
+      const record = {
+        id: session.registeredId,
+        name: session.name,
+        pub: session.devPub,
+        fp: session.devFp ?? '',
+        pairedAt: session.pairedAtMs ?? now,
+        lastSeenAt: now,
+      };
       try {
         await deps.keys.devicePut(record);
       } catch {
@@ -470,6 +530,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return;
     }
     let registered = false;
+    let registeredId: string | null = null;
     let pairedAt: number | undefined;
     const devFp = fingerprintOf(msg.dev);
     try {
@@ -477,6 +538,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       for (const device of devices) {
         if (device.fp === devFp) {
           registered = true;
+          registeredId = device.id;
           pairedAt = device.pairedAt;
           break;
         }
@@ -498,6 +560,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     session.codec = accepted.codec;
     session.devPub = msg.dev;
     session.registered = registered;
+    session.registeredId = registeredId;
     session.pairedAtMs = pairedAt ?? null;
     session.phase = 'auth';
     session.pump.upgrade(sessionCap);
@@ -561,7 +624,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         const deviceId = session.deviceId ?? 'unknown';
         try {
           if (msg.delta !== undefined) {
-            const applied = await engine.applyDelta(msg.delta, deviceId);
+            const applied = await engine.applyDelta(
+              msg.delta,
+              deviceId,
+              session.cancel.signal,
+            );
             if (!applied.ok) {
               sendSealed(session, {
                 t: 'error',
@@ -570,7 +637,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
               return;
             }
           }
-          const exported = await engine.exportDelta(msg.since);
+          const exported = await engine.exportDelta(
+            msg.since,
+            session.cancel.signal,
+          );
           if (!exported.ok) {
             sendSealed(session, {
               t: 'error',
@@ -613,12 +683,15 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         },
         onClose: () => dropSession(session),
       }),
+      remoteIp: socket.remoteAddress ?? '',
+      cancel: new CancellationSource(),
       phase: 'hello',
       codec: null,
       deviceId: null,
       devFp: null,
       devPub: '',
       registered: false,
+      registeredId: null,
       pairedAtMs: null,
       name: '',
       handshakeTimer: null,
@@ -649,8 +722,12 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       listener = 'disabled';
       return status();
     }
+    // Custody keeps shape-valid records; usable is stronger — the
+    // material must load as X25519 keys. A corrupt read regenerates
+    // rather than listening with an identity no peer can complete DH
+    // against.
     let identity = await deps.keys.identityGet();
-    if (identity === null) {
+    if (identity === null || !isUsableIdentity(identity)) {
       identity = generateIdentity();
       await deps.keys.identitySet(identity);
     }
@@ -697,6 +774,38 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   /* -------------------------- handlers ---------------------------- */
 
+  /**
+   * AppError → ShellError: the engine speaks the application taxonomy,
+   * the IPC boundary the shell one. Equivalent kinds map directly;
+   * retryable failures without a shell twin land on 'unavailable' and
+   * the rest on 'internal' — a failed export is never reported as an
+   * actionable 'internal' when the engine named something better.
+   */
+  const ENGINE_ERROR_KINDS: Readonly<
+    Partial<Record<AppError['kind'], ShellErrorKind>>
+  > = {
+    'invalid-response': 'invalid-response',
+    cancelled: 'cancelled',
+    released: 'released',
+    'storage-full': 'io-error',
+    'not-found': 'invalid-request',
+    'invalid-message': 'invalid-request',
+    'artifact-rejected': 'invalid-request',
+    'permission-denied': 'invalid-request',
+    'auth-expired': 'invalid-request',
+    'budget-exceeded': 'invalid-request',
+    'guest-trap': 'invalid-request',
+    internal: 'internal',
+  };
+
+  function engineError(error: AppError): ShellError {
+    return shellError(
+      ENGINE_ERROR_KINDS[error.kind] ??
+        (error.retryable ? 'unavailable' : 'internal'),
+      error.message,
+    );
+  }
+
   // Outbound re-validation per the utility boundary pattern: a
   // malformed service result must surface as a typed invalid-response,
   // never as a confused renderer.
@@ -731,6 +840,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         throw shellError('unavailable', 'no LAN address to pair to');
       }
       const { code, expiresAt } = pairing.mint();
+      badAttempts.clear(); // a fresh code means a fresh budget
       const payload = JSON.stringify({
         v: 1,
         endpoint: ep,
@@ -761,6 +871,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         throw shellError('invalid-request', 'sync:unpair expects {id}');
       }
       await deps.keys.deviceDelete(args.id);
+      pendingSync.delete(args.id);
       kickDevice(args.id);
       // Library data stays — unpair revokes the key, nothing more.
       return null;
@@ -776,7 +887,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
       const result = await engine.exportDelta(args.since);
       if (!result.ok) {
-        throw shellError('internal', result.error.message);
+        throw engineError(result.error);
       }
       return checked(isSyncDeltasResult, 'sync:deltas')({
         delta: result.value,
@@ -799,7 +910,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         args.deviceId ?? 'local-import',
       );
       if (!applied.ok) {
-        throw shellError('internal', applied.error.message);
+        throw engineError(applied.error);
       }
       return checked(isSyncImportDeltaResult, 'sync:importDelta')({
         result: applied.value,

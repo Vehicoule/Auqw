@@ -346,7 +346,11 @@ export async function run(): Promise<void> {
     }
   }
 
-  // —— Attempt cap: enough wrong codes burn the whole pending pair ——
+  // —— Attempt cap: wrong-code budget is per remote address ——
+  // Loopback can't fake distinct source IPs, so what this proves is:
+  // the shared pool is gone — misses count against the attacker's
+  // address only — and a fresh mint resets the table so the legit
+  // phone can always get a new window.
   {
     const { service, port } = await startService({ maxCodeAttempts: 2 });
     try {
@@ -366,10 +370,273 @@ export async function run(): Promise<void> {
         if (i === 0) {
           assertEqual(reply.reason, 'bad-code');
         } else {
-          assertEqual(reply.reason, 'pairing-attempts', 'attempts burned');
+          assertEqual(
+            reply.reason,
+            'pairing-attempts',
+            'that source exhausted its guesses',
+          );
         }
         client.close();
       }
+      // The pending code survives attacker misses — minting a fresh
+      // code resets budgets so pairing is never permanently locked.
+      const pairing2 = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'phone-ok-after',
+        code: pairing2.code,
+        fp: pairing2.fp,
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A single bad guess never invalidates the pending code ——
+  {
+    const { service, port } = await startService();
+    try {
+      const pairing = await pairingCode(service);
+      const wrong = pairing.code === '000000' ? '000001' : '000000';
+      const attacker = await dial(port);
+      const rogue = createTestPeer({
+        deviceId: 'phone-evil-0',
+        name: 'evil',
+      });
+      const badHs = await phoneHandshake(attacker, rogue, pairing.fp);
+      attacker.send(
+        sealJson(badHs.codec, { t: 'pair', code: wrong }),
+      );
+      assertDeepEqual(await openJson(badHs.codec, await attacker.recv()), {
+        t: 'reject',
+        reason: 'bad-code',
+      });
+      // Old behavior burned the code globally; now the legit phone
+      // still completes pairing inside its window.
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'phone-00012',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Resume aliases the registry id, never the claimed id ——
+  {
+    const { service, keys, port } = await startService();
+    try {
+      const pairing = await pairingCode(service);
+      const real = createTestPeer({
+        deviceId: 'phone-00013',
+        name: 'pixel-real',
+      });
+      const first = await dial(port);
+      const hs1 = await phoneHandshake(first, real, pairing.fp);
+      first.send(
+        sealJson(hs1.codec, { t: 'pair', code: pairing.code }),
+      );
+      await openJson(hs1.codec, await first.recv());
+      first.close();
+      await first.closed;
+      assertEqual(keys.records.size, 1);
+      assert(keys.records.has('phone-00013'));
+
+      // Same device key, different claimed deviceId — an alias attempt.
+      const rogue = createTestPeer({
+        deviceId: 'phone-alias9',
+        name: 'rogue',
+        identity: real.identity,
+      });
+      const second = await dial(port);
+      const hs2 = await phoneHandshake(second, rogue, pairing.fp);
+      assertEqual(hs2.registered, true);
+      second.send(sealJson(hs2.codec, { t: 'resume' }));
+      const welcome = await openJson(hs2.codec, await second.recv());
+      assert(isRecord(welcome) && welcome['t'] === 'welcome');
+      const device = welcome['device'];
+      assert(isRecord(device));
+      assertEqual(
+        device['id'],
+        'phone-00013',
+        'registry id pins over claimed alias',
+      );
+      assertEqual(
+        keys.records.size,
+        1,
+        'no shadow registry entry written',
+      );
+      assert(
+        !keys.records.has('phone-alias9'),
+        'claimed alias never lands in the registry',
+      );
+      second.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Unpair clears the device's pending-sync mark ——
+  {
+    const { service, port } = await startService();
+    try {
+      const pairing = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'phone-00014',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.close();
+      await client.closed;
+      // The server's own close event lands after the client's — wait
+      // for the session to be reaped before the kick.
+      for (let i = 0; i < 50; i += 1) {
+        if ((await service.status()).sessions === 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const kick = await invokeHandler(service, 'sync:trigger', undefined);
+      assert(kick.ok && isRecord(kick.value));
+      assertEqual(
+        kick.value['pending'],
+        true,
+        'offline device marks pending',
+      );
+      await invokeHandler(service, 'sync:unpair', {
+        id: 'phone-00014',
+      });
+      const again = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(again.ok && isRecord(again.value));
+      assertEqual(
+        again.value['pending'],
+        false,
+        'unpaired device is never pending',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— IPC: engine failures keep their error kind ——
+  {
+    const { service } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          return Promise.resolve({
+            ok: false,
+            error: {
+              kind: 'storage-full',
+              message: 'full',
+              retryable: false,
+            },
+          });
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve({
+            ok: false,
+            error: {
+              kind: 'cancelled',
+              message: 'drop',
+              retryable: false,
+            },
+          });
+        },
+      },
+    });
+    try {
+      const deltas = await invokeHandler(service, 'sync:deltas', {
+        since: 's0',
+      });
+      assert(!deltas.ok);
+      assertEqual(
+        deltas.error.kind,
+        'io-error',
+        'storage-full keeps an io-class kind',
+      );
+      const imported = await invokeHandler(
+        service,
+        'sync:importDelta',
+        { delta: {} },
+      );
+      assert(!imported.ok);
+      assertEqual(imported.error.kind, 'cancelled');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Over-cap engine reply: typed error, never a silent drop ——
+  {
+    const { service, port } = await startService({
+      sessionCap: 8 * 1_024,
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok({ blob: 'x'.repeat(9 * 1_024) }));
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(null));
+        },
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-00015',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.send(sealJson(codec, { t: 'sync', since: 's1' }));
+      const reply = await openJson(codec, await client.recv());
+      assertDeepEqual(
+        reply,
+        { t: 'error', code: 'too-large' },
+        'oversize reply is a typed error, not silence',
+      );
+      // The session survives — the sequence stayed contiguous.
+      client.send(sealJson(codec, { t: 'ping' }));
+      assertDeepEqual(await openJson(codec, await client.recv()), {
+        t: 'pong',
+      });
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Corrupt custody identity regenerates instead of bricking ——
+  {
+    const keys = createMemoryKeys();
+    // Shape-valid base64 garbage — isSyncIdentity passes, crypto won't.
+    await keys.identitySet({ pub: 'QUJD', priv: 'REVG' });
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys,
+      endpointHost: '127.0.0.1',
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assertEqual(status.listener, 'listening', 'service recovers');
+      const regen = await keys.identityGet();
+      assert(
+        regen !== null && regen.pub !== 'QUJD',
+        'identity regenerated',
+      );
+      assert(
+        status.fingerprint !== null && status.fingerprint.length === 64,
+      );
     } finally {
       await service.close();
     }

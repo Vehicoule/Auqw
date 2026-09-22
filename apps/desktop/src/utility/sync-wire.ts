@@ -8,6 +8,8 @@
  */
 
 export type WireSocketLike = {
+  /** Peer address when the underlying transport has one (net.Socket). */
+  readonly remoteAddress?: string | undefined;
   write(
     data: Uint8Array,
     callback?: (error?: Error | null) => void,
@@ -22,8 +24,12 @@ export type WireSocketLike = {
 export type WireCloseReason = 'peer' | 'error' | 'oversize' | 'local';
 
 export type WirePump = {
-  /** Length-prefixes and writes one payload; no-op after close. */
-  send(payload: Uint8Array): void;
+  /**
+   * Length-prefixes and writes one payload; false when the payload
+   * exceeds the phase cap or the pump is closed — callers that need
+   * guaranteed delivery must check the return.
+   */
+  send(payload: Uint8Array): boolean;
   /** Raise the payload cap once the session is authenticated. */
   upgrade(maxPayload: number): void;
   /** The cap a single declared frame length may not exceed. */
@@ -89,7 +95,7 @@ export function attachWirePump(opts: {
   return {
     send(payload) {
       if (closed || payload.length > maxPayload) {
-        return;
+        return false;
       }
       const head = Buffer.alloc(HEADER_BYTES);
       head.writeUInt32LE(payload.length, 0);
@@ -97,7 +103,9 @@ export function attachWirePump(opts: {
         socket.write(Buffer.concat([head, payload]));
       } catch {
         finish('error');
+        return false;
       }
+      return true;
     },
     upgrade(nextMax: number): void {
       maxPayload = nextMax;
