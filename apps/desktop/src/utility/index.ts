@@ -91,26 +91,32 @@ if (port === null) {
     ...createTagService({ database: indexDb.get }).handlers,
     ...createLocalService({ database: indexDb.get, mediaDir }).handlers,
   });
-  // Startup integrity: orphans past the bounded age go before the
-  // first renderer request arrives.
-  void transfer.sweepOrphans();
-  port.on('message', (event) => {
-    const raw: unknown = event.data;
-    if (isStreamPumpAttach(raw)) {
-      const transfer = event.ports?.[0];
-      if (transfer === undefined) {
-        return;
-      }
-      createStreamPump({
-        host: runtime.host,
-        handle: raw.handle,
-        port: transfer as PumpPort,
+  // Startup integrity resolves before the port starts delivering:
+  // `.replace` recovery renames and the orphan reap can only race
+  // publishes or reconciles once requests arrive, so the port waits
+  // for the sweep rather than trusting it to finish first.
+  void transfer
+    .sweepOrphans()
+    .catch(() => undefined)
+    .then(() => {
+      port.on('message', (event) => {
+        const raw: unknown = event.data;
+        if (isStreamPumpAttach(raw)) {
+          const transfer = event.ports?.[0];
+          if (transfer === undefined) {
+            return;
+          }
+          createStreamPump({
+            host: runtime.host,
+            handle: raw.handle,
+            port: transfer as PumpPort,
+          });
+          return;
+        }
+        void respond(port, raw, route);
       });
-      return;
-    }
-    void respond(port, raw, route);
-  });
-  port.start();
+      port.start();
+    });
 }
 
 async function respond(
