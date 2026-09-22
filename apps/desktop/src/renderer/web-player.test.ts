@@ -715,6 +715,43 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A live attach whose element start rejects must emit `failed` on
+  // its own successor attempt — the transition already committed it,
+  // so suppressing the failure strands an unusable stream.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream({
+      prepare: () =>
+        Promise.resolve({
+          type: 'prepared',
+          stream: { handle: 'h-2', mime: 'audio/mp4' },
+        }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.play = () => Promise.reject(new Error('autoplay blocked'));
+    audio.fire('ended');
+    await settle();
+    const failed = events.find(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(
+      failed !== undefined && failed.type === 'status',
+      'post-attach element failure emits failed',
+    );
+    if (failed !== undefined && failed.type === 'status') {
+      assertEqual(
+        failed.handle,
+        'h-2',
+        'failure labels the attached successor',
+      );
+    }
+    // Roll the element back so the tail test below starts paused.
+    audio.play = () => Promise.resolve();
+  }
+
   // remote-next at the queue tail stops the element — a null target
   // while audio is live must not leave playback running.
   {

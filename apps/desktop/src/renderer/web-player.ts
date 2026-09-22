@@ -213,6 +213,10 @@ export function createWebPlayerPort(deps: {
   /** Monotonic op generation — a superseded async completion (play,
    * cursor attach) must never touch `current` or the element. */
   let opGen = 0;
+  /** Handles an in-flight `play` can still attach — a `release` of one
+   * invalidates that op (bumps opGen) so its late serveUrl completion
+   * can't start a stream the host already dropped. */
+  const pendingPlays = new Set<string>();
 
   const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
@@ -300,6 +304,10 @@ export function createWebPlayerPort(deps: {
     const requestId = `watt-${++seq}`;
     const gen = ++opGen;
     let handle: string | undefined;
+    // Once this op owns `current`, failure-emit ownership is the
+    // handle match — emitTransition already swapped the projection
+    // reference, so `projection === p` can no longer prove liveness.
+    let attached = false;
     try {
       const outcome = await stream.prepare({
         pluginId: item.provider,
@@ -333,6 +341,7 @@ export function createWebPlayerPort(deps: {
         queueRev: p.queueRev,
       };
       current = { handle, identity, occurrenceId: item.occurrenceId };
+      attached = true;
       audio.src = url;
       audio.currentTime = 0;
       emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
@@ -352,7 +361,15 @@ export function createWebPlayerPort(deps: {
       }
       // A stale op's rejection must not label the live attempt — its
       // outcome belongs to the op the session already replaced.
-      if (gen === opGen && projection === p) {
+      // Ownership is the handle match once this op set `current` (our
+      // own emitTransition already replaced the projection reference),
+      // or the untouched projection before attach.
+      const stillMine =
+        gen === opGen &&
+        (attached
+          ? current !== null && current.handle === handle
+          : projection === p);
+      if (stillMine) {
         status('failed', toError(thrown));
       }
     }
@@ -576,27 +593,33 @@ export function createWebPlayerPort(deps: {
 
     async play(input) {
       const gen = ++opGen;
+      pendingPlays.add(input.handle);
       return guard(async () => {
-        const { url } = await stream.serveUrl({ handle: input.handle });
-        // A newer play/prepare/stop superseded this one while the
-        // loopback URL resolved — the late completion must not retake
-        // the element.
-        if (gen !== opGen) {
-          return;
-        }
-        const identity = input.identity;
-        current = {
-          handle: input.handle,
-          identity,
-          occurrenceId: projection?.currentOccurrenceId ?? null,
-        };
-        audio.src = url;
-        audio.currentTime = (input.positionMs ?? 0) / 1000;
-        status('buffering');
-        emitMarks(input.handle, identity);
-        await audio.play();
-        if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-          deps.mediaSession.playbackState = 'playing';
+        try {
+          const { url } = await stream.serveUrl({ handle: input.handle });
+          // A newer play/prepare/stop superseded this one while the
+          // loopback URL resolved — the late completion must not retake
+          // the element. A release of this same handle landed too: it
+          // bumped opGen through the pendingPlays guard.
+          if (gen !== opGen) {
+            return;
+          }
+          const identity = input.identity;
+          current = {
+            handle: input.handle,
+            identity,
+            occurrenceId: projection?.currentOccurrenceId ?? null,
+          };
+          audio.src = url;
+          audio.currentTime = (input.positionMs ?? 0) / 1000;
+          status('buffering');
+          emitMarks(input.handle, identity);
+          await audio.play();
+          if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
+            deps.mediaSession.playbackState = 'playing';
+          }
+        } finally {
+          pendingPlays.delete(input.handle);
         }
       });
     },
@@ -647,6 +670,12 @@ export function createWebPlayerPort(deps: {
         audio.pause();
         audio.src = '';
         current = null;
+      }
+      // Releasing a handle an in-flight play is about to attach must
+      // invalidate that op — otherwise its late serveUrl resolves into
+      // an already-dropped host stream and audio resumes post-teardown.
+      if (pendingPlays.delete(input.handle)) {
+        opGen++;
       }
       return guard(() => stream.release({ handle: input.handle }));
     },
