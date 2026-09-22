@@ -5,6 +5,7 @@ members = [
     "crates/host-surface",
     "crates/integration-runner",
     "crates/mobile-bindings",
+    "crates/node-bindings",
     "crates/plugin-host",
     "sdk/conformance/echo",
     "sdk/conformance/scenario",
