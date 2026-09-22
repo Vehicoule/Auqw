@@ -64,6 +64,12 @@ export interface MseSource {
   readonly url: string;
   seekTo(positionMs: number): void;
   /**
+   * The element's playback position — quota eviction keeps a window
+   * around the playhead. Without it a download that outruns playback
+   * would evict the media about to play.
+   */
+  notePosition(positionMs: number): void;
+  /**
    * Terminal failure after the attach resolved — pump or SourceBuffer
    * death. The element keeps the (dead) blob URL with no error event of
    * its own, so the player uses this to mark the attempt failed instead
@@ -446,6 +452,10 @@ function runSession(
   // removes must wait behind it. The queue drains one range at a time;
   // the final updateend hands back to `drain` for the queued retry.
   let evicting = false;
+  /** Reported element position in seconds — the eviction anchor;
+   * `-1` until the player reports one (pre-play attaches fall back
+   * to the append frontier). */
+  let playheadS = -1;
   // One eviction retry per appended unit — a later quota hit on a new
   // unit is fresh pressure worth evicting for, not a retry loop.
   let retriedUnit: PendingUnit | null = null;
@@ -463,11 +473,14 @@ function runSession(
       drain();
       return;
     }
-    // Anchor on the latest appended media — eviction keeps a window
-    // around the ingest head, not the element position (the player's
-    // currentTime always trails the append frontier on seeks).
+    // Anchor on the playhead — eviction protects the media the
+    // element is about to play. Anchoring on the append frontier would
+    // evict the playhead itself whenever the download outruns playback
+    // by more than KEEP_BEHIND_S. Before a report lands, the frontier
+    // stands in (a pre-play attach is all there is to keep).
     const last = journal[journal.length - 1];
-    const anchorS = last === undefined ? 0 : last.mediaEnd / 1000;
+    const anchorS =
+      playheadS >= 0 ? playheadS : last === undefined ? 0 : last.mediaEnd / 1000;
     for (let i = 0; i < ranges.length; i++) {
       const start = ranges.start(i);
       const end = ranges.end(i);
@@ -624,6 +637,9 @@ function runSession(
       resolve({
         url,
         seekTo: (ms) => seek(ms),
+        notePosition: (ms) => {
+          playheadS = ms / 1000;
+        },
         onFail: (listener) => {
           // A failure that already landed fires immediately — the
           // caller subscribes a microtask after resolve at the earliest.
@@ -661,6 +677,19 @@ function runSession(
     flush(false);
   }
 
+  function isBuffered(seconds: number): boolean {
+    const ranges = buffer?.buffered;
+    if (ranges === undefined) {
+      return false;
+    }
+    for (let i = 0; i < ranges.length; i++) {
+      if (seconds >= ranges.start(i) && seconds < ranges.end(i)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function seek(mediaMs: number): void {
     if (destroyed) {
       return;
@@ -669,6 +698,16 @@ function runSession(
     const hit = journal.find(
       (j) => mediaMs >= j.mediaStart && mediaMs < j.mediaEnd,
     );
+    // A target still buffered needs no pump work — the element plays
+    // it directly. Re-anchoring would refetch media the buffer already
+    // holds — and past EOF the append on the ended source would fail.
+    if (
+      hit !== undefined &&
+      buffer !== null &&
+      isBuffered(mediaMs / 1000)
+    ) {
+      return;
+    }
     let byte: number | null = hit?.byteStart ?? null;
     if (byte === null && cues.length > 0) {
       // Cues index: greatest cue at or before the target timecode.
@@ -720,6 +759,13 @@ function runSession(
   }
 
   media.addEventListener('sourceopen', () => {
+    if (buffer !== null) {
+      // An append on an ended source re-opens it — the same
+      // SourceBuffer comes back (adding a second would throw), and
+      // the stream may legitimately end again later.
+      ended = false;
+      return;
+    }
     try {
       buffer = media.addSourceBuffer(mime);
     } catch {

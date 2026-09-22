@@ -66,6 +66,7 @@ class FakeSourceBuffer implements SourceBufferLike {
   /** When true, appends EXTEND the last range instead of adding one —
    * Chromium merges adjacent appended media into a single TimeRange. */
   mergeAppends = false;
+  media: FakeMediaSource | null = null;
   private listeners = new Map<string, Array<() => void>>();
 
   appendBuffer(data: Uint8Array): void {
@@ -74,6 +75,14 @@ class FakeSourceBuffer implements SourceBufferLike {
       const e = new Error('quota');
       e.name = 'QuotaExceededError';
       throw e;
+    }
+    // Per the MSE spec, an append on an ended source transitions it
+    // back to open and refires sourceopen before the append lands.
+    if (this.media !== null && this.media.readyState === 'ended') {
+      const media = this.media;
+      media.ended = false;
+      media.readyState = 'open';
+      queueMicrotask(() => media.fireSourceopen());
     }
     this.appends.push(new Uint8Array(data));
     this.updating = true;
@@ -141,10 +150,12 @@ class FakeMediaSource implements MediaSourceLike {
 
   addSourceBuffer(_mime: string): SourceBufferLike {
     this.sourceBuffer = new FakeSourceBuffer();
+    this.sourceBuffer.media = this;
     return this.sourceBuffer;
   }
   endOfStream(): void {
     this.ended = true;
+    this.readyState = 'ended';
   }
   addEventListener(type: string, listener: () => void): void {
     const list = this.listeners.get(type) ?? [];
@@ -258,8 +269,10 @@ export async function run(): Promise<void> {
     assert(media.ended, 'endOfStream after drain');
   }
 
-  // Journal-covered seek: the byte↔media map routes seekTo into a pump
-  // `seek` frame at the covering unit's byte start.
+  // Journal-covered seek with the media no longer buffered: the
+  // byte↔media map routes seekTo into a pump `seek` frame at the
+  // covering unit's byte start. (A still-buffered target is an
+  // element-only rewind — no pump frame.)
   {
     const media = new FakeMediaSource();
     const port = new FakePort();
@@ -273,7 +286,10 @@ export async function run(): Promise<void> {
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
     const source = await (await attach).ready;
-    source.seekTo(5_000); // covered by unit 0's 0–10s media range
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    sb.buffered.list = [[30, 40]]; // early media evicted
+    source.seekTo(5_000); // journaled at 0–10s but no longer buffered
     const seek = port.sent.find(
       (m) => (m as { kind?: string }).kind === 'seek',
     ) as { position: number; epoch: number } | undefined;
@@ -514,6 +530,93 @@ export async function run(): Promise<void> {
     ) as { position: number } | undefined;
     assert(seek !== undefined, 'estimated seek sent');
     assertEqual(seek.position, 78, 'estimate from delta coverage');
+  }
+
+  // A journal-covered seek whose media is still buffered does no pump
+  // work — and past EOF it must not re-anchor a fetch into the ended
+  // source. Only an UNCOVERED post-EOF seek re-anchors, and its next
+  // append re-opens the source per the MSE spec (sourceopen refires
+  // with the existing SourceBuffer — not a second addSourceBuffer).
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4d0',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    // No Cues tail — all coverage lands in the journal.
+    feedData(port, webmFixture().subarray(0, 48), 0);
+    port.feed({ kind: 'eof', epoch: 0 });
+    const source = await (await attach).ready;
+    await settle();
+    assert(media.ended, 'eof ended the source');
+    assertEqual(media.readyState, 'ended');
+    const coveredSeeks = port.sent.filter(
+      (m) => (m as { kind?: string }).kind === 'seek',
+    ).length;
+    // Covered + still buffered: element-only rewind, no pump traffic.
+    source.seekTo(5_000);
+    assert(
+      port.sent.filter((m) => (m as { kind?: string }).kind === 'seek')
+        .length === coveredSeeks,
+      'covered seek sent no pump frame',
+    );
+    // Uncovered: re-anchor at the estimate — the next append on the
+    // ended source re-opens it instead of failing playback.
+    source.seekTo(40_000);
+    const seek = port.sent.find(
+      (m) => (m as { kind?: string }).kind === 'seek',
+    ) as { position: number; epoch: number } | undefined;
+    assert(seek !== undefined, 'uncovered seek re-anchored');
+    const appendsBefore = media.sourceBuffer?.appends.length ?? 0;
+    feedData(
+      port,
+      webmFixture().subarray(29, 48),
+      seek.position,
+      seek.epoch,
+    );
+    port.feed({ kind: 'eof', epoch: seek.epoch });
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null && sb.appends.length > appendsBefore);
+    assert(
+      media.ended && media.readyState === 'ended',
+      'the reopened source re-ended on the post-seek eof',
+    );
+  }
+
+  // Quota eviction anchors at the reported playhead — a download far
+  // ahead of playback must not evict the media about to play.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4d1',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    // One merged 500s range with the playhead at 300s: eviction keeps
+    // [anchor−120s, anchor+300s] = [180, 600] — only [0,180) is stale.
+    // Anchored on the append frontier (~40s) it would have evicted the
+    // playhead's own media below ~340s instead.
+    source.notePosition(300_000);
+    sb.buffered.list = [[0, 500]];
+    sb.failNext = true;
+    feedData(port, webmFixture(), webmFixture().length);
+    await settle();
+    assertDeepEqual(sb.removes, [[0, 180]], 'eviction kept the playhead window');
   }
 
   // Post-attach failure reaches the player: a pump error frame after

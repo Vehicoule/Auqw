@@ -230,6 +230,23 @@ export function createWebPlayerPort(deps: {
   const handleMimes = new Map<string, string>();
   /** The live MSE attach, keyed by the handle it serves. */
   let activeMse: { handle: string; source: MseSource } | null = null;
+  /** In-flight attachUrl aborts keyed by op generation — between
+   * `attachUrl` and its `settle` there is no `activeMse` for dropMse
+   * to kill, so a stop, release, or superseding op must abort the
+   * pending attach directly or its pump lease outlives the op. */
+  const pendingAttaches = new Map<
+    number,
+    { readonly handle: string; readonly abort: () => void }
+  >();
+
+  function abortPendingAttaches(handle?: string): void {
+    for (const [gen, pending] of [...pendingAttaches]) {
+      if (handle === undefined || pending.handle === handle) {
+        pendingAttaches.delete(gen);
+        pending.abort();
+      }
+    }
+  }
 
   function installMse(handle: string, source: MseSource | null): void {
     activeMse = source === null ? null : { handle, source };
@@ -355,6 +372,7 @@ export function createWebPlayerPort(deps: {
     for (const [handle, pending] of [...pendingPlayGens]) {
       if (identity === null || identityEq(identity, pending.identity)) {
         pendingPlayGens.delete(handle);
+        abortPendingAttaches(handle);
         opGen++;
       }
     }
@@ -445,6 +463,10 @@ export function createWebPlayerPort(deps: {
     }
     const requestId = `watt-${++seq}`;
     const gen = ++opGen;
+    // A new remote transition supersedes every older op — their
+    // in-flight attaches are dead on arrival, so kill their pump
+    // leases now rather than at settle.
+    abortPendingAttaches();
     let handle: string | undefined;
     // Once this op owns `current`, failure-emit ownership is the
     // handle match — emitTransition already swapped the projection
@@ -472,10 +494,12 @@ export function createWebPlayerPort(deps: {
       handle = outcome.stream.handle;
       noteMime(handle, outcome.stream.mime);
       const first = await attachUrl(handle, outcome.stream.mime);
+      pendingAttaches.set(gen, { handle, abort: first.abort });
       // A later play/attach/prepare or a moved projection makes this
       // completion stale — release its minted handle and stay out of
       // the element; the live attempt keeps ownership.
       if (gen !== opGen || projection !== p) {
+        pendingAttaches.delete(gen);
         first.abort();
         void first.settle.then((s) => s.source?.destroy());
         void stream.release({ handle }).catch(() => undefined);
@@ -505,10 +529,12 @@ export function createWebPlayerPort(deps: {
         current === null ||
         current.handle !== handle
       ) {
+        pendingAttaches.delete(gen);
         settled.source?.destroy();
         void stream.release({ handle }).catch(() => undefined);
         return;
       }
+      pendingAttaches.delete(gen);
       installMse(handle, settled.source);
       // A mid-stream MSE refusal swaps the element onto the loopback leg.
       if (settled.url !== first.url) {
@@ -523,6 +549,10 @@ export function createWebPlayerPort(deps: {
         deps.mediaSession.playbackState = shouldPlay ? 'playing' : 'paused';
       }
     } catch (thrown) {
+      // A failed op's pending attach can't outlive it — a settle that
+      // never resolved would leave its pump lease running.
+      pendingAttaches.get(gen)?.abort();
+      pendingAttaches.delete(gen);
       // A minted-but-never-attached handle is ours to reap — repeated
       // leaks would cap the registry.
       if (handle !== undefined) {
@@ -572,6 +602,10 @@ export function createWebPlayerPort(deps: {
           cur.identity,
           cur.handle,
         );
+        // The track start may have been evicted — rewinding only the
+        // element would wait on bytes the pump never re-requests;
+        // the source re-anchors it, matching the seekTo path.
+        activeMse?.source.seekTo(0);
         audio.currentTime = 0;
         if (p.mode === 'playing') {
           void audio.play().catch(() => undefined);
@@ -592,6 +626,7 @@ export function createWebPlayerPort(deps: {
         // A remote skip at the tail leaves the element live — detach
         // it so playback stops with the queue, not after it.
         opGen++;
+        abortPendingAttaches();
         dropMse();
         current = null;
         audio.pause();
@@ -663,10 +698,12 @@ export function createWebPlayerPort(deps: {
       status('paused');
     }
   });
-  audio.addEventListener('seeked', () =>
-    status(audio.paused ? 'paused' : 'playing'),
-  );
+  audio.addEventListener('seeked', () => {
+    activeMse?.source.notePosition(posMs());
+    status(audio.paused ? 'paused' : 'playing');
+  });
   audio.addEventListener('timeupdate', () => {
+    activeMse?.source.notePosition(posMs());
     if (!audio.paused) {
       status('playing');
     }
@@ -798,6 +835,10 @@ export function createWebPlayerPort(deps: {
 
     async play(input) {
       const gen = ++opGen;
+      // A new play supersedes every older op — kill their in-flight
+      // attaches now; their settles are already dead on arrival and
+      // the pump lease mustn't ride out a source that never lands.
+      abortPendingAttaches();
       pendingPlayGens.set(input.handle, {
         gen,
         identity: { ...input.identity },
@@ -807,11 +848,16 @@ export function createWebPlayerPort(deps: {
       return guard(async () => {
         try {
           const first = await attachUrl(input.handle);
+          pendingAttaches.set(gen, {
+            handle: input.handle,
+            abort: first.abort,
+          });
           // A newer play/prepare/stop superseded this one while the
           // attach resolved — the late completion must not retake
           // the element. A release of this same handle landed too: it
           // bumped opGen through the pendingPlayGens guard.
           if (gen !== opGen) {
+            pendingAttaches.delete(gen);
             first.abort();
             void first.settle.then((s) => s.source?.destroy());
             return;
@@ -838,9 +884,11 @@ export function createWebPlayerPort(deps: {
           // Superseded while the MSE attach settled — whatever source
           // it produced belongs to a dead op.
           if (gen !== opGen) {
+            pendingAttaches.delete(gen);
             settled.source?.destroy();
             return;
           }
+          pendingAttaches.delete(gen);
           installMse(input.handle, settled.source);
           // A mid-stream MSE refusal swaps the element onto the
           // loopback leg.
@@ -854,6 +902,14 @@ export function createWebPlayerPort(deps: {
             deps.mediaSession.playbackState = 'playing';
           }
         } finally {
+          // An attach still pending on exit — error, abort path, or
+          // an upstream settle that never landed — must not keep its
+          // pump lease running past the dead op.
+          const attach = pendingAttaches.get(gen);
+          if (attach !== undefined) {
+            pendingAttaches.delete(gen);
+            attach.abort();
+          }
           // Only this op's own token is removed — a superseded play
           // must not clear the marker of the play that replaced it.
           if (pendingPlayGens.get(input.handle)?.gen === gen) {
@@ -906,6 +962,7 @@ export function createWebPlayerPort(deps: {
         return bad;
       }
       opGen++;
+      abortPendingAttaches();
       dropMse();
       audio.pause();
       audio.src = '';
@@ -930,6 +987,7 @@ export function createWebPlayerPort(deps: {
         current = null;
       }
       dropMse(input.handle);
+      abortPendingAttaches(input.handle);
       handleMimes.delete(input.handle);
       // Releasing a handle an in-flight play is about to attach must
       // invalidate that op — otherwise its late serveUrl resolves into

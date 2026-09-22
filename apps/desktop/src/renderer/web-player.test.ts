@@ -1140,6 +1140,11 @@ export async function run(): Promise<void> {
     media.fireSourceopen();
     await settle();
     await playing;
+    // Evict the early media — a still-buffered target is an
+    // element-only rewind with no pump traffic.
+    const sb = media.buffer;
+    assert(sb !== null);
+    sb.buffered = { length: 1, start: () => 20, end: () => 30 };
     await player.seekTo({ positionMs: 5_000, identity });
     await settle();
     assert(
@@ -1186,6 +1191,81 @@ export async function run(): Promise<void> {
     );
     assert(failed !== undefined, 'pump death emitted a failed status');
     assert(port.closed, 'dead session closed its port');
+  }
+
+  // A stop before the MSE attach settles aborts it directly — the
+  // unresolved attach has no activeMse to drop, so without the
+  // pending-attach registry its pump lease would outlive the dead op.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    // No sourceopen, no feed — first.settle never resolves.
+    void playing;
+    await player.stop(identity);
+    assert(port.closed, 'stop aborted the pending attach');
+  }
+
+  // remote-previous restart routes through the MSE source — an
+  // evicted track start must re-anchor the pump, not just the
+  // element clock.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const ms = fakeMediaSession();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession: ms,
+      mse: fakeMseFactories(media),
+    });
+    await player.setQueueProjection(twoItemProjection());
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    media.fireSourceopen();
+    await settle();
+    await playing;
+    // The track's start is no longer buffered — the restart must ask
+    // the source for it, not just rewind the element.
+    const sb = media.buffer;
+    assert(sb !== null);
+    sb.buffered = { length: 1, start: () => 20, end: () => 30 };
+    port.sent.length = 0;
+    ms.actions.get('previoustrack')?.();
+    await settle();
+    assert(
+      port.sent.some(
+        (m) =>
+          (m as { kind?: string }).kind === 'seek' &&
+          (m as { position?: number }).position === 0,
+      ),
+      'restart re-anchored the pump at byte 0',
+    );
+    assertEqual(audio.currentTime, 0);
   }
 
   // release destroys the live MSE source — its pump port closes.
@@ -1280,23 +1360,32 @@ class FakePort {
 class FakeMedia {
   readyState = 'closed';
   duration = 0;
+  ended = false;
+  buffer: FakeBuffer | null = null;
   private listeners = new Map<string, Array<() => void>>();
   addSourceBuffer(): FakeBuffer {
-    return new FakeBuffer();
+    this.buffer = new FakeBuffer();
+    this.buffer.media = this;
+    return this.buffer;
   }
-  endOfStream(): void {}
+  endOfStream(): void {
+    this.ended = true;
+    this.readyState = 'ended';
+  }
   addEventListener(type: string, listener: () => void): void {
     const list = this.listeners.get(type) ?? [];
     list.push(listener);
     this.listeners.set(type, list);
   }
   fireSourceopen(): void {
+    this.readyState = 'open';
     for (const l of this.listeners.get('sourceopen') ?? []) l();
   }
 }
 
 class FakeBuffer {
   updating = false;
+  media: FakeMedia | null = null;
   buffered = {
     length: 0,
     start: () => 0,
@@ -1304,6 +1393,13 @@ class FakeBuffer {
   };
   private listeners = new Map<string, Array<() => void>>();
   appendBuffer(): void {
+    // An append on an ended source re-opens it (MSE spec).
+    if (this.media !== null && this.media.readyState === 'ended') {
+      this.media.ended = false;
+      this.media.readyState = 'open';
+      const media = this.media;
+      queueMicrotask(() => media.fireSourceopen());
+    }
     this.updating = true;
     this.buffered = { length: 1, start: () => 0, end: () => 30 };
     queueMicrotask(() => {

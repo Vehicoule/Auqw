@@ -213,6 +213,74 @@ export function run(): void {
   assertDeepEqual(carve(plainMp4Fixture()), { kind: 'unsupported' });
   assertDeepEqual(carve(new Uint8Array([0x1a])), { kind: 'need-more' });
 
+  // Property-ish: every truncation of the fixtures yields a verdict —
+  // never a throw, never a hang — and emitted boundaries stay
+  // strictly ascending and inside the buffer.
+  {
+    for (const fix of [
+      webmFixture(),
+      fmp4Fixture(),
+      stypFmp4Fixture(),
+      plainMp4Fixture(),
+    ]) {
+      for (let cut = 0; cut <= fix.length; cut++) {
+        const r = carve(fix.subarray(0, cut));
+        assert(
+          r.kind === 'ok' ||
+            r.kind === 'need-more' ||
+            r.kind === 'unsupported',
+          'carve verdict on truncation',
+        );
+        if (r.kind === 'ok') {
+          for (let i = 1; i < r.boundaries.length; i++) {
+            const prev = r.boundaries[i - 1];
+            const next = r.boundaries[i];
+            assert(
+              next !== undefined &&
+                prev !== undefined &&
+                next > prev &&
+                next < cut,
+              'boundaries strictly ascending + in-range',
+            );
+          }
+        }
+      }
+    }
+    // Malformed size fields — the walker still terminates in a
+    // verdict rather than running off the buffer or looping.
+    const wild = stypFmp4Fixture();
+    wild[4] = 0xff;
+    wild[5] = 0xff;
+    const w = carve(wild);
+    assert(
+      w.kind === 'ok' || w.kind === 'need-more' || w.kind === 'unsupported',
+      'malformed sizes still reach a verdict',
+    );
+    // boundaryScan steady-state: any truncation keeps emitted
+    // boundaries ascending and in-range on both containers.
+    for (const fix of [webmFixture(), stypFmp4Fixture()]) {
+      for (let cut = 0; cut <= fix.length; cut += 3) {
+        const s = boundaryScan(
+          fix.subarray(0, cut),
+          fix === webmFixture() ? 'webm' : 'mp4',
+          0,
+          1,
+        );
+        for (let i = 1; i < s.boundaries.length; i++) {
+          const prev = s.boundaries[i - 1];
+          const next = s.boundaries[i];
+          assert(
+            next !== undefined &&
+              prev !== undefined &&
+              next > prev &&
+              next < cut,
+            'scan boundaries ascending + in-range',
+          );
+        }
+      }
+    }
+  }
+
   // carve: an mp4 head that stops after ftyp/moov stays need-more —
   // only a moof (fragmented) or a bare mdat (non-fragmented) decides,
   // so a plain mp4 whose mdat hasn't arrived yet isn't locked into
