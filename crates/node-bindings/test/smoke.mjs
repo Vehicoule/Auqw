@@ -11,12 +11,29 @@
 // (slice 4 phase 1b).
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, readFileSync } from 'node:fs';
+import { copyFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 
-const SO = 'target/debug/libauqw_node_bindings.so';
-const NODE = `/tmp/auqw_node_bindings-${process.pid}.node`;
-copyFileSync(SO, NODE);
+// The debug artifact name is platform-shaped (cdylib conventions);
+// the copy to a fresh .node path is unconditional so a stale binary
+// can never pass for a broken build.
+const ARTIFACT = {
+  linux: 'libauqw_node_bindings.so',
+  darwin: 'libauqw_node_bindings.dylib',
+  win32: 'auqw_node_bindings.dll',
+}[process.platform];
+const NODE = join(tmpdir(), `auqw_node_bindings-${process.pid}-${Date.now()}.node`);
+copyFileSync(`target/debug/${ARTIFACT}`, NODE);
+// A loaded native module stays open (and locked on Windows), so the
+// cleanup is best-effort — /tmp churn is bounded by pid+timestamp
+// uniqueness, not by this line.
+process.on('exit', () => {
+  try {
+    rmSync(NODE, { force: true });
+  } catch {}
+});
 const host_ = await import(NODE);
 const bindings = host_.default ?? host_;
 

@@ -96,15 +96,17 @@ pub struct HttpTraceSummary {
     pub elapsed_ms: f64,
 }
 
-impl From<surface::HttpTraceSummary> for HttpTraceSummary {
-    fn from(s: surface::HttpTraceSummary) -> Self {
-        Self {
+impl TryFrom<surface::HttpTraceSummary> for HttpTraceSummary {
+    type Error = Error;
+
+    fn try_from(s: surface::HttpTraceSummary) -> Result<Self> {
+        Ok(Self {
             method: s.method,
             url: s.url,
             status: s.status,
-            bytes: s.bytes as f64,
-            elapsed_ms: s.elapsed_ms as f64,
-        }
+            bytes: u64_out(s.bytes, "bytes")?,
+            elapsed_ms: u64_out(s.elapsed_ms, "elapsedMs")?,
+        })
     }
 }
 
@@ -157,18 +159,24 @@ pub struct AttemptSummary {
     pub guest_log: Vec<GuestLogSummary>,
 }
 
-impl From<surface::AttemptSummary> for AttemptSummary {
-    fn from(s: surface::AttemptSummary) -> Self {
-        Self {
+impl TryFrom<surface::AttemptSummary> for AttemptSummary {
+    type Error = Error;
+
+    fn try_from(s: surface::AttemptSummary) -> Result<Self> {
+        Ok(Self {
             request_id: s.request_id,
             steps: s.steps,
             http_calls: s.http_calls,
-            bytes: s.bytes as f64,
-            fuel_used: s.fuel_used as f64,
-            elapsed_ms: s.elapsed_ms as f64,
-            http_trace: s.http_trace.into_iter().map(Into::into).collect(),
+            bytes: u64_out(s.bytes, "bytes")?,
+            fuel_used: u64_out(s.fuel_used, "fuelUsed")?,
+            elapsed_ms: u64_out(s.elapsed_ms, "elapsedMs")?,
+            http_trace: s
+                .http_trace
+                .into_iter()
+                .map(TryFrom::try_from)
+                .collect::<Result<Vec<_>>>()?,
             guest_log: s.guest_log.into_iter().map(Into::into).collect(),
-        }
+        })
     }
 }
 
@@ -198,17 +206,19 @@ pub struct ResolvedResource {
     pub itag: Option<u32>,
 }
 
-impl From<surface::ResolvedResource> for ResolvedResource {
-    fn from(r: surface::ResolvedResource) -> Self {
-        Self {
+impl TryFrom<surface::ResolvedResource> for ResolvedResource {
+    type Error = Error;
+
+    fn try_from(r: surface::ResolvedResource) -> Result<Self> {
+        Ok(Self {
             url: r.url,
             mime: r.mime,
             bitrate_kbps: r.bitrate_kbps,
-            expires_at_ms: r.expires_at_ms.map(|v| v as f64),
+            expires_at_ms: opt_u64_out(r.expires_at_ms, "expiresAtMs")?,
             client: r.client,
-            content_length: r.content_length.map(|v| v as f64),
+            content_length: opt_u64_out(r.content_length, "contentLength")?,
             itag: r.itag,
-        }
+        })
     }
 }
 
@@ -234,15 +244,17 @@ pub struct ResolveOutcome {
     pub attempt: AttemptSummary,
 }
 
-impl From<surface::ResolveOutcome> for ResolveOutcome {
-    fn from(o: surface::ResolveOutcome) -> Self {
-        match o {
+impl TryFrom<surface::ResolveOutcome> for ResolveOutcome {
+    type Error = Error;
+
+    fn try_from(o: surface::ResolveOutcome) -> Result<Self> {
+        Ok(match o {
             surface::ResolveOutcome::Resolved { resource, attempt } => Self {
                 kind_tag: "resolved".to_string(),
-                resource: Some(resource.into()),
+                resource: Some(resource.try_into()?),
                 kind: None,
                 message: None,
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
             surface::ResolveOutcome::Failed {
                 kind,
@@ -253,9 +265,9 @@ impl From<surface::ResolveOutcome> for ResolveOutcome {
                 resource: None,
                 kind: Some(kind),
                 message: Some(message),
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
-        }
+        })
     }
 }
 
@@ -281,9 +293,11 @@ pub struct RequestOutcome {
     pub attempt: AttemptSummary,
 }
 
-impl From<surface::RequestOutcome> for RequestOutcome {
-    fn from(o: surface::RequestOutcome) -> Self {
-        match o {
+impl TryFrom<surface::RequestOutcome> for RequestOutcome {
+    type Error = Error;
+
+    fn try_from(o: surface::RequestOutcome) -> Result<Self> {
+        Ok(match o {
             surface::RequestOutcome::Succeeded {
                 result_json,
                 attempt,
@@ -292,7 +306,7 @@ impl From<surface::RequestOutcome> for RequestOutcome {
                 result_json: Some(result_json),
                 kind: None,
                 message: None,
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
             surface::RequestOutcome::Failed {
                 kind,
@@ -303,9 +317,9 @@ impl From<surface::RequestOutcome> for RequestOutcome {
                 result_json: None,
                 kind: Some(kind),
                 message: Some(message),
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
-        }
+        })
     }
 }
 
@@ -323,13 +337,15 @@ pub struct SpinReport {
     pub kind: String,
 }
 
-impl From<surface::SpinReport> for SpinReport {
-    fn from(r: surface::SpinReport) -> Self {
-        Self {
-            elapsed_ms: r.elapsed_ms as f64,
-            fuel_used: r.fuel_used as f64,
+impl TryFrom<surface::SpinReport> for SpinReport {
+    type Error = Error;
+
+    fn try_from(r: surface::SpinReport) -> Result<Self> {
+        Ok(Self {
+            elapsed_ms: u64_out(r.elapsed_ms, "elapsedMs")?,
+            fuel_used: u64_out(r.fuel_used, "fuelUsed")?,
             kind: r.kind,
-        }
+        })
     }
 }
 
@@ -357,16 +373,18 @@ pub struct PreparedStream {
     pub expires_at_ms: Option<f64>,
 }
 
-impl From<surface::PreparedStream> for PreparedStream {
-    fn from(s: surface::PreparedStream) -> Self {
-        Self {
+impl TryFrom<surface::PreparedStream> for PreparedStream {
+    type Error = Error;
+
+    fn try_from(s: surface::PreparedStream) -> Result<Self> {
+        Ok(Self {
             handle: s.handle,
             mime: s.mime,
             itag: s.itag,
             bitrate_kbps: s.bitrate_kbps,
-            content_length: s.content_length.map(|v| v as f64),
-            expires_at_ms: s.expires_at_ms.map(|v| v as f64),
-        }
+            content_length: opt_u64_out(s.content_length, "contentLength")?,
+            expires_at_ms: opt_u64_out(s.expires_at_ms, "expiresAtMs")?,
+        })
     }
 }
 
@@ -395,20 +413,22 @@ pub struct PrepareOutcome {
     pub attempt: AttemptSummary,
 }
 
-impl From<surface::PrepareOutcome> for PrepareOutcome {
-    fn from(o: surface::PrepareOutcome) -> Self {
-        match o {
+impl TryFrom<surface::PrepareOutcome> for PrepareOutcome {
+    type Error = Error;
+
+    fn try_from(o: surface::PrepareOutcome) -> Result<Self> {
+        Ok(match o {
             surface::PrepareOutcome::Prepared {
                 stream,
                 superseded,
                 attempt,
             } => Self {
                 kind_tag: "prepared".to_string(),
-                stream: Some(stream.into()),
+                stream: Some(stream.try_into()?),
                 superseded,
                 kind: None,
                 message: None,
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
             surface::PrepareOutcome::Failed {
                 kind,
@@ -420,9 +440,9 @@ impl From<surface::PrepareOutcome> for PrepareOutcome {
                 superseded: Vec::new(),
                 kind: Some(kind),
                 message: Some(message),
-                attempt: attempt.into(),
+                attempt: attempt.try_into()?,
             },
-        }
+        })
     }
 }
 
@@ -450,16 +470,18 @@ pub struct StreamPhaseMarks {
     pub attach_ms: Option<f64>,
 }
 
-impl From<surface::StreamPhaseMarks> for StreamPhaseMarks {
-    fn from(m: surface::StreamPhaseMarks) -> Self {
-        Self {
-            prepare_started_ms: m.prepare_started_ms as f64,
-            resolve_ms: m.resolve_ms.map(|v| v as f64),
-            mint_ms: m.mint_ms.map(|v| v as f64),
-            first_byte_ms: m.first_byte_ms.map(|v| v as f64),
-            head_ready_ms: m.head_ready_ms.map(|v| v as f64),
-            attach_ms: m.attach_ms.map(|v| v as f64),
-        }
+impl TryFrom<surface::StreamPhaseMarks> for StreamPhaseMarks {
+    type Error = Error;
+
+    fn try_from(m: surface::StreamPhaseMarks) -> Result<Self> {
+        Ok(Self {
+            prepare_started_ms: u64_out(m.prepare_started_ms, "prepareStartedMs")?,
+            resolve_ms: opt_u64_out(m.resolve_ms, "resolveMs")?,
+            mint_ms: opt_u64_out(m.mint_ms, "mintMs")?,
+            first_byte_ms: opt_u64_out(m.first_byte_ms, "firstByteMs")?,
+            head_ready_ms: opt_u64_out(m.head_ready_ms, "headReadyMs")?,
+            attach_ms: opt_u64_out(m.attach_ms, "attachMs")?,
+        })
     }
 }
 
@@ -517,6 +539,26 @@ fn u64_field(value: f64, field: &str, min: u64) -> Result<u64> {
     Ok(value as u64)
 }
 
+/// Validate a host-side `u64` before it becomes an `f64`: the JS
+/// safe-integer bound is the widest exact integer JS has, so a value
+/// past it can't cross the boundary without silent rounding. That is
+/// a malformed host result, not a caller bug — the conversion
+/// typed-fails `invalid-response`.
+fn u64_out(v: u64, field: &str) -> Result<f64> {
+    if v > 9_007_199_254_740_991 {
+        return Err(typed_err(
+            "invalid-response",
+            format!("outbound {field} {v} exceeds the JS safe-integer bound"),
+            serde_json::json!({"field": field, "value": v}),
+        ));
+    }
+    Ok(v as f64)
+}
+
+fn opt_u64_out(v: Option<u64>, field: &str) -> Result<Option<f64>> {
+    v.map(|n| u64_out(n, field)).transpose()
+}
+
 fn host_err(e: surface::HostError) -> Error {
     match e {
         surface::HostError::Load { detail } => typed_err(
@@ -540,6 +582,17 @@ fn host_err(e: surface::HostError) -> Error {
             serde_json::json!({"detail": detail}),
         ),
     }
+}
+
+/// A `JoinError` on a parked worker is an internal runtime fault —
+/// panic or cancellation — never a caller slug, so it rides
+/// `runtime` with the join error's own detail.
+fn worker_err(task: &str, e: tokio::task::JoinError) -> Error {
+    typed_err(
+        "runtime",
+        format!("{task} failed: {e}"),
+        serde_json::json!({"detail": e.to_string()}),
+    )
 }
 
 fn stream_err(e: surface::StreamError) -> Error {
@@ -568,8 +621,13 @@ where
 {
     let (tx, rx) = oneshot::channel();
     spawn(tx).map_err(host_err)?;
-    rx.await
-        .map_err(|_| Error::from_reason("host dropped request"))
+    rx.await.map_err(|_| {
+        typed_err(
+            "runtime",
+            "host dropped request".to_string(),
+            serde_json::json!({"detail": "outcome channel closed before delivery"}),
+        )
+    })
 }
 
 /// The plugin host object exposed to the utility process. Request
@@ -645,11 +703,12 @@ impl JsPluginHost {
                 source_ref,
                 request_id,
                 move |_id, o| async move {
-                    let _ = tx.send(o.into());
+                    let _ = tx.send(o);
                 },
             )
         })
         .await
+        .and_then(ResolveOutcome::try_from)
     }
 
     /// Start any declared capability with a JSON object payload. The
@@ -670,11 +729,12 @@ impl JsPluginHost {
                 payload_json,
                 request_id,
                 move |_id, o| async move {
-                    let _ = tx.send(o.into());
+                    let _ = tx.send(o);
                 },
             )
         })
         .await
+        .and_then(RequestOutcome::try_from)
     }
 
     /// Resolve `source_ref` and register the result as a prepared
@@ -694,11 +754,12 @@ impl JsPluginHost {
                 source_ref,
                 request_id,
                 move |_id, o| async move {
-                    let _ = tx.send(o.into());
+                    let _ = tx.send(o);
                 },
             )
         })
         .await
+        .and_then(PrepareOutcome::try_from)
     }
 
     /// Cancel an in-flight request. Unknown ids are a no-op except a
@@ -719,11 +780,11 @@ impl JsPluginHost {
         tokio::task::spawn_blocking(move || {
             inner
                 .run_spin(wasm, manifest_json)
-                .map(SpinReport::from)
                 .map_err(host_err)
+                .and_then(SpinReport::try_from)
         })
         .await
-        .map_err(|_| Error::from_reason("spin worker panicked"))?
+        .map_err(|e| worker_err("spin worker", e))?
     }
 
     /// Attach a consumer at `position` (session open). Returns
@@ -732,8 +793,9 @@ impl JsPluginHost {
     pub fn stream_open(&self, handle: String, position: f64) -> Result<Option<f64>> {
         self.inner
             .stream_open(handle, u64_field(position, "position", 0)?)
-            .map(|v| v.map(|n| n as f64))
-            .map_err(stream_err)
+            .map_err(stream_err)?
+            .map(|n| u64_out(n, "remaining"))
+            .transpose()
     }
 
     /// Blocking read — deliberately a promise so the seam parks a
@@ -754,7 +816,7 @@ impl JsPluginHost {
                 .map_err(stream_err)
         })
         .await
-        .map_err(|_| Error::from_reason("stream read worker panicked"))?
+        .map_err(|e| worker_err("stream read worker", e))?
     }
 
     /// Session close: detaches the consumer; the session stays live
@@ -777,8 +839,8 @@ impl JsPluginHost {
     pub fn stream_phase_marks(&self, handle: String) -> Result<StreamPhaseMarks> {
         self.inner
             .stream_phase_marks(handle)
-            .map(StreamPhaseMarks::from)
             .map_err(stream_err)
+            .and_then(StreamPhaseMarks::try_from)
     }
 
     /// Dev-gate entry: register a session for a bare URL, skipping
@@ -805,7 +867,7 @@ impl JsPluginHost {
                     .transpose()?,
                 remintable,
             )
-            .map(PreparedStream::from)
             .map_err(stream_err)
+            .and_then(PreparedStream::try_from)
     }
 }
