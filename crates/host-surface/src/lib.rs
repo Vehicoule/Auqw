@@ -678,6 +678,14 @@ impl PluginHost {
     /// the wire — a slot still mid-delivery is consumed but its handle
     /// left live, or the listener would get a `Prepared` naming a
     /// released session.
+    ///
+    /// Cancellation targets whatever invocation currently owns the id —
+    /// the API carries no generation discriminator. Once a settled
+    /// generic id is re-admitted, a late `cancel` lands on the NEW
+    /// invocation of that id, not the caller's stale intent. Callers
+    /// that can have two in-flight intents for one id must mint
+    /// distinct ids (the JS/desktop side already does — request ids
+    /// are per-attempt `req-<counter>`).
     pub fn cancel(&self, request_id: String) {
         let mut live_found = false;
         let mut live_was_prepare = false;
