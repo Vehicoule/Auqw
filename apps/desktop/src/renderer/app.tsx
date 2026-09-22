@@ -1649,7 +1649,7 @@ function Main({
           <HomeScreen
             model={homeModel}
             onPressCard={(card) => void playRecording(card.key)}
-            onResume={() => void session.resume()}
+            onResume={onPlayPause}
           />
         );
     }
@@ -1753,16 +1753,24 @@ function Main({
               const metas = entityModelFor(fetch)
                 .items.map((row) => metaFor(row))
                 .filter(
-                  (m): m is TrackMetadata => m !== undefined,
+                  (m): m is TrackMetadata =>
+                    m !== undefined && canPlayMeta(m),
                 );
+              if (metas.length === 0) {
+                return;
+              }
               void session.playMetadata(metas);
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
                 .items.map((row) => metaFor(row))
                 .filter(
-                  (m): m is TrackMetadata => m !== undefined,
+                  (m): m is TrackMetadata =>
+                    m !== undefined && canPlayMeta(m),
                 );
+              if (metas.length === 0) {
+                return;
+              }
               void session.playMetadata(metas, { shuffle: true });
             }}
             onToggleLike={
@@ -1839,9 +1847,12 @@ function Main({
         type="file"
         accept="application/json,.json"
         style={{ display: 'none' }}
-        onChange={(event) =>
-          onImportFileChosen(event.target.files?.[0] ?? null)
-        }
+        onChange={(event) => {
+          const file = event.target.files?.[0] ?? null;
+          // Clear the input so re-picking the same file refires.
+          event.target.value = '';
+          onImportFileChosen(file);
+        }}
       />
       <AppStack>
         <StackItem stackKey="root">

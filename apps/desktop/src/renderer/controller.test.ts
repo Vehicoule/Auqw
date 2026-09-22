@@ -378,6 +378,111 @@ async function disposeSeam(): Promise<void> {
   assertEqual(rig.netUnsubscribes, 1);
 }
 
+// 7. A plugin set with no declarer for a required capability cannot
+// serve a session — an arbitrary id would only route ops into
+// unsupported. The boot throws before Session construction.
+async function incompleteProviderSet(): Promise<void> {
+  const rig = fakeApi();
+  let thrown: unknown = null;
+  try {
+    await createSessionController(rig.api, {
+      storage: new FakeStorage(persisted()),
+      player: new FakePlayer(),
+      providers: [stubProvider('lyrics-lib', ['lyrics.plain'])],
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown instanceof Error);
+  assert(
+    (thrown as Error).message.includes('catalog.search'),
+    'missing catalog.search declarer fails the boot',
+  );
+
+  thrown = null;
+  try {
+    await createSessionController(rig.api, {
+      storage: new FakeStorage(persisted()),
+      player: new FakePlayer(),
+      providers: [stubProvider('itunes', ['catalog.search'])],
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown instanceof Error);
+  assert(
+    (thrown as Error).message.includes('playback.resolve'),
+    'missing playback.resolve declarer fails the boot',
+  );
+}
+
+// 8. Restored settings naming providers this plugin dir no longer
+// ships are reconciled and persisted: required slots repick a
+// capability-valid id; optional overrides drop to auto routing rather
+// than resurrecting a provider that cannot serve them.
+async function restoreRepairsSettings(): Promise<void> {
+  const rig = fakeApi();
+  const storage = new FakeStorage(
+    persisted({
+      settings: {
+        ...SETTINGS,
+        playbackProvider: 'removed-playback',
+        lyricsProvider: 'removed-lyrics',
+        radioProvider: 'removed-radio',
+      },
+    }),
+  );
+  const controller = await createSessionController(rig.api, {
+    storage,
+    player: new FakePlayer(),
+    providers: [
+      stubProvider('itunes', ['catalog.search']),
+      stubProvider('deezer', ['playback.resolve', 'lyrics.synced']),
+    ],
+  });
+  const state = controller.session.snapshot();
+  assertEqual(state.type, 'ready');
+  if (state.type !== 'ready') {
+    return;
+  }
+  assertEqual(state.settings.catalogProvider, 'itunes');
+  assertEqual(state.settings.playbackProvider, 'deezer');
+  assertEqual(state.settings.lyricsProvider, null);
+  assertEqual(state.settings.radioProvider, null);
+  const settled = storage.commits.find(
+    (commit) => commit.batch.settings !== undefined,
+  );
+  assert(
+    settled !== undefined,
+    'the reconciliation is persisted through the storage seam',
+  );
+  assertEqual(settled.batch.settings?.playbackProvider, 'deezer');
+  await controller.dispose();
+}
+
+// 9. subscribeOnline replays the settled baseline to a subscriber
+// that mounts after the edge — the UI never waits for the next
+// transition to learn it is offline.
+async function onlineBaselineReplay(): Promise<void> {
+  const rig = fakeApi();
+  rig.snapshotResult = { online: false };
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(persisted()),
+    player: new FakePlayer(),
+    providers: defaultProviders(),
+  });
+  await Promise.resolve();
+  const seen: boolean[] = [];
+  const unsubscribe = controller.subscribeOnline((online) => {
+    seen.push(online);
+  });
+  assertDeepEqual(seen, [false]);
+  unsubscribe();
+  rig.netListeners[0]?.({ online: true });
+  assertDeepEqual(seen, [false]);
+  await controller.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['providersFromManifests', providersFromManifests],
   ['unavailableBindings', unavailableBindings],
@@ -385,6 +490,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['restoreFailed', restoreFailed],
   ['connectivity', connectivity],
   ['disposeSeam', disposeSeam],
+  ['incompleteProviderSet', incompleteProviderSet],
+  ['restoreRepairsSettings', restoreRepairsSettings],
+  ['onlineBaselineReplay', onlineBaselineReplay],
 ];
 
 export async function run(): Promise<void> {

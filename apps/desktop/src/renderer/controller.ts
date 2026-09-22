@@ -4,6 +4,7 @@ import type {
   IdPort,
   LogPort,
   PlayerPort,
+  ProviderCapability,
   Settings,
   StoragePort,
 } from '@auqw/application';
@@ -22,6 +23,34 @@ import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike } from './web-player.ts';
 
 /**
+ * The provider-slot → routing-capability map mirrored from the app's
+ * settings pickers: a slot value is only meaningful while a provider
+ * with that id declares one of the slot's capabilities.
+ */
+const SLOT_CAPABILITIES = {
+  catalogProvider: ['catalog.search'],
+  playbackProvider: ['playback.resolve'],
+  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
+  radioProvider: ['radio.seed'],
+} as const;
+
+/** First provider declaring the slot's capability — the shipped id
+ *  preferred, then any declarer; null when nothing can serve it. */
+function pickProvider(
+  providers: readonly PluginProvider[],
+  capabilities: readonly ProviderCapability[],
+  preferred: string,
+): string | null {
+  const declares = (p: PluginProvider) =>
+    capabilities.some((capability) => p.capabilities.includes(capability));
+  return (
+    providers.find((p) => p.id === preferred && declares(p))?.id ??
+    providers.find(declares)?.id ??
+    null
+  );
+}
+
+/**
  * Defaults for a fresh install — identical to the mobile controller's
  * (docs/specs/providers.md: quality ≈ 128 kbps inside the 1–512 bound,
  * storefront null defers to system-locale → API-default resolution,
@@ -29,29 +58,106 @@ import type { MediaSessionLike } from './web-player.ts';
  * The provider slots are derived per boot: the constructor requires
  * the defaults to name injected providers, and a runtime plugin dir
  * may lack the mobile bundle's exact ids — prefer the shipped ids,
- * else the first provider declaring the slot's capability.
+ * else the first provider declaring the slot's capability. A set with
+ * no declarer for a required slot cannot boot — an id alone would
+ * only route every search/playback into `unsupported`.
  */
 function defaultSettings(
   providers: readonly PluginProvider[],
 ): Settings {
-  const pick = (
-    capability: 'catalog.search' | 'playback.resolve',
-    preferred: string,
-  ): string =>
-    providers.find(
-      (p) => p.id === preferred && p.capabilities.includes(capability),
-    )?.id ??
-    providers.find((p) => p.capabilities.includes(capability))?.id ??
-    providers[0]?.id ??
-    '';
+  const catalog = pickProvider(
+    providers,
+    SLOT_CAPABILITIES.catalogProvider,
+    'itunes',
+  );
+  const playback = pickProvider(
+    providers,
+    SLOT_CAPABILITIES.playbackProvider,
+    'youtube-music',
+  );
+  const missing = [
+    ...(catalog === null ? (['catalog.search'] as const) : []),
+    ...(playback === null ? (['playback.resolve'] as const) : []),
+  ];
+  if (catalog === null || playback === null) {
+    throw new Error(
+      `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
+    );
+  }
   return {
-    catalogProvider: pick('catalog.search', 'itunes'),
-    playbackProvider: pick('playback.resolve', 'youtube-music'),
+    catalogProvider: catalog,
+    playbackProvider: playback,
     storefront: null,
     qualityKbps: 128,
     theme: 'system',
     prefetch: true,
   };
+}
+
+/**
+ * Reconciles restored settings against the providers this boot loaded:
+ * persisted slots name ids picked under an earlier plugin dir, and a
+ * removed plugin strands every op routed to it. Required slots are
+ * repicked through the capability map (a declarer is guaranteed by the
+ * boot gate); optional overrides drop to `null` (auto routing) rather
+ * than resurrecting a provider that cannot serve them. Returns null
+ * when nothing needed repair.
+ */
+function repairedSettings(
+  settings: Settings,
+  providers: readonly PluginProvider[],
+): Settings | null {
+  const declares = (
+    id: string | null | undefined,
+    capabilities: readonly ProviderCapability[],
+  ): boolean => {
+    if (id === null || id === undefined) {
+      return false;
+    }
+    const provider = providers.find((p) => p.id === id);
+    return (
+      provider !== undefined &&
+      capabilities.some((capability) =>
+        provider.capabilities.includes(capability),
+      )
+    );
+  };
+  const next = { ...settings };
+  let changed = false;
+  if (!declares(settings.catalogProvider, SLOT_CAPABILITIES.catalogProvider)) {
+    const repaired = pickProvider(
+      providers,
+      SLOT_CAPABILITIES.catalogProvider,
+      'itunes',
+    );
+    if (repaired !== null) {
+      next.catalogProvider = repaired;
+      changed = true;
+    }
+  }
+  if (
+    !declares(settings.playbackProvider, SLOT_CAPABILITIES.playbackProvider)
+  ) {
+    const repaired = pickProvider(
+      providers,
+      SLOT_CAPABILITIES.playbackProvider,
+      'youtube-music',
+    );
+    if (repaired !== null) {
+      next.playbackProvider = repaired;
+      changed = true;
+    }
+  }
+  for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
+    if (
+      settings[slot] != null &&
+      !declares(settings[slot], SLOT_CAPABILITIES[slot])
+    ) {
+      next[slot] = null;
+      changed = true;
+    }
+  }
+  return changed ? next : null;
 }
 
 /**
@@ -181,6 +287,9 @@ export async function createSessionController(
   };
   const subscribeOnline = (listener: (online: boolean) => void): (() => void) => {
     onlineListeners.add(listener);
+    // Emit the settled value — a subscriber that mounts after the
+    // baseline edge must not wait for the next transition.
+    listener(lastOnline);
     return () => {
       onlineListeners.delete(listener);
     };
@@ -210,6 +319,14 @@ export async function createSessionController(
   // restore() never throws — its Result surfaces through session state
   // as 'restore-failed'.
   await session.restore();
+  const restored = session.snapshot();
+  if (restored.type === 'ready') {
+    const repaired = repairedSettings(restored.settings, providers);
+    if (repaired !== null) {
+      // Persist the reconciliation so the next boot restores clean.
+      await session.updateSettings(repaired);
+    }
+  }
 
   return {
     session,
