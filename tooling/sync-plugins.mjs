@@ -31,7 +31,18 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCK = join(ROOT, 'providers.lock.json');
-const OUT = join(ROOT, 'apps/mobile/assets/plugins');
+// Optional first arg: output dir relative to the repo root (desktop's
+// packaged plugin set, for example). The default keeps the mobile path.
+const outArg = process.argv[2];
+const OUT = outArg === undefined ? join(ROOT, 'apps/mobile/assets/plugins') : resolve(ROOT, outArg);
+if (!OUT.startsWith(ROOT)) {
+  throw new Error(`sync-plugins: output dir must stay inside the repo: ${outArg}`);
+}
+// The spin conformance guest is a fuel-gate test plugin — ship it only
+// in the default sync (mobile gate) or behind --conformance, never in a
+// packaged consumer artifact's provider list.
+const syncSpin =
+  outArg === undefined || process.argv.includes('--conformance');
 
 // Resolve a lock-relative source path. On a case-sensitive filesystem a
 // sibling checkout may carry different casing than the lock expects
@@ -208,16 +219,18 @@ for (const plugin of lock.plugins) {
 }
 
 // Spin conformance guest (fuel gate).
-const spinPath = join(ROOT, 'sdk/conformance/spin/spin.wasm');
-const spin = readFileSync(spinPath);
-const spinManifest = {
-  id: 'spin',
-  version: '0.1.0',
-  abi: lock.abi,
-  capabilities: ['playback.resolve'],
-  permissions: [],
-  artifact: { path: 'spin.wasm', digest: sha256(spin) },
-};
-copyFileSync(spinPath, join(OUT, 'spin.wasm'));
-writeFileSync(join(OUT, 'spin.manifest.json'), JSON.stringify(spinManifest));
-console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
+if (syncSpin) {
+  const spinPath = join(ROOT, 'sdk/conformance/spin/spin.wasm');
+  const spin = readFileSync(spinPath);
+  const spinManifest = {
+    id: 'spin',
+    version: '0.1.0',
+    abi: lock.abi,
+    capabilities: ['playback.resolve'],
+    permissions: [],
+    artifact: { path: 'spin.wasm', digest: sha256(spin) },
+  };
+  copyFileSync(spinPath, join(OUT, 'spin.wasm'));
+  writeFileSync(join(OUT, 'spin.manifest.json'), JSON.stringify(spinManifest));
+  console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
+}

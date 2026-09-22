@@ -1,5 +1,11 @@
 # Android packaging plan
 
+**Status: Open** — plan awaiting ratification in the docs-repo decision
+log (`../docs/decisions.md`, not vendored here). Every "recommend" below
+is a proposal, not a settled choice; each carries its reopen condition.
+Once ratified, the picked path moves into the decision log and this doc
+keeps only the how-to.
+
 Current state: `app.config.ts` pins `com.vehicoule.auqw` / `version: 0.1.0`;
 no `eas.json`, no checked-in `android/` (CNG — `expo prebuild` regenerates
 it, gitignored). A debug APK already builds locally per `README.md`
@@ -23,6 +29,9 @@ Every Android artifact needs, in order:
    icons.
 
 ## Path A — EAS Build (recommended for distribution)
+
+*Open — vs Path B; reopen if the project moves off Expo-hosted builds
+(cost, offline CI, or an org-wide no-SaaS rule).*
 
 Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
 `app.config.ts`). Drop in `apps/mobile/eas.json`:
@@ -112,6 +121,10 @@ plugin**, not a hand-edit:
 
 ## Signing strategy — what to ratify
 
+*Open — ratify before the first distributed artifact; reopen when a
+distribution channel is picked (Play vs direct APK), because "upload
+key" only makes sense under Play App Signing.*
+
 - **Upload key, not a shared "release" key**: Play App Signing holds the
   app-signing key at Google; our keystore is only the upload key — one
   generated key, stored outside the repo (EAS-managed or
@@ -125,6 +138,9 @@ plugin**, not a hand-edit:
   not from APK signatures.
 
 ## Versioning
+
+*Open — one owner for `versionCode` must be picked before any release
+build; reopen if the EAS-vs-local decision flips.*
 
 - `version` (semver, user-facing): `app.config.ts` `version` is the
   single source of truth (kept in step with `package.json`

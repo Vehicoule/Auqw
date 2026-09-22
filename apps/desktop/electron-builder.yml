@@ -22,9 +22,14 @@ asarUnpack:
 # crates/node-bindings builds the cdylib libauqw_node_bindings.so; the
 # packaged utility host scans process.resourcesPath for
 # auqw_node_bindings.node (see src/utility/host.ts bindingsCandidates).
+# `plugins/` is the synced provider set (tooling/sync-plugins.mjs
+# apps/desktop/plugins) — the fork env defaults AUQW_PLUGIN_DIR to it
+# in packaged mode (src/main/index.ts utilityEnv).
 extraResources:
   - from: ../../target/release/libauqw_node_bindings.so
     to: auqw_node_bindings.node
+  - from: plugins
+    to: plugins
 
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
