@@ -9,7 +9,7 @@ import type {
   TrackMetadata,
 } from '../domain.ts';
 import type { ClockPort } from '../ports/clock.ts';
-import type { IdPort } from '../ports/runtime.ts';
+import type { IdPort, RandomPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
 import type {
   ConnectivityPort,
@@ -62,6 +62,25 @@ export class SequenceIds implements IdPort {
   next(prefix: string): string {
     this.#next += 1;
     return `${prefix}-${this.#next}`;
+  }
+}
+
+/** Deterministic RandomPort: cycles the given [0, 1) draws. */
+export class SequenceRandom implements RandomPort {
+  readonly #values: readonly number[];
+  #next = 0;
+
+  constructor(values: readonly number[] = [0]) {
+    if (values.length === 0 || values.some((v) => !(v >= 0 && v < 1))) {
+      throw new TypeError('random values must be in [0, 1)');
+    }
+    this.#values = Object.freeze([...values]);
+  }
+
+  unit(): number {
+    const value = this.#values[this.#next % this.#values.length] ?? 0;
+    this.#next += 1;
+    return value;
   }
 }
 

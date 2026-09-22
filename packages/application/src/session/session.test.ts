@@ -22,6 +22,7 @@ import type { OperationContext } from '../cancellation.ts';
 import { CancellationSource } from '../cancellation.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { ProviderPort } from '../ports/provider.ts';
+import type { RandomPort } from '../ports/runtime.ts';
 import { Session } from './session.ts';
 import type { ReadySession, SessionState } from './session.ts';
 import {
@@ -31,6 +32,7 @@ import {
   FakeProvider,
   FakeStorage,
   SequenceIds,
+  SequenceRandom,
 } from '../testing/fakes.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 
@@ -154,6 +156,7 @@ function rig(
   extraProviders: ProviderPort[] = [],
   localPlayback?: Map<string, string>,
   online?: () => boolean,
+  random: RandomPort = new SequenceRandom(),
 ): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
@@ -170,6 +173,7 @@ function rig(
     providers: [itunes, ytm, ...extraProviders],
     clock,
     ids: new SequenceIds(),
+    random,
     log,
     defaults: SETTINGS,
     localPlaybackFor: (recordingId) => localPlayback?.get(recordingId) ?? null,
@@ -1399,6 +1403,7 @@ async function portThrows(): Promise<void> {
     providers: [new FakeProvider('itunes'), new FakeProvider('youtube-music')],
     clock: new FakeClock(0),
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: SETTINGS,
   });
@@ -1433,6 +1438,7 @@ async function portThrows(): Promise<void> {
     providers: [new FakeProvider('itunes'), badProvider],
     clock: new FakeClock(0),
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: SETTINGS,
   });
@@ -2341,6 +2347,7 @@ async function deadClockSkipsPort(): Promise<void> {
     ],
     clock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: SETTINGS,
   });
@@ -2388,6 +2395,7 @@ async function prepareTimerInternal(): Promise<void> {
     ],
     clock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: SETTINGS,
   });
@@ -3130,6 +3138,37 @@ async function playRecordingsFlow(): Promise<void> {
   );
 }
 
+async function playMetadataShuffleDraws(): Promise<void> {
+  // Ranks a=0.8, b=0.1, c=0.5 sort to b, c, a — the order is
+  // reproducible because entropy comes through the injected port.
+  const r = rig(
+    persisted(),
+    [],
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1, 0.5]),
+  );
+  await restoreOk(r);
+  const res = r.session.playMetadata(
+    [
+      meta('youtube-music', 'a', 'A', 'Artist', 200_000),
+      meta('youtube-music', 'b', 'B', 'Artist', 200_000),
+      meta('youtube-music', 'c', 'C', 'Artist', 200_000),
+    ],
+    { shuffle: true },
+  );
+  await pump();
+  assertDeepEqual(
+    readyOf(r).queue.occurrences.map((o) => o.selectedRef?.id),
+    ['b', 'c', 'a'],
+    'shuffle order follows injected draws',
+  );
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-shuffle'));
+  r.player.settlePrepare(ok('req-shuffle'));
+  assert((await res).ok, 'playMetadata failed');
+}
+
 async function occurrencePinPlayed(): Promise<void> {
   // A pin for the active playback provider plays verbatim: no
   // candidates round, no mapping required, no clobber.
@@ -3577,6 +3616,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['entityPageFlow', entityPageFlow],
   ['ensureRecordingFlow', ensureRecordingFlow],
   ['playRecordingsFlow', playRecordingsFlow],
+  ['playMetadataShuffleDraws', playMetadataShuffleDraws],
   ['occurrencePinPlayed', occurrencePinPlayed],
   ['occurrencePinProjection', occurrencePinProjection],
   ['foreignPinFallsBack', foreignPinFallsBack],

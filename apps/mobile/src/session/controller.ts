@@ -42,7 +42,12 @@ import {
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createExpoTagReader } from '../adapters/expo-tag-reader.ts';
 import { createExpoTransfer } from '../adapters/expo-transfer.ts';
-import { createClock, createIds, createLog } from '../adapters/runtime.ts';
+import {
+  createClock,
+  createIds,
+  createLog,
+  createRandom,
+} from '../adapters/runtime.ts';
 
 // Metro asset requires must be static literals. All pairs are
 // produced by tooling/sync-plugins.mjs per providers.lock.json.
@@ -253,6 +258,7 @@ export async function createSessionController(
     providers,
     clock,
     ids,
+    random: createRandom(),
     log,
     defaults: DEFAULT_SETTINGS,
     // Android-only: the auqw-expo player attaches local files; the
