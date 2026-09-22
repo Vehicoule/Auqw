@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'"
+      content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; media-src 'self' http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:*"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>auqw</title>
@@ -47,6 +47,68 @@
       .error {
         color: #e8837a;
       }
+      #player {
+        margin-top: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid #2c2e36;
+      }
+      #player label {
+        display: block;
+        margin: 0.5rem 0 0.2rem;
+        font-size: 0.75rem;
+        color: #a8abb3;
+      }
+      #player input[type='text'],
+      #player select {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1c1e24;
+        color: #e8e8ea;
+        border: 1px solid #2c2e36;
+        border-radius: 4px;
+        padding: 0.4rem 0.5rem;
+        font: inherit;
+        font-size: 0.8rem;
+      }
+      #player .row {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.75rem;
+      }
+      #player button {
+        background: #2c2e36;
+        color: #e8e8ea;
+        border: none;
+        border-radius: 4px;
+        padding: 0.4rem 0.8rem;
+        font: inherit;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      #player button:hover {
+        background: #3a3d47;
+      }
+      #player .gate {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        margin-top: 0.6rem;
+        font-size: 0.75rem;
+        color: #a8abb3;
+      }
+      #player-state {
+        margin-top: 0.6rem;
+        font-size: 0.8rem;
+        color: #e8e8ea;
+      }
+      #events {
+        margin: 0.75rem 0 0;
+        padding-left: 1.2rem;
+        font-size: 0.72rem;
+        color: #a8abb3;
+        max-height: 12rem;
+        overflow-y: auto;
+      }
     </style>
   </head>
   <body>
@@ -56,6 +118,24 @@
         <dt>ipc</dt>
         <dd>connecting…</dd>
       </dl>
+      <section id="player">
+        <label for="source">source (provider ref or dev url)</label>
+        <input id="source" type="text" placeholder="track id or https://…file" />
+        <label for="provider">provider</label>
+        <select id="provider"></select>
+        <label class="gate">
+          <input id="dev-gate" type="checkbox" checked />
+          dev-gate: prepare a bare URL (skips provider resolve)
+        </label>
+        <div class="row">
+          <button id="prepare" type="button">prepare</button>
+          <button id="play" type="button">play</button>
+          <button id="pause" type="button">pause</button>
+          <button id="stop" type="button">stop</button>
+        </div>
+        <div id="player-state">idle</div>
+        <ul id="events"></ul>
+      </section>
     </main>
     <script src="./index.js"></script>
   </body>

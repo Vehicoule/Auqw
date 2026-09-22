@@ -6,6 +6,12 @@ import type {
   SecureDeleteArgs,
   SecureGetArgs,
   SecureSetArgs,
+  StreamCancelArgs,
+  StreamDevPrepareArgs,
+  StreamHandleArgs,
+  StreamOpenArgs,
+  StreamPrepareArgs,
+  StreamReadArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
 import {
@@ -20,6 +26,12 @@ import {
   isStorageExecuteArgs,
   isStorageQueryArgs,
   isStorageTxArgs,
+  isStreamCancelArgs,
+  isStreamDevPrepareArgs,
+  isStreamHandleArgs,
+  isStreamOpenArgs,
+  isStreamPrepareArgs,
+  isStreamReadArgs,
   isUtilityPingArgs,
 } from '../shared/contract.ts';
 import type { ResultEnvelope } from '../shared/envelope.ts';
@@ -153,6 +165,66 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.utilityPing,
     channel(isUtilityPingArgs, (args: UtilityPingArgs, deps) =>
       deps.utility.request(CHANNELS.utilityPing, args),
+    ),
+  ],
+  [
+    CHANNELS.hostPlugins,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.hostPlugins, undefined),
+    ),
+  ],
+  [
+    CHANNELS.streamPrepare,
+    channel(isStreamPrepareArgs, (args: StreamPrepareArgs, deps) =>
+      deps.utility.request(CHANNELS.streamPrepare, args),
+    ),
+  ],
+  [
+    CHANNELS.streamDevPrepare,
+    channel(isStreamDevPrepareArgs, (args: StreamDevPrepareArgs, deps) =>
+      deps.utility.request(CHANNELS.streamDevPrepare, args),
+    ),
+  ],
+  [
+    CHANNELS.streamServeUrl,
+    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
+      deps.utility.request(CHANNELS.streamServeUrl, args),
+    ),
+  ],
+  [
+    CHANNELS.streamOpen,
+    channel(isStreamOpenArgs, (args: StreamOpenArgs, deps) =>
+      deps.utility.request(CHANNELS.streamOpen, args),
+    ),
+  ],
+  [
+    CHANNELS.streamRead,
+    channel(isStreamReadArgs, (args: StreamReadArgs, deps) =>
+      deps.utility.request(CHANNELS.streamRead, args),
+    ),
+  ],
+  [
+    CHANNELS.streamClose,
+    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
+      deps.utility.request(CHANNELS.streamClose, args),
+    ),
+  ],
+  [
+    CHANNELS.streamRelease,
+    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
+      deps.utility.request(CHANNELS.streamRelease, args),
+    ),
+  ],
+  [
+    CHANNELS.streamMarks,
+    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
+      deps.utility.request(CHANNELS.streamMarks, args),
+    ),
+  ],
+  [
+    CHANNELS.streamCancel,
+    channel(isStreamCancelArgs, (args: StreamCancelArgs, deps) =>
+      deps.utility.request(CHANNELS.streamCancel, args),
     ),
   ],
   // Storage channels forward verbatim to the utility process — it
