@@ -123,6 +123,7 @@ function recording(partial: {
       },
     ],
     mappings: [],
+    provenance: 'provider',
   };
 }
 

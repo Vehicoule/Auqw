@@ -1,7 +1,7 @@
 import type { CancellationSignal } from '../cancellation.ts';
 import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
-import { appError, ok } from '../errors.ts';
+import { appError, err, ok } from '../errors.ts';
 import type {
   ArtworkRef,
   EntityRef,
@@ -11,6 +11,21 @@ import type {
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
+import type {
+  ConnectivityPort,
+  ConnectivitySnapshot,
+} from '../ports/connectivity.ts';
+import type {
+  MediaTransferPort,
+  TransferSink,
+} from '../ports/media-transfer.ts';
+import type {
+  FileFingerprint,
+  LocalEntry,
+  LocalTags,
+  PickedFolder,
+  TagReaderPort,
+} from '../ports/tag-reader.ts';
 import type {
   AttemptTrace,
   PlayerEvent,
@@ -35,7 +50,7 @@ import type {
   StorageBatch,
   StoragePort,
 } from '../ports/storage.ts';
-import { isExportDocument } from '../library/library.ts';
+import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
 
 function isSafeNonNegative(value: unknown): value is number {
@@ -747,6 +762,19 @@ export class FakeStorage implements StoragePort {
       this.#failWith = null;
       return Promise.resolve({ ok: false, error });
     }
+    if (
+      batch.recordings !== undefined &&
+      batch.recordingsMerge !== undefined
+    ) {
+      return Promise.resolve(
+        err(
+          appError(
+            'internal',
+            'commit: recordings and recordingsMerge are exclusive',
+          ),
+        ),
+      );
+    }
     if (this.#deferNextCommit) {
       // A held commit is not durable yet — neither the stored state nor
       // the commits log observe it until settleCommit resolves it.
@@ -754,22 +782,29 @@ export class FakeStorage implements StoragePort {
       const deferred = new Deferred<Result<void>>();
       this.#commitDeferreds.push(deferred);
       return deferred.promise.then((settled) => {
-        if (settled.ok) {
-          this.#applyCommit(batch, context);
+        if (!settled.ok) {
+          return settled;
         }
-        return settled;
+        return this.#applyCommit(batch, context);
       });
     }
-    this.#applyCommit(batch, context);
-    return Promise.resolve(ok(undefined));
+    return Promise.resolve(this.#applyCommit(batch, context));
   }
 
-  #applyCommit(batch: StorageBatch, context: OperationContext): void {
+  #applyCommit(
+    batch: StorageBatch,
+    context: OperationContext,
+  ): Result<void> {
+    // The recorded batch is JSON-cloned; a function field survives
+    // only as its applied result, so the merge runs on live state.
     this.commits.push({ batch: this.#clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
     const staged = this.#clone(batch);
-    this.#state = {
-      recordings: staged.recordings ?? this.#state.recordings,
+    const merged: PersistedState = {
+      recordings:
+        batch.recordingsMerge !== undefined
+          ? batch.recordingsMerge(this.#state.recordings)
+          : (staged.recordings ?? this.#state.recordings),
       likes: staged.likes ?? this.#state.likes,
       entities: staged.entities ?? this.#state.entities,
       entitySourceRefs:
@@ -782,14 +817,26 @@ export class FakeStorage implements StoragePort {
       matchReviews: staged.matchReviews ?? this.#state.matchReviews,
       lyricsCache: staged.lyricsCache ?? this.#state.lyricsCache,
       artworkCache: staged.artworkCache ?? this.#state.artworkCache,
+      downloads: staged.downloads ?? this.#state.downloads,
+      localSources: staged.localSources ?? this.#state.localSources,
+      localFiles: staged.localFiles ?? this.#state.localFiles,
       queue: staged.queue ?? this.#state.queue,
       settings: staged.settings ?? this.#state.settings,
     };
+    // Mirror sqlite: validate the merged document before any mutation
+    // so tests can't commit states the real backend would reject.
+    if (!isPersistedState(merged)) {
+      return err(
+        appError('invalid-response', 'commit batch failed validation'),
+      );
+    }
+    this.#state = merged;
     if (staged.attempts !== undefined) {
       this.#attempts = [...this.#attempts, ...staged.attempts].slice(
         -FakeStorage.MAX_ATTEMPTS,
       );
     }
+    return ok(undefined);
   }
 
   /** Diagnostics only: newest-first, capped at 500 stored traces. */
@@ -886,6 +933,8 @@ export class FakeStorage implements StoragePort {
       ...this.#state,
       recordings: staged.recordings.map((rec) => ({
         ...rec,
+        // Pre-slice-3 exports carry no provenance — 'provider'.
+        provenance: rec.provenance ?? 'provider',
         sourceRefs: staged.sourceRefs
           .filter((row) => row.recordingId === rec.id)
           .map((row) => row.ref),
@@ -902,6 +951,8 @@ export class FakeStorage implements StoragePort {
       playCounts: staged.playCounts,
       matchReviews: staged.matchReviews,
       lyricsCache: [],
+      downloads: [],
+      localFiles: [],
       queue: {
         revision: this.#state.queue.revision + 1,
         occurrences: [],
@@ -917,5 +968,270 @@ export class FakeStorage implements StoragePort {
   /** The next commit fails with the given typed error once. */
   failNext(error: AppError): void {
     this.#failWith = error;
+  }
+}
+
+// ---- slice 3 ports --------------------------------------------------------
+
+/** One fake sink's scripted outcome, consumed in begin order. */
+export type FakeSinkScript = {
+  /** Bytes the sink "has" pre-resume (the .part prefix length). */
+  partialBytes?: number;
+  /** Fail `write` calls after this many successful writes. */
+  failWritesAfter?: number;
+  writeError?: AppError;
+  /** Fail `commit` with this error once. */
+  commitError?: AppError;
+  /** Fail `finalize` with this error once (checksum mismatch etc.). */
+  finalizeError?: AppError;
+  /** Digest `finalize` reports as the real file hash. */
+  digest?: string;
+};
+
+export class FakeTransferSink implements TransferSink {
+  #script: Omit<Required<FakeSinkScript>, 'commitError' | 'finalizeError'> & {
+    commitError: AppError | null;
+    finalizeError: AppError | null;
+  };
+  #bytes = 0;
+  #writes = 0;
+  #committed = 0;
+  #closed = false;
+  readonly writesLog: number[] = [];
+  readonly commitsLog: number[] = [];
+  finalizedWith: string | null = null;
+  abortedKeep: boolean | null = null;
+
+  constructor(script: FakeSinkScript = {}, resumeAtBytes = 0) {
+    const partial = script.partialBytes ?? resumeAtBytes;
+    this.#script = {
+      partialBytes: partial,
+      failWritesAfter: script.failWritesAfter ?? Number.MAX_SAFE_INTEGER,
+      writeError:
+        script.writeError ?? appError('transient', 'write failed'),
+      // Errors default to null — a plain script succeeds end to end.
+      commitError: script.commitError ?? null,
+      finalizeError: script.finalizeError ?? null,
+      digest: script.digest ?? 'f'.repeat(64),
+    };
+    this.#bytes = partial;
+    this.#committed = partial;
+  }
+
+  get bytes(): number {
+    return this.#bytes;
+  }
+
+  get committed(): number {
+    return this.#committed;
+  }
+
+  async write(bytes: Uint8Array): Promise<Result<void>> {
+    if (this.#closed) {
+      return err(appError('invalid-response', 'sink is closed'));
+    }
+    this.#writes += 1;
+    if (this.#writes > this.#script.failWritesAfter) {
+      return err(this.#script.writeError);
+    }
+    this.#bytes += bytes.length;
+    this.writesLog.push(bytes.length);
+    return ok(undefined);
+  }
+
+  async commit(): Promise<Result<number>> {
+    if (this.#closed) {
+      return err(appError('invalid-response', 'sink is closed'));
+    }
+    if (this.#script.commitError !== null) {
+      const error = this.#script.commitError;
+      this.#script.commitError = null;
+      return err(error);
+    }
+    this.#committed = this.#bytes;
+    this.commitsLog.push(this.#committed);
+    return ok(this.#committed);
+  }
+
+  async finalize(expected: string | null): Promise<Result<string>> {
+    if (this.#closed) {
+      return err(appError('invalid-response', 'sink is closed'));
+    }
+    if (this.#script.finalizeError !== null) {
+      const error = this.#script.finalizeError;
+      this.#script.finalizeError = null;
+      return err(error);
+    }
+    this.finalizedWith = expected;
+    this.#closed = true;
+    return ok(this.#script.digest);
+  }
+
+  async abort(keep: boolean): Promise<Result<void>> {
+    this.abortedKeep = keep;
+    this.#closed = true;
+    return ok(undefined);
+  }
+}
+
+export class FakeTransfer implements MediaTransferPort {
+  /** begin() scripts, consumed in order. */
+  #scripts: FakeSinkScript[] = [];
+  #beginError: AppError | null = null;
+  readonly sinks: FakeTransferSink[] = [];
+  readonly beginCalls: { destPath: string; resumeAtBytes: number }[] = [];
+  readonly removedFiles: string[] = [];
+  dirReady = false;
+  usageBytes = 0;
+  free = Number.MAX_SAFE_INTEGER;
+  /** stat() overrides keyed by file name. */
+  readonly statResults = new Map<
+    string,
+    { exists: boolean; bytes: number | null }
+  >();
+  sweptPartials = 0;
+  sweepCalls: string[][] = [];
+
+  /** Queue a sink script for the next begin(). */
+  enqueueSink(script: FakeSinkScript = {}): void {
+    this.#scripts.push(script);
+  }
+
+  failNextBegin(error: AppError): void {
+    this.#beginError = error;
+  }
+
+  async ensureDir(_signal: CancellationSignal): Promise<Result<void>> {
+    this.dirReady = true;
+    return ok(undefined);
+  }
+
+  async begin(
+    input: { destPath: string; resumeAtBytes: number },
+    _signal: CancellationSignal,
+  ): Promise<Result<TransferSink>> {
+    this.beginCalls.push({ ...input });
+    if (this.#beginError !== null) {
+      const error = this.#beginError;
+      this.#beginError = null;
+      return err(error);
+    }
+    const sink = new FakeTransferSink(
+      this.#scripts.shift() ?? {},
+      input.resumeAtBytes,
+    );
+    this.sinks.push(sink);
+    return ok(sink);
+  }
+
+  async sweepPartials(
+    keepPaths: readonly string[],
+    _signal: CancellationSignal,
+  ): Promise<Result<number>> {
+    this.sweepCalls.push([...keepPaths]);
+    return ok(this.sweptPartials);
+  }
+
+  async usage(_signal: CancellationSignal): Promise<Result<number>> {
+    return ok(this.usageBytes);
+  }
+
+  async freeBytes(_signal: CancellationSignal): Promise<Result<number>> {
+    return ok(this.free);
+  }
+
+  async removeFile(
+    name: string,
+    _signal: CancellationSignal,
+  ): Promise<Result<void>> {
+    this.removedFiles.push(name);
+    return ok(undefined);
+  }
+
+  async stat(
+    name: string,
+    _signal: CancellationSignal,
+  ): Promise<Result<{ exists: boolean; bytes: number | null }>> {
+    return ok(this.statResults.get(name) ?? { exists: false, bytes: null });
+  }
+}
+
+export class FakeTagReader implements TagReaderPort {
+  readonly entries = new Map<string, LocalEntry[]>();
+  readonly tags = new Map<string, LocalTags>();
+  readonly fingerprints = new Map<string, FileFingerprint>();
+  pickResult: Result<PickedFolder> = err(
+    appError('no-result', 'folder pick cancelled'),
+  );
+  pickCalls = 0;
+  enumerateCalls: string[] = [];
+  fingerprintCalls: string[][] = [];
+  readTagsCalls: string[][] = [];
+
+  async pickFolder(
+    _signal: CancellationSignal,
+  ): Promise<Result<PickedFolder>> {
+    this.pickCalls += 1;
+    return this.pickResult;
+  }
+
+  async enumerate(
+    treeUri: string,
+    _signal: CancellationSignal,
+  ): Promise<Result<readonly LocalEntry[]>> {
+    this.enumerateCalls.push(treeUri);
+    return ok(this.entries.get(treeUri) ?? []);
+  }
+
+  async fingerprint(
+    _treeUri: string,
+    docIds: readonly string[],
+    _signal: CancellationSignal,
+  ): Promise<Result<readonly (FileFingerprint | null)[]>> {
+    this.fingerprintCalls.push([...docIds]);
+    return ok(docIds.map((id) => this.fingerprints.get(id) ?? null));
+  }
+
+  async readTags(
+    _treeUri: string,
+    docIds: readonly string[],
+    _signal: CancellationSignal,
+  ): Promise<Result<readonly (LocalTags | null)[]>> {
+    this.readTagsCalls.push([...docIds]);
+    return ok(docIds.map((id) => this.tags.get(id) ?? null));
+  }
+
+  docUri(treeUri: string, docId: string): string {
+    return `${treeUri}/document/${docId}`;
+  }
+}
+
+export class FakeConnectivity implements ConnectivityPort {
+  state: ConnectivitySnapshot = { online: true, metered: false };
+  snapshotCalls = 0;
+  readonly listeners = new Set<
+    (snapshot: ConnectivitySnapshot) => void
+  >();
+
+  async snapshot(): Promise<Result<ConnectivitySnapshot>> {
+    this.snapshotCalls += 1;
+    return ok({ ...this.state });
+  }
+
+  subscribe(
+    listener: (snapshot: ConnectivitySnapshot) => void,
+  ): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** Push a new state to all subscribers (edge-only, like the port). */
+  set(state: ConnectivitySnapshot): void {
+    this.state = state;
+    for (const listener of this.listeners) {
+      listener({ ...state });
+    }
   }
 }

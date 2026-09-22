@@ -73,6 +73,7 @@ function recording(partial: {
       partial.versionLabels ?? extractVersionLabels(partial.title, explicit),
     sourceRefs: [],
     mappings: [],
+    provenance: 'provider',
   };
 }
 

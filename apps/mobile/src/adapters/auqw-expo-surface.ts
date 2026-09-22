@@ -139,6 +139,12 @@ export type AuqwExpoPlayerLike = {
     attemptId: string,
     queueRev: number,
   ): Promise<string>;
+  /**
+   * provider:'local' attach — registers an `lf-*` handle for a
+   * device-owned file path or content URI. No stream session:
+   * release/cancel are bookkeeping no-ops.
+   */
+  prepareLocal(path: string, mime?: string | null): Promise<string>;
   play(
     handle: string,
     attemptId: string,
@@ -251,3 +257,69 @@ export function nativeError(thrown: unknown): AppError {
       : 'native call failed';
   return appError(kind, message);
 }
+
+// ---------------------------------------------------------------------------
+// Connectivity monitor — mirrors the auqw-expo `connectivity*` surface.
+// ---------------------------------------------------------------------------
+
+export type AuqwConnectivityEvent = {
+  online: boolean;
+  metered: boolean;
+};
+
+export type AuqwConnectivityNative = {
+  connectivitySnapshot(): Promise<AuqwConnectivityEvent>;
+  connectivityWatch(): void;
+  connectivityUnwatch(): void;
+  addConnectivityChangedListener(
+    listener: (event: AuqwConnectivityEvent) => void,
+  ): AuqwExpoSubscription;
+};
+
+// ---------------------------------------------------------------------------
+// TagReader — mirrors the auqw-expo `tag*`/`docUri` surface (slice 3).
+// ---------------------------------------------------------------------------
+
+export type AuqwTagEntryNative = {
+  docId: string;
+  name: string;
+  size: number;
+  mime: string;
+  /**
+   * DocumentsContract COLUMN_LAST_MODIFIED; null when the provider
+   * reports none. Older native builds may omit the key entirely.
+   */
+  modifiedMs?: number | null;
+};
+
+export type AuqwTagFingerprintNative = {
+  docId: string;
+  fingerprint: string;
+};
+
+export type AuqwTagTagsNative = {
+  docId: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  durationMs: number | null;
+  genre: string | null;
+};
+
+export type AuqwDownloadsNative = {
+  downloadsActiveChanged(active: number): Promise<void>;
+};
+
+export type AuqwTagReaderNative = {
+  tagPickFolder(): Promise<{ treeUri: string; label: string }>;
+  tagEnumerate(treeUri: string): Promise<readonly AuqwTagEntryNative[]>;
+  tagFingerprint(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (AuqwTagFingerprintNative | null)[]>;
+  tagRead(
+    treeUri: string,
+    docIds: readonly string[],
+  ): Promise<readonly (AuqwTagTagsNative | null)[]>;
+  docUri(treeUri: string, docId: string): string;
+};

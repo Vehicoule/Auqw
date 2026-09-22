@@ -34,6 +34,9 @@ function state(): PersistedState {
     matchReviews: [],
     lyricsCache: [],
     artworkCache: [],
+    downloads: [],
+    localSources: [],
+    localFiles: [],
     queue: {
       revision: 0,
       occurrences: [],
@@ -148,8 +151,29 @@ async function storageTests(): Promise<void> {
   assert(again.ok && again.value.queue.revision === 0);
 
   // Clone-on-commit: mutating the batch after commit cannot alter it.
+  // The like's target must exist — the fake now validates the merged
+  // document exactly like sqlite does.
+  const target: PersistedState['recordings'][number] = {
+    id: 'r',
+    title: 'T',
+    artist: null,
+    album: null,
+    durationMs: 1000,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    isrc: null,
+    versionLabels: [],
+    sourceRefs: [{ provider: 'itunes', kind: 'track', id: 'i1' }],
+    mappings: [],
+    provenance: 'provider',
+  };
   const likes = [{ entityKind: 'track' as const, targetId: 'r', likedAtMs: 1 }];
-  const committed = await storage.commit({ likes }, ctx());
+  const committed = await storage.commit(
+    { recordings: [target], likes },
+    ctx(),
+  );
   assert(committed.ok);
   const first = likes[0];
   if (first !== undefined) {

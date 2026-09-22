@@ -2,6 +2,7 @@ import type { ThemeName } from '@auqw/design-tokens';
 import type {
   AppError,
   ArtworkRef,
+  DownloadProgress,
   Entity,
   EntityKind,
   EntityPage,
@@ -30,6 +31,14 @@ export type PlatformVariant = 'android' | 'ios';
 
 export type TrackRowState = 'available' | 'unavailable' | 'error';
 
+/** Owned-bytes state on a track row — honest download chip. */
+export type DownloadChip =
+  | 'idle'
+  | 'queued'
+  | 'downloading'
+  | 'stored'
+  | 'failed';
+
 export type TrackRowModel = {
   readonly key: string;
   readonly title: string;
@@ -41,6 +50,7 @@ export type TrackRowModel = {
   readonly playing: boolean;
   readonly state: TrackRowState;
   readonly note: string | null;
+  readonly download: DownloadChip | null;
 };
 
 export type PlayerStatus =
@@ -141,7 +151,7 @@ export type CollectionRowModel = {
 };
 
 export type CollectionModel = {
-  readonly key: 'liked' | 'top50' | 'history';
+  readonly key: 'liked' | 'top50' | 'history' | 'downloads';
   readonly title: string;
   readonly rows: readonly CollectionRowModel[];
 };
@@ -180,6 +190,7 @@ export type LibraryModel = {
     readonly liked: readonly CollectionRowModel[];
     readonly top50: readonly CollectionRowModel[];
     readonly history: readonly CollectionRowModel[];
+    readonly downloads: readonly CollectionRowModel[];
   };
   readonly cards: readonly LibraryCardModel[];
   readonly artists: readonly ArtistRailModel[];
@@ -624,6 +635,7 @@ export type TrackRowOptions = {
   readonly playing?: boolean;
   readonly state?: TrackRowState;
   readonly note?: string | null;
+  readonly download?: DownloadChip | null;
 };
 
 export function toTrackRowModel(
@@ -644,6 +656,7 @@ export function toTrackRowModel(
     playing: options.playing ?? false,
     state: options.state ?? 'available',
     note: options.note ?? null,
+    download: options.download ?? null,
   };
 }
 
@@ -662,6 +675,7 @@ export function toSearchRowModel(
     playing: false,
     state: 'available',
     note: null,
+    download: null,
   };
 }
 
@@ -755,7 +769,7 @@ export type QueueModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
-  readonly unavailableRecordingIds?: ReadonlySet<string>;
+  readonly unavailableRecordingIds?: ReadonlySet<string> | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
@@ -784,6 +798,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
           playing: current && queue.mode === 'playing',
           state: 'unavailable',
           note: 'unavailable',
+          download: null,
         }
         : {
           key: occurrence.occurrenceId,
@@ -799,6 +814,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
           playing: current && queue.mode === 'playing',
           state: unavailable.has(recording.id) ? 'unavailable' : 'available',
           note: unavailable.has(recording.id) ? 'unavailable' : null,
+          download: null,
         };
     return {
       occurrenceId: occurrence.occurrenceId,
@@ -858,6 +874,8 @@ export function entityIdForRef(
 
 export function toLibraryModel(input: {
   readonly recordings: readonly Recording[];
+  /** Live download rows — the downloads collection and row chips. */
+  readonly downloads?: readonly DownloadProgress[];
   readonly likes: readonly Like[];
   readonly playlists: readonly Playlist[];
   readonly playlistEntries: readonly PlaylistEntry[];
@@ -1016,9 +1034,11 @@ export function toLibraryModel(input: {
       {
         key: 'downloads',
         label: 'downloads',
-        count: 0,
-        enabled: false,
-        note: 'offline arrives in Slice 3',
+        count: (input.downloads ?? []).filter(
+          (d) => d.state === 'available',
+        ).length,
+        enabled: true,
+        note: null,
       },
       {
         key: 'top50',
@@ -1035,7 +1055,37 @@ export function toLibraryModel(input: {
         note: null,
       },
     ],
-    collectionRows: { liked: likedRows, top50, history },
+    collectionRows: {
+      liked: likedRows,
+      top50,
+      history,
+      downloads: (input.downloads ?? [])
+        .filter((d) => d.state !== 'removing')
+        .sort((a, b) =>
+          // Stored rows first, then in-flight, then failed; stable by
+          // recordingId inside a state.
+          chipRank(a.state) - chipRank(b.state) ||
+          a.recordingId.localeCompare(b.recordingId),
+        )
+        .flatMap((d) => {
+          const recording = byId.get(d.recordingId);
+          if (recording === undefined) {
+            return [];
+          }
+          return [
+            {
+              key: `dl-${d.downloadId}`,
+              recordingId: recording.id,
+              badge: downloadBadge(d),
+              row: toTrackRowModel(recording, {
+                key: `dl-${d.downloadId}`,
+                liked: liked.has(recording.id),
+                download: downloadChip(d.state),
+              }),
+            },
+          ];
+        }),
+    },
     cards,
     artists: [...rail.values()],
     recentlyAdded: items.slice(0, 3),
@@ -1045,10 +1095,47 @@ export function toLibraryModel(input: {
 
 export function toCollectionModel(
   model: LibraryModel,
-  key: 'liked' | 'top50' | 'history',
+  key: 'liked' | 'top50' | 'history' | 'downloads',
 ): CollectionModel {
-  const titles = { liked: 'liked', top50: 'top 50', history: 'history' } as const;
+  const titles = {
+    liked: 'liked',
+    top50: 'top 50',
+    history: 'history',
+    downloads: 'downloads',
+  } as const;
   return { key, title: titles[key], rows: model.collectionRows[key] };
+}
+
+function downloadChip(state: DownloadProgress['state']): DownloadChip {
+  switch (state) {
+    case 'requested':
+      return 'queued';
+    case 'transferring':
+      return 'downloading';
+    case 'available':
+      return 'stored';
+    default:
+      return 'failed';
+  }
+}
+
+function chipRank(state: DownloadProgress['state']): number {
+  return state === 'available'
+    ? 0
+    : state === 'transferring' || state === 'requested'
+      ? 1
+      : 2;
+}
+
+function downloadBadge(d: DownloadProgress): string {
+  if (
+    d.state === 'transferring' &&
+    d.totalBytes !== null &&
+    d.totalBytes > 0
+  ) {
+    return `${Math.min(99, Math.round((d.transferredBytes / d.totalBytes) * 100))}%`;
+  }
+  return downloadChip(d.state);
 }
 
 export function toPlaylistModel(input: {
@@ -1093,6 +1180,7 @@ export function toPlaylistModel(input: {
           playing: false,
           state: 'unavailable',
           note: 'unavailable',
+          download: null,
         }
         : toTrackRowModel(recording, {
           key: entry.entryId,
@@ -1229,6 +1317,20 @@ export function toHomeModel(input: {
 export function toSettingsModel(
   settings: Settings,
   diagnostics: DiagnosticsModel,
+  media: {
+    readonly storageText?: string | null;
+    readonly localFolderCount?: number | undefined;
+    readonly localSources?:
+      | readonly { sourceId: string; label: string }[]
+      | undefined;
+    readonly downloadCount?: number | undefined;
+    /**
+     * False where the platform has no tag-reader surface (iOS today)
+     * — the local-folder actions stay visible but disabled, never
+     * silently dead.
+     */
+    readonly localSupported?: boolean;
+  } = {},
 ): SettingsModel {
   return {
     theme: settings.theme,
@@ -1288,6 +1390,65 @@ export function toSettingsModel(
         value: settings.prefetch ? 'on' : 'off',
         kind: 'toggle',
         enabled: settings.prefetch,
+      },
+      {
+        key: 'downloadMetered',
+        label: 'downloads on cellular',
+        value: settings.downloadMetered ? 'on' : 'off',
+        kind: 'toggle',
+        enabled: settings.downloadMetered === true,
+      },
+      {
+        key: 'downloadStorage',
+        label: 'download storage',
+        value: media.storageText ?? '—',
+        kind: 'value',
+        enabled: true,
+      },
+      {
+        key: 'removeAllDownloads',
+        label: 'remove all downloads',
+        value:
+          media.downloadCount === undefined
+            ? null
+            : `${media.downloadCount}`,
+        kind: 'navigation',
+        enabled: (media.downloadCount ?? 0) > 0,
+      },
+      {
+        key: 'localSources',
+        label: 'local folders',
+        value:
+          media.localSupported === false
+            ? 'unsupported'
+            : media.localFolderCount === undefined
+              ? '—'
+              : `${media.localFolderCount}`,
+        kind: 'value',
+        enabled: true,
+      },
+      // One removal row per granted source — the plan's local-files
+      // "remove" affordance without a picker surface.
+      ...(media.localSources ?? []).map((source) => ({
+        key: `localSourceRemove:${source.sourceId}`,
+        label: `remove “${source.label}”`,
+        value: null,
+        kind: 'navigation' as const,
+        enabled: media.localSupported !== false,
+      })),
+      {
+        key: 'addLocalFolder',
+        label: 'add local folder',
+        value: null,
+        kind: 'navigation',
+        enabled: media.localSupported !== false,
+      },
+      {
+        key: 'rescanLocal',
+        label: 'rescan local folders',
+        value: null,
+        kind: 'navigation',
+        enabled: media.localSupported !== false,
       },
       {
         key: 'exportLibrary',

@@ -418,6 +418,7 @@ function recording(id: string, durationMs: number | null = 300_000): Recording {
     versionLabels: [],
     sourceRefs: [trackRef('itunes', `it-${id}`)],
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -434,6 +435,9 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
     matchReviews: partial.matchReviews ?? [],
     lyricsCache: partial.lyricsCache ?? [],
     artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? {
       revision: 0,
       occurrences: [],

@@ -424,13 +424,13 @@ function testLibraryAndSettings(): void {
   assertEqual(byKey.get('liked')?.enabled, true, 'liked tile live');
   assertEqual(
     byKey.get('downloads')?.enabled,
-    false,
-    'downloads stay honestly unavailable in Slice 2',
+    true,
+    'downloads tile is live in Slice 3',
   );
-  assert(
-    byKey.get('downloads')?.note !== null &&
-    byKey.get('downloads')?.note !== undefined,
-    'downloads tile must explain its disabled state',
+  assertEqual(
+    byKey.get('downloads')?.count,
+    0,
+    'downloads tile counts stored rows, not pending',
   );
   assertEqual(byKey.get('top50')?.enabled, true, 'top 50 tile live');
   assertEqual(byKey.get('history')?.enabled, true, 'history tile live');
@@ -478,6 +478,28 @@ function testLibraryAndSettings(): void {
   const model = toSettingsModel(fixtureSettings, fixtureDiagnostics);
   const prefetch = model.rows.find((r) => r.key === 'prefetch');
   assert(prefetch !== undefined && prefetch.kind === 'toggle');
+  // Platforms without a tag-reader surface (iOS) disable the
+  // local-folder actions — they stay visible, never dead-tappable.
+  const unsupported = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    localSupported: false,
+    localFolderCount: 2,
+    localSources: [{ sourceId: 's1', label: 'Music' }],
+  });
+  for (const key of ['addLocalFolder', 'rescanLocal', 'localSourceRemove:s1']) {
+    const row = unsupported.rows.find((r) => r.key === key);
+    assert(row !== undefined && row.enabled === false, `${key} disabled`);
+  }
+  assertEqual(
+    unsupported.rows.find((r) => r.key === 'localSources')?.value,
+    'unsupported',
+  );
+  const supported = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    localSupported: true,
+  });
+  assert(
+    supported.rows.find((r) => r.key === 'addLocalFolder')?.enabled === true,
+    'supported platform keeps actions live',
+  );
 }
 
 function testLibraryCards(): void {

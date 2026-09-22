@@ -23,12 +23,14 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
@@ -60,6 +62,7 @@ private const val EVENT_PREPARE_OUTCOME = "onPrepareOutcome"
 private const val EVENT_PLAYBACK_STATUS = "onPlaybackStatus"
 private const val EVENT_PHASE_MARK = "onPhaseMark"
 private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
+private const val EVENT_CONNECTIVITY = "onConnectivityChanged"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
@@ -228,6 +231,9 @@ class AuqwExpoModule : Module() {
   // the session is still routable (a genuinely failed release).
   private val releasedHandles = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+  /** One in-flight SAF folder pick — resolved by OnActivityResult. */
+  private var pendingPickPromise: Promise? = null
+
   // ---- queue projection state (player-looper confined) ----
   // The service executes a cursor inside ONE installed immutable
   // revision, per the PlayerPort contract: never reorder/add/remove,
@@ -236,6 +242,25 @@ class AuqwExpoModule : Module() {
   // initial value. JS may consume several moves after resuming.
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
+
+
+  /** Lazily created on the first connectivity observer. */
+  private var connectivityMonitor: AuqwConnectivityMonitor? = null
+
+  private fun connectivityMonitorInstance(ctx: Context): AuqwConnectivityMonitor =
+    connectivityMonitor
+      ?: AuqwConnectivityMonitor(ctx) { online, metered ->
+        sendEvent(
+          EVENT_CONNECTIVITY,
+          mapOf("online" to online, "metered" to metered)
+        )
+      }.also { connectivityMonitor = it }
+
+  /** provider:'local' attach tokens — path/mime for an lf-* handle. */
+  private class LocalHandle(val path: String, val mime: String?)
+  private val localHandles = java.util.concurrent.ConcurrentHashMap<String, LocalHandle>()
+  private val localSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
   @Volatile
   private var installedProjection: QueueProjectionInput? = null
   // The occurrence the currently attached stream serves: FIXED at a
@@ -354,7 +379,8 @@ class AuqwExpoModule : Module() {
       EVENT_PREPARE_OUTCOME,
       EVENT_PLAYBACK_STATUS,
       EVENT_PHASE_MARK,
-      EVENT_QUEUE_TRANSITION
+      EVENT_QUEUE_TRANSITION,
+      EVENT_CONNECTIVITY
     )
 
     OnCreate {
@@ -367,11 +393,41 @@ class AuqwExpoModule : Module() {
 
     OnDestroy {
       try {
+        connectivityMonitor?.stop()
+        connectivityMonitor = null
         boundService?.remoteDispatcher = null
         appContext.reactContext?.unbindService(serviceConnection)
       } catch (e: Exception) {
         Log.w(TAG, "unbind: ${e.message}")
       }
+      // lf-* handles are bookkeeping only — drop the registry so a
+      // recreated module can't resurrect a dead caller's file attach.
+      localHandles.clear()
+    }
+
+    /**
+     * Point-in-time {online, metered} for the scheduler — a local
+     * read of the active network's capabilities, never a probe.
+     */
+    AsyncFunction("connectivitySnapshot") { ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+      val (online, metered) = connectivityMonitorInstance(ctx).snapshot()
+      mapOf("online" to online, "metered" to metered)
+    }
+
+    /**
+     * Register the NetworkCallback. Emits a baseline edge at start —
+     * subscribers get the current state, not silence until a change.
+     * Idempotent; unwatch stops the callback.
+     */
+    Function("connectivityWatch") { ->
+      val ctx = appContext.reactContext ?: return@Function
+      connectivityMonitorInstance(ctx).start()
+    }
+
+    Function("connectivityUnwatch") { ->
+      connectivityMonitor?.stop()
     }
 
     AsyncFunction("createHost") { config: HostConfigInput ->
@@ -584,11 +640,41 @@ class AuqwExpoModule : Module() {
       }
     }
 
+    /**
+     * provider:'local' attach — registers an lf-* handle for a
+     * device-owned file; `play` resolves it to a file:// URI with
+     * DefaultDataSource.Factory. No stream session: release/cancel
+     * is a bookkeeping no-op.
+     */
+    AsyncFunction("prepareLocal") Coroutine { path: String, mime: String? ->
+      if (path.isEmpty()) {
+        throw CodedException("ERR_INVALID_ARGUMENT", "bad path", null)
+      }
+      val handle = "lf-${localSeq.incrementAndGet()}"
+      localHandles[handle] = LocalHandle(path, mime)
+      handle
+    }
+
     AsyncFunction("play") Coroutine { handle: String, attemptId: String, queueRev: Double, positionMs: Double? ->
       if (attemptId.isEmpty() || !isSafeNonNegative(queueRev) ||
         (positionMs != null && !isSafeNonNegative(positionMs))
       ) {
         throw CodedException("ERR_INVALID_ARGUMENT", "bad play arguments", null)
+      }
+      val local = localHandles[handle]
+      if (local !== null) {
+        val ctx = appContext.reactContext
+          ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+        val uri = Uri.parse(
+          if (local.path.contains("://")) local.path else "file://${local.path}"
+        )
+        attachNow(
+          handle, attemptId, queueRev, positionMs, uri,
+          DefaultDataSource.Factory(ctx),
+          OccurrenceBind.CURSOR, null, local.mime
+        )
+        maybeRequestNotificationPermission()
+        return@Coroutine null
       }
       if (streamRegistry.hostFor(handle) == null) {
         throw CodedException("not-found", "unknown stream handle", null)
@@ -596,7 +682,7 @@ class AuqwExpoModule : Module() {
       attachNow(
         handle, attemptId, queueRev, positionMs,
         Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
-        OccurrenceBind.CURSOR, null
+        OccurrenceBind.CURSOR, null, null
       )
       // After the attach post so a first-play permission prompt can't
       // queue ahead of it on the main looper.
@@ -645,6 +731,27 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("releaseStream") Coroutine { handle: String ->
+      // lf-* never reached the host: release is bookkeeping — remove
+      // the registry entry, mark ended, stop only when attached.
+      // Idempotent by prefix so a release after cancelPrepare (which
+      // already removed the entry) stays a no-op, never a host call.
+      if (handle.startsWith("lf-")) {
+        localHandles.remove(handle)
+        if (releasedHandles.size < RELEASED_HANDLES_CAP) {
+          releasedHandles.add(handle)
+        }
+        val pl = awaitPlayer()
+        onPlayerThread(pl) {
+          if (attached?.handle == handle) {
+            attached = null
+            attachedForOccurrence = null
+            attachedByService = false
+            pl.stop()
+            pl.clearMediaItems()
+          }
+        }
+        return@Coroutine null
+      }
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       // Mark the handle ended before terminating: an attach still
       // queued on the player looper checks the mark and skips, so a
@@ -745,6 +852,84 @@ class AuqwExpoModule : Module() {
       validateProjection(projection)
       val p = awaitPlayer()
       onPlayerThread(p) { installProjection(p, projection) }
+      null
+    }
+
+    // ---- TagReaderPort: SAF picker + tree scan + tag reads ----
+
+    AsyncFunction("tagPickFolder") { promise: Promise ->
+      val activity = appContext.currentActivity
+        ?: throw CodedException("unavailable", "no foreground activity", null)
+      if (pendingPickPromise != null) {
+        throw CodedException("unavailable", "folder pick already in flight", null)
+      }
+      pendingPickPromise = promise
+      try {
+        activity.startActivityForResult(
+          Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
+          AuqwTagReader.PICK_REQUEST_CODE
+        )
+      } catch (e: Exception) {
+        pendingPickPromise = null
+        throw CodedException("internal", e.message, e)
+      }
+    }
+
+    OnActivityResult { _, payload ->
+      if (payload.requestCode != AuqwTagReader.PICK_REQUEST_CODE) {
+        return@OnActivityResult
+      }
+      val promise = pendingPickPromise
+      pendingPickPromise = null
+      if (promise == null) {
+        return@OnActivityResult
+      }
+      val uri = payload.data?.data
+      val ctx = appContext.reactContext
+      if (payload.resultCode != android.app.Activity.RESULT_OK || uri == null || ctx == null) {
+        promise.reject(CodedException("no-result", "folder pick cancelled", null))
+        return@OnActivityResult
+      }
+      try {
+        val (treeUri, label) = AuqwTagReader.persistAndLabel(ctx, uri)
+        promise.resolve(mapOf("treeUri" to treeUri, "label" to label))
+      } catch (e: Exception) {
+        promise.reject(CodedException("internal", e.message, e))
+      }
+    }
+
+    AsyncFunction("tagEnumerate") Coroutine { treeUri: String ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      try {
+        AuqwTagReader.enumerate(ctx, Uri.parse(treeUri))
+      } catch (e: SecurityException) {
+        throw CodedException("permission-denied", "tree grant revoked", e)
+      }
+    }
+
+    AsyncFunction("tagFingerprint") Coroutine { treeUri: String, docIds: List<String> ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      AuqwTagReader.fingerprint(ctx, Uri.parse(treeUri), docIds)
+    }
+
+    AsyncFunction("tagRead") Coroutine { treeUri: String, docIds: List<String> ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      AuqwTagReader.readTags(ctx, Uri.parse(treeUri), docIds)
+    }
+
+    Function("docUri") { treeUri: String, docId: String ->
+      AuqwTagReader.documentUri(Uri.parse(treeUri), docId)
+    }
+
+    // Slice-3 dataSync FGS: JS reports the live active-transfer count;
+    // the service is a stateless keep-alive (see AuqwDownloadService).
+    AsyncFunction("downloadsActiveChanged") { active: Double ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("no-result", "no react context", null)
+      AuqwDownloadService.update(ctx.applicationContext, active.toInt())
       null
     }
   }
@@ -886,6 +1071,7 @@ class AuqwExpoModule : Module() {
     dataSourceFactory: DataSource.Factory,
     bind: OccurrenceBind,
     occurrenceId: String?,
+    mimeHint: String? = null,
   ) {
     val p = awaitPlayer()
     val a = Attachment(handle, attemptId, queueRev, SystemClock.elapsedRealtime())
@@ -894,7 +1080,7 @@ class AuqwExpoModule : Module() {
       // drop the latch (cancelling its prepare) so the stale outcome
       // can't clobber this attach with the move's target.
       dropArmedMove()
-      attachOnPlayerThread(p, a, positionMs, uri, dataSourceFactory, bind, occurrenceId)
+      attachOnPlayerThread(p, a, positionMs, uri, dataSourceFactory, bind, occurrenceId, mimeHint)
     }
   }
 
@@ -908,6 +1094,7 @@ class AuqwExpoModule : Module() {
     dataSourceFactory: DataSource.Factory,
     bind: OccurrenceBind,
     occurrenceId: String?,
+    mimeHint: String? = null,
   ) {
     // A release that landed while this attach was queued ended the
     // handle before it reached the player — skip rather than emit a
@@ -949,6 +1136,7 @@ class AuqwExpoModule : Module() {
     }
     val mediaItem = MediaItem.Builder()
       .setUri(uri)
+      .setMimeType(mimeHint)
       .setMediaMetadata(
         MediaMetadata.Builder()
           .setTitle(projected?.title)
@@ -1215,6 +1403,32 @@ class AuqwExpoModule : Module() {
       // legal nonnull-target transition exists — park on the cursor.
       failEndedAttach(reason, "unavailable", "queue successor is unplayable")
       Log.i(TAG, "queue transition parked: target unavailable")
+      return
+    }
+    if (provider == "local") {
+      // Local items carry a file/content URI as their sourceRef —
+      // attach directly; there is no plugin session to prepare.
+      val localHandle = "lf-${localSeq.incrementAndGet()}"
+      localHandles[localHandle] = LocalHandle(sourceRef, null)
+      val localAttempt = nextSvcId()
+      val localAttach = Attachment(
+        localHandle, localAttempt, proj.queueRev,
+        SystemClock.elapsedRealtime()
+      )
+      val localUri = Uri.parse(
+        if (sourceRef.contains("://")) sourceRef else "file://$sourceRef"
+      )
+      attachOnPlayerThread(
+        p, localAttach, 0.0, localUri,
+        DefaultDataSource.Factory(p.applicationContext),
+        OccurrenceBind.FIXED, target.occurrenceId
+      )
+      if (attached === localAttach) {
+        emitTransition(
+          proj, from, target.occurrenceId, reason, 0.0,
+          localAttempt to proj.queueRev, localHandle
+        )
+      }
       return
     }
     val h = host ?: return

@@ -70,6 +70,7 @@ function recording(id: string, refs: readonly SourceRef[]): Recording {
     versionLabels: [],
     sourceRefs: refs,
     mappings: [],
+    provenance: 'provider',
   };
 }
 
@@ -104,6 +105,9 @@ function persisted(partial: Partial<PersistedState> = {}): PersistedState {
     matchReviews: partial.matchReviews ?? [],
     lyricsCache: partial.lyricsCache ?? [],
     artworkCache: partial.artworkCache ?? [],
+    downloads: partial.downloads ?? [],
+    localSources: partial.localSources ?? [],
+    localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? emptyQueue(),
     settings: partial.settings ?? SETTINGS,
   };
@@ -249,6 +253,7 @@ async function parseRejects(): Promise<void> {
     recordings: [],
     sourceRefs: [],
     mappings: [],
+    provenance: 'provider',
     likes: [{ entityKind: 'track', targetId: 'ghost', likedAtMs: 1 }],
     entities: [],
     entitySourceRefs: [],
@@ -366,7 +371,105 @@ function preparedEvent(
   };
 }
 
-// 7. Import during playback releases the handle and lands idle.
+// 8. A provenance:'local' row round-trips: provenance and the stable
+// fingerprint id (its provider:'local' sourceRef) export and import;
+// device-local sections (downloads/local_sources/local_files) never
+// appear in the document.
+async function exportRoundtripLocalRows(): Promise<void> {
+  const seeded = persisted({
+    recordings: [
+      recording('r1', [ref('youtube-music', 'y1')]),
+      {
+        ...recording('r2', [{ provider: 'local', kind: 'track', id: 'fp-deadbeef' }]),
+        provenance: 'local' as const,
+      },
+    ],
+    downloads: [
+      {
+        downloadId: 'd1',
+        recordingId: 'r1',
+        provider: 'youtube-music',
+        sourceRef: ref('youtube-music', 'y1'),
+        filePath: 'd1.mp4',
+        bytes: 1024,
+        state: 'available',
+        committedOffset: 1024,
+        checksum: 'a'.repeat(64),
+        mime: 'audio/mp4',
+        itag: 140,
+        expiresAtMs: null,
+        error: null,
+        priority: 2,
+        requestedMs: 10,
+        downloadedMs: 20,
+      },
+    ],
+    localSources: [
+      {
+        sourceId: 'src-1',
+        treeUri: 'content://tree/Music',
+        label: 'Music',
+        addedMs: 100,
+        lastScanMs: 200,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'fp-deadbeef',
+        sourceId: 'src-1',
+        docId: 'doc-9',
+        size: 4096,
+        fingerprint: 'fp-deadbeef',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Local Song',
+        artist: 'Local Artist',
+        album: null,
+        durationMs: 180_000,
+        genre: null,
+        recordingId: 'r2',
+      },
+    ],
+  });
+  const storage = new FakeStorage(seeded);
+  const exported = await exportLibrary(
+    storage,
+    new FakeClock(6_000),
+    ctx().context,
+  );
+  assert(exported.ok, 'export resolves');
+  const raw = JSON.parse(exported.value.json) as Record<string, unknown>;
+  assert(!('downloads' in raw), 'downloads never export');
+  assert(!('localSources' in raw), 'local_sources never export');
+  assert(!('localFiles' in raw), 'local_files never export');
+  const parsed = parseExportJson(exported.value.json);
+  assert(parsed.ok, 'export JSON reparses');
+  const localRec = parsed.value.recordings.find((r) => r.id === 'r2');
+  assertEqual(localRec?.provenance, 'local', 'provenance exported');
+  assert(
+    parsed.value.sourceRefs.some(
+      (s) =>
+        s.recordingId === 'r2' &&
+        s.ref.provider === 'local' &&
+        s.ref.id === 'fp-deadbeef',
+    ),
+    'stable fingerprint id exports as the local sourceRef',
+  );
+  const target = new FakeStorage(persisted());
+  const applied = await applyImport(target, parsed.value, ctx().context);
+  assert(applied.ok, 'apply resolves');
+  const loaded = await target.load(ctx().context);
+  assert(loaded.ok);
+  const landed = loaded.value.recordings.find((r) => r.id === 'r2');
+  assertEqual(landed?.provenance, 'local', 'provenance round-trips');
+  assert(
+    landed?.sourceRefs.some(
+      (s) => s.provider === 'local' && s.id === 'fp-deadbeef',
+    ) === true,
+    'local ref round-trips',
+  );
+}
+
+// 9. Import during playback releases the handle and lands idle.
 async function sessionImportDuringPlayback(): Promise<void> {
   const playing = persisted({
     recordings: [recording('r1', [ref('youtube-music', 'y1')])],
@@ -432,6 +535,7 @@ const TESTS: readonly [string, () => Promise<void>][] = [
   ['applyReplaces', applyReplaces],
   ['sessionImportApplies', sessionImportApplies],
   ['sessionImportRejects', sessionImportRejects],
+  ['exportRoundtripLocalRows', exportRoundtripLocalRows],
   ['sessionImportDuringPlayback', sessionImportDuringPlayback],
 ];
 

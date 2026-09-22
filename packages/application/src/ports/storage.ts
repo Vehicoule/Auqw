@@ -1,6 +1,13 @@
 import type { OperationContext } from '../cancellation.ts';
 import type { Result } from '../errors.ts';
-import type { Recording, Settings, Like } from '../domain.ts';
+import type {
+  DownloadRecord,
+  LocalFile,
+  LocalSource,
+  Recording,
+  Settings,
+  Like,
+} from '../domain.ts';
 import type {
   ArtworkCacheEntry,
   Entity,
@@ -28,6 +35,14 @@ export type PersistedState = {
   readonly matchReviews: readonly MatchReview[];
   readonly lyricsCache: readonly LyricsCacheEntry[];
   readonly artworkCache: readonly ArtworkCacheEntry[];
+  /**
+   * Download rows and the local-file index persist in the owned
+   * database but are device-local detail — export/import excludes
+   * them (recordings keep `provenance` + stable local file ids).
+   */
+  readonly downloads: readonly DownloadRecord[];
+  readonly localSources: readonly LocalSource[];
+  readonly localFiles: readonly LocalFile[];
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
 };
@@ -39,6 +54,17 @@ export type PersistedState = {
  */
 export type StorageBatch = {
   readonly recordings?: readonly Recording[];
+  /**
+   * Read-modify-write for `recordings`: the implementation applies
+   * this to the rows it just read INSIDE the commit transaction, so
+   * a session write landing between a caller's own load and this
+   * commit is preserved instead of clobbered by a stale array.
+   * Mutually exclusive with `recordings` — passing both is an
+   * 'internal' error.
+   */
+  readonly recordingsMerge?: (
+    current: readonly Recording[],
+  ) => readonly Recording[];
   readonly likes?: readonly Like[];
   readonly entities?: readonly Entity[];
   readonly entitySourceRefs?: readonly EntitySourceRef[];
@@ -49,6 +75,9 @@ export type StorageBatch = {
   readonly matchReviews?: readonly MatchReview[];
   readonly lyricsCache?: readonly LyricsCacheEntry[];
   readonly artworkCache?: readonly ArtworkCacheEntry[];
+  readonly downloads?: readonly DownloadRecord[];
+  readonly localSources?: readonly LocalSource[];
+  readonly localFiles?: readonly LocalFile[];
   readonly queue?: QueueSnapshot;
   readonly settings?: Settings;
   readonly attempts?: readonly AttemptTrace[];
