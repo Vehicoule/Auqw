@@ -32,6 +32,9 @@ export const CHANNELS = {
   streamRelease: 'stream:release',
   streamMarks: 'stream:marks',
   streamCancel: 'stream:cancel',
+  streamPort: 'stream:port',
+  /** Main→renderer port delivery — carries the pump's MessagePort. */
+  streamBytes: 'stream-bytes',
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

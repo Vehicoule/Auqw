@@ -201,4 +201,44 @@ export async function run(): Promise<void> {
   } finally {
     recovered.shutdown();
   }
+
+  // sendToHost posts one-way messages only while a child is live.
+  {
+    const oneWay: FakeChild[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const c = new FakeChild();
+        oneWay.push(c);
+        return c;
+      },
+      baseBackoffMs: 5,
+      maxBackoffMs: 20,
+    });
+    try {
+      assertEqual(sup.sendToHost({ kind: 'stream-pump' }), false,
+        'no child yet — refused');
+      const req = sup.request('utility:ping', { message: 'w' });
+      const c = oneWay[0];
+      assert(c !== undefined);
+      assertEqual(sup.sendToHost({ kind: 'stream-pump' }), false,
+        'pre-spawn refused');
+      c.emit('spawn');
+      assertEqual(
+        sup.sendToHost({ kind: 'stream-pump', handle: 'h' }, [{ p: 1 }]),
+        true,
+        'spawned child receives the post',
+      );
+      const posted = c.posted[c.posted.length - 1] as {
+        kind?: string;
+        handle?: string;
+      };
+      assertEqual(posted?.kind, 'stream-pump', 'message reached postMessage');
+      c.emit('message', { id: 1, ok: true, result: null });
+      await req;
+    } finally {
+      sup.shutdown();
+    }
+    assertEqual(sup.sendToHost({ kind: 'stream-pump' }), false,
+      'post-shutdown refused');
+  }
 }

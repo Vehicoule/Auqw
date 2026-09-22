@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  MessageChannelMain,
   net,
   safeStorage,
   screen,
@@ -151,6 +152,9 @@ async function main(): Promise<void> {
     net: netService,
     secure,
     utility: supervisor,
+    // Brokers the stream pump channel — the utility child gets one end
+    // with the attach message, the renderer the other via postMessage.
+    messageChannel: () => new MessageChannelMain(),
   });
 
   const { state } = await loadWindowState(statePath);

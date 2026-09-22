@@ -628,6 +628,41 @@ export function isHostCancelArgs(
   );
 }
 
+/**
+ * `stream:port` — asks main to broker a MessageChannel to the utility
+ * process's byte pump for `handle`. The port itself arrives on the
+ * `stream-bytes` event keyed by `requestId`; the invoke resolves once
+ * main has posted both ends (or rejects typed).
+ */
+export type StreamPortArgs = {
+  readonly handle: string;
+  readonly requestId: string;
+};
+
+export function isStreamPortArgs(
+  value: unknown,
+): value is StreamPortArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['handle', 'requestId']) &&
+    isBoundedString(value['handle'], 512) &&
+    isBoundedString(value['requestId'], 128)
+  );
+}
+
+/**
+ * The pump-port facade the preload hands the renderer — the real
+ * MessagePort stays inside the isolated world; only wrapped
+ * send/receive callbacks cross the contextBridge. `send` takes a
+ * client protocol frame (see `shared/pump-protocol.ts`); `onMessage`
+ * delivers pump frames.
+ */
+export type StreamPortLike = {
+  readonly send: (message: unknown) => void;
+  readonly onMessage: (listener: (message: unknown) => void) => () => void;
+  readonly close: () => void;
+};
+
 export type UndefinedArgs = undefined;
 
 /**
@@ -835,6 +870,7 @@ export type AuqwApi = {
     readonly release: (args: StreamHandleArgs) => Promise<void>;
     readonly marks: (args: StreamHandleArgs) => Promise<StreamMarksResult>;
     readonly cancel: (args: StreamCancelArgs) => Promise<void>;
+    readonly channel: (args: StreamHandleArgs) => Promise<StreamPortLike>;
   };
 };
 

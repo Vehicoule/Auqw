@@ -28,11 +28,109 @@ import type {
   StorageBeginResult,
   StorageExecuteResult,
   StorageQueryResult,
+  StreamPortLike,
   UtilityPingResult,
 } from '../shared/contract.ts';
+import { isPumpServerMessage } from '../shared/pump-protocol.ts';
 import type { SqlValue } from '@auqw/storage-sqlite';
 import { isResultEnvelope } from '../shared/envelope.ts';
 import { shellError } from '../shared/errors.ts';
+
+let portSeq = 0;
+
+/** The Electron message event carrying the brokered pump MessagePort. */
+type PortMessageEvent = {
+  readonly ports: readonly MessagePort[];
+};
+
+/**
+ * `stream:port` — invoke the brokered-channel handshake, then pick the
+ * transferred port off the next `stream-bytes` event matching the
+ * requestId. The MessagePort itself never crosses the contextBridge —
+ * the facade below wraps send/onMessage/close so the sandboxed
+ * renderer drives it without owning it.
+ */
+function channelPort(handle: string): Promise<StreamPortLike> {
+  const requestId = `prt-${++portSeq}-${Date.now().toString(36)}`;
+  return new Promise<StreamPortLike>((resolve, reject) => {
+    const onBytes = (event: IpcRendererEvent, payload: unknown): void => {
+      if (
+        typeof payload !== 'object' ||
+        payload === null ||
+        (payload as { requestId?: unknown }).requestId !== requestId
+      ) {
+        return;
+      }
+      ipcRenderer.removeListener(CHANNELS.streamBytes, onBytes);
+      const port = (event as unknown as PortMessageEvent).ports[0];
+      if (port === undefined) {
+        reject(
+          shellError('invalid-response', 'stream-bytes without port'),
+        );
+        return;
+      }
+      resolve(wrapPort(port));
+    };
+    ipcRenderer.on(CHANNELS.streamBytes, onBytes);
+    invoke(
+      CHANNELS.streamPort,
+      { handle, requestId },
+      isUndefinedResult,
+    ).catch((thrown: unknown) => {
+      ipcRenderer.removeListener(CHANNELS.streamBytes, onBytes);
+      reject(thrown instanceof Error ? thrown : shellError('internal', 'stream:port failed'));
+    });
+  });
+}
+
+function wrapPort(port: MessagePort): StreamPortLike {
+  const listeners = new Set<(message: unknown) => void>();
+  let closed = false;
+  port.onmessage = (event: MessageEvent): void => {
+    const data: unknown = event.data;
+    // Only protocol frames cross — anything else is dropped at the seam.
+    if (!isPumpServerMessage(data)) {
+      return;
+    }
+    for (const listener of [...listeners]) {
+      listener(data);
+    }
+  };
+  // Electron emits `close` on a dead peer — abnormal termination, so
+  // surface it as an error frame, never a clean eof (the append loop
+  // would endOfStream on truncated media). Epoch 0 keeps the frame
+  // protocol-valid — error frames carry no epoch gate at the receiver.
+  port.addEventListener('close', () => {
+    closed = true;
+    for (const listener of [...listeners]) {
+      listener({
+        kind: 'error',
+        epoch: 0,
+        code: 'closed',
+        message: 'pump port closed',
+      });
+    }
+    listeners.clear();
+  });
+  return {
+    send: (message: unknown): void => {
+      if (!closed) {
+        port.postMessage(message);
+      }
+    },
+    onMessage: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    close: (): void => {
+      if (!closed) {
+        closed = true;
+        port.close();
+        listeners.clear();
+      }
+    },
+  };
+}
 
 /**
  * Every invoke answer is re-validated here — the main side is trusted
@@ -178,6 +276,7 @@ const api: AuqwApi = {
       invoke(CHANNELS.streamMarks, args, isStreamMarksResult),
     cancel: (args) =>
       invoke(CHANNELS.streamCancel, args, isUndefinedResult),
+    channel: (args) => channelPort(args.handle),
   },
 };
 
