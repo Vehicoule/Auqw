@@ -527,17 +527,22 @@ async fn reap_loop(
             // Recheck under `shared`: an attach landing between the
             // filter and here clears `detached_since`, so the recheck
             // fails and the attach wins — never an evict on a session
-            // a consumer just reconnected to.
-            if s.terminate_if(StreamError::Evicted, |sh| {
-                sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
-            }) {
-                // The evicted session can never attach or serve again —
-                // keeping its entry only grows the map on every
-                // abandoned prepare, and callers routing by handle drop
-                // it on the `not-found` answer anyway. Entries killed
-                // by other paths keep their typed terminal error until
-                // the next supersede prunes them.
-                if let Ok(mut m) = sessions.lock() {
+            // a consumer just reconnected to. The map lock spans the
+            // terminal write and the removal (`sessions` is outermost),
+            // so a lookup can never observe the terminal-but-present
+            // gap — a stale handle answers `not-found`, never a
+            // transient `evicted`.
+            if let Ok(mut m) = sessions.lock() {
+                if s.terminate_if(StreamError::Evicted, |sh| {
+                    sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
+                }) {
+                    // The evicted session can never attach or serve
+                    // again — keeping its entry only grows the map on
+                    // every abandoned prepare, and callers routing by
+                    // handle drop it on the `not-found` answer anyway.
+                    // Entries killed by other paths keep their typed
+                    // terminal error until the next supersede prunes
+                    // them.
                     m.remove(&handle);
                 }
             }
