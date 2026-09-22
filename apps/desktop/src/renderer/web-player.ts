@@ -21,6 +21,11 @@ import type {
 } from '../shared/contract.ts';
 import { isRecord } from '../shared/check.ts';
 import type { ShellError } from '../shared/errors.ts';
+import {
+  attachMseSource,
+  type MseFactories,
+  type MseSource,
+} from './mse-source.ts';
 
 /** The preload `stream` section as injected — never reaches for
  * `window` itself, so the port is testable under plain node. */
@@ -193,12 +198,25 @@ function toAttemptTrace(
  * `remote-previous` restarts or steps back — and lands as
  * `queue-transition` events for the session to reconcile.
  */
+/** The port's full surface — `noteMime` feeds the MSE gate mimes the
+ * page learned outside `prepare` (the dev-gate's `stream.devPrepare`). */
+export type WebPlayerPort = PlayerPort & {
+  noteMime(handle: string, mime: string): void;
+};
+
 export function createWebPlayerPort(deps: {
   stream: StreamClient;
   audio: AudioLike;
   mediaSession?: MediaSessionLike | null;
   now?: () => number;
-}): PlayerPort {
+  /**
+   * MSE factories — present under Electron (real `MediaSource` + blob
+   * URLs); absent in tests/node, where the serve-url path is the only
+   * leg. The MSE attach is preferred for every mime it can take; a
+   * non-fragmented container still falls back to `streamServeUrl`.
+   */
+  mse?: MseFactories | null;
+}): WebPlayerPort {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
   const listeners = new Set<(event: PlayerEvent) => void>();
@@ -207,6 +225,55 @@ export function createWebPlayerPort(deps: {
     identity: PlaybackIdentity;
     occurrenceId: string | null;
   } | null = null;
+  /** `handle` → container mime, recorded from this port's own prepares
+   * — `play()` args carry no mime, so the MSE gate reads it here. */
+  const handleMimes = new Map<string, string>();
+  /** The live MSE attach, keyed by the handle it serves. */
+  let activeMse: { handle: string; source: MseSource } | null = null;
+
+  function dropMse(handle?: string): void {
+    if (
+      activeMse !== null &&
+      (handle === undefined || activeMse.handle === handle)
+    ) {
+      const { source } = activeMse;
+      activeMse = null;
+      source.destroy();
+    }
+  }
+
+  /**
+   * The MSE-first attach: when the mime is known and MSE-decodable the
+   * byte pump feeds a SourceBuffer; anything it refuses — non-fragmented
+   * mp4 above all — takes the `streamServeUrl` loopback instead.
+   */
+  async function attachUrl(
+    handle: string,
+    mimeHint?: string,
+  ): Promise<{ url: string; source: MseSource | null }> {
+    const mime = mimeHint ?? handleMimes.get(handle);
+    if (
+      deps.mse != null &&
+      mime !== undefined &&
+      (deps.mse.isTypeSupported === undefined ||
+        deps.mse.isTypeSupported(mime))
+    ) {
+      try {
+        const source = await attachMseSource({
+          handle,
+          mime,
+          channel: (args) => stream.channel(args),
+          mse: deps.mse,
+        });
+        return { url: source.url, source };
+      } catch {
+        // MSE refusal is a fallback, not a failure — the loopback leg
+        // serves the same element through server.rs.
+      }
+    }
+    const { url } = await stream.serveUrl({ handle });
+    return { url, source: null };
+  }
   let projection: QueueProjection | null = null;
   let mediaActionsInstalled = false;
   let seq = 0;
@@ -229,6 +296,17 @@ export function createWebPlayerPort(deps: {
       occurrenceId: string | null;
     }
   >();
+
+  /**
+   * A mime learned outside `prepare` — the dev-gate calls
+   * `stream.devPrepare` through the page, never through this port, so
+   * the page reports the payload's mime for the MSE gate to read.
+   */
+  function noteMime(handle: string, mime: string): void {
+    if (handle.length <= 512 && mime.length <= 128) {
+      handleMimes.set(handle, mime);
+    }
+  }
 
   /** Drop pending plays — `identity` matches the same contract `stale`
    * applies to a live attempt; `null` drops all (a transport-wide
@@ -352,14 +430,20 @@ export function createWebPlayerPort(deps: {
         return;
       }
       handle = outcome.stream.handle;
-      const { url } = await stream.serveUrl({ handle });
+      noteMime(handle, outcome.stream.mime);
+      const { url, source } = await attachUrl(
+        handle,
+        outcome.stream.mime,
+      );
       // A later play/attach/prepare or a moved projection makes this
       // completion stale — release its minted handle and stay out of
       // the element; the live attempt keeps ownership.
       if (gen !== opGen || projection !== p) {
+        source?.destroy();
         void stream.release({ handle }).catch(() => undefined);
         return;
       }
+      activeMse = source === null ? null : { handle, source };
       const identity: PlaybackIdentity = {
         attemptId: `watt-id-${seq}`,
         queueRev: p.queueRev,
@@ -615,6 +699,7 @@ export function createWebPlayerPort(deps: {
             outcome.stream !== undefined
           ) {
             const prepared = toPreparedStream(outcome.stream);
+            noteMime(prepared.handle, prepared.mime);
             emit({
               type: 'prepare',
               requestId,
@@ -659,12 +744,13 @@ export function createWebPlayerPort(deps: {
       });
       return guard(async () => {
         try {
-          const { url } = await stream.serveUrl({ handle: input.handle });
+          const { url, source } = await attachUrl(input.handle);
           // A newer play/prepare/stop superseded this one while the
-          // loopback URL resolved — the late completion must not retake
+          // attach resolved — the late completion must not retake
           // the element. A release of this same handle landed too: it
           // bumped opGen through the pendingPlayGens guard.
           if (gen !== opGen) {
+            source?.destroy();
             return;
           }
           // The surviving token is authoritative — a queue mutation may
@@ -673,12 +759,15 @@ export function createWebPlayerPort(deps: {
           // later control as `invalid-message`.
           const pending = pendingPlayGens.get(input.handle);
           const identity = pending?.identity ?? input.identity;
+          dropMse();
           current = {
             handle: input.handle,
             identity,
             occurrenceId:
               pending?.occurrenceId ?? projection?.currentOccurrenceId ?? null,
           };
+          activeMse =
+            source === null ? null : { handle: input.handle, source };
           audio.src = url;
           audio.currentTime =
             (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
@@ -729,6 +818,9 @@ export function createWebPlayerPort(deps: {
         }
       }
       audio.currentTime = input.positionMs / 1000;
+      // An uncovered position re-anchors the pump through the
+      // journal/Cues index; a covered one just plays from buffer.
+      activeMse?.source.seekTo(input.positionMs);
       return ok(undefined);
     },
 
@@ -738,6 +830,7 @@ export function createWebPlayerPort(deps: {
         return bad;
       }
       opGen++;
+      dropMse();
       audio.pause();
       audio.src = '';
       if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
@@ -752,12 +845,16 @@ export function createWebPlayerPort(deps: {
       return guard(() => stream.cancel({ requestId: input.requestId }));
     },
 
+    noteMime,
+
     async release(input) {
       if (current !== null && current.handle === input.handle) {
         audio.pause();
         audio.src = '';
         current = null;
       }
+      dropMse(input.handle);
+      handleMimes.delete(input.handle);
       // Releasing a handle an in-flight play is about to attach must
       // invalidate that op — otherwise its late serveUrl resolves into
       // an already-dropped host stream and audio resumes post-teardown.

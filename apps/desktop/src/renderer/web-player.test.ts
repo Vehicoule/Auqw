@@ -65,7 +65,9 @@ function fakeStream(overrides: Partial<StreamClient> = {}): StreamClient & {
     calls.push({ method, args });
     return args;
   };
-  return {
+  const client: StreamClient & {
+    calls: Array<{ method: string; args: unknown }>;
+  } = {
     calls,
     prepare: (args) => {
       record('prepare')(args);
@@ -100,8 +102,25 @@ function fakeStream(overrides: Partial<StreamClient> = {}): StreamClient & {
       record('cancel')(args);
       return Promise.resolve(undefined);
     },
+    channel: (args) => {
+      record('channel')(args);
+      return Promise.reject(
+        Object.assign(new Error('no test pump'), { kind: 'unavailable' }),
+      );
+    },
     ...overrides,
   };
+  // Overriding a method must not lose the call record.
+  for (const key of Object.keys(overrides) as Array<keyof StreamClient>) {
+    const inner = overrides[key];
+    if (inner !== undefined) {
+      (client as Record<string, unknown>)[key] = (args: unknown) => {
+        record(key)(args);
+        return (inner as (a: unknown) => unknown)(args);
+      };
+    }
+  }
+  return client;
 }
 
 const identity = { attemptId: 'attempt-1', queueRev: 3 };
@@ -1005,4 +1024,288 @@ export async function run(): Promise<void> {
     assertEqual(audio.src, '', 'element detached at the tail');
     assertEqual(mediaSession.playbackState, 'none');
   }
+
+  // ---- MSE primary path -------------------------------------------------
+
+  // play() prefers the byte pump: mime recorded at prepare, channel
+  // invoked, element attaches the blob URL — serveUrl never called.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playResult = player.play({ handle: 'h-1', identity });
+    await settle(); // channel resolves → runSession's listener lands
+    media.fireSourceopen();
+    await settle();
+    const res = await playResult;
+    assert(res.ok, 'MSE-first play succeeds');
+    assertEqual(audio.src, 'blob:fake-0', 'element attaches the blob URL');
+    assert(
+      stream.calls.some((c) => c.method === 'channel'),
+      'stream:port channel invoked',
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'serveUrl'),
+      'loopback leg not used',
+    );
+    const playing = events.find(
+      (e) => e.type === 'status' && e.state === 'playing',
+    );
+    assert(playing !== undefined, 'playing status emitted');
+  }
+
+  // A mime MSE can't take (or a refused attach) falls back to serveUrl.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(new FakeMedia(), { supported: () => false }),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    await player.play({ handle: 'h-1', identity });
+    await settle();
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/tok',
+      'unsupported mime takes the loopback leg',
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'channel'),
+      'channel skipped for an unsupported mime',
+    );
+  }
+
+  // A pump attach that never lands a segment still falls back.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream({
+      channel: () => Promise.reject(new Error('utility dead')),
+    });
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(new FakeMedia()),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const res = await player.play({ handle: 'h-1', identity });
+    await settle();
+    assert(res.ok, 'attach failure is a fallback, not a play failure');
+    assertEqual(audio.src, 'http://127.0.0.1:9/s/tok');
+  }
+
+  // seekTo routes through the MSE source while it owns the element.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    media.fireSourceopen();
+    await settle();
+    await playing;
+    await player.seekTo({ positionMs: 5_000, identity });
+    await settle();
+    assert(
+      port.sent.some((m) => (m as { kind?: string }).kind === 'seek'),
+      'seek frame reached the pump',
+    );
+  }
+
+  // release destroys the live MSE source — its pump port closes.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    media.fireSourceopen();
+    await settle();
+    await playing;
+    await player.release({ handle: 'h-1', identity });
+    assert(port.closed === true, 'release closed the pump port');
+  }
+}
+
+// ---- MSE fakes ------------------------------------------------------------
+
+/** The minimal webm fixture — one cluster, cues appended at the tail. */
+function mseWebm(): Uint8Array {
+  const el = (id: number[], payload: number[]): number[] => [
+    ...id,
+    0x80 + payload.length,
+    ...payload,
+  ];
+  const head = el([0x1a, 0x45, 0xdf, 0xa3], [0x42, 0x82, 0x84, 0x77]);
+  const info = el(
+    [0x15, 0x49, 0xa9, 0x66],
+    el([0x2a, 0xd7, 0xb1], [0x0f, 0x42, 0x40]),
+  );
+  const cluster = el([0x1f, 0x43, 0xb6, 0x75], [0xe7, 0x81, 0x00, 0xaa]);
+  const body = [...info, ...cluster];
+  return new Uint8Array([
+    ...head,
+    ...[0x18, 0x53, 0x80, 0x67, 0x80 + body.length],
+    ...body,
+  ]);
+}
+
+class FakePort {
+  sent: unknown[] = [];
+  closed = false;
+  private fed = false;
+  private listeners = new Set<(m: unknown) => void>();
+  send(message: unknown): void {
+    this.sent.push(message);
+    if (
+      !this.fed &&
+      (message as { kind?: string }).kind === 'grant'
+    ) {
+      // A real pump answers the first credit with bytes — re-grants
+      // after that are the session's own credit refresh, not new reads.
+      this.fed = true;
+      const bytes = mseWebm();
+      queueMicrotask(() => {
+        this.feed({
+          kind: 'data',
+          position: 0,
+          epoch: 0,
+          bytes,
+        });
+        this.feed({ kind: 'eof', epoch: 0 });
+      });
+    }
+  }
+  onMessage(listener: (m: unknown) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  close(): void {
+    this.closed = true;
+  }
+  feed(frame: unknown): void {
+    for (const l of [...this.listeners]) l(frame);
+  }
+}
+
+class FakeMedia {
+  readyState = 'closed';
+  duration = 0;
+  private listeners = new Map<string, Array<() => void>>();
+  addSourceBuffer(): FakeBuffer {
+    return new FakeBuffer();
+  }
+  endOfStream(): void {}
+  addEventListener(type: string, listener: () => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+  fireSourceopen(): void {
+    for (const l of this.listeners.get('sourceopen') ?? []) l();
+  }
+}
+
+class FakeBuffer {
+  updating = false;
+  buffered = {
+    length: 0,
+    start: () => 0,
+    end: () => 0,
+  };
+  private listeners = new Map<string, Array<() => void>>();
+  appendBuffer(): void {
+    this.updating = true;
+    this.buffered = { length: 1, start: () => 0, end: () => 30 };
+    queueMicrotask(() => {
+      this.updating = false;
+      for (const l of this.listeners.get('updateend') ?? []) l();
+    });
+  }
+  remove(): void {}
+  addEventListener(type: string, listener: () => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+  removeEventListener(type: string, listener: () => void): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((l) => l !== listener),
+    );
+  }
+}
+
+function fakeMseFactories(
+  media: FakeMedia,
+  opts: {
+    supported?: (mime: string) => boolean;
+  } = {},
+): {
+  isTypeSupported: (mime: string) => boolean;
+  createSource: () => FakeMedia;
+  createObjectURL: () => string;
+  revokeObjectURL: () => void;
+} {
+  let seq = 0;
+  return {
+    isTypeSupported: opts.supported ?? (() => true),
+    createSource: () => media,
+    createObjectURL: () => `blob:fake-${seq++}`,
+    revokeObjectURL: () => undefined,
+  } as {
+    isTypeSupported: (mime: string) => boolean;
+    createSource: () => FakeMedia;
+    createObjectURL: () => string;
+    revokeObjectURL: () => void;
+  };
 }
