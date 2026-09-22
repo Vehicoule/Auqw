@@ -24,23 +24,35 @@ export function useOverlayDismiss(
   onDismissed: (() => void) | undefined,
 ): void {
   const api = useContext(OverlayDismissContext);
+  // The latest callback lives in a ref — callers pass inline closures,
+  // so effect deps must key on defined-ness, not identity. Otherwise a
+  // parent overlay re-render re-registers it ABOVE a still-open child
+  // and one Escape collapses both levels.
+  const cbRef = useRef(onDismissed);
   useEffect(() => {
-    if (onDismissed === undefined) {
+    cbRef.current = onDismissed;
+  });
+  const active = onDismissed !== undefined;
+  useEffect(() => {
+    if (!active) {
       return;
     }
+    const dismiss = () => {
+      cbRef.current?.();
+    };
     if (api !== null) {
-      return api.register(onDismissed);
+      return api.register(dismiss);
     }
     // Outside a stack (a lone sheet in a demo or test) the overlay owns
     // the Escape key itself.
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (sheetKeyAction(event.key) === 'close') {
-        onDismissed();
+        dismiss();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [api, onDismissed]);
+  }, [api, active]);
 }
 
 /**

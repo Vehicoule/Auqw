@@ -87,8 +87,13 @@ export type {
     TransportProps,
 } from './now-playing-screen.tsx';
 
-export { QueueList } from './queue-list.tsx';
-export type { QueueListProps } from './queue-list.tsx';
+export {
+  applyPendingMove,
+  idsEqual,
+  QueueList,
+  reconcilePendingOps,
+} from './queue-list.tsx';
+export type { PendingMove, QueueListProps } from './queue-list.tsx';
 
 export {
     globalKeyAction,

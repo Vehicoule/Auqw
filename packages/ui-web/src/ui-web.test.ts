@@ -50,12 +50,15 @@ const {
   ThemeProvider,
   TrackRow,
   TransferScreen,
+  applyPendingMove,
   globalKeyAction,
+  idsEqual,
   initialRovingIndex,
   isEditableTarget,
   progressPathState,
   quadPath,
   reconcileFocusIndex,
+  reconcilePendingOps,
   rowKeyAction,
   seekStepMs,
   sheetKeyAction,
@@ -106,6 +109,40 @@ function render(node: ReactNode): string {
   check('reconcileFocusIndex keeps valid index', reconcileFocusIndex(2, 5) === 2);
   check('reconcileFocusIndex clamps shrunk list', reconcileFocusIndex(4, 3) === 2);
   check('reconcileFocusIndex empties at 0', reconcileFocusIndex(4, 0) === -1);
+}
+{
+  const ops = [
+    { id: 'A', dir: 1 as const },
+    { id: 'A', dir: 1 as const },
+  ];
+  const partial = reconcilePendingOps(['A', 'B', 'C'], ops, ['B', 'A', 'C']);
+  check(
+    'reconcilePendingOps partial ack keeps tail',
+    partial !== null &&
+      partial.ops.length === 1 &&
+      idsEqual(partial.ids, ['B', 'C', 'A']),
+  );
+  const full = reconcilePendingOps(['A', 'B', 'C'], ops, ['B', 'C', 'A']);
+  check(
+    'reconcilePendingOps full ack clears',
+    full !== null && full.ops.length === 0 && idsEqual(full.ids, ['B', 'C', 'A']),
+  );
+  check(
+    'reconcilePendingOps divergent rebases',
+    reconcilePendingOps(['A', 'B', 'C'], ops, ['C', 'B', 'A']) === null,
+  );
+  check(
+    'reconcilePendingOps membership change rebases',
+    reconcilePendingOps(['A', 'B', 'C'], ops, ['A', 'B']) === null,
+  );
+  check(
+    'applyPendingMove swaps neighbors',
+    idsEqual(applyPendingMove(['A', 'B', 'C'], { id: 'A', dir: 1 }), ['B', 'A', 'C']),
+  );
+  check(
+    'applyPendingMove bounds-checks',
+    idsEqual(applyPendingMove(['A', 'B'], { id: 'A', dir: -1 }), ['A', 'B']),
+  );
 }
 {
   check('sheetKeyAction Escape closes', sheetKeyAction('Escape') === 'close');
