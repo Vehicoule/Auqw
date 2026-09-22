@@ -24,9 +24,16 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,7 +42,11 @@ const LOCK = join(ROOT, 'providers.lock.json');
 // packaged plugin set, for example). The default keeps the mobile path.
 const outArg = process.argv[2];
 const OUT = outArg === undefined ? join(ROOT, 'apps/mobile/assets/plugins') : resolve(ROOT, outArg);
-if (!OUT.startsWith(ROOT)) {
+// relative() (not a string prefix check): a sibling named with the repo
+// prefix (Auqw-fake) starts with ROOT textually but resolves to '..',
+// and the repo root itself is never a valid output dir.
+const outRel = relative(ROOT, OUT);
+if (outRel === '' || outRel.startsWith('..') || isAbsolute(outRel)) {
   throw new Error(`sync-plugins: output dir must stay inside the repo: ${outArg}`);
 }
 // The spin conformance guest is a fuel-gate test plugin — ship it only
@@ -89,6 +100,15 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
+// Prune the previous synced set: the lock is the desired state, so a
+// provider dropped from it must not linger (a packaged build copies
+// OUT wholesale — stale files would ship and load). Only artifact
+// names are touched; anything else in the dir is left alone.
+for (const entry of readdirSync(OUT)) {
+  if (entry.endsWith('.wasm') || entry.endsWith('.manifest.json')) {
+    unlinkSync(join(OUT, entry));
+  }
+}
 
 const keyIdOf = (publicPem) =>
   createHash('sha256')
