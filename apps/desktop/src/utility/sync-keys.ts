@@ -172,6 +172,13 @@ export function createMemoryKeys(): SyncKeys & {
       return { devices: [...records.values()], skipped: 0 };
     },
     async devicePut(record) {
+      // Mirror custody: a re-pair of the same key under a new id
+      // evicts the stale record — the fake keeps real semantics.
+      for (const [id, existing] of records) {
+        if (existing.fp === record.fp && id !== record.id) {
+          records.delete(id);
+        }
+      }
       records.set(record.id, record);
     },
     async deviceTouch(record) {

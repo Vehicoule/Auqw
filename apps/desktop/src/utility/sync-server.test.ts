@@ -17,6 +17,7 @@ import {
 } from '@auqw/application';
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
+import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
 import { createTestPeer, type SessionCodec } from './sync-crypto.ts';
 import {
   createMemoryKeys,
@@ -1422,6 +1423,118 @@ export async function run(): Promise<void> {
           isRecord(trig.value) &&
           trig.value['triggered'] === true,
         'trigger reports the live kick',
+      );
+      c2.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A contract-max delta doc crosses the wire both ways ——
+  {
+    const bigDoc = {
+      changes: ['x'.repeat(MAX_SYNC_DOC_BYTES - 256)],
+    };
+    const { service, port } = await startService({
+      engine: {
+        exportDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok(bigDoc));
+        },
+        applyDelta(): Promise<Result<unknown>> {
+          return Promise.resolve(ok({ applied: true }));
+        },
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-maxdelta1',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      client.send(
+        sealJson(codec, { t: 'sync', since: 's', delta: bigDoc }),
+      );
+      const reply = openJson(codec, await client.recv());
+      assert(
+        isRecord(reply) &&
+          reply['t'] === 'delta' &&
+          isRecord(reply['delta']) &&
+          Array.isArray(reply['delta']['changes']),
+        `max-size delta crosses sealed frames, got ${JSON.stringify(reply).slice(0, 120)}`,
+      );
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Re-pair under a new id clears the stale pending mark ——
+  {
+    const { service, port } = await startService();
+    try {
+      // Device 'phone-repair-a' pairs, drops, and goes pending.
+      const pairing1 = await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-repair-a',
+        name: 're',
+      });
+      const c1 = await dial(port);
+      const h1 = await phoneHandshake(c1, peer, pairing1.fp);
+      c1.send(
+        sealJson(h1.codec, { t: 'pair', code: pairing1.code }),
+      );
+      await c1.recv();
+      c1.close();
+      await c1.closed;
+      // The server's close event lands after the client's — wait for
+      // the session to be reaped before the kick.
+      for (let i = 0; i < 50; i += 1) {
+        if ((await service.status()).sessions === 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const trig = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(
+        trig.ok &&
+          isRecord(trig.value) &&
+          trig.value['pending'] === true,
+        'offline device is pending',
+      );
+      // Same key re-pairs under a NEW id — the old record dedupes
+      // out and its pending mark must go with it.
+      const pairing2 = await pairingCode(service);
+      const peer2 = createTestPeer({
+        deviceId: 'phone-repair-b',
+        name: 're',
+        identity: peer.identity,
+      });
+      const c2 = await dial(port);
+      const h2 = await phoneHandshake(c2, peer2, pairing2.fp);
+      c2.send(
+        sealJson(h2.codec, { t: 'pair', code: pairing2.code }),
+      );
+      await c2.recv();
+      const status = await service.status();
+      assertEqual(status.pairedDevices, 1, 're-pair deduped the old id');
+      // c2 stays open: the kick drains its (not-pending) state — only
+      // the OLD id's mark can leak. Pre-fix this reported pending.
+      const trig2 = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(
+        trig2.ok &&
+          isRecord(trig2.value) &&
+          trig2.value['pending'] === false,
+        'stale pending mark cleared with the re-pair',
       );
       c2.close();
     } finally {

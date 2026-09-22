@@ -12,6 +12,7 @@ import {
   isRecord,
 } from '../shared/check.ts';
 import {
+  MAX_SYNC_DOC_BYTES,
   isSyncDeltasArgs,
   isSyncDeltasResult,
   isSyncDeltaDoc,
@@ -314,7 +315,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const nowMs = deps.nowMs ?? (() => Date.now());
   const host = deps.host ?? '0.0.0.0';
   const handshakeCap = deps.handshakeCap ?? 16 * 1_024;
-  const sessionCap = deps.sessionCap ?? 1_048_576;
+  /** AEAD overhead per frame: 12-byte iv + 16-byte auth tag. */
+  const SEAL_OVERHEAD = 28;
+  // A sealed frame carries the protocol wrapper around a contract-max
+  // delta doc — budget the cap above MAX_SYNC_DOC_BYTES + seal or a
+  // valid max-size delta can't cross the wire at all.
+  const sessionCap =
+    deps.sessionCap ?? MAX_SYNC_DOC_BYTES + SEAL_OVERHEAD + 4_096;
   const maxConnections = deps.maxConnections ?? 16;
   const handshakeMs = deps.handshakeMs ?? 15_000;
   const idleMs = deps.idleMs ?? 120_000;
@@ -416,9 +423,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       session.idleTimer = null;
     }
   }
-
-  /** AEAD overhead per frame: 12-byte iv + 16-byte auth tag. */
-  const SEAL_OVERHEAD = 28;
 
   function sendSealed(session: Session, msg: unknown): void {
     const codec = session.codec;
@@ -566,6 +570,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!outcome.ok) {
         reject(outcome.reason);
         return;
+      }
+      // Re-pair under a new id evicted the old record — drop its
+      // pending mark too, or triggers report work no device can clear.
+      if (
+        session.registeredId !== null &&
+        session.registeredId !== outcome.record.id
+      ) {
+        pendingSync.delete(session.registeredId);
       }
       sendSealed(session, {
         t: 'welcome',
