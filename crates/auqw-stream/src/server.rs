@@ -73,6 +73,10 @@ struct Shared {
     shutdown: AtomicBool,
     /// Live conn-thread count + slot-free signal (`Mutex`, `Condvar`).
     conn_slots: Arc<(Mutex<usize>, Condvar)>,
+    /// Open conns per session handle — `close` runs only when the
+    /// last one ends; an eager close would bump the detach epoch
+    /// and cancel sibling conns' parked reads.
+    attaches: Mutex<HashMap<String, usize>>,
 }
 
 /// The bound loopback adapter. `Drop` stops the accept loop; live
@@ -108,6 +112,7 @@ impl StreamServer {
             grants: Mutex::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
             conn_slots: Arc::new((Mutex::new(0), Condvar::new())),
+            attaches: Mutex::new(HashMap::new()),
         });
         let accept = {
             let shared = Arc::clone(&shared);
@@ -140,6 +145,12 @@ impl StreamServer {
         let (mime, _hint) = self.shared.registry.source_meta(handle)?;
         let mut grants = lock(&self.shared.grants)?;
         grants.retain(|_, g| self.shared.registry.is_live(&g.handle));
+        // A live grant for this handle is already a valid URL —
+        // minting per call would grow the map for the session's
+        // whole lifetime.
+        if let Some((token, _)) = grants.iter().find(|(_, g)| g.handle == handle) {
+            return Ok(format!("http://{}/s/{token}", self.shared.addr));
+        }
         let token = loop {
             let mut raw = [0u8; 16];
             getrandom::fill(&mut raw).map_err(|e| StreamError::Internal {
@@ -442,21 +453,59 @@ fn graceful_close(reader: &mut BufReader<TcpStream>) {
     }
 }
 
+/// Attach under the server's per-handle conn count — the
+/// DataSource-open semantic. The count is what keeps sibling conns'
+/// reads alive when one conn ends: `close` runs only when the last
+/// conn releases. Held under the same lock as the decrement so a
+/// racing attach is ordered against the detach.
+fn attach_counted(shared: &Shared, handle: &str, position: u64) -> Result<(), StreamError> {
+    let mut counts = lock(&shared.attaches)?;
+    shared.registry.attach(handle, position)?;
+    *counts.entry(handle.to_string()).or_insert(0) += 1;
+    Ok(())
+}
+
 /// Detaches the session a request attached when the connection ends
-/// — the DataSource-close semantic. Without it a served conn pins
-/// the session attached forever, invisible to detached reaping and
-/// immune to supersede.
+/// — the DataSource-close semantic, applied once the LAST conn
+/// holding the handle ends. Without it a served conn pins the
+/// session attached forever, invisible to detached reaping and
+/// immune to supersede; with a per-conn close, an ending conn would
+/// cancel its still-reading siblings.
 struct AttachClose<'a> {
-    registry: &'a StreamRegistry,
+    shared: &'a Shared,
     handle: Option<String>,
 }
 
 impl Drop for AttachClose<'_> {
     fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            // A session that ended mid-request returns NotFound —
-            // the detach still ran while it was live.
-            let _ = self.registry.close(&h);
+        let Some(h) = self.handle.take() else {
+            return;
+        };
+        match lock(&self.shared.attaches) {
+            Ok(mut counts) => {
+                let last = match counts.get_mut(&h) {
+                    Some(n) if *n > 1 => {
+                        *n -= 1;
+                        false
+                    }
+                    _ => {
+                        counts.remove(&h);
+                        true
+                    }
+                };
+                if last {
+                    // Still under the counts lock: a racing conn's
+                    // attach is ordered — it either incremented
+                    // first (its count survives) or lands after and
+                    // re-attaches the now-detached session, the
+                    // documented re-open path.
+                    let _ = self.shared.registry.close(&h);
+                }
+            }
+            // A poisoned count lock still unpins the session.
+            Err(_) => {
+                let _ = self.shared.registry.close(&h);
+            }
         }
     }
 }
@@ -548,13 +597,15 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
         write_status(out, 404, &[]);
         return Ok(());
     };
-    // The session detaches on conn end — a parked attachment would
-    // shield the session from detached reaping and supersede forever.
+    // The session detaches when the LAST conn holding it ends — a
+    // parked attachment would shield the session from detached
+    // reaping and supersede forever, while a per-conn close would
+    // cancel sibling conns' parked reads.
     let mut detach = AttachClose {
-        registry: &shared.registry,
+        shared,
         handle: None,
     };
-    let total = match shared.registry.effective_total(&handle) {
+    let hinted = match shared.registry.effective_total(&handle) {
         Ok(t) => t,
         Err(e) => {
             write_status(out, status_for(&e), &[]);
@@ -570,26 +621,58 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
             return Ok(());
         }
     }
-    // A ranged request whose bounds can't be resolved — past EOF,
-    // malformed, or an unknown total where no `last-byte-pos` exists
-    // to report — answers `416` (RFC 9110's only honest range
-    // failure); a `200` that starts mid-resource would lie.
-    let Some((start, end)) = (match &req.range {
-        None => Some((0u64, total.and_then(|t| t.checked_sub(1)))),
-        Some(spec) => match resolve_range(spec, total) {
-            Ok(r) => Some(r),
-            Err(status) => {
-                let star = total.map_or_else(|| "*".to_string(), |t| t.to_string());
-                write_status(
-                    out,
-                    status,
-                    &[("Content-Range".into(), format!("bytes */{star}"))],
-                );
-                None
-            }
-        },
-    }) else {
+    let star = |total: Option<u64>| total.map_or_else(|| "*".to_string(), |t| t.to_string());
+    // Malformed range syntax needs no total to fail — and a `200`
+    // that starts mid-resource would lie, so `416` is the honest
+    // answer RFC 9110 gives a range that cannot be satisfied.
+    if matches!(req.range, Some(RangeSpec::Invalid)) {
+        write_status(
+            out,
+            416,
+            &[("Content-Range".into(), format!("bytes */{}", star(hinted)))],
+        );
         return Ok(());
+    }
+    if req.head_only {
+        // HEAD proves liveness and reports bounds — no body bytes are
+        // spent on it, so the verdict resolves on the resolve-time
+        // hint (the wire's correction needs a read a HEAD never
+        // spends).
+        let (start, end) = match &req.range {
+            None => (0u64, hinted.and_then(|t| t.checked_sub(1))),
+            Some(spec) => match resolve_range(spec, hinted) {
+                Ok(r) => r,
+                Err(status) => {
+                    write_status(
+                        out,
+                        status,
+                        &[("Content-Range".into(), format!("bytes */{}", star(hinted)))],
+                    );
+                    return Ok(());
+                }
+            },
+        };
+        if let Err(e) = attach_counted(shared, &handle, start) {
+            write_status(out, status_for(&e), &[]);
+            return Ok(());
+        }
+        detach.handle = Some(handle.clone());
+        return write_reply_head(out, &mime, req.range.is_some(), start, end, hinted);
+    }
+    // GET: the resolve-time hint can lie until the wire's
+    // `Content-Range` lands, so the verdict resolves on the freshest
+    // total — while a read at or past the known end is declared EOF
+    // and fetches nothing. Where to probe: the spec's own position
+    // when it lands inside the hinted bounds, else the boundary just
+    // before the hinted end — a read on an uncovered position
+    // triggers a fetch that can reveal the real total (a covered
+    // probe can't — the hinted verdict then stands).
+    let provisional = match &req.range {
+        Some(RangeSpec::Interval(s, _) | RangeSpec::From(s)) => {
+            (*s).min(hinted.map_or(*s, |t| t.saturating_sub(1)))
+        }
+        Some(RangeSpec::Suffix(n)) => hinted.map_or(0, |t| t.saturating_sub(*n)),
+        _ => 0,
     };
     // Attaching per-request marks consumer intent exactly once (the
     // session's attach gate runs only on the first) while a detached
@@ -597,76 +680,76 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
     // semantics the DataSource close→open gives the native surfaces.
     // A session that already ended returns its typed terminal error
     // here — the honest status, not a blanket `410`.
-    if let Err(e) = shared.registry.attach(&handle, start) {
+    if let Err(e) = attach_counted(shared, &handle, provisional) {
         write_status(out, status_for(&e), &[]);
         return Ok(());
     }
     detach.handle = Some(handle.clone());
-    if req.head_only {
-        // HEAD proves liveness and reports bounds — no body bytes are
-        // spent on it.
-        return write_reply_head(out, &mime, req.range.is_some(), start, end, total);
-    }
-    // One read before headers: an immediate terminal error still maps
-    // to an honest status; a healthy session starts the body.
-    let first_want = end.map_or(READ_CHUNK, |e| (e - start + 1).min(READ_CHUNK));
-    let first = match shared.registry.read(&handle, start, first_want) {
+    // One read before headers: an immediate terminal error still
+    // maps to an honest status, a healthy session starts the body,
+    // and a fetch it triggers can advance upstream discovery.
+    let mut first = match shared.registry.read(&handle, provisional, READ_CHUNK) {
         Ok(b) => b,
         Err(e) => {
             write_status(out, status_for(&e), &[]);
             return Ok(());
         }
     };
-    // The probe read can advance upstream discovery — re-anchor the
-    // reported bounds on the freshest total instead of the stale
-    // hint; a range that collapsed under it answers honest 416
-    // while headers are still unsent.
-    let fresh = shared.registry.effective_total(&handle).ok().flatten();
-    let total = fresh.or(total);
-    if req.range.is_some() {
-        if let Some(t) = total {
-            if start >= t {
+    // Re-resolve on the freshest total — the wire's `Content-Range`
+    // beats the hint once seen: a suffix re-anchors to the real end,
+    // an interval re-clamps, a range that collapsed under the real
+    // total answers honest `416` while headers are still unsent, and
+    // a wire-proven total bounds a previously unbounded body so
+    // truncation shows up as a byte shortfall rather than a clean
+    // FIN.
+    let total = shared
+        .registry
+        .effective_total(&handle)
+        .ok()
+        .flatten()
+        .or(hinted);
+    let (start, end) = match &req.range {
+        None => (0u64, total.and_then(|t| t.checked_sub(1))),
+        Some(spec) => match resolve_range(spec, total) {
+            Ok(r) => r,
+            Err(status) => {
                 write_status(
                     out,
-                    416,
-                    &[("Content-Range".into(), format!("bytes */{t}"))],
+                    status,
+                    &[("Content-Range".into(), format!("bytes */{}", star(total)))],
                 );
                 return Ok(());
             }
-        }
-    }
-    // The probe read can advance upstream discovery — re-anchor the
-    // reported bounds on the freshest total instead of the stale
-    // hint; a range that collapsed under it answers honest 416
-    // while headers are still unsent. A wire-proven total also
-    // bounds a previously unbounded body, so truncation shows up as
-    // a byte-count shortfall rather than a clean FIN.
-    let fresh = shared.registry.effective_total(&handle).ok().flatten();
-    let total = fresh.or(total);
-    if req.range.is_some() {
-        if let Some(t) = total {
-            if start >= t {
-                write_status(
-                    out,
-                    416,
-                    &[("Content-Range".into(), format!("bytes */{t}"))],
-                );
-                return Ok(());
-            }
-        }
-    }
-    let end = match (end, fresh) {
-        (Some(e), Some(t)) => t.checked_sub(1).map(|last| e.min(last)),
-        (None, Some(t)) => t.checked_sub(1),
-        (e, _) => e,
+        },
     };
+    if start != provisional {
+        // The bounds moved under the wire total — re-seed intent and
+        // re-read where the resolved range actually begins.
+        if let Err(e) = shared.registry.attach(&handle, start) {
+            write_status(out, status_for(&e), &[]);
+            return Ok(());
+        }
+        let want = end.map_or(READ_CHUNK, |e| (e - start + 1).min(READ_CHUNK));
+        first = match shared.registry.read(&handle, start, want) {
+            Ok(b) => b,
+            Err(e) => {
+                write_status(out, status_for(&e), &[]);
+                return Ok(());
+            }
+        };
+    }
     write_reply_head(out, &mime, req.range.is_some(), start, end, total)?;
-    // The body walks seam reads; a mid-body failure can only close
-    // the connection truncated — the status is already out.
-    out.write_all(&first).map_err(|e| StreamError::Internal {
-        message: format!("response body: {e}"),
-    })?;
-    let mut pos = start.saturating_add(u64::try_from(first.len()).unwrap_or(u64::MAX));
+    // The probe read ran unbounded — serve only the resolved span;
+    // a mid-body failure can only close the connection truncated —
+    // the status is already out.
+    let first_take = end.map_or(first.len(), |e| {
+        ((e - start + 1).min(first.len() as u64)) as usize
+    });
+    out.write_all(&first[..first_take])
+        .map_err(|e| StreamError::Internal {
+            message: format!("response body: {e}"),
+        })?;
+    let mut pos = start + first_take as u64;
     loop {
         let Some(e) = end else {
             match shared.registry.read(&handle, pos, READ_CHUNK) {
@@ -1072,6 +1155,186 @@ mod tests {
         assert_eq!(r.status, 200);
         assert_eq!(r.header("content-length"), Some("512"));
         assert_eq!(r.body.len(), 512);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_reuses_the_live_grant() {
+        // Repeated serve calls for one handle return the same token —
+        // minting per call would grow the grant map for the session's
+        // whole lifetime.
+        let (server, reg, url, handle, _dir) = served(filled(), Some(1024));
+        assert_eq!(
+            server
+                .serve(&handle)
+                .unwrap_or_else(|e| panic!("serve: {e}")),
+            url
+        );
+        let mut alt = source();
+        alt.source_ref = "vid-2".into();
+        alt.url = "https://signed.example/s2?sig=SECRET".into();
+        let other = reg
+            .prepare(alt, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        assert_ne!(
+            server
+                .serve(&other.handle)
+                .unwrap_or_else(|e| panic!("serve: {e}")),
+            url
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ending_conn_leaves_sibling_reads_attached() {
+        // Two conns share the session: when the first ends, the
+        // second's parked read must keep its epoch — an eager close
+        // would wake it `Cancelled`.
+        // Head replies cover 0..1024 but declare the real 2048-byte
+        // total — the park target must sit inside it.
+        let mut steps: Vec<Step> = (0..1024)
+            .step_by(128)
+            .map(|off| Step::Reply(resp(206, off, 128, 2048)))
+            .collect();
+        steps.push(Step::Hang); // anything past the head parks forever
+        let dir = TestDir::new("srv-overlap");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 1024;
+        cfg.read_ahead = 1024;
+        cfg.read_deadline = Duration::from_secs(4);
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = Some(2048);
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        // Conn B opens a range past the cached head and parks on the
+        // hung fetch; conn A completes on cached bytes and ends.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b_url = url.clone();
+        let b = thread::spawn(move || {
+            let rest = b_url.strip_prefix("http://").unwrap_or(&b_url);
+            let (addr, path) = rest.split_once('/').unwrap_or_else(|| panic!("{b_url}"));
+            let mut conn =
+                TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
+            conn.set_read_timeout(Some(Duration::from_secs(6))).ok();
+            conn.write_all(
+                format!("GET /{path} HTTP/1.1\r\nHost: {addr}\r\nRange: bytes=1500-\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap_or_else(|e| panic!("send: {e}"));
+            let mut byte = [0u8; 1];
+            let _ = tx.send(conn.read(&mut byte).map(|n| (n, byte[0])));
+        });
+        thread::sleep(Duration::from_millis(400));
+        let r = http(&url, "GET", &[("Range", "bytes=0-63")]);
+        assert_eq!(r.status, 206);
+        // B's read must still be parked — nothing may arrive yet (an
+        // eager close would wake B `Cancelled` and FIN the conn).
+        assert!(
+            rx.recv_timeout(Duration::from_millis(800)).is_err(),
+            "sibling conn must stay attached"
+        );
+        reg.release(&info.handle)
+            .unwrap_or_else(|e| panic!("release: {e}"));
+        let _ = b.join();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_hint_suffix_reanchors_to_wire_total() {
+        // Hint says 512 but the wire reports 2048 — the probe fetch
+        // at the hinted anchor reveals the real total, and the
+        // suffix re-anchors to it instead of serving the hint's tail.
+        let steps: Vec<Step> = vec![
+            Step::Reply(FetchResponse {
+                status: 206,
+                content_range: Some("bytes 0-127/*".into()),
+                body: stream_body(vec![0xABu8; 128]),
+            }),
+            Step::Reply(FetchResponse {
+                status: 206,
+                content_range: Some("bytes 128-255/*".into()),
+                body: stream_body(vec![0xABu8; 128]),
+            }),
+            Step::Reply(resp(206, 448, 128, 2048)),
+            Step::Reply(resp(206, 1984, 64, 2048)),
+        ];
+        let dir = TestDir::new("srv-suffix");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 256;
+        cfg.read_ahead = 128;
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = Some(512);
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "GET", &[("Range", "bytes=-64")]);
+        assert_eq!(r.status, 206);
+        assert_eq!(r.header("content-range"), Some("bytes 1984-2047/2048"));
+        assert_eq!(r.header("content-length"), Some("64"));
+        assert_eq!(r.body.len(), 64);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_hint_interval_serves_when_wire_proves_it() {
+        // Hint says 512 but the wire reports 2048 — `bytes=1500-`
+        // fails under the hint yet is satisfiable: the boundary
+        // probe at 511 uncovers the real total and the request
+        // serves 1500-2047 instead of a stale 416.
+        let steps: Vec<Step> = vec![
+            Step::Reply(FetchResponse {
+                status: 206,
+                content_range: Some("bytes 0-127/*".into()),
+                body: stream_body(vec![0xABu8; 128]),
+            }),
+            Step::Reply(FetchResponse {
+                status: 206,
+                content_range: Some("bytes 128-255/*".into()),
+                body: stream_body(vec![0xABu8; 128]),
+            }),
+            Step::Reply(resp(206, 511, 128, 2048)),
+            Step::Reply(resp(206, 1500, 128, 2048)),
+            Step::Reply(resp(206, 1628, 128, 2048)),
+            Step::Reply(resp(206, 1756, 128, 2048)),
+            Step::Reply(resp(206, 1884, 128, 2048)),
+            Step::Reply(resp(206, 2012, 36, 2048)),
+        ];
+        let dir = TestDir::new("srv-boundary");
+        let mut cfg = test_config(&dir);
+        cfg.head_bytes = 256;
+        cfg.read_ahead = 128;
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+                .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let mut src = source();
+        src.content_length = Some(512);
+        let info = reg
+            .prepare(src, Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let url = server
+            .serve(&info.handle)
+            .unwrap_or_else(|e| panic!("serve: {e}"));
+        let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
+        assert_eq!(r.status, 206);
+        assert_eq!(r.header("content-range"), Some("bytes 1500-2047/2048"));
+        assert_eq!(r.header("content-length"), Some("548"));
+        assert_eq!(r.body.len(), 548);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
