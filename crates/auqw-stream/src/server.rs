@@ -399,6 +399,15 @@ fn parse_request(reader: &mut BufReader<TcpStream>) -> Result<Request, StreamErr
         }
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("range") {
+                if range.is_some() {
+                    // A second `Range` field merges into one
+                    // multi-range request this server cannot
+                    // serve — refuse rather than silently keep
+                    // the last interval.
+                    return Err(StreamError::InvalidResponse {
+                        message: "multiple Range header fields".into(),
+                    });
+                }
                 range = parse_range(value.trim());
             }
         }
@@ -1485,6 +1494,21 @@ mod tests {
         assert_eq!(r.status, 416);
         assert_eq!(r.header("content-range"), Some("bytes */2048"));
         assert_eq!(r.body.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_range_fields_answer_400() {
+        // Two `Range` header fields merge into one multi-range
+        // request the server cannot serve — it refuses rather than
+        // silently keeping the last interval.
+        let (server, _reg, url, _h, _dir) = served(vec![], Some(1024));
+        let r = http(
+            &url,
+            "GET",
+            &[("Range", "bytes=0-99"), ("Range", "bytes=200-299")],
+        );
+        assert_eq!(r.status, 400);
+        drop(server);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -332,12 +332,7 @@ async fn fetch_chunk(
                             return if stallable(&e) {
                                 Outcome::Stalled(e)
                             } else {
-                                // The mint is spent, but the wire's
-                                // refusal still stands as EOF evidence
-                                // — a dead URL can neither prove the
-                                // range exists nor justify killing the
-                                // session and reads below the ceiling.
-                                Outcome::Eof(offset)
+                                Outcome::Failed(e)
                             };
                         }
                         // A fresh mint is a fresh attempt — the
@@ -1031,12 +1026,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dead_mint_416_falls_back_to_wire_eof() {
-        // The mint is spent before the second refusal can land: the
-        // wire's `416` still stands as EOF evidence — a dead URL can
-        // neither prove the range exists nor justify killing the
-        // session (and every read below the ceiling) with it.
-        let d = TestDir::new("eofdead");
+    async fn failed_remint_after_416_surfaces_typed_error() {
+        // A terminal remint error after a bare `416` is the session's
+        // own verdict, not end-of-stream: a dead URL that fails to
+        // re-mint reports `NotFound`, never a fabricated EOF that
+        // truncates the media silently.
+        let d = TestDir::new("remintdead");
         let remint = remint_ok();
         *remint.fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamError::NotFound);
         let s = session(config(&d), remint.clone());
@@ -1050,9 +1045,12 @@ mod tests {
             sh.fetch_through.insert(900, 1);
         }
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
-        wait_until(|| eof_below(&s).is_some() || s.is_terminal()).await;
-        assert_eq!(eof_below(&s), Some(900));
-        assert!(!s.is_terminal(), "dead mint must not kill the session");
+        wait_until(|| s.is_terminal()).await;
+        assert_eq!(eof_below(&s), None);
+        assert!(
+            s.is_terminal(),
+            "a terminal remint error must end the session typed, not as EOF"
+        );
         stop_pump(&s, task).await;
         assert_eq!(remint.calls.load(Ordering::Relaxed), 1);
     }
