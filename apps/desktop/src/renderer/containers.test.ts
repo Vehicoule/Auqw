@@ -23,6 +23,11 @@ import {
 // fmp4Fixture:
 //   0..11 ftyp(4)  12..20 moov(1)  21..30 moof(2)  31..39 mdat(1)
 //  40..48 moof(1)  49..58 mdat(2)                  boundaries 21, 40
+//
+// stypFmp4Fixture (segment-type-headed fmp4):
+//   0..11 ftyp(4)  12..20 moov(1)  21..28 styp(0)  29..38 moof(2)
+//  39..47 mdat(1) 48..55 styp(0) 56..64 moof(1)  65..74 mdat(2)
+//                                                  boundaries 21, 48
 
 function bytes(...parts: number[]): number[] {
   return parts;
@@ -107,6 +112,22 @@ function plainMp4Fixture(): Uint8Array {
   ]);
 }
 
+/** Fragmented mp4 whose segments open with `styp` — the boundary
+ * must anchor the styp, not the following moof, or the segment type
+ * lands inside the previous append. */
+function stypFmp4Fixture(): Uint8Array {
+  return new Uint8Array([
+    ...mp4Box('ftyp', bytes(0x69, 0x73, 0x6f, 0x36)),
+    ...mp4Box('moov', bytes(0x00)),
+    ...mp4Box('styp', bytes()),
+    ...mp4Box('moof', bytes(0x01, 0x02)),
+    ...mp4Box('mdat', bytes(0x33)),
+    ...mp4Box('styp', bytes()),
+    ...mp4Box('moof', bytes(0x04)),
+    ...mp4Box('mdat', bytes(0x44, 0x55)),
+  ]);
+}
+
 export function run(): void {
   // sniff
   assertDeepEqual(sniff(webmFixture()), { kind: 'ok', container: 'webm' });
@@ -152,6 +173,15 @@ export function run(): void {
     assertEqual(result.container, 'mp4');
   }
 
+  // carve: styp-headed fmp4 — each boundary anchors the styp that
+  // opens the segment, not the moof after it.
+  {
+    const result = carve(stypFmp4Fixture());
+    assert(result.kind === 'ok', 'styp fmp4 carves');
+    if (result.kind !== 'ok') return;
+    assertDeepEqual(result.boundaries, [21, 48], 'styp-anchored bounds');
+  }
+
   // carve: plain mp4 is refused — the caller falls back to serve-url.
   assertDeepEqual(carve(plainMp4Fixture()), { kind: 'unsupported' });
   assertDeepEqual(carve(new Uint8Array([0x1a])), { kind: 'need-more' });
@@ -175,6 +205,14 @@ export function run(): void {
     assertDeepEqual(scan.boundaries, [29, 39]);
   }
 
+  // boundaryScan mid-stream on styp: the head is already a boundary
+  // (styp opens a segment), and the next styp anchors the next.
+  {
+    const fix = stypFmp4Fixture();
+    const scan = boundaryScan(fix.subarray(48), 'mp4', 0, 0);
+    assertDeepEqual(scan.boundaries, [0], 'mid-stream styp is a boundary');
+  }
+
   // resyncScan lands on the first boundary signature after junk bytes.
   {
     const fix = webmFixture();
@@ -189,6 +227,12 @@ export function run(): void {
       'mp4',
     );
     assertEqual(mp4Found, 3, 'moof found after junk');
+    const styp = stypFmp4Fixture();
+    const stypFound = resyncScan(
+      new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, ...styp.subarray(48)]),
+      'mp4',
+    );
+    assertEqual(stypFound, 4, 'styp found after junk');
     assertEqual(resyncScan(new Uint8Array([1, 2, 3]), 'mp4'), -1);
   }
 }

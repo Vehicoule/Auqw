@@ -105,9 +105,9 @@ export function sniff(buf: Uint8Array): SniffResult {
   if (buf.byteLength < 12) {
     return { kind: 'need-more' };
   }
-  // ISO BMFF: first box is `ftyp`/`stypd` — size(4) then 4cc at +4.
+  // ISO BMFF: first box is `ftyp`/`styp` — size(4) then 4cc at +4.
   const type = asciiType(buf, 4);
-  if (type === 'ftyp' || type === 'stypd') {
+  if (type === 'ftyp' || type === 'styp') {
     return { kind: 'ok', container: 'mp4' };
   }
   return { kind: 'unsupported' };
@@ -340,7 +340,7 @@ function readBox(buf: Uint8Array, off: number): Mp4Box | null {
 }
 
 /**
- * MP4 boundaries: each `moof` starts a media segment; `stypd` glues to
+ * MP4 boundaries: each `moof` starts a media segment; a `styp` glues to
  * the following `moof`. A `mdat` reached with `moov` seen but no `moof`
  * is a non-fragmented file — the caller falls back to the range server.
  */
@@ -353,6 +353,9 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
   const boundaries: number[] = [];
   let pos = 0;
   let sawMoof = false;
+  // A `styp` glues to the moof that immediately follows it — the
+  // segment boundary anchors on the styp, not the moof.
+  let pendingStyp = -1;
   while (pos + 8 <= buf.length) {
     const box = readBox(buf, pos);
     if (box === null) {
@@ -360,9 +363,7 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
     }
     if (box.type === 'moof') {
       sawMoof = true;
-      // stypd+moof is one segment — anchor on the stypd when it was the
-      // immediately preceding box start.
-      boundaries.push(pos);
+      boundaries.push(pendingStyp >= 0 ? pendingStyp : pos);
     }
     if (box.type === 'mdat' && !sawMoof) {
       // Every media-data box in a fragmented file is preceded by its
@@ -370,6 +371,7 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
       // whatever order moov arrives in.
       return { kind: 'non-fragmented' };
     }
+    pendingStyp = box.type === 'styp' ? pos : -1;
     pos += box.size;
   }
   return { kind: 'fragmented', boundaries };
@@ -456,14 +458,16 @@ export function boundaryScan(
     }
     return { boundaries, cues };
   }
+  let pendingStyp = -1;
   while (pos + 8 <= buf.length) {
     const box = readBox(buf, pos);
     if (box === null) {
       break;
     }
     if (box.type === 'moof') {
-      boundaries.push(pos);
+      boundaries.push(pendingStyp >= 0 ? pendingStyp : pos);
     }
+    pendingStyp = box.type === 'styp' ? pos : -1;
     pos += box.size;
   }
   return { boundaries, cues };
@@ -489,7 +493,9 @@ export function resyncScan(
     return -1;
   }
   for (let i = 0; i + 8 <= buf.length; i++) {
-    if (asciiType(buf, i + 4) === 'moof') {
+    const type = asciiType(buf, i + 4);
+    // A segment may start on its styp — both anchor the resync.
+    if (type === 'moof' || type === 'styp') {
       const size = u32be(buf, i);
       if (size >= 8 && size <= 64 * 1024 * 1024) {
         return i;

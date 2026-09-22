@@ -66,6 +66,25 @@ export interface MseSource {
   destroy(): void;
 }
 
+/**
+ * The attach outcome splits URL creation from readiness: `url` must be
+ * assigned to the element for `sourceopen` to fire at all, so waiting
+ * on first-append readiness before returning it deadlocks the caller.
+ * `ready` settles once a segment actually lands (or rejects on
+ * MseUnsupported/pump failure → caller takes the loopback leg).
+ */
+export interface MseAttach {
+  readonly url: string;
+  readonly ready: Promise<MseSource>;
+  /**
+   * Abandon the attach before its URL reaches an element: closes the
+   * pump/port and revokes the object URL, and leaves `ready` unsettled
+   * — callers on a stale op must not let it fall through to the
+   * serve-url arm and mint a stream for a dead playback.
+   */
+  abort(): void;
+}
+
 type JournalEntry = {
   byteStart: number;
   byteEnd: number;
@@ -75,8 +94,13 @@ type JournalEntry = {
 
 type PendingUnit = { readonly byteStart: number; readonly bytes: Uint8Array };
 
-/** Credit window granted to the pump per append batch. */
-const GRANT_BYTES = 512 * 1024;
+/**
+ * Outstanding-byte ceiling the renderer tops the pump's credit up to:
+ * ingest (unemitted) + pending (emitted, unappended) bytes. Granting
+ * only on append completion would stall an open unit bigger than the
+ * window — its next boundary can't arrive without more bytes.
+ */
+const HIGH_WATER_BYTES = 8 * 1024 * 1024;
 /** Buffered-media window kept across evictions (seconds). */
 const KEEP_BEHIND_S = 120;
 const KEEP_AHEAD_S = 300;
@@ -90,7 +114,7 @@ export function attachMseSource(deps: {
   readonly mime: string;
   readonly channel: (args: { handle: string }) => Promise<StreamPortLike>;
   readonly mse: MseFactories;
-}): Promise<MseSource> {
+}): Promise<MseAttach> {
   if (
     deps.mse.isTypeSupported !== undefined &&
     !deps.mse.isTypeSupported(deps.mime)
@@ -102,34 +126,41 @@ export function attachMseSource(deps: {
   const media = deps.mse.createSource();
   const url = deps.mse.createObjectURL(media);
   let revoked = false;
+  let sessionDestroy: (() => void) | null = null;
   const revoke = (): void => {
     if (!revoked) {
       revoked = true;
       deps.mse.revokeObjectURL(url);
     }
   };
-  const started = deps
+  const abort = (): void => {
+    sessionDestroy?.();
+    revoke();
+  };
+  return deps
     .channel({ handle: deps.handle })
-    .then(
-      (port) =>
-        new Promise<MseSource>((resolve, reject) => {
-          runSession(
-            deps.mime,
-            deps.mse,
-            media,
-            url,
-            port,
-            resolve,
-            reject,
-            revoke,
-          );
-        }),
-    )
+    .then((port) => {
+      const ready = new Promise<MseSource>((resolve, reject) => {
+        sessionDestroy = runSession(
+          deps.mime,
+          deps.mse,
+          media,
+          url,
+          port,
+          resolve,
+          reject,
+          revoke,
+        );
+      });
+      // A failed session revokes the object URL itself via destroy();
+      // this catch keeps `ready` handled for callers that ignore it.
+      ready.catch(() => revoke());
+      return { url, ready, abort };
+    })
     .catch((thrown: unknown) => {
       revoke();
       throw thrown;
     });
-  return started;
 }
 
 function runSession(
@@ -141,7 +172,7 @@ function runSession(
   resolve: (source: MseSource) => void,
   reject: (error: Error) => void,
   revoke: () => void,
-): void {
+): () => void {
   let buffer: SourceBufferLike | null = null;
   let ingest = new Uint8Array(0);
   let ingestBase = 0;
@@ -159,8 +190,21 @@ function runSession(
   let resync = false;
   let lastAppended: PendingUnit | null = null;
   let resolved = false;
-  function grant(): void {
-    port.send({ kind: 'grant', bytes: GRANT_BYTES });
+  /** Re-grant whatever head-room the byte window freed — consumed
+   * ingest drops off the window at trimIngest, so a unit larger than
+   * the initial grant still pulls bytes until it closes. */
+  function maybeGrant(): void {
+    if (destroyed || eof) {
+      return;
+    }
+    let pendingBytes = 0;
+    for (const unit of pending) {
+      pendingBytes += unit.bytes.byteLength;
+    }
+    const head = HIGH_WATER_BYTES - ingest.length - pendingBytes;
+    if (head > 0) {
+      port.send({ kind: 'grant', bytes: head });
+    }
   }
 
   function fail(error: Error): void {
@@ -294,6 +338,10 @@ function runSession(
     }
     trimIngest();
     drain();
+    // Consumed ingest frees window even mid-open-unit — without this a
+    // segment bigger than the initial grant could never close (its next
+    // boundary can't arrive until more bytes do).
+    maybeGrant();
   }
 
   function isQuotaError(thrown: unknown): boolean {
@@ -303,11 +351,20 @@ function runSession(
     );
   }
 
-  function evict(): void {
-    if (buffer === null) {
+  // Eviction is itself an asynchronous SourceBuffer operation — remove()
+  // sets `updating` until its own updateend, so appends and further
+  // removes must wait behind it. The queue drains one range at a time;
+  // the final updateend hands back to `drain` for the queued retry.
+  let evicting = false;
+  let evictedOnce = false;
+  const evictQueue: Array<readonly [number, number]> = [];
+
+  function startEviction(): void {
+    const ranges = buffer?.buffered;
+    if (ranges === undefined) {
+      drain();
       return;
     }
-    const ranges = buffer.buffered;
     // Anchor on the latest appended media — eviction keeps a window
     // around the ingest head, not the element position (the player's
     // currentTime always trails the append frontier on seeks).
@@ -320,11 +377,7 @@ function runSession(
         end < anchorS - KEEP_BEHIND_S ||
         start > anchorS + KEEP_AHEAD_S
       ) {
-        try {
-          buffer.remove(start, end);
-        } catch {
-          // Eviction is best-effort; the retry still follows.
-        }
+        evictQueue.push([start, end]);
         journal = journal.filter(
           (j) =>
             !(
@@ -334,11 +387,29 @@ function runSession(
         );
       }
     }
+    evicting = true;
+    removeNext();
+  }
+
+  function removeNext(): void {
+    const next = evictQueue.shift();
+    if (next === undefined || buffer === null) {
+      evicting = false;
+      drain(); // the evicted append retries here, behind the removals
+      return;
+    }
+    try {
+      buffer.remove(next[0], next[1]);
+    } catch {
+      // Eviction is best-effort; a refused range skips to the next.
+      removeNext();
+    }
   }
 
   function drain(): void {
     if (
       destroyed ||
+      evicting ||
       buffer === null ||
       buffer.updating ||
       pending.length === 0
@@ -353,18 +424,11 @@ function runSession(
     try {
       buffer.appendBuffer(unit.bytes);
     } catch (thrown) {
-      if (isQuotaError(thrown)) {
-        evict();
+      if (isQuotaError(thrown) && !evictedOnce) {
+        evictedOnce = true;
         pending.unshift(unit);
-        try {
-          buffer.appendBuffer(unit.bytes);
-        } catch (retry) {
-          fail(
-            retry instanceof Error
-              ? retry
-              : new Error('append failed'),
-          );
-        }
+        lastAppended = null;
+        startEviction();
         return;
       }
       fail(
@@ -408,6 +472,12 @@ function runSession(
     if (destroyed) {
       return;
     }
+    if (evicting) {
+      // A removal's updateend, not an append's — continue the eviction
+      // chain; append bookkeeping resumes once `drain` re-arms it.
+      removeNext();
+      return;
+    }
     const unit = lastAppended;
     if (unit !== null && buffer !== null) {
       const ranges = buffer.buffered;
@@ -435,9 +505,11 @@ function runSession(
         }
       }
     }
-    if (!resolved) {
-      // The attach resolves only once a segment actually landed — a
-      // sniff-ok container that decodes nothing still falls back.
+    if (!resolved && journal.length > 0) {
+      // Resolve only once a media range exists — an init-segment append
+      // produces no `buffered` range, so a stream that dies right after
+      // its header still rejects and falls back instead of attaching a
+      // source that will never play.
       resolved = true;
       resolve({
         url,
@@ -447,10 +519,7 @@ function runSession(
     }
     drain();
     checkEnd();
-    // Replenish the credit window once a batch drained.
-    if (!destroyed && !eof && pending.length === 0) {
-      grant();
-    }
+    maybeGrant(); // freed appended bytes pull the next read window
   }
 
   function onData(frame: PumpData): void {
@@ -515,7 +584,7 @@ function runSession(
     emitCursor = byte;
     eof = false;
     port.send({ kind: 'seek', position: byte, epoch });
-    grant();
+    maybeGrant();
   }
 
   media.addEventListener('sourceopen', () => {
@@ -529,7 +598,7 @@ function runSession(
     buffer.addEventListener('error', () =>
       fail(new Error('SourceBuffer error')),
     );
-    grant();
+    maybeGrant();
   });
 
   port.onMessage((raw) => {
@@ -554,4 +623,5 @@ function runSession(
         break;
     }
   });
+  return destroy;
 }

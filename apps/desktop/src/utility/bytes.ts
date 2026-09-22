@@ -114,9 +114,13 @@ export function createStreamPump(deps: {
           });
         } catch (thrown) {
           inFlight -= 1;
-          if (readEpoch === epoch) {
-            sendError(thrown, 'io-error');
+          if (readEpoch !== epoch) {
+            // Stale-epoch read failed after a seek — keep pumping at
+            // the re-anchored position; returning here strands the
+            // post-seek grant's credit with nothing left to spend it.
+            continue;
           }
+          sendError(thrown, 'io-error');
           return;
         }
       }

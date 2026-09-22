@@ -246,11 +246,22 @@ export function createWebPlayerPort(deps: {
    * The MSE-first attach: when the mime is known and MSE-decodable the
    * byte pump feeds a SourceBuffer; anything it refuses — non-fragmented
    * mp4 above all — takes the `streamServeUrl` loopback instead.
+   *
+   * `url` lands fast enough to attach (a MediaSource only opens once
+   * its object URL is on the element — waiting for first-append
+   * readiness before assigning `audio.src` would deadlock `sourceopen`).
+   * `settle` then resolves the committed outcome: the MSE source once a
+   * segment lands, or the serve-url leg when the attach refuses
+   * mid-stream.
    */
   async function attachUrl(
     handle: string,
     mimeHint?: string,
-  ): Promise<{ url: string; source: MseSource | null }> {
+  ): Promise<{
+    url: string;
+    settle: Promise<{ url: string; source: MseSource | null }>;
+    abort(): void;
+  }> {
     const mime = mimeHint ?? handleMimes.get(handle);
     if (
       deps.mse != null &&
@@ -259,20 +270,31 @@ export function createWebPlayerPort(deps: {
         deps.mse.isTypeSupported(mime))
     ) {
       try {
-        const source = await attachMseSource({
+        const attach = await attachMseSource({
           handle,
           mime,
           channel: (args) => stream.channel(args),
           mse: deps.mse,
         });
-        return { url: source.url, source };
+        const settle = attach.ready.then(
+          (source) => ({ url: attach.url, source }),
+          async (): Promise<{ url: string; source: MseSource | null }> => {
+            const served = await stream.serveUrl({ handle });
+            return { url: served.url, source: null };
+          },
+        );
+        return { url: attach.url, settle, abort: attach.abort };
       } catch {
-        // MSE refusal is a fallback, not a failure — the loopback leg
-        // serves the same element through server.rs.
+        // Pre-wire MSE refusal (mime gate / dead broker) — the loopback
+        // leg serves the same element through server.rs.
       }
     }
     const { url } = await stream.serveUrl({ handle });
-    return { url, source: null };
+    return {
+      url,
+      settle: Promise.resolve({ url, source: null }),
+      abort: () => undefined,
+    };
   }
   let projection: QueueProjection | null = null;
   let mediaActionsInstalled = false;
@@ -431,29 +453,53 @@ export function createWebPlayerPort(deps: {
       }
       handle = outcome.stream.handle;
       noteMime(handle, outcome.stream.mime);
-      const { url, source } = await attachUrl(
-        handle,
-        outcome.stream.mime,
-      );
+      const first = await attachUrl(handle, outcome.stream.mime);
       // A later play/attach/prepare or a moved projection makes this
       // completion stale — release its minted handle and stay out of
       // the element; the live attempt keeps ownership.
       if (gen !== opGen || projection !== p) {
-        source?.destroy();
+        first.abort();
+        void first.settle.then((s) => s.source?.destroy());
         void stream.release({ handle }).catch(() => undefined);
         return;
       }
-      activeMse = source === null ? null : { handle, source };
+      // The successor's pump must close before this source installs —
+      // two live pumps on one element attach is the leak the review
+      // flagged (dropMse only ran inside play()).
+      dropMse();
       const identity: PlaybackIdentity = {
         attemptId: `watt-id-${seq}`,
         queueRev: p.queueRev,
       };
       current = { handle, identity, occurrenceId: item.occurrenceId };
       attached = true;
-      audio.src = url;
+      audio.src = first.url;
       audio.currentTime = 0;
       emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
       emitMarks(handle, identity);
+      const settled = await first.settle;
+      // Liveness past the element install is the handle match —
+      // our own emitTransition already swapped the `projection`
+      // reference, so `projection === p` can no longer prove this op
+      // is the live attempt.
+      if (
+        gen !== opGen ||
+        current === null ||
+        current.handle !== handle
+      ) {
+        settled.source?.destroy();
+        void stream.release({ handle }).catch(() => undefined);
+        return;
+      }
+      activeMse =
+        settled.source === null
+          ? null
+          : { handle, source: settled.source };
+      // A mid-stream MSE refusal swaps the element onto the loopback leg.
+      if (settled.url !== first.url) {
+        audio.src = settled.url;
+        audio.currentTime = 0;
+      }
       const shouldPlay = reason === 'ended' || p.mode === 'playing';
       if (shouldPlay) {
         await audio.play();
@@ -531,6 +577,7 @@ export function createWebPlayerPort(deps: {
         // A remote skip at the tail leaves the element live — detach
         // it so playback stops with the queue, not after it.
         opGen++;
+        dropMse();
         current = null;
         audio.pause();
         audio.src = '';
@@ -744,13 +791,14 @@ export function createWebPlayerPort(deps: {
       });
       return guard(async () => {
         try {
-          const { url, source } = await attachUrl(input.handle);
+          const first = await attachUrl(input.handle);
           // A newer play/prepare/stop superseded this one while the
           // attach resolved — the late completion must not retake
           // the element. A release of this same handle landed too: it
           // bumped opGen through the pendingPlayGens guard.
           if (gen !== opGen) {
-            source?.destroy();
+            first.abort();
+            void first.settle.then((s) => s.source?.destroy());
             return;
           }
           // The surviving token is authoritative — a queue mutation may
@@ -766,13 +814,29 @@ export function createWebPlayerPort(deps: {
             occurrenceId:
               pending?.occurrenceId ?? projection?.currentOccurrenceId ?? null,
           };
-          activeMse =
-            source === null ? null : { handle: input.handle, source };
-          audio.src = url;
+          audio.src = first.url;
           audio.currentTime =
             (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
           status('buffering');
           emitMarks(input.handle, identity);
+          const settled = await first.settle;
+          // Superseded while the MSE attach settled — whatever source
+          // it produced belongs to a dead op.
+          if (gen !== opGen) {
+            settled.source?.destroy();
+            return;
+          }
+          activeMse =
+            settled.source === null
+              ? null
+              : { handle: input.handle, source: settled.source };
+          // A mid-stream MSE refusal swaps the element onto the
+          // loopback leg.
+          if (settled.url !== first.url) {
+            audio.src = settled.url;
+            audio.currentTime =
+              (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
+          }
           await audio.play();
           if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
             deps.mediaSession.playbackState = 'playing';

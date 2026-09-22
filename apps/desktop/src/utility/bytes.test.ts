@@ -186,6 +186,46 @@ export async function run(): Promise<void> {
     assertEqual(data[0]?.position, 700, 're-read at the re-anchored position');
   }
 
+  // A stale-epoch read that *rejects* after a seek must not strand the
+  // post-seek credit: the pump keeps reading at the re-anchored
+  // position, not dead-stop on the old epoch's failure.
+  {
+    const bytes = new Uint8Array(1024).fill(6);
+    let reject: ((e: Error) => void) | undefined;
+    let calls = 0;
+    const host = fakeHost(bytes, {
+      async streamRead(_h: string, position: number, length: number) {
+        calls += 1;
+        if (calls === 1) {
+          await new Promise<void>((_r, rej) => {
+            reject = rej;
+          });
+        }
+        return Buffer.from(bytes.subarray(position, position + length));
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-4b', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await settle();
+    // The in-flight read is epoch 0; the seek re-anchors to epoch 1 and
+    // the new grant is already queued when the stale read finally dies.
+    port.emitMessage({ kind: 'seek', position: 700, epoch: 1 });
+    port.emitMessage({ kind: 'grant', bytes: 128 });
+    reject?.(new Error('socket died mid-read'));
+    await settle();
+    const data = port.sent.filter((m) => m.kind === 'data');
+    assert(
+      data.length >= 1 && data.every((m) => m.epoch === 1),
+      'post-seek credit still produced reads after the stale rejection',
+    );
+    assertEqual(data[0]?.position, 700, 'reads continued at the anchor');
+    assert(
+      port.sent.every((m) => m.kind !== 'error'),
+      'stale rejection never surfaced as an error frame',
+    );
+  }
+
   // A streamOpen failure surfaces as an error frame, then closes.
   {
     const host = fakeHost(new Uint8Array(0), {

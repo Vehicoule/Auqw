@@ -97,13 +97,14 @@ function wrapPort(port: MessagePort): StreamPortLike {
   };
   // Electron emits `close` on a dead peer — abnormal termination, so
   // surface it as an error frame, never a clean eof (the append loop
-  // would endOfStream on truncated media).
+  // would endOfStream on truncated media). Epoch 0 keeps the frame
+  // protocol-valid — error frames carry no epoch gate at the receiver.
   port.addEventListener('close', () => {
     closed = true;
     for (const listener of [...listeners]) {
       listener({
         kind: 'error',
-        epoch: -1,
+        epoch: 0,
         code: 'closed',
         message: 'pump port closed',
       });

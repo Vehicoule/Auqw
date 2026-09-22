@@ -60,6 +60,9 @@ class FakeSourceBuffer implements SourceBufferLike {
   appends: Uint8Array[] = [];
   removes: Array<[number, number]> = [];
   failNext = false;
+  /** Append indexes that produce no buffered range — init segments
+   * land no media, so these model header-only appends. */
+  rangelessAppends = new Set<number>();
   private listeners = new Map<string, Array<() => void>>();
 
   appendBuffer(data: Uint8Array): void {
@@ -73,7 +76,9 @@ class FakeSourceBuffer implements SourceBufferLike {
     this.updating = true;
     // Each appended unit maps to 10s of media in this fake.
     const i = this.appends.length - 1;
-    this.buffered.list.push([i * 10, i * 10 + 10]);
+    if (!this.rangelessAppends.has(i)) {
+      this.buffered.list.push([i * 10, i * 10 + 10]);
+    }
     queueMicrotask(() => {
       this.updating = false;
       for (const l of this.listeners.get('updateend') ?? []) l();
@@ -209,7 +214,9 @@ export async function run(): Promise<void> {
     assert(port.grants() === 1, 'initial credit grant');
     feedData(port, webmFixture(), 0);
     port.feed({ kind: 'eof', epoch: 0 });
-    const source = await attach;
+    const { url } = await attach;
+    const source = await (await attach).ready;
+    assertEqual(url, 'blob:fake');
     assertEqual(source.url, 'blob:fake');
     const sb = media.sourceBuffer;
     assert(sb !== null);
@@ -233,7 +240,7 @@ export async function run(): Promise<void> {
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
-    const source = await attach;
+    const source = await (await attach).ready;
     source.seekTo(5_000); // covered by unit 0's 0–10s media range
     const seek = port.sent.find(
       (m) => (m as { kind?: string }).kind === 'seek',
@@ -265,7 +272,7 @@ export async function run(): Promise<void> {
     media.fireSourceopen();
     feedData(port, mp4, 0);
     let rejected: unknown = null;
-    await attach.catch((e) => {
+    await (await attach).ready.catch((e) => {
       rejected = e;
     });
     assert(
@@ -290,7 +297,7 @@ export async function run(): Promise<void> {
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
-    const source = await attach;
+    const source = await (await attach).ready;
     const sb = media.sourceBuffer;
     assert(sb !== null);
     sb.failNext = true;
@@ -302,6 +309,87 @@ export async function run(): Promise<void> {
     assert(sb.removes.length >= 0, 'eviction ran without throwing');
     assert(sb.appends.length > 3, 'retry appended');
     void source;
+  }
+
+  // Credit keeps flowing while a unit is open: bytes past the last
+  // boundary sit in ingest, and a grant that only replenished on
+  // append-completion would starve a segment larger than the window.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4a',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    const grantsAtOpen = port.grants();
+    // Feed only through mid-cluster1 — no second boundary exists yet,
+    // so the open unit's bytes sit in ingest.
+    feedData(port, webmFixture().subarray(0, 35), 0);
+    await settle();
+    assert(
+      port.grants() > grantsAtOpen,
+      'credit topped up while the open unit was incomplete',
+    );
+    void attach;
+  }
+
+  // The attach resolves only once media lands — an init-segment append
+  // produces no `buffered` range, so a head-only stream stays pending
+  // and can still fall back; the first media-bearing append resolves.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const attach = attachMseSource({
+      handle: 'h-4b',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse: factories(media),
+    });
+    await settle();
+    media.fireSourceopen();
+    let settled = false;
+    void (await attach).ready.then(() => {
+      settled = true;
+    });
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    // Feed through mid-cluster1 — the boundary at 29 becomes visible,
+    // so the init unit [17,29) appends (marked range-less, like a real
+    // init segment) while the open cluster keeps the rest in ingest.
+    sb.rangelessAppends.add(0);
+    feedData(port, webmFixture().subarray(0, 35), 0);
+    await settle();
+    assert(sb.appends.length === 1, 'init unit appended');
+    assert(!settled, 'attach pending until a media range lands');
+    feedData(port, webmFixture().subarray(35), 35);
+    await settle();
+    assert(settled, 'attach resolved once media appended');
+  }
+
+  // abort() before the URL reaches an element closes the pump port and
+  // revokes the object URL — no fallback leg is minted for a dead op.
+  {
+    const media = new FakeMediaSource();
+    const port = new FakePort();
+    const mse = factories(media);
+    const attach = await attachMseSource({
+      handle: 'h-4c',
+      mime: 'audio/webm',
+      channel: () => Promise.resolve(port),
+      mse,
+    });
+    await settle();
+    attach.abort();
+    assert(
+      port.sent.some((m) => (m as { kind?: string }).kind === 'close'),
+      'abort sent the close frame',
+    );
+    assert(port.closed, 'abort closed the port');
+    assertDeepEqual(mse.revoked, ['blob:fake'], 'abort revoked the url');
   }
 
   // destroy() closes the pump port and revokes the object URL.
@@ -318,7 +406,7 @@ export async function run(): Promise<void> {
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
-    const source = await attach;
+    const source = await (await attach).ready;
     source.destroy();
     assert(
       port.sent.some((m) => (m as { kind?: string }).kind === 'close'),
