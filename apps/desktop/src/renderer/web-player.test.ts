@@ -1254,6 +1254,48 @@ export async function run(): Promise<void> {
     assert((await playing).ok, 'aborted play resolves quietly');
   }
 
+  // An attachItem aborted mid-attach reaps the handle it minted — the
+  // quiet-abort path can't leave the registry slot held forever, or
+  // repeated supersessions cap the stream registry.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    // ended → attachItem prepares the successor (mints 'h-1') and
+    // parks on its pending settle — channel resolved, nothing fed.
+    audio.fire('ended');
+    await settle();
+    assert(port.closed === false, 'attach pump is live mid-attach');
+    // A superseding prepare kills the op and its pending attach.
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:9',
+      identity,
+    });
+    await settle();
+    assert(port.closed, 'pump closed with the aborted attach');
+    assert(
+      stream.calls.some(
+        (c) =>
+          c.method === 'release' &&
+          typeof c.args === 'object' &&
+          c.args !== null &&
+          (c.args as { handle?: string }).handle === 'h-1',
+      ),
+      'the minted-but-never-installed handle is released',
+    );
+  }
+
   // A resume position (or a seek issued while the attach was in
   // flight) must reach the MSE source after install — the pump always
   // opens at byte 0, so without the handoff the element waits on the

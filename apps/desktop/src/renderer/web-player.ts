@@ -536,6 +536,16 @@ export function createWebPlayerPort(deps: {
         throw thrown;
       });
       if (settled === null) {
+        // MseAborted only comes from abortPendingAttaches — a
+        // superseding op — so this op is dead and its minted-but-
+        // never-installed handle is ours to reap, or repeated
+        // supersessions leak registry slots. (play() doesn't own its
+        // handle — the session minted it — so no release there.)
+        pendingAttaches.delete(gen);
+        if (current !== null && current.handle === handle) {
+          current = null;
+        }
+        void stream.release({ handle }).catch(() => undefined);
         return;
       }
       // Liveness past the element install is the handle match —
