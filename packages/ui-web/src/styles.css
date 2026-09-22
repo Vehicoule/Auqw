@@ -876,13 +876,13 @@
   border-radius: var(--radius-control);
   border: var(--stroke-hairline) solid var(--hairline);
 }
-.uw-collection__head {
+.uw-collection-screen__head {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
   margin-bottom: var(--spacing-sm);
 }
-.uw-collection__title {
+.uw-collection-screen__title {
   flex: 1;
   min-width: 0;
 }

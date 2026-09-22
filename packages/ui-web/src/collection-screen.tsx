@@ -52,14 +52,14 @@ export function CollectionScreen({
   });
   return (
     <div
-      className="uw-screen uw-collection"
+      className="uw-screen uw-collection-screen"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <div className="uw-collection__head">
+      <div className="uw-collection-screen__head">
         <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
-        <Text variant="display" color="bright" className="uw-collection__title">
+        <Text variant="display" color="bright" className="uw-collection-screen__title">
           {model.title}
         </Text>
         <Text variant="metadata" color="secondary">

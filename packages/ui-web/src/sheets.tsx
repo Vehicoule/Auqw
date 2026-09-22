@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
-import { useOverlayDismiss } from './stack.tsx';
+import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
 import { sheetKeyAction } from './keyboard.ts';
 
 /**
@@ -71,6 +71,21 @@ export function Sheet({
   if (!open) {
     return null;
   }
+  return <SheetDialog label={label} onDismiss={onDismiss}>{children}</SheetDialog>;
+}
+
+// Separate component so focus entry/restore tracks the open/close
+// mount boundary exactly (Sheet itself stays mounted while closed).
+function SheetDialog({
+  label,
+  onDismiss,
+  children,
+}: {
+  readonly label: string;
+  readonly onDismiss?: (() => void) | undefined;
+  readonly children: ReactNode;
+}) {
+  const dialogRef = useOverlayFocus<HTMLDivElement>();
   return (
     <div className="uw-sheet-host" data-sheet="panel">
       <button
@@ -80,7 +95,14 @@ export function Sheet({
         tabIndex={-1}
         onClick={onDismiss}
       />
-      <div className="uw-sheet" role="dialog" aria-modal="true" aria-label={label}>
+      <div
+        ref={dialogRef}
+        className="uw-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        tabIndex={-1}
+      >
         {children}
       </div>
     </div>
@@ -130,6 +152,10 @@ export function NameField({
             onSubmit(trimmed);
           }
           if (sheetKeyAction(event.key) === 'close' && onCancel !== undefined) {
+            // The field consumes Escape before the overlay sees it —
+            // cancel stays local, the sheet stays open. When no
+            // onCancel exists the key still bubbles to the dismisser.
+            event.stopPropagation();
             onCancel();
           }
         }}

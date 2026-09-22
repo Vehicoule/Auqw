@@ -150,7 +150,7 @@ export function LinearScrubber({
       aria-valuetext={`${formatClock(positionMs)} of ${formatClock(durationMs)}`}
       min={0}
       max={Math.max(1, durationMs ?? 0)}
-      step={10_000}
+      step="any"
       value={Math.round(positionMs)}
       disabled={!enabled}
       onKeyDown={onKeyDown}
@@ -216,7 +216,7 @@ export function WaveformSeek({
         aria-valuetext={`${formatClock(positionMs)} of ${formatClock(durationMs)}`}
         min={0}
         max={Math.max(1, durationMs ?? 0)}
-        step={10_000}
+        step="any"
         value={Math.round(positionMs)}
         disabled={!enabled}
         onKeyDown={onKeyDown}

@@ -57,7 +57,14 @@ export type {
     DesktopSidebarProps,
 } from './chrome.tsx';
 
-export { AppStack, PushScreen, SheetScreen, StackItem, useOverlayDismiss } from './stack.tsx';
+export {
+  AppStack,
+  PushScreen,
+  SheetScreen,
+  StackItem,
+  useOverlayDismiss,
+  useOverlayFocus,
+} from './stack.tsx';
 export type {
   AppStackProps,
   PushScreenProps,

@@ -43,6 +43,30 @@ export function useOverlayDismiss(
   }, [api, onDismissed]);
 }
 
+/**
+ * Focus entry + restore for modal dialogs: the sheet takes focus on
+ * mount so keyboard input lands inside it, and closing returns focus
+ * to whatever held it before. Tab containment and background
+ * inertness belong to the app shell that mounts these hosts.
+ */
+export function useOverlayFocus<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (node === null) {
+      return;
+    }
+    const previous = document.activeElement;
+    node.focus();
+    return () => {
+      if (previous instanceof HTMLElement) {
+        previous.focus();
+      }
+    };
+  }, []);
+  return ref;
+}
+
 export type AppStackProps = {
   readonly children: ReactNode;
 };
@@ -118,6 +142,7 @@ export type SheetScreenProps = {
 
 export function SheetScreen({ stackKey, onDismissed, children }: SheetScreenProps) {
   useOverlayDismiss(onDismissed);
+  const dialogRef = useOverlayFocus<HTMLDivElement>();
   return (
     <div className="uw-sheet-host" data-stack={stackKey}>
       <button
@@ -127,7 +152,14 @@ export function SheetScreen({ stackKey, onDismissed, children }: SheetScreenProp
         tabIndex={-1}
         onClick={onDismissed}
       />
-      <div className="uw-sheet" role="dialog" aria-modal="true" aria-label={stackKey}>
+      <div
+        ref={dialogRef}
+        className="uw-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={stackKey}
+        tabIndex={-1}
+      >
         {children}
       </div>
     </div>
