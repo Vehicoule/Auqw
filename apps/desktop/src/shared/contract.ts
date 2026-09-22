@@ -357,10 +357,13 @@ export type StreamDevPrepareArgs = {
 export function isStreamDevPrepareArgs(
   value: unknown,
 ): value is StreamDevPrepareArgs {
+  const url = isRecord(value) ? value['url'] : undefined;
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ['url', 'mime', 'contentLength', 'remintable']) &&
-    isBoundedString(value['url'], 4096) &&
+    typeof url === 'string' &&
+    url.length <= 4096 &&
+    (url.startsWith('https://') || url.startsWith('http://')) &&
     isBoundedString(value['mime'], 128) &&
     (value['contentLength'] === undefined ||
       isSafeNonNegativeInt(value['contentLength'])) &&

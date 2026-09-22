@@ -100,10 +100,44 @@ function fakeStream(overrides: Partial<StreamClient> = {}): StreamClient & {
 
 const identity = { attemptId: 'attempt-1', queueRev: 3 };
 
+const settle = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
 function collect(player: { subscribe(l: (e: PlayerEvent) => void): () => void }) {
   const events: PlayerEvent[] = [];
   player.subscribe((e) => events.push(e));
   return events;
+}
+
+function twoItemProjection(
+  overrides: Partial<QueueProjection> = {},
+): QueueProjection {
+  return {
+    projectionId: 'proj-1',
+    queueRev: 4,
+    currentOccurrenceId: 'occ-1',
+    positionMs: 0,
+    mode: 'playing',
+    items: [
+      {
+        occurrenceId: 'occ-1',
+        provider: 'deezer',
+        sourceRef: 't1',
+        title: 'one',
+        artist: null,
+        artworkUrl: null,
+      },
+      {
+        occurrenceId: 'occ-2',
+        provider: 'deezer',
+        sourceRef: 't2',
+        title: 'two',
+        artist: null,
+        artworkUrl: null,
+      },
+    ],
+    ...overrides,
+  };
 }
 
 export async function run(): Promise<void> {
@@ -254,40 +288,19 @@ export async function run(): Promise<void> {
     assert(idle !== undefined, 'stop emits idle status');
   }
 
-  // ended → status ended + queue-transition 'ended' inside a projection.
+  // ended → status ended + service-attached queue-transition inside a
+  // projection: the port prepares+attaches the successor itself and the
+  // emitted transition carries its fresh identity + handle.
   {
     const audio = fakeAudio();
     const stream = fakeStream();
     const player = createWebPlayerPort({ stream, audio });
     const events = collect(player);
-    const projection: QueueProjection = {
-      projectionId: 'proj-1',
-      queueRev: 4,
-      currentOccurrenceId: 'occ-1',
-      positionMs: 0,
-      mode: 'playing',
-      items: [
-        {
-          occurrenceId: 'occ-1',
-          provider: 'deezer',
-          sourceRef: 't1',
-          title: 'one',
-          artist: null,
-          artworkUrl: null,
-        },
-        {
-          occurrenceId: 'occ-2',
-          provider: 'deezer',
-          sourceRef: 't2',
-          title: 'two',
-          artist: null,
-          artworkUrl: null,
-        },
-      ],
-    };
+    const projection = twoItemProjection();
     assert((await player.setQueueProjection(projection)).ok);
     await player.play({ handle: 'h-1', identity });
     audio.fire('ended');
+    await settle();
     const transition = events.find((e) => e.type === 'queue-transition');
     assert(
       transition !== undefined &&
@@ -295,8 +308,21 @@ export async function run(): Promise<void> {
         transition.reason === 'ended' &&
         transition.fromOccurrenceId === 'occ-1' &&
         transition.toOccurrenceId === 'occ-2' &&
-        transition.projectionId === 'proj-1',
-      'ended advances the projection cursor',
+        transition.projectionId === 'proj-1' &&
+        transition.identity !== null &&
+        transition.identity.queueRev === 4 &&
+        transition.handle === 'h-1',
+      'ended attaches the successor and reports its identity+handle',
+    );
+    assert(
+      stream.calls.some(
+        (c) =>
+          c.method === 'prepare' &&
+          typeof c.args === 'object' &&
+          c.args !== null &&
+          (c.args as { sourceRef?: string }).sourceRef === 't2',
+      ),
+      'the successor is prepared through the host',
     );
     // Media Session next/previous drive remote transitions.
     const ms = fakeMediaSession();
@@ -308,13 +334,146 @@ export async function run(): Promise<void> {
     const events2 = collect(player2);
     await player2.setQueueProjection(projection);
     ms.actions.get('nexttrack')?.();
+    await settle();
     const remote = events2.find((e) => e.type === 'queue-transition');
     assert(
       remote !== undefined &&
         remote.type === 'queue-transition' &&
         remote.reason === 'remote-next' &&
-        remote.toOccurrenceId === 'occ-2',
-      'media-session next reports remote-next',
+        remote.toOccurrenceId === 'occ-2' &&
+        remote.identity !== null &&
+        remote.handle === 'h-1',
+      'media-session next attaches + reports remote-next',
+    );
+  }
+
+  // Queue rekeys: a projection for the SAME occurrence re-keys the live
+  // identity, so transport calls with the new rev pass and the old rev
+  // reads stale. A projection naming another occurrence must not re-key.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    collect(player);
+    const live = { attemptId: 'attempt-1', queueRev: 4 };
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity: live });
+    await player.setQueueProjection(twoItemProjection({ queueRev: 5 }));
+    const rekeyed = await player.pause({ attemptId: 'attempt-1', queueRev: 5 });
+    assert(rekeyed.ok, 're-keyed identity passes the stale guard');
+    const staleRev = await player.pause({
+      attemptId: 'attempt-1',
+      queueRev: 4,
+    });
+    assert(
+      !staleRev.ok && staleRev.error.kind === 'invalid-message',
+      'the superseded rev is rejected',
+    );
+    await player.setQueueProjection(
+      twoItemProjection({ currentOccurrenceId: 'occ-9', queueRev: 6 }),
+    );
+    const stillLive = await player.pause({
+      attemptId: 'attempt-1',
+      queueRev: 5,
+    });
+    assert(
+      stillLive.ok,
+      'a projection for another occurrence leaves the live rev alone',
+    );
+  }
+
+  // remote-previous inside 3 s restarts the current stream in place —
+  // same attempt, same handle, position 0.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const ms = fakeMediaSession();
+    const player = createWebPlayerPort({ stream, audio, mediaSession: ms });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.currentTime = 5;
+    ms.actions.get('previoustrack')?.();
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.reason === 'remote-previous' &&
+        transition.toOccurrenceId === 'occ-1' &&
+        transition.identity !== null &&
+        transition.identity.attemptId === 'attempt-1' &&
+        transition.handle === 'h-1' &&
+        transition.positionMs === 0,
+      'remote-previous restarts the current stream',
+    );
+    assertEqual(audio.currentTime, 0);
+  }
+
+  // Tail of the queue: ended with no successor emits the null-target
+  // transition the session reads as stopped.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === null &&
+        transition.identity === null &&
+        transition.handle === null,
+      'tail-off reports a null target',
+    );
+  }
+
+  // A failed successor attach surfaces as a failed status — never an
+  // illegal transition the session must reject.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream({
+      prepare: () =>
+        Promise.resolve({
+          type: 'failed',
+          kind: 'transient',
+          message: 'upstream 502',
+        }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    assert(
+      !events.some((e) => e.type === 'queue-transition'),
+      'no transition on a failed attach',
+    );
+    const failed = events.findLast(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(
+      failed !== undefined &&
+        failed.type === 'status' &&
+        failed.error?.kind === 'transient',
+      'attach failure reports a failed status',
     );
   }
 
