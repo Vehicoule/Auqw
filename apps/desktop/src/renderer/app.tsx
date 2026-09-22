@@ -189,8 +189,15 @@ function BootGate({
 }
 
 function Shell({ controller }: { readonly controller: SessionController }) {
+  // `Session.subscribe` uses instance state — pass a bound wrapper,
+  // not the unbound method (an unbound `this.#listeners` throws and
+  // React unmounts the tree, leaving a blank window on boot).
+  const subscribe = useCallback(
+    (listener: () => void) => controller.session.subscribe(listener),
+    [controller.session],
+  );
   const state = useSyncExternalStore(
-    controller.session.subscribe,
+    subscribe,
     () => controller.session.snapshot(),
   );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';

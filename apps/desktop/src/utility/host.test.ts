@@ -54,11 +54,11 @@ export async function run(): Promise<void> {
   }
 
   // Fake bindings module + plugin dir scan.
-  const loadedPlugins: Array<{ wasm: string; manifest: string }> = [];
+  const loadedPlugins: Array<{ wasm: Buffer; manifest: string }> = [];
   const hostConfigs: unknown[] = [];
   const fakeHost: PluginHostLike = {
-    async loadPlugin(wasmBase64: string, manifestJson: string) {
-      loadedPlugins.push({ wasm: wasmBase64, manifest: manifestJson });
+    async loadPlugin(wasm: Buffer, manifestJson: string) {
+      loadedPlugins.push({ wasm, manifest: manifestJson });
       return 'plugin-id';
     },
     async startPrepare() {
@@ -138,10 +138,9 @@ export async function run(): Promise<void> {
     'host paths derive from AUQW_USER_DATA',
   );
   assert(
-    Buffer.from(loadedPlugins[0]?.wasm ?? '', 'base64').toString('utf8') ===
-      'wasm-deezer' &&
+    loadedPlugins[0]?.wasm.toString('utf8') === 'wasm-deezer' &&
       loadedPlugins[0]?.manifest?.includes('"id":"deezer"') === true,
-    'wasm rides base64 + manifest JSON to loadPlugin',
+    'wasm Buffer + manifest JSON reach loadPlugin untouched',
   );
   const loaded = await runtime.status();
   assertEqual(loaded.bindings, 'loaded');

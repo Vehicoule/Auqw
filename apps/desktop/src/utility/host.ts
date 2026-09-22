@@ -33,7 +33,7 @@ export type NodeBindingsModule = {
 
 /** The subset of the napi `PluginHost` the stream channels call. */
 export type PluginHostLike = {
-  loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
+  loadPlugin(wasm: Buffer, manifestJson: string): Promise<string>;
   startPrepare(
     pluginId: string,
     sourceRef: string,
@@ -292,10 +292,7 @@ export function createHostRuntime(opts: {
       try {
         const wasm = fs.read(wasmPath);
         const manifest = fs.read(join(dir, manifestName)).toString('utf8');
-        const pluginId = await h.loadPlugin(
-          wasm.toString('base64'),
-          manifest,
-        );
+        const pluginId = await h.loadPlugin(wasm, manifest);
         const fields = manifestFields(manifest, stem);
         loaded.push({
           pluginId,
