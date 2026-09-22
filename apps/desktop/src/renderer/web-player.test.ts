@@ -622,6 +622,69 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A seek while play still awaits its serve URL must win — the late
+  // completion applies the newest requested position, not the play's
+  // captured one.
+  {
+    const audio = fakeAudio();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const pendingA = player.play({
+      handle: 'h-a',
+      identity,
+      positionMs: 10_000,
+    });
+    const seeked = await player.seekTo({ positionMs: 45_000, identity });
+    assertEqual(seeked.ok, true, 'seek succeeds while play is pending');
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      45,
+      'late play applies the newest seek position',
+    );
+  }
+
+  // A media-key pause while play still awaits its serve URL must win —
+  // it carries no identity, so it drops every pending play.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({ handle: 'h-a', identity });
+    mediaSession.actions.get('pause')?.();
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(audio.src, '', 'late play cannot attach after media pause');
+    assertEqual(audio.paused, true, 'element stays paused');
+  }
+
   // Two cursor moves in flight — the superseded attach releases its
   // handle and emits no transition.
   {

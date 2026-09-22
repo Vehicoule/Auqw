@@ -217,11 +217,25 @@ export function createWebPlayerPort(deps: {
    * each play removes only its own token. A `release` of a tracked
    * handle or a matching `pause` invalidates that op (bumps opGen) so
    * its late serveUrl completion can't start a host-dropped stream or
-   * resume audio past a successful pause. */
+   * resume audio past a successful pause. `positionMs` tracks the
+   * newest seek issued against the op's identity so a seek during the
+   * resolve isn't overwritten by the play's older start position. */
   const pendingPlayGens = new Map<
     string,
-    { gen: number; identity: PlaybackIdentity }
+    { gen: number; identity: PlaybackIdentity; positionMs: number }
   >();
+
+  /** Drop pending plays — `identity` matches the same contract `stale`
+   * applies to a live attempt; `null` drops all (a transport-wide
+   * media-key pause has no attempt identity). */
+  function invalidatePendingPlays(identity: PlaybackIdentity | null): void {
+    for (const [handle, pending] of [...pendingPlayGens]) {
+      if (identity === null || identityEq(identity, pending.identity)) {
+        pendingPlayGens.delete(handle);
+        opGen++;
+      }
+    }
+  }
 
   const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
@@ -523,7 +537,13 @@ export function createWebPlayerPort(deps: {
     ms.setActionHandler('play', () => {
       void audio.play().catch(() => undefined);
     });
-    ms.setActionHandler('pause', () => audio.pause());
+    ms.setActionHandler('pause', () => {
+      // A media-key pause is transport-wide — a pending play's late
+      // serveUrl must not start audio after it, whatever attempt the
+      // op belongs to.
+      invalidatePendingPlays(null);
+      audio.pause();
+    });
     ms.setActionHandler('nexttrack', () => advanceQueue('remote-next'));
     ms.setActionHandler('previoustrack', () =>
       advanceQueue('remote-previous'),
@@ -613,7 +633,11 @@ export function createWebPlayerPort(deps: {
 
     async play(input) {
       const gen = ++opGen;
-      pendingPlayGens.set(input.handle, { gen, identity: input.identity });
+      pendingPlayGens.set(input.handle, {
+        gen,
+        identity: input.identity,
+        positionMs: input.positionMs ?? 0,
+      });
       return guard(async () => {
         try {
           const { url } = await stream.serveUrl({ handle: input.handle });
@@ -631,7 +655,10 @@ export function createWebPlayerPort(deps: {
             occurrenceId: projection?.currentOccurrenceId ?? null,
           };
           audio.src = url;
-          audio.currentTime = (input.positionMs ?? 0) / 1000;
+          audio.currentTime =
+            (pendingPlayGens.get(input.handle)?.positionMs ??
+              input.positionMs ??
+              0) / 1000;
           status('buffering');
           emitMarks(input.handle, identity);
           await audio.play();
@@ -657,12 +684,7 @@ export function createWebPlayerPort(deps: {
       // yet — without invalidating it, the late completion would start
       // audio after this pause already succeeded. `stale` can't see it,
       // so match it by the same identity contract a live attempt uses.
-      for (const [handle, pending] of [...pendingPlayGens]) {
-        if (identityEq(identity, pending.identity)) {
-          pendingPlayGens.delete(handle);
-          opGen++;
-        }
-      }
+      invalidatePendingPlays(identity);
       audio.pause();
       if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
         deps.mediaSession.playbackState = 'paused';
@@ -674,6 +696,14 @@ export function createWebPlayerPort(deps: {
       const bad = stale(input.identity);
       if (bad !== null) {
         return bad;
+      }
+      // A play still awaiting its serve URL applies its captured
+      // position when it lands — keep the pending op's position in
+      // step so a seek issued during the resolve isn't overwritten.
+      for (const pending of pendingPlayGens.values()) {
+        if (identityEq(input.identity, pending.identity)) {
+          pending.positionMs = input.positionMs;
+        }
       }
       audio.currentTime = input.positionMs / 1000;
       return ok(undefined);

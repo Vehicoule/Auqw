@@ -23,7 +23,7 @@ export type NodeBindingsModule = {
     potProviderUrl?: string;
     statePath?: string;
     streamPath?: string;
-    prefer?: string;
+    prefer?: string[];
     authToken?: string;
   }) => PluginHostLike;
 };
@@ -177,6 +177,10 @@ export function createHostRuntime(opts: {
         fuelTotal: FUEL_TOTAL,
         statePath: join(userData, 'host-state'),
         streamPath: opts.env.AUQW_STREAM_DIR ?? join(userData, 'streams'),
+        // Decided surface hint: webm-first on desktop, mp4 where the
+        // codec matrix requires it. Without the hint the guest prefers
+        // mp4 on ties — wrong container for this surface.
+        prefer: ['audio/webm', 'audio/mp4'],
       });
       bindingsError = undefined;
       return host;
