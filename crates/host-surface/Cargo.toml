@@ -1,0 +1,21 @@
+[package]
+name = "auqw-host-surface"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Platform-neutral plugin-host surface shared by the UniFFI (mobile) and napi-rs (desktop) bindings"
+
+[lints]
+workspace = true
+
+[dependencies]
+auqw-plugin-host = { path = "../plugin-host" }
+auqw-stream = { path = "../auqw-stream" }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "time", "sync"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+
+[dev-dependencies]
+sha2 = "0.10.9"
+wat = "1.259.0"

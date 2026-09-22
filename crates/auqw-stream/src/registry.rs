@@ -395,6 +395,41 @@ impl StreamRegistry {
         Ok(lock(&self.session(handle)?.shared)?.marks.clone())
     }
 
+    /// The session's terminal error if it has ended — the loopback
+    /// adapter refuses to mint a URL for a dead handle, and a request
+    /// that lands after termination maps this error to its status.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn terminal_err(&self, handle: &str) -> Result<Option<StreamError>, StreamError> {
+        Ok(self.session(handle)?.terminal_err())
+    }
+
+    /// `(mime, content_length)` of the session's pinned source — the
+    /// `Content-Type` and resolve-time length hint the loopback
+    /// adapter reports. The wire `Content-Range` wins over the hint
+    /// once bytes land; [`Self::effective_total`] has the freshest
+    /// total.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn source_meta(&self, handle: &str) -> Result<(String, Option<u64>), StreamError> {
+        let session = self.session(handle)?;
+        let core = lock(&session.core)?;
+        Ok((core.source.mime.clone(), core.source.content_length))
+    }
+
+    /// The session's best-known total length — the wire
+    /// `Content-Range` total when bytes have landed, else the
+    /// resolve-time hint — the loopback adapter's `Content-Range`
+    /// bookkeeping.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle.
+    pub fn effective_total(&self, handle: &str) -> Result<Option<u64>, StreamError> {
+        self.session(handle)?.effective_total()
+    }
+
     /// Look up a live-or-terminal session by handle.
     fn session(&self, handle: &str) -> Result<Arc<SessionInner>, StreamError> {
         self.lookup(handle)?.ok_or(StreamError::NotFound)
@@ -524,36 +559,27 @@ async fn reap_loop(
             })
             .unwrap_or_default();
         for (handle, s) in doomed {
-            // Terminate and remove under the map guard so the pair is
-            // atomic for callers: an `attach` either lands first —
-            // clearing `detached_since`, so the `shared` recheck spares
-            // the session — or it finds the handle already gone and
-            // answers `not-found`. No lookup can observe the
-            // evicted-but-still-mapped gap. `sessions` is the outermost
-            // lock, so `persist_lock`/`shared` nest inside it in the
-            // sanctioned order.
-            match sessions.lock() {
-                Ok(mut m) => {
-                    // Recheck under `shared`: an attach landing between
-                    // the filter and here clears `detached_since`, so
-                    // the recheck fails and the attach wins — never an
-                    // evict on a session a consumer just reconnected to.
-                    if s.terminate_if(StreamError::Evicted, |sh| {
-                        sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
-                    }) {
-                        // The evicted session can never attach or serve
-                        // again — keeping its entry only grows the map
-                        // on every abandoned prepare, and callers
-                        // routing by handle drop it on the `not-found`
-                        // answer anyway. Entries killed by other paths
-                        // keep their typed terminal error until the
-                        // next supersede prunes them.
-                        m.remove(&handle);
-                    }
+            // Recheck under `shared`: an attach landing between the
+            // filter and here clears `detached_since`, so the recheck
+            // fails and the attach wins — never an evict on a session
+            // a consumer just reconnected to. The map lock spans the
+            // terminal write and the removal (`sessions` is outermost),
+            // so a lookup can never observe the terminal-but-present
+            // gap — a stale handle answers `not-found`, never a
+            // transient `evicted`.
+            if let Ok(mut m) = sessions.lock() {
+                if s.terminate_if(StreamError::Evicted, |sh| {
+                    sh.detached_since.is_some_and(|d| d.elapsed() >= ttl)
+                }) {
+                    // The evicted session can never attach or serve
+                    // again — keeping its entry only grows the map on
+                    // every abandoned prepare, and callers routing by
+                    // handle drop it on the `not-found` answer anyway.
+                    // Entries killed by other paths keep their typed
+                    // terminal error until the next supersede prunes
+                    // them.
+                    m.remove(&handle);
                 }
-                // A poisoned map must not veto termination — a session
-                // that cannot end leaks its pump and readers forever.
-                Err(_) => s.terminate(StreamError::Evicted),
             }
         }
     }

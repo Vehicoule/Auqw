@@ -15,6 +15,9 @@ serde_json = "1.0.149"
 tokio = { version = "1.52.0", features = ["rt", "time", "sync", "macros"] }
 tokio-util = "0.7.18"
 futures-util = "0.3.31"
+# Grant tokens for the loopback range adapter (server.rs) — 16
+# bytes of OS entropy per `serve`, unguessable to page scripts.
+getrandom = "0.4"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 
 # Same rationale as auqw-plugin-host: rustls-platform-verifier needs a
