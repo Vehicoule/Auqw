@@ -334,9 +334,10 @@ export function isPrepareOutcomePayload(
       value['type'] === 'superseded') &&
     (value['stream'] === undefined ||
       isPreparedStreamPayload(value['stream'])) &&
+    // No length cap: the registry prunes unbounded terminal sets, and
+    // rejecting post-registration would strand the minted handle.
     (value['superseded'] === undefined ||
       (Array.isArray(value['superseded']) &&
-        value['superseded'].length <= 64 &&
         value['superseded'].every((h) => isBoundedString(h, 256)))) &&
     isStringOrUndefined(value['kind']) &&
     isStringOrUndefined(value['message']) &&
