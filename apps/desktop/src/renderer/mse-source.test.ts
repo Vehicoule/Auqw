@@ -707,9 +707,11 @@ export async function run(): Promise<void> {
     await settle();
     assertEqual(failed, null, 'stale-epoch error ignored');
     assert(!port.closed, 'stale error did not close the port');
-    port.feed({ kind: 'error', epoch: 1, code: 'io-error', message: 'dead' });
+    // 'closed' is the bridge's transport-death signal, not an
+    // epoch-scoped read error — it must fail even at a stale epoch.
+    port.feed({ kind: 'error', epoch: 0, code: 'closed', message: 'gone' });
     await settle();
-    assert(failed instanceof Error, 'current-epoch error still fails');
+    assert(failed instanceof Error, 'transport closure fails at any epoch');
     assert(port.closed, 'dead session closed its port');
   }
 
