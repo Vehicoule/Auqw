@@ -1,0 +1,25 @@
+[package]
+name = "auqw-node-bindings"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "napi-rs bindings over the Auqw plugin host (Electron utility process)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# unsafe_code is inherent to the FFI scaffolding napi generates;
+# the deny-by-default lint is not inherited here, same as
+# mobile-bindings at the UniFFI boundary.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[dependencies]
+auqw-host-surface = { path = "../host-surface" }
+napi = { version = "3", features = ["napi6", "async"] }
+napi-derive = "3"
+tokio = { version = "1.52.0", features = ["sync"] }
+
+[build-dependencies]
+napi-build = "2"
