@@ -5,6 +5,13 @@ description: How to launch and exercise the auqw Electron desktop shell (apps/de
 
 # Testing the auqw desktop Electron shell end-to-end
 
+Prerequisites: the desktop legs must be on the checkout — `apps/desktop`
+lands with the s4 PRs (`s4/desktop-shell` base, `s4/desktop-player` for
+`stream:*`/`host:*` channels, `s4/desktop-sound` for the player page and
+CSP), and `AUQW_NODE_BINDINGS` needs a real `libauqw_node_bindings.so`
+built from `crates/node-bindings` (`s4/node-bindings`). On `main` before
+those merge, this skill has nothing to run against.
+
 ## Launch
 
 - Build once: `cd apps/desktop && pnpm build` (needs
