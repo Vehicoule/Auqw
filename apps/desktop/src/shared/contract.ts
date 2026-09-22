@@ -227,6 +227,10 @@ function isHttpTracePayload(value: unknown): value is HttpTracePayload {
     hasOnlyKeys(value, ['method', 'url', 'status', 'bytes', 'elapsedMs']) &&
     isBoundedString(value['method'], 32) &&
     isBoundedString(value['url'], 2048) &&
+    // Signed-url material never crosses: queries and fragments are the
+    // host's redaction target, so the boundary enforces the invariant.
+    !(value['url'] as string).includes('?') &&
+    !(value['url'] as string).includes('#') &&
     (value['status'] === undefined ||
       isSafeNonNegativeInt(value['status'])) &&
     isSafeNonNegativeInt(value['bytes']) &&
@@ -283,8 +287,10 @@ function isAttemptSummaryPayload(
     isSafeNonNegativeInt(value['fuelUsed']) &&
     isSafeNonNegativeInt(value['elapsedMs']) &&
     Array.isArray(value['httpTrace']) &&
+    value['httpTrace'].length <= 64 &&
     value['httpTrace'].every(isHttpTracePayload) &&
     Array.isArray(value['guestLog']) &&
+    value['guestLog'].length <= 64 &&
     value['guestLog'].every(isGuestLogPayload)
   );
 }

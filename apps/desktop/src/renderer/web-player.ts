@@ -210,6 +210,9 @@ export function createWebPlayerPort(deps: {
   let projection: QueueProjection | null = null;
   let mediaActionsInstalled = false;
   let seq = 0;
+  /** Monotonic op generation — a superseded async completion (play,
+   * cursor attach) must never touch `current` or the element. */
+  let opGen = 0;
 
   const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
@@ -295,6 +298,7 @@ export function createWebPlayerPort(deps: {
       return;
     }
     const requestId = `watt-${++seq}`;
+    const gen = ++opGen;
     try {
       const outcome = await stream.prepare({
         pluginId: item.provider,
@@ -312,6 +316,13 @@ export function createWebPlayerPort(deps: {
       }
       const handle = outcome.stream.handle;
       const { url } = await stream.serveUrl({ handle });
+      // A later play/attach/prepare or a moved projection makes this
+      // completion stale — release its minted handle and stay out of
+      // the element; the live attempt keeps ownership.
+      if (gen !== opGen || projection !== p) {
+        void stream.release({ handle }).catch(() => undefined);
+        return;
+      }
       const identity: PlaybackIdentity = {
         attemptId: `watt-id-${seq}`,
         queueRev: p.queueRev,
@@ -487,55 +498,66 @@ export function createWebPlayerPort(deps: {
         );
         return ok(requestId);
       }
-      try {
-        const outcome: PrepareOutcomePayload = await stream.prepare({
+      // Return the requestId up front — the terminal outcome arrives
+      // as a `prepare` event, so a session-side deadline can reach
+      // `cancelPrepare` while the utility is still resolving.
+      opGen++;
+      void stream
+        .prepare({
           pluginId: input.provider,
           sourceRef: input.sourceRef,
           requestId,
-        });
-        if (
-          outcome.type === 'prepared' &&
-          outcome.stream !== undefined
-        ) {
-          const prepared = toPreparedStream(outcome.stream);
-          emit({
-            type: 'prepare',
-            requestId,
-            identity: input.identity,
-            outcome: {
-              type: 'prepared',
-              stream: prepared,
-              attempt: toAttemptTrace(outcome.attempt, requestId),
-            },
-          });
-        } else {
-          const kind =
-            outcome.type === 'superseded'
-              ? 'superseded'
-              : toKind(outcome.kind);
-          emit({
-            type: 'prepare',
-            requestId,
-            identity: input.identity,
-            outcome: {
-              type: 'failed',
-              error: appError(
-                kind,
-                outcome.message ?? 'prepare failed',
-              ),
-              attempt: toAttemptTrace(outcome.attempt, requestId),
-            },
-          });
-        }
-      } catch (thrown) {
-        emitFailed(toError(thrown));
-      }
+        })
+        .then((outcome: PrepareOutcomePayload) => {
+          if (
+            outcome.type === 'prepared' &&
+            outcome.stream !== undefined
+          ) {
+            const prepared = toPreparedStream(outcome.stream);
+            emit({
+              type: 'prepare',
+              requestId,
+              identity: input.identity,
+              outcome: {
+                type: 'prepared',
+                stream: prepared,
+                attempt: toAttemptTrace(outcome.attempt, requestId),
+              },
+            });
+          } else {
+            const kind =
+              outcome.type === 'superseded'
+                ? 'superseded'
+                : toKind(outcome.kind);
+            emit({
+              type: 'prepare',
+              requestId,
+              identity: input.identity,
+              outcome: {
+                type: 'failed',
+                error: appError(
+                  kind,
+                  outcome.message ?? 'prepare failed',
+                ),
+                attempt: toAttemptTrace(outcome.attempt, requestId),
+              },
+            });
+          }
+        })
+        .catch((thrown) => emitFailed(toError(thrown)));
       return ok(requestId);
     },
 
     async play(input) {
+      const gen = ++opGen;
       return guard(async () => {
         const { url } = await stream.serveUrl({ handle: input.handle });
+        // A newer play/prepare/stop superseded this one while the
+        // loopback URL resolved — the late completion must not retake
+        // the element.
+        if (gen !== opGen) {
+          return;
+        }
         const identity = input.identity;
         current = {
           handle: input.handle,
@@ -579,6 +601,7 @@ export function createWebPlayerPort(deps: {
       if (bad !== null) {
         return bad;
       }
+      opGen++;
       audio.pause();
       audio.src = '';
       if (deps.mediaSession !== null && deps.mediaSession !== undefined) {

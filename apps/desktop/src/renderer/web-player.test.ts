@@ -1,6 +1,7 @@
 import { assert, assertEqual } from '@auqw/application/testing';
 import type { PlayerEvent, QueueProjection } from '@auqw/application';
 import type { StreamClient } from './web-player.ts';
+import type { PrepareOutcomePayload } from '../shared/contract.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { AudioLike, MediaSessionLike } from './web-player.ts';
 
@@ -187,6 +188,7 @@ export async function run(): Promise<void> {
     const player = createWebPlayerPort({ stream, audio: fakeAudio() });
     const events = collect(player);
     await player.prepare({ provider: 'deezer', sourceRef: 'x', identity });
+    await settle();
     const prepared = events.find((e) => e.type === 'prepare');
     assert(
       prepared !== undefined &&
@@ -211,6 +213,7 @@ export async function run(): Promise<void> {
       identity,
     });
     assert(res.ok, 'rejected prepare still resolves with requestId');
+    await settle();
     const prepared = events.find((e) => e.type === 'prepare');
     assert(
       prepared !== undefined &&
@@ -489,6 +492,129 @@ export async function run(): Promise<void> {
     assert(
       stream.calls.some((c) => c.method === 'release'),
       'release reaches the host',
+    );
+  }
+
+  // prepare returns its requestId immediately — the outcome arrives
+  // later as a 'prepare' event, so a session deadline can cancel.
+  {
+    const audio = fakeAudio();
+    let resolvePrepare:
+      | ((o: PrepareOutcomePayload) => void)
+      | undefined;
+    const stream = fakeStream({
+      prepare: () =>
+        new Promise((resolve) => {
+          resolvePrepare = resolve;
+        }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    const res = await player.prepare({
+      provider: 'deezer',
+      sourceRef: 't1',
+      identity,
+    });
+    assert(res.ok && res.value === 'wreq-1', 'requestId up front');
+    assert(
+      !events.some((e) => e.type === 'prepare'),
+      'no outcome while the host resolves',
+    );
+    resolvePrepare?.({
+      type: 'prepared',
+      stream: { handle: 'h-1', mime: 'audio/mp4' },
+    });
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'prepared' &&
+        prepared.requestId === 'wreq-1',
+      'outcome arrives as a prepare event',
+    );
+  }
+
+  // An older play whose serveUrl resolves late must not retake the
+  // element from a newer play that already attached.
+  {
+    const audio = fakeAudio();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const pendingA = player.play({ handle: 'h-a', identity });
+    await player.play({
+      handle: 'h-b',
+      identity: { ...identity, attemptId: 'a2' },
+    });
+    assertEqual(audio.src, 'http://127.0.0.1:9/s/h-b');
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-b',
+      'stale play cannot clobber the live element',
+    );
+  }
+
+  // Two cursor moves in flight — the superseded attach releases its
+  // handle and emits no transition.
+  {
+    const audio = fakeAudio();
+    let resolveFirst:
+      | ((o: PrepareOutcomePayload) => void)
+      | undefined;
+    const stream = fakeStream({
+      prepare: (args) => {
+        const { requestId } = args as { requestId: string };
+        if (requestId === 'watt-1') {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve({
+          type: 'prepared',
+          stream: { handle: 'h-2', mime: 'audio/mp4' },
+        });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    audio.fire('ended');
+    await settle();
+    resolveFirst?.({
+      type: 'prepared',
+      stream: { handle: 'h-stale', mime: 'audio/mp4' },
+    });
+    await settle();
+    const transitions = events.filter((e) => e.type === 'queue-transition');
+    assertEqual(transitions.length, 1, 'one attach wins');
+    assert(
+      stream.calls.some(
+        (c) =>
+          c.method === 'release' &&
+          (c.args as { handle: string }).handle === 'h-stale',
+      ),
+      'superseded attach releases its handle',
+    );
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/tok',
+      'live attach owns the element',
     );
   }
 }
