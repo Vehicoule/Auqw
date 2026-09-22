@@ -12,6 +12,7 @@ import type { AuqwApi, LocalPickPayload } from '../shared/contract.ts';
 import { MAX_TAGREAD_BATCH } from '../shared/contract.ts';
 import { docUriFor } from '../shared/local-paths.ts';
 import { shellToAppError } from './ipc-errors.ts';
+import { raced } from './race.ts';
 
 /**
  * `TagReaderPort` over the `tagread:*` + `local:add` + `dialog` IPC
@@ -125,7 +126,19 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
         return cancelled;
       }
       try {
-        const { entries } = await api.tagread.enumerate({ treeUri });
+        // Read-only: a cancel settles the caller early; the parked
+        // utility enumeration's result is simply dropped.
+        const outcome = await raced(
+          api.tagread.enumerate({ treeUri }),
+          signal,
+        );
+        if (outcome.t === 'cancelled') {
+          return err(appError('cancelled', 'cancelled'));
+        }
+        if (outcome.t === 'failed') {
+          return err(shellToAppError(outcome.thrown));
+        }
+        const { entries } = outcome.value;
         const mapped: LocalEntry[] = entries.map((entry) => ({
           docId: entry.docId,
           name: entry.name,
@@ -154,10 +167,20 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
           if (between !== null) {
             return between;
           }
-          const { fingerprints } = await api.tagread.fingerprint({
-            treeUri,
-            docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
-          });
+          const batch = await raced(
+            api.tagread.fingerprint({
+              treeUri,
+              docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
+            }),
+            signal,
+          );
+          if (batch.t === 'cancelled') {
+            return err(appError('cancelled', 'cancelled'));
+          }
+          if (batch.t === 'failed') {
+            return err(shellToAppError(batch.thrown));
+          }
+          const { fingerprints } = batch.value;
           for (const fp of fingerprints) {
             mapped.push(
               fp === null
@@ -184,10 +207,20 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
           if (between !== null) {
             return between;
           }
-          const { tags } = await api.tagread.read({
-            treeUri,
-            docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
-          });
+          const batch = await raced(
+            api.tagread.read({
+              treeUri,
+              docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
+            }),
+            signal,
+          );
+          if (batch.t === 'cancelled') {
+            return err(appError('cancelled', 'cancelled'));
+          }
+          if (batch.t === 'failed') {
+            return err(shellToAppError(batch.thrown));
+          }
+          const { tags } = batch.value;
           for (const tag of tags) {
             mapped.push(
               tag === null

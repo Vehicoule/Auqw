@@ -149,4 +149,46 @@ export async function run(): Promise<void> {
     'mid-write cancel settles cancelled, not the dead-sink error',
   );
   assertEqual(midWrites, 1, 'remaining chunks never issue');
+
+  // A cancel while begin is parked behind the utility settles
+  // immediately — and the sink minted when the late IPC lands is
+  // reaped (keep:false) instead of leaking a live write handle.
+  const parkedSrc = new CancellationSource();
+  const release: ((v: { sinkId: string }) => void)[] = [];
+  const aborts: { sinkId: string; keep: boolean }[] = [];
+  const parkedApi = fakeApi({
+    begin: () =>
+      new Promise<{ sinkId: string }>((resolve) => {
+        release.push(resolve);
+      }),
+  });
+  (parkedApi.transfer as Record<string, unknown>)['abort'] = (args: {
+    sinkId: string;
+    keep: boolean;
+  }) => {
+    aborts.push(args);
+    return Promise.resolve(undefined);
+  };
+  const parkedPort = createDesktopTransfer(parkedApi);
+  const pendingBegin = parkedPort.begin(
+    { destPath: 'c.mp4', resumeAtBytes: 0 },
+    parkedSrc.signal,
+  );
+  parkedSrc.cancel();
+  const settled = await pendingBegin;
+  assert(
+    !settled.ok && settled.error.kind === 'cancelled',
+    'cancel settles while begin is still parked',
+  );
+  const releaseBegin = release[0];
+  assert(releaseBegin !== undefined, 'begin parked inside the fake');
+  releaseBegin({ sinkId: 'sink-late' });
+  for (let i = 0; i < 50 && aborts.length === 0; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(aborts.length, 1, 'late-minted sink reaped');
+  assert(
+    aborts[0] !== undefined && aborts[0].keep === false,
+    'reaped sink dropped, not kept',
+  );
 }

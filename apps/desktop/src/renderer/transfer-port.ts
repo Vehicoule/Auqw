@@ -7,6 +7,7 @@ import type {
 import { appError, err, ok } from '@auqw/application';
 import type { AuqwApi } from '../shared/contract.ts';
 import { shellToAppError } from './ipc-errors.ts';
+import { raced } from './race.ts';
 
 /**
  * `MediaTransferPort` over the `transfer:*` IPC surface — the desktop
@@ -16,21 +17,39 @@ import { shellToAppError } from './ipc-errors.ts';
  * with the utility owning `.part` staging and the atomic rename.
  *
  * Cancellation is observed: the signal is polled before each call,
- * a sink cancelled mid-`begin` is aborted as soon as it lands, and a
- * live sink subscribes so a cancel aborts it utility-side even while
- * the engine isn't driving a call.
+ * every IPC call races the signal so a cancel doesn't out-wait a
+ * parked utility op, a sink minted after a mid-`begin` cancel is
+ * reaped, and a live sink subscribes so a cancel aborts it
+ * utility-side even while the engine isn't driving a call.
  */
 export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
   const ifCancelled = (signal: CancellationSignal): Result<never> | null =>
     signal.cancelled ? err(appError('cancelled', 'cancelled')) : null;
 
+  /** Race a read-only IPC call against the caller's signal. */
+  const settle = async <T>(
+    call: Promise<T>,
+    signal: CancellationSignal,
+  ): Promise<Result<T>> => {
+    const outcome = await raced(call, signal);
+    if (outcome.t === 'cancelled') {
+      return err(appError('cancelled', 'cancelled'));
+    }
+    if (outcome.t === 'failed') {
+      return err(shellToAppError(outcome.thrown));
+    }
+    return ok(outcome.value);
+  };
+
   class DesktopSink implements TransferSink {
     #id: string;
+    #signal: CancellationSignal;
     #closed = false;
     #cancelled = false;
 
     constructor(id: string, signal: CancellationSignal) {
       this.#id = id;
+      this.#signal = signal;
       // A cancel while the sink is live aborts the utility side —
       // the engine may not issue another call for the signal to ride.
       const unsubscribe = signal.subscribe(() => {
@@ -80,10 +99,19 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
             off,
             Math.min(off + WRITE_CHUNK, bytes.length),
           );
-          await api.transfer.write({
-            sinkId: this.#id,
-            data: toBase64(chunk),
-          });
+          const sent = await raced(
+            api.transfer.write({
+              sinkId: this.#id,
+              data: toBase64(chunk),
+            }),
+            this.#signal,
+          );
+          if (sent.t === 'cancelled') {
+            return err(appError('cancelled', 'cancelled'));
+          }
+          if (sent.t === 'failed') {
+            return this.#settleError(sent.thrown);
+          }
         }
         return ok(undefined);
       } catch (thrown) {
@@ -92,37 +120,47 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     }
 
     async commit(): Promise<Result<number>> {
-      try {
-        const result = await api.transfer.commit({ sinkId: this.#id });
-        return ok(result.offset);
-      } catch (thrown) {
-        return this.#settleError(thrown);
+      const result = await raced(
+        api.transfer.commit({ sinkId: this.#id }),
+        this.#signal,
+      );
+      if (result.t === 'cancelled') {
+        return err(appError('cancelled', 'cancelled'));
       }
+      if (result.t === 'failed') {
+        return this.#settleError(result.thrown);
+      }
+      return ok(result.value.offset);
     }
 
     async finalize(expected: string | null): Promise<Result<string>> {
-      try {
-        const result = await api.transfer.finalize({
-          sinkId: this.#id,
-          expected,
-        });
-        this.#closed = true;
-        return ok(result.digest);
-      } catch (thrown) {
-        this.#closed = true;
-        return this.#settleError(thrown);
+      const result = await raced(
+        api.transfer.finalize({ sinkId: this.#id, expected }),
+        this.#signal,
+      );
+      this.#closed = true;
+      if (result.t === 'cancelled') {
+        return err(appError('cancelled', 'cancelled'));
       }
+      if (result.t === 'failed') {
+        return this.#settleError(result.thrown);
+      }
+      return ok(result.value.digest);
     }
 
     async abort(keep: boolean): Promise<Result<void>> {
-      try {
-        await api.transfer.abort({ sinkId: this.#id, keep });
-        this.#closed = true;
-        return ok(undefined);
-      } catch (thrown) {
-        this.#closed = true;
-        return err(shellToAppError(thrown));
+      const result = await raced(
+        api.transfer.abort({ sinkId: this.#id, keep }),
+        this.#signal,
+      );
+      this.#closed = true;
+      if (result.t === 'cancelled') {
+        return err(appError('cancelled', 'cancelled'));
       }
+      if (result.t === 'failed') {
+        return err(shellToAppError(result.thrown));
+      }
+      return ok(undefined);
     }
   }
 
@@ -139,12 +177,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        await api.transfer.ensureDir();
-        return ok(undefined);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      return settle(api.transfer.ensureDir(), signal);
     },
 
     async begin(input, signal) {
@@ -152,23 +185,36 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        const { sinkId } = await api.transfer.begin({
-          destPath: input.destPath,
-          resumeAtBytes: input.resumeAtBytes,
-        });
-        if (signal.cancelled) {
-          // Cancellation landed mid-begin (e.g. behind the sink cap):
-          // release the just-minted sink so nothing writes through it.
-          await api.transfer
-            .abort({ sinkId, keep: false })
-            .catch(() => undefined);
-          return err(appError('cancelled', 'cancelled'));
-        }
-        return ok(makeSink(sinkId, signal));
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
+      const call = api.transfer.begin({
+        destPath: input.destPath,
+        resumeAtBytes: input.resumeAtBytes,
+      });
+      const outcome = await raced(call, signal);
+      if (outcome.t === 'cancelled') {
+        // The begin can still land utility-side after the caller
+        // settles — reap the minted sink when it does.
+        void call.then(
+          ({ sinkId }) =>
+            api.transfer
+              .abort({ sinkId, keep: false })
+              .catch(() => undefined),
+          () => undefined,
+        );
+        return err(appError('cancelled', 'cancelled'));
       }
+      if (outcome.t === 'failed') {
+        return err(shellToAppError(outcome.thrown));
+      }
+      const { sinkId } = outcome.value;
+      if (signal.cancelled) {
+        // Cancellation landed between the race settling and the sink
+        // subscription — release the just-minted sink.
+        await api.transfer
+          .abort({ sinkId, keep: false })
+          .catch(() => undefined);
+        return err(appError('cancelled', 'cancelled'));
+      }
+      return ok(makeSink(sinkId, signal));
     },
 
     async sweepPartials(keepPaths, signal) {
@@ -176,12 +222,11 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        const { swept } = await api.transfer.sweepPartials({ keepPaths });
-        return ok(swept);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      const res = await settle(
+        api.transfer.sweepPartials({ keepPaths }),
+        signal,
+      );
+      return res.ok ? ok(res.value.swept) : res;
     },
 
     async usage(signal) {
@@ -189,12 +234,8 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        const stats = await api.transfer.stats();
-        return ok(stats.bytes);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      const res = await settle(api.transfer.stats(), signal);
+      return res.ok ? ok(res.value.bytes) : res;
     },
 
     async freeBytes(signal) {
@@ -202,14 +243,13 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        const stats = await api.transfer.stats();
-        return stats.freeBytes === null
-          ? err(appError('unavailable', 'free-bytes probe failed'))
-          : ok(stats.freeBytes);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
+      const res = await settle(api.transfer.stats(), signal);
+      if (!res.ok) {
+        return res;
       }
+      return res.value.freeBytes === null
+        ? err(appError('unavailable', 'free-bytes probe failed'))
+        : ok(res.value.freeBytes);
     },
 
     async removeFile(name, signal) {
@@ -217,12 +257,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        await api.transfer.remove({ name });
-        return ok(undefined);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      return settle(api.transfer.remove({ name }), signal);
     },
 
     async stat(name, signal) {
@@ -230,12 +265,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        const result = await api.transfer.stat({ name });
-        return ok(result);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      return settle(api.transfer.stat({ name }), signal);
     },
   };
 }
