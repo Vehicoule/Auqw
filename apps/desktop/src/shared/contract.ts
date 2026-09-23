@@ -367,7 +367,10 @@ export function isRequestOutcomePayload(
 export type PrepareOutcomePayload = {
   readonly type: 'prepared' | 'failed' | 'superseded';
   readonly stream?: PreparedStreamPayload;
-  readonly superseded?: boolean;
+  // Session handles this prepare superseded or pruned (napi
+  // `PrepareOutcome.superseded: Vec<String>`) — handle routing drops
+  // them so a dead session can never serve a later attach.
+  readonly superseded?: readonly string[];
   readonly kind?: string;
   readonly message?: string;
   readonly attempt?: AttemptSummaryPayload;
@@ -391,8 +394,11 @@ export function isPrepareOutcomePayload(
       value['type'] === 'superseded') &&
     (value['stream'] === undefined ||
       isPreparedStreamPayload(value['stream'])) &&
+    // No length cap: the registry prunes unbounded terminal sets, and
+    // rejecting post-registration would strand the minted handle.
     (value['superseded'] === undefined ||
-      isBoolean(value['superseded'])) &&
+      (Array.isArray(value['superseded']) &&
+        value['superseded'].every((h) => isBoundedString(h, 256)))) &&
     isStringOrUndefined(value['kind']) &&
     isStringOrUndefined(value['message']) &&
     (value['attempt'] === undefined ||

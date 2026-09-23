@@ -94,6 +94,12 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     // may arm the dev-gate channel; packaged runs use resourcesPath.
     env['AUQW_REPO_ROOT'] = join(here, '../../../..');
     env['AUQW_DEV_GATE'] = '1';
+  } else {
+    // Packaged installs carry the locked provider set under
+    // resources/plugins (electron-builder.yml extraResources). An
+    // explicit AUQW_PLUGIN_DIR still wins — dev loops and harnesses
+    // point at their own sets.
+    env['AUQW_PLUGIN_DIR'] ??= join(process.resourcesPath, 'plugins');
   }
   return env;
 }

@@ -1,0 +1,61 @@
+appId: com.vehicoule.auqw
+productName: auqw
+copyright: Copyright © 2026 Vehicoule
+
+# electron-builder owns this output dir — `dist/` belongs to esbuild.
+directories:
+  output: dist-packages
+
+# The packaged app is exactly the esbuild bundles + its own manifest —
+# never src/, node_modules, or the cargo target tree.
+files:
+  - "dist/**/*"
+  - "package.json"
+
+# utilityProcess.fork resolves the entry by real path — a fork target
+# must live outside app.asar. The napi binding ships outside it too
+# (extraResources below).
+asarUnpack:
+  - "dist/utility/**"
+  - "**/*.node"
+
+# crates/node-bindings builds the cdylib libauqw_node_bindings.so; the
+# packaged utility host scans process.resourcesPath for
+# auqw_node_bindings.node (see src/utility/host.ts bindingsCandidates).
+# `plugins/` is the synced provider set (tooling/sync-plugins.mjs
+# apps/desktop/plugins) — the fork env defaults AUQW_PLUGIN_DIR to it
+# in packaged mode (src/main/index.ts utilityEnv).
+extraResources:
+  - from: ../../target/release/libauqw_node_bindings.so
+    to: auqw_node_bindings.node
+  - from: plugins
+    to: plugins
+
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+linux:
+  executableName: auqw
+  # WM_CLASS tracks the .desktop filename so desktops associate the
+  # running window with the entry (taskbar icon, rules).
+  syncDesktopName: true
+  category: Audio
+  maintainer: Vehicoule
+  target:
+    - AppImage
+    - tar.gz
+    - flatpak
+  desktop:
+    entry:
+      Name: auqw
+      GenericName: Music Player
+      Comment: Plugin-resolved audio client — sandboxed Wasm providers
+      Categories: Audio;AudioVideo;Player;
+
+# electron-builder defaults pin freedesktop 20.08, too old for Electron
+# 44's glibc floor — 24.08 matches the current Electron2.BaseApp branch.
+flatpak:
+  runtime: org.freedesktop.Platform
+  runtimeVersion: "24.08"
+  sdk: org.freedesktop.Sdk
+  base: org.electronjs.Electron2.BaseApp
+  baseVersion: "24.08"
