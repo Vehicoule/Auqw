@@ -42,6 +42,12 @@ export interface SyncSocketPort {
     timeoutMs: number;
     signal?: CancellationSignal;
   }): Promise<Result<SyncSocket>>;
+  /**
+   * Teardown hook for adapters holding bridge subscriptions —
+   * `SyncClient.close()` invokes it after killing sessions. Adapters
+   * with nothing to release leave it undefined.
+   */
+  close?(): void;
 }
 
 /**

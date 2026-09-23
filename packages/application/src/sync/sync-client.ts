@@ -240,6 +240,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   const peers = new Map<string, SyncPeer>();
   const views = new Map<string, PeerView>();
   const sessions = new Map<string, ClientSession>();
+  /** In-flight dials keyed by fp — concurrent syncNow shares one. */
+  const connecting = new Map<
+    string,
+    Promise<Result<{ session: ClientSession; welcome: WelcomeMsg }>>
+  >();
   const listeners = new Set<(status: SyncClientStatus) => void>();
   let peersLoaded = false;
   let closing = false;
@@ -294,6 +299,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       peers.set(peer.fp, peer);
     }
     peersLoaded = true;
+    // Custody hydration changes what status() reports — subscribers
+    // learn about restored pairings without waiting for an op.
+    emit();
     return ok(undefined);
   }
 
@@ -455,25 +463,38 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         return;
       }
       session.pending = { accepts, done: finish as PendingWaiter['done'] };
+      // The wire carries no request id — a late reply to a timed-out
+      // or cancelled request would complete whatever request a retry
+      // parked next. Cancel/timeout/send-fail therefore kill the
+      // session too; the next op redials clean. The caller still
+      // gets the original error.
       unsubscribe =
-        signal?.subscribe(() =>
-          finish(err(appError('cancelled', 'cancelled'))),
-        ) ?? (() => {});
+        signal?.subscribe(() => {
+          if (settled) {
+            return;
+          }
+          const failure = appError('cancelled', 'cancelled');
+          finish(err(failure));
+          killSession(session, failure);
+        }) ?? (() => {});
       void deps.clock.sleep(ms, session.cancel.signal).then((slept) => {
-        if (slept.ok) {
-          finish(
-            err(appError('timeout', 'sync: reply deadline passed')),
-          );
+        // The sleeper outlives a settled waiter — only kill when this
+        // request is actually the one timing out.
+        if (!slept.ok || settled) {
+          return;
         }
+        const failure = appError('timeout', 'sync: reply deadline passed');
+        finish(err(failure));
+        killSession(session, failure);
       });
       const sent =
         session.codec === null
           ? session.pump.send(encodeJson(msg))
           : sendSealed(session, msg);
-      if (!sent) {
-        finish(
-          err(appError('transient', 'sync: send failed — socket dead')),
-        );
+      if (!sent && !settled) {
+        const failure = appError('transient', 'sync: send failed — socket dead');
+        finish(err(failure));
+        killSession(session, failure);
       }
     });
   }
@@ -910,11 +931,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       let session = sessions.get(fp);
       if (session === undefined || session.closed) {
         setView(fp, { state: 'connecting' });
-        const opened = await openSession({
-          endpoints: peer.endpoints,
-          pinnedFp: peer.fp,
-          ...(signal !== undefined ? { signal } : {}),
-        });
+        // Concurrent syncNow shares one dial — the map entry exists
+        // from the synchronous start until the shared promise lands.
+        let opening = connecting.get(fp);
+        if (opening === undefined) {
+          opening = openSession({
+            endpoints: peer.endpoints,
+            pinnedFp: peer.fp,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          connecting.set(fp, opening);
+        }
+        const opened = await opening;
+        if (connecting.get(fp) === opening) {
+          connecting.delete(fp);
+        }
         if (!opened.ok) {
           setView(fp, { state: 'offline', lastError: opened.error });
           if (opened.error.kind === 'auth-required') {
@@ -936,20 +967,31 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             appError('permission-denied', 'sync: fingerprint mismatch'),
           );
         }
-        sessions.set(fp, session);
-        setView(fp, { state: 'open' });
-        if (opened.value.welcome.device.id !== deps.deviceId) {
-          // The desktop rebound our key to another id — custody is
-          // stale on their side; treat as unpaired and drop locally.
+        const prior = sessions.get(fp);
+        if (prior !== undefined && prior !== session && !prior.closed) {
+          // A connect that slipped the dedupe window already owns the
+          // slot — the superseded dial must not leak its keepalive.
           killSession(
             session,
-            appError('auth-required', 'sync: device re-bound remotely'),
+            appError('superseded', 'sync: superseded connect'),
           );
-          peers.delete(fp);
-          void deps.keys.peerDelete(fp, signal);
-          return err(
-            appError('auth-required', 'sync: device re-bound remotely'),
-          );
+          session = prior;
+        } else {
+          sessions.set(fp, session);
+          setView(fp, { state: 'open' });
+          if (opened.value.welcome.device.id !== deps.deviceId) {
+            // The desktop rebound our key to another id — custody is
+            // stale on their side; treat as unpaired and drop locally.
+            killSession(
+              session,
+              appError('auth-required', 'sync: device re-bound remotely'),
+            );
+            peers.delete(fp);
+            void deps.keys.peerDelete(fp, signal);
+            return err(
+              appError('auth-required', 'sync: device re-bound remotely'),
+            );
+          }
         }
       }
       return enqueue(session, () => syncRound(session, peer, signal));
@@ -1011,6 +1053,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         killSession(session, null);
       }
       sessions.clear();
+      deps.sockets.close?.();
       emit();
     },
   };

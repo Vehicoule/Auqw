@@ -165,6 +165,7 @@ export function createExpoSyncSockets(
   const live = new Map<string, ExpoSyncSocket>();
   let dataSub: AuqwExpoSubscription | null = null;
   let closedSub: AuqwExpoSubscription | null = null;
+  let released = false;
 
   const ensureWatch = (): void => {
     if (dataSub !== null) {
@@ -184,6 +185,9 @@ export function createExpoSyncSockets(
 
   return {
     async connect({ host, port, timeoutMs, signal }) {
+      if (released) {
+        return err(appError('released', 'sync: socket port closed'));
+      }
       const socketId = `sync-${(socketSeq += 1)}-${Date.now().toString(36)}`;
       ensureWatch();
       const unsubscribe: (() => void)[] = [];
@@ -236,6 +240,22 @@ export function createExpoSyncSockets(
       const result = await Promise.race([dial, cancelled]);
       unsubscribe[0]?.();
       return result;
+    },
+    close() {
+      if (released) {
+        return;
+      }
+      released = true;
+      // Bridge subscriptions outlive the client if not removed —
+      // controller disposal would stack dead listeners forever.
+      dataSub?.remove();
+      dataSub = null;
+      closedSub?.remove();
+      closedSub = null;
+      for (const socket of live.values()) {
+        socket.destroy();
+      }
+      live.clear();
     },
   };
 }

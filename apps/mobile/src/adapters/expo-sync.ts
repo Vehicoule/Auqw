@@ -9,7 +9,6 @@ import type {
   SyncLogStore,
 } from '@auqw/application';
 import {
-  appError,
   createSyncClient,
   createSyncEngine,
   ensureSyncIdentity,
@@ -23,7 +22,7 @@ import {
 } from './noble-sync-crypto.ts';
 import { createExpoSyncSockets } from './expo-sync-socket.ts';
 import { createSecureSyncKeys } from './secure-sync-keys.ts';
-import type { AuqwSyncNative } from './auqw-expo-surface.ts';
+import { nativeError, type AuqwSyncNative } from './auqw-expo-surface.ts';
 
 /**
  * The whole mobile sync stack over the auqw-expo native seam —
@@ -68,53 +67,55 @@ function nativeRandom(host: AuqwSyncNative): (n: number) => Uint8Array {
 export async function createExpoSync(
   deps: ExpoSyncDeps,
 ): Promise<Result<ExpoSyncSurface>> {
-  const keys = deps.keys ?? createSecureSyncKeys();
-  const random = nativeRandom(deps.host);
-  const custody = await ensureSyncIdentity({
-    keys,
-    crypto: { createIdentity: () => createNobleIdentity(random) },
-    ids: deps.ids,
-  });
-  if (!custody.ok) {
-    return err(custody.error);
-  }
-  const deviceId = custody.value.deviceId;
-  const engine = await createSyncEngine({
-    store: deps.logStore,
-    clock: deps.clock,
-    ids: deps.ids,
-    log: deps.log,
-    deviceId,
-  });
-  if (!engine.ok) {
-    return err(engine.error);
-  }
+  // One boundary covers native throws anywhere in init — RNG,
+  // custody, engine, codec — so a sync failure surfaces as a typed
+  // error (honest 'unavailable'), never as a boot-killing rejection.
   try {
+    const keys = deps.keys ?? createSecureSyncKeys();
+    const random = nativeRandom(deps.host);
+    const custody = await ensureSyncIdentity({
+      keys,
+      crypto: { createIdentity: () => createNobleIdentity(random) },
+      ids: deps.ids,
+    });
+    if (!custody.ok) {
+      return err(custody.error);
+    }
+    const deviceId = custody.value.deviceId;
+    const engine = await createSyncEngine({
+      store: deps.logStore,
+      clock: deps.clock,
+      ids: deps.ids,
+      log: deps.log,
+      deviceId,
+    });
+    if (!engine.ok) {
+      return err(engine.error);
+    }
     const crypto = createNobleSyncCrypto({
       identity: custody.value.identity,
       randomBytes: random,
     });
-    return ok({
-      client: createSyncClient({
-        sockets: createExpoSyncSockets(deps.host),
-        crypto,
-        keys,
-        engine: engine.value,
-        ids: deps.ids,
-        clock: deps.clock,
-        log: deps.log,
-        deviceId,
-        name: `auqw ${deviceId.slice(0, 8)}`,
-      }),
+    const client = createSyncClient({
+      sockets: createExpoSyncSockets(deps.host),
+      crypto,
+      keys,
       engine: engine.value,
+      ids: deps.ids,
+      clock: deps.clock,
+      log: deps.log,
       deviceId,
+      name: `auqw ${deviceId.slice(0, 8)}`,
     });
+    // Hydrate custody before the surface is exposed — the UI reads
+    // status() first, and it must already show the paired desktops.
+    const hydrated = await client.peers();
+    if (!hydrated.ok) {
+      await client.close();
+      return err(hydrated.error);
+    }
+    return ok({ client, engine: engine.value, deviceId });
   } catch (thrown) {
-    return err(
-      appError(
-        'internal',
-        `sync: crypto init failed — ${thrown instanceof Error ? thrown.message : 'unknown'}`,
-      ),
-    );
+    return err(nativeError(thrown));
   }
 }

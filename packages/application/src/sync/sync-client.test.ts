@@ -207,6 +207,8 @@ type ScriptedServer = {
   deviceSummaries: SyncDeviceSummary[];
   /** Kill the transport when a sync request arrives mid-open phase. */
   dropOnSync: boolean;
+  /** Stay silent on a sync request — the socket stays open, no reply. */
+  muteOnSync: boolean;
 };
 
 async function createEngine(
@@ -242,6 +244,7 @@ async function rig(): Promise<{
   keys: ReturnType<typeof fakeKeys>;
   clock: FakeClock;
   sockets: { registered: Map<string, (socket: FakeSocket) => void> };
+  portCloses: () => number;
 }> {
   const clock = new FakeClock();
   const ids = new SequenceIds();
@@ -251,6 +254,7 @@ async function rig(): Promise<{
 
   const servers = new Map<string, (socket: FakeSocket) => void>();
 
+  let portCloseCount = 0;
   const sockets: SyncSocketPort = {
     connect: ({ host, port }) => {
       const hook = servers.get(`${host}:${port}`);
@@ -263,6 +267,9 @@ async function rig(): Promise<{
       const [clientEnd, serverEnd] = socketPair();
       hook(serverEnd);
       return Promise.resolve(ok<SyncSocket>(clientEnd));
+    },
+    close: () => {
+      portCloseCount += 1;
     },
   };
 
@@ -279,6 +286,7 @@ async function rig(): Promise<{
     registered: true,
     deviceSummaries: [],
     dropOnSync: false,
+    muteOnSync: false,
   };
 
   servers.set('10.0.0.4:7777', (socket) => {
@@ -316,6 +324,7 @@ async function rig(): Promise<{
     keys,
     clock,
     sockets: { registered: servers },
+    portCloses: () => portCloseCount,
   };
 }
 
@@ -369,6 +378,9 @@ async function handle(
     server.syncs.push(msg);
     if (server.dropOnSync) {
       pump.close();
+      return;
+    }
+    if (server.muteOnSync) {
       return;
     }
     const sent = msg as { since?: unknown; delta?: unknown };
@@ -649,6 +661,96 @@ async function keepalivePings(): Promise<void> {
   await client.close();
 }
 
+// 13. Custody hydration: a peer persisted before construction
+// surfaces in status() once the client loads it — the restart path
+// (createExpoSync awaits peers() before exposing the surface).
+async function restartHydratesPeers(): Promise<void> {
+  const { client, keys } = await rig();
+  keys.peers.set(SERVER_FP, {
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  assertEqual(client.status().peers.length, 0, 'pre-load status empty');
+  let emitted = 0;
+  client.subscribe(() => {
+    emitted += 1;
+  });
+  const listed = await client.peers();
+  assert(listed.ok && listed.value.length === 1);
+  assertEqual(client.status().peers.length, 1, 'status sees custody');
+  assertEqual(client.status().peers[0]?.state, 'offline');
+  assert(emitted > 0, 'subscribers notified on hydration');
+  await client.close();
+}
+
+// 14. Concurrent syncNow shares one dial — one hello, one auth, both
+// rounds serialized on the single session.
+async function concurrentSyncSharesOneDial(): Promise<void> {
+  const { client, server, keys } = await rig();
+  keys.peers.set(SERVER_FP, {
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  const [a, b] = await Promise.all([
+    client.syncNow(SERVER_FP),
+    client.syncNow(SERVER_FP),
+  ]);
+  assert(a.ok && b.ok, 'both rounds resolve');
+  assertEqual(server.hello.length, 1, 'one handshake only');
+  assertEqual(server.auths.length, 1, 'one auth');
+  await client.close();
+}
+
+// 15. A request that outlives its deadline is session-fatal: the wire
+// has no request ids, so a late reply must never complete a retried
+// request — the next op redials a clean session.
+async function timeoutKillsSessionAndRedials(): Promise<void> {
+  const { client, server, clock, keys } = await rig();
+  keys.peers.set(SERVER_FP, {
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  server.muteOnSync = true;
+  const timed = client.syncNow(SERVER_FP);
+  // Let the handshake resolve and the sync request go out before the
+  // clock advances — the reply deadline arms only after that.
+  for (let i = 0; i < 50 && server.syncs.length === 0; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(server.syncs.length, 1, 'sync request went out');
+  clock.advance(60_000);
+  const outcome = await timed;
+  assert(!outcome.ok && outcome.error.kind === 'timeout');
+  assertEqual(client.status().peers[0]?.state, 'offline');
+  server.muteOnSync = false;
+  const retried = await client.syncNow(SERVER_FP);
+  assert(retried.ok, 'retry redials and converges');
+  assertEqual(server.hello.length, 2, 'second dial happened');
+  await client.close();
+}
+
+// 16. close() hands the socket port its teardown hook — adapters
+// holding bridge subscriptions get released with the client.
+async function closeDisposesSocketPort(): Promise<void> {
+  const { client, portCloses } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  await client.close();
+  assertEqual(portCloses(), 1, 'socket port released');
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -662,6 +764,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['resumeUnpairedDropsCustody', resumeUnpairedDropsCustody],
   ['refreshPeerReadsDevices', refreshPeerReadsDevices],
   ['keepalivePings', keepalivePings],
+  ['restartHydratesPeers', restartHydratesPeers],
+  ['concurrentSyncSharesOneDial', concurrentSyncSharesOneDial],
+  ['timeoutKillsSessionAndRedials', timeoutKillsSessionAndRedials],
+  ['closeDisposesSocketPort', closeDisposesSocketPort],
 ];
 
 export async function run(): Promise<void> {
