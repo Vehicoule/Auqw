@@ -4,6 +4,8 @@ import { networkInterfaces } from 'node:os';
 import {
   CancellationSource,
   type AppError,
+  type CancellationSignal,
+  type Result,
   type SyncEnginePort,
 } from '@auqw/application';
 import {
@@ -19,6 +21,8 @@ import {
   isSyncDevicesResult,
   isSyncImportDeltaArgs,
   isSyncImportDeltaResult,
+  isSyncLocalChangesArgs,
+  isSyncLocalChangesResult,
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
@@ -101,10 +105,23 @@ export type SyncServiceDeps = {
   readonly disabled?: boolean;
   readonly keys: SyncKeys;
   /**
-   * The merge engine — absent until the engine leg lands; delta
-   * channels answer typed 'unavailable', pairing still works.
+   * The merge engine — a `SyncEnginePort` directly, or the promise
+   * of one while construction (log open + hydrate) is still in
+   * flight; `start()` resolves it before anything reads the seam.
+   * Absent: delta channels answer typed 'unavailable', pairing
+   * still works.
    */
-  readonly engine?: SyncEnginePort;
+  readonly engine?: SyncEnginePort | Promise<SyncEnginePort | null>;
+  /**
+   * Renderer-committed edits pushed into the engine log — the
+   * `sync:localChanges` emission seam. Each write re-validates
+   * inside the engine (`validLocalWrite`), so the channel owes only
+   * the contract's bounded-shape check. Absent: typed 'unavailable'.
+   */
+  readonly localChanges?: (
+    writes: readonly unknown[],
+    signal?: CancellationSignal,
+  ) => Promise<Result<unknown>>;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
@@ -378,6 +395,29 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   const sessions = new Set<Session>();
   const pendingSync = new Set<string>();
+  // The resolved engine — a promise dep settles inside start(),
+  // and every consumer reads this, never `deps.engine` (which may
+  // itself be the unsettled promise).
+  let engine: SyncEnginePort | undefined;
+
+  async function resolveEngine(): Promise<void> {
+    const candidate = deps.engine;
+    if (candidate === undefined) {
+      engine = undefined;
+      return;
+    }
+    if (candidate instanceof Promise) {
+      try {
+        engine = (await candidate) ?? undefined;
+      } catch {
+        // A failed engine build degrades to absent — pairing and
+        // the listener still serve.
+        engine = undefined;
+      }
+      return;
+    }
+    engine = candidate;
+  }
   // Renderer-originated engine ops bind to the service's lifetime —
   // there is no per-request cancel on the IPC boundary, so close() is
   // the cancellation edge (sessions use their own per-socket source).
@@ -435,7 +475,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         listener === 'disabled' ? 0 : await deviceCount(),
       sessions: [...sessions].filter((s) => s.phase === 'open').length,
       lastSyncAt,
-      engine: deps.engine === undefined ? 'absent' : 'ready',
+      engine: engine === undefined ? 'absent' : 'ready',
       name: deviceName,
       fingerprint,
     };
@@ -777,7 +817,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           sendSealed(session, { t: 'error', code: 'bad-request' });
           return;
         }
-        const engine = deps.engine;
         if (engine === undefined) {
           sendSealed(session, { t: 'error', code: 'engine-absent' });
           return;
@@ -907,6 +946,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   };
 
   async function start(): Promise<SyncStatusResult> {
+    // An async engine resolves before anything reads the seam —
+    // status then answers 'ready'/'absent' truthfully even when the
+    // listener is disabled.
+    await resolveEngine();
     if (deps.disabled === true) {
       listener = 'disabled';
       return status();
@@ -1011,6 +1054,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     released: 'released',
     'storage-full': 'io-error',
     'not-found': 'invalid-request',
+    'not-applicable': 'invalid-request',
     'invalid-message': 'invalid-request',
     'artifact-rejected': 'invalid-request',
     'permission-denied': 'invalid-request',
@@ -1109,7 +1153,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!isSyncDeltasArgs(args)) {
         throw shellError('invalid-request', 'sync:deltas expects {since}');
       }
-      const engine = deps.engine;
       if (engine === undefined) {
         throw shellError('unavailable', 'sync engine not installed');
       }
@@ -1132,7 +1175,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           'sync:importDelta expects {delta}',
         );
       }
-      const engine = deps.engine;
       if (engine === undefined) {
         throw shellError('unavailable', 'sync engine not installed');
       }
@@ -1195,6 +1237,28 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         pending: pendingSync.size > 0,
       });
     },
+
+    'sync:localChanges': async (args) => {
+      if (!isSyncLocalChangesArgs(args)) {
+        throw shellError(
+          'invalid-request',
+          'sync:localChanges expects {writes}',
+        );
+      }
+      if (deps.localChanges === undefined) {
+        throw shellError('unavailable', 'sync engine not installed');
+      }
+      const result = await deps.localChanges(
+        args.writes,
+        serviceCancel.signal,
+      );
+      if (!result.ok) {
+        throw engineError(result.error);
+      }
+      return checked(isSyncLocalChangesResult, 'sync:localChanges')({
+        result: result.value,
+      });
+    },
   };
 
   const started = start()
@@ -1221,7 +1285,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           pairedDevices: 0,
           sessions: 0,
           lastSyncAt,
-          engine: deps.engine === undefined ? 'absent' : 'ready',
+          engine: engine === undefined ? 'absent' : 'ready',
           name: deviceName,
           fingerprint,
         };

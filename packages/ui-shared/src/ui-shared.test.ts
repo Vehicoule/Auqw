@@ -3,7 +3,13 @@
 // they now exercise this module through '@auqw/ui-shared'. Here we only
 // prove the package resolves cleanly for a plain node consumer: the
 // mappers import nothing react-native and fixtures stay coherent.
-import { toHomeModel, toQueueModel, toSettingsModel } from './index.ts';
+import {
+  formatAgo,
+  toHomeModel,
+  toQueueModel,
+  toSettingsModel,
+  toSyncPanel,
+} from './index.ts';
 import {
   fixtureDiagnostics,
   fixtureHomeModel,
@@ -68,5 +74,67 @@ assert(
 
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
 assertEqual(settings.rows.length, fixtureSettingsModel.rows.length);
+
+// ---- sync panel ------------------------------------------------------------
+const NOW = 1_800_000_000_000;
+
+assertEqual(formatAgo(NOW - 5_000, NOW), 'just now');
+assertEqual(formatAgo(NOW - 5 * 60_000, NOW), '5m ago');
+assertEqual(formatAgo(NOW - 3 * 3_600_000, NOW), '3h ago');
+assertEqual(formatAgo(NOW - 4 * 86_400_000, NOW), '4d ago');
+assertEqual(formatAgo(NOW - 40 * 86_400_000, NOW).length, 10, 'weeks+ → ISO date');
+assertEqual(formatAgo(NOW + 1_000, NOW), '—', 'future is honest');
+assertEqual(formatAgo(NaN, NOW), '—', 'non-finite is honest');
+
+const syncPanel = toSyncPanel(
+  {
+    listener: 'listening',
+    endpoint: '192.168.1.20:44100',
+    boundPort: 44100,
+    advertise: 'announcing',
+    pairedDevices: 1,
+    sessions: 2,
+    lastSyncAt: NOW - 5 * 60_000,
+    engine: 'ready',
+    name: 'desk',
+    fingerprint: 'ab:cd:ef',
+  },
+  [
+    {
+      id: 'dev-phone',
+      name: 'pixel',
+      pairedAt: NOW - 3 * 3_600_000,
+      lastSeenAt: NOW - 5_000,
+    },
+  ],
+  { payload: '{"v":1,"code":"123456"}', code: '123456', expiresAt: NOW + 4 * 60_000 },
+  NOW,
+);
+const syncStatus = syncPanel.status;
+assert(syncStatus !== null, 'status maps through');
+assertEqual(syncStatus.listenerLabel, 'listening');
+assertEqual(syncStatus.engineLabel, 'ready');
+assertEqual(syncStatus.addressLabel, '192.168.1.20:44100');
+assertEqual(syncStatus.lastSyncLabel, '5m ago');
+assertEqual(syncStatus.sessionsLabel, '2 live');
+assertEqual(syncStatus.fingerprintLabel, 'ab:cd:ef');
+assertEqual(syncPanel.devices.length, 1);
+assertEqual(syncPanel.devices[0]?.pairedLabel, 'paired 3h ago');
+assertEqual(syncPanel.devices[0]?.lastSeenLabel, 'seen just now');
+assertEqual(syncPanel.pairing?.code, '123456');
+assertEqual(syncPanel.pairing?.expiresLabel, 'expires in 4m');
+
+const noSync = toSyncPanel(null, [], null, NOW);
+assertEqual(noSync.status, null, 'a dead channel maps to a null status');
+assertEqual(noSync.devices.length, 0);
+assertEqual(noSync.pairing, null);
+
+const expiredPairing = toSyncPanel(
+  null,
+  [],
+  { payload: 'x', code: '000000', expiresAt: NOW - 1 },
+  NOW,
+);
+assertEqual(expiredPairing.pairing?.expiresLabel, 'expired');
 
 console.log('ui-shared tests passed');

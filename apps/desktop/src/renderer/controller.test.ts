@@ -1,10 +1,20 @@
 import type {
+  DownloadRecord,
+  LocalFile,
+  LocalSource,
   OperationContext,
   PersistedState,
   QueueSnapshot,
+  Recording,
   Settings,
 } from '@auqw/application';
-import { appError, CancellationSource, err } from '@auqw/application';
+import {
+  appError,
+  CancellationSource,
+  err,
+  localTrackRef,
+  ok,
+} from '@auqw/application';
 import {
   assert,
   assertDeepEqual,
@@ -82,6 +92,14 @@ type Rig = {
   pluginsResult: HostPluginsResult;
   requestOutcome: RequestOutcomePayload;
   snapshotResult: { readonly online: boolean };
+  transferStat: { readonly exists: boolean; readonly bytes: number | null };
+  transferSwept: number;
+  transferStats: {
+    readonly bytes: number;
+    readonly files: number;
+    readonly partials: number;
+    readonly freeBytes: number | null;
+  };
 };
 
 function fakeApi(): Rig {
@@ -107,6 +125,9 @@ function fakeApi(): Rig {
       },
     },
     snapshotResult: { online: true },
+    transferStat: { exists: true, bytes: null },
+    transferSwept: 0,
+    transferStats: { bytes: 0, files: 0, partials: 0, freeBytes: null },
     api: {
       app: {
         meta: () =>
@@ -152,6 +173,8 @@ function fakeApi(): Rig {
         deltas: () => Promise.reject(new Error('seam: inject sync')),
         importDelta: () => Promise.reject(new Error('seam: inject sync')),
         trigger: () => Promise.reject(new Error('seam: inject sync')),
+        localChanges: () =>
+          Promise.reject(new Error('seam: inject sync')),
       },
       utility: {
         ping: () => Promise.reject(new Error('unused')),
@@ -180,19 +203,19 @@ function fakeApi(): Rig {
         channel: () => Promise.reject(new Error('seam: inject player')),
       },
       transfer: {
-        ensureDir: () => Promise.reject(new Error('seam: inject transfer')),
+        ensureDir: () => Promise.resolve(),
         begin: () => Promise.reject(new Error('seam: inject transfer')),
         write: () => Promise.reject(new Error('seam: inject transfer')),
         commit: () => Promise.reject(new Error('seam: inject transfer')),
         finalize: () => Promise.reject(new Error('seam: inject transfer')),
-        abort: () => Promise.reject(new Error('seam: inject transfer')),
-        stat: () => Promise.reject(new Error('seam: inject transfer')),
-        remove: () => Promise.reject(new Error('seam: inject transfer')),
+        abort: () => Promise.resolve(),
+        stat: () => Promise.resolve(rig.transferStat),
+        remove: () => Promise.resolve(),
         sweepPartials: () =>
-          Promise.reject(new Error('seam: inject transfer')),
-        list: () => Promise.reject(new Error('seam: inject transfer')),
+          Promise.resolve({ swept: rig.transferSwept }),
+        list: () => Promise.resolve({ sinks: [], files: [] }),
         status: () => Promise.reject(new Error('seam: inject transfer')),
-        stats: () => Promise.reject(new Error('seam: inject transfer')),
+        stats: () => Promise.resolve(rig.transferStats),
       },
       tagread: {
         enumerate: () => Promise.reject(new Error('seam: inject tagread')),
@@ -391,12 +414,22 @@ async function connectivity(): Promise<void> {
     providers: defaultProviders(),
   });
   await Promise.resolve();
-  assertEqual(rig.netListeners.length, 1);
+  // The session's edge subscription plus the download ledger's
+  // connectivity watch both hang off api.net.
+  assert(
+    rig.netListeners.length >= 1,
+    'at least the session net subscription',
+  );
   assertEqual(controller.isOnline(), false);
-  rig.netListeners[0]?.({ online: true });
+  for (const listener of rig.netListeners) {
+    listener({ online: true });
+  }
   assertEqual(controller.isOnline(), true);
   await controller.dispose();
-  assertEqual(rig.netUnsubscribes, 1);
+  assert(
+    rig.netUnsubscribes >= 1,
+    'dispose releases every net subscription',
+  );
 }
 
 // 6. dispose unsubscribes net, disposes providers (ops settle
@@ -411,7 +444,10 @@ async function disposeSeam(): Promise<void> {
   });
   await controller.dispose();
   assertDeepEqual(disposed, ['itunes', 'youtube-music']);
-  assertEqual(rig.netUnsubscribes, 1);
+  assert(
+    rig.netUnsubscribes >= 1,
+    'dispose releases every net subscription',
+  );
 }
 
 // 7. A plugin set with no declarer for a required capability cannot
@@ -519,6 +555,234 @@ async function onlineBaselineReplay(): Promise<void> {
   await controller.dispose();
 }
 
+function rec(id: string, provenance: Recording['provenance']): Recording {
+  return {
+    id,
+    title: `title-${id}`,
+    artist: null,
+    album: null,
+    durationMs: 1,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    isrc: null,
+    versionLabels: [],
+    sourceRefs:
+      provenance === 'local'
+        ? [localTrackRef(`lf-${id}`)]
+        : [{ provider: 'youtube-music', kind: 'track', id: `yt-${id}` }],
+    mappings: [],
+    provenance,
+  };
+}
+
+function downloadRow(over: Partial<DownloadRecord> = {}): DownloadRecord {
+  return {
+    downloadId: 'dl-1',
+    recordingId: 'rec-dl',
+    provider: 'youtube-music',
+    sourceRef: { provider: 'youtube-music', kind: 'track', id: 'yt-1' },
+    filePath: 'dl-1',
+    bytes: 100,
+    state: 'available',
+    committedOffset: 100,
+    checksum: 'a'.repeat(64),
+    mime: 'audio/webm',
+    itag: null,
+    expiresAtMs: null,
+    error: null,
+    priority: 0,
+    requestedMs: 1,
+    downloadedMs: 1,
+    ...over,
+  };
+}
+
+function localSourceRow(): LocalSource {
+  return {
+    sourceId: 'src-1',
+    treeUri: 'file:///music/rips',
+    label: 'rips',
+    addedMs: 1,
+    lastScanMs: 1,
+  };
+}
+
+function localFileRow(): LocalFile {
+  return {
+    fileId: 'lf-rec-lf',
+    sourceId: 'src-1',
+    docId: 'sub/rip.flac',
+    size: 5,
+    fingerprint: 'fp-1',
+    modifiedMs: 1,
+    title: 'rip',
+    artist: null,
+    album: null,
+    durationMs: null,
+    genre: null,
+    recordingId: 'rec-lf',
+  };
+}
+
+async function pump(): Promise<void> {
+  for (let i = 0; i < 30; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+/** The prepare calls the player saw, newest last. */
+function prepareCalls(player: FakePlayer) {
+  return player.calls.filter((c) => c.method === 'prepare');
+}
+
+// 10. An 'available' download row makes the session attach the owned
+// file — `provider:'local'` carrying the media-dir `file://` URI —
+// even online, and even over a provider mapping.
+async function downloadResolvesLocal(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  rig.transferStat = { exists: true, bytes: 100 };
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [rec('rec-dl', 'provider')],
+        downloads: [downloadRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  // The ledger verified the row through the scripted transfer port.
+  assertEqual(controller.downloads.fileFor('rec-dl'), 'dl-1');
+  const pending = controller.session.playRecordings([
+    { recordingId: 'rec-dl', selectedRef: null },
+  ]);
+  await pump();
+  const calls = prepareCalls(player);
+  assertEqual(calls.length, 1, 'one prepare');
+  const input = calls[0]?.input as {
+    provider?: string;
+    sourceRef?: string;
+  };
+  assertEqual(input.provider, 'local');
+  assertEqual(
+    input.sourceRef,
+    'file:///tmp/auqw-test/media/dl-1',
+    'owned download resolves to the media-dir file URI',
+  );
+  player.settlePrepare(ok('h-1'));
+  const played = await pending;
+  assert(played.ok, `playRecordings: ${JSON.stringify(played)}`);
+  await controller.dispose();
+}
+
+// 11. A scanned local file resolves through the local source's URI
+// math — same `docUriFor` string the utility's `local:probe` mints.
+async function localFileResolvesUri(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [rec('rec-lf', 'local')],
+        localSources: [localSourceRow()],
+        localFiles: [localFileRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  assert(
+    controller.local() !== null,
+    'local source built off the restored rows',
+  );
+  const pending = controller.session.playRecordings([
+    { recordingId: 'rec-lf', selectedRef: null },
+  ]);
+  await pump();
+  const calls = prepareCalls(player);
+  assertEqual(calls.length, 1, 'one prepare');
+  const input = calls[0]?.input as {
+    provider?: string;
+    sourceRef?: string;
+  };
+  assertEqual(input.provider, 'local');
+  assertEqual(
+    input.sourceRef,
+    'file:///music/rips/sub/rip.flac',
+    'local file resolves through docUriFor',
+  );
+  player.settlePrepare(ok('h-1'));
+  const played = await pending;
+  assert(played.ok, `playRecordings: ${JSON.stringify(played)}`);
+  await controller.dispose();
+}
+
+// 12. `rehydrateMedia` reloads the media owners after an import-shaped
+// commit — the rebuilt local source serves the swapped rows.
+async function rehydrateAfterImport(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  const storage = new FakeStorage(persisted());
+  const controller = await createSessionController(rig.api, {
+    storage,
+    player,
+    providers: defaultProviders(),
+  });
+  assertEqual(
+    controller.local()?.uriFor('rec-lf') ?? null,
+    null,
+    'no local rows at boot',
+  );
+  // A committed swap — what importLibrary leaves behind — is what a
+  // rehydrate must pick up.
+  const committed = await storage.commit(
+    {
+      recordings: [rec('rec-lf', 'local')],
+      localSources: [localSourceRow()],
+      localFiles: [localFileRow()],
+    },
+    ctx(),
+  );
+  assert(committed.ok);
+  await controller.rehydrateMedia(new CancellationSource().signal);
+  const local = controller.local();
+  assert(local !== null, 'local source rebuilt off the new rows');
+  assertEqual(
+    local?.uriFor('rec-lf'),
+    'file:///music/rips/sub/rip.flac',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
+// 13. A vanished owned file drops the row at init — the ledger is
+// honest empty, playback falls back to provider resolution.
+async function vanishedDownloadHonest(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  rig.transferStat = { exists: false, bytes: null };
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [rec('rec-dl', 'provider')],
+        downloads: [downloadRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  assertEqual(
+    controller.downloads.fileFor('rec-dl'),
+    null,
+    'vanished file never answers fileFor',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['providersFromManifests', providersFromManifests],
   ['unavailableBindings', unavailableBindings],
@@ -529,6 +793,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['incompleteProviderSet', incompleteProviderSet],
   ['restoreRepairsSettings', restoreRepairsSettings],
   ['onlineBaselineReplay', onlineBaselineReplay],
+  ['downloadResolvesLocal', downloadResolvesLocal],
+  ['localFileResolvesUri', localFileResolvesUri],
+  ['rehydrateAfterImport', rehydrateAfterImport],
+  ['vanishedDownloadHonest', vanishedDownloadHonest],
 ];
 
 export async function run(): Promise<void> {

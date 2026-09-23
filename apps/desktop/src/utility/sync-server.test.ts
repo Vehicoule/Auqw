@@ -12,9 +12,21 @@ import {
 } from '@auqw/application/testing';
 import {
   ok,
+  type ApplyResult,
   type Result,
+  type SyncDelta,
   type SyncEnginePort,
 } from '@auqw/application';
+import { FakeSyncLogStore } from '@auqw/application/testing';
+import {
+  createClock,
+  createIds,
+  createLog,
+} from '../renderer/runtime.ts';
+import {
+  createUtilitySyncEngine,
+  type UtilitySyncEngine,
+} from './sync-engine.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
@@ -163,6 +175,33 @@ async function pairingCode(service: SyncService): Promise<PairingPayload> {
     fp: String(payload['fp']),
     expiresAt: Number(result['expiresAt']),
   };
+}
+
+/** A real engine behind the adapter — no fake in the E2E path. */
+async function testUtilityEngine(
+  deviceId: string,
+): Promise<UtilitySyncEngine> {
+  const built = await createUtilitySyncEngine({
+    store: new FakeSyncLogStore(),
+    clock: createClock(),
+    ids: createIds(),
+    log: createLog(() => {}),
+    deviceId,
+  });
+  assert(built.ok, `engine build failed: ${JSON.stringify(built)}`);
+  if (!built.ok) {
+    throw new Error('unreachable');
+  }
+  return built.value;
+}
+
+function writeName(recordId: string, value: string) {
+  return {
+    kind: 'playlist',
+    recordId,
+    field: 'name',
+    value,
+  } as const;
 }
 
 /** Engine double: echoes since and records applied deltas. */
@@ -1883,6 +1922,236 @@ export async function run(): Promise<void> {
           reply.value['result'] === null,
         'ok(null) is a valid receipt, not invalid-response',
       );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Real engines through the socket: two devices converge ——
+  // The desktop's service carries a real SyncEngine behind the
+  // adapter; the phone half is the same stack with its own store.
+  // Writes on BOTH sides cross over one sealed session.
+  {
+    const desk = await testUtilityEngine('dsk-e2e');
+    const phone = await testUtilityEngine('phone-e2e');
+    await desk.localChanges(
+      [writeName('pl-desk', 'desk list')],
+      undefined,
+    );
+    await phone.localChanges(
+      [writeName('pl-phone', 'phone list')],
+      undefined,
+    );
+    const { service, port } = await startService({ engine: desk.port });
+    try {
+      const status = await service.status();
+      assertEqual(status.engine, 'ready', 'engine reports ready');
+      const pairing = await pairingCode(service);
+      const { client, codec } = await pairPhone({
+        port,
+        deviceId: 'phone-e2e',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      // Phone → desk: the phone's own export is the apply doc.
+      const phoneDelta = await phone.port.exportDelta('', undefined);
+      assert(phoneDelta.ok);
+      if (!phoneDelta.ok) {
+        return;
+      }
+      client.send(
+        sealJson(codec, {
+          t: 'sync',
+          since: '',
+          delta: phoneDelta.value,
+        }),
+      );
+      const reply = await openJson(codec, await client.recv());
+      assert(
+        isRecord(reply) && reply['t'] === 'delta',
+        `expected delta, got ${JSON.stringify(reply)}`,
+      );
+      const deskDelta = reply['delta'] as SyncDelta;
+      assertEqual(deskDelta.senderDeviceId, 'dsk-e2e');
+      assert(
+        deskDelta.entries.some(
+          (e) => e.recordId === 'pl-desk' && e.deviceId === 'dsk-e2e',
+        ),
+        'reply carries the desk-side write',
+      );
+      // Desk → phone: apply the reply on the phone's engine — it
+      // must record the desk entry AND move its watermark.
+      const applied = await phone.port.applyDelta(
+        JSON.parse(JSON.stringify(deskDelta)),
+        'dsk-e2e',
+        undefined,
+      );
+      assert(applied.ok);
+      if (applied.ok) {
+        const result = applied.value as ApplyResult;
+        assert(
+          result.entries.some(
+            (e) => e.recordId === 'pl-desk' && e.deviceId === 'dsk-e2e',
+          ),
+          'phone converged on the desk write',
+        );
+        assertEqual(result.cursor['dsk-e2e'], 1);
+      }
+      // Continuation: since=<reply cursor> returns only what's new.
+      const follow = await desk.localChanges(
+        [writeName('pl-desk-2', 'second list')],
+        undefined,
+      );
+      assert(follow.ok);
+      const replyCursor = JSON.stringify(deskDelta.cursor);
+      client.send(
+        sealJson(codec, { t: 'sync', since: replyCursor }),
+      );
+      const reply2 = await openJson(codec, await client.recv());
+      assert(isRecord(reply2) && reply2['t'] === 'delta');
+      const deskDelta2 = reply2['delta'] as SyncDelta;
+      assertEqual(deskDelta2.entries.length, 1);
+      assertEqual(deskDelta2.entries[0]?.recordId, 'pl-desk-2');
+      client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Channels on the real engine: deltas/importDelta/localChanges ——
+  {
+    const desk = await testUtilityEngine('dsk-chan');
+    const { service } = await startService({
+      engine: desk.port,
+      localChanges: (writes, signal) =>
+        desk.localChanges(writes, signal),
+    });
+    try {
+      // Renderer-committed write lands in the change log.
+      const changed = await invokeHandler(service, 'sync:localChanges', {
+        writes: [writeName('pl-c1', 'channel list')],
+      });
+      assert(changed.ok, `localChanges: ${JSON.stringify(changed)}`);
+      const changedResult = changed.ok
+        ? (changed.value as {
+            result: readonly { outcome: { type: string } }[];
+          })
+        : null;
+      assertEqual(changedResult?.result[0]?.outcome.type, 'applied');
+
+      // A write outside the engine's whitelist fails the whole batch
+      // typed — never a per-write reject riding inside an ok.
+      const refused = await invokeHandler(service, 'sync:localChanges', {
+        writes: [
+          {
+            kind: 'playlist',
+            recordId: 'pl-c2',
+            field: 'bogus',
+            value: 1,
+          },
+        ],
+      });
+      assert(!refused.ok);
+      assertEqual(refused.error.kind, 'invalid-request');
+
+      // Malformed args never reach the engine.
+      const malformed = await invokeHandler(service, 'sync:localChanges', {
+        writes: [],
+      });
+      assert(!malformed.ok);
+      assertEqual(malformed.error.kind, 'invalid-request');
+
+      // The committed write exports through sync:deltas.
+      const deltas = await invokeHandler(service, 'sync:deltas', {
+        since: '',
+      });
+      assert(deltas.ok);
+      const deltaValue = deltas.ok
+        ? (deltas.value as { delta: SyncDelta }).delta
+        : null;
+      assert(
+        deltaValue !== null &&
+          deltaValue.entries.some((e) => e.recordId === 'pl-c1'),
+        'exported delta carries the committed write',
+      );
+
+      // And a real phone-built delta imports through importDelta.
+      const phone = await testUtilityEngine('phone-chan');
+      await phone.localChanges(
+        [writeName('pl-imp', 'imported list')],
+        undefined,
+      );
+      const phoneDelta = await phone.port.exportDelta('', undefined);
+      assert(phoneDelta.ok);
+      if (!phoneDelta.ok) {
+        return;
+      }
+      const imported = await invokeHandler(service, 'sync:importDelta', {
+        delta: JSON.parse(JSON.stringify(phoneDelta.value)),
+      });
+      assert(imported.ok);
+      const applied = imported.ok
+        ? (imported.value as { result: ApplyResult }).result
+        : null;
+      assert(
+        applied !== null &&
+          applied.entries.some(
+            (e) =>
+              e.recordId === 'pl-imp' && e.deviceId === 'phone-chan',
+          ),
+        'imported delta lands in the desk log',
+      );
+      assertEqual(applied?.cursor['phone-chan'], 1);
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— localChanges absent: typed unavailable ——
+  {
+    const { service } = await startService();
+    try {
+      const reply = await invokeHandler(service, 'sync:localChanges', {
+        writes: [writeName('pl-z', 'nope')],
+      });
+      assert(!reply.ok);
+      assertEqual(reply.error.kind, 'unavailable');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Promise engine: settles inside start(), status 'ready' ——
+  {
+    const desk = await testUtilityEngine('dsk-prom');
+    const { service } = await startService({
+      engine: Promise.resolve(desk.port),
+    });
+    try {
+      const status = await service.status();
+      assertEqual(status.engine, 'ready', 'promise engine resolved');
+      const deltas = await invokeHandler(service, 'sync:deltas', {
+        since: '',
+      });
+      assert(deltas.ok, 'deltas answer on the resolved engine');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A rejected engine promise degrades to absent ——
+  {
+    const { service } = await startService({
+      engine: Promise.resolve(null),
+    });
+    try {
+      const status = await service.status();
+      assertEqual(status.engine, 'absent', 'null engine degrades');
+      const deltas = await invokeHandler(service, 'sync:deltas', {
+        since: '',
+      });
+      assert(!deltas.ok);
+      assertEqual(deltas.error.kind, 'unavailable');
     } finally {
       await service.close();
     }

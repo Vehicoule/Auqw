@@ -40,6 +40,7 @@ import {
   LibraryScreen,
   LoadingState,
   MiniPlayer,
+  PairingSheet,
   PlaylistScreen,
   ProviderPickerSheet,
   PushScreen,
@@ -67,6 +68,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  toSyncPanel,
 } from '@auqw/ui-web';
 import type {
   CollectionRowModel,
@@ -80,6 +82,11 @@ import type {
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-web';
+import type {
+  SyncDeviceInfo,
+  SyncPairingResult,
+  SyncStatusResult,
+} from '../shared/contract.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
@@ -474,6 +481,37 @@ function Main({
   const importInput = useRef<HTMLInputElement | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
+  // LAN sync panel — polled status/devices plus the minted pairing
+  // offer while its sheet is open. No push channel exists, so the
+  // panel refreshes on actions and on a slow interval while the
+  // settings tab is visible.
+  const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(
+    null,
+  );
+  const [syncDevices, setSyncDevices] = useState<
+    readonly SyncDeviceInfo[]
+  >([]);
+  const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
+  const syncRefresh = useCallback(() => {
+    const { sync } = window.auqw;
+    void sync
+      .status()
+      .then((status) => setSyncStatus(status))
+      .catch(() => setSyncStatus(null));
+    void sync
+      .devices()
+      .then((result) => setSyncDevices(result.devices))
+      .catch(() => setSyncDevices([]));
+  }, []);
+  useEffect(() => {
+    if (tab !== 'settings') {
+      return;
+    }
+    syncRefresh();
+    const timer = window.setInterval(syncRefresh, 5_000);
+    return () => window.clearInterval(timer);
+  }, [tab, syncRefresh]);
+
   const catalogProvider =
     controller.providers.find(
       (p) => p.id === state.settings.catalogProvider,
@@ -779,6 +817,44 @@ function Main({
       }),
     [state.settings, diagnostics],
   );
+  const syncModel = useMemo(
+    () => toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
+    [syncStatus, syncDevices, pairing],
+  );
+
+  const onPairDevice = useCallback(() => {
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => setPairing(offer))
+      .catch(() => setPairing(null));
+  }, []);
+  const onUnpairDevice = useCallback(
+    (deviceId: string) => {
+      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
+    },
+    [syncRefresh],
+  );
+  const onSyncNow = useCallback(() => {
+    void window.auqw.sync.trigger().then(syncRefresh);
+  }, [syncRefresh]);
+  const onExportDelta = useCallback(() => {
+    // '' is the honest full-snapshot cursor — a device-importable doc.
+    void window.auqw.sync.deltas({ since: '' }).then((result) => {
+      void navigator.clipboard.writeText(JSON.stringify(result.delta));
+    });
+  }, []);
+  const onImportDelta = useCallback(() => {
+    void navigator.clipboard
+      .readText()
+      .then((text) =>
+        window.auqw.sync.importDelta({ delta: JSON.parse(text) }),
+      )
+      .then(syncRefresh)
+      .catch(() => {
+        // A non-JSON or invalid clipboard payload lands nowhere — the
+        // panel just re-reads status.
+      });
+  }, [syncRefresh]);
 
   const playRecording = useCallback(
     async (recordingId: string) => {
@@ -1211,7 +1287,7 @@ function Main({
       return;
     }
     setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
-    void session.importLibrary(text).then((result) => {
+    void session.importLibrary(text).then(async (result) => {
       if (!result.ok) {
         setTransfer((prev) => ({
           ...prev,
@@ -1220,6 +1296,10 @@ function Main({
         }));
         return;
       }
+      // The import swapped the whole library — reload the media
+      // owners (download ledger + local source) off the new rows so
+      // playback never resolves through a stale owner.
+      await controller.rehydrateMedia(new CancellationSource().signal);
       importText.current = null;
       const counts = result.value.counts;
       setTransfer((prev) => ({
@@ -1685,6 +1765,12 @@ function Main({
             onOpenCorrections={() =>
               pushOverlay({ type: 'corrections' })
             }
+            sync={syncModel}
+            onPairDevice={onPairDevice}
+            onUnpairDevice={onUnpairDevice}
+            onSyncNow={onSyncNow}
+            onExportDelta={onExportDelta}
+            onImportDelta={onImportDelta}
           />
         );
       default:
@@ -2099,6 +2185,20 @@ function Main({
               selectedKey={providerPicker.selectedKey}
               onPick={onPickProvider}
               onDismiss={() => setProviderSlot(null)}
+            />
+          </SheetScreen>
+        )}
+        {pairing !== null && syncModel.pairing !== null && (
+          <SheetScreen
+            stackKey="sheet-pairing"
+            onDismissed={() => setPairing(null)}
+          >
+            <PairingSheet
+              pairing={syncModel.pairing}
+              onCopyPayload={() => {
+                void navigator.clipboard.writeText(pairing.payload);
+              }}
+              onDismiss={() => setPairing(null)}
             />
           </SheetScreen>
         )}

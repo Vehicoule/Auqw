@@ -40,6 +40,7 @@ const {
   MiniPlayer,
   NameField,
   NowPlayingScreen,
+  PairingSheet,
   PlaylistScreen,
   QueueScreen,
   RowActionsSheet,
@@ -52,6 +53,7 @@ const {
   TransferScreen,
   applyPendingMove,
   globalKeyAction,
+  toSyncPanel,
   idsEqual,
   initialRovingIndex,
   isEditableTarget,
@@ -249,6 +251,7 @@ function render(node: ReactNode): string {
       onSelectRow: () => {},
       onToggleRow: () => {},
       onOpenCorrections: () => {},
+      sync: toSyncPanel(null, [], null, 1_800_000_000_000),
     }),
   );
   assertIncludes('settings diagnostics lists providers', markup, 'providers');
@@ -256,6 +259,96 @@ function render(node: ReactNode): string {
   assertIncludes('settings paired-devices placeholder renders', markup, 'paired devices');
   check('settings toggle rows are switches', markup.includes('role="switch"'));
   assertIncludes('settings corrections entry', markup, 'match reviews');
+}
+
+{
+  const NOW = 1_800_000_000_000;
+  const sync = toSyncPanel(
+    {
+      listener: 'listening',
+      endpoint: '192.168.1.20:44100',
+      boundPort: 44100,
+      advertise: 'announcing',
+      pairedDevices: 1,
+      sessions: 1,
+      lastSyncAt: NOW - 5 * 60_000,
+      engine: 'ready',
+      name: 'desk',
+      fingerprint: 'ab:cd:ef',
+    },
+    [
+      {
+        id: 'dev-phone',
+        name: 'pixel',
+        pairedAt: NOW - 3 * 3_600_000,
+        lastSeenAt: NOW - 5_000,
+      },
+    ],
+    null,
+    NOW,
+  );
+  const markup = render(
+    h(SettingsScreen, {
+      model: fixtureSettingsModel,
+      onSelectRow: () => {},
+      onToggleRow: () => {},
+      onOpenCorrections: () => {},
+      sync,
+      onPairDevice: () => {},
+      onUnpairDevice: () => {},
+      onSyncNow: () => {},
+      onExportDelta: () => {},
+      onImportDelta: () => {},
+    }),
+  );
+  assertIncludes('sync listener state renders', markup, 'listening');
+  assertIncludes('sync endpoint renders', markup, '192.168.1.20:44100');
+  assertIncludes('sync lastSync renders', markup, '5m ago');
+  assertIncludes('sync fingerprint renders', markup, 'ab:cd:ef');
+  assertIncludes('sync device row renders', markup, 'pixel');
+  assertIncludes('sync pair affordance', markup, 'pair a device');
+  assertIncludes('sync trigger affordance', markup, 'sync now');
+  assertIncludes('delta exchange renders', markup, 'delta exchange');
+  check(
+    'unpair press carries the device name',
+    markup.includes('aria-label="unpair pixel"'),
+  );
+}
+
+{
+  const markup = render(
+    h(SettingsScreen, {
+      model: fixtureSettingsModel,
+      onSelectRow: () => {},
+      onToggleRow: () => {},
+      onOpenCorrections: () => {},
+      sync: toSyncPanel(null, [], null, 1_800_000_000_000),
+    }),
+  );
+  assertIncludes(
+    'a dead sync channel renders its honest state',
+    markup,
+    'unavailable',
+  );
+  assertIncludes('paired-devices row still renders', markup, 'paired devices');
+}
+
+{
+  const markup = render(
+    h(PairingSheet, {
+      pairing: {
+        code: '123456',
+        payload: '{"v":1}',
+        expiresLabel: 'expires in 4m',
+      },
+      onCopyPayload: () => {},
+      onDismiss: () => {},
+    }),
+  );
+  assertIncludes('pairing code renders', markup, '123456');
+  assertIncludes('pairing payload renders', markup, '{&quot;v&quot;:1}');
+  assertIncludes('pairing expiry renders', markup, 'expires in 4m');
+  assertIncludes('pairing copy affordance', markup, 'copy payload');
 }
 
 // ---- markup: now playing / lyrics -----------------------------------------

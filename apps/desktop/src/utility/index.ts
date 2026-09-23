@@ -1,3 +1,4 @@
+import { appError, err } from '@auqw/application';
 import { shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import type { UtilityResponse } from './envelope.ts';
@@ -15,6 +16,16 @@ import {
   createSyncService,
   type SyncAdvertise,
 } from './sync-server.ts';
+import { openSyncLogStore } from './sync-log.ts';
+import {
+  createUtilitySyncEngine,
+  type UtilitySyncEngine,
+} from './sync-engine.ts';
+import {
+  createClock,
+  createIds,
+  createLog,
+} from '../renderer/runtime.ts';
 import { createTagService } from './tags.ts';
 import { createTransferService } from './transfer.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
@@ -108,9 +119,35 @@ if (port === null) {
   const serviceClient = createServiceClient({
     post: (message) => port.postMessage(message),
   });
+  // The merge engine: a JSONL change log under userData plus the
+  // app's DOM-free runtime ports (clock/ids/log are shared with the
+  // renderer — one clock, one id source, one log voice). The store
+  // header mints the device id: its durability horizon IS the log it
+  // stamps. Construction is async, so the service resolves the
+  // promise inside start() — a failed build degrades to
+  // engine-absent and the listener/pairing still serve.
+  const userData = process.env['AUQW_USER_DATA'];
+  const enginePromise: Promise<UtilitySyncEngine | null> | null =
+    userData === undefined
+      ? null
+      : (async () => {
+          const opened = await openSyncLogStore(
+            `${userData}/sync-log.jsonl`,
+          );
+          if (!opened.ok) {
+            return null;
+          }
+          const built = await createUtilitySyncEngine({
+            store: opened.value.store,
+            clock: createClock(),
+            ids: createIds(),
+            log: createLog(),
+            deviceId: opened.value.deviceId,
+          });
+          return built.ok ? built.value : null;
+        })();
   // The LAN sync service: listener + pairing + device registry +
-  // engine seam. Engine itself lands with the parallel sync-engine
-  // leg — absent here, delta channels answer typed `unavailable`.
+  // engine seam.
   const syncPort = syncPortEnv();
   const syncHost = process.env['AUQW_SYNC_HOST'];
   const syncName = process.env['AUQW_SYNC_NAME'];
@@ -128,6 +165,25 @@ if (port === null) {
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),
     keys: createServiceKeys(serviceClient.request),
+    ...(enginePromise === null
+      ? {}
+      : {
+          engine: enginePromise.then(
+            (utility) => utility?.port ?? null,
+          ),
+          // Renderer-committed edits ride their own channel into the
+          // same engine — the dep awaits the shared build instead of
+          // racing it.
+          localChanges: async (writes, signal) => {
+            const utility = await enginePromise;
+            if (utility === null) {
+              return err(
+                appError('unavailable', 'sync engine not installed'),
+              );
+            }
+            return utility.localChanges(writes, signal);
+          },
+        }),
     advertise:
       process.env['AUQW_SYNC_NO_MDNS'] === '1'
         ? null
@@ -138,7 +194,6 @@ if (port === null) {
   // transfer sink service over `userData/media`, the grant-checked tag
   // reader, and the local probe/list/sweep surface.
   const indexDb = createIndexDb(process.env['AUQW_DB_PATH']);
-  const userData = process.env['AUQW_USER_DATA'];
   const mediaDir =
     userData === undefined ? undefined : `${userData}/media`;
   const transfer = createTransferService({

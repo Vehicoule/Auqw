@@ -1,15 +1,29 @@
-import { Session } from '@auqw/application';
+import {
+  appError,
+  CancellationSource,
+  DownloadManager,
+  err,
+  LocalFileSource,
+  Session,
+} from '@auqw/application';
 import type {
+  CancellationSignal,
   ClockPort,
+  ConnectivityPort,
   IdPort,
   LogPort,
   PlayerPort,
   ProviderCapability,
+  QueueSnapshot,
   Settings,
   StoragePort,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
 import type { AuqwApi } from '../shared/contract.ts';
+import { createDesktopConnectivity } from './connectivity.ts';
+import { createLocalPlayback } from './local-playback.ts';
+import { createDesktopTagReader } from './tag-reader.ts';
+import { createDesktopTransfer } from './transfer-port.ts';
 import type { MediaSourceLike } from './mse-source.ts';
 import type { MseFactories } from './mse-source.ts';
 import {
@@ -185,6 +199,15 @@ export type SessionController = {
   readonly storage: StoragePort;
   readonly providers: readonly PluginProvider[];
   readonly player: PlayerPort;
+  /** The download ledger — `init`d post-restore inside the controller. */
+  readonly downloads: DownloadManager;
+  /**
+   * Local-files index — null until the media owners come up post-
+   * restore (its constructor takes the committed rows). UI must
+   * render a null-local state honestly.
+   */
+  readonly local: () => LocalFileSource | null;
+  readonly connectivity: ConnectivityPort;
   /** The session's synchronous connectivity read — kept by net events. */
   readonly isOnline: () => boolean;
   /**
@@ -193,6 +216,12 @@ export type SessionController = {
    * this stream instead of the session's subscribe.
    */
   readonly subscribeOnline: (listener: (online: boolean) => void) => () => void;
+  /**
+   * Re-loads persisted state into the media owners after a
+   * whole-library replace (import): rebuilds the local source and
+   * re-inits the download ledger so their rows can't go stale.
+   */
+  rehydrateMedia(signal: CancellationSignal): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -214,8 +243,10 @@ export type SessionControllerOptions = {
  * Boots the application Session inside the renderer: SqliteStorage
  * over the txId-pinned IPC driver, the web player over `api.stream`
  * (MSE primary + serve-url fallback), providers built per loaded
- * plugin manifest, and connectivity feeding the session's zero-
- * resolution gate. `localPlaybackFor` stays unset until Phase 4.
+ * plugin manifest, connectivity feeding the session's zero-
+ * resolution gate, and the file plane — DownloadManager over
+ * `api.transfer` plus LocalFileSource over `api.tagread` — feeding
+ * `localPlaybackFor` so owned bytes resolve to `provider:'local'`.
  */
 export async function createSessionController(
   api: AuqwApi,
@@ -261,6 +292,41 @@ export async function createSessionController(
       mse: browserMse(),
     });
 
+  const clock = options?.clock ?? createClock();
+  const ids = options?.ids ?? createIds();
+  const log = options?.log ?? createLog();
+
+  // The file plane: the transfer port is the download sink, the tag
+  // reader enumerates granted folders, and the net monitor doubles
+  // as the engines' ConnectivityPort. `localSource` and `mediaDir`
+  // fill in around restore — the session's playback hook reads the
+  // closure boxes live so a URI resolves the moment a source exists.
+  const connectivity = createDesktopConnectivity(api);
+  const transfer = createDesktopTransfer(api);
+  const tagReader = createDesktopTagReader(api);
+  let localSource: LocalFileSource | null = null;
+  // The media dir comes over IPC — fill in async. Until it lands the
+  // download leg answers null honestly; the local-file leg's docUri
+  // math never needed it.
+  let mediaDir: string | null = null;
+  const uriForHook = (id: string): string | null =>
+    localSource?.uriFor(id) ?? null;
+  let probe: ((id: string) => string | null) | null = null;
+  void api.app
+    .meta()
+    .then((meta) => {
+      mediaDir = `${meta.userDataPath}/media`;
+      probe = createLocalPlayback({
+        mediaDir,
+        fileFor: (id) => downloads.fileFor(id),
+        uriFor: uriForHook,
+      });
+    })
+    .catch(() => {
+      // meta() failed — owned downloads can't form file:// URIs and
+      // stay inert; local files still resolve through uriForHook.
+    });
+
   // Optimistic-online baseline; the net subscribe path pushes the live
   // state immediately on platforms that report it, and the snapshot is
   // the fallback seed. Every transition re-runs the session's
@@ -270,12 +336,162 @@ export async function createSessionController(
     storage,
     player,
     providers,
-    clock: options?.clock ?? createClock(),
-    ids: options?.ids ?? createIds(),
-    log: options?.log ?? createLog(),
+    clock,
+    ids,
+    log,
     defaults,
+    // `probe`/`localSource` are closure boxes — both fill in after
+    // construction (probe on the meta round-trip, localSource at
+    // rehydrate) and are read on every probe.
+    localPlaybackFor: (id) => probe?.(id) ?? uriForHook(id),
     isOnline: () => lastOnline,
   });
+  type ReadyState = Extract<
+    ReturnType<Session['snapshot']>,
+    { type: 'ready' }
+  >;
+  const readyOr = <T>(
+    pick: (state: ReadyState) => T,
+    fallback: T,
+  ): T => {
+    const state = session.snapshot();
+    return state.type === 'ready' ? pick(state) : fallback;
+  };
+  const emptyQueue: QueueSnapshot = {
+    revision: 0,
+    occurrences: [],
+    currentOccurrenceId: null,
+    positionMs: 0,
+    mode: 'paused',
+  };
+  const providerMap = new Map(providers.map((p) => [p.id, p]));
+  const downloads = new DownloadManager({
+    storage,
+    transfer,
+    connectivity,
+    clock,
+    ids,
+    log,
+    fetchImpl: (url, init, signal) => {
+      // Bridge the port's CancellationSignal onto fetch's AbortSignal.
+      // Detach on settle — a long transfer must not accumulate one
+      // controller per completed chunk on the shared signal.
+      const abort = new AbortController();
+      const unsub = signal.subscribe(() => abort.abort());
+      return fetch(url, { headers: init.headers, signal: abort.signal }).finally(
+        () => unsub(),
+      );
+    },
+    resolvePlayback: (ref, input, context) => {
+      const provider = providerMap.get(
+        readyOr(
+          (s) => s.settings.playbackProvider,
+          defaults.playbackProvider,
+        ),
+      );
+      if (provider === undefined) {
+        return Promise.resolve(
+          err(appError('unavailable', 'playback provider not loaded')),
+        );
+      }
+      return provider.resolvePlayback(
+        ref,
+        {
+          targetBitrateKbps: readyOr(
+            (s) => s.settings.qualityKbps,
+            defaults.qualityKbps,
+          ),
+          prefer: ['audio/webm', 'audio/mp4'],
+          pinItag: input.pinItag,
+          resumeOffset: input.resumeOffset,
+        },
+        context,
+      );
+    },
+    queue: () => readyOr((s) => s.queue, emptyQueue),
+    settings: () => readyOr((s) => s.settings, defaults),
+  });
+  // Media-owner subscriptions — dispose() detaches them.
+  const mediaUnsubs: Array<() => void> = [];
+  // The owned set drives re-derivation: a download completing (or a
+  // removal/integrity drop) must re-project or the player keeps a
+  // stale remote ref — or attaches a file that no longer exists.
+  let ownedIds = new Set<string>();
+  mediaUnsubs.push(
+    downloads.subscribe(() => {
+      const nowOwned = new Set(
+        downloads
+          .list()
+          .filter((d) => d.state === 'available')
+          .map((d) => d.recordingId),
+      );
+      const ownershipChanged =
+        nowOwned.size !== ownedIds.size ||
+        [...nowOwned].some((id) => !ownedIds.has(id));
+      if (ownershipChanged) {
+        ownedIds = nowOwned;
+        session.connectivityChanged();
+      }
+    }),
+  );
+  // Re-band pending downloads when the queue moves: a track that
+  // becomes now-playing jumps the line.
+  let queueRevision = readyOr((s) => s.queue.revision, 0);
+  mediaUnsubs.push(
+    session.subscribe((next) => {
+      if (
+        next.type !== 'ready' ||
+        next.queue.revision === queueRevision
+      ) {
+        return;
+      }
+      queueRevision = next.queue.revision;
+      void downloads.updatePriorities(new CancellationSource().signal);
+    }),
+  );
+  /**
+   * Bring-up + post-import refresh: loads persisted state into the
+   * media owners — the local source rebuilds off the committed rows
+   * and the download ledger re-inits. After an import the session
+   * re-adopts provenance-local rows from the source's snapshot.
+   */
+  const rehydrateMedia = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    const loaded = await storage.load({
+      requestId: ids.next('media-rehydrate'),
+      deadlineMs: clock.nowMs() + 30_000,
+      signal,
+    });
+    if (!loaded.ok || signal.cancelled) {
+      void log.write({
+        level: 'warn',
+        message: 'media rehydrate skipped: storage load failed',
+        atMs: clock.nowMs(),
+      });
+      return;
+    }
+    localSource = new LocalFileSource(
+      { storage, tagReader, ids, clock, log },
+      {
+        localSources: loaded.value.localSources,
+        localFiles: loaded.value.localFiles,
+        recordings: loaded.value.recordings,
+      },
+    );
+    const inited = await downloads.init(loaded.value.downloads, signal);
+    if (!inited.ok) {
+      void log.write({
+        level: 'warn',
+        message: `download init failed: ${inited.error.kind}`,
+        atMs: clock.nowMs(),
+      });
+      return;
+    }
+    // Imported recordings replace prior local rows — the session
+    // re-merges provenance-local rows through this hook.
+    void session.syncLocalRecordings(localSource.recordings());
+  };
   let edged = false;
   const onlineListeners = new Set<(online: boolean) => void>();
   const applyOnline = (online: boolean): void => {
@@ -327,16 +543,32 @@ export async function createSessionController(
       await session.updateSettings(repaired);
     }
   }
+  // Media owners come up after restore — their constructors take the
+  // committed rows, which only settle once restore's own writes land.
+  const bootSignal = new CancellationSource().signal;
+  await rehydrateMedia(bootSignal);
+  // Final re-derive: the ledger's owned set was empty when restore
+  // projected remote refs — replay the truth now that owned files
+  // resolve.
+  session.connectivityChanged();
 
   return {
     session,
     storage,
     providers,
     player,
+    downloads,
+    local: () => localSource,
+    connectivity,
     isOnline: () => lastOnline,
     subscribeOnline,
+    rehydrateMedia,
     async dispose() {
       unsubscribeNet();
+      await downloads.stop(new CancellationSource().signal);
+      for (const unsub of mediaUnsubs.splice(0)) {
+        unsub();
+      }
       await session.dispose();
       for (const provider of providers) {
         provider.dispose();
