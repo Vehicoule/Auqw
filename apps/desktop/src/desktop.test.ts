@@ -15,6 +15,8 @@ import { run as runSqliteDriver } from './renderer/sqlite-driver.test.ts';
 import { run as runContainers } from './renderer/containers.test.ts';
 import { run as runMseSource } from './renderer/mse-source.test.ts';
 import { run as runWebPlayer } from './renderer/web-player.test.ts';
+import { run as runProvider } from './renderer/provider.test.ts';
+import { run as runController } from './renderer/controller.test.ts';
 
 runEnvelope();
 await runRouter();
@@ -33,4 +35,6 @@ await runSqliteDriver();
 runContainers();
 await runMseSource();
 await runWebPlayer();
+await runProvider();
+await runController();
 console.log('desktop shell tests passed');

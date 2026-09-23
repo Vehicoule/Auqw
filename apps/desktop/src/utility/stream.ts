@@ -1,7 +1,10 @@
 import { CHANNELS } from '../shared/channels.ts';
 import {
+  isHostCancelArgs,
+  isHostRequestArgs,
   isPrepareOutcomePayload,
   isPreparedStreamPayload,
+  isRequestOutcomePayload,
   isStreamCancelArgs,
   isStreamDevPrepareArgs,
   isStreamHandleArgs,
@@ -121,6 +124,30 @@ export function createStreamHandlers(deps: {
 }): Readonly<Record<string, UtilityHandler>> {
   return {
     [CHANNELS.hostPlugins]: () => deps.status(),
+
+    [CHANNELS.hostRequest]: async (args) => {
+      const a = validated(isHostRequestArgs, 'host:request')(args);
+      // Same lazy-load gate as prepare — the plugin directory must
+      // be scanned before a capability can reach a guest.
+      await deps.pluginsReady();
+      const outcome = await deps
+        .host()
+        .startRequest(a.pluginId, a.capability, a.payloadJson, a.requestId)
+        .catch((thrown: unknown) => {
+          throw napiError(thrown);
+        });
+      return checked(isRequestOutcomePayload, 'host:request')(outcome);
+    },
+
+    [CHANNELS.hostCancel]: async (args) => {
+      const a = validated(isHostCancelArgs, 'host:cancel')(args);
+      try {
+        deps.host().cancel(a.requestId);
+        return undefined;
+      } catch (thrown) {
+        throw napiError(thrown);
+      }
+    },
 
     [CHANNELS.streamPrepare]: async (args) => {
       const a = validated(isStreamPrepareArgs, 'stream:prepare')(args);

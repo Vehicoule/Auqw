@@ -54,15 +54,18 @@ export async function run(): Promise<void> {
   }
 
   // Fake bindings module + plugin dir scan.
-  const loadedPlugins: Array<{ wasm: string; manifest: string }> = [];
+  const loadedPlugins: Array<{ wasm: Buffer; manifest: string }> = [];
   const hostConfigs: unknown[] = [];
   const fakeHost: PluginHostLike = {
-    async loadPlugin(wasmBase64: string, manifestJson: string) {
-      loadedPlugins.push({ wasm: wasmBase64, manifest: manifestJson });
+    async loadPlugin(wasm: Buffer, manifestJson: string) {
+      loadedPlugins.push({ wasm, manifest: manifestJson });
       return 'plugin-id';
     },
     async startPrepare() {
       return { type: 'prepared' };
+    },
+    async startRequest() {
+      return { type: 'succeeded' };
     },
     cancel() {},
     devPrepareUrl() {
@@ -94,7 +97,12 @@ export async function run(): Promise<void> {
   const files = new Map<string, Buffer>([
     ['/b/auqw_node_bindings.node', Buffer.from('')],
     ['/plugins/deezer.wasm', Buffer.from('wasm-deezer')],
-    ['/plugins/deezer.manifest.json', Buffer.from('{"id":"deezer"}')],
+    [
+      '/plugins/deezer.manifest.json',
+      Buffer.from(
+        '{"id":"deezer","capabilities":["catalog.search","playback.resolve"]}',
+      ),
+    ],
     ['/plugins/lyrics.manifest.json', Buffer.from('{"id":"lyrics"}')],
   ]);
   const runtime = createHostRuntime({
@@ -130,14 +138,22 @@ export async function run(): Promise<void> {
     'host paths derive from AUQW_USER_DATA',
   );
   assert(
-    Buffer.from(loadedPlugins[0]?.wasm ?? '', 'base64').toString('utf8') ===
-      'wasm-deezer' &&
-      loadedPlugins[0]?.manifest === '{"id":"deezer"}',
-    'wasm rides base64 + manifest JSON to loadPlugin',
+    loadedPlugins[0]?.wasm.toString('utf8') === 'wasm-deezer' &&
+      loadedPlugins[0]?.manifest?.includes('"id":"deezer"') === true,
+    'wasm Buffer + manifest JSON reach loadPlugin untouched',
   );
   const loaded = await runtime.status();
   assertEqual(loaded.bindings, 'loaded');
   assertEqual(loaded.plugins.length, 1);
+  // Each loaded plugin surfaces its declared provider id + capabilities
+  // for the renderer's provider adapters.
+  assert(
+    loaded.manifests.length === 1 &&
+      loaded.manifests[0]?.providerId === 'deezer' &&
+      loaded.manifests[0]?.capabilities.length === 2 &&
+      loaded.manifests[0]?.capabilities.includes('catalog.search'),
+    'status carries the manifest fields',
+  );
 
   // A platform-named cdylib (what cargo emits) is staged to a .node
   // copy under userData before require — direct .node paths are not.

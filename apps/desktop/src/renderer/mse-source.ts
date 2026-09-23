@@ -824,7 +824,14 @@ function runSession(
         }
         break;
       case 'error':
-        fail(new Error(`pump ${raw.code}: ${raw.message}`));
+        // Epoch gate matches EOF — a queued read error from before a
+        // seek must not kill the re-anchored session — except 'closed':
+        // the bridge synthesizes it (at epoch 0) when the port itself
+        // dies, which is transport-terminal regardless of epoch. The
+        // pump only ever codes errors 'io-error'/'unavailable'.
+        if (raw.epoch === epoch || raw.code === 'closed') {
+          fail(new Error(`pump ${raw.code}: ${raw.message}`));
+        }
         break;
       case 'ready':
         break;
