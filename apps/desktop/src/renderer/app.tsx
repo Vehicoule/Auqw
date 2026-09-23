@@ -9,7 +9,9 @@ import {
 import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
+  LOCAL_PROVIDER,
   SearchSession,
+  isSyncDelta,
   previewImport,
 } from '@auqw/application';
 import type {
@@ -26,6 +28,7 @@ import type {
   SearchState,
   SessionState,
   SourceRef,
+  SyncDelta,
   TrackMetadata,
 } from '@auqw/application';
 import {
@@ -40,6 +43,7 @@ import {
   LibraryScreen,
   LoadingState,
   MiniPlayer,
+  PairingSheet,
   PlaylistScreen,
   ProviderPickerSheet,
   PushScreen,
@@ -67,6 +71,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  toSyncPanel,
 } from '@auqw/ui-web';
 import type {
   CollectionRowModel,
@@ -80,6 +85,12 @@ import type {
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-web';
+import type {
+  SyncDeviceInfo,
+  SyncPairingResult,
+  SyncStatusResult,
+} from '../shared/contract.ts';
+import { isSyncDeltaDoc } from '../shared/contract.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
@@ -446,11 +457,14 @@ function Main({
 
   // Offline honesty for remote paths: with connectivity explicitly
   // down nothing streams — every row's play affordance waits instead
-  // of firing a remote attempt (no owned-bytes surface on desktop
-  // until Phase 4).
+  // of firing a remote attempt. Owned bytes are the exception: a row
+  // the local playback probe resolves (download ledger or local
+  // files) stays playable offline.
   const canPlay = useCallback(
-    (_recordingId: string): boolean => online !== false,
-    [online],
+    (recordingId: string): boolean =>
+      online !== false ||
+      controller.localPlaybackFor(recordingId) !== null,
+    [online, controller],
   );
 
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -473,6 +487,51 @@ function Main({
   const importText = useRef<string | null>(null);
   const importInput = useRef<HTMLInputElement | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
+
+  // LAN sync panel — polled status/devices plus the minted pairing
+  // offer while its sheet is open. No push channel exists, so the
+  // panel refreshes on actions and on a slow interval while the
+  // settings tab is visible.
+  const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(
+    null,
+  );
+  const [syncDevices, setSyncDevices] = useState<
+    readonly SyncDeviceInfo[]
+  >([]);
+  const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
+  // The sheet's 'expires in Nm' label is a render-time read — tick
+  // while an offer is open so the countdown doesn't freeze between
+  // sync polls.
+  const [pairingTick, setPairingTick] = useState(0);
+  useEffect(() => {
+    if (pairing === null) {
+      return;
+    }
+    const timer = window.setInterval(
+      () => setPairingTick((n) => n + 1),
+      15_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [pairing]);
+  const syncRefresh = useCallback(() => {
+    const { sync } = window.auqw;
+    void sync
+      .status()
+      .then((status) => setSyncStatus(status))
+      .catch(() => setSyncStatus(null));
+    void sync
+      .devices()
+      .then((result) => setSyncDevices(result.devices))
+      .catch(() => setSyncDevices([]));
+  }, []);
+  useEffect(() => {
+    if (tab !== 'settings') {
+      return;
+    }
+    syncRefresh();
+    const timer = window.setInterval(syncRefresh, 5_000);
+    return () => window.clearInterval(timer);
+  }, [tab, syncRefresh]);
 
   const catalogProvider =
     controller.providers.find(
@@ -779,6 +838,101 @@ function Main({
       }),
     [state.settings, diagnostics],
   );
+  const syncModel = useMemo(
+    () =>
+      toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
+    [syncStatus, syncDevices, pairing, pairingTick],
+  );
+
+  const onPairDevice = useCallback(() => {
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => setPairing(offer))
+      .catch(() => setPairing(null));
+  }, []);
+  const onUnpairDevice = useCallback(
+    (deviceId: string) => {
+      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
+    },
+    [syncRefresh],
+  );
+  const onSyncNow = useCallback(() => {
+    void window.auqw.sync.trigger().then(syncRefresh);
+  }, [syncRefresh]);
+  const onExportDelta = useCallback(() => {
+    void (async () => {
+      // Large logs page over the wire — `more` means follow up with a
+      // cursor covering what the page shipped (exported seqs plus the
+      // exporter's known-absent claims). Every page is itself a valid
+      // SyncDelta, so the clipboard carries one doc or, past the
+      // envelope caps, an array of docs the importer applies in order.
+      const docs: SyncDelta[] = [];
+      const covered: Record<string, number> = {};
+      for (;;) {
+        const page = await window.auqw.sync.deltas({
+          since: JSON.stringify(covered),
+        });
+        if (!isSyncDelta(page.delta)) {
+          return; // a malformed page ships nothing honest
+        }
+        const doc = page.delta;
+        docs.push(doc);
+        let advanced = false;
+        for (const entry of doc.entries) {
+          if (typeof entry.seq !== 'number' || entry.seq < 0) {
+            return;
+          }
+          if (entry.seq > (covered[entry.deviceId] ?? -1)) {
+            covered[entry.deviceId] = entry.seq;
+            advanced = true;
+          }
+        }
+        for (const [dev, seqs] of Object.entries(doc.skipped)) {
+          for (const seq of seqs) {
+            if (seq > (covered[dev] ?? -1)) {
+              covered[dev] = seq;
+              advanced = true;
+            }
+          }
+        }
+        // `more` with no new coverage would re-ask the same window —
+        // ship what the pages gave rather than spin.
+        if (!doc.more || !advanced) {
+          break;
+        }
+      }
+      await navigator.clipboard.writeText(
+        JSON.stringify(docs.length === 1 ? docs[0] : docs),
+      );
+    })().catch(() => undefined);
+  }, []);
+  const onImportDelta = useCallback(() => {
+    void navigator.clipboard
+      .readText()
+      .then(async (text) => {
+        const parsed: unknown = JSON.parse(text);
+        // Multi-page exports land as an array — apply each doc in
+        // order; a single-doc payload applies as before. Validate the
+        // whole batch first: a malformed element must not strand a
+        // partially imported array.
+        const docs: readonly unknown[] = Array.isArray(parsed)
+          ? parsed
+          : [parsed];
+        if (
+          !docs.every((d) => isSyncDelta(d) && isSyncDeltaDoc(d))
+        ) {
+          return;
+        }
+        for (const delta of docs) {
+          await window.auqw.sync.importDelta({ delta });
+        }
+      })
+      .then(syncRefresh)
+      .catch(() => {
+        // A non-JSON or invalid clipboard payload lands nowhere — the
+        // panel just re-reads status.
+      });
+  }, [syncRefresh]);
 
   const playRecording = useCallback(
     async (recordingId: string) => {
@@ -811,22 +965,40 @@ function Main({
   // Mirrors QueueEngine.next()/previous() targeting: next → index+1
   // (never wraps); previous → restart current when positionMs>3s or
   // at index 0, else index−1. The gate sees the same target the
-  // engine would land on.
+  // engine would land on — an owned target still advances offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
-      if (online === false) {
+      const { occurrences, currentOccurrenceId, positionMs } =
+        state.queue;
+      const index = occurrences.findIndex(
+        (o) => o.occurrenceId === currentOccurrenceId,
+      );
+      if (index < 0) {
+        return;
+      }
+      const target =
+        occurrences[
+          method === 'next'
+            ? index + 1
+            : positionMs > 3_000 || index === 0
+              ? index
+              : index - 1
+        ];
+      if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
       void (method === 'next' ? session.next() : session.previous());
     },
-    [online, session],
+    [session, state.queue, canPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
   // the materialized recording plays only when a stream can resolve —
-  // nothing owned exists on desktop yet, so offline blocks them all.
+  // the exception is a meta already file-backed by the 'local'
+  // provider.
   const canPlayMeta = useCallback(
-    (_meta: TrackMetadata): boolean => online !== false,
+    (meta: TrackMetadata): boolean =>
+      online !== false || meta.sourceRef.provider === LOCAL_PROVIDER,
     [online],
   );
 
@@ -1211,24 +1383,29 @@ function Main({
       return;
     }
     setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
-    void session.importLibrary(text).then((result) => {
-      if (!result.ok) {
+    // replaceLibrary drains downloads before the swap and rehydrates
+    // the media owners after — a live runner could otherwise
+    // repersist a ledger row the import removed.
+    void controller
+      .replaceLibrary(text, new CancellationSource().signal)
+      .then((result) => {
+        if (!result.ok) {
+          setTransfer((prev) => ({
+            ...prev,
+            importPhase: 'error',
+            importDetail: result.error.message,
+          }));
+          return;
+        }
+        importText.current = null;
+        const counts = result.value.counts;
         setTransfer((prev) => ({
           ...prev,
-          importPhase: 'error',
-          importDetail: result.error.message,
+          importPhase: 'done',
+          importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
         }));
-        return;
-      }
-      importText.current = null;
-      const counts = result.value.counts;
-      setTransfer((prev) => ({
-        ...prev,
-        importPhase: 'done',
-        importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
-      }));
-    });
-  }, [session]);
+      });
+  }, [controller]);
 
   const onResetImport = useCallback(() => {
     importText.current = null;
@@ -1685,6 +1862,12 @@ function Main({
             onOpenCorrections={() =>
               pushOverlay({ type: 'corrections' })
             }
+            sync={syncModel}
+            onPairDevice={onPairDevice}
+            onUnpairDevice={onUnpairDevice}
+            onSyncNow={onSyncNow}
+            onExportDelta={onExportDelta}
+            onImportDelta={onImportDelta}
           />
         );
       default:
@@ -2099,6 +2282,20 @@ function Main({
               selectedKey={providerPicker.selectedKey}
               onPick={onPickProvider}
               onDismiss={() => setProviderSlot(null)}
+            />
+          </SheetScreen>
+        )}
+        {pairing !== null && syncModel.pairing !== null && (
+          <SheetScreen
+            stackKey="sheet-pairing"
+            onDismissed={() => setPairing(null)}
+          >
+            <PairingSheet
+              pairing={syncModel.pairing}
+              onCopyPayload={() => {
+                void navigator.clipboard.writeText(pairing.payload);
+              }}
+              onDismiss={() => setPairing(null)}
             />
           </SheetScreen>
         )}

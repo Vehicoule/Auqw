@@ -56,6 +56,14 @@ await build({
   format: 'iife',
   sourcemap: true,
   logLevel: 'warning',
+  // shared/local-paths.ts pulls node:url/node:path into this browser
+  // bundle — alias to the POSIX implementations in src/shared/posix-
+  // path.ts (URI math is POSIX-shaped on both sides). The utility
+  // bundle below keeps the real Node builtins.
+  alias: {
+    'node:url': './src/shared/posix-path.ts',
+    'node:path': './src/shared/posix-path.ts',
+  },
   entryPoints: ['src/renderer/app.tsx'],
   outfile: 'dist/renderer/app.js',
 });

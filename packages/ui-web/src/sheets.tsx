@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import type { PairingModel } from '@auqw/ui-shared';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
@@ -384,6 +385,59 @@ export function AddToPlaylistSheet({
           </Text>
         </Pressable>
       )}
+    </SheetScaffold>
+  );
+}
+
+/**
+ * The pairing offer: the 6-digit code for the typed path plus the QR
+ * payload string for the scan path (no QR rendering dependency — the
+ * payload copies verbatim for the phone to consume). `expiresLabel`
+ * counts down to the offer's expiry.
+ */
+export function PairingSheet({
+  pairing,
+  onCopyPayload,
+  onDismiss,
+}: {
+  readonly pairing: PairingModel;
+  readonly onCopyPayload?: (() => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  return (
+    <SheetScaffold title="pair a device" onDismiss={onDismiss}>
+      <div className="uw-pairing">
+        <Text
+          variant="title"
+          color="bright"
+          numeric
+          className="uw-pairing__code"
+        >
+          {pairing.code}
+        </Text>
+        <Text variant="metadata" color="secondary">
+          enter this code on the other device · {pairing.expiresLabel}
+        </Text>
+        <Text
+          variant="metadata"
+          color="secondary"
+          numberOfLines={4}
+          className="uw-pairing__payload"
+        >
+          {pairing.payload}
+        </Text>
+        <Pressable
+          onPress={onCopyPayload}
+          disabled={onCopyPayload === undefined}
+          ariaLabel="copy pairing payload"
+          className="uw-diag-row uw-diag-row--action"
+        >
+          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
+            copy payload
+          </Text>
+          <Icon name="check" size={12} color="var(--text-secondary)" />
+        </Pressable>
+      </div>
     </SheetScaffold>
   );
 }

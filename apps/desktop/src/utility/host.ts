@@ -33,6 +33,8 @@ export type NodeBindingsModule = {
 
 /** The subset of the napi `PluginHost` the stream channels call. */
 export type PluginHostLike = {
+  // napi `load_plugin(&self, wasm: Buffer, manifest_json: String)` —
+  // raw bytes, NOT the base64 string the UniFFI mobile surface takes.
   loadPlugin(wasm: Buffer, manifestJson: string): Promise<string>;
   startPrepare(
     pluginId: string,

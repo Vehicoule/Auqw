@@ -1560,3 +1560,155 @@ export function toSettingsModel(
     diagnostics,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Sync — LAN pairing panel: listener status, device list, the minted  */
+/* pairing offer. The shapes mirror the desktop `api.sync.*` contract  */
+/* verbatim (kept structural here so ui-web never imports app code).   */
+/* ------------------------------------------------------------------ */
+
+export type SyncStatusInput = {
+  readonly listener: 'starting' | 'listening' | 'unavailable' | 'disabled';
+  /** `ip:port` a peer dials, or null when nothing is up. */
+  readonly endpoint: string | null;
+  readonly boundPort: number | null;
+  readonly advertise: 'off' | 'announcing' | 'unavailable';
+  readonly pairedDevices: number;
+  readonly sessions: number;
+  readonly lastSyncAt: number | null;
+  readonly engine: 'ready' | 'absent';
+  readonly name: string;
+  readonly fingerprint: string | null;
+};
+
+export type SyncDeviceInput = {
+  readonly id: string;
+  readonly name: string;
+  readonly pairedAt: number;
+  readonly lastSeenAt: number;
+};
+
+/** The minted offer `api.sync.pairing()` returns — code + QR payload. */
+export type SyncPairingInput = {
+  readonly payload: string;
+  readonly code: string;
+  readonly expiresAt: number;
+};
+
+export type SyncDeviceModel = {
+  readonly id: string;
+  readonly name: string;
+  /** Relative label — 'paired 2h ago'. */
+  readonly pairedLabel: string;
+  /** Relative label — 'seen 5m ago'. */
+  readonly lastSeenLabel: string;
+};
+
+export type SyncStatusModel = {
+  readonly listenerLabel: string;
+  readonly engineLabel: string;
+  readonly nameLabel: string;
+  /** The dialable address — null when the listener is down. */
+  readonly addressLabel: string | null;
+  readonly advertiseLabel: string;
+  /** 'none' | '2 live' — active sync sessions. */
+  readonly sessionsLabel: string;
+  /** 'never' until the first exchange lands. */
+  readonly lastSyncLabel: string;
+  /** The device fingerprint — null until identity materializes. */
+  readonly fingerprintLabel: string | null;
+};
+
+export type PairingModel = {
+  readonly code: string;
+  readonly payload: string;
+  /** 'expires in 4m' counting down to the offer's expiry; 'expired' past it. */
+  readonly expiresLabel: string;
+};
+
+export type SyncPanelModel = {
+  readonly status: SyncStatusModel | null;
+  readonly devices: readonly SyncDeviceModel[];
+  readonly pairing: PairingModel | null;
+};
+
+/** Relative-time label: 'just now' / '5m' / '2h' / '3d' / ISO date. */
+export function formatAgo(ms: number, nowMs: number): string {
+  if (!Number.isFinite(ms) || !Number.isFinite(nowMs)) {
+    return '—';
+  }
+  const delta = nowMs - ms;
+  if (delta < 0) {
+    return '—';
+  }
+  if (delta < 60_000) {
+    return 'just now';
+  }
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `${days}d ago`;
+  }
+  return formatExportDate(ms) ?? '—';
+}
+
+function formatExpiry(expiresAt: number, nowMs: number): string {
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
+    return 'expired';
+  }
+  const left = Math.ceil((expiresAt - nowMs) / 60_000);
+  if (left >= 60) {
+    return `expires in ${Math.floor(left / 60)}h`;
+  }
+  return `expires in ${Math.max(1, left)}m`;
+}
+
+export function toSyncPanel(
+  status: SyncStatusInput | null,
+  devices: readonly SyncDeviceInput[],
+  pairing: SyncPairingInput | null,
+  nowMs: number,
+): SyncPanelModel {
+  return {
+    status:
+      status === null
+        ? null
+        : {
+            listenerLabel: status.listener,
+            engineLabel: status.engine,
+            nameLabel: status.name,
+            addressLabel: status.endpoint,
+            advertiseLabel: status.advertise,
+            sessionsLabel:
+              status.sessions === 0
+                ? 'none'
+                : `${status.sessions} live`,
+            lastSyncLabel:
+              status.lastSyncAt === null
+                ? 'never'
+                : formatAgo(status.lastSyncAt, nowMs),
+            fingerprintLabel: status.fingerprint,
+          },
+    devices: devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      pairedLabel: `paired ${formatAgo(device.pairedAt, nowMs)}`,
+      lastSeenLabel: `seen ${formatAgo(device.lastSeenAt, nowMs)}`,
+    })),
+    pairing:
+      pairing === null
+        ? null
+        : {
+            code: pairing.code,
+            payload: pairing.payload,
+            expiresLabel: formatExpiry(pairing.expiresAt, nowMs),
+          },
+  };
+}
