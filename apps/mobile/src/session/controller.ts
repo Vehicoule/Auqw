@@ -9,6 +9,7 @@ import {
   LocalFileSource,
   previewImport,
   Session,
+  syncedRecordKey,
 } from '@auqw/application';
 import type {
   ArtworkCache,
@@ -653,22 +654,48 @@ export async function createSessionController(
           // truth and this rebuild restores anything lost (Review
           // #46). Idempotent — outcomes that already projected just
           // re-fold to the same rows.
-          void session
-            .applyMaterializedEntries(syncSurface.engine.materialize())
-            .then((applied) => {
-              if (!applied.ok) {
-                void log.write({
-                  level: 'warn',
-                  message: `sync reconcile failed: ${applied.error.kind}`,
-                  atMs: clock.nowMs(),
-                });
+          void (async () => {
+            const materialized = syncSurface.engine.materialize();
+            let applied = await session.applyMaterializedEntries(
+              materialized,
+            );
+            // A failed apply keeps the whole union in the session's
+            // retained pending — refold with bounded retries rather
+            // than drop the recovery page until restart (Review #46).
+            for (
+              let attempt = 0;
+              !applied.ok && attempt < 3 && !signal.cancelled;
+              attempt += 1
+            ) {
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, 400 * (attempt + 1)),
+              );
+              if (signal.cancelled) {
                 return;
               }
-              if (applied.value.rehydrateMedia) {
-                void rehydrateMedia(signal);
-              }
-            })
-            .catch(() => undefined);
+              applied = await session.applyMaterializedEntries([]);
+            }
+            if (!applied.ok) {
+              void log.write({
+                level: 'warn',
+                message: `sync reconcile failed: ${applied.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+              return;
+            }
+            if (applied.value.rehydrateMedia) {
+              void rehydrateMedia(signal);
+            }
+            // The session's emit queue is memory-only — committed
+            // writes a past kill stranded re-emit against the
+            // (kind, recordId) set the same materialized view just
+            // walked: upserts only, never tombstones (Review #46).
+            const synced = new Set<string>();
+            for (const rec of materialized) {
+              synced.add(syncedRecordKey(rec.kind, rec.recordId));
+            }
+            await session.emitUnsynced(synced).catch(() => undefined);
+          })().catch(() => undefined);
           // Flush buffered pre-surface writes NOW — the next edit
           // may never come, and the buffer only rides emit calls.
           void emitWrites([]).then((flushed) => {

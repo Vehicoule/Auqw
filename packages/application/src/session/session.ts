@@ -112,6 +112,7 @@ import {
   recordingDeleteWrites,
   recordingUpsertWrites,
   reviewSyncWrites,
+  unsyncedWrites,
 } from '../sync/sync-projection.ts';
 import type { SyncEmitInput } from '../sync/sync-projection.ts';
 import type {
@@ -1099,7 +1100,10 @@ export class Session {
    * applies only to a backlog that keeps failing to send.
    */
   #emitSync(writes: readonly LocalWrite[]): void {
-    if (this.#sync === undefined || this.#disposed || writes.length === 0) {
+    // Queue even during dispose — dispose runs one final graceful
+    // drain after owned work settles, and a commit landing inside it
+    // still deserves its emission (Review #46).
+    if (this.#sync === undefined || writes.length === 0) {
       return;
     }
     this.#syncEmitPending.push(...writes);
@@ -1316,7 +1320,16 @@ export class Session {
           deadlineMs,
           source,
         );
+        const warn = (m: string): void => this.#logWarn(m);
+        // Union retained pending with the fresh page — a dependent
+        // that pended on an earlier page folds again here and lands
+        // once its parent arrives (same key, fresher record wins).
+        const union = [...r.materializedPending, ...records];
         if (!loaded.ok) {
+          // Served-but-unprojected records are as consumed as drained
+          // outcomes — retain the union for the next call exactly like
+          // a commit failure (Review #46).
+          r.materializedPending = retainMaterializedPending(union, warn);
           r.persistenceError = loaded.error;
           this.#publish();
           return err(loaded.error);
@@ -1326,16 +1339,12 @@ export class Session {
             'invalid-response',
             'persisted state failed validation',
           );
+          r.materializedPending = retainMaterializedPending(union, warn);
           r.persistenceError = error;
           this.#publish();
           return err(error);
         }
         const data = loaded.value;
-        const warn = (m: string): void => this.#logWarn(m);
-        // Union retained pending with the fresh page — a dependent
-        // that pended on an earlier page folds again here and lands
-        // once its parent arrives (same key, fresher record wins).
-        const union = [...r.materializedPending, ...records];
         const projection = projectMaterialized(union, {
           recordings: r.recordings,
           likes: r.likes,
@@ -1380,6 +1389,50 @@ export class Session {
         );
         return applied;
       });
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
+  /**
+   * Boot-time recovery for emissions that never reached the log —
+   * `#syncEmitPending` is memory-only, so a shutdown or dead emit
+   * port can strand committed writes (Review #46). `synced` is the
+   * engine's materialized (kind, recordId) set — the same source
+   * `applyMaterializedEntries` consumes — and every write whose
+   * record is absent re-emits. Upserts only: a record the remote
+   * never saw can only be created, never re-deleted.
+   */
+  async emitUnsynced(synced: ReadonlySet<string>): Promise<void> {
+    const r = this.#ready;
+    if (r === null || this.#sync === undefined) {
+      return;
+    }
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      const deadlineMs = this.#deadline();
+      const loaded = await this.#withDeadline(
+        () =>
+          this.#storage.load(
+            this.#newContext('load', deadlineMs, source.signal),
+          ),
+        deadlineMs,
+        source,
+      );
+      if (this.#ready !== r) {
+        return;
+      }
+      const matchReviews =
+        loaded.ok && isPersistedState(loaded.value)
+          ? loaded.value.matchReviews
+          : [];
+      this.#emitSync(
+        unsyncedWrites(
+          { ...syncEmitInput(r), matchReviews },
+          synced,
+        ),
+      );
     } finally {
       this.#opSources.delete(source);
     }
@@ -4819,5 +4872,12 @@ export class Session {
     }
     this.#playerUnsub();
     await this.#drainAll();
+    // Graceful emit finish AFTER owned work settles: the cancel loop
+    // above kills the in-flight drain mid-send, leaving its chunk
+    // queued — one final drain with a fresh, uncancelled source gives
+    // committed writes their stamp instead of dying with the queue
+    // (Review #46). A failure just keeps the queue; boot-diff is the
+    // net for whatever the port could not take.
+    await this.#drainSyncEmit().catch(() => undefined);
   }
 }

@@ -4037,6 +4037,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'applyMaterializedPendingAcrossCalls',
     applyMaterializedPendingAcrossCalls,
   ],
+  ['emitUnsyncedRecoversCommitted', emitUnsyncedRecoversCommitted],
+  ['disposeFinishesEmitTail', disposeFinishesEmitTail],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -4075,6 +4077,86 @@ async function applyMaterializedEntriesRestores(): Promise<void> {
   assert(
     readyOf(r).likes.some((l) => l.targetId === 'r1'),
     'unsynced like survives the rebuild',
+  );
+}
+
+// A committed write stranded in the memory-only emit queue (killed
+// mid-drain, dead port) re-emits at boot via the existence diff —
+// upserts only (Devin Review #46 round-6).
+async function emitUnsyncedRecoversCommitted(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: (readonly LocalWrite[])[] = [];
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(base, [], undefined, undefined, port);
+  await restoreOk(r);
+  const before = captured.flat().length;
+
+  await r.session.emitUnsynced(new Set());
+  await pump();
+  const recovered = captured.flat().slice(before);
+  assert(
+    recovered.some(
+      (w) => w.kind === 'recording' && w.recordId === 'r1',
+    ),
+    'unsynced recording re-emits its field writes',
+  );
+
+  // Once every emitted record reports synced, the diff closes — a
+  // second call emits nothing (no double-stamps on 'sum' fields).
+  const synced = new Set(
+    recovered.map((w) => `${w.kind}\u001f${w.recordId}`),
+  );
+  const seen = captured.flat().length;
+  await r.session.emitUnsynced(synced);
+  await pump();
+  assertEqual(
+    captured.flat().length,
+    seen,
+    'fully synced domain emits nothing on re-diff',
+  );
+}
+
+// Graceful dispose finishes the emit tail: a chunk retained by a
+// failed in-flight send gets one final drain with an uncancelled
+// source instead of dying with the queue (Devin Review #46 round-6).
+async function disposeFinishesEmitTail(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: (readonly LocalWrite[])[] = [];
+  let calls = 0;
+  const flaky: SyncEmitPort = {
+    localChanges: (writes) => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve(err(appError('cancelled', 'mid-send')));
+      }
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(base, [], undefined, undefined, flaky);
+  await restoreOk(r);
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  assertEqual(captured.length, 0, 'first send failed — chunk retained');
+
+  await r.session.dispose();
+  assert(
+    captured.flat().some(
+      (w) =>
+        w.kind === 'like' &&
+        w.recordId === likeRecordId('track', 'r1'),
+    ),
+    'dispose drains the retained chunk before dying',
   );
 }
 

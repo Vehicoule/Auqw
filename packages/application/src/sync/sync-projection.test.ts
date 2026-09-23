@@ -43,6 +43,7 @@ import {
   recordingUpsertWrites,
   reviewSyncWrites,
   settingsWrites,
+  unsyncedWrites,
 } from './sync-projection.ts';
 import type {
   SyncEmitInput,
@@ -912,20 +913,57 @@ function testInboundMatchReview(): void {
   assertDeepEqual(reviews[0]?.resolution, { ref: null });
   assertEqual(reviews[0]?.resolvedMs, 900);
 
-  // A review insert from a remote device can't materialize — the
-  // whitelist has no recordingId/createdMs; it lands in skipped, not
-  // pending (it can never satisfy its fields later).
+  // A remote review carrying only `status` lacks its immutable
+  // identity (recordingId/createdMs) — it pends, never skipped: a
+  // later page may still deliver the identity fields (Review #46).
   const inserted = projectAppliedEntries(
     [applied(fieldEntry('matchReview', 'rev-new', 'status', 'pending'))],
     projInput({ recordings: [rec] }),
   );
-  assert(
-    inserted.skipped.some(
-      (s) => s.kind === 'matchReview' && s.reason === 'unmaterializable',
-    ),
-    'remote review insert reports unmaterializable',
+  assertEqual(
+    inserted.pending.length,
+    1,
+    'identity-less remote review pends',
   );
   assertEqual(inserted.batch.matchReviews?.length ?? 0, 0);
+
+  // Identity-bearing first-seen-remote review materializes whole
+  // against a live parent recording.
+  const remote = projectAppliedEntries(
+    [
+      applied(fieldEntry('matchReview', 'rev-2', 'recordingId', 'r-1')),
+      applied(fieldEntry('matchReview', 'rev-2', 'createdMs', 700)),
+      applied(
+        fieldEntry(
+          'matchReview',
+          'rev-2',
+          'candidates',
+          review('rev-2', 'r-1').candidates,
+        ),
+      ),
+    ],
+    projInput({ recordings: [rec] }),
+  );
+  const landed = remote.batch.matchReviews ?? [];
+  assertEqual(landed.length, 1, 'remote review inserts');
+  assertEqual(landed[0]?.recordingId, 'r-1');
+  assertEqual(landed[0]?.status, 'pending');
+  assertEqual(landed[0]?.createdMs, 700);
+
+  // The same review against a missing parent pends until the
+  // recording arrives.
+  const orphan = projectAppliedEntries(
+    [
+      applied(fieldEntry('matchReview', 'rev-3', 'recordingId', 'r-x')),
+      applied(fieldEntry('matchReview', 'rev-3', 'createdMs', 700)),
+    ],
+    projInput({ recordings: [rec] }),
+  );
+  assertEqual(
+    orphan.pending.length,
+    2,
+    'parent-less remote review pends',
+  );
 }
 
 function testInboundSettings(): void {
@@ -1322,6 +1360,84 @@ function testEntryTombstoneRemoves(): void {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* boot-diff emission: unsyncedWrites                                   */
+/* ------------------------------------------------------------------ */
+
+// Committed writes a past life stranded in the memory-only emit
+// queue re-emit at boot: every domain row whose (kind, recordId) is
+// absent from the materialized set; upserts only (Review #46).
+function testUnsyncedWrites(): void {
+  const rec = recording('r-1', [ref('itunes', 't-1')]);
+  const input = emitInput({
+    recordings: [rec],
+    likes: [{ entityKind: 'track', targetId: 'r-1', likedAtMs: 1 }],
+    playlists: [playlist('pl-1')],
+    matchReviews: [review('rev-1', 'r-1')],
+  });
+
+  // Everything already synced → nothing to recover.
+  const all = unsyncedWrites(input, new Set(['unused']));
+  const keys = (writes: typeof all): string[] =>
+    writes.map((w) => `${w.kind}\u001f${w.recordId}`);
+  const synced = new Set([
+    ...keys(recordingUpsertWrites(rec)),
+    `like\u001f${likeRecordId('track', 'r-1')}`,
+    `playlist\u001fpl-1`,
+    `matchReview\u001frev-1`,
+    `settings\u001f${SETTINGS_RECORD_ID}`,
+  ]);
+  const none = unsyncedWrites(input, synced);
+  assertEqual(none.length, 0, 'fully synced domain emits nothing');
+
+  // Recording absent → its field + presence writes re-emit; the
+  // still-synced like/playlist/review do not.
+  const withoutRec = new Set(synced);
+  for (const key of keys(recordingUpsertWrites(rec))) {
+    withoutRec.delete(key);
+  }
+  const onlyRec = unsyncedWrites(input, withoutRec);
+  assert(
+    onlyRec.length > 0 &&
+      onlyRec.every((w) => !('tombstone' in w)),
+    'recovery emits upserts only',
+  );
+  assert(
+    onlyRec.every(
+      (w) =>
+        w.kind === 'recording' ||
+        w.kind === 'recordingSourceRef' ||
+        w.kind === 'recordingMapping',
+    ),
+    'only the absent record re-emits',
+  );
+  assert(
+    onlyRec.some((w) => w.kind === 'recording' && w.recordId === 'r-1'),
+    'missing recording re-emits its field writes',
+  );
+
+  // Settings absent → every whitelisted field emits; present → none.
+  const noSettings = new Set(synced);
+  noSettings.delete(`settings\u001f${SETTINGS_RECORD_ID}`);
+  const settingWrites = unsyncedWrites(input, noSettings).filter(
+    (w) => w.kind === 'settings',
+  );
+  assertDeepEqual(
+    settingWrites.map((w) => ('field' in w ? w.field : '?')).sort(),
+    [
+      'catalogProvider',
+      'lyricsProvider',
+      'playbackProvider',
+      'prefetch',
+      'qualityKbps',
+      'radioProvider',
+      'storefront',
+      'theme',
+    ],
+    'missing settings record emits all whitelisted fields',
+  );
+}
+
 export function run(): void {
   testRecordIdDecode();
   testRecordingUpsertWrites();
@@ -1329,6 +1445,7 @@ export function run(): void {
   testEntityWrites();
   testSettingsWrites();
   testEmissionWritesBatch();
+  testUnsyncedWrites();
   testInboundRecordingInsert();
   testInboundPartialInsertPending();
   testInboundRecordingDeleteCascade();

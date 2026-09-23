@@ -1,5 +1,13 @@
 import { randomInt } from 'node:crypto';
-import { appendFile, readFile, rename, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import {
+  appendFile,
+  readFile,
+  rename,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { createServer, type Server } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import {
@@ -478,8 +486,116 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   let appliedDropped = false;
   /** Serializes spill appends against drain reads and ack rewrites. */
   let spillTail: Promise<unknown> = Promise.resolve();
-  /** File lines served by the most recent drain, awaiting ack. */
-  let awaitingAck = 0;
+  /** Bytes served by the most recent drain, awaiting ack. */
+  let awaitingAckBytes = 0;
+
+  /**
+   * Incremental line walk over the spill starting at `startOff` —
+   * memory bounded by the page budget, not the backlog: served lines
+   * stop at the budget but the walk keeps counting for `remaining`.
+   * `servedBytes` is the exact byte length the ack advances the
+   * durable offset by (line + its newline).
+   */
+  async function spillScan(
+    path: string,
+    startOff: number,
+    budgetBytes: number,
+  ): Promise<{
+    readonly served: readonly string[];
+    readonly servedBytes: number;
+    readonly totalLines: number;
+  }> {
+    const served: string[] = [];
+    let servedBytes = 0;
+    let totalLines = 0;
+    let fits = true;
+    const take = (line: string): void => {
+      totalLines += 1;
+      if (fits && servedBytes + Buffer.byteLength(line, 'utf8') + 1 <= budgetBytes) {
+        served.push(line);
+        servedBytes += Buffer.byteLength(line, 'utf8') + 1;
+      } else {
+        fits = false;
+      }
+    };
+    const stream = createReadStream(path, { start: startOff });
+    stream.setEncoding('utf8');
+    let carry = '';
+    try {
+      for await (const chunk of stream) {
+        let buf = carry + (chunk as string);
+        carry = '';
+        for (;;) {
+          const nl = buf.indexOf('\n');
+          if (nl < 0) {
+            break;
+          }
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.length > 0) {
+            take(line);
+          }
+        }
+        carry = buf;
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { served: [], servedBytes: 0, totalLines: 0 };
+      }
+      throw e;
+    }
+    if (carry.length > 0) {
+      totalLines += 1;
+      if (fits && servedBytes + Buffer.byteLength(carry, 'utf8') + 1 <= budgetBytes) {
+        served.push(carry);
+        servedBytes += Buffer.byteLength(carry, 'utf8');
+      }
+    }
+    return { served, servedBytes, totalLines };
+  }
+
+  /** The ack sidecar: the byte offset the served prefix ends at. */
+  function spillOffsetPath(path: string): string {
+    return `${path}.off`;
+  }
+
+  /**
+   * Durable ack position for the spill, in bytes. A sidecar past EOF
+   * is stale — a crash between a compact's rename and its offset
+   * reset — so rescan from 0: the compacted file already starts at
+   * the old offset and re-serving is correct, not a duplicate.
+   */
+  async function readSpillOffset(
+    offPath: string,
+    path: string,
+  ): Promise<number> {
+    const raw = await readFile(offPath, 'utf8').catch(() => '');
+    const off = Number.parseInt(raw.trim(), 10);
+    if (!Number.isSafeInteger(off) || off < 0) {
+      return 0;
+    }
+    const size = await stat(path)
+      .then((s) => s.size)
+      .catch(() => 0);
+    return off > size ? 0 : off;
+  }
+
+  /**
+   * Drop the consumed prefix by streaming the rest into a fresh file
+   * — bounded IO per ack: only runs once the dead prefix dominates
+   * the file, so each byte is rewritten O(1) times across the
+   * backlog's life instead of the whole remainder per page.
+   */
+  async function compactSpill(
+    path: string,
+    offPath: string,
+    startOff: number,
+  ): Promise<void> {
+    const tmp = `${path}.tmp`;
+    await pipeline(createReadStream(path, { start: startOff }), createWriteStream(tmp));
+    await rename(tmp, path);
+    await writeFile(offPath, '0');
+  }
 
   function notifyApplied(pending: number): void {
     try {
@@ -567,33 +683,21 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
     const path = deps.appliedSpillPath;
     let spilledBacklog = 0;
-    let servedFile = 0;
+    let servedFileBytes = 0;
     if (path !== undefined) {
       // Peek inside `spillTail` so a concurrent append or ack rewrite
-      // can't interleave with the read.
+      // can't interleave with the read — and scan incrementally so a
+      // huge backlog can't exhaust utility memory (Review #46).
       const drainFile = spillTail.then(async () => {
-        const raw = await readFile(path, 'utf8').catch(
-          (e: NodeJS.ErrnoException) =>
-            e.code === 'ENOENT' ? '' : Promise.reject(e),
-        );
-        const lines = raw.split('\n').filter((l) => l.length > 0);
-        for (let i = 0; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (line === undefined) {
-            break;
-          }
-          const lineBytes = Buffer.byteLength(line, 'utf8');
-          if (bytes + lineBytes + 1 > budget) {
-            // Stop at the first non-fitting line — spill order IS
-            // merge order, so a smaller later outcome must not
-            // leapfrog it across pages.
-            break;
-          }
-          servedFile += 1;
+        const offPath = spillOffsetPath(path);
+        const off = await readSpillOffset(offPath, path);
+        const scan = await spillScan(path, off, budget - bytes);
+        servedFileBytes = scan.servedBytes;
+        for (const line of scan.served) {
           try {
             const parsed: unknown = JSON.parse(line);
             if (isJsonValue(parsed)) {
-              bytes += lineBytes + 1;
+              bytes += Buffer.byteLength(line, 'utf8') + 1;
               chunk.push(parsed);
             } else {
               appliedDropped = true;
@@ -604,7 +708,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             appliedDropped = true;
           }
         }
-        spilledBacklog = lines.length - servedFile;
+        spilledBacklog = scan.totalLines - scan.served.length;
       });
       spillTail = drainFile.then(
         () => undefined,
@@ -612,7 +716,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       );
       await drainFile;
     }
-    awaitingAck = servedFile;
+    awaitingAckBytes = servedFileBytes;
 
     while (appliedOutbox.length > 0) {
       const next = appliedOutbox[0];
@@ -644,43 +748,42 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   /**
-   * Consume the file lines the most recent drain served — called by
+   * Consume the file bytes the most recent drain served — called by
    * the renderer only after its domain commit landed, so served
    * outcomes leave durable storage exactly once they're reflected
-   * downstream. A rewrite failure just re-serves the lines next
-   * drain: nothing is lost, replay is idempotent, and `dropped`
-   * stays honest (retained ≠ dropped).
+   * downstream. The ack persists a byte-offset sidecar (tiny write)
+   * instead of rewriting the whole remainder; the dead prefix is
+   * compacted only once it dominates the file, so recovery stays
+   * linear rather than quadratic (Review #46). A failed ack must
+   * REJECT, not swallow: the served prefix stays on disk either way,
+   * but the renderer's drain loop stops here instead of re-fetching
+   * the same page forever.
    */
   async function ackApplied(): Promise<void> {
     const path = deps.appliedSpillPath;
-    const drop = awaitingAck;
-    awaitingAck = 0;
-    if (path === undefined || drop === 0) {
+    const dropBytes = awaitingAckBytes;
+    awaitingAckBytes = 0;
+    if (path === undefined || dropBytes === 0) {
       return;
     }
+    const offPath = spillOffsetPath(path);
     const rewrite = spillTail.then(async () => {
-      const raw = await readFile(path, 'utf8').catch(
-        (e: NodeJS.ErrnoException) =>
-          e.code === 'ENOENT' ? '' : Promise.reject(e),
-      );
-      const lines = raw.split('\n').filter((l) => l.length > 0);
-      if (drop >= lines.length) {
-        await writeFile(path, '');
-        return;
+      const off = await readSpillOffset(offPath, path);
+      const newOff = off + dropBytes;
+      // Persist the advanced offset first — durable before any
+      // compaction, so a crash leaves file + sidecar consistent.
+      await writeFile(offPath, String(newOff));
+      const size = await stat(path)
+        .then((s) => s.size)
+        .catch(() => 0);
+      if (newOff >= Math.max(1_048_576, size / 2)) {
+        await compactSpill(path, offPath, newOff);
       }
-      const keep = lines.slice(drop);
-      const tmp = `${path}.tmp`;
-      await writeFile(tmp, `${keep.join('\n')}\n`).then(() =>
-        rename(tmp, path),
-      );
     });
     spillTail = rewrite.then(
       () => undefined,
       () => undefined,
     );
-    // A failed ack must REJECT, not swallow: the served prefix stays on
-    // disk either way, but the renderer's drain loop stops here instead
-    // of re-fetching the same page forever (Review #46).
     await rewrite.catch(() => {
       throw shellError(
         'io-error',
@@ -693,18 +796,30 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * The engine's materialized record view, byte-paged — the durable
    * recovery path for any outcome stream the outbox lost (drained
    * before ack, evicted, pre-durability version). Records aren't
-   * consumed, so no ack exists: paging is a pure read over a live
-   * engine call.
+   * consumed, so no ack exists.
+   *
+   * One reconcile pass pages a SINGLE snapshot: a fresh `materialize()`
+   * per offset would let a concurrent merge shift every later offset —
+   * pages would duplicate or omit records mid-pass (Review #46). The
+   * snapshot is taken lazily at the pass's first pull, reused for the
+   * rest, and dropped when the pass completes or a new pass restarts
+   * at offset 0. Merges landing mid-pass aren't lost — their outcomes
+   * still flow through the normal applied drain.
    */
+  let materializedSnapshot: readonly unknown[] | null = null;
   function materializedChunk(offset: number): {
     readonly records: readonly unknown[];
     readonly nextOffset: number | null;
   } {
-    const all = engine?.materialize?.() ?? [];
+    const start = Math.max(0, Math.floor(offset));
+    if (start === 0 || materializedSnapshot === null) {
+      materializedSnapshot = engine?.materialize?.() ?? [];
+    }
+    const all = materializedSnapshot;
     const budget = MAX_SYNC_DOC_BYTES - 16_384;
     const page: unknown[] = [];
     let bytes = 2;
-    let i = Math.max(0, Math.floor(offset));
+    let i = start;
     for (; i < all.length; i += 1) {
       const rec = all[i];
       const size = Buffer.byteLength(JSON.stringify(rec), 'utf8') + 1;
@@ -719,7 +834,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       bytes += size;
       page.push(rec);
     }
-    return { records: page, nextOffset: i < all.length ? i : null };
+    const nextOffset = i < all.length ? i : null;
+    if (nextOffset === null) {
+      // Pass complete — the next offset-0 pull re-snapshots so a later
+      // reconcile sees merges that landed after this pass started.
+      materializedSnapshot = null;
+    }
+    return { records: page, nextOffset };
   }
 
   /**

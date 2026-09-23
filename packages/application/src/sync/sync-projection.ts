@@ -232,6 +232,8 @@ const PLAYLIST_ENTRY_SYNC_FIELDS = [
 const PLAY_COUNT_SYNC_FIELDS = ['count', 'lastMs'] as const;
 
 const MATCH_REVIEW_SYNC_FIELDS = [
+  'recordingId',
+  'createdMs',
   'status',
   'resolution',
   'resolvedMs',
@@ -750,6 +752,66 @@ export function emissionWrites(
   }
 
   return writes;
+}
+
+/**
+ * Boot-time emit recovery (Review #46): emission is post-commit and
+ * the pending queue is memory-only, so a shutdown or dead emit port
+ * can strand committed writes forever. `synced` is the set of
+ * `syncedRecordKey`s the engine materializes — every write whose
+ * record already exists there was delivered; the rest re-emit whole.
+ *
+ * Existence-level only: a record present in the materialized view is
+ * not re-diffed per field (a stale field is merge business, not
+ * durability). Tombstones never emit — absent-from-materialized
+ * means the remote never saw the row, and resurrecting it just to
+ * delete it would corrupt the shared state.
+ */
+export function unsyncedWrites(
+  input: SyncEmitInput,
+  synced: ReadonlySet<string>,
+): LocalWrite[] {
+  const batch: StorageBatch = {
+    recordings: [...input.recordings],
+    likes: [...input.likes],
+    entities: [...input.entities],
+    entitySourceRefs: [...input.entitySourceRefs],
+    playlists: [...input.playlists],
+    playlistEntries: [...input.playlistEntries],
+    playHistory: [...input.playHistory],
+    playCounts: [...input.playCounts],
+    matchReviews: [...(input.matchReviews ?? [])],
+  };
+  const writes = emissionWrites(
+    {
+      recordings: [],
+      likes: [],
+      entities: [],
+      entitySourceRefs: [],
+      playlists: [],
+      playlistEntries: [],
+      playHistory: [],
+      playCounts: [],
+      matchReviews: [],
+      settings: input.settings,
+    },
+    batch,
+  );
+  if (!synced.has(`settings${KEY_SEP}${SETTINGS_RECORD_ID}`)) {
+    for (const field of SETTINGS_SYNC_FIELDS) {
+      writes.push({
+        kind: 'settings',
+        recordId: SETTINGS_RECORD_ID,
+        field,
+        value: input.settings[field],
+      });
+    }
+  }
+  return writes.filter(
+    (write) =>
+      !('tombstone' in write) &&
+      !synced.has(`${write.kind}${KEY_SEP}${write.recordId}`),
+  );
 }
 
 /**
@@ -1860,12 +1922,46 @@ function finishProjection(
       changedKinds.add('matchReview');
       nextReviews.push(candidate);
     }
-    // recordingId/createdMs are not whitelisted — a review this
-    // device never had can never materialize; update-only records.
+    // A review CREATED on another device materializes here: the
+    // whitelist carries its immutable identity (recordingId +
+    // createdMs), so a first-seen-remote record can build the row.
+    // Missing identity or a missing parent recording pends — the
+    // fields or the parent may still arrive (Review #46).
     for (const id of touched) {
-      if (!current.matchReviews.some((r) => r.reviewId === id)) {
-        skipped.push({ kind: 'matchReview', reason: 'unmaterializable' });
+      if (current.matchReviews.some((r) => r.reviewId === id)) {
+        continue;
       }
+      const fold = foldOf('matchReview', id);
+      if (fold === undefined || fold.tombstoned) {
+        continue;
+      }
+      const fields = fold.fields;
+      const recordingId = strField(fields, 'recordingId');
+      if (recordingId === null || !liveRecordingIds.has(recordingId)) {
+        pend(fold);
+        continue;
+      }
+      const createdMs = numField(fields, 'createdMs');
+      const candidate: MatchReview = {
+        reviewId: id,
+        recordingId,
+        candidates:
+          (fields.get('candidates') as MatchReview['candidates']) ?? [],
+        status: (fields.get('status') as MatchReview['status']) ?? 'pending',
+        resolution:
+          (fields.get('resolution') as MatchReview['resolution']) ?? null,
+        createdMs: createdMs ?? 0,
+        resolvedMs: (fields.get('resolvedMs') as number | null) ?? null,
+      };
+      // Not a valid row YET — the domain needs ≥1 candidate and a
+      // resolution stamp on non-pending statuses, so an insert that
+      // only carried a field subset pends until the rest arrives.
+      if (!isMatchReview(candidate)) {
+        pend(fold);
+        continue;
+      }
+      changedKinds.add('matchReview');
+      nextReviews.push(candidate);
     }
     for (const fold of folds.values()) {
       if (fold.kind === 'matchReview' && fold.tombstoned) {

@@ -7,6 +7,7 @@ import {
   ok,
   previewImport,
   Session,
+  syncedRecordKey,
 } from '@auqw/application';
 import type {
   CancellationSignal,
@@ -594,18 +595,41 @@ export async function createSessionController(
   const ACK_RETRY_MAX = 3;
   const ACK_RETRY_MS = 800;
   let ackRetries = 0;
-  const reconcileMaterialized = async (): Promise<void> => {
+  const reconcileMaterialized = async (
+    emitDiff = false,
+  ): Promise<void> => {
     // Staged, not accumulated: each byte-bounded page applies on its
     // own and records that can't materialize yet (a dependent paging
     // ahead of its parent) ride the session's retained pending into
     // the next page's fold — memory stays page-bounded while the
     // cross-page ordering resolves itself (Review #46).
+    const synced = new Set<string>();
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
+      for (const rec of page.records as readonly MaterializedRecord[]) {
+        synced.add(syncedRecordKey(rec.kind, rec.recordId));
+      }
       if (page.records.length > 0) {
-        const applied = await session.applyMaterializedEntries(
+        let applied = await session.applyMaterializedEntries(
           page.records as readonly MaterializedRecord[],
         );
+        // A failed apply keeps the served page in the session's
+        // retained pending — refold with bounded retries rather than
+        // drop the recovery page until the next reconcile (Review
+        // #46).
+        for (
+          let attempt = 0;
+          !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
+          attempt += 1
+        ) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
+          );
+          if (disposed) {
+            return;
+          }
+          applied = await session.applyMaterializedEntries([]);
+        }
         if (!applied.ok) {
           void log.write({
             level: 'warn',
@@ -619,6 +643,15 @@ export async function createSessionController(
         }
       }
       if (page.nextOffset === null) {
+        // Boot-diff recovery: the session's emit queue is
+        // memory-only, so committed writes lost to shutdown or a
+        // dead port re-emit against the (kind, recordId) set the
+        // pass just walked — upserts only, never tombstones (Review
+        // #46). Runs only on a complete pass; an early exit leaves
+        // the set partial and would double-emit still-synced rows.
+        if (emitDiff && !disposed) {
+          await session.emitUnsynced(synced).catch(() => undefined);
+        }
         return;
       }
       offset = page.nextOffset;
@@ -757,7 +790,10 @@ export async function createSessionController(
   // life (drained-then-crashed, evicted, or pre-durability versions).
   drainArmed = true;
   void drainApplied()
-    .then(() => reconcileMaterialized())
+    // Boot only: the pass diffs domain-vs-synced to recover committed
+    // writes a past shutdown stranded in the memory-only emit queue
+    // (Review #46).
+    .then(() => reconcileMaterialized(true))
     .catch(() => undefined);
 
   return {

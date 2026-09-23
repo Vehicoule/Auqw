@@ -5,7 +5,7 @@ import {
 } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -2455,6 +2455,93 @@ export async function run(): Promise<void> {
         await restarted.service.close();
       }
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— Ack persists a byte-offset sidecar instead of rewriting the ——
+  // —— file: post-ack drains serve only the tail past the offset ——
+  // —— (Devin Review #46 round-6).                            ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-off-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const desk = await testUtilityEngine('dsk-off');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const phone = await testUtilityEngine('phone-off');
+      for (const name of ['pl-off-a', 'pl-off-b', 'pl-off-c']) {
+        const wrote = await phone.localChanges(
+          [writeName(name, name)],
+          undefined,
+        );
+        assert(wrote.ok, 'localChanges failed');
+      }
+      const page = await phone.port.exportDelta('', undefined);
+      assert(page.ok);
+      if (!page.ok) {
+        return;
+      }
+      const imported = await invokeHandler(service, 'sync:importDelta', {
+        delta: JSON.parse(JSON.stringify(page.value)),
+      });
+      assert(imported.ok, 'importDelta failed');
+
+      const before = await stat(spill);
+      const drained = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(drained.ok, 'drain failed');
+      const served = drained.ok
+        ? (drained.value as { outcomes: readonly unknown[] })
+        : { outcomes: [] };
+      assert(served.outcomes.length > 0, 'drain served outcomes');
+
+      const acked = await invokeHandler(service, 'sync:ackApplied');
+      assert(acked.ok, 'ack failed');
+
+      // The offset sidecar now records the consumed prefix; the JSONL
+      // is untouched — below the compaction threshold it keeps its
+      // full contents (a stale offset self-heals via off > size).
+      const offRaw = await readFile(`${spill}.off`, 'utf8');
+      assertEqual(
+        Number.parseInt(offRaw.trim(), 10),
+        before.size,
+        'sidecar offset covers every served byte',
+      );
+      const after = await stat(spill);
+      assertEqual(
+        after.size,
+        before.size,
+        'ack under the compaction threshold leaves the file alone',
+      );
+
+      // A post-ack drain serves nothing — the offset skipped every
+      // consumed line; another import lands past the offset.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok, 'post-ack drain failed');
+      if (again.ok) {
+        const page2 = again.value as {
+          outcomes: readonly unknown[];
+          remaining: number;
+        };
+        assertEqual(
+          page2.outcomes.length,
+          0,
+          'acked lines never re-serve',
+        );
+        assertEqual(page2.remaining, 0, 'backlog fully consumed');
+      }
+    } finally {
+      await service.close();
       await rm(dir, { recursive: true, force: true });
     }
   }

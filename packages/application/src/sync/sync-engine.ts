@@ -179,6 +179,18 @@ export function mappingRecordId(
   ]);
 }
 
+/**
+ * Set key identifying one synced record — matches the materialized
+ * view's (kind, recordId) pair space. Callers building a
+ * membership set for `Session.emitUnsynced` key records with this.
+ */
+export function syncedRecordKey(
+  kind: SyncRecordKind,
+  recordId: string,
+): string {
+  return `${kind}\u001f${recordId}`;
+}
+
 export function entitySourceRefRecordId(
   entityId: string,
   provider: string,
@@ -723,6 +735,11 @@ export const SYNC_FIELD_RULES: Readonly<
     lastMs: rule(isSafeNonNegative, 'max'),
   },
   matchReview: {
+    // Identity fields ride too — a review CREATED on another device
+    // must materialize locally, and a receiver can't build the row
+    // from mutable state alone (Review #46).
+    recordingId: rule(str(64)),
+    createdMs: rule(isSafeNonNegative),
     status: rule(isReviewStatus),
     resolution: rule(isResolutionValue),
     resolvedMs: rule(isOptSafeNonNegative),
