@@ -90,7 +90,12 @@ export function createServiceClient(opts: {
       }
       const response: UtilityResponse = raw;
       if (!pending.has(response.id)) {
-        return false;
+        // A response-shaped message that matches nothing is a late reply
+        // to an already-settled call (timeout, close). Consume it —
+        // falling through to the request dispatcher would bounce a
+        // 'malformed request' reply whose id can collide with an
+        // in-flight request in the other direction.
+        return true;
       }
       if (response.ok) {
         settle(response.id, (slot) => slot.resolve(response.result));

@@ -44,7 +44,10 @@ export async function run(): Promise<void> {
   // Non-response messages are not consumed — the router keeps them.
   assertEqual(client.onMessage({ id: 999, channel: 'x', args: {} }), false);
   assertEqual(client.onMessage('noise'), false);
-  assertEqual(client.onMessage({ id: 999, ok: true, result: 1 }), false);
+  // A response-shaped message for an id nothing tracks is a late reply:
+  // consumed, never bounced into the request dispatcher.
+  assertEqual(client.onMessage({ id: 999, ok: true, result: 1 }), true);
+  assertEqual(client.onMessage({ id: 999, ok: false, error: { kind: 'internal', message: 'm', retryable: true } }), true);
 
   // Typed failures reject; unknown ids are dropped.
   const failing = client.request('sync:keys', { op: 'x' });
