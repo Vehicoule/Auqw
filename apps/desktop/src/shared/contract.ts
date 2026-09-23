@@ -1116,6 +1116,14 @@ export function isSyncDeltaDoc(value: unknown): boolean {
 
 export type SyncDeltasArgs = { readonly since: string };
 
+/**
+ * The serialized-cursor bound: `since` is `JSON.stringify(SyncCursor)`
+ * — a map of up to 512 device ids (each ≤128 chars) to sequences.
+ * Worst case is 512 entries × ~150 JSON chars ≈ 77 KB; round to
+ * 80 000 so a full cursor always fits.
+ */
+export const MAX_SYNC_CURSOR_CHARS = 80_000;
+
 export function isSyncDeltasArgs(
   value: unknown,
 ): value is SyncDeltasArgs {
@@ -1124,7 +1132,7 @@ export function isSyncDeltasArgs(
     hasOnlyKeys(value, ['since']) &&
     // '' is a legal cursor — the engine reads it as "full snapshot".
     typeof value['since'] === 'string' &&
-    value['since'].length <= 256
+    value['since'].length <= MAX_SYNC_CURSOR_CHARS
   );
 }
 
@@ -1188,6 +1196,79 @@ export function isSyncTriggerResult(
 }
 
 /**
+ * `sync:localChanges` — domain edits the renderer already committed,
+ * pushed to the engine so it can stamp them into the change log. The
+ * doc mirrors the engine's `LocalWrite` shape with `kind` left a
+ * string: the whitelist check is the engine's own `validLocalWrite`,
+ * which runs per write before stamping — the boundary only owes the
+ * bounded-shape check below.
+ */
+export const MAX_SYNC_LOCAL_WRITES = 256;
+export const MAX_SYNC_FIELD_BYTES = 65_536;
+
+export type SyncLocalWriteDoc =
+  | {
+      readonly kind: string;
+      readonly recordId: string;
+      readonly field: string;
+      readonly value: unknown;
+    }
+  | {
+      readonly kind: string;
+      readonly recordId: string;
+      readonly tombstone: true;
+    };
+
+export function isSyncLocalWriteDoc(
+  value: unknown,
+): value is SyncLocalWriteDoc {
+  if (
+    !isRecord(value) ||
+    !isBoundedString(value['kind'], 64) ||
+    !isBoundedString(value['recordId'], 1024)
+  ) {
+    return false;
+  }
+  if (hasOnlyKeys(value, ['kind', 'recordId', 'tombstone'])) {
+    return value['tombstone'] === true;
+  }
+  return (
+    hasOnlyKeys(value, ['kind', 'recordId', 'field', 'value']) &&
+    isBoundedString(value['field'], 64) &&
+    isBoundedJson(value['value'], MAX_SYNC_FIELD_BYTES)
+  );
+}
+
+export type SyncLocalChangesArgs = {
+  readonly writes: readonly SyncLocalWriteDoc[];
+};
+
+export function isSyncLocalChangesArgs(
+  value: unknown,
+): value is SyncLocalChangesArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['writes']) &&
+    Array.isArray(value['writes']) &&
+    value['writes'].length > 0 &&
+    value['writes'].length <= MAX_SYNC_LOCAL_WRITES &&
+    value['writes'].every(isSyncLocalWriteDoc)
+  );
+}
+
+export type SyncLocalChangesResult = { readonly result: unknown };
+
+export function isSyncLocalChangesResult(
+  value: unknown,
+): value is SyncLocalChangesResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['result']) &&
+    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+  );
+}
+
+/**
  * The renderer's `api.sync.*` — one method per `sync:*` channel; the
  * utility's sync service answers them all and works plugin-free.
  */
@@ -1201,6 +1282,14 @@ export type AuqwSync = {
     args: SyncImportDeltaArgs,
   ) => Promise<SyncImportDeltaResult>;
   readonly trigger: () => Promise<SyncTriggerResult>;
+  /**
+   * Commit-then-log: the engine stamps renderer-side domain edits so
+   * later deltas carry them. Call-site wiring lands with the sync
+   * emission leg — the channel + engine path exist now.
+   */
+  readonly localChanges: (
+    args: SyncLocalChangesArgs,
+  ) => Promise<SyncLocalChangesResult>;
 };
 
 /* ------------------------------------------------------------------ */

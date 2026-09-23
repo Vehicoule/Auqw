@@ -42,6 +42,7 @@ export const CHANNELS = {
   syncDeltas: 'sync:deltas',
   syncImportDelta: 'sync:importDelta',
   syncTrigger: 'sync:trigger',
+  syncLocalChanges: 'sync:localChanges',
   transferEnsureDir: 'transfer:ensureDir',
   transferBegin: 'transfer:begin',
   transferWrite: 'transfer:write',

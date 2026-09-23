@@ -25,6 +25,7 @@ import {
   isSyncDeltasResult,
   isSyncDevicesResult,
   isSyncImportDeltaResult,
+  isSyncLocalChangesResult,
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
@@ -56,6 +57,8 @@ import type {
   SyncDevicesResult,
   SyncImportDeltaArgs,
   SyncImportDeltaResult,
+  SyncLocalChangesArgs,
+  SyncLocalChangesResult,
   SyncPairingResult,
   SyncStatusResult,
   SyncTriggerResult,
@@ -298,6 +301,14 @@ const api: AuqwApi = {
       ),
     trigger: (): Promise<SyncTriggerResult> =>
       invoke(CHANNELS.syncTrigger, undefined, isSyncTriggerResult),
+    localChanges: (
+      args: SyncLocalChangesArgs,
+    ): Promise<SyncLocalChangesResult> =>
+      invoke(
+        CHANNELS.syncLocalChanges,
+        args,
+        isSyncLocalChangesResult,
+      ),
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>
