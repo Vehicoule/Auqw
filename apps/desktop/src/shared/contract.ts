@@ -818,6 +818,386 @@ export type AuqwStorage = {
 };
 
 /* ------------------------------------------------------------------ */
+/* Sync — LAN transport, pairing, device registry, delta seam.         */
+/* ------------------------------------------------------------------ */
+
+/** Cap on an opaque delta document — sync payloads must not balloon IPC. */
+export const MAX_SYNC_DOC_BYTES = 1_048_576;
+
+export type SyncListenerState =
+  | 'starting'
+  | 'listening'
+  | 'unavailable'
+  | 'disabled';
+
+export type SyncStatusResult = {
+  readonly listener: SyncListenerState;
+  /** `ip:port` to feed a pairing payload, or null when nothing is up. */
+  readonly endpoint: string | null;
+  readonly boundPort: number | null;
+  readonly advertise: 'off' | 'announcing' | 'unavailable';
+  readonly pairedDevices: number;
+  readonly sessions: number;
+  readonly lastSyncAt: number | null;
+  readonly engine: 'ready' | 'absent';
+  readonly name: string;
+  readonly fingerprint: string | null;
+};
+
+export function isSyncStatusResult(
+  value: unknown,
+): value is SyncStatusResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'listener',
+      'endpoint',
+      'boundPort',
+      'advertise',
+      'pairedDevices',
+      'sessions',
+      'lastSyncAt',
+      'engine',
+      'name',
+      'fingerprint',
+    ]) &&
+    (value['listener'] === 'starting' ||
+      value['listener'] === 'listening' ||
+      value['listener'] === 'unavailable' ||
+      value['listener'] === 'disabled') &&
+    (value['endpoint'] === null ||
+      isBoundedString(value['endpoint'], 128)) &&
+    (value['boundPort'] === null ||
+      isSafeNonNegativeInt(value['boundPort'])) &&
+    (value['advertise'] === 'off' ||
+      value['advertise'] === 'announcing' ||
+      value['advertise'] === 'unavailable') &&
+    isSafeNonNegativeInt(value['pairedDevices']) &&
+    isSafeNonNegativeInt(value['sessions']) &&
+    (value['lastSyncAt'] === null ||
+      isFiniteNumber(value['lastSyncAt'])) &&
+    (value['engine'] === 'ready' || value['engine'] === 'absent') &&
+    isBoundedString(value['name'], 128) &&
+    (value['fingerprint'] === null ||
+      isBoundedString(value['fingerprint'], 128))
+  );
+}
+
+export type SyncPairingResult = {
+  /** QR-payload text: JSON {v, endpoint, code, fp}. */
+  readonly payload: string;
+  /** The 6-digit typed path — same session as the QR payload. */
+  readonly code: string;
+  readonly expiresAt: number;
+};
+
+export function isSyncPairingResult(
+  value: unknown,
+): value is SyncPairingResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['payload', 'code', 'expiresAt']) &&
+    isBoundedString(value['payload'], 1_024) &&
+    typeof value['code'] === 'string' &&
+    /^[0-9]{6}$/.test(value['code']) &&
+    isFiniteNumber(value['expiresAt'])
+  );
+}
+
+export type SyncDeviceInfo = {
+  readonly id: string;
+  readonly name: string;
+  readonly pairedAt: number;
+  readonly lastSeenAt: number;
+};
+
+function isSyncDeviceInfo(value: unknown): value is SyncDeviceInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id', 'name', 'pairedAt', 'lastSeenAt']) &&
+    isBoundedString(value['id'], 64) &&
+    isBoundedString(value['name'], 128) &&
+    isFiniteNumber(value['pairedAt']) &&
+    isFiniteNumber(value['lastSeenAt'])
+  );
+}
+
+export type SyncDevicesResult = {
+  readonly devices: readonly SyncDeviceInfo[];
+};
+
+export function isSyncDevicesResult(
+  value: unknown,
+): value is SyncDevicesResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['devices']) &&
+    Array.isArray(value['devices']) &&
+    value['devices'].length <= 64 &&
+    value['devices'].every(isSyncDeviceInfo)
+  );
+}
+
+export type SyncUnpairArgs = { readonly id: string };
+
+export function isSyncUnpairArgs(
+  value: unknown,
+): value is SyncUnpairArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id']) &&
+    isBoundedString(value['id'], 64)
+  );
+}
+
+/**
+ * The strict JSON domain — values that survive a serialize/parse round
+ * trip unchanged. Electron IPC preserves `undefined` properties, sparse
+ * array slots, `NaN`, and ±Infinity that `JSON.stringify` silently
+ * rewrites or drops; accepting them here would validate one document
+ * while the sync engine receives a different one.
+ */
+const MAX_JSON_DEPTH = 64;
+
+/**
+ * A getter answers per-read — validation and serialization would
+ * observe different documents (a value accepted now can vanish or
+ * change on the wire). Only own enumerable DATA properties are stable
+ * enough to validate and then send. `toJSON` is the exception that
+ * escapes an enumerable-only scan: JSON.stringify invokes it whatever
+ * its enumerability, so a hidden hook would serialize a document
+ * validation never saw — reject a `toJSON` getter or function value.
+ */
+function hasNoEnumerableGetter(value: object): boolean {
+  // `toJSON` is honored wherever it sits on the prototype chain —
+  // Object.prototype/Array.prototype are the allowed protos, and a
+  // hook placed there rewrites the wire doc just like an own prop.
+  // The FIRST descriptor wins the stringify lookup: an inert
+  // non-function value shadows anything deeper and stays legal.
+  // The walk is cycle-marked and bounded — a proxy answering
+  // getPrototypeOf with itself or a fresh proxy would otherwise loop
+  // forever, and this cap is not covered by the value-depth bound.
+  const seen = new WeakSet<object>();
+  const MAX_PROTO_DEPTH = 16;
+  for (
+    let level: object | null = value, depth = 0;
+    level !== null;
+    level = Object.getPrototypeOf(level), depth += 1
+  ) {
+    if (depth > MAX_PROTO_DEPTH || seen.has(level)) {
+      return false;
+    }
+    seen.add(level);
+    const hook = Object.getOwnPropertyDescriptor(level, 'toJSON');
+    if (hook === undefined) {
+      continue;
+    }
+    if (
+      hook.get !== undefined ||
+      ('value' in hook && typeof hook.value === 'function')
+    ) {
+      return false;
+    }
+    break;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return Object.values(descriptors).every(
+    (desc) => desc.enumerable !== true || desc.get === undefined,
+  );
+}
+
+function isJsonValueInner(
+  value: unknown,
+  active: WeakSet<object>,
+  depth: number,
+): boolean {
+  if (value === null || typeof value === 'boolean') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+  if (typeof value === 'string') {
+    return true;
+  }
+  if (depth > MAX_JSON_DEPTH) {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    // `length` counts holes; keys enumerate real slots — a sparse
+    // array serializes to nulls it doesn't actually contain.
+    if (
+      Object.keys(value).length !== value.length ||
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
+    ) {
+      return false;
+    }
+    active.add(value);
+    try {
+      return value.every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
+  }
+  if (isRecord(value)) {
+    // Only plain objects — a Date, Map, or class instance carries no
+    // own enumerable slots yet serializes to a different domain (a
+    // Date becomes a string, a Map becomes {}).
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (
+      (proto !== Object.prototype && proto !== null) ||
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
+    ) {
+      return false;
+    }
+    active.add(value);
+    try {
+      return Object.values(value).every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
+  }
+  return false;
+}
+
+export function isJsonValue(value: unknown): boolean {
+  // `active` marks the CURRENT path only — deleted on unwind — so a
+  // diamond of shared references still passes while a true cycle
+  // returns false instead of overflowing the stack. The depth cap
+  // bounds the recursion a hostile object graph can provoke.
+  return isJsonValueInner(value, new WeakSet<object>(), 0);
+}
+
+/**
+ * A JSON value whose serialized UTF-8 form fits `maxBytes`. The cap is
+ * BYTES on the wire — `encoded.length` counts UTF-16 code units, so
+ * non-ASCII payloads are measured with TextEncoder.
+ */
+function isBoundedJson(value: unknown, maxBytes: number): boolean {
+  // The whole validation sits inside the exception boundary — a
+  // malformed graph (proxy, throwing accessor) answers false, never
+  // an internal throw that lands as the wrong error kind.
+  try {
+    if (!isJsonValue(value)) {
+      return false;
+    }
+    const encoded = JSON.stringify(value);
+    return (
+      typeof encoded === 'string' &&
+      new TextEncoder().encode(encoded).length <= maxBytes
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opaque delta document: a JSON object or array that stays inside the
+ * cap — deltas are documents, not bare primitives.
+ */
+export function isSyncDeltaDoc(value: unknown): boolean {
+  return (
+    (isRecord(value) || Array.isArray(value)) &&
+    isBoundedJson(value, MAX_SYNC_DOC_BYTES)
+  );
+}
+
+export type SyncDeltasArgs = { readonly since: string };
+
+export function isSyncDeltasArgs(
+  value: unknown,
+): value is SyncDeltasArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['since']) &&
+    // '' is a legal cursor — the engine reads it as "full snapshot".
+    typeof value['since'] === 'string' &&
+    value['since'].length <= 256
+  );
+}
+
+export type SyncDeltasResult = { readonly delta: unknown };
+
+export function isSyncDeltasResult(
+  value: unknown,
+): value is SyncDeltasResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta']) &&
+    isSyncDeltaDoc(value['delta'])
+  );
+}
+
+export type SyncImportDeltaArgs = {
+  readonly delta: unknown;
+  readonly deviceId?: string;
+};
+
+export function isSyncImportDeltaArgs(
+  value: unknown,
+): value is SyncImportDeltaArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta', 'deviceId']) &&
+    isSyncDeltaDoc(value['delta']) &&
+    (value['deviceId'] === undefined ||
+      isBoundedString(value['deviceId'], 64))
+  );
+}
+
+export type SyncImportDeltaResult = { readonly result: unknown };
+
+export function isSyncImportDeltaResult(
+  value: unknown,
+): value is SyncImportDeltaResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['result']) &&
+    // The engine's apply receipt is `unknown` — any bounded JSON value
+    // (including `null`) is a valid result, not just full documents.
+    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+  );
+}
+
+export type SyncTriggerResult = {
+  readonly triggered: boolean;
+  readonly pending: boolean;
+};
+
+export function isSyncTriggerResult(
+  value: unknown,
+): value is SyncTriggerResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['triggered', 'pending']) &&
+    isBoolean(value['triggered']) &&
+    isBoolean(value['pending'])
+  );
+}
+
+/**
+ * The renderer's `api.sync.*` — one method per `sync:*` channel; the
+ * utility's sync service answers them all and works plugin-free.
+ */
+export type AuqwSync = {
+  readonly status: () => Promise<SyncStatusResult>;
+  readonly pairing: () => Promise<SyncPairingResult>;
+  readonly devices: () => Promise<SyncDevicesResult>;
+  readonly unpair: (args: SyncUnpairArgs) => Promise<void>;
+  readonly deltas: (args: SyncDeltasArgs) => Promise<SyncDeltasResult>;
+  readonly importDelta: (
+    args: SyncImportDeltaArgs,
+  ) => Promise<SyncImportDeltaResult>;
+  readonly trigger: () => Promise<SyncTriggerResult>;
+};
+
+/* ------------------------------------------------------------------ */
 /* Transfer file-plane + local index + tag-read payloads                */
 /* ------------------------------------------------------------------ */
 
@@ -1471,6 +1851,7 @@ export type AuqwApi = {
     readonly delete: (key: string) => Promise<void>;
   };
   readonly storage: AuqwStorage;
+  readonly sync: AuqwSync;
   readonly utility: {
     readonly ping: (message: string) => Promise<UtilityPingResult>;
   };

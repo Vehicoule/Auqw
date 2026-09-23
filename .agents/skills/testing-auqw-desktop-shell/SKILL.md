@@ -36,3 +36,33 @@ source: session s4/desktop-shell testing
 ## Devin Secrets Needed
 
 None — all local.
+
+## Sync service (`window.auqw.sync.*`, s4/sync-transport)
+
+Renderer API is `window.auqw` (preload exposes `api` as `auqw`), not `window.api`: `status / pairing / devices / unpair / deltas / importDelta / trigger`. DevTools = Ctrl+Shift+I separate window; top-level `await` works in its console. Rejections surface as `Error` with `.kind` set.
+
+`status()` → `{listener, endpoint, boundPort, advertise, pairedDevices, sessions, lastSyncAt, engine, name, fingerprint}`; `engine:'absent'` until the sync-engine leg lands. Pairing mints a fresh 6-digit code + payload `{v,endpoint,code,fp}` (~90 s TTL, `codeTtlMs`).
+
+### No OS keystore on this VM → safeStorage degrades honestly
+
+kwalletd5 crashes on dbus activation; Electron 44 ignores `--password-store=basic|mock`; no gnome-keyring → `safeStorage.isEncryptionAvailable()` is false → custody `unavailable` → sync `start()` fails before binding → `status()` reports `listener:'unavailable'` honestly (on a real desktop with a keyring this does not happen).
+
+Test-only unlock (plain-text backend — exercises the real SecureStore→safeStorage IPC; never production evidence):
+
+1. Launch electron with `--inspect=9330` + `--remote-debugging-port=9222`.
+2. `node scripts/cdp-inspect.mjs 'process.mainModule.require("electron").safeStorage.setUsePlainTextEncryption(true); ""+process.mainModule.require("electron").safeStorage.isEncryptionAvailable()'` → `true`.
+3. `kill $(pgrep -f "node.mojom.NodeServic[e]" | head -1)` — the auqw utility child respawns after ~100 ms and re-runs `start()` → `listener:'listening'` + real `boundPort`. Keys persist under `~/.config/auqw-desktop/secure/*.b64`; wipe `~/.config/auqw-desktop` for a fresh identity.
+
+### Proving the sync seam end-to-end
+
+- Cross-evidence: `ss -tlnp | grep <boundPort>` → `LISTEN 0.0.0.0:<port>` owned by the electron utility pid; `/dev/tcp` connect proves accept.
+- `node scripts/sync-client.mjs <host> <port> <code|resume> <deviceId> [holdSecs]` speaks the real wire protocol (hello→challenge→noise-v1 seal→pair/welcome→open ping/devices/sync→push listen). Rejected pair → sealed `{t:'reject',reason:'no-pairing'}`; unpair while connected → server closes the socket mid-hold.
+- `trigger()` → `{triggered:true}` only with a phase-open session; offline paired devices → `{pending:true}`.
+- `unpair` resolves `undefined` — the utility envelope normalizes null→undefined before the renderer validator.
+
+### Gotchas
+
+- `pkill -f`/`pgrep -f` self-match: use the bracket trick (`pgrep -f "nod[e].mojom"`) or kill by PID.
+- `konsole -e 'bash -c "..."'` is not interactive; launch plain `konsole`.
+- `scripts/cdp-eval.mjs`/`cdp-inspect.mjs` need `(async()=>{...})()` wrappers; bare `require`/`import()` don't work in inspector eval — use `process.mainModule.require`.
+- Rebuild `dist/` if it predates branch HEAD — stale dist silently tests old code.

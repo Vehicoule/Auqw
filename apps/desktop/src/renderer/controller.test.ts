@@ -144,6 +144,15 @@ function fakeApi(): Rig {
         backup: () => Promise.reject(new Error('seam: inject storage')),
         dropBackup: () => Promise.reject(new Error('seam: inject storage')),
       },
+      sync: {
+        status: () => Promise.reject(new Error('seam: inject sync')),
+        pairing: () => Promise.reject(new Error('seam: inject sync')),
+        devices: () => Promise.reject(new Error('seam: inject sync')),
+        unpair: () => Promise.reject(new Error('seam: inject sync')),
+        deltas: () => Promise.reject(new Error('seam: inject sync')),
+        importDelta: () => Promise.reject(new Error('seam: inject sync')),
+        trigger: () => Promise.reject(new Error('seam: inject sync')),
+      },
       utility: {
         ping: () => Promise.reject(new Error('unused')),
       },

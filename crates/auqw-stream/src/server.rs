@@ -905,11 +905,42 @@ mod tests {
         }
     }
 
+    /// Poll `pred` until true or ~2 s — a pump that never gets there
+    /// fails honestly, never by sleep-timing luck.
+    async fn wait_until(pred: impl Fn() -> bool) {
+        for _ in 0..400 {
+            if pred() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("pump did not reach the expected state");
+    }
+
+    /// Wait until the pump has issued `n` fetch requests. The head
+    /// fill is async — `prepare` returns before it drains — and the
+    /// script pops replies in request order, so a demand read fired
+    /// early pops a head reply whose `Content-Range` start does not
+    /// match its offset and the session dies `InvalidResponse`. Once
+    /// the head requests are issued, every later fetch meets the
+    /// step written for its offset.
+    async fn head_drained(fetch: &ScriptedFetch, requests: usize) {
+        wait_until(|| {
+            fetch
+                .requests
+                .lock()
+                .map(|r| r.len() >= requests)
+                .unwrap_or(false)
+        })
+        .await;
+    }
+
     /// Registry → prepared session → bound server → serve URL +
     /// session handle. `head_bytes` covers the whole 1024-byte canned
     /// resource so one scripted reply fills it; `hint` is the
-    /// resolve-time length hint.
-    fn served(
+    /// resolve-time length hint. Returns once the head fill has
+    /// issued every scripted head request — see [`head_drained`].
+    async fn served(
         steps: Vec<Step>,
         hint: Option<u64>,
     ) -> (StreamServer, Arc<StreamRegistry>, String, String, TestDir) {
@@ -917,9 +948,16 @@ mod tests {
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 1024;
         cfg.read_ahead = 2048;
-        let scripted = !steps.is_empty();
+        // The fill stops at the hinted total too — `hint` 0 issues
+        // no requests at all.
+        let chunks = cfg
+            .head_bytes
+            .min(hint.unwrap_or(u64::MAX))
+            .div_ceil(cfg.chunk_bytes) as usize;
+        let head = steps.len().min(chunks);
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -932,9 +970,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        if scripted {
-            head_ready(&reg, &info.handle);
-        }
+        head_drained(&fetch, head).await;
         (server, reg, url, info.handle, dir)
     }
 
@@ -976,7 +1012,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_get_answers_200_with_length_and_body() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.header("content-type"), Some("audio/mp4"));
@@ -988,7 +1024,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn serve_url_is_loopback_with_unguessable_token() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let rest = url
             .strip_prefix("http://127.0.0.1:")
             .unwrap_or_else(|| panic!("not loopback: {url}"));
@@ -1003,7 +1039,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn interval_range_answers_206_with_content_range() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "bytes=4-131")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 4-131/1024"));
@@ -1013,7 +1049,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_ended_range_answers_to_eof() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "bytes=512-")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 512-1023/1024"));
@@ -1022,7 +1058,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn suffix_range_answers_last_n_bytes() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "bytes=-64")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 960-1023/1024"));
@@ -1031,7 +1067,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn range_past_eof_answers_416_with_star_total() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         for range in ["bytes=1024-", "bytes=2000-2200"] {
             let r = http(&url, "GET", &[("Range", range)]);
             assert_eq!(r.status, 416, "{range}");
@@ -1042,7 +1078,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_and_multi_ranges_answer_416() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         for range in ["bytes=50-10", "bytes=0-1,4-5", "bytes=abc", "bytes="] {
             let r = http(&url, "GET", &[("Range", range)]);
             assert_eq!(r.status, 416, "{range}");
@@ -1051,7 +1087,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_bytes_range_unit_is_ignored() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "items=0-10")]);
         assert_eq!(r.status, 200);
         assert_eq!(r.body.len(), 1024);
@@ -1059,7 +1095,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unknown_token_and_path_answer_404() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let token = &url[url.len() - 32..];
         // A well-shaped grant that was never minted is a 404, and a
         // path outside `/s/{token}` is a 404 — never a session.
@@ -1072,7 +1108,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ended_session_answers_410() {
-        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024));
+        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024)).await;
         // A minted grant whose session has since ended is `410 Gone`
         // — distinct from the never-issued grant's 404.
         reg.release(&handle)
@@ -1083,7 +1119,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn head_sends_headers_without_body() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "HEAD", &[("Range", "bytes=0-127")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 0-127/1024"));
@@ -1093,7 +1129,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn post_is_405_with_allow() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "POST", &[]);
         assert_eq!(r.status, 405);
         assert_eq!(r.header("allow"), Some("GET, HEAD"));
@@ -1114,7 +1150,7 @@ mod tests {
                 })
             })
             .collect();
-        let (_srv, _reg, url, _h, _dir) = served(steps, None);
+        let (_srv, _reg, url, _h, _dir) = served(steps, None).await;
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.header("content-length"), None);
@@ -1128,7 +1164,7 @@ mod tests {
         // The terminal probe runs before range resolution — a dead
         // session answers its honest error, never a range verdict
         // computed for a stream that cannot serve.
-        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024));
+        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024)).await;
         reg.release(&handle)
             .unwrap_or_else(|e| panic!("release: {e}"));
         let r = http(&url, "GET", &[("Range", "bytes=0-9")]);
@@ -1137,7 +1173,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn case_insensitive_bytes_unit_ranges() {
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "Bytes=4-131")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 4-131/1024"));
@@ -1147,7 +1183,7 @@ mod tests {
     async fn suffix_range_on_empty_resource_answers_416() {
         // total 0 — `t - 1` must never underflow; the honest answer
         // is unsatisfiable.
-        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(0));
+        let (_srv, _reg, url, _h, _dir) = served(filled(), Some(0)).await;
         let r = http(&url, "GET", &[("Range", "bytes=-64")]);
         assert_eq!(r.status, 416);
         assert_eq!(r.header("content-range"), Some("bytes */0"));
@@ -1159,7 +1195,7 @@ mod tests {
         // unattached again — detached-close lets an intent-flip
         // cancel reach it; without it the session is shielded
         // forever.
-        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024));
+        let (_srv, reg, url, handle, _dir) = served(filled(), Some(1024)).await;
         let r = http(&url, "GET", &[("Range", "bytes=0-63")]);
         assert_eq!(r.status, 206);
         reg.cancel_if_unattached(&handle)
@@ -1184,8 +1220,9 @@ mod tests {
         cfg.read_ahead = 64;
         cfg.stall = Duration::from_millis(50);
         cfg.read_deadline = Duration::from_millis(400);
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let info = reg
@@ -1196,7 +1233,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 1).await;
         let r = http(&url, "HEAD", &[("Range", "bytes=64-127")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 64-127/1024"));
@@ -1216,8 +1253,9 @@ mod tests {
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 512;
         cfg.read_ahead = 512;
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -1230,7 +1268,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 4).await;
         let r = http(&url, "GET", &[("Range", "bytes=500-")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 500-511/512"));
@@ -1250,7 +1288,7 @@ mod tests {
         // Repeated serve calls for one handle return the same token —
         // minting per call would grow the grant map for the session's
         // whole lifetime.
-        let (server, reg, url, handle, _dir) = served(filled(), Some(1024));
+        let (server, reg, url, handle, _dir) = served(filled(), Some(1024)).await;
         assert_eq!(
             server
                 .serve(&handle)
@@ -1288,8 +1326,9 @@ mod tests {
         cfg.head_bytes = 1024;
         cfg.read_ahead = 1024;
         cfg.read_deadline = Duration::from_secs(4);
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -1302,6 +1341,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_drained(&fetch, 8).await;
         // Conn B opens a range past the cached head and parks on the
         // hung fetch; conn A completes on cached bytes and ends.
         head_ready(&reg, &info.handle);
@@ -1357,13 +1397,16 @@ mod tests {
         let dir = TestDir::new("srv-suffix");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        // No speculative fill once attached — a fill at the stale
-        // `read_pos` could fire between the probe read and the
-        // re-anchor attach and pop the next scripted reply at the
-        // wrong offset. Demand reads alone drive the script order.
+        // No speculative read-ahead: attach wakes the pump before the
+        // demand read queues, and a fill fetch fired in that gap —
+        // clamped to the stale hinted end — pops the probe's reply
+        // with a `max_len` it exceeds -> InvalidResponse -> 502 (seen
+        // in CI). Demand fetch-through is the only fetch this script
+        // survives.
         cfg.read_ahead = 0;
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -1376,7 +1419,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 2).await;
         let r = http(&url, "GET", &[("Range", "bytes=-64")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 1984-2047/2048"));
@@ -1411,12 +1454,13 @@ mod tests {
         let dir = TestDir::new("srv-boundary");
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
-        // Same determinism rule as the suffix re-anchor: attached
-        // speculative fill stays parked so demand reads alone pop the
-        // scripted replies in order.
+        // No speculative read-ahead — see stale_hint_suffix above: an
+        // attach-time fill fetch racing the demand probe pops a reply
+        // sized past its `max_len` and dies InvalidResponse -> 502.
         cfg.read_ahead = 0;
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -1429,7 +1473,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 2).await;
         let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
         assert_eq!(r.status, 206);
         assert_eq!(r.header("content-range"), Some("bytes 1500-2047/2048"));
@@ -1441,7 +1485,7 @@ mod tests {
     async fn empty_resource_answers_content_length_zero() {
         // total 0 — an unranged GET is `200 Content-Length: 0` with
         // no body, not a close-delimited unknown-length reply.
-        let (_srv, _reg, url, _h, _dir) = served(vec![], Some(0));
+        let (_srv, _reg, url, _h, _dir) = served(vec![], Some(0)).await;
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.header("content-length"), Some("0"));
@@ -1530,8 +1574,9 @@ mod tests {
         let mut cfg = test_config(&dir);
         cfg.head_bytes = 256;
         cfg.read_ahead = 128;
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let mut src = source();
@@ -1544,7 +1589,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 2).await;
         let r = http(&url, "GET", &[("Range", "bytes=1500-")]);
         assert_eq!(r.status, 416);
         assert_eq!(r.header("content-range"), Some("bytes */2048"));
@@ -1556,7 +1601,7 @@ mod tests {
         // Two `Range` header fields merge into one multi-range
         // request the server cannot serve — it refuses rather than
         // silently keeping the last interval.
-        let (server, _reg, url, _h, _dir) = served(vec![], Some(1024));
+        let (server, _reg, url, _h, _dir) = served(vec![], Some(1024)).await;
         let r = http(
             &url,
             "GET",
@@ -1591,8 +1636,9 @@ mod tests {
         cfg.read_ahead = 64;
         cfg.stall = Duration::from_millis(50);
         cfg.read_deadline = Duration::from_millis(400);
+        let fetch = Arc::new(ScriptedFetch::new(steps));
         let reg = Arc::new(
-            StreamRegistry::with_fetch(cfg, Handle::current(), Arc::new(ScriptedFetch::new(steps)))
+            StreamRegistry::with_fetch(cfg, Handle::current(), fetch.clone())
                 .unwrap_or_else(|e| panic!("registry: {e}")),
         );
         let info = reg
@@ -1603,7 +1649,7 @@ mod tests {
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
-        head_ready(&reg, &info.handle);
+        head_drained(&fetch, 1).await;
         let r = http(&url, "GET", &[("Range", "bytes=128-255")]);
         assert_eq!(r.status, 503);
     }

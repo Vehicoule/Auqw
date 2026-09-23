@@ -35,6 +35,13 @@ export const CHANNELS = {
   streamPort: 'stream:port',
   /** Main→renderer port delivery — carries the pump's MessagePort. */
   streamBytes: 'stream-bytes',
+  syncStatus: 'sync:status',
+  syncPairing: 'sync:pairing',
+  syncDevices: 'sync:devices',
+  syncUnpair: 'sync:unpair',
+  syncDeltas: 'sync:deltas',
+  syncImportDelta: 'sync:importDelta',
+  syncTrigger: 'sync:trigger',
   transferEnsureDir: 'transfer:ensureDir',
   transferBegin: 'transfer:begin',
   transferWrite: 'transfer:write',

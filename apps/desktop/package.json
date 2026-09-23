@@ -14,6 +14,7 @@
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
     "@types/node": "26.6.1",
+    "bonjour-service": "1.4.4",
     "@types/react": "~19.2.2",
     "@types/react-dom": "~19.2.3",
     "electron": "44.3.0",

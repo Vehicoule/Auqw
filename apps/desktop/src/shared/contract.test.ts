@@ -1,5 +1,6 @@
 import { assert } from '@auqw/application/testing';
 import {
+  isJsonValue,
   isStorageBackupArgs,
   isStorageBeginArgs,
   isStorageBeginResult,
@@ -7,6 +8,7 @@ import {
   isStorageExecuteResult,
   isStorageQueryResult,
   isStorageTxArgs,
+  isSyncDeltaDoc,
 } from './contract.ts';
 
 export function run(): void {
@@ -142,4 +144,116 @@ export function run(): void {
   assert(!isStorageBackupArgs({ tag: '../walk' }), 'path tag rejected');
   assert(!isStorageBackupArgs({ tag: 'a'.repeat(65) }), 'long tag rejected');
   assert(!isStorageBackupArgs({ tag: 12 }), 'numeric tag rejected');
+
+  // strict-JSON domain — malformed graphs reject, never overflow
+  const cyclic: Record<string, unknown> = {};
+  cyclic['self'] = cyclic;
+  assert(!isJsonValue(cyclic), 'cyclic object rejected, not a crash');
+  const cyclicArr: unknown[] = [];
+  cyclicArr.push(cyclicArr);
+  assert(!isJsonValue(cyclicArr), 'cyclic array rejected');
+  let deep: unknown = { v: 1 };
+  for (let i = 0; i < 80; i += 1) {
+    deep = { next: deep };
+  }
+  assert(!isJsonValue(deep), 'over-depth graph rejected');
+  // A shared (non-cyclic) reference is a diamond, not a cycle.
+  const shared = { k: 1 };
+  assert(isJsonValue({ a: shared, b: shared }), 'diamond refs pass');
+  const sparse = new Array(3);
+  sparse[0] = 1;
+  assert(!isJsonValue(sparse), 'sparse array rejected');
+  assert(!isJsonValue(NaN), 'NaN rejected');
+  assert(
+    isJsonValue({ ok: [1, 'x', null, true] }),
+    'plain document passes',
+  );
+  assert(
+    !isSyncDeltaDoc(cyclic),
+    'cyclic delta doc rejected instead of throwing',
+  );
+  // A getter can answer differently per read — validation could never
+  // vouch for the serialized wire document, so accessors reject.
+  let getterReads = 0;
+  const getterDoc = {
+    get value() {
+      getterReads += 1;
+      return getterReads === 1 ? 1 : undefined;
+    },
+  };
+  assert(!isJsonValue(getterDoc), 'enumerable getter rejected');
+  const getterArr = [
+    1,
+    {
+      get v() {
+        return 2;
+      },
+    },
+  ];
+  assert(!isJsonValue(getterArr), 'nested getter rejected');
+  // `toJSON` is honored by JSON.stringify regardless of enumerability —
+  // a hidden hook would serialize a document validation never saw.
+  const hooked = { value: 1 };
+  Object.defineProperty(hooked, 'toJSON', {
+    enumerable: false,
+    value: () => ({ value: 2 }),
+  });
+  assert(!isJsonValue(hooked), 'hidden toJSON hook rejected');
+  const docWithToJsonField = { toJSON: 'name', v: 1 };
+  assert(
+    isJsonValue(docWithToJsonField),
+    'a non-function toJSON field is inert',
+  );
+  // Hooks inherited through the prototype chain rewrite the wire doc
+  // the same way — set on the shared protos and always restored.
+  const arrayToJson = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    'toJSON',
+  );
+  try {
+    Object.defineProperty(Array.prototype, 'toJSON', {
+      configurable: true,
+      value: () => ({ replaced: true }),
+    });
+    assert(!isJsonValue([1]), 'inherited Array toJSON rejected');
+  } finally {
+    if (arrayToJson === undefined) {
+      Reflect.deleteProperty(Array.prototype, 'toJSON');
+    } else {
+      Object.defineProperty(Array.prototype, 'toJSON', arrayToJson);
+    }
+  }
+  const objectToJson = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    'toJSON',
+  );
+  try {
+    Object.defineProperty(Object.prototype, 'toJSON', {
+      configurable: true,
+      value: () => ({ replaced: true }),
+    });
+    assert(!isJsonValue({ v: 1 }), 'inherited Object toJSON rejected');
+    assert(
+      isJsonValue({ toJSON: 0, v: 1 }),
+      'an inert own toJSON shadows the inherited hook',
+    );
+  } finally {
+    if (objectToJson === undefined) {
+      Reflect.deleteProperty(Object.prototype, 'toJSON');
+    } else {
+      Object.defineProperty(Object.prototype, 'toJSON', objectToJson);
+    }
+  }
+  // A cyclic or unbounded prototype chain must reject, not hang —
+  // a proxy getPrototypeOf trap can answer with itself or a fresh
+  // proxy forever.
+  const selfProto: object[] = [];
+  const cycProxy: object = new Proxy(selfProto, {
+    getPrototypeOf: (): object => cycProxy,
+  });
+  assert(!isJsonValue(cycProxy), 'self-returning proto rejected');
+  function endlessProto(): object {
+    return new Proxy([], { getPrototypeOf: endlessProto });
+  }
+  assert(!isJsonValue(endlessProto()), 'unbounded proto chain rejected');
 }

@@ -4,10 +4,17 @@ import type { UtilityResponse } from './envelope.ts';
 import { createStreamPump, type PumpPort } from './bytes.ts';
 import { createHostRuntime } from './host.ts';
 import { createUtilityRouter } from './router.ts';
+import { createServiceClient } from './service.ts';
 import { createIndexDb } from './index-db.ts';
 import { createLocalService } from './local.ts';
 import { createStorageService } from './storage.ts';
 import { createStreamHandlers } from './stream.ts';
+import { createServiceKeys } from './sync-keys.ts';
+import { createBonjourAdvertise } from './sync-mdns.ts';
+import {
+  createSyncService,
+  type SyncAdvertise,
+} from './sync-server.ts';
 import { createTagService } from './tags.ts';
 import { createTransferService } from './transfer.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
@@ -48,6 +55,31 @@ function parentPort(): ParentPort | null {
   return proc.parentPort ?? null;
 }
 
+/**
+ * Defer `new Bonjour()` to first use — a constructor failure lands
+ * inside the sync service's typed `unavailable` path instead of
+ * crashing the child at module init.
+ */
+function lazyBonjour(): SyncAdvertise {
+  let factory: SyncAdvertise | null = null;
+  return (opts) => {
+    factory ??= createBonjourAdvertise();
+    return factory(opts);
+  };
+}
+
+/** AUQW_SYNC_PORT — an explicit port when set, else ephemeral. */
+function syncPortEnv(): number | undefined {
+  const raw = process.env['AUQW_SYNC_PORT'];
+  if (raw === undefined || raw === '') {
+    return undefined;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 65_535
+    ? parsed
+    : undefined;
+}
+
 const port = parentPort();
 if (port === null) {
   // Only an Electron utilityProcess provides a parent port; running this
@@ -69,6 +101,38 @@ if (port === null) {
   const storage = createStorageService({
     dbPath: process.env['AUQW_DB_PATH'],
   });
+  // Utility→main service client: safeStorage exists only in main, so
+  // the sync service's identity + device key custody rides the
+  // whitelisted `sync:keys` channel. Its replies share the envelope
+  // shape but are consumed by the client, never by the router.
+  const serviceClient = createServiceClient({
+    post: (message) => port.postMessage(message),
+  });
+  // The LAN sync service: listener + pairing + device registry +
+  // engine seam. Engine itself lands with the parallel sync-engine
+  // leg — absent here, delta channels answer typed `unavailable`.
+  const syncPort = syncPortEnv();
+  const syncHost = process.env['AUQW_SYNC_HOST'];
+  const syncName = process.env['AUQW_SYNC_NAME'];
+  const syncService = createSyncService({
+    ...(syncHost !== undefined ? { host: syncHost } : {}),
+    // A specific bind address is the only address the listener can be
+    // reached at — pairing payloads must advertise it, not the first
+    // LAN interface. Wildcard binds keep automatic selection.
+    ...(syncHost !== undefined &&
+    syncHost !== '0.0.0.0' &&
+    syncHost !== '::'
+      ? { endpointHost: syncHost }
+      : {}),
+    ...(syncPort !== undefined ? { port: syncPort } : {}),
+    disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
+    ...(syncName !== undefined ? { deviceName: syncName } : {}),
+    keys: createServiceKeys(serviceClient.request),
+    advertise:
+      process.env['AUQW_SYNC_NO_MDNS'] === '1'
+        ? null
+        : lazyBonjour(),
+  });
   // The offline file plane: a shared read accessor on the domain db
   // (same file the storage service drives — never a second file), the
   // transfer sink service over `userData/media`, the grant-checked tag
@@ -87,6 +151,7 @@ if (port === null) {
       devGateEnabled: process.env.AUQW_DEV_GATE === '1',
     }),
     ...storage.handlers,
+    ...syncService.handlers,
     ...transfer.handlers,
     ...createTagService({ database: indexDb.get }).handlers,
     ...createLocalService({ database: indexDb.get, mediaDir }).handlers,
@@ -101,6 +166,9 @@ if (port === null) {
     .then(() => {
       port.on('message', (event) => {
         const raw: unknown = event.data;
+        if (serviceClient.onMessage(raw)) {
+          return;
+        }
         if (isStreamPumpAttach(raw)) {
           const transfer = event.ports?.[0];
           if (transfer === undefined) {
@@ -117,6 +185,20 @@ if (port === null) {
       });
       port.start();
     });
+  // The supervisor kills the child outright on shutdown; when the
+  // platform delivers SIGTERM first, drain what this entry owns — the
+  // listener, sessions, and the mDNS announce — instead of letting
+  // forced teardown drop them. (On Windows utilityProcess.kill is
+  // TerminateProcess: no signal, forced teardown stands.)
+  process.on('SIGTERM', () => {
+    serviceClient.close();
+    void syncService
+      .close()
+      .catch(() => undefined)
+      .then(() => {
+        process.exit(0);
+      });
+  });
 }
 
 async function respond(

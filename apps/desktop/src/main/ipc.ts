@@ -15,6 +15,9 @@ import type {
   StreamPortArgs,
   StreamPrepareArgs,
   StreamReadArgs,
+  SyncDeltasArgs,
+  SyncImportDeltaArgs,
+  SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
 import {
@@ -40,6 +43,9 @@ import {
   isStreamPortArgs,
   isStreamPrepareArgs,
   isStreamReadArgs,
+  isSyncDeltasArgs,
+  isSyncImportDeltaArgs,
+  isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
   isTransferAbortArgs,
@@ -372,6 +378,51 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.storageDropBackup,
     channel(isStorageBackupArgs, (args, deps) =>
       deps.utility.request(CHANNELS.storageDropBackup, args),
+    ),
+  ],
+  // Sync channels forward to the utility's LAN service — status,
+  // pairing, the device registry, and the engine seam. They are
+  // plugin-independent: zero plugins still syncs.
+  [
+    CHANNELS.syncStatus,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncStatus, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncPairing,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncPairing, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncDevices,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncDevices, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncUnpair,
+    channel(isSyncUnpairArgs, (args: SyncUnpairArgs, deps) =>
+      deps.utility.request(CHANNELS.syncUnpair, args),
+    ),
+  ],
+  [
+    CHANNELS.syncDeltas,
+    channel(isSyncDeltasArgs, (args: SyncDeltasArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDeltas, args),
+    ),
+  ],
+  [
+    CHANNELS.syncImportDelta,
+    channel(isSyncImportDeltaArgs, (args: SyncImportDeltaArgs, deps) =>
+      deps.utility.request(CHANNELS.syncImportDelta, args),
+    ),
+  ],
+  [
+    CHANNELS.syncTrigger,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncTrigger, undefined),
     ),
   ],
   // The offline file plane — the utility re-validates each payload
