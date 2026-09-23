@@ -1417,8 +1417,10 @@ async function concurrentPlayCounts(): Promise<void> {
   // 'sum' merge: a count is a cumulative aggregate — a scalar max
   // silently loses concurrent increments (two devices at 5 each log
   // a play → both publish 6 → max keeps 6 although 7 plays happened).
-  // The write convention is the device's OWN counter; the merge sums
-  // per-device components.
+  // The write convention asserts the AGGREGATE the caller wants —
+  // the engine translates it into this device's component (target
+  // minus the remote share it already merged), so a domain row's
+  // merged total can be emitted verbatim without double-counting.
   const a = await makeEngine('a', 1_000);
   const b = await makeEngine('b', 2_000);
   const baseline = await mustWrite(a.engine, {
@@ -1428,7 +1430,9 @@ async function concurrentPlayCounts(): Promise<void> {
     value: 5,
   });
   await mustApply(b.engine, delta([baseline]));
-  // A plays once (own total 6); B plays for the first time (own total 1).
+  // A plays once → asserts its materialized 5 + 1 = 6 (stamps a's
+  // component 6, displacing 5). B plays once → asserts the same
+  // aggregate 6; with a's 5 already merged, b's component stamps 1.
   await mustWrite(a.engine, {
     kind: 'playCount',
     recordId: 'r1',
@@ -1439,7 +1443,7 @@ async function concurrentPlayCounts(): Promise<void> {
     kind: 'playCount',
     recordId: 'r1',
     field: 'count',
-    value: 1,
+    value: 6,
   });
   const aToB = await a.engine.exportDelta();
   const bToA = await b.engine.exportDelta();
@@ -1461,6 +1465,51 @@ async function concurrentPlayCounts(): Promise<void> {
     ),
     'own-component loser preserved',
   );
+}
+
+// Devin Review #46 round-3 (UoTZ): 'sum' writes assert the desired
+// AGGREGATE — the engine stamps this device's component as
+// (target − remote share), so a domain row can be emitted verbatim.
+async function sumWriteAssertsAggregate(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  const base = await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  const appliedB = await mustApply(b.engine, delta([base]));
+  // Applied outcomes carry the post-merge materialized snapshot —
+  // absolute field truth the projector can project verbatim (UoQ3).
+  const baseOutcome = appliedB.outcomes.find(
+    (o) => o.type === 'applied' && o.entry.recordId === 'r1',
+  );
+  assertDeepEqual(
+    baseOutcome?.type === 'applied' ? baseOutcome.record : undefined,
+    { kind: 'playCount', recordId: 'r1', fields: { count: 5 } },
+    'applied outcome carries materialized snapshot',
+  );
+  // b merged a's 5. b asserts aggregate 8 → its component stamps 3.
+  const write = await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 8,
+  });
+  assertEqual(
+    write.value,
+    3,
+    'component = asserted aggregate − remote share',
+  );
+  // A target below the remote share clamps to 0 — never negative.
+  const low = await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 2,
+  });
+  assertEqual(low.value, 0, 'below remote share clamps to 0');
 }
 
 async function expiredHistoryPagination(): Promise<void> {
@@ -2075,6 +2124,7 @@ export async function run(): Promise<void> {
   await remoteMutationImmunity();
   await hydrateRepairsDivergence();
   await concurrentPlayCounts();
+  await sumWriteAssertsAggregate();
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();

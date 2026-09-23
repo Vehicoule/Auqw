@@ -108,12 +108,17 @@ import {
   emissionWrites,
   importEmissionWrites,
   projectAppliedEntries,
+  projectMaterialized,
   recordingDeleteWrites,
   recordingUpsertWrites,
   reviewSyncWrites,
 } from '../sync/sync-projection.ts';
 import type { SyncEmitInput } from '../sync/sync-projection.ts';
-import type { LocalWrite, MergeOutcome } from '../sync/sync-engine.ts';
+import type {
+  LocalWrite,
+  MaterializedRecord,
+  MergeOutcome,
+} from '../sync/sync-engine.ts';
 import {
   isRadioPage,
   planRadioPage,
@@ -421,6 +426,28 @@ function boundSyncPending(
     }
   }
   return out;
+}
+
+/**
+ * Failure-path retention: the union still feeds the next drain, but
+ * bounded and deduped like the success path — a growing failure loop
+ * can't grow memory unboundedly (Review #46). Evicted outcomes are
+ * recoverable via `applyMaterializedEntries` — the engine's durable
+ * log still holds them; the typed warn marks the loss window.
+ */
+function retainSyncPending(
+  union: readonly MergeOutcome[],
+  warn: (message: string) => void,
+): MergeOutcome[] {
+  const retained = boundSyncPending(union);
+  const eligible = union.reduce(
+    (n, o) => n + (o.type === 'applied' ? 1 : 0),
+    0,
+  );
+  if (retained.length < eligible) {
+    warn('sync pending bound evicted applied outcomes');
+  }
+  return retained;
 }
 
 /**
@@ -1123,10 +1150,11 @@ export class Session {
         // feeds projection; the bound applies only to post-projection
         // pending, never to a fresh drain (Review #46).
         const union = [...r.syncPending, ...outcomes];
+        const warn = (m: string): void => this.#logWarn(m);
         if (!loaded.ok) {
           // Retain the union for the next drain exactly like a commit
           // failure — consumed outcomes can't be re-fetched.
-          r.syncPending = union;
+          r.syncPending = retainSyncPending(union, warn);
           r.persistenceError = loaded.error;
           this.#publish();
           return err(loaded.error);
@@ -1136,7 +1164,7 @@ export class Session {
             'invalid-response',
             'persisted state failed validation',
           );
-          r.syncPending = union;
+          r.syncPending = retainSyncPending(union, warn);
           r.persistenceError = error;
           this.#publish();
           return err(error);
@@ -1184,101 +1212,208 @@ export class Session {
           this.#publish();
           return ok(SYNC_APPLY_STABLE);
         }
-        // Reconcile remote settings against THIS session's providers
-        // — projection validates the shape only; the required-slot
-        // fallback / optional-slot nulling mirrors updateSettings.
-        if (batch.settings !== undefined) {
-          const s = batch.settings;
-          batch.settings = {
-            ...s,
-            catalogProvider: this.#providers.has(s.catalogProvider)
-              ? s.catalogProvider
-              : r.settings.catalogProvider,
-            playbackProvider: this.#providers.has(s.playbackProvider)
-              ? s.playbackProvider
-              : r.settings.playbackProvider,
-            lyricsProvider:
-              s.lyricsProvider != null &&
-              !this.#providers.has(s.lyricsProvider)
-                ? null
-                : (s.lyricsProvider ?? null),
-            radioProvider:
-              s.radioProvider != null &&
-              !this.#providers.has(s.radioProvider)
-                ? null
-                : (s.radioProvider ?? null),
-          };
-        }
-        const committed = await this.#withDeadline(
-          () =>
-            this.#storage.commit(
-              batch,
-              this.#newContext('persist', deadlineMs, source.signal),
-            ),
-          deadlineMs,
+        const applied = await this.#commitSyncProjection(
+          r,
+          batch,
           source,
+          deadlineMs,
         );
-        if (!committed.ok) {
-          r.persistenceError = committed.error;
-          this.#publish();
+        if (!applied.ok) {
           // Nothing landed — refold the whole union next drain.
-          r.syncPending = union;
-          return err(committed.error);
+          r.syncPending = retainSyncPending(union, warn);
+          return applied;
         }
         r.syncPending = boundSyncPending(projection.pending);
-        if (batch.recordingsMerge !== undefined) {
-          r.recordings = [...batch.recordingsMerge(r.recordings)];
-        }
-        if (batch.likes !== undefined) {
-          r.likes = [...batch.likes];
-        }
-        if (batch.entities !== undefined) {
-          r.entities = [...batch.entities];
-        }
-        if (batch.entitySourceRefs !== undefined) {
-          r.entitySourceRefs = [...batch.entitySourceRefs];
-        }
-        if (batch.playlists !== undefined) {
-          r.playlists = [...batch.playlists];
-        }
-        if (batch.playlistEntries !== undefined) {
-          r.playlistEntries = [...batch.playlistEntries];
-        }
-        if (batch.playHistory !== undefined) {
-          r.playHistory = [...batch.playHistory];
-        }
-        if (batch.playCounts !== undefined) {
-          r.playCounts = [...batch.playCounts];
-        }
-        if (batch.lyricsCache !== undefined) {
-          r.lyricsCache = [...batch.lyricsCache];
-        }
-        if (batch.settings !== undefined) {
-          r.settings = { ...batch.settings };
-        }
-        if (batch.queue !== undefined) {
-          r.queue = new QueueEngine(batch.queue);
-          r.queueCommittedRev = Math.max(
-            r.queueCommittedRev,
-            batch.queue.revision,
-          );
-          // A queued #persistQueue holding the old engine must
-          // supersede — its revision math no longer describes
-          // this queue.
-          r.queueEpoch += 1;
-        }
-        r.persistenceError = undefined;
-        this.#derived();
-        this.#publish();
-        return ok({
-          rehydrateMedia:
-            batch.downloads !== undefined ||
-            batch.localFiles !== undefined,
-        });
+        return applied;
       });
     } finally {
       this.#opSources.delete(source);
     }
+  }
+
+  /**
+   * Durable recovery: rebuild the synced sections from the engine's
+   * materialized record view. Use it when an outcome stream may have
+   * been lost (drain-then-crash, bound eviction) — the engine's sync
+   * log is durable, so its materialized truth is always rebuildable.
+   * Records absent from `records` keep their rows (they were never
+   * synced); rows whose records materialize empty are deleted.
+   */
+  async applyMaterializedEntries(
+    records: readonly MaterializedRecord[],
+  ): Promise<Result<SyncApplyReport>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const generation = ready.value;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const r = this.#ready;
+        if (r === null || r !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        const deadlineMs = this.#deadline();
+        const loaded = await this.#withDeadline(
+          () =>
+            this.#storage.load(
+              this.#newContext('load', deadlineMs, source.signal),
+            ),
+          deadlineMs,
+          source,
+        );
+        if (!loaded.ok) {
+          r.persistenceError = loaded.error;
+          this.#publish();
+          return err(loaded.error);
+        }
+        if (!isPersistedState(loaded.value)) {
+          const error = appError(
+            'invalid-response',
+            'persisted state failed validation',
+          );
+          r.persistenceError = error;
+          this.#publish();
+          return err(error);
+        }
+        const data = loaded.value;
+        const projection = projectMaterialized(records, {
+          recordings: r.recordings,
+          likes: r.likes,
+          entities: r.entities,
+          entitySourceRefs: r.entitySourceRefs,
+          playlists: r.playlists,
+          playlistEntries: r.playlistEntries,
+          playHistory: r.playHistory,
+          playCounts: r.playCounts,
+          matchReviews: data.matchReviews,
+          lyricsCache: data.lyricsCache,
+          downloads: data.downloads,
+          localFiles: data.localFiles,
+          queue: r.queue.snapshot(),
+          settings: r.settings,
+        });
+        for (const skip of projection.skipped) {
+          this.#logWarn(`sync projection skipped ${skip.kind} record`);
+        }
+        const batch = { ...projection.batch };
+        if (Object.keys(batch).length === 0) {
+          r.persistenceError = undefined;
+          this.#publish();
+          return ok(SYNC_APPLY_STABLE);
+        }
+        return this.#commitSyncProjection(r, batch, source, deadlineMs);
+      });
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
+  /**
+   * Shared commit tail for the two sync-apply paths: provider
+   * reconcile on remote settings, the storage commit, the section
+   * mirror, and the publish. The caller owns pending-bookkeeping —
+   * on failure it decides what to retain.
+   */
+  async #commitSyncProjection(
+    r: Ready,
+    batch: {
+      -readonly [K in keyof StorageBatch]?: StorageBatch[K];
+    },
+    source: CancellationSource,
+    deadlineMs: number,
+  ): Promise<Result<SyncApplyReport>> {
+    // Reconcile remote settings against THIS session's providers
+    // — projection validates the shape only; the required-slot
+    // fallback / optional-slot nulling mirrors updateSettings.
+    if (batch.settings !== undefined) {
+      const s = batch.settings;
+      batch.settings = {
+        ...s,
+        catalogProvider: this.#providers.has(s.catalogProvider)
+          ? s.catalogProvider
+          : r.settings.catalogProvider,
+        playbackProvider: this.#providers.has(s.playbackProvider)
+          ? s.playbackProvider
+          : r.settings.playbackProvider,
+        lyricsProvider:
+          s.lyricsProvider != null &&
+          !this.#providers.has(s.lyricsProvider)
+            ? null
+            : (s.lyricsProvider ?? null),
+        radioProvider:
+          s.radioProvider != null &&
+          !this.#providers.has(s.radioProvider)
+            ? null
+            : (s.radioProvider ?? null),
+      };
+    }
+    const committed = await this.#withDeadline(
+      () =>
+        this.#storage.commit(
+          batch,
+          this.#newContext('persist', deadlineMs, source.signal),
+        ),
+      deadlineMs,
+      source,
+    );
+    if (!committed.ok) {
+      r.persistenceError = committed.error;
+      this.#publish();
+      return err(committed.error);
+    }
+    if (batch.recordingsMerge !== undefined) {
+      r.recordings = [...batch.recordingsMerge(r.recordings)];
+    }
+    if (batch.likes !== undefined) {
+      r.likes = [...batch.likes];
+    }
+    if (batch.entities !== undefined) {
+      r.entities = [...batch.entities];
+    }
+    if (batch.entitySourceRefs !== undefined) {
+      r.entitySourceRefs = [...batch.entitySourceRefs];
+    }
+    if (batch.playlists !== undefined) {
+      r.playlists = [...batch.playlists];
+    }
+    if (batch.playlistEntries !== undefined) {
+      r.playlistEntries = [...batch.playlistEntries];
+    }
+    if (batch.playHistory !== undefined) {
+      r.playHistory = [...batch.playHistory];
+    }
+    if (batch.playCounts !== undefined) {
+      r.playCounts = [...batch.playCounts];
+    }
+    if (batch.lyricsCache !== undefined) {
+      r.lyricsCache = [...batch.lyricsCache];
+    }
+    if (batch.settings !== undefined) {
+      r.settings = { ...batch.settings };
+    }
+    if (batch.queue !== undefined) {
+      r.queue = new QueueEngine(batch.queue);
+      r.queueCommittedRev = Math.max(
+        r.queueCommittedRev,
+        batch.queue.revision,
+      );
+      // A queued #persistQueue holding the old engine must
+      // supersede — its revision math no longer describes
+      // this queue.
+      r.queueEpoch += 1;
+    }
+    r.persistenceError = undefined;
+    this.#derived();
+    this.#publish();
+    return ok({
+      rehydrateMedia:
+        batch.downloads !== undefined || batch.localFiles !== undefined,
+    });
   }
 
   // ---- restore ----------------------------------------------------

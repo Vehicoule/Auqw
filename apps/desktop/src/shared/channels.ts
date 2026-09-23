@@ -44,6 +44,8 @@ export const CHANNELS = {
   syncTrigger: 'sync:trigger',
   syncLocalChanges: 'sync:localChanges',
   syncDrainApplied: 'sync:drainApplied',
+  syncAckApplied: 'sync:ackApplied',
+  syncMaterialized: 'sync:materialized',
   /** Main→renderer push: applied sync outcomes are queued for drain. */
   syncApplied: 'sync:applied',
   syncAppliedSubscribe: 'sync:appliedSubscribe',

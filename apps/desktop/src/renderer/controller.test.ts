@@ -179,6 +179,10 @@ function fakeApi(): Rig {
           Promise.reject(new Error('seam: inject sync')),
         drainApplied: () =>
           Promise.reject(new Error('seam: inject sync')),
+        ackApplied: () =>
+          Promise.reject(new Error('seam: inject sync')),
+        materialized: () =>
+          Promise.reject(new Error('seam: inject sync')),
         onApplied: () => () => {},
       },
       utility: {

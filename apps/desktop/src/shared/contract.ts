@@ -1314,6 +1314,46 @@ export function isSyncDrainAppliedResult(
 }
 
 /**
+ * `sync:materialized` — paged pull of the engine's materialized
+ * record view. `records` are opaque `{kind, recordId, fields}`
+ * JSON — the session validates each via `isMaterializedRecord`;
+ * `nextOffset` continues the pull, `null` ends it.
+ */
+export type SyncMaterializedArgs = {
+  readonly offset: number;
+};
+
+export function isSyncMaterializedArgs(
+  value: unknown,
+): value is SyncMaterializedArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['offset']) &&
+    isSafeNonNegativeInt(value['offset']) &&
+    value['offset'] <= 1_000_000
+  );
+}
+
+export type SyncMaterializedResult = {
+  readonly records: readonly unknown[];
+  readonly nextOffset: number | null;
+};
+
+export function isSyncMaterializedResult(
+  value: unknown,
+): value is SyncMaterializedResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['records', 'nextOffset']) &&
+    Array.isArray(value['records']) &&
+    value['records'].every(isJsonValue) &&
+    isBoundedJson(value['records'], MAX_SYNC_DOC_BYTES) &&
+    (value['nextOffset'] === null ||
+      isSafeNonNegativeInt(value['nextOffset']))
+  );
+}
+
+/**
  * The renderer's `api.sync.*` — one method per `sync:*` channel; the
  * utility's sync service answers them all and works plugin-free.
  */
@@ -1338,8 +1378,20 @@ export type AuqwSync = {
   /**
    * Pull side of the applied-outcome seam: returns one bounded chunk;
    * call until `remaining` is 0 (the `onApplied` push prompts it).
+   * The pull is a PEEK — the durable copy leaves only via ackApplied
+   * after the renderer's domain commit lands.
    */
   readonly drainApplied: () => Promise<SyncDrainAppliedResult>;
+  /** Consume the outcomes the last drain served — post-commit ack. */
+  readonly ackApplied: () => Promise<void>;
+  /**
+   * Durable recovery: paged pull of the engine's materialized record
+   * view for sessions that lost outcome streams (drained-then-crashed,
+   * evicted from a bound). Loop until `nextOffset` is null.
+   */
+  readonly materialized: (
+    args: SyncMaterializedArgs,
+  ) => Promise<SyncMaterializedResult>;
   /**
    * Push side — the utility posts `sync:applied` through main after
    * every applyDelta; subscribing also warrants a first manual drain

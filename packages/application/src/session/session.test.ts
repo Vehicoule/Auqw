@@ -4029,7 +4029,50 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'applySyncedEntriesReportsRehydrate',
     applySyncedEntriesReportsRehydrate,
   ],
+  [
+    'applyMaterializedEntriesRestores',
+    applyMaterializedEntriesRestores,
+  ],
 ] as const;
+
+// The materialized rebuild: the durable log's surviving records
+// restore rows the outcome drain missed, and never delete rows the
+// engine still materializes (Devin Review #46 round-3).
+async function applyMaterializedEntriesRestores(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+    }),
+  );
+  await restoreOk(r);
+  const sr = ref('itunes', 't-mat');
+  const result = await r.session.applyMaterializedEntries([
+    {
+      kind: 'recording',
+      recordId: 'r-mat',
+      fields: { title: 'Mat Song', artist: 'M' },
+    },
+    {
+      kind: 'recordingSourceRef',
+      recordId: sourceRefRecordId('r-mat', sr),
+      fields: { ref: sr },
+    },
+  ]);
+  assert(result.ok, 'applyMaterializedEntries failed');
+  await pump();
+  const landed = readyOf(r).recordings.find(
+    (rec) => rec.id === 'r-mat',
+  );
+  assert(landed !== undefined, 'materialized record mirrors in');
+  assertEqual(landed?.title, 'Mat Song');
+  // Rows absent from the materialized set are untouched — they were
+  // never synced, not deleted.
+  assert(
+    readyOf(r).likes.some((l) => l.targetId === 'r1'),
+    'unsynced like survives the rebuild',
+  );
+}
 
 // Offline + unowned: the attempt must fail 'unavailable' BEFORE any
 // candidates/resolve/prepare call — zero resolution calls is the

@@ -647,6 +647,28 @@ export async function createSessionController(
         });
         if (built.ok) {
           syncSurface = built.value;
+          // Reconcile from the engine's materialized view ONCE at
+          // bring-up — pending outcomes are in-memory only, so a kill
+          // mid-apply loses them; the durable sync log keeps the
+          // truth and this rebuild restores anything lost (Review
+          // #46). Idempotent — outcomes that already projected just
+          // re-fold to the same rows.
+          void session
+            .applyMaterializedEntries(syncSurface.engine.materialize())
+            .then((applied) => {
+              if (!applied.ok) {
+                void log.write({
+                  level: 'warn',
+                  message: `sync reconcile failed: ${applied.error.kind}`,
+                  atMs: clock.nowMs(),
+                });
+                return;
+              }
+              if (applied.value.rehydrateMedia) {
+                void rehydrateMedia(signal);
+              }
+            })
+            .catch(() => undefined);
           // Flush buffered pre-surface writes NOW — the next edit
           // may never come, and the buffer only rides emit calls.
           void emitWrites([]).then((flushed) => {

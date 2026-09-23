@@ -29,6 +29,7 @@ import {
 import type {
   ChangeEntry,
   LocalWrite,
+  MaterializedRecord,
   MergeOutcome,
   SyncRecordKind,
 } from './sync-engine.ts';
@@ -37,6 +38,7 @@ import {
   entityDeleteWrites,
   entityUpsertWrites,
   projectAppliedEntries,
+  projectMaterialized,
   recordingDeleteWrites,
   recordingUpsertWrites,
   reviewSyncWrites,
@@ -281,8 +283,11 @@ function tombstoneEntry(
 function applied(
   entry: ChangeEntry,
   displaced: readonly ChangeEntry[] = [],
+  record?: MaterializedRecord,
 ): MergeOutcome {
-  return { type: 'applied', entry, displaced };
+  return record === undefined
+    ? { type: 'applied', entry, displaced }
+    : { type: 'applied', entry, displaced, record };
 }
 
 function isTombstone(write: LocalWrite): boolean {
@@ -1098,6 +1103,153 @@ function testEntityRefUpdateReplaces(): void {
   assertEqual(rows[0]?.ref.id, 'new-id');
 }
 
+/* ------------------------------------------------------------------ */
+/* round-3: ref-change emission, snapshots, materialized recovery      */
+/* ------------------------------------------------------------------ */
+
+// UoXN — a same-provider entitySourceRef CHANGE emits an upsert;
+// presence-only keying would silently absorb the edit.
+function testEntityRefChangeEmits(): void {
+  const ent = entity('e-1', 'album');
+  const prev = [entityRef('e-1', 'itunes', 'al-old')];
+  const next = [entityRef('e-1', 'itunes', 'al-new')];
+  const writes = entityUpsertWrites(ent, next, prev);
+  const refWrites = writes.filter(
+    (w) => w.kind === 'entitySourceRef' && !isTombstone(w),
+  );
+  assertEqual(refWrites.length, 1, 'changed ref emits an upsert');
+  assertEqual(
+    (refWrites[0] as { value: EntityRef }).value.id,
+    'al-new',
+    'upsert carries the new ref',
+  );
+  const same = entityUpsertWrites(ent, prev, prev);
+  assertEqual(
+    same.filter((w) => w.kind === 'entitySourceRef').length,
+    0,
+    'unchanged ref emits nothing',
+  );
+}
+
+// UoQ3 — a delayed tombstone that lost to newer fields must not
+// delete the row the engine still materializes.
+function testSnapshotSurvivesTombstone(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+  });
+  const outcome = applied(tombstoneEntry('recording', 'r-1'), [], {
+    kind: 'recording',
+    recordId: 'r-1',
+    fields: { title: 'Still Alive', artist: 'A' },
+  });
+  const projected = projectAppliedEntries([outcome], current);
+  const rows = projected.batch.recordingsMerge?.(current.recordings) ?? [];
+  assertEqual(rows.length, 1, 'snapshot with fields keeps the row');
+  assertEqual(rows[0]?.title, 'Still Alive');
+}
+
+// Empty snapshot = the engine's "fully deleted" — the row goes.
+function testSnapshotEmptyDeletes(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+  });
+  const outcome = applied(tombstoneEntry('recording', 'r-1'), [], {
+    kind: 'recording',
+    recordId: 'r-1',
+    fields: {},
+  });
+  const projected = projectAppliedEntries([outcome], current);
+  assertDeepEqual(
+    projected.batch.recordingsMerge?.(current.recordings),
+    [],
+    'empty snapshot deletes the row',
+  );
+}
+
+// Snapshot counts are ABSOLUTE (materialized truth), not deltas —
+// replaying the same drain can't double a play count.
+function testSnapshotCountAbsolute(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [playCount('r-1', 5)],
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 7, lastMs: 900 },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  const counts = projected.batch.playCounts ?? [];
+  assertEqual(counts[0]?.count, 7, 'snapshot count applies absolute');
+  const replay = projectAppliedEntries(
+    [outcome],
+    projInput({
+      recordings: current.recordings,
+      playCounts: counts,
+    }),
+  );
+  assertEqual(
+    replay.batch.playCounts?.[0]?.count ?? 7,
+    7,
+    'replayed drain stays idempotent',
+  );
+}
+
+// The materialized recovery path: records rebuild rows, absent
+// records keep existing rows, empty-field records delete.
+function testProjectMaterialized(): void {
+  const current = projInput({
+    recordings: [
+      recording('r-keep', [ref('itunes', 'k-1')]),
+      recording('r-dead', [ref('itunes', 'd-1')]),
+    ],
+    likes: [{ entityKind: 'track', targetId: 'r-keep', likedAtMs: 1 }],
+  });
+  const srNew = ref('itunes', 'n-1');
+  const projected = projectMaterialized(
+    [
+      {
+        kind: 'recording',
+        recordId: 'r-new',
+        fields: {
+          title: 'New',
+          artist: 'N',
+          album: 'AL',
+          durationMs: 100,
+        },
+      },
+      {
+        kind: 'recordingSourceRef',
+        recordId: sourceRefRecordId('r-new', srNew),
+        fields: { ref: srNew },
+      },
+      { kind: 'recording', recordId: 'r-dead', fields: {} },
+      {
+        kind: 'recording',
+        recordId: 'r-keep',
+        fields: { title: 'Kept', artist: 'K' },
+      },
+    ],
+    current,
+  );
+  const rows = projected.batch.recordingsMerge?.(current.recordings) ?? [];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  assert(byId.has('r-new'), 'materialized insert lands');
+  assert(!byId.has('r-dead'), 'empty record deletes');
+  assertEqual(byId.get('r-keep')?.title, 'Kept', 'materialized refresh');
+  // The like never synced — absent from the materialized set — and
+  // must stay, not get deleted.
+  assertEqual(
+    (projected.batch.likes ?? current.likes).length,
+    1,
+    'unsynced row keeps',
+  );
+}
+
 // A playlistEntry tombstone deletes the existing row (Devin Review
 // #46 — the existing-row loop must not re-push it).
 function testEntryTombstoneRemoves(): void {
@@ -1139,5 +1291,10 @@ export function run(): void {
   testInboundIdempotentReplay();
   testMappingTombstoneKeepsOthers();
   testEntityRefUpdateReplaces();
+  testEntityRefChangeEmits();
+  testSnapshotSurvivesTombstone();
+  testSnapshotEmptyDeletes();
+  testSnapshotCountAbsolute();
+  testProjectMaterialized();
   testEntryTombstoneRemoves();
 }

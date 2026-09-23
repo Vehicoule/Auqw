@@ -2318,9 +2318,10 @@ export async function run(): Promise<void> {
     }
   }
 
-  // —— Durable spill: overflow goes to sync-applied.jsonl, so the ——
-  // —— drain serves ALL outcomes and a fresh service inherits the ——
-  // —— spilled backlog across a restart (Devin Review #46).       ——
+  // —— Durable spill: every applied outcome writes through to ——
+  // —— sync-applied.jsonl before the import acks, drain PEEKS and ——
+  // —— ack consumes — a fresh service inherits the backlog across ——
+  // —— a restart (Devin Review #46).                           ——
   {
     const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-'));
     const spill = join(dir, 'sync-applied.jsonl');
@@ -2331,10 +2332,10 @@ export async function run(): Promise<void> {
     });
     try {
       const phone = await testUtilityEngine('phone-spill');
-      // 6_500 applied outcomes: 4_096 fit the volatile outbox, the
-      // ~2_400 overflow spills to the JSONL file — more than one
-      // drain page's byte budget (~1 MB ≈ ~1_700 outcomes), so a
-      // file remainder survives for the restarted service.
+      // 6_500 applied outcomes all write through to the JSONL file
+      // — more than one drain page's byte budget (~1 MB ≈ ~1_700
+      // outcomes), so a file remainder survives for the restarted
+      // service.
       const pad = 'x'.repeat(480);
       let since = '';
       for (let i = 0; i < 6_500; i += 500) {
@@ -2366,7 +2367,8 @@ export async function run(): Promise<void> {
       assert(spilledFile !== null, 'spill file written');
 
       // One drain on the first service: byte budget pages it and
-      // leaves a file remainder for the restarted service.
+      // leaves a file remainder. The drain is a peek — no ack — so
+      // the file keeps every served line for the restarted service.
       const first = await invokeHandler(
         service,
         'sync:drainApplied',
@@ -2386,6 +2388,24 @@ export async function run(): Promise<void> {
         'first drain served outcomes',
       );
       assert(firstPage.remaining > 0, 'backlog remains after page');
+      // An un-acked second drain re-serves the same file prefix —
+      // the peek consumed nothing.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok, 'repeat drain failed');
+      if (again.ok) {
+        const againPage = again.value as {
+          outcomes: readonly unknown[];
+        };
+        assertEqual(
+          againPage.outcomes.length,
+          firstPage.outcomes.length,
+          'un-acked drain re-serves the same prefix',
+        );
+      }
       await service.close();
 
       // A fresh service on the same spill path inherits the backlog —
@@ -2415,12 +2435,22 @@ export async function run(): Promise<void> {
           };
           rest += page.outcomes.length;
           restDropped ||= page.dropped;
+          // The peek only leaves disk at ack — consume each page so
+          // the next drain serves the next segment.
+          const acked = await invokeHandler(
+            restarted.service,
+            'sync:ackApplied',
+            undefined,
+          );
+          assert(acked.ok, 'restarted ack failed');
           if (page.remaining === 0) {
             break;
           }
         }
         assert(rest > 0, 'restarted service drained spilled backlog');
         assert(!restDropped, 'durable path reports nothing dropped');
+        const tail = await stat(spill);
+        assertEqual(tail.size, 0, 'ack consumed the spill file');
       } finally {
         await restarted.service.close();
       }

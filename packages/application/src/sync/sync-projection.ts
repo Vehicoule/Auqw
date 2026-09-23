@@ -53,6 +53,7 @@ import { compareStamp } from './hlc.ts';
 import type {
   ChangeEntry,
   LocalWrite,
+  MaterializedRecord,
   MergeOutcome,
   SyncRecordKind,
 } from './sync-engine.ts';
@@ -60,6 +61,7 @@ import {
   decodeRecordId,
   entitySourceRefRecordId,
   isChangeEntry,
+  isMaterializedRecord,
   likeRecordId,
   mappingRecordId,
   SETTINGS_RECORD_ID,
@@ -395,7 +397,10 @@ export function entityUpsertWrites(
   }
   const prev = prevRefs ?? [];
   for (const ref of refs) {
-    if (prev.every((p) => p.provider !== ref.provider)) {
+    // Same-provider row with a changed ref value is still an upsert —
+    // provider-key presence alone would silently absorb the edit.
+    const prior = prev.find((p) => p.provider === ref.provider);
+    if (prior === undefined || !jsonEqual(prior.ref, ref.ref)) {
       writes.push({
         kind: 'entitySourceRef',
         recordId: entitySourceRefRecordId(entity.entityId, ref.provider),
@@ -557,38 +562,35 @@ export function emissionWrites(
     // An unchanged entity whose ref set still moved (a late-arriving
     // ref rides the same commit's entitySourceRefs section) emits
     // just the presence diff.
-    const refKey = (entityId: string, provider: string): string =>
-      `${entityId}${KEY_SEP}${provider}`;
     for (const entityId of new Set([...prevRefs.keys(), ...nextRefs.keys()])) {
       if (prevById.get(entityId) !== batch.entities.find((e) => e.entityId === entityId)) {
         continue; // entity itself changed or vanished — covered above
       }
-      const prevSet = new Set(
-        (prevRefs.get(entityId) ?? []).map((ref) =>
-          refKey(entityId, ref.provider),
-        ),
+      // Keyed by provider, compared by value: a same-provider ref
+      // rewrite still emits an upsert.
+      const prevMap = new Map(
+        (prevRefs.get(entityId) ?? []).map((ref) => [ref.provider, ref.ref]),
       );
-      const nextSet = new Set(
-        (nextRefs.get(entityId) ?? []).map((ref) =>
-          refKey(entityId, ref.provider),
-        ),
+      const nextMap = new Map(
+        (nextRefs.get(entityId) ?? []).map((ref) => [ref.provider, ref.ref]),
       );
-      for (const ref of nextRefs.get(entityId) ?? []) {
-        if (!prevSet.has(refKey(entityId, ref.provider))) {
+      for (const [provider, refValue] of nextMap) {
+        const prior = prevMap.get(provider);
+        if (prior === undefined || !jsonEqual(prior, refValue)) {
           writes.push({
             kind: 'entitySourceRef',
-            recordId: entitySourceRefRecordId(entityId, ref.provider),
+            recordId: entitySourceRefRecordId(entityId, provider),
             field: 'ref',
-            value: ref.ref,
+            value: refValue,
           });
         }
       }
-      for (const ref of prevRefs.get(entityId) ?? []) {
-        if (!nextSet.has(refKey(entityId, ref.provider))) {
+      for (const provider of prevMap.keys()) {
+        if (!nextMap.has(provider)) {
           writes.push(
             tombstoneWrite(
               'entitySourceRef',
-              entitySourceRefRecordId(entityId, ref.provider),
+              entitySourceRefRecordId(entityId, provider),
             ),
           );
         }
@@ -619,7 +621,10 @@ export function emissionWrites(
     );
     const nextKeys = new Set(batch.entitySourceRefs.map(keyOf));
     for (const ref of batch.entitySourceRefs) {
-      if (prevKeys.get(keyOf(ref)) !== ref) {
+      // Value compare, not identity — a same-provider row whose ref
+      // changed emits the upsert; a rebuilt identical ref does not.
+      const priorRef = prevKeys.get(keyOf(ref));
+      if (priorRef === undefined || !jsonEqual(priorRef.ref, ref.ref)) {
         writes.push({
           kind: 'entitySourceRef',
           recordId: entitySourceRefRecordId(ref.entityId, ref.provider),
@@ -823,6 +828,12 @@ type RecordFold = {
   readonly outcomes: AppliedOutcome[];
   /** Earliest hlc.l folded — createdMs fallback for new rows. */
   minL: number;
+  /**
+   * Fields/sum values carry the engine's materialized TRUTH (absolute
+   * post-merge state), not drain-relative deltas — set when the
+   * outcome stream carried a `record` snapshot (Review #46).
+   */
+  absolute: boolean;
 };
 
 function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
@@ -932,6 +943,7 @@ export function projectAppliedEntries(
         sumDeltas: new Map(),
         outcomes: [],
         minL: Number.MAX_SAFE_INTEGER,
+        absolute: false,
       };
       folds.set(key, fold);
     }
@@ -940,6 +952,74 @@ export function projectAppliedEntries(
   for (const outcome of applied) {
     foldOutcome(foldFor(outcome.entry.kind, outcome.entry.recordId), outcome);
   }
+  // Engine-attached materialized snapshots override fold inference —
+  // the fold can't see fields that merged in earlier drains, and a
+  // delayed tombstone that lost to newer fields must not delete a
+  // record the engine still materializes (Review #46).
+  for (const fold of folds.values()) {
+    const snap = applied
+      .map((o) => o.record)
+      .find(
+        (r) =>
+          r !== undefined &&
+          r.kind === fold.kind &&
+          r.recordId === fold.recordId,
+      );
+    if (snap === undefined) {
+      continue;
+    }
+    fold.fields.clear();
+    for (const [field, value] of Object.entries(snap.fields)) {
+      fold.fields.set(field, value);
+    }
+    fold.sumDeltas.clear();
+    fold.tombstoned = Object.keys(snap.fields).length === 0;
+    fold.absolute = true;
+  }
+
+  return finishProjection(folds, current, pending, skipped);
+}
+
+/**
+ * Rebuild the projected sections from the engine's materialized record
+ * view — the durable recovery path for outcome streams a client can
+ * lose (drained-then-crashed, evicted from a bound). Records absent
+ * from `records` keep their current rows: absence means 'never
+ * synced', not 'deleted' — deletion arrives as a record with empty
+ * fields, exactly as materialize() reports it.
+ */
+export function projectMaterialized(
+  records: readonly MaterializedRecord[],
+  current: SyncProjectionInput,
+): SyncProjection {
+  const folds = new Map<string, RecordFold>();
+  const skipped: ProjectionSkip[] = [];
+  for (const rec of records) {
+    if (!isMaterializedRecord(rec)) {
+      skipped.push({ kind: 'unknown', reason: 'invalid' });
+      continue;
+    }
+    const fields = new Map(Object.entries(rec.fields));
+    folds.set(`${rec.kind}${KEY_SEP}${rec.recordId}`, {
+      kind: rec.kind,
+      recordId: rec.recordId,
+      tombstoned: fields.size === 0,
+      fields,
+      sumDeltas: new Map(),
+      outcomes: [],
+      minL: 0,
+      absolute: true,
+    });
+  }
+  return finishProjection(folds, current, [], skipped);
+}
+
+function finishProjection(
+  folds: Map<string, RecordFold>,
+  current: SyncProjectionInput,
+  pending: MergeOutcome[],
+  skipped: ProjectionSkip[],
+): SyncProjection {
   const foldOf = (kind: SyncRecordKind, recordId: string): RecordFold | undefined =>
     folds.get(`${kind}${KEY_SEP}${recordId}`);
 
@@ -1647,13 +1727,17 @@ export function projectAppliedEntries(
         continue;
       }
       countFoldIds.add(count.recordingId);
-      const delta = fold.sumDeltas.get('count') ?? 0;
       const foldedLast = numField(fold.fields, 'lastMs');
       const candidate: PlayCount = {
         recordingId: count.recordingId,
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
-          Math.max(0, count.count + delta),
+          Math.max(
+            0,
+            fold.absolute
+              ? (numField(fold.fields, 'count') ?? count.count)
+              : count.count + (fold.sumDeltas.get('count') ?? 0),
+          ),
         ),
         lastMs:
           foldedLast !== null && foldedLast > count.lastMs
@@ -1688,7 +1772,12 @@ export function projectAppliedEntries(
         recordingId: fold.recordId,
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
-          Math.max(0, fold.sumDeltas.get('count') ?? 0),
+          Math.max(
+            0,
+            fold.absolute
+              ? (numField(fold.fields, 'count') ?? 0)
+              : (fold.sumDeltas.get('count') ?? 0),
+          ),
         ),
         lastMs: Math.max(0, numField(fold.fields, 'lastMs') ?? 0),
       };

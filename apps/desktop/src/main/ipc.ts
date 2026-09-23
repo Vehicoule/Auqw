@@ -46,6 +46,7 @@ import {
   isSyncDeltasArgs,
   isSyncImportDeltaArgs,
   isSyncLocalChangesArgs,
+  isSyncMaterializedArgs,
   isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
@@ -441,6 +442,18 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.syncDrainApplied,
     channel(noArgs, (_args, deps) =>
       deps.utility.request(CHANNELS.syncDrainApplied, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncAckApplied,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncAckApplied, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncMaterialized,
+    channel(isSyncMaterializedArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.syncMaterialized, args),
     ),
   ],
   // The offline file plane — the utility re-validates each payload

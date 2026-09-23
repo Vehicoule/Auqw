@@ -351,6 +351,14 @@ export type MergeOutcome =
     readonly type: 'applied';
     readonly entry: ChangeEntry;
     readonly displaced: readonly ChangeEntry[];
+    /**
+     * Post-merge materialized fields for the entry's record (every
+     * surviving field, not just this entry's). The projector must
+     * trust this over inferring record state from entries alone —
+     * a delayed tombstone that lost to newer fields leaves fields
+     * alive here. Empty `fields` means the record is fully deleted.
+     */
+    readonly record?: MaterializedRecord;
   }
   | {
     readonly type: 'superseded';
@@ -781,6 +789,24 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
     isRecord(value) &&
     Object.keys(value).length <= MAX_CURSOR_DEVICES &&
     Object.values(value).every(isSafeNonNegative)
+  );
+}
+
+/**
+ * Wire-level shape check for the materialized pull — field VALUES go
+ * unvalidated here because the projector only reads them through
+ * per-field typed accessors and the field whitelist.
+ */
+export function isMaterializedRecord(
+  value: unknown,
+): value is MaterializedRecord {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['kind', 'recordId', 'fields']) &&
+    isSyncRecordKind(value['kind']) &&
+    isString(value['recordId'], MAX_RECORD_ID) &&
+    isRecord(value['fields']) &&
+    Object.keys(value['fields']).every((k) => k.length <= MAX_FIELD)
   );
 }
 
@@ -1678,6 +1704,30 @@ export async function createSyncEngine(
     return ok(input);
   }
 
+  /**
+   * 'sum' callers assert the desired AGGREGATE — the merged value the
+   * field should show — because the domain row is exactly that. The
+   * stamped entry must carry only THIS device's component (the merge
+   * sums per-device winners), so translate: component = target minus
+   * what peer components already contribute. Clamped at 0 — a target
+   * below the remote share can't be expressed and the remote share
+   * honestly survives.
+   */
+  function sumComponentFor(
+    input: Extract<LocalWrite, { field: string }>,
+  ): unknown {
+    const rule = syncFieldRule(input.kind, input.field);
+    if (rule?.merge !== 'sum' || typeof input.value !== 'number') {
+      return input.value;
+    }
+    const record = records.get(`${input.kind}${KEY_SEP}${input.recordId}`);
+    const cell = record?.fields.get(input.field);
+    const remoteShare = sumValue(
+      (cell?.live ?? []).filter((e) => e.deviceId !== deviceId),
+    );
+    return Math.max(0, input.value - remoteShare);
+  }
+
   async function writeChanges(
     inputs: readonly LocalWrite[],
     signal: CancellationSignal | undefined,
@@ -1732,7 +1782,9 @@ export async function createSyncEngine(
                 // Own the value: the caller keeps its mutable object,
                 // the engine freezes its clone — same ownership rule
                 // as accepted wire entries.
-                value: JSON.parse(JSON.stringify(input.value)) as unknown,
+                value: JSON.parse(
+                  JSON.stringify(sumComponentFor(input)),
+                ) as unknown,
                 tombstone: false,
                 hlc: stamp,
                 deviceId,
@@ -2018,16 +2070,37 @@ export async function createSyncEngine(
         return err(fromUnknown(thrown));
       }
       await appendDivergence(divs, sig, deadlineMs);
+      // Attach the post-merge materialized truth per applied record —
+      // projecting from entries alone can't see fields that merged in
+      // earlier deltas (a delayed tombstone that lost to newer fields
+      // must not delete a row the engine still materializes).
+      const stamped = outcomes.map((outcome) =>
+        outcome.type === 'applied'
+          ? { ...outcome, record: recordSnapshot(outcome.entry) }
+          : outcome,
+      );
       const result: ApplyResult = {
         senderDeviceId: doc.senderDeviceId,
         entries: fresh,
-        outcomes,
+        outcomes: stamped,
         divergence: divs,
         cursor: cursorSnapshot(),
       };
       return ok(result);
     });
     return cancellable(work, sig);
+  }
+
+  /** The record's surviving field set as the merge currently sees it. */
+  function recordSnapshot(entry: ChangeEntry): MaterializedRecord {
+    const record = records.get(`${entry.kind}${KEY_SEP}${entry.recordId}`);
+    const fields: Record<string, unknown> = {};
+    if (record !== undefined) {
+      for (const [field, cell] of record.fields) {
+        fields[field] = cell.value;
+      }
+    }
+    return { kind: entry.kind, recordId: entry.recordId, fields };
   }
 
   function divergenceHistory(

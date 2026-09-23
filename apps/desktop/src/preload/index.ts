@@ -28,6 +28,7 @@ import {
   isSyncDrainAppliedResult,
   isSyncImportDeltaResult,
   isSyncLocalChangesResult,
+  isSyncMaterializedResult,
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
@@ -63,6 +64,8 @@ import type {
   SyncImportDeltaResult,
   SyncLocalChangesArgs,
   SyncLocalChangesResult,
+  SyncMaterializedArgs,
+  SyncMaterializedResult,
   SyncPairingResult,
   SyncStatusResult,
   SyncTriggerResult,
@@ -318,6 +321,16 @@ const api: AuqwApi = {
         CHANNELS.syncDrainApplied,
         undefined,
         isSyncDrainAppliedResult,
+      ),
+    ackApplied: (): Promise<void> =>
+      invoke(CHANNELS.syncAckApplied, undefined, isUndefinedResult),
+    materialized: (
+      args: SyncMaterializedArgs,
+    ): Promise<SyncMaterializedResult> =>
+      invoke(
+        CHANNELS.syncMaterialized,
+        args,
+        isSyncMaterializedResult,
       ),
     onApplied: (
       listener: (event: SyncAppliedEvent) => void,
