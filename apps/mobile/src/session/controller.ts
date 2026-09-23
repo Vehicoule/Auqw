@@ -7,7 +7,6 @@ import {
   DownloadManager,
   err,
   LocalFileSource,
-  ok,
   previewImport,
   Session,
 } from '@auqw/application';
@@ -50,6 +49,7 @@ import {
   type ExpoSyncSurface,
 } from '../adapters/expo-sync.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
+import { createSyncEmit } from './sync-emit.ts';
 
 // Metro asset requires must be static literals. All pairs are
 // produced by tooling/sync-plugins.mjs per providers.lock.json.
@@ -250,8 +250,11 @@ export async function createSessionController(
   // flush through one localChangeBatch once the surface lands — a
   // drop-oldest bound keeps a never-syncable platform (iOS, web
   // build) from growing memory forever.
-  const SYNC_PRE_SURFACE_MAX = 2_048;
-  const preSurfaceWrites: LocalWrite[] = [];
+  // Serializes every localChangeBatch call — emission order IS the
+  // log order, so a racing flush can't reorder writes on one record.
+  const emitWrites = createSyncEmit({
+    surface: () => syncSurface?.engine ?? null,
+  });
   const providerMap = new Map(providers.map((p) => [p.id, p]));
   const player = (options.player ?? ((map) => {
     return createExpoAudioPlayer({
@@ -308,38 +311,12 @@ export async function createSessionController(
     // Commit-then-log over the in-process engine: every syncable
     // domain write emits mapped LocalWrites here post-commit. While
     // the surface is absent the writes buffer (drop-oldest) so
-    // pre-bring-up edits still reach the log on first emit; a failed
-    // flush re-pends the buffer — the session retains the fresh
-    // writes itself.
+    // pre-bring-up edits still reach the log once it lands — the
+    // surface assignment itself triggers the flush, no edit needed;
+    // a failed flush re-pends the buffer.
     sync: {
-      localChanges: async (writes: readonly LocalWrite[], signal) => {
-        const surface = syncSurface;
-        if (surface === null) {
-          preSurfaceWrites.push(...writes);
-          if (preSurfaceWrites.length > SYNC_PRE_SURFACE_MAX) {
-            preSurfaceWrites.splice(
-              0,
-              preSurfaceWrites.length - SYNC_PRE_SURFACE_MAX,
-            );
-          }
-          return ok(undefined);
-        }
-        const pending = preSurfaceWrites.splice(0);
-        const stamped = await surface.engine.localChangeBatch(
-          pending.length > 0 ? [...pending, ...writes] : writes,
-          signal,
-        );
-        if (!stamped.ok && pending.length > 0) {
-          preSurfaceWrites.unshift(...pending);
-          if (preSurfaceWrites.length > SYNC_PRE_SURFACE_MAX) {
-            preSurfaceWrites.splice(
-              0,
-              preSurfaceWrites.length - SYNC_PRE_SURFACE_MAX,
-            );
-          }
-        }
-        return stamped;
-      },
+      localChanges: (writes: readonly LocalWrite[], signal) =>
+        emitWrites(writes, signal),
     },
   });
   type ReadyState = Extract<
@@ -651,6 +628,17 @@ export async function createSessionController(
         });
         if (built.ok) {
           syncSurface = built.value;
+          // Flush buffered pre-surface writes NOW — the next edit
+          // may never come, and the buffer only rides emit calls.
+          void emitWrites([]).then((flushed) => {
+            if (!flushed.ok) {
+              void log.write({
+                level: 'warn',
+                message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+            }
+          });
         } else {
           void log.write({
             level: 'warn',

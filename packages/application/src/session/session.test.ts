@@ -3768,6 +3768,71 @@ async function applySyncedEntriesRequiresReady(): Promise<void> {
   assert(!result.ok, 'apply before restore must fail typed');
 }
 
+// A load failure must retain the consumed outcomes for the next
+// drain — the transport already dequeued them (Devin Review #46).
+async function applySyncedEntriesLoadFailRetains(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  r.storage.holdNextLoad();
+  const first = r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'Remote')),
+  ]);
+  await pump();
+  // The deferred queue keeps resolved entries — drain until the
+  // held load is actually settled.
+  let settled = false;
+  while (
+    r.storage.settleLoad(err(appError('unavailable', 'disk wedged')))
+  ) {
+    settled = true;
+  }
+  assert(settled, 'held load settles');
+  const failed = await first;
+  assert(!failed.ok, 'load failure fails typed');
+  assert(
+    readyOf(r).persistenceError !== undefined,
+    'failure surfaces honestly',
+  );
+  // Next drain replays nothing — the retained union folds alone.
+  const retry = await r.session.applySyncedEntries([]);
+  assert(retry.ok, 'retained outcomes refold');
+  await pump();
+  const list = readyOf(r).playlists.find((p) => p.playlistId === 'pl-1');
+  assert(list !== undefined, 'retained outcome materializes');
+  assertEqual(list?.name, 'Remote');
+}
+
+// applySyncedEntries is serialized through the storage segment —
+// two overlapping calls resolve, no interleaved batch.
+async function applySyncedEntriesOverlapping(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const [a, b] = await Promise.all([
+    r.session.applySyncedEntries([
+      appliedOutcome(syncEntry('playlist', 'pl-a', 'name', 'A')),
+    ]),
+    r.session.applySyncedEntries([
+      appliedOutcome(syncEntry('playlist', 'pl-b', 'name', 'B')),
+    ]),
+  ]);
+  assert(a.ok && b.ok, 'overlapping applies both resolve');
+  await pump();
+  const names = readyOf(r).playlists.map((p) => p.name);
+  assert(names.includes('A') && names.includes('B'), 'both land');
+}
+
+// Post-dispose the method returns a typed failure — the mobile
+// detach path must never throw (Devin Review #46).
+async function applySyncedEntriesAfterDispose(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  await r.session.dispose();
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'X')),
+  ]);
+  assert(!result.ok, 'apply after dispose fails typed, not thrown');
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pauseDuringPreparing', pauseDuringPreparing],
   ['seekDuringPreparing', seekDuringPreparing],
@@ -3839,6 +3904,18 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     applySyncedEntriesSupersededKeepsRow,
   ],
   ['applySyncedEntriesRequiresReady', applySyncedEntriesRequiresReady],
+  [
+    'applySyncedEntriesLoadFailRetains',
+    applySyncedEntriesLoadFailRetains,
+  ],
+  [
+    'applySyncedEntriesOverlapping',
+    applySyncedEntriesOverlapping,
+  ],
+  [
+    'applySyncedEntriesAfterDispose',
+    applySyncedEntriesAfterDispose,
+  ],
 ] as const;
 
 // Offline + unowned: the attempt must fail 'unavailable' BEFORE any
@@ -4151,7 +4228,7 @@ async function localPlaybackPinnedForeign(): Promise<void> {
 }
 
 export async function run(): Promise<void> {
-  for (const [name, fn] of TESTS) {
+  for (const [, fn] of TESTS) {
     await fn();
   }
 }

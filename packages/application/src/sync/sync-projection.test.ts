@@ -1046,6 +1046,77 @@ function testInboundIdempotentReplay(): void {
 
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* regressions                                                          */
+/* ------------------------------------------------------------------ */
+
+// A mapping tombstone removes ONLY its own key — unrelated mappings
+// on the same recording survive (Devin Review #46).
+function testMappingTombstoneKeepsOthers(): void {
+  const r1 = ref('itunes', 't-1');
+  const r2 = ref('deezer', 'd-2');
+  const m1 = mappingFor(r1);
+  const m2 = { ...mappingFor(r2), matchedAtMs: 9_000 };
+  const rec: Recording = { ...recording('r-1', [r1, r2]), mappings: [m1, m2] };
+  const projected = projectAppliedEntries(
+    [
+      applied(
+        tombstoneEntry('recordingMapping', mappingRecordId('r-1', m1)),
+      ),
+    ],
+    projInput({ recordings: [rec] }),
+  );
+  const merged = projected.batch.recordingsMerge?.([rec]) ?? [];
+  assertEqual(merged.length, 1, 'recording stays');
+  const kept = merged[0]?.mappings ?? [];
+  assertEqual(kept.length, 1, 'other mapping survives the tombstone');
+  assertEqual(kept[0]?.matchedAtMs, 9_000);
+}
+
+// An entitySourceRef field entry REPLACES the (entityId, provider)
+// row — never appends a duplicate (Devin Review #46).
+function testEntityRefUpdateReplaces(): void {
+  const current = projInput({
+    entities: [entity('al-1', 'album')],
+    entitySourceRefs: [entityRef('al-1', 'itunes', 'old-id')],
+  });
+  const projected = projectAppliedEntries(
+    [
+      applied(
+        fieldEntry(
+          'entitySourceRef',
+          entitySourceRefRecordId('al-1', 'itunes'),
+          'ref',
+          { provider: 'itunes', kind: 'album', id: 'new-id' },
+        ),
+      ),
+    ],
+    current,
+  );
+  const rows = projected.batch.entitySourceRefs ?? [];
+  assertEqual(rows.length, 1, 'same-key update replaces, not duplicates');
+  assertEqual(rows[0]?.ref.id, 'new-id');
+}
+
+// A playlistEntry tombstone deletes the existing row (Devin Review
+// #46 — the existing-row loop must not re-push it).
+function testEntryTombstoneRemoves(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playlists: [playlist('pl-1')],
+    playlistEntries: [entryRow('pe-9', 'pl-1', 'r-1')],
+  });
+  const projected = projectAppliedEntries(
+    [applied(tombstoneEntry('playlistEntry', 'pe-9'))],
+    current,
+  );
+  assertDeepEqual(
+    projected.batch.playlistEntries,
+    [],
+    'entry tombstone removes the row',
+  );
+}
+
 export function run(): void {
   testRecordIdDecode();
   testRecordingUpsertWrites();
@@ -1066,4 +1137,7 @@ export function run(): void {
   testInboundSupersededAndInvalid();
   testInboundFieldMergeOnExisting();
   testInboundIdempotentReplay();
+  testMappingTombstoneKeepsOthers();
+  testEntityRefUpdateReplaces();
+  testEntryTombstoneRemoves();
 }

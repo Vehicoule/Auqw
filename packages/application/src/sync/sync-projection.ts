@@ -1099,9 +1099,11 @@ export function projectAppliedEntries(
     let next = mappings.filter((m) =>
       plan.mapRemoves.every(
         (r) =>
-          sameRef(r.ref, m.ref) &&
-          r.status === m.status &&
-          r.matchedAtMs === m.matchedAtMs,
+          !(
+            sameRef(r.ref, m.ref) &&
+            r.status === m.status &&
+            r.matchedAtMs === m.matchedAtMs
+          ),
       ),
     );
     for (const mapping of plan.mapAdds) {
@@ -1351,6 +1353,14 @@ export function projectAppliedEntries(
       skipped.push({ kind: 'entitySourceRef', reason: 'invalid' });
       continue;
     }
+    // (entityId, provider) is the row's identity — an update replaces
+    // the stale same-key row, never appends a second one.
+    const stale = nextEntityRefs.findIndex(
+      (r) => r.entityId === ref.entityId && r.provider === ref.provider,
+    );
+    if (stale >= 0) {
+      nextEntityRefs.splice(stale, 1);
+    }
     nextEntityRefs.push(ref);
   }
 
@@ -1532,8 +1542,11 @@ export function projectAppliedEntries(
       continue;
     }
     const fold = foldOf('playlistEntry', entry.entryId);
-    if (fold === undefined || fold.tombstoned) {
+    if (fold === undefined) {
       nextEntries.push(entry);
+      continue;
+    }
+    if (fold.tombstoned) {
       continue;
     }
     const candidate = buildEntry(fold, entry);

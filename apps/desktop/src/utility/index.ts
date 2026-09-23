@@ -193,6 +193,9 @@ if (port === null) {
                 () => undefined,
                 () => undefined,
               ),
+          // Outbox overflow spills beside the durable log — renderer-
+          // side projection survives the queue's memory bound.
+          appliedSpillPath: `${userData}/sync-applied.jsonl`,
         }),
     advertise:
       process.env['AUQW_SYNC_NO_MDNS'] === '1'

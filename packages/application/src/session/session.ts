@@ -1099,6 +1099,9 @@ export class Session {
           source,
         );
         if (!loaded.ok) {
+          // The transport already consumed these outcomes — retain
+          // them for the next drain exactly like a commit failure.
+          r.syncPending = boundSyncPending([...r.syncPending, ...outcomes]);
           r.persistenceError = loaded.error;
           this.#publish();
           return err(loaded.error);
@@ -1108,6 +1111,7 @@ export class Session {
             'invalid-response',
             'persisted state failed validation',
           );
+          r.syncPending = boundSyncPending([...r.syncPending, ...outcomes]);
           r.persistenceError = error;
           this.#publish();
           return err(error);

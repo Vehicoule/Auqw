@@ -1,4 +1,5 @@
 import { randomInt } from 'node:crypto';
+import { appendFile, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import {
@@ -133,6 +134,15 @@ export type SyncServiceDeps = {
    * reaches the same queue.
    */
   readonly notifyApplied?: (pending: number) => unknown;
+  /**
+   * Durability seam for the applied outbox: when set, outcomes that
+   * overflow the in-memory cap append to a JSONL spill file here
+   * (same durability horizon as the sync log) and the drain serves
+   * them before the memory queue — nothing is lost while the
+   * renderer is booting or dead. Absent: overflow drops oldest and
+   * sets `dropped`, honest but lossy.
+   */
+  readonly appliedSpillPath?: string;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
@@ -449,14 +459,35 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   /* ------------- applied-outcome outbox (renderer drain) ---------- */
   /**
    * Every successful applyDelta's 'applied' merge outcomes queue
-   * here until the renderer pulls `sync:drainApplied`. Flat FIFO,
-   * drop-oldest with a `dropped` flag so a deep queue degrades to a
-   * typed loss report instead of unbounded memory — the renderer's
-   * domain db is reconcilable by re-importing the peer's delta.
+   * here until the renderer pulls `sync:drainApplied`. Flat FIFO
+   * bounded in memory; overflow spills to `appliedSpillPath` (JSONL,
+   * same horizon as the sync log) so a deep queue loses nothing —
+   * the drain serves spill first, and a spill IO failure degrades to
+   * the honest `dropped` flag. Volatile mode (no path) keeps the
+   * drop-oldest bound for tests.
    */
   const APPLIED_OUTBOX_MAX = 4_096;
   const appliedOutbox: unknown[] = [];
   let appliedDropped = false;
+  /** Serializes spill appends against drain rewrites. */
+  let spillTail: Promise<unknown> = Promise.resolve();
+
+  function spillOutcomes(spilled: readonly unknown[]): void {
+    if (spilled.length === 0) {
+      return;
+    }
+    const path = deps.appliedSpillPath;
+    if (path === undefined) {
+      appliedDropped = true;
+      return;
+    }
+    const lines = `${spilled.map((o) => JSON.stringify(o)).join('\n')}\n`;
+    spillTail = spillTail
+      .then(() => appendFile(path, lines))
+      .catch(() => {
+        appliedDropped = true;
+      });
+  }
 
   function recordApplied(result: unknown): void {
     if (!isRecord(result) || !Array.isArray(result['outcomes'])) {
@@ -475,8 +506,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       pushed += 1;
     }
     if (appliedOutbox.length > APPLIED_OUTBOX_MAX) {
-      appliedOutbox.splice(0, appliedOutbox.length - APPLIED_OUTBOX_MAX);
-      appliedDropped = true;
+      spillOutcomes(
+        appliedOutbox.splice(0, appliedOutbox.length - APPLIED_OUTBOX_MAX),
+      );
     }
     if (pushed > 0) {
       try {
@@ -492,24 +524,77 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   /**
    * One byte-bounded pull: pack outcomes until the encoded payload
    * would approach `MAX_SYNC_DOC_BYTES`, leaving headroom for the
-   * envelope keys. Oversized single entries drop with the flag set —
-   * a queue entry that can never serialize is exactly what the bound
-   * exists for.
+   * envelope keys. Spill lines serve before the memory queue (FIFO
+   * across both); oversized or unparsable entries drop with the flag
+   * set — a queue entry that can never serialize is exactly what the
+   * bound exists for.
    */
-  function drainAppliedChunk(): {
+  async function drainAppliedChunk(): Promise<{
     readonly outcomes: readonly unknown[];
     readonly dropped: boolean;
     readonly remaining: number;
-  } {
+  }> {
     const budget = MAX_SYNC_DOC_BYTES - 16_384;
     const chunk: unknown[] = [];
     let bytes = 2; // '[]'
+    const sizeOf = (next: unknown): number => {
+      try {
+        return JSON.stringify(next).length + 1;
+      } catch {
+        return -1;
+      }
+    };
+
+    // Flush pending appends before reading — a drain can race a
+    // spill write still in `spillTail`.
+    await spillTail.catch(() => undefined);
+    const path = deps.appliedSpillPath;
+    let spilledBacklog = 0;
+    if (path !== undefined) {
+      const raw = await readFile(path, 'utf8').catch(
+        (e: NodeJS.ErrnoException) =>
+          e.code === 'ENOENT' ? '' : Promise.reject(e),
+      );
+      const lines = raw.split('\n').filter((l) => l.length > 0);
+      const keep: string[] = [];
+      for (const line of lines) {
+        if (bytes + line.length + 1 > budget) {
+          keep.push(line);
+          continue;
+        }
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (isJsonValue(parsed)) {
+            bytes += line.length + 1;
+            chunk.push(parsed);
+          } else {
+            appliedDropped = true;
+          }
+        } catch {
+          // Torn tail line (killed mid-append) — drop it, keep the rest.
+          appliedDropped = true;
+        }
+      }
+      spilledBacklog = keep.length;
+      // Rewrite only when the consumed share changes the file — an
+      // untouched read pays no write.
+      if (lines.length !== keep.length) {
+        const tmp = `${path}.tmp`;
+        const rewritten = keep.length > 0 ? `${keep.join('\n')}\n` : '';
+        await writeFile(tmp, rewritten)
+          .then(() => rename(tmp, path))
+          .catch(() => {
+            // Consume nothing we couldn't persist back — replay the
+            // file next drain rather than lose the tail.
+            appliedDropped = true;
+          });
+      }
+    }
+
     while (appliedOutbox.length > 0) {
       const next = appliedOutbox[0];
-      let size = 0;
-      try {
-        size = JSON.stringify(next).length + 1;
-      } catch {
+      const size = sizeOf(next);
+      if (size < 0) {
         appliedOutbox.shift();
         appliedDropped = true;
         continue;
@@ -528,7 +613,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     const dropped = appliedDropped;
     appliedDropped = false;
-    return { outcomes: chunk, dropped, remaining: appliedOutbox.length };
+    return {
+      outcomes: chunk,
+      dropped,
+      remaining: spilledBacklog + appliedOutbox.length,
+    };
   }
 
   /**
@@ -1360,7 +1449,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
     'sync:drainApplied': async () =>
       checked(isSyncDrainAppliedResult, 'sync:drainApplied')(
-        drainAppliedChunk(),
+        await drainAppliedChunk(),
       ),
   };
 

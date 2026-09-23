@@ -4,6 +4,7 @@ import { run as runRuntime } from './adapters/runtime.test.ts';
 import { run as runRangeDownload } from './adapters/range-download.test.ts';
 import { run as runConnectivity } from './adapters/expo-connectivity.test.ts';
 import { run as runExpoSync } from './adapters/expo-sync.test.ts';
+import { runSyncEmit } from './session/sync-emit.test.ts';
 import { devRoute } from './dev-routes.ts';
 
 assertEqual(devRoute('auqw://gallery'), 'gallery');
@@ -39,6 +40,7 @@ await runRuntime();
 await runRangeDownload();
 await runConnectivity();
 await runExpoSync();
+await runSyncEmit();
 console.log('mobile shell tests passed');
 
 function assertEqual<T>(actual: T, expected: T): void {

@@ -5,6 +5,9 @@ import {
 } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assert,
   assertDeepEqual,
@@ -2312,6 +2315,117 @@ export async function run(): Promise<void> {
       assertEqual(total, 4_096, 'outbox kept only the capped tail');
     } finally {
       await service.close();
+    }
+  }
+
+  // —— Durable spill: overflow goes to sync-applied.jsonl, so the ——
+  // —— drain serves ALL outcomes and a fresh service inherits the ——
+  // —— spilled backlog across a restart (Devin Review #46).       ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const desk = await testUtilityEngine('dsk-spill');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const phone = await testUtilityEngine('phone-spill');
+      // 6_500 applied outcomes: 4_096 fit the volatile outbox, the
+      // ~2_400 overflow spills to the JSONL file — more than one
+      // drain page's byte budget (~1 MB ≈ ~1_700 outcomes), so a
+      // file remainder survives for the restarted service.
+      const pad = 'x'.repeat(480);
+      let since = '';
+      for (let i = 0; i < 6_500; i += 500) {
+        for (let j = i; j < i + 500 && j < 6_500; j += 256) {
+          const batch = Array.from(
+            { length: Math.min(256, 6_500 - j) },
+            (_, k) => writeName(`pl-s${j + k}`, `${pad}-${j + k}`),
+          );
+          const wrote = await phone.localChanges(batch, undefined);
+          assert(wrote.ok, 'bulk localChanges failed');
+        }
+        const page = await phone.port.exportDelta(since, undefined);
+        assert(page.ok);
+        if (!page.ok) {
+          return;
+        }
+        const imported = await invokeHandler(
+          service,
+          'sync:importDelta',
+          {
+            delta: JSON.parse(JSON.stringify(page.value)),
+          },
+        );
+        assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+        since = JSON.stringify((page.value as SyncDelta).cursor);
+      }
+
+      const spilledFile = await stat(spill).catch(() => null);
+      assert(spilledFile !== null, 'spill file written');
+
+      // One drain on the first service: byte budget pages it and
+      // leaves a file remainder for the restarted service.
+      const first = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(first.ok, 'first drain failed');
+      const firstPage = first.ok
+        ? (first.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          })
+        : null;
+      assert(firstPage !== null);
+      assert(
+        firstPage.outcomes.length > 0,
+        'first drain served outcomes',
+      );
+      assert(firstPage.remaining > 0, 'backlog remains after page');
+      await service.close();
+
+      // A fresh service on the same spill path inherits the backlog —
+      // its own volatile outbox is empty, so anything it serves came
+      // from the durable file.
+      const restarted = await startService({
+        engine: desk.port,
+        appliedSpillPath: spill,
+      });
+      try {
+        let rest = 0;
+        let restDropped = false;
+        for (;;) {
+          const drained = await invokeHandler(
+            restarted.service,
+            'sync:drainApplied',
+            undefined,
+          );
+          assert(drained.ok, 'restarted drain failed');
+          if (!drained.ok) {
+            return;
+          }
+          const page = drained.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          };
+          rest += page.outcomes.length;
+          restDropped ||= page.dropped;
+          if (page.remaining === 0) {
+            break;
+          }
+        }
+        assert(rest > 0, 'restarted service drained spilled backlog');
+        assert(!restDropped, 'durable path reports nothing dropped');
+      } finally {
+        await restarted.service.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   }
 }
