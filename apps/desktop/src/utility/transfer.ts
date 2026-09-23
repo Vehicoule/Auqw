@@ -455,25 +455,29 @@ export function createTransferService(
         // refused by `isBareName`, so no public destination can
         // collide with it.
         const backupAbs = join(dir(), `${sink.destPath}${REPLACE_SUFFIX}`);
-        const incumbent = await stat(sink.destAbs).catch(() => null);
-        if (incumbent === null) {
-          // No live destination — a stranded backup is whatever a
-          // crashed publish parked, and the verified `.part` outranks
-          // it. Publish directly; no incumbent needs preserving.
-          await rm(backupAbs, { force: true });
-          await rename(sink.partAbs, sink.destAbs);
-        } else {
-          // A leftover backup beside a live destination can only be
-          // the stale half of a crashed publish — drop it, then swap.
-          await rm(backupAbs, { force: true });
-          await rename(sink.destAbs, backupAbs);
-          try {
+        const incumbent = await stat(sink.destAbs).catch(absentOrThrow);
+        try {
+          if (incumbent === null) {
+            // No live destination — a stranded backup is whatever a
+            // crashed publish parked, and the verified `.part` outranks
+            // it. Publish directly; no incumbent needs preserving.
+            await rm(backupAbs, { force: true });
             await rename(sink.partAbs, sink.destAbs);
-          } catch (thrown) {
-            await rename(backupAbs, sink.destAbs).catch(() => undefined);
-            asIo('transfer finalize rename failed', thrown);
+          } else {
+            // A leftover backup beside a live destination can only be
+            // the stale half of a crashed publish — drop it, then swap.
+            await rm(backupAbs, { force: true });
+            await rename(sink.destAbs, backupAbs);
+            try {
+              await rename(sink.partAbs, sink.destAbs);
+            } catch (thrown) {
+              await rename(backupAbs, sink.destAbs).catch(() => undefined);
+              throw thrown;
+            }
+            await rm(backupAbs, { force: true });
           }
-          await rm(backupAbs, { force: true });
+        } catch (thrown) {
+          asIo('transfer finalize rename failed', thrown);
         }
       }
       return { digest };
