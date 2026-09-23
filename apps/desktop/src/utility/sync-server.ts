@@ -539,7 +539,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     let bytes = 2; // '[]'
     const sizeOf = (next: unknown): number => {
       try {
-        return JSON.stringify(next).length + 1;
+        // The contract validates the RESULT in UTF-8 bytes — string
+        // length undercounts multi-byte metadata, and an over-budget
+        // chunk is rejected AFTER these entries were dequeued.
+        return Buffer.byteLength(JSON.stringify(next), 'utf8') + 1;
       } catch {
         return -1;
       }
@@ -563,7 +566,8 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           if (line === undefined) {
             break;
           }
-          if (bytes + line.length + 1 > budget) {
+          const lineBytes = Buffer.byteLength(line, 'utf8');
+          if (bytes + lineBytes + 1 > budget) {
             // Stop at the first non-fitting line and keep the whole
             // suffix — spill order IS merge order, so a smaller
             // later outcome must not leapfrog it across pages.
@@ -573,7 +577,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           try {
             const parsed: unknown = JSON.parse(line);
             if (isJsonValue(parsed)) {
-              bytes += line.length + 1;
+              bytes += lineBytes + 1;
               chunk.push(parsed);
             } else {
               appliedDropped = true;
