@@ -1,7 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
-  copyFile,
   mkdir,
   open,
   readdir,
@@ -93,11 +92,9 @@ type Sink = {
 const DEFAULT_MAX_SINKS = 4;
 const DEFAULT_MAX_WAITERS = 32;
 const PART_SUFFIX = '.part';
-const RECONCILE_SUFFIX = '.reconcile.part';
 /** Reserved finalize-internal namespace: the parked incumbent of an
  * in-flight destination replace. */
 const REPLACE_SUFFIX = '.replace';
-const CHUNK = 1024 * 1024;
 /** Orphans must be older than this to sweep — a just-minted `.part` is not an orphan. */
 const ORPHAN_MIN_AGE_MS = 60_000;
 const RESUMABLE_STATES =
@@ -306,13 +303,13 @@ export function createTransferService(
 
   /**
    * Resume handling mirrors the expo adapter: a `.part` longer than the
-   * resume point gets its kept prefix copied to a `.reconcile` sibling
-   * and moved back over (there is no truncate on an appending handle);
-   * shorter or missing is an invalid-response per the port contract.
+   * resume point is truncated in place through a fresh `r+` handle —
+   * atomic, keeps the prefix, and sidesteps rename-over-existing, which
+   * Windows refuses; shorter or missing is an invalid-response per the
+   * port contract.
    */
   async function reconcilePart(
     partAbs: string,
-    destPath: string,
     resumeAtBytes: number,
   ): Promise<void> {
     const part = await stat(partAbs).catch(absentOrThrow);
@@ -332,40 +329,12 @@ export function createTransferService(
       if (part.size === resumeAtBytes) {
         return;
       }
-      const reconcileAbs = join(
-        dir(),
-        `${destPath}.reconcile${PART_SUFFIX}`,
-      );
-      const src = await open(partAbs, 'r');
+      const trunc = await open(partAbs, 'r+');
       try {
-        const dst = await open(reconcileAbs, 'w');
-        try {
-          let remaining = resumeAtBytes;
-          let position = 0;
-          const buf = Buffer.alloc(Math.min(CHUNK, remaining));
-          while (remaining > 0) {
-            const take = Math.min(remaining, buf.length);
-            const { bytesRead } = await src.read(buf, 0, take, position);
-            if (bytesRead === 0) {
-              break;
-            }
-            await writeAll(dst, buf, 0, bytesRead);
-            remaining -= bytesRead;
-            position += bytesRead;
-          }
-          if (remaining > 0) {
-            throw shellError(
-              'invalid-response',
-              'stored partial shrank during reconcile',
-            );
-          }
-        } finally {
-          await dst.close();
-        }
+        await trunc.truncate(resumeAtBytes);
       } finally {
-        await src.close();
+        await trunc.close();
       }
-      await rename(reconcileAbs, partAbs);
       return;
     }
     await rm(partAbs, { force: true });
@@ -402,7 +371,7 @@ export function createTransferService(
       acquired = true;
       await ensureDir();
       const partAbs = join(dir(), `${destPath}${PART_SUFFIX}`);
-      await reconcilePart(partAbs, destPath, resumeAtBytes);
+      await reconcilePart(partAbs, resumeAtBytes);
       const sink: Sink = {
         id: randomUUID(),
         destPath,
