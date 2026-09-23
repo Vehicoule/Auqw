@@ -24,6 +24,7 @@ import {
   mappingRecordId,
   SETTINGS_RECORD_ID,
   sourceRefRecordId,
+  syncFieldRule,
   TOMBSTONE_FIELD,
 } from './sync-engine.ts';
 import type {
@@ -1568,6 +1569,98 @@ function testUnsyncedWrites(): void {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Review #46 round-10 — emitted writes satisfy their field rules      */
+/* ------------------------------------------------------------------ */
+
+// Optional-domain fields arrive `undefined` (Settings lyricsProvider/
+// radioProvider, Recording.isrc) but the wire accepts only `null` —
+// an undefined value fails `localChangeBatch` validation, and the
+// whole batch would wedge behind it at the emit-queue head.
+function testEmissionNeverEmitsUndefined(): void {
+  // SETTINGS has neither optional provider key: unsetting one emits
+  // `null` (the wire's absent), never `undefined` (a rule failure).
+  const prev = { ...SETTINGS, lyricsProvider: 'itunes' } as Settings;
+  const next = { ...SETTINGS } as Settings;
+  const writes = settingsWrites(prev, next);
+  assert(writes.length > 0, 'settings diff emits');
+  const lyr = writes.find(
+    (w) => !('tombstone' in w) && w.field === 'lyricsProvider',
+  );
+  assert(
+    lyr !== undefined && !('tombstone' in lyr) && lyr.value === null,
+    'unset emits null',
+  );
+  for (const w of writes) {
+    if ('tombstone' in w) {
+      continue;
+    }
+    const rule = syncFieldRule('settings', w.field);
+    assert(rule !== undefined, 'settings field is whitelisted');
+    assert(
+      rule.valid(w.value),
+      `settings.${w.field} value satisfies its rule (got ${String(w.value)})`,
+    );
+  }
+
+  // Boot-diff: the same emission from `unsyncedWrites` — every write,
+  // of every kind, must validate.
+  const input = emitInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+  });
+  for (const w of unsyncedWrites(input, new Map())) {
+    if ('tombstone' in w) {
+      continue;
+    }
+    const rule = syncFieldRule(w.kind, w.field);
+    assert(rule !== undefined, `${w.kind}.${w.field} is whitelisted`);
+    assert(
+      rule.valid(w.value),
+      `${w.kind}.${w.field} value satisfies its rule (got ${String(w.value)})`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Review #46 round-10 — merge dead-set is the same set dependents     */
+/* were pruned by: a fresh ref can't preserve a 'delete' plan          */
+/* ------------------------------------------------------------------ */
+
+// A remote ref tombstone leaves r1 with no snapshot refs → 'delete'
+// in `dead`. A concurrent local ref L inside the transaction does NOT
+// resurrect it — the merge honors the same 'delete' set the
+// dependent sections were pruned by, so a surviving recording can
+// never be left with deleted dependents.
+function testMergeDeadSetConsistent(): void {
+  const refA = ref('itunes', 't-1');
+  const recA = recording('r-1', [refA]);
+  const current = projInput({
+    recordings: [recA],
+    likes: [{ entityKind: 'track', targetId: 'r-1', likedAtMs: 1 }],
+  });
+  const outcomes = [
+    applied(tombstoneEntry('recordingSourceRef', sourceRefRecordId('r-1', refA))),
+  ];
+  const projected = projectAppliedEntries(outcomes, current);
+  // Snapshot classification: r1 dies — dependents prune with it.
+  assertEqual(
+    (projected.batch.likes ?? []).length,
+    0,
+    'dead recording\'s like drops',
+  );
+  // The transaction re-read finds r1 carrying a concurrent local ref
+  // — the merge still honors 'delete' rather than reviving it, so
+  // merged recordings stay coherent with the pruned dependents.
+  const recL = recording('r-1', [refA, ref('local', 'file-7')]);
+  const merged =
+    projected.batch.recordingsMerge?.([recL]) ?? ([] as Recording[]);
+  assertEqual(
+    merged.length,
+    0,
+    'a stale-delete plan cannot preserve the row its dependents lost',
+  );
+}
+
 export function run(): void {
   testRecordIdDecode();
   testRecordingUpsertWrites();
@@ -1599,4 +1692,6 @@ export function run(): void {
   testProjectMaterialized();
   testProjectMaterializedPending();
   testEntryTombstoneRemoves();
+  testEmissionNeverEmitsUndefined();
+  testMergeDeadSetConsistent();
 }

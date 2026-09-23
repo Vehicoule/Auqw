@@ -257,7 +257,12 @@ function fieldWrite(
   field: string,
   value: unknown,
 ): LocalWrite {
-  return { kind, recordId, field, value };
+  // Domain optionals arrive `undefined` (Settings.lyricsProvider,
+  // Recording.isrc, ...) but the wire accepts `null` for absent —
+  // `undefined` fails the field rule, and `localChangeBatch`
+  // validates the whole batch, so one undefined write wedges every
+  // sibling emission behind it (Review #46 round-10).
+  return { kind, recordId, field, value: value === undefined ? null : value };
 }
 
 function tombstoneWrite(kind: SyncRecordKind, recordId: string): LocalWrite {
@@ -837,12 +842,9 @@ export function unsyncedWrites(
   const settingsFields = synced.get(settingsKey);
   if (settingsFields === undefined || Object.keys(settingsFields).length === 0) {
     for (const field of SETTINGS_SYNC_FIELDS) {
-      writes.push({
-        kind: 'settings',
-        recordId: SETTINGS_RECORD_ID,
-        field,
-        value: input.settings[field],
-      });
+      writes.push(
+        fieldWrite('settings', SETTINGS_RECORD_ID, field, input.settings[field]),
+      );
     }
   } else {
     for (const field of SETTINGS_SYNC_FIELDS) {

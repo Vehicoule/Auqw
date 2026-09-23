@@ -1813,6 +1813,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       for (const session of [...sessions]) {
         killSession(session);
       }
+      // Sessions are dead — no handler can queue new spill work, so
+      // settle the tail before tearing down: a mid-flight drain's
+      // offset write or compaction must not survive close()
+      // (Review #46 round-10).
+      await spillTail.then(
+        () => undefined,
+        () => undefined,
+      );
       pairing.expire();
       if (advertiser !== null) {
         try {

@@ -2731,4 +2731,40 @@ export async function run(): Promise<void> {
       await rm(dir, { recursive: true, force: true });
     }
   }
+
+  // —— close() must settle the spill tail: a drain already on the ——
+  // —— chain finishes its offset advance before close() resolves   ——
+  // —— (Devin Review #46 round-10).                                ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-close-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const poison = JSON.stringify({ pad: 'p'.repeat(1_100_000) });
+    await writeFile(spill, `${poison}\n{"k":"a"}\n`);
+
+    const desk = await testUtilityEngine('dsk-close');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const drainPromise = invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      // close() while the drain's tail work may still be queued —
+      // the poison self-advance + compaction must land before
+      // close() resolves.
+      await service.close();
+      await drainPromise.catch(() => undefined);
+      const settled = await stat(spill);
+      assertEqual(
+        settled.size,
+        10,
+        'in-flight spill work settled before close resolved',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 }
