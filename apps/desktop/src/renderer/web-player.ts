@@ -249,6 +249,27 @@ export function createWebPlayerPort(deps: {
     }
   }
 
+  /**
+   * Handles a prepared outcome reports as superseded/pruned — dead
+   * registry-side, so every local route that could still aim a mime
+   * hint, attach, or pending play at them is dropped. `current` is
+   * left alone: it is only ever superseded by the very op installing
+   * its replacement, and stale-identity reporting needs the entry.
+   */
+  function dropSuperseded(handles: readonly string[] | undefined): void {
+    if (handles === undefined) {
+      return;
+    }
+    for (const handle of handles) {
+      handleMimes.delete(handle);
+      abortPendingAttaches(handle);
+      dropMse(handle);
+      if (pendingPlayGens.delete(handle)) {
+        opGen++;
+      }
+    }
+  }
+
   function installMse(handle: string, source: MseSource | null): void {
     activeMse = source === null ? null : { handle, source };
     // Post-attach pump/SourceBuffer death — the element's own error
@@ -490,8 +511,7 @@ export function createWebPlayerPort(deps: {
         // A stale op's failure is not the live attempt's — suppress it
         // rather than label the stream the session already moved to.
         if (gen === opGen && projection === p) {
-          const kind =
-            outcome.type === 'superseded' ? 'superseded' : toKind(outcome.kind);
+          const kind = toKind(outcome.kind);
           status(
             'failed',
             appError(kind, outcome.message ?? 'successor prepare failed'),
@@ -500,6 +520,10 @@ export function createWebPlayerPort(deps: {
         return;
       }
       handle = outcome.stream.handle;
+      // Sessions this prepare superseded are dead registry-side —
+      // drop every local route aimed at them before they can serve
+      // a later attach.
+      dropSuperseded(outcome.superseded);
       noteMime(handle, outcome.stream.mime);
       const first = await attachUrl(handle, outcome.stream.mime);
       pendingAttaches.set(gen, { handle, abort: first.abort });
@@ -831,6 +855,7 @@ export function createWebPlayerPort(deps: {
             outcome.stream !== undefined
           ) {
             const prepared = toPreparedStream(outcome.stream);
+            dropSuperseded(outcome.superseded);
             noteMime(prepared.handle, prepared.mime);
             emit({
               type: 'prepare',
@@ -843,10 +868,7 @@ export function createWebPlayerPort(deps: {
               },
             });
           } else {
-            const kind =
-              outcome.type === 'superseded'
-                ? 'superseded'
-                : toKind(outcome.kind);
+            const kind = toKind(outcome.kind);
             emit({
               type: 'prepare',
               requestId,

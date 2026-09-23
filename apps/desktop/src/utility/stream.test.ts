@@ -9,9 +9,11 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
       return 'id';
     },
     async startPrepare() {
+      // The real napi outcome always carries `superseded` as an array.
       return {
         type: 'prepared',
         stream: { handle: 'h1', mime: 'audio/mp4' },
+        superseded: [],
       };
     },
     async startRequest() {
