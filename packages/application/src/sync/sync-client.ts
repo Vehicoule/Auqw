@@ -994,7 +994,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           }
         }
       }
-      return enqueue(session, () => syncRound(session, peer, signal));
+      const outcome = await enqueue(session, () =>
+        syncRound(session, peer, signal),
+      );
+      if (!session.closed) {
+        // A dead session already reported its cause through
+        // killSession. On a live one the round's verdict is the
+        // lastError — a failed round must not read as connected.
+        setView(
+          fp,
+          outcome.ok
+            ? { state: 'open' }
+            : { state: 'open', lastError: outcome.error },
+        );
+      }
+      return outcome;
     },
 
     async refreshPeer(fp, signal) {

@@ -199,18 +199,27 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      try {
-        await deleteItemAsync(peerKey(fp));
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
+      // Index before the record: a failed delete then leaves an
+      // unreferenced record (inert — the index drives listing) rather
+      // than a stale index entry every peerList reads forever.
       const indexRead = await readJsonStore(PEER_INDEX_KEY);
       if (!indexRead.ok) {
         return indexRead;
       }
       const fps = isFpList(indexRead.value) ? indexRead.value : [];
-      const next = fps.filter((f) => f !== fp);
-      return writeJsonStore(PEER_INDEX_KEY, next);
+      const wrote = await writeJsonStore(
+        PEER_INDEX_KEY,
+        fps.filter((f) => f !== fp),
+      );
+      if (!wrote.ok) {
+        return wrote;
+      }
+      try {
+        await deleteItemAsync(peerKey(fp));
+      } catch (thrown) {
+        return err(nativeError(thrown));
+      }
+      return ok(undefined);
     },
   };
 }

@@ -1,5 +1,5 @@
 import { CancellationSource } from '../cancellation.ts';
-import { appError, ok, type Result } from '../errors.ts';
+import { appError, err, ok, type Result } from '../errors.ts';
 import type {
   SyncClientCrypto,
   SyncClientHandshake,
@@ -169,26 +169,36 @@ function fakeCrypto(opts: { identity?: SyncIdentity } = {}): SyncClientCrypto {
 
 /* ---------------------------- fake keys ---------------------------- */
 
-function fakeKeys(): SyncClientKeys & { peers: Map<string, SyncPeer> } {
+function fakeKeys(): SyncClientKeys & {
+  peers: Map<string, SyncPeer>;
+  failPeerPut: boolean;
+} {
   const peers = new Map<string, SyncPeer>();
   let identity: { deviceId: string; identity: SyncIdentity } | null = null;
-  return {
+  const keys = {
     peers,
+    failPeerPut: false,
     identityGet: () => Promise.resolve(ok(identity)),
-    identitySet: (record) => {
+    identitySet: (record: { deviceId: string; identity: SyncIdentity }) => {
       identity = record;
       return Promise.resolve(ok(undefined));
     },
     peerList: () => Promise.resolve(ok([...peers.values()])),
-    peerPut: (peer) => {
+    peerPut: (peer: SyncPeer) => {
+      if (keys.failPeerPut) {
+        return Promise.resolve(
+          err(appError('unavailable', 'sync: custody write failed')),
+        );
+      }
       peers.set(peer.fp, peer);
       return Promise.resolve(ok(undefined));
     },
-    peerDelete: (fp) => {
+    peerDelete: (fp: string) => {
       peers.delete(fp);
       return Promise.resolve(ok(undefined));
     },
   };
+  return keys;
 }
 
 /* -------------------------- scripted server ------------------------ */
@@ -751,6 +761,35 @@ async function closeDisposesSocketPort(): Promise<void> {
   assertEqual(portCloses(), 1, 'socket port released');
 }
 
+// 17. A failed round on a live session records lastError on the view —
+// the UI must not read "connected" over a custody-write failure, and a
+// later success clears it.
+async function failedRoundSurfacesLastError(): Promise<void> {
+  const { client, keys } = await rig();
+  keys.peers.set(SERVER_FP, {
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  keys.failPeerPut = true;
+  const failed = await client.syncNow(SERVER_FP);
+  assert(!failed.ok && failed.error.kind === 'unavailable');
+  const view = client.status().peers[0];
+  assert(view !== undefined && view.state === 'open', 'session survived');
+  assertEqual(view.lastError?.kind, 'unavailable', 'lastError recorded');
+  keys.failPeerPut = false;
+  const retried = await client.syncNow(SERVER_FP);
+  assert(retried.ok, 'retry converges');
+  assert(
+    client.status().peers[0]?.lastError === undefined,
+    'success clears lastError',
+  );
+  await client.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -768,6 +807,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentSyncSharesOneDial', concurrentSyncSharesOneDial],
   ['timeoutKillsSessionAndRedials', timeoutKillsSessionAndRedials],
   ['closeDisposesSocketPort', closeDisposesSocketPort],
+  ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
 ];
 
 export async function run(): Promise<void> {
