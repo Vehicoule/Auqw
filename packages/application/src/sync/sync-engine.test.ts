@@ -389,8 +389,9 @@ async function tombstoneRules(): Promise<void> {
   // Reordered delivery: tombstone first, then the older write.
   await mustApply(b.engine, delta([tomb]));
   await mustApply(b.engine, delta([write]));
-  // The older write stays dead.
-  assertEqual(materialized(b.engine, 'recording', 'r1'), undefined);
+  // The older write stays dead — materialize() reports the winning
+  // tombstone as an empty-field record ('synced then deleted').
+  assertDeepEqual(materialized(b.engine, 'recording', 'r1'), {});
   // Its value is preserved in divergence.
   const rows = b.engine.divergenceHistory();
   assertEqual(rows.length, 1);
@@ -413,14 +414,14 @@ async function tombstoneRules(): Promise<void> {
     b.engine,
     delta([rawTombstone('recording', 'r2', { l: 6, c: 0 })]),
   );
-  assertEqual(materialized(b.engine, 'recording', 'r2'), undefined);
+  assertDeepEqual(materialized(b.engine, 'recording', 'r2'), {});
 
   // A still-newer tombstone beats the field that outlived the first.
   await mustApply(
     b.engine,
     delta([rawTombstone('recording', 'r1', { l: 40, c: 0 })]),
   );
-  assertEqual(materialized(b.engine, 'recording', 'r1'), undefined);
+  assertDeepEqual(materialized(b.engine, 'recording', 'r1'), {});
 }
 
 async function whitelistOnApply(): Promise<void> {
@@ -670,7 +671,7 @@ async function tombstoneRestore(): Promise<void> {
   assert(restored.ok);
   assertEqual(restored.value.outcome.type, 'applied');
   // Fresh delete stamp wins: the record stays deleted.
-  assertEqual(materialized(a.engine, 'recording', 'r1'), undefined);
+  assertDeepEqual(materialized(a.engine, 'recording', 'r1'), {});
 }
 
 async function hydration(): Promise<void> {
@@ -1176,6 +1177,19 @@ function expectedMaterialize(
     string,
     { kind: string; recordId: string; fields: Record<string, unknown> }
   >();
+  // materialize() reports every record the merge ever saw — a winning
+  // tombstone leaves an empty-field row that means 'synced then
+  // deleted', distinct from a record that never arrived.
+  for (const e of entries) {
+    const key = recordKey(e);
+    if (!byRecord.has(key)) {
+      byRecord.set(key, {
+        kind: e.kind,
+        recordId: e.recordId,
+        fields: {},
+      });
+    }
+  }
   for (const parts of slotWinners.values()) {
     const first = parts[0];
     if (first === undefined) {
@@ -1510,6 +1524,39 @@ async function sumWriteAssertsAggregate(): Promise<void> {
     value: 2,
   });
   assertEqual(low.value, 0, 'below remote share clamps to 0');
+}
+
+// Review #46 round-4: materialize() includes tombstoned records as
+// empty-field rows — a deletion must be distinguishable from a record
+// that was never synced (absent entirely), or the materialized rebuild
+// path keeps stale rows forever.
+async function materializeIncludesTombstones(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  const write = await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r-del',
+    field: 'title',
+    value: 'Gone',
+  });
+  const tomb = rawTombstone('recording', 'r-del', {
+    l: write.hlc.l + 1,
+    c: 0,
+  });
+  await mustApply(b.engine, delta([write, tomb]));
+  const view = b.engine.materialize();
+  const deleted = view.find(
+    (r) => r.kind === 'recording' && r.recordId === 'r-del',
+  );
+  assertDeepEqual(
+    deleted,
+    { kind: 'recording', recordId: 'r-del', fields: {} },
+    'winning tombstone surfaces as an empty record',
+  );
+  assert(
+    view.find((r) => r.recordId === 'r-never') === undefined,
+    'a record never synced stays absent, not empty',
+  );
 }
 
 async function expiredHistoryPagination(): Promise<void> {
@@ -2125,6 +2172,7 @@ export async function run(): Promise<void> {
   await hydrateRepairsDivergence();
   await concurrentPlayCounts();
   await sumWriteAssertsAggregate();
+  await materializeIncludesTombstones();
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();

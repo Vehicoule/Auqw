@@ -678,7 +678,15 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       () => undefined,
       () => undefined,
     );
-    await rewrite.catch(() => undefined);
+    // A failed ack must REJECT, not swallow: the served prefix stays on
+    // disk either way, but the renderer's drain loop stops here instead
+    // of re-fetching the same page forever (Review #46).
+    await rewrite.catch(() => {
+      throw shellError(
+        'io-error',
+        'sync applied ack could not persist; drain stopped',
+      );
+    });
   }
 
   /**

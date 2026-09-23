@@ -496,7 +496,11 @@ export interface SyncEngine {
     historyId: string,
     signal?: CancellationSignal,
   ): Promise<Result<LocalChangeResult>>;
-  /** The merged record view: every record with at least one live field. */
+  /**
+   * The merged record view: every record the merge ever touched —
+   * empty `fields` means a winning tombstone ("synced then deleted"),
+   * distinct from a record absent here, which was never synced.
+   */
   materialize(): readonly MaterializedRecord[];
   /** This device's per-source-device watermark map. */
   cursor(): SyncCursor;
@@ -2146,13 +2150,16 @@ export async function createSyncEngine(
       for (const [field, cell] of record.fields) {
         fields[field] = cell.value;
       }
-      if (Object.keys(fields).length > 0) {
-        out.push({
-          kind: record.kind,
-          recordId: record.recordId,
-          fields,
-        });
-      }
+      // Empty fields is included on purpose: a record only ends up
+      // fieldless after a WINNING tombstone, so it means "synced then
+      // deleted" — distinct from a record absent here, which was never
+      // synced at all. Rebuild consumers need the tombstone to drop
+      // the row; absence must keep it.
+      out.push({
+        kind: record.kind,
+        recordId: record.recordId,
+        fields,
+      });
     }
     out.sort((a, b) => {
       if (a.kind !== b.kind) {

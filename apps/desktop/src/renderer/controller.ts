@@ -592,28 +592,34 @@ export async function createSessionController(
   const APPLY_RETRY_MAX = 3;
   const APPLY_RETRY_MS = 400;
   const reconcileMaterialized = async (): Promise<void> => {
+    // Accumulate the whole paged view BEFORE projecting: records sort
+    // by kind, so a dependent (like/playCount/playEvent) can page ahead
+    // of its recording — projecting per page would drop dependents whose
+    // parents haven't arrived (Review #46). The IPC stays byte-paged;
+    // the apply is one batch so parent/dependent land atomically.
+    const records: MaterializedRecord[] = [];
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
-      if (page.records.length > 0) {
-        const applied = await session.applyMaterializedEntries(
-          page.records as readonly MaterializedRecord[],
-        );
-        if (!applied.ok) {
-          void log.write({
-            level: 'warn',
-            message: `sync reconcile failed: ${applied.error.kind}`,
-            atMs: clock.nowMs(),
-          });
-          return;
-        }
-        if (applied.value.rehydrateMedia) {
-          void rehydrateMedia(new CancellationSource().signal);
-        }
-      }
+      records.push(...(page.records as readonly MaterializedRecord[]));
       if (page.nextOffset === null) {
-        return;
+        break;
       }
       offset = page.nextOffset;
+    }
+    if (records.length === 0) {
+      return;
+    }
+    const applied = await session.applyMaterializedEntries(records);
+    if (!applied.ok) {
+      void log.write({
+        level: 'warn',
+        message: `sync reconcile failed: ${applied.error.kind}`,
+        atMs: clock.nowMs(),
+      });
+      return;
+    }
+    if (applied.value.rehydrateMedia) {
+      void rehydrateMedia(new CancellationSource().signal);
     }
   };
   const drainApplied = async (): Promise<void> => {
@@ -667,9 +673,18 @@ export async function createSessionController(
             });
             return;
           }
-          // Commit landed — durable lines may go now. An ack that
-          // fails leaves them re-serving next drain, which is safe.
-          await api.sync.ackApplied().catch(() => undefined);
+          // Commit landed — durable lines may go now. A failed ack
+          // stops the drain: the file still holds the served prefix,
+          // so the next page would just re-serve this one forever
+          // (Review #46). The next `sync:applied` push or restart
+          // re-arms and replays idempotently.
+          const acked = await api.sync
+            .ackApplied()
+            .then(() => true)
+            .catch(() => false);
+          if (!acked) {
+            return;
+          }
           if (applied.value.rehydrateMedia) {
             // Remote rows rewrote the media sections — the owners hold
             // their own snapshots and must not keep deleted rows.
