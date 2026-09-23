@@ -47,6 +47,7 @@ import {
   wireRejectReason,
   DEVICE_ID_PATTERN,
   HANDSHAKE_CAP,
+  MAX_SYNC_DOC_BYTES,
   PAIR_CODE_PATTERN,
   SEAL_OVERHEAD,
   SESSION_CAP,
@@ -828,8 +829,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
 
   /**
    * Engine pages by entry count; the wire caps serialized bytes —
-   * halve the page until the full sealed request ships, so a large
-   * log can never emit a frame the receiver rejects (which would
+   * halve the page until the delta doc fits MAX_SYNC_DOC_BYTES and
+   * the sealed request frame fits the session bound, so a large log
+   * can never emit a payload the receiver rejects (which would
    * strand the cursor forever). `more` stays honest: the engine sets
    * it against the applied limit. Mirrors the desktop adapter's
    * refit (apps/desktop/src/utility/sync-engine.ts).
@@ -854,9 +856,13 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       if (own.value.entries.length > 0 || own.value.more) {
         msg['delta'] = own.value;
       }
+      // Two caps both bind: the receiver validates the nested delta
+      // doc against MAX_SYNC_DOC_BYTES, and the sealed frame must fit
+      // the session payload bound. A delta in the gap between them
+      // ships fine and dies server-side — so both gates must pass.
       if (
-        encodeJson(msg).length + SEAL_OVERHEAD <=
-        session.pump.maxPayload
+        encodeJson(own.value).length <= MAX_SYNC_DOC_BYTES &&
+        encodeJson(msg).length + SEAL_OVERHEAD <= session.pump.maxPayload
       ) {
         return ok({ delta: own.value, msg });
       }
