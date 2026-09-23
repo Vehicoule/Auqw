@@ -219,6 +219,8 @@ type ScriptedServer = {
   dropOnSync: boolean;
   /** Stay silent on a sync request — the socket stays open, no reply. */
   muteOnSync: boolean;
+  /** Reply `more:true` on every delta — a peer that never converges. */
+  forceDeltaMore: boolean;
 };
 
 async function createEngine(
@@ -297,6 +299,7 @@ async function rig(): Promise<{
     deviceSummaries: [],
     dropOnSync: false,
     muteOnSync: false,
+    forceDeltaMore: false,
   };
 
   servers.set('10.0.0.4:7777', (socket) => {
@@ -408,7 +411,10 @@ async function handle(
       pump.send(encodeJson({ t: 'error', code: 'internal' }));
       return;
     }
-    pump.send(encodeJson({ t: 'delta', delta: exported.value }));
+    const delta = server.forceDeltaMore
+      ? { ...exported.value, more: true }
+      : exported.value;
+    pump.send(encodeJson({ t: 'delta', delta }));
     return;
   }
   if (t === 'ping') {
@@ -790,6 +796,54 @@ async function failedRoundSurfacesLastError(): Promise<void> {
   await client.close();
 }
 
+// 18. An export that serializes over the wire cap refits by halving —
+// a large log still converges across pages instead of dying on send.
+async function oversizedExportPaginates(): Promise<void> {
+  const { client, clientEngine, serverEngine } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  // ~260 B per entry × 6000 ≈ 1.5 MB — over SESSION_CAP, so the
+  // default 10k page cannot ship until the limit refits.
+  const writes = Array.from({ length: 6_000 }, (_, i) => ({
+    kind: 'like' as const,
+    recordId: `like-${i}`,
+    field: 'like',
+    value: { entityKind: 'track', targetId: `trk-${i}`, likedAtMs: 1 },
+  }));
+  const batch = await clientEngine.localChangeBatch(writes);
+  assert(batch.ok, 'local batch');
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(outcome.ok, 'big export converges');
+  assertEqual(outcome.value.sentEntries, 6_000);
+  assert(outcome.value.rounds >= 2, 'refit produced multiple pages');
+  const deskLikes = serverEngine
+    .materialize()
+    .filter((r) => r.kind === 'like');
+  assertEqual(deskLikes.length, 6_000, 'server merged every like');
+  await client.close();
+}
+
+// 19. A peer that keeps advertising `more` without progress must not
+// read as converged — the round reports budget-exceeded on the view.
+async function incompleteRoundFailsHonest(): Promise<void> {
+  const { client, server, keys } = await rig();
+  keys.peers.set(SERVER_FP, {
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  server.forceDeltaMore = true;
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(!outcome.ok && outcome.error.kind === 'budget-exceeded');
+  const view = client.status().peers[0];
+  assert(view !== undefined && view.state === 'open', 'session survived');
+  assertEqual(view.lastError?.kind, 'budget-exceeded');
+  await client.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -808,6 +862,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['timeoutKillsSessionAndRedials', timeoutKillsSessionAndRedials],
   ['closeDisposesSocketPort', closeDisposesSocketPort],
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
+  ['oversizedExportPaginates', oversizedExportPaginates],
+  ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
 ];
 
 export async function run(): Promise<void> {

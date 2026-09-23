@@ -23,6 +23,8 @@ import type {
 import {
   isSyncDelta,
   type ApplyResult,
+  type SyncCursor,
+  type SyncDelta,
   type SyncEngine,
 } from './sync-engine.ts';
 import {
@@ -188,6 +190,8 @@ type PeerView = {
 
 /** Pages per sync round — each page is one `sync` request/response. */
 const MAX_SYNC_PAGES = 64;
+/** Entry bound the export refit starts from — the engine's wire cap. */
+const MAX_EXPORT_PAGE = 10_000;
 
 /**
  * Mint-or-load the phone's sync identity — the deviceId the wire
@@ -732,6 +736,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     let sentEntries = 0;
     let divergence = 0;
     let rounds = 0;
+    let converged = false;
     let current: SyncPeer = peer;
     try {
       for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
@@ -739,24 +744,18 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           return err(appError('cancelled', 'cancelled'));
         }
         rounds += 1;
-        const own = await deps.engine.exportDelta(
+        const fitted = await exportFittedPage(
+          session,
           current.peerCursor,
-          undefined,
           joined.signal,
         );
-        if (!own.ok) {
-          return own;
+        if (!fitted.ok) {
+          return fitted;
         }
-        const msg: Record<string, unknown> = {
-          t: 'sync',
-          since: cursorToSince(deps.engine.cursor()),
-        };
-        if (own.value.entries.length > 0 || own.value.more) {
-          msg['delta'] = own.value;
-        }
+        const own = fitted.value.delta;
         const reply = await sessionRequest(
           session,
-          msg,
+          fitted.value.msg,
           (m): m is DeltaMsg | ErrorMsg => isDeltaMsg(m) || isErrorMsg(m),
           requestMs,
           joined.signal,
@@ -786,7 +785,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         }
         remoteEntries += applied.value.entries.length;
         divergence += applied.value.divergence.length;
-        sentEntries += own.value.entries.length;
+        sentEntries += own.entries.length;
         current = {
           ...current,
           peerCursor: delta.cursor,
@@ -798,12 +797,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         if (!persisted.ok) {
           return persisted;
         }
-        const converged = !own.value.more && !delta.more;
-        const progressed =
-          own.value.entries.length > 0 || delta.entries.length > 0;
+        converged = !own.more && !delta.more;
+        const progressed = own.entries.length > 0 || delta.entries.length > 0;
         if (converged || !progressed) {
           break;
         }
+      }
+      if (!converged) {
+        // The page budget or a stall left advertised work undone — a
+        // converged-looking ok would hide a resolvable backlog.
+        return err(
+          appError(
+            'budget-exceeded',
+            'sync: round incomplete — entries remain after the page budget',
+          ),
+        );
       }
       return ok({
         peerFp: session.peerFp,
@@ -815,6 +823,52 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     } finally {
       cleanup();
       emit();
+    }
+  }
+
+  /**
+   * Engine pages by entry count; the wire caps serialized bytes —
+   * halve the page until the full sealed request ships, so a large
+   * log can never emit a frame the receiver rejects (which would
+   * strand the cursor forever). `more` stays honest: the engine sets
+   * it against the applied limit. Mirrors the desktop adapter's
+   * refit (apps/desktop/src/utility/sync-engine.ts).
+   */
+  async function exportFittedPage(
+    session: ClientSession,
+    cursor: SyncCursor,
+    signal: CancellationSignal,
+  ): Promise<
+    Result<{ delta: SyncDelta; msg: Record<string, unknown> }>
+  > {
+    let limit = MAX_EXPORT_PAGE;
+    for (;;) {
+      const own = await deps.engine.exportDelta(cursor, limit, signal);
+      if (!own.ok) {
+        return own;
+      }
+      const msg: Record<string, unknown> = {
+        t: 'sync',
+        since: cursorToSince(deps.engine.cursor()),
+      };
+      if (own.value.entries.length > 0 || own.value.more) {
+        msg['delta'] = own.value;
+      }
+      if (
+        encodeJson(msg).length + SEAL_OVERHEAD <=
+        session.pump.maxPayload
+      ) {
+        return ok({ delta: own.value, msg });
+      }
+      if (limit === 1) {
+        return err(
+          appError(
+            'invalid-response',
+            'sync: single delta entry exceeds the wire bound',
+          ),
+        );
+      }
+      limit = Math.max(1, Math.floor(limit / 2));
     }
   }
 
