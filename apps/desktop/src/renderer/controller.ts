@@ -579,14 +579,42 @@ export async function createSessionController(
   // arrive early simply leave the utility's outbox queued for the
   // boot drain below.
   let drainArmed = false;
+  let disposed = false;
   let unsubscribeApplied: () => void = () => {};
+  const APPLY_RETRY_MAX = 3;
+  const APPLY_RETRY_MS = 400;
   const drainApplied = async (): Promise<void> => {
     for (;;) {
       const batch = await api.sync.drainApplied();
+      if (batch.dropped) {
+        void log.write({
+          level: 'warn',
+          message:
+            'sync applied outbox reported dropped outcomes; a fresh full import reconciles the gap',
+          atMs: clock.nowMs(),
+        });
+      }
       if (batch.outcomes.length > 0) {
-        const applied = await session.applySyncedEntries(
+        let applied = await session.applySyncedEntries(
           batch.outcomes as readonly MergeOutcome[],
         );
+        // The utility page is consumed — a failed projection stays in
+        // the session's pending, so refold with bounded retries before
+        // pulling another destructive page. Disposing or exhausting
+        // attempts exits; the next `sync:applied` push re-arms.
+        for (
+          let attempt = 0;
+          !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
+          attempt += 1
+        ) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
+          );
+          if (disposed) {
+            return;
+          }
+          applied = await session.applySyncedEntries([]);
+        }
         if (!applied.ok) {
           void log.write({
             level: 'warn',
@@ -594,6 +622,11 @@ export async function createSessionController(
             atMs: clock.nowMs(),
           });
           return;
+        }
+        if (applied.value.rehydrateMedia) {
+          // Remote rows rewrote the media sections — the owners hold
+          // their own snapshots and must not keep deleted rows.
+          void rehydrateMedia(new CancellationSource().signal);
         }
       }
       if (batch.remaining === 0) {
@@ -696,6 +729,7 @@ export async function createSessionController(
       }
     },
     async dispose() {
+      disposed = true;
       unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);

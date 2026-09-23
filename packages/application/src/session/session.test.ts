@@ -3800,6 +3800,107 @@ async function applySyncedEntriesLoadFailRetains(): Promise<void> {
   const list = readyOf(r).playlists.find((p) => p.playlistId === 'pl-1');
   assert(list !== undefined, 'retained outcome materializes');
   assertEqual(list?.name, 'Remote');
+  // The successful refold clears the surface the failure raised —
+  // a sticky error would misreport a resolved state (Review #46).
+  assertEqual(readyOf(r).persistenceError, undefined);
+}
+
+// A drain page may carry more outcomes than the retained-pending
+// bound (Review #46): the cap applies to the post-failure backlog,
+// never to fresh page data.
+async function applySyncedEntriesLargeDrain(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const outcomes: MergeOutcome[] = [];
+  for (let i = 0; i < 3_000; i += 1) {
+    outcomes.push(
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'name', `P${i}`)),
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'createdMs', 7)),
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'updatedMs', 7)),
+    );
+  }
+  const applied = await r.session.applySyncedEntries(outcomes);
+  assert(applied.ok, 'large drain failed');
+  await pump();
+  assertEqual(
+    readyOf(r).playlists.length,
+    3_000,
+    'every outcome in the page projected',
+  );
+}
+
+// Remote settings naming providers this build lacks must never
+// strand playback (Review #46): required slots keep the current
+// valid value, optional slots null out, unrelated fields merge.
+async function applySyncedEntriesSettingsReconcile(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const applied = await r.session.applySyncedEntries([
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'playbackProvider', 'ghost'),
+    ),
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'lyricsProvider', 'ghost'),
+    ),
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'theme', 'dark'),
+    ),
+  ]);
+  assert(applied.ok, 'settings apply failed');
+  await pump();
+  const settings = readyOf(r).settings;
+  assertEqual(settings.playbackProvider, 'youtube-music');
+  assertEqual(settings.lyricsProvider, null);
+  assertEqual(settings.theme, 'dark');
+}
+
+// Remote deletes that cascade into downloads/localFiles report
+// rehydrateMedia so the controllers rebuild their live media owners;
+// a plain apply reports false (Review #46).
+async function applySyncedEntriesReportsRehydrate(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      localSources: [
+        {
+          sourceId: 'src-1',
+          treeUri: 'tree://music',
+          label: 'Music',
+          addedMs: 1,
+          lastScanMs: null,
+        },
+      ],
+      localFiles: [
+        {
+          fileId: 'f1',
+          sourceId: 'src-1',
+          docId: 'doc-1',
+          size: 1024,
+          fingerprint: 'fp-1',
+          modifiedMs: null,
+          title: 'T',
+          artist: 'A',
+          album: null,
+          durationMs: 1000,
+          genre: null,
+          recordingId: 'r1',
+        },
+      ],
+    }),
+  );
+  await restoreOk(r);
+  const applied = await r.session.applySyncedEntries([
+    appliedOutcome(syncTombstone('recording', 'r1')),
+  ]);
+  assert(applied.ok, 'cascade apply failed');
+  assertEqual(applied.value.rehydrateMedia, true);
+  const plain = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'P')),
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'createdMs', 7)),
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'updatedMs', 7)),
+  ]);
+  assert(plain.ok, 'plain apply failed');
+  assertEqual(plain.value.rehydrateMedia, false);
 }
 
 // applySyncedEntries is serialized through the storage segment —
@@ -3915,6 +4016,18 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   [
     'applySyncedEntriesAfterDispose',
     applySyncedEntriesAfterDispose,
+  ],
+  [
+    'applySyncedEntriesLargeDrain',
+    applySyncedEntriesLargeDrain,
+  ],
+  [
+    'applySyncedEntriesSettingsReconcile',
+    applySyncedEntriesSettingsReconcile,
+  ],
+  [
+    'applySyncedEntriesReportsRehydrate',
+    applySyncedEntriesReportsRehydrate,
   ],
 ] as const;
 

@@ -193,6 +193,17 @@ export type SyncEmitPort = {
   ): Promise<Result<unknown>>;
 };
 
+/**
+ * What `applySyncedEntries` hands back on success: which non-Ready
+ * sections the projection rewrote so the owning controllers can
+ * rehydrate their media plane (`rehydrateMedia`) — DownloadManager
+ * and LocalFileSource hold their own snapshots and must not keep
+ * rows a remote tombstone just deleted.
+ */
+export type SyncApplyReport = {
+  readonly rehydrateMedia: boolean;
+};
+
 export type SessionDeps = {
   readonly storage: StoragePort;
   readonly player: PlayerPort;
@@ -237,8 +248,11 @@ const MAX_TICK_DELTA_MS = 2_500;
 const SYNC_EMIT_CHUNK = 256;
 /** Retained emit backlog bound — drop-oldest past it. */
 const SYNC_EMIT_PENDING_MAX = 2_048;
-/** Remote outcomes held for refold — drop-newest past it. */
+/** Post-projection pending bound — unresolved inserts waiting on
+ *  parent rows; drop-newest past it. Never bounds a fresh drain. */
 const SYNC_APPLY_PENDING_MAX = 2_048;
+
+const SYNC_APPLY_STABLE: SyncApplyReport = { rehydrateMedia: false };
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -1004,19 +1018,14 @@ export class Session {
    * Queue the mapped writes and kick the drain. Called inside the
    * storage segment right after a successful syncable commit — the
    * drain itself is async port work, so it never holds the tail.
+   * A fresh commit's writes are NEVER truncated — the bound below
+   * applies only to a backlog that keeps failing to send.
    */
   #emitSync(writes: readonly LocalWrite[]): void {
     if (this.#sync === undefined || this.#disposed || writes.length === 0) {
       return;
     }
     this.#syncEmitPending.push(...writes);
-    if (this.#syncEmitPending.length > SYNC_EMIT_PENDING_MAX) {
-      this.#syncEmitPending.splice(
-        0,
-        this.#syncEmitPending.length - SYNC_EMIT_PENDING_MAX,
-      );
-      this.#logWarn('sync emission backlog overflowed; oldest writes dropped');
-    }
     this.#own(this.#drainSyncEmit());
   }
 
@@ -1048,7 +1057,19 @@ export class Session {
       }
       if (!sent.ok) {
         // Retained: the chunk stays queued and the next emission
-        // retries it. Surface through the persist-owned channel —
+        // retries it. The backlog bound applies HERE only — under a
+        // sustained send failure, drop-oldest caps memory while the
+        // fresh-writes path above never truncates a healthy commit.
+        if (this.#syncEmitPending.length > SYNC_EMIT_PENDING_MAX) {
+          this.#syncEmitPending.splice(
+            0,
+            this.#syncEmitPending.length - SYNC_EMIT_PENDING_MAX,
+          );
+          this.#logWarn(
+            'sync emission backlog overflowed; oldest writes dropped',
+          );
+        }
+        // Surface through the persist-owned channel —
         // the domain writes already landed, so this reports the
         // truth: the change log is behind, not the library.
         const r = this.#ready;
@@ -1073,7 +1094,7 @@ export class Session {
    */
   async applySyncedEntries(
     outcomes: readonly MergeOutcome[],
-  ): Promise<Result<void>> {
+  ): Promise<Result<SyncApplyReport>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
       return ready;
@@ -1098,10 +1119,14 @@ export class Session {
           deadlineMs,
           source,
         );
+        // The transport already consumed these outcomes — every one
+        // feeds projection; the bound applies only to post-projection
+        // pending, never to a fresh drain (Review #46).
+        const union = [...r.syncPending, ...outcomes];
         if (!loaded.ok) {
-          // The transport already consumed these outcomes — retain
-          // them for the next drain exactly like a commit failure.
-          r.syncPending = boundSyncPending([...r.syncPending, ...outcomes]);
+          // Retain the union for the next drain exactly like a commit
+          // failure — consumed outcomes can't be re-fetched.
+          r.syncPending = union;
           r.persistenceError = loaded.error;
           this.#publish();
           return err(loaded.error);
@@ -1111,7 +1136,7 @@ export class Session {
             'invalid-response',
             'persisted state failed validation',
           );
-          r.syncPending = boundSyncPending([...r.syncPending, ...outcomes]);
+          r.syncPending = union;
           r.persistenceError = error;
           this.#publish();
           return err(error);
@@ -1129,7 +1154,6 @@ export class Session {
             `sync projection dropped ${superseded} non-applied outcomes`,
           );
         }
-        const union = boundSyncPending([...r.syncPending, ...outcomes]);
         const projection = projectAppliedEntries(union, {
           recordings: r.recordings,
           likes: r.likes,
@@ -1149,10 +1173,41 @@ export class Session {
         for (const skip of projection.skipped) {
           this.#logWarn(`sync projection skipped ${skip.kind} record`);
         }
-        const batch = projection.batch;
+        // Spread lifts the readonly section map — the settings
+        // reconcile below may rewrite the projected row.
+        const batch = { ...projection.batch };
         if (Object.keys(batch).length === 0) {
           r.syncPending = boundSyncPending(projection.pending);
-          return ok(undefined);
+          // A clean projection clears the surface it shares with
+          // persist failures — the failure that set it is resolved.
+          r.persistenceError = undefined;
+          this.#publish();
+          return ok(SYNC_APPLY_STABLE);
+        }
+        // Reconcile remote settings against THIS session's providers
+        // — projection validates the shape only; the required-slot
+        // fallback / optional-slot nulling mirrors updateSettings.
+        if (batch.settings !== undefined) {
+          const s = batch.settings;
+          batch.settings = {
+            ...s,
+            catalogProvider: this.#providers.has(s.catalogProvider)
+              ? s.catalogProvider
+              : r.settings.catalogProvider,
+            playbackProvider: this.#providers.has(s.playbackProvider)
+              ? s.playbackProvider
+              : r.settings.playbackProvider,
+            lyricsProvider:
+              s.lyricsProvider != null &&
+              !this.#providers.has(s.lyricsProvider)
+                ? null
+                : (s.lyricsProvider ?? null),
+            radioProvider:
+              s.radioProvider != null &&
+              !this.#providers.has(s.radioProvider)
+                ? null
+                : (s.radioProvider ?? null),
+          };
         }
         const committed = await this.#withDeadline(
           () =>
@@ -1167,7 +1222,7 @@ export class Session {
           r.persistenceError = committed.error;
           this.#publish();
           // Nothing landed — refold the whole union next drain.
-          r.syncPending = boundSyncPending(union);
+          r.syncPending = union;
           return err(committed.error);
         }
         r.syncPending = boundSyncPending(projection.pending);
@@ -1215,7 +1270,11 @@ export class Session {
         r.persistenceError = undefined;
         this.#derived();
         this.#publish();
-        return ok(undefined);
+        return ok({
+          rehydrateMedia:
+            batch.downloads !== undefined ||
+            batch.localFiles !== undefined,
+        });
       });
     } finally {
       this.#opSources.delete(source);

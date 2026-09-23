@@ -545,50 +545,65 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
     };
 
-    // Flush pending appends before reading — a drain can race a
-    // spill write still in `spillTail`.
-    await spillTail.catch(() => undefined);
     const path = deps.appliedSpillPath;
     let spilledBacklog = 0;
     if (path !== undefined) {
-      const raw = await readFile(path, 'utf8').catch(
-        (e: NodeJS.ErrnoException) =>
-          e.code === 'ENOENT' ? '' : Promise.reject(e),
-      );
-      const lines = raw.split('\n').filter((l) => l.length > 0);
-      const keep: string[] = [];
-      for (const line of lines) {
-        if (bytes + line.length + 1 > budget) {
-          keep.push(line);
-          continue;
-        }
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (isJsonValue(parsed)) {
-            bytes += line.length + 1;
-            chunk.push(parsed);
-          } else {
+      // Run the whole read-modify-rename inside `spillTail`: appends
+      // chain onto the same tail, so a rewrite can never rename over
+      // an outcome spilled between the read and the rename.
+      const drainFile = spillTail.then(async () => {
+        const raw = await readFile(path, 'utf8').catch(
+          (e: NodeJS.ErrnoException) =>
+            e.code === 'ENOENT' ? '' : Promise.reject(e),
+        );
+        const lines = raw.split('\n').filter((l) => l.length > 0);
+        const keep: string[] = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i];
+          if (line === undefined) {
+            break;
+          }
+          if (bytes + line.length + 1 > budget) {
+            // Stop at the first non-fitting line and keep the whole
+            // suffix — spill order IS merge order, so a smaller
+            // later outcome must not leapfrog it across pages.
+            keep.push(...lines.slice(i));
+            break;
+          }
+          try {
+            const parsed: unknown = JSON.parse(line);
+            if (isJsonValue(parsed)) {
+              bytes += line.length + 1;
+              chunk.push(parsed);
+            } else {
+              appliedDropped = true;
+            }
+          } catch {
+            // Torn tail line (killed mid-append) — drop it, keep the
+            // rest.
             appliedDropped = true;
           }
-        } catch {
-          // Torn tail line (killed mid-append) — drop it, keep the rest.
-          appliedDropped = true;
         }
-      }
-      spilledBacklog = keep.length;
-      // Rewrite only when the consumed share changes the file — an
-      // untouched read pays no write.
-      if (lines.length !== keep.length) {
-        const tmp = `${path}.tmp`;
-        const rewritten = keep.length > 0 ? `${keep.join('\n')}\n` : '';
-        await writeFile(tmp, rewritten)
-          .then(() => rename(tmp, path))
-          .catch(() => {
-            // Consume nothing we couldn't persist back — replay the
-            // file next drain rather than lose the tail.
-            appliedDropped = true;
-          });
-      }
+        spilledBacklog = keep.length;
+        // Rewrite only when the consumed share changes the file — an
+        // untouched read pays no write.
+        if (lines.length !== keep.length) {
+          const tmp = `${path}.tmp`;
+          const rewritten = keep.length > 0 ? `${keep.join('\n')}\n` : '';
+          await writeFile(tmp, rewritten)
+            .then(() => rename(tmp, path))
+            .catch(() => {
+              // Consume nothing we couldn't persist back — replay the
+              // file next drain rather than lose the tail.
+              appliedDropped = true;
+            });
+        }
+      });
+      spillTail = drainFile.then(
+        () => undefined,
+        () => undefined,
+      );
+      await drainFile;
     }
 
     while (appliedOutbox.length > 0) {

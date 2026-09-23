@@ -609,21 +609,40 @@ export async function createSessionController(
           clock,
           log,
           // Every inbound merge — syncNow pages and any other
-          // applyDelta path — projects onto the domain here. The
-          // session keeps failed outcomes pending itself.
+          // applyDelta path — projects onto the domain here. A
+          // failed projection stays in the session's pending, so
+          // refold with bounded retries rather than wait for an
+          // inbound delta that may never come.
           onApplied: (applied) => {
-            void session
-              .applySyncedEntries(applied.outcomes)
-              .then((result) => {
-                if (!result.ok) {
-                  void log.write({
-                    level: 'warn',
-                    message: `sync apply failed: ${result.error.kind}`,
-                    atMs: clock.nowMs(),
-                  });
+            void (async () => {
+              let result = await session.applySyncedEntries(
+                applied.outcomes,
+              );
+              for (
+                let attempt = 0;
+                !result.ok && attempt < 3 && !signal.cancelled;
+                attempt += 1
+              ) {
+                await new Promise<void>((resolve) =>
+                  setTimeout(resolve, 400 * (attempt + 1)),
+                );
+                if (signal.cancelled) {
+                  return;
                 }
-              })
-              .catch(() => undefined);
+                result = await session.applySyncedEntries([]);
+              }
+              if (!result.ok) {
+                void log.write({
+                  level: 'warn',
+                  message: `sync apply failed: ${result.error.kind}`,
+                  atMs: clock.nowMs(),
+                });
+                return;
+              }
+              if (result.value.rehydrateMedia) {
+                void rehydrateMedia(signal);
+              }
+            })().catch(() => undefined);
           },
         });
         if (built.ok) {
