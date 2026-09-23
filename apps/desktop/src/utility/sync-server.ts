@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import {
   appendFile,
+  open,
   readFile,
   rename,
   stat,
@@ -586,15 +587,43 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * the file, so each byte is rewritten O(1) times across the
    * backlog's life instead of the whole remainder per page.
    */
+  /**
+   * fsync a file's current contents — used before the renames that
+   * commit a compaction, so a power-loss can't resurrect a torn
+   * generation boundary.
+   */
+  async function fsyncFile(path: string): Promise<void> {
+    const fh = await open(path, 'r+');
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  }
+
   async function compactSpill(
     path: string,
     offPath: string,
     startOff: number,
   ): Promise<void> {
+    // Commit the zeroed sidecar BEFORE the compacted file: the only
+    // bad generation state would be `off > 0` beside the NEW layout
+    // (the offset was measured against the old one and would skip
+    // unserved rows — Review #46 round-8). Resetting first means a
+    // crash mid-compact leaves `off = 0` + the OLD file → rescan
+    // and re-serve a prefix (at-least-once, which the projection
+    // tolerates), never a stale offset on the new file.
+    const offTmp = `${offPath}.tmp`;
+    await writeFile(offTmp, '0');
+    await fsyncFile(offTmp);
+    await rename(offTmp, offPath);
     const tmp = `${path}.tmp`;
-    await pipeline(createReadStream(path, { start: startOff }), createWriteStream(tmp));
+    await pipeline(
+      createReadStream(path, { start: startOff }),
+      createWriteStream(tmp),
+    );
+    await fsyncFile(tmp);
     await rename(tmp, path);
-    await writeFile(offPath, '0');
   }
 
   function notifyApplied(pending: number): void {

@@ -5,7 +5,7 @@ import {
 } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -2543,6 +2543,95 @@ export async function run(): Promise<void> {
           'acked lines never re-serve',
         );
         assertEqual(page2.remaining, 0, 'backlog fully consumed');
+      }
+    } finally {
+      await service.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— Compaction commits sidecar(0) BEFORE the data rename, so the ——
+  // —— only reachable post-compact generation is {off: 0, new file}; ——
+  // —— a stale positive offset can never sit beside the compacted  ——
+  // —— layout and skip unserved rows (Devin Review #46 round-8).   ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-gen-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    // ~1.2 MB of parseable JSON lines — a backlog big enough that the
+    // second ack crosses the 1 MiB compaction watermark.
+    const pad = 'x'.repeat(48_000);
+    const lines: string[] = [];
+    for (let i = 0; i < 24; i += 1) {
+      lines.push(JSON.stringify({ pad, i }));
+    }
+    await writeFile(spill, `${lines.join('\n')}\n`);
+    const seeded = await stat(spill);
+    assert(seeded.size > 1_048_576, 'seeded backlog crosses the watermark');
+
+    const desk = await testUtilityEngine('dsk-gen');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      for (;;) {
+        const drained = await invokeHandler(
+          service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok, 'drain failed');
+        if (!drained.ok) {
+          return;
+        }
+        const page = drained.value as { remaining: number };
+        const acked = await invokeHandler(
+          service,
+          'sync:ackApplied',
+          undefined,
+        );
+        assert(acked.ok, 'ack failed');
+        if (page.remaining === 0) {
+          break;
+        }
+      }
+      // Whole backlog acked → the compacted generation is {off: 0,
+      // empty file}: the zero sidecar commits before the data rename,
+      // so a crash mid-compact re-serves (never skips) old rows.
+      const offRaw = await readFile(`${spill}.off`, 'utf8');
+      assertEqual(
+        Number.parseInt(offRaw.trim(), 10),
+        0,
+        'compacted generation commits a zero offset',
+      );
+      const tail = await stat(spill);
+      assertEqual(tail.size, 0, 'compacted file holds only the unacked tail');
+
+      const restarted = await startService({
+        engine: desk.port,
+        appliedSpillPath: spill,
+      });
+      try {
+        const drained = await invokeHandler(
+          restarted.service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok);
+        if (drained.ok) {
+          const page = drained.value as {
+            outcomes: readonly unknown[];
+            remaining: number;
+          };
+          assertEqual(
+            page.outcomes.length,
+            0,
+            'no stale offset skips — compacted file drains empty',
+          );
+          assertEqual(page.remaining, 0);
+        }
+      } finally {
+        await restarted.service.close();
       }
     } finally {
       await service.close();

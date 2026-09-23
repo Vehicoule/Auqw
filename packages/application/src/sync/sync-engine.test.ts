@@ -646,6 +646,60 @@ async function restoreLoser(): Promise<void> {
   assertEqual(missing.ok ? '' : missing.error.kind, 'not-found');
 }
 
+// Review #46 round-8: a divergence-stored loser for a 'sum' field is
+// already a per-device component — restoreLoser must stamp it
+// verbatim, not translate it through the aggregate-assertion path a
+// second time (which would double-subtract the remote share).
+async function restoreLoserSumComponent(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  // b's component of 5 is the nonzero remote share a's sums carry.
+  await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  const bDoc = await b.engine.exportDelta();
+  assert(bDoc.ok);
+  await mustApply(a.engine, bDoc.value);
+  // a asserts aggregate 8 → component 3; then asserts 20 → component
+  // 15, whose larger value displaces the 3 into divergence.
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 8,
+  });
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 20,
+  });
+  const row = a.engine
+    .divergenceHistory()
+    .find((d) => d.kind === 'playCount');
+  assert(row !== undefined, "a's displaced component preserved");
+  assertEqual(row.loser.value, 3);
+  const restored = await a.engine.restoreLoser(row.historyId);
+  assert(restored.ok);
+  // The stored component enters the log verbatim — translating it
+  // again would clamp 3 − 5 to 0 and mangle the durable entry.
+  assertEqual(restored.value.entry.value, 3);
+  // The 3-component loses its own merge to the live 15 — restoring a
+  // dominated component changes nothing materialized, but the logged
+  // entry itself is the honest stored value.
+  const view = a.engine
+    .materialize()
+    .find((r) => r.kind === 'playCount' && r.recordId === 'r1');
+  assertDeepEqual(
+    view?.fields['count'],
+    20,
+    'dominated restore leaves the materialized sum',
+  );
+}
+
 async function tombstoneRestore(): Promise<void> {
   const a = await makeEngine('a', 5_000);
   await mustApply(
@@ -2244,6 +2298,7 @@ export async function run(): Promise<void> {
   await sumWriteAssertsAggregate();
   await materializeIncludesTombstones();
   await materializeParentsFirst();
+  await restoreLoserSumComponent();
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();

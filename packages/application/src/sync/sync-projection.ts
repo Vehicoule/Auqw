@@ -1073,16 +1073,22 @@ export function projectAppliedEntries(
   // Engine-attached materialized snapshots override fold inference —
   // the fold can't see fields that merged in earlier drains, and a
   // delayed tombstone that lost to newer fields must not delete a
-  // record the engine still materializes (Review #46).
-  for (const fold of folds.values()) {
-    const snap = applied
-      .map((o) => o.record)
-      .find(
-        (r) =>
-          r !== undefined &&
-          r.kind === fold.kind &&
-          r.recordId === fold.recordId,
+  // record the engine still materializes (Review #46). When several
+  // outcomes carry a snapshot for the same record — a retained
+  // pending outcome replayed beside a newer one — the LAST wins:
+  // snapshots ride outcome order, so the newest apply's view is the
+  // honest merge state (Review #46 round-8).
+  const snaps = new Map<string, MaterializedRecord>();
+  for (const outcome of applied) {
+    if (outcome.record !== undefined) {
+      snaps.set(
+        `${outcome.record.kind}${KEY_SEP}${outcome.record.recordId}`,
+        outcome.record,
       );
+    }
+  }
+  for (const fold of folds.values()) {
+    const snap = snaps.get(`${fold.kind}${KEY_SEP}${fold.recordId}`);
     if (snap === undefined) {
       continue;
     }

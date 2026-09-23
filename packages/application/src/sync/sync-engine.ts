@@ -1764,6 +1764,13 @@ export async function createSyncEngine(
   async function writeChanges(
     inputs: readonly LocalWrite[],
     signal: CancellationSignal | undefined,
+    /**
+     * `restoreLoser` only: the stored loser value is already a 'sum'
+     * component — translating it through `sumComponentFor` again
+     * would subtract the remote share twice and clamp the restore
+     * to zero. Domain-originated writes stay aggregate-asserted.
+     */
+    preNormalized = false,
   ): Promise<Result<readonly LocalChangeResult[]>> {
     if (!Array.isArray(inputs) || inputs.length === 0) {
       return err(appError('invalid-response', 'empty local write'));
@@ -1816,7 +1823,9 @@ export async function createSyncEngine(
                 // the engine freezes its clone — same ownership rule
                 // as accepted wire entries.
                 value: JSON.parse(
-                  JSON.stringify(sumComponentFor(input)),
+                  JSON.stringify(
+                    preNormalized ? input.value : sumComponentFor(input),
+                  ),
                 ) as unknown,
                 tombstone: false,
                 hlc: stamp,
@@ -2169,7 +2178,18 @@ export async function createSyncEngine(
         field: row.field,
         value: row.loser.value,
       };
-    return localChange(input, signal);
+    // The loser value is already the field's component form for
+    // 'sum' rules — restoring must stamp it verbatim, not translate
+    // a second aggregate (Review #46 round-8).
+    const batch = await writeChanges([input], signal, true);
+    if (!batch.ok) {
+      return err(batch.error);
+    }
+    const first = batch.value[0];
+    if (first === undefined) {
+      return err(appError('internal', 'local write produced no entry'));
+    }
+    return ok(first);
   }
 
   function materialize(): readonly MaterializedRecord[] {

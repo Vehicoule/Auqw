@@ -1237,6 +1237,60 @@ function testSnapshotCountAbsolute(): void {
   );
 }
 
+// W98I — several applied outcomes may snapshot the same record; the
+// LAST one in canonical order is the merge truth. Picking the first
+// rewinds the row to a stale generation.
+function testSnapshotNewestWins(): void {
+  const sr = ref('itunes', 't-1');
+  const current = projInput();
+  const outcomes = [
+    // The dependent that pends while its parent recording is missing.
+    applied(fieldEntry('matchReview', 'rev-1', 'recordingId', 'r-1')),
+    applied(fieldEntry('matchReview', 'rev-1', 'createdMs', 700)),
+    applied(
+      fieldEntry(
+        'matchReview',
+        'rev-1',
+        'candidates',
+        review('rev-1', 'r-1').candidates,
+      ),
+    ),
+    // Older retained outcome for r-1 — its snapshot is already stale.
+    applied(fieldEntry('recording', 'r-1', 'title', 'Older'), [], {
+      kind: 'recording',
+      recordId: 'r-1',
+      fields: { title: 'Older', artist: 'Stale' },
+    }),
+    // Newer outcome for the same record — its snapshot must win.
+    applied(fieldEntry('recording', 'r-1', 'artist', 'B'), [], {
+      kind: 'recording',
+      recordId: 'r-1',
+      fields: { title: 'Newer', artist: 'B' },
+    }),
+    // The dependency that resolves the row (and frees the pending
+    // review): the source-ref presence that makes r-1 insertable.
+    applied(
+      fieldEntry(
+        'recordingSourceRef',
+        sourceRefRecordId('r-1', sr),
+        'ref',
+        sr,
+      ),
+    ),
+  ];
+  const projected = projectAppliedEntries(outcomes, current);
+  assertEqual(projected.pending.length, 0, 'dependency resolves pending');
+  const rows =
+    projected.batch.recordingsMerge?.(current.recordings) ?? [];
+  assertEqual(rows[0]?.title, 'Newer', 'newest snapshot wins');
+  assertEqual(rows[0]?.artist, 'B');
+  assertDeepEqual(
+    (projected.batch.matchReviews ?? []).map((r) => r.reviewId),
+    ['rev-1'],
+    'pending review lands with its parent',
+  );
+}
+
 // The materialized recovery path: records rebuild rows, absent
 // records keep existing rows, empty-field records delete.
 function testProjectMaterialized(): void {
@@ -1541,6 +1595,7 @@ export function run(): void {
   testSnapshotSurvivesTombstone();
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
+  testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();
   testEntryTombstoneRemoves();
