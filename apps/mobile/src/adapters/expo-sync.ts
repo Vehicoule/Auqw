@@ -9,6 +9,7 @@ import type {
   SyncLogStore,
 } from '@auqw/application';
 import {
+  appError,
   createSyncClient,
   createSyncEngine,
   ensureSyncIdentity,
@@ -116,6 +117,15 @@ export async function createExpoSync(
     }
     return ok({ client, engine: engine.value, deviceId });
   } catch (thrown) {
-    return err(nativeError(thrown));
+    // Native exception text can carry paths, URLs, or stack detail and
+    // the log sink performs no redaction — neither the typed error nor
+    // the log may quote it; the kind survives as the only signal.
+    const mapped = nativeError(thrown);
+    void deps.log.write({
+      level: 'error',
+      message: `sync init failed (${mapped.kind})`,
+      atMs: deps.clock.nowMs(),
+    });
+    return err(appError(mapped.kind, 'sync initialization failed'));
   }
 }
