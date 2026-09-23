@@ -10,6 +10,7 @@ import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
   LOCAL_PROVIDER,
+  MAX_DELTA_ENTRIES,
   SearchSession,
   isSyncDelta,
   previewImport,
@@ -29,6 +30,7 @@ import type {
   SearchState,
   SessionState,
   SourceRef,
+  SyncDelta,
   TrackMetadata,
 } from '@auqw/application';
 import {
@@ -867,14 +869,21 @@ function Main({
       const entries: ChangeEntry[] = [];
       const skipped: Record<string, number[]> = {};
       const covered: Record<string, number> = {};
-      let doc: unknown;
+      let doc: SyncDelta | null = null;
       for (;;) {
         const page = await window.auqw.sync.deltas({
           since: JSON.stringify(covered),
         });
-        doc = page.delta;
-        if (!isSyncDelta(doc)) {
+        if (!isSyncDelta(page.delta)) {
           return; // a malformed page ships nothing honest
+        }
+        doc = page.delta;
+        // The merged doc must stay a valid SyncDelta — stop before a
+        // page would overflow the entry cap and leave `more` honest so
+        // the importer knows the log continues past what shipped.
+        if (entries.length + doc.entries.length > MAX_DELTA_ENTRIES) {
+          doc = { ...doc, more: true };
+          break;
         }
         let advanced = false;
         for (const entry of doc.entries) {
@@ -888,9 +897,9 @@ function Main({
         }
         entries.push(...doc.entries);
         for (const [dev, seqs] of Object.entries(doc.skipped)) {
-          skipped[dev] = [...new Set([...(skipped[dev] ?? []), ...seqs])].sort(
-            (a, b) => a - b,
-          );
+          skipped[dev] = [...new Set([...(skipped[dev] ?? []), ...seqs])]
+            .sort((a, b) => a - b)
+            .slice(0, MAX_DELTA_ENTRIES);
           for (const seq of seqs) {
             if (seq > (covered[dev] ?? -1)) {
               covered[dev] = seq;
@@ -904,8 +913,11 @@ function Main({
           break;
         }
       }
+      if (doc === null) {
+        return;
+      }
       await navigator.clipboard.writeText(
-        JSON.stringify({ ...doc, entries, skipped, more: false }),
+        JSON.stringify({ ...doc, entries, skipped, more: doc.more }),
       );
     })().catch(() => undefined);
   }, []);

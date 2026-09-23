@@ -466,7 +466,8 @@ const OP_DEADLINE_MS = 15_000;
 const MAX_DEVICE_ID = 128;
 const MAX_RECORD_ID = 1024;
 const MAX_FIELD = 64;
-const MAX_DELTA_ENTRIES = 10_000;
+/** Largest entry set a single delta doc may carry — envelope-level cap. */
+export const MAX_DELTA_ENTRIES = 10_000;
 const MAX_CURSOR_DEVICES = 512;
 /** Bounded loser history — diagnostics surfaces stay small. */
 export const DIVERGENCE_HISTORY_LIMIT = 500;

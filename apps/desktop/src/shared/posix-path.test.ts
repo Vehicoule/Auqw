@@ -44,6 +44,13 @@ export function run(): void {
     'file://nas/share/a.wav',
     'backslash UNC normalizes',
   );
+  // On POSIX a backslash is a filename character — it encodes as %5C
+  // rather than splitting the path.
+  assertEqual(
+    pathToFileURL('/music/we\\ird.wav').href,
+    'file:///music/we%5Cird.wav',
+    'posix backslash is a filename char',
+  );
 
   // UNC grants keep their host as the root.
   assertEqual(

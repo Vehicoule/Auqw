@@ -36,8 +36,13 @@ export function fileURLToPath(uri: string): string {
 export function pathToFileURL(absPath: string): { href: string } {
   // Windows APIs hand back backslashes (`C:\Users\…`, `\\nas\…`) —
   // normalize first or the drive colon encodes as %3A and the URL
-  // stops being a file URI anything can resolve.
-  const normalized = absPath.replace(/\\/g, '/');
+  // stops being a file URI anything can resolve. Normalize only
+  // Windows shapes: on POSIX a backslash is a filename character and
+  // must encode as %5C, not split into a separator.
+  const normalized = /^[A-Za-z]:[\\/]/.test(absPath) ||
+    absPath.startsWith('\\\\')
+    ? absPath.replace(/\\/g, '/')
+    : absPath;
   const encodeTail = (p: string): string =>
     p
       .split('/')
