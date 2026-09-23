@@ -24,6 +24,8 @@ export * from './queue/radio-tail.ts';
 export * from './matching/matching-engine.ts';
 export * from './search/search-session.ts';
 export * from './session/session.ts';
+export * from './sync/hlc.ts';
+export * from './sync/sync-engine.ts';
 export * from './library/playlists.ts';
 export * from './library/history.ts';
 export * from './library/lyrics.ts';
