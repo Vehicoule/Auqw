@@ -688,11 +688,12 @@ export async function createSessionController(
             }
             // The session's emit queue is memory-only — committed
             // writes a past kill stranded re-emit against the
-            // (kind, recordId) set the same materialized view just
-            // walked: upserts only, never tombstones (Review #46).
-            const synced = new Set<string>();
+            // materialized (kind, recordId)→fields map the same
+            // view just walked: absent records AND stale field
+            // values, upserts only (Review #46).
+            const synced = new Map<string, Record<string, unknown>>();
             for (const rec of materialized) {
-              synced.add(syncedRecordKey(rec.kind, rec.recordId));
+              synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
             }
             await session.emitUnsynced(synced).catch(() => undefined);
           })().catch(() => undefined);
@@ -765,7 +766,14 @@ export async function createSessionController(
       }
     },
     async dispose() {
-      // Sync goes down first — bye frames flush while the sockets
+      // Session FIRST: its graceful emit drain must run while the
+      // sync surface is still live — after close() the emit port
+      // would buffer the retained writes into a pre-surface queue
+      // the dead controller discards, losing committed tombstones
+      // (Review #46). dispose() also bars new session work, so the
+      // client can't be re-entered once it goes down.
+      await session.dispose();
+      // Sync goes down next — bye frames flush while the sockets
       // still answer; a live session must never outlive its client.
       if (syncSurface !== null) {
         await syncSurface.client.close();
@@ -784,7 +792,6 @@ export async function createSessionController(
       } catch {
         // Method absent on this platform.
       }
-      await session.dispose();
       for (const provider of providers) {
         provider.dispose();
       }

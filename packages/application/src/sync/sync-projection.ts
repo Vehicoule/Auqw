@@ -757,20 +757,56 @@ export function emissionWrites(
 /**
  * Boot-time emit recovery (Review #46): emission is post-commit and
  * the pending queue is memory-only, so a shutdown or dead emit port
- * can strand committed writes forever. `synced` is the set of
- * `syncedRecordKey`s the engine materializes — every write whose
- * record already exists there was delivered; the rest re-emit whole.
+ * can strand committed writes forever. `synced` maps each live
+ * materialized record's `syncedRecordKey` to its synced `fields` —
+ * the same `MaterializedRecord[]` the callers already page through —
+ * and every write whose field value the log never saw re-emits:
  *
- * Existence-level only: a record present in the materialized view is
- * not re-diffed per field (a stale field is merge business, not
- * durability). Tombstones never emit — absent-from-materialized
- * means the remote never saw the row, and resurrecting it just to
- * delete it would corrupt the shared state.
+ * - the record is absent or tombstoned (empty `fields` — a winning
+ *   tombstone means nothing about the row was delivered);
+ * - the field is absent or carries a different value — the stale
+ *   `lww` case a record-existence check misses (a rename committed
+ *   but never emitted);
+ * - for `sum`/`max` fields, only when the local value is LARGER —
+ *   asserting a smaller aggregate/ceiling is a guaranteed no-op
+ *   (clamped to a zero component), so only a truly undelivered
+ *   increment re-emits.
+ *
+ * Tombstones never emit — absent-from-domain can't be told apart
+ * from a remote create the inbound pass hasn't folded yet, so a
+ * reconstructed delete could erase a row the remote legitimately
+ * owns.
  */
 export function unsyncedWrites(
   input: SyncEmitInput,
-  synced: ReadonlySet<string>,
+  synced: ReadonlyMap<string, Record<string, unknown>>,
 ): LocalWrite[] {
+  const delivered = (write: LocalWrite): boolean => {
+    if ('tombstone' in write) {
+      return true;
+    }
+    const fields = synced.get(`${write.kind}${KEY_SEP}${write.recordId}`);
+    if (fields === undefined || Object.keys(fields).length === 0) {
+      return false;
+    }
+    const syncedValue = fields[write.field];
+    if (syncedValue === undefined) {
+      // The record never carried this field. A defined domain value
+      // must still deliver; an `undefined` domain value already IS
+      // the materialized shape (a stamped absent and an unstamped
+      // field fold identically) — re-emitting it converges to
+      // nothing and would fire on every boot.
+      return write.value === undefined;
+    }
+    const merge = SYNC_FIELD_RULES[write.kind][write.field]?.merge;
+    if (
+      (merge === 'sum' || merge === 'max') &&
+      typeof write.value === 'number'
+    ) {
+      return typeof syncedValue === 'number' && syncedValue >= write.value;
+    }
+    return jsonEqual(syncedValue, write.value);
+  };
   const batch: StorageBatch = {
     recordings: [...input.recordings],
     likes: [...input.likes],
@@ -797,7 +833,9 @@ export function unsyncedWrites(
     },
     batch,
   );
-  if (!synced.has(`settings${KEY_SEP}${SETTINGS_RECORD_ID}`)) {
+  const settingsKey = `settings${KEY_SEP}${SETTINGS_RECORD_ID}`;
+  const settingsFields = synced.get(settingsKey);
+  if (settingsFields === undefined || Object.keys(settingsFields).length === 0) {
     for (const field of SETTINGS_SYNC_FIELDS) {
       writes.push({
         kind: 'settings',
@@ -806,12 +844,20 @@ export function unsyncedWrites(
         value: input.settings[field],
       });
     }
+  } else {
+    for (const field of SETTINGS_SYNC_FIELDS) {
+      const write = fieldWrite(
+        'settings',
+        SETTINGS_RECORD_ID,
+        field,
+        input.settings[field],
+      );
+      if (!delivered(write)) {
+        writes.push(write);
+      }
+    }
   }
-  return writes.filter(
-    (write) =>
-      !('tombstone' in write) &&
-      !synced.has(`${write.kind}${KEY_SEP}${write.recordId}`),
-  );
+  return writes.filter((write) => !delivered(write));
 }
 
 /**

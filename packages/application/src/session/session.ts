@@ -1397,13 +1397,16 @@ export class Session {
   /**
    * Boot-time recovery for emissions that never reached the log —
    * `#syncEmitPending` is memory-only, so a shutdown or dead emit
-   * port can strand committed writes (Review #46). `synced` is the
-   * engine's materialized (kind, recordId) set — the same source
-   * `applyMaterializedEntries` consumes — and every write whose
-   * record is absent re-emits. Upserts only: a record the remote
-   * never saw can only be created, never re-deleted.
+   * port can strand committed writes (Review #46). `synced` maps the
+   * engine's materialized `syncedRecordKey` to each live record's
+   * fields — the same source `applyMaterializedEntries` consumes —
+   * and every domain field the log never saw re-emits (absent
+   * records AND stale field values). Upserts only: a record the
+   * remote never saw can only be created, never re-deleted.
    */
-  async emitUnsynced(synced: ReadonlySet<string>): Promise<void> {
+  async emitUnsynced(
+    synced: ReadonlyMap<string, Record<string, unknown>>,
+  ): Promise<void> {
     const r = this.#ready;
     if (r === null || this.#sync === undefined) {
       return;
@@ -2575,9 +2578,11 @@ export class Session {
         r.persistenceError = reloaded.ok
           ? appError('invalid-response', 'reload after review failed validation')
           : reloaded.error;
-        if (prevRec !== undefined) {
-          this.#emitSync(recordingUpsertWrites(prevRec));
-        }
+        // No recording emit here: the op already committed but the
+        // committed row is unknown — stamping `prevRec` would publish
+        // a known-stale mapping with a fresh stamp that wins remotely.
+        // The boot-time field diff in `emitUnsynced` recovers the
+        // committed row on the next reconcile.
       }
       this.#emitSync(reviewSyncWrites(result.value));
       this.#publish();

@@ -1212,7 +1212,18 @@ function expectedMaterialize(
     rec.fields[first.field] = value;
   }
   const out = [...byRecord.values()];
+  const parentRank = (kind: string): number =>
+    kind === 'recording' || kind === 'entity' || kind === 'playlist'
+      ? 0
+      : 1;
   out.sort((a, b) => {
+    // Mirrors the engine's parent-first materialize order (Review
+    // #46 round-7): parents before dependents, then (kind, recordId).
+    const ra = parentRank(a.kind);
+    const rb = parentRank(b.kind);
+    if (ra !== rb) {
+      return ra - rb;
+    }
     if (a.kind !== b.kind) {
       return a.kind < b.kind ? -1 : 1;
     }
@@ -1556,6 +1567,65 @@ async function materializeIncludesTombstones(): Promise<void> {
   assert(
     view.find((r) => r.recordId === 'r-never') === undefined,
     'a record never synced stays absent, not empty',
+  );
+}
+
+// Review #46 round-7: materialize() orders parent kinds before the
+// dependent kinds that reference them — a paged rebuild consumer
+// folding page-by-page meets every parent before its dependents, so
+// a large library can't leave dependents pending past the retention
+// bound.
+async function materializeParentsFirst(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'song',
+  });
+  await mustWrite(a.engine, {
+    kind: 'like',
+    recordId: likeRecordId('track', 'r1'),
+    field: 'like',
+    value: { entityKind: 'track', targetId: 'r1', likedAtMs: 1 },
+  });
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 3,
+  });
+  await mustWrite(a.engine, {
+    kind: 'playlist',
+    recordId: 'pl1',
+    field: 'name',
+    value: 'mix',
+  });
+  await mustWrite(a.engine, {
+    kind: 'playlistEntry',
+    recordId: 'e1',
+    field: 'playlistId',
+    value: 'pl1',
+  });
+  const view = a.engine.materialize();
+  const idx = (kind: string, recordId: string): number =>
+    view.findIndex((r) => r.kind === kind && r.recordId === recordId);
+  assert(idx('recording', 'r1') >= 0, 'recording materialized');
+  for (const [kind, recordId] of [
+    ['like', likeRecordId('track', 'r1')],
+    ['playCount', 'r1'],
+    ['playlistEntry', 'e1'],
+  ] as const) {
+    assert(
+      idx(kind, recordId) > idx('recording', 'r1') ||
+        (kind === 'playlistEntry' &&
+          idx(kind, recordId) > idx('playlist', 'pl1')),
+      `${kind} sorts after its parent`,
+    );
+  }
+  assert(
+    idx('playlist', 'pl1') < idx('playlistEntry', 'e1'),
+    'playlist sorts before its entries',
   );
 }
 
@@ -2173,6 +2243,7 @@ export async function run(): Promise<void> {
   await concurrentPlayCounts();
   await sumWriteAssertsAggregate();
   await materializeIncludesTombstones();
+  await materializeParentsFirst();
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();

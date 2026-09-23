@@ -1366,7 +1366,8 @@ function testEntryTombstoneRemoves(): void {
 
 // Committed writes a past life stranded in the memory-only emit
 // queue re-emit at boot: every domain row whose (kind, recordId) is
-// absent from the materialized set; upserts only (Review #46).
+// absent from the materialized map, AND every synced field whose
+// value the domain has moved past — upserts only (Review #46).
 function testUnsyncedWrites(): void {
   const rec = recording('r-1', [ref('itunes', 't-1')]);
   const input = emitInput({
@@ -1374,32 +1375,40 @@ function testUnsyncedWrites(): void {
     likes: [{ entityKind: 'track', targetId: 'r-1', likedAtMs: 1 }],
     playlists: [playlist('pl-1')],
     matchReviews: [review('rev-1', 'r-1')],
+    playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
   });
 
-  // Everything already synced → nothing to recover.
-  const all = unsyncedWrites(input, new Set(['unused']));
-  const keys = (writes: typeof all): string[] =>
-    writes.map((w) => `${w.kind}\u001f${w.recordId}`);
-  const synced = new Set([
-    ...keys(recordingUpsertWrites(rec)),
-    `like\u001f${likeRecordId('track', 'r-1')}`,
-    `playlist\u001fpl-1`,
-    `matchReview\u001frev-1`,
-    `settings\u001f${SETTINGS_RECORD_ID}`,
-  ]);
+  // The fully-delivered log: every emitted write's field value is
+  // what materialize() would report.
+  const allWrites = unsyncedWrites(input, new Map());
+  const syncedMap = (
+    writes: readonly LocalWrite[],
+  ): Map<string, Record<string, unknown>> => {
+    const map = new Map<string, Record<string, unknown>>();
+    for (const w of writes) {
+      if ('tombstone' in w) {
+        continue;
+      }
+      const key = `${w.kind}\u001f${w.recordId}`;
+      const fields = map.get(key) ?? {};
+      fields[w.field] = w.value;
+      map.set(key, fields);
+    }
+    return map;
+  };
+  const synced = syncedMap(allWrites);
   const none = unsyncedWrites(input, synced);
   assertEqual(none.length, 0, 'fully synced domain emits nothing');
 
   // Recording absent → its field + presence writes re-emit; the
-  // still-synced like/playlist/review do not.
-  const withoutRec = new Set(synced);
-  for (const key of keys(recordingUpsertWrites(rec))) {
-    withoutRec.delete(key);
+  // still-synced like/playlist/review/count do not.
+  const withoutRec = syncedMap(allWrites);
+  for (const w of recordingUpsertWrites(rec)) {
+    withoutRec.delete(`${w.kind}\u001f${w.recordId}`);
   }
   const onlyRec = unsyncedWrites(input, withoutRec);
   assert(
-    onlyRec.length > 0 &&
-      onlyRec.every((w) => !('tombstone' in w)),
+    onlyRec.length > 0 && onlyRec.every((w) => !('tombstone' in w)),
     'recovery emits upserts only',
   );
   assert(
@@ -1416,8 +1425,67 @@ function testUnsyncedWrites(): void {
     'missing recording re-emits its field writes',
   );
 
-  // Settings absent → every whitelisted field emits; present → none.
-  const noSettings = new Set(synced);
+  // A synced record carrying a STALE field value re-emits just that
+  // field — record-existence alone can't see a rename that never
+  // reached the log (Review #46).
+  const staleTitle = syncedMap(allWrites);
+  const recFields = staleTitle.get(`recording\u001fr-1`);
+  assert(recFields !== undefined, 'recording record present');
+  recFields['title'] = 'old name';
+  const titleWrites = unsyncedWrites(input, staleTitle);
+  assertEqual(titleWrites.length, 1, 'one stale field emits one write');
+  assert(
+    titleWrites[0]?.kind === 'recording' &&
+      'field' in (titleWrites[0] ?? {}) &&
+      (titleWrites[0] as { field?: string }).field === 'title',
+    'the stale field re-emits',
+  );
+
+  // A synced field absent from the record re-emits too — a partial
+  // earlier emission must not mask the missing value.
+  const missingField = syncedMap(allWrites);
+  delete missingField.get(`recording\u001fr-1`)?.['title'];
+  assert(
+    unsyncedWrites(input, missingField).some(
+      (w) => 'field' in w && w.field === 'title',
+    ),
+    'a field the record lacks re-emits',
+  );
+
+  // 'sum'/'max' policies: only a LARGER local value re-emits — a
+  // smaller assertion would stamp a zero component anyway.
+  const smallerCount = syncedMap(allWrites);
+  smallerCount.get(`playCount\u001fr-1`)!['count'] = 9;
+  assertEqual(
+    unsyncedWrites(input, smallerCount).length,
+    0,
+    'remote-ahead sum stays delivered',
+  );
+  const largerCount = syncedMap(allWrites);
+  largerCount.get(`playCount\u001fr-1`)!['count'] = 2;
+  const countWrites = unsyncedWrites(input, largerCount);
+  assert(
+    countWrites.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'local-ahead sum re-emits the gap',
+  );
+
+  // A tombstoned synced record (empty fields) counts as absent —
+  // the local row re-emits whole.
+  const tombstoned = syncedMap(allWrites);
+  tombstoned.set(`recording\u001fr-1`, {});
+  assert(
+    unsyncedWrites(input, tombstoned).some(
+      (w) => w.kind === 'recording' && w.recordId === 'r-1',
+    ),
+    'a tombstoned synced record resurrects the local row',
+  );
+
+  // Settings absent → every whitelisted field emits; a stale
+  // settings field emits just that one.
+  const noSettings = syncedMap(allWrites);
   noSettings.delete(`settings\u001f${SETTINGS_RECORD_ID}`);
   const settingWrites = unsyncedWrites(input, noSettings).filter(
     (w) => w.kind === 'settings',
@@ -1435,6 +1503,14 @@ function testUnsyncedWrites(): void {
       'theme',
     ],
     'missing settings record emits all whitelisted fields',
+  );
+  const staleSettings = syncedMap(allWrites);
+  staleSettings.get(`settings\u001f${SETTINGS_RECORD_ID}`)!['theme'] =
+    'other';
+  assertEqual(
+    unsyncedWrites(input, staleSettings).length,
+    1,
+    'stale settings field re-emits alone',
   );
 }
 

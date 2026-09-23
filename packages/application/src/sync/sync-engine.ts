@@ -181,8 +181,8 @@ export function mappingRecordId(
 
 /**
  * Set key identifying one synced record — matches the materialized
- * view's (kind, recordId) pair space. Callers building a
- * membership set for `Session.emitUnsynced` key records with this.
+ * view's (kind, recordId) pair space. Callers building the
+ * key→fields map for `Session.emitUnsynced` key records with this.
  */
 export function syncedRecordKey(
   kind: SyncRecordKind,
@@ -190,6 +190,18 @@ export function syncedRecordKey(
 ): string {
   return `${kind}\u001f${recordId}`;
 }
+
+/**
+ * `materialize()` ordering rank — kinds other rows can depend on sort
+ * first, so a paged consumer folding page-by-page meets every parent
+ * before its dependents (Review #46 round-7). `settings` and every
+ * dependent kind stay rank 1: no record looks up to them.
+ */
+const MATERIALIZE_PARENT_RANK: Partial<Record<SyncRecordKind, number>> = {
+  recording: 0,
+  entity: 0,
+  playlist: 0,
+};
 
 export function entitySourceRefRecordId(
   entityId: string,
@@ -2179,6 +2191,16 @@ export async function createSyncEngine(
       });
     }
     out.sort((a, b) => {
+      // Parents before dependents: paged rebuild consumers fold each
+      // page as it arrives, so a dependent kind that sorts before its
+      // parent would sit pending across every parent page (and could
+      // evict under the retention bound). Within a rank, (kind,
+      // recordId) keeps the order total and deterministic.
+      const ra = MATERIALIZE_PARENT_RANK[a.kind] ?? 1;
+      const rb = MATERIALIZE_PARENT_RANK[b.kind] ?? 1;
+      if (ra !== rb) {
+        return ra - rb;
+      }
       if (a.kind !== b.kind) {
         return a.kind < b.kind ? -1 : 1;
       }

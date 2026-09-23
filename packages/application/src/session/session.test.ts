@@ -4098,7 +4098,7 @@ async function emitUnsyncedRecoversCommitted(): Promise<void> {
   await restoreOk(r);
   const before = captured.flat().length;
 
-  await r.session.emitUnsynced(new Set());
+  await r.session.emitUnsynced(new Map());
   await pump();
   const recovered = captured.flat().slice(before);
   assert(
@@ -4108,11 +4108,19 @@ async function emitUnsyncedRecoversCommitted(): Promise<void> {
     'unsynced recording re-emits its field writes',
   );
 
-  // Once every emitted record reports synced, the diff closes — a
-  // second call emits nothing (no double-stamps on 'sum' fields).
-  const synced = new Set(
-    recovered.map((w) => `${w.kind}\u001f${w.recordId}`),
-  );
+  // Once every emitted record reports its delivered field values,
+  // the diff closes — a second call emits nothing (no double-stamps
+  // on 'sum' fields).
+  const synced = new Map<string, Record<string, unknown>>();
+  for (const w of recovered) {
+    if ('tombstone' in w) {
+      continue;
+    }
+    const key = `${w.kind}\u001f${w.recordId}`;
+    const fields = synced.get(key) ?? {};
+    fields[w.field] = w.value;
+    synced.set(key, fields);
+  }
   const seen = captured.flat().length;
   await r.session.emitUnsynced(synced);
   await pump();

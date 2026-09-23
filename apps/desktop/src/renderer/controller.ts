@@ -603,11 +603,11 @@ export async function createSessionController(
     // ahead of its parent) ride the session's retained pending into
     // the next page's fold — memory stays page-bounded while the
     // cross-page ordering resolves itself (Review #46).
-    const synced = new Set<string>();
+    const synced = new Map<string, Record<string, unknown>>();
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
       for (const rec of page.records as readonly MaterializedRecord[]) {
-        synced.add(syncedRecordKey(rec.kind, rec.recordId));
+        synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
       }
       if (page.records.length > 0) {
         let applied = await session.applyMaterializedEntries(
@@ -645,10 +645,11 @@ export async function createSessionController(
       if (page.nextOffset === null) {
         // Boot-diff recovery: the session's emit queue is
         // memory-only, so committed writes lost to shutdown or a
-        // dead port re-emit against the (kind, recordId) set the
-        // pass just walked — upserts only, never tombstones (Review
+        // dead port re-emit against the materialized (kind,
+        // recordId)→fields map the pass just walked — absent
+        // records AND stale field values, upserts only (Review
         // #46). Runs only on a complete pass; an early exit leaves
-        // the set partial and would double-emit still-synced rows.
+        // the map partial and would double-emit still-synced rows.
         if (emitDiff && !disposed) {
           await session.emitUnsynced(synced).catch(() => undefined);
         }
