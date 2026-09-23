@@ -54,6 +54,28 @@ import {
 
 const ATTEMPT_CAP = 500;
 
+// Names SQLite collides within — tables, views, and indexes share
+// one namespace; triggers are separate. The version-zero probe
+// rejects a foreign file only when it holds an object that would
+// actually block a migration's CREATE.
+const FOREIGN_OBJECT_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'object',
+).map((o) => o.name);
+const FOREIGN_TRIGGER_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'trigger',
+).map((o) => o.name);
+const FOREIGN_PROBE_SQL =
+  `SELECT name FROM sqlite_master WHERE ` +
+  `(type IN ('table','index','view') AND name COLLATE NOCASE IN (${FOREIGN_OBJECT_NAMES.map(() => '?').join(',')}))` +
+  (FOREIGN_TRIGGER_NAMES.length > 0
+    ? ` OR (type = 'trigger' AND name COLLATE NOCASE IN (${FOREIGN_TRIGGER_NAMES.map(() => '?').join(',')}))`
+    : '') +
+  ` LIMIT 1`;
+const FOREIGN_PROBE_PARAMS = [
+  ...FOREIGN_OBJECT_NAMES,
+  ...FOREIGN_TRIGGER_NAMES,
+];
+
 /**
  * Initialize sections keyed by driver: probe, backup, and migrate are
  * three steps split across two transactions (VACUUM INTO cannot run
@@ -221,18 +243,12 @@ export class SqliteStorage implements StoragePort {
           // migrations cannot get here: each migration is one
           // transaction and rolls back whole.
           const foreign = await conn.query<SqlRow>(
-            // SQLite names tables and indexes in one namespace, so a
-            // foreign index or a table shadowing a mid-migration
-            // throwaway (likes_new) collides just like a foreign
-            // table — probe every name any migration creates.
             // NOCASE: sqlite_master stores the creation-time spelling
             // but SQLite treats identifiers case-insensitively — a
             // foreign `Downloads` collides with `downloads` all the
             // same, and must reject as foreign, not die in-migration.
-            `SELECT name FROM sqlite_master
-             WHERE name COLLATE NOCASE IN (${KNOWN_SCHEMA_OBJECTS.map(() => '?').join(',')})
-             LIMIT 1`,
-            [...KNOWN_SCHEMA_OBJECTS],
+            FOREIGN_PROBE_SQL,
+            FOREIGN_PROBE_PARAMS,
             signal,
           );
           if (foreign.length > 0) {

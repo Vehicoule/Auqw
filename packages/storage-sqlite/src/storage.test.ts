@@ -1491,6 +1491,21 @@ async function foreignSchemaObjectsRejected(): Promise<void> {
     'foreign table shadowing a migration throwaway rejected',
   );
   shadow.close();
+
+  // Triggers live in their own namespace — a trigger reusing a
+  // migration object name doesn't collide with any CREATE, so the
+  // file must migrate rather than reject.
+  const trigger = new NodeSqliteDriver();
+  trigger.execScript(`
+    CREATE TABLE scratchpad (id TEXT PRIMARY KEY, note TEXT);
+    CREATE TRIGGER downloads AFTER INSERT ON scratchpad
+      BEGIN SELECT 1; END;
+  `);
+  const triggerInit = await new SqliteStorage(trigger, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(triggerInit.ok, 'same-named trigger does not block initialize');
+  trigger.close();
 }
 
 // 24. Unrelated user tables outside the schema's names are
