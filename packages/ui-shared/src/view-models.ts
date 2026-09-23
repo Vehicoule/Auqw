@@ -23,6 +23,7 @@ import type {
   SessionPlayback,
   Settings,
   SourceRef,
+  SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
 import { topPlayed } from '@auqw/application';
@@ -500,6 +501,80 @@ export function toCorrectionsModel(input: {
     pendingCount: pending,
     resolvedCount: rows.length - pending,
     rows: visible,
+  };
+}
+
+// ---- LAN sync (docs/specs/sync.md, slice 4) --------------------------
+
+export type SyncPeerModel = {
+  /** Custody key — the desktop's pinned fingerprint. */
+  readonly key: string;
+  readonly name: string;
+  readonly state: 'offline' | 'connecting' | 'open';
+  readonly stateLabel: string;
+  readonly syncing: boolean;
+  /** 'last sync <iso>' — null before the first converged round. */
+  readonly lastSyncLabel: string | null;
+  /** First dialed endpoint — the honest 'where' for the row. */
+  readonly endpointLabel: string | null;
+  /** The typed error message from the last failed op, if any. */
+  readonly lastError: string | null;
+  readonly fpShort: string;
+};
+
+export type SyncModel = {
+  /** False where the platform lacks the socket seam (iOS today). */
+  readonly available: boolean;
+  /** This install's wire identity — null before bring-up resolves. */
+  readonly deviceId: string | null;
+  readonly peers: readonly SyncPeerModel[];
+  /** One-line summary for the settings row's value slot. */
+  readonly statusLabel: string;
+};
+
+export function toSyncModel(input: {
+  readonly available: boolean;
+  /** `client.status()` — null while bring-up is pending or failed. */
+  readonly status: SyncClientStatus | null;
+  /** Format one epoch-ms — locale-free short date or '—'. */
+  readonly formatSyncAt?: ((ms: number) => string | null) | undefined;
+}): SyncModel {
+  const fmt = input.formatSyncAt ?? formatExportDate;
+  const peers: SyncPeerModel[] = (input.status?.peers ?? []).map(
+    (view) => ({
+      key: view.peer.fp,
+      name: view.peer.name,
+      state: view.state,
+      stateLabel: view.syncing
+        ? 'syncing'
+        : view.state === 'open'
+          ? 'connected'
+          : view.state === 'connecting'
+            ? 'connecting'
+            : 'offline',
+      syncing: view.syncing,
+      lastSyncLabel:
+        view.peer.lastSyncAt === undefined
+          ? null
+          : `last sync ${fmt(view.peer.lastSyncAt) ?? '—'}`,
+      endpointLabel: view.peer.endpoints[0] ?? null,
+      lastError: view.lastError?.message ?? null,
+      fpShort: view.peer.fp.slice(0, 12),
+    }),
+  );
+  const open = peers.filter((p) => p.state === 'open').length;
+  return {
+    available: input.available,
+    deviceId: input.status?.deviceId ?? null,
+    peers,
+    statusLabel:
+      input.status === null
+        ? 'unavailable'
+        : peers.length === 0
+          ? 'not paired'
+          : open > 0
+            ? `${open} connected`
+            : `${peers.length} paired`,
   };
 }
 
@@ -1330,6 +1405,13 @@ export function toSettingsModel(
      * silently dead.
      */
     readonly localSupported?: boolean;
+    /**
+     * False where the platform has no LAN-sync socket seam (iOS
+     * today) — the row reports 'unavailable' and stays disabled.
+     */
+    readonly syncSupported?: boolean;
+    /** 'not paired' / 'N connected' / 'N paired' — the row's value. */
+    readonly syncLabel?: string | null;
   } = {},
 ): SettingsModel {
   return {
@@ -1451,6 +1533,16 @@ export function toSettingsModel(
         enabled: media.localSupported !== false,
       },
       {
+        key: 'sync',
+        label: 'desktop sync',
+        value:
+          media.syncSupported === false
+            ? 'unavailable'
+            : (media.syncLabel ?? 'not paired'),
+        kind: 'navigation',
+        enabled: media.syncSupported !== false,
+      },
+      {
         key: 'exportLibrary',
         label: 'export library',
         value: null,
@@ -1466,5 +1558,157 @@ export function toSettingsModel(
       },
     ],
     diagnostics,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Sync — LAN pairing panel: listener status, device list, the minted  */
+/* pairing offer. The shapes mirror the desktop `api.sync.*` contract  */
+/* verbatim (kept structural here so ui-web never imports app code).   */
+/* ------------------------------------------------------------------ */
+
+export type SyncStatusInput = {
+  readonly listener: 'starting' | 'listening' | 'unavailable' | 'disabled';
+  /** `ip:port` a peer dials, or null when nothing is up. */
+  readonly endpoint: string | null;
+  readonly boundPort: number | null;
+  readonly advertise: 'off' | 'announcing' | 'unavailable';
+  readonly pairedDevices: number;
+  readonly sessions: number;
+  readonly lastSyncAt: number | null;
+  readonly engine: 'ready' | 'absent';
+  readonly name: string;
+  readonly fingerprint: string | null;
+};
+
+export type SyncDeviceInput = {
+  readonly id: string;
+  readonly name: string;
+  readonly pairedAt: number;
+  readonly lastSeenAt: number;
+};
+
+/** The minted offer `api.sync.pairing()` returns — code + QR payload. */
+export type SyncPairingInput = {
+  readonly payload: string;
+  readonly code: string;
+  readonly expiresAt: number;
+};
+
+export type SyncDeviceModel = {
+  readonly id: string;
+  readonly name: string;
+  /** Relative label — 'paired 2h ago'. */
+  readonly pairedLabel: string;
+  /** Relative label — 'seen 5m ago'. */
+  readonly lastSeenLabel: string;
+};
+
+export type SyncStatusModel = {
+  readonly listenerLabel: string;
+  readonly engineLabel: string;
+  readonly nameLabel: string;
+  /** The dialable address — null when the listener is down. */
+  readonly addressLabel: string | null;
+  readonly advertiseLabel: string;
+  /** 'none' | '2 live' — active sync sessions. */
+  readonly sessionsLabel: string;
+  /** 'never' until the first exchange lands. */
+  readonly lastSyncLabel: string;
+  /** The device fingerprint — null until identity materializes. */
+  readonly fingerprintLabel: string | null;
+};
+
+export type PairingModel = {
+  readonly code: string;
+  readonly payload: string;
+  /** 'expires in 4m' counting down to the offer's expiry; 'expired' past it. */
+  readonly expiresLabel: string;
+};
+
+export type SyncPanelModel = {
+  readonly status: SyncStatusModel | null;
+  readonly devices: readonly SyncDeviceModel[];
+  readonly pairing: PairingModel | null;
+};
+
+/** Relative-time label: 'just now' / '5m' / '2h' / '3d' / ISO date. */
+export function formatAgo(ms: number, nowMs: number): string {
+  if (!Number.isFinite(ms) || !Number.isFinite(nowMs)) {
+    return '—';
+  }
+  const delta = nowMs - ms;
+  if (delta < 0) {
+    return '—';
+  }
+  if (delta < 60_000) {
+    return 'just now';
+  }
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `${days}d ago`;
+  }
+  return formatExportDate(ms) ?? '—';
+}
+
+function formatExpiry(expiresAt: number, nowMs: number): string {
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
+    return 'expired';
+  }
+  const left = Math.ceil((expiresAt - nowMs) / 60_000);
+  if (left >= 60) {
+    return `expires in ${Math.floor(left / 60)}h`;
+  }
+  return `expires in ${Math.max(1, left)}m`;
+}
+
+export function toSyncPanel(
+  status: SyncStatusInput | null,
+  devices: readonly SyncDeviceInput[],
+  pairing: SyncPairingInput | null,
+  nowMs: number,
+): SyncPanelModel {
+  return {
+    status:
+      status === null
+        ? null
+        : {
+            listenerLabel: status.listener,
+            engineLabel: status.engine,
+            nameLabel: status.name,
+            addressLabel: status.endpoint,
+            advertiseLabel: status.advertise,
+            sessionsLabel:
+              status.sessions === 0
+                ? 'none'
+                : `${status.sessions} live`,
+            lastSyncLabel:
+              status.lastSyncAt === null
+                ? 'never'
+                : formatAgo(status.lastSyncAt, nowMs),
+            fingerprintLabel: status.fingerprint,
+          },
+    devices: devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      pairedLabel: `paired ${formatAgo(device.pairedAt, nowMs)}`,
+      lastSeenLabel: `seen ${formatAgo(device.lastSeenAt, nowMs)}`,
+    })),
+    pairing:
+      pairing === null
+        ? null
+        : {
+            code: pairing.code,
+            payload: pairing.payload,
+            expiresLabel: formatExpiry(pairing.expiresAt, nowMs),
+          },
   };
 }

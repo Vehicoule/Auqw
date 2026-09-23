@@ -1,6 +1,8 @@
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   AppMeta,
+  HostCancelArgs,
+  HostRequestArgs,
   PickFilesArgs,
   PickFolderArgs,
   SecureDeleteArgs,
@@ -13,9 +15,16 @@ import type {
   StreamPortArgs,
   StreamPrepareArgs,
   StreamReadArgs,
+  SyncDeltasArgs,
+  SyncImportDeltaArgs,
+  SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
 import {
+  isLocalAddArgs,
+  isLocalProbeArgs,
+  isHostCancelArgs,
+  isHostRequestArgs,
   isPickFilesArgs,
   isPickFolderArgs,
   isSecureDeleteArgs,
@@ -34,6 +43,18 @@ import {
   isStreamPortArgs,
   isStreamPrepareArgs,
   isStreamReadArgs,
+  isSyncDeltasArgs,
+  isSyncImportDeltaArgs,
+  isSyncUnpairArgs,
+  isTagreadBatchArgs,
+  isTagreadEnumerateArgs,
+  isTransferAbortArgs,
+  isTransferBeginArgs,
+  isTransferFinalizeArgs,
+  isTransferNameArgs,
+  isTransferSinkArgs,
+  isTransferSweepArgs,
+  isTransferWriteArgs,
   isUtilityPingArgs,
 } from '../shared/contract.ts';
 import type { ResultEnvelope } from '../shared/envelope.ts';
@@ -191,6 +212,18 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     ),
   ],
   [
+    CHANNELS.hostRequest,
+    channel(isHostRequestArgs, (args: HostRequestArgs, deps) =>
+      deps.utility.request(CHANNELS.hostRequest, args),
+    ),
+  ],
+  [
+    CHANNELS.hostCancel,
+    channel(isHostCancelArgs, (args: HostCancelArgs, deps) =>
+      deps.utility.request(CHANNELS.hostCancel, args),
+    ),
+  ],
+  [
     CHANNELS.streamPrepare,
     channel(isStreamPrepareArgs, (args: StreamPrepareArgs, deps) =>
       deps.utility.request(CHANNELS.streamPrepare, args),
@@ -345,6 +378,173 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.storageDropBackup,
     channel(isStorageBackupArgs, (args, deps) =>
       deps.utility.request(CHANNELS.storageDropBackup, args),
+    ),
+  ],
+  // Sync channels forward to the utility's LAN service — status,
+  // pairing, the device registry, and the engine seam. They are
+  // plugin-independent: zero plugins still syncs.
+  [
+    CHANNELS.syncStatus,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncStatus, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncPairing,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncPairing, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncDevices,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncDevices, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncUnpair,
+    channel(isSyncUnpairArgs, (args: SyncUnpairArgs, deps) =>
+      deps.utility.request(CHANNELS.syncUnpair, args),
+    ),
+  ],
+  [
+    CHANNELS.syncDeltas,
+    channel(isSyncDeltasArgs, (args: SyncDeltasArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDeltas, args),
+    ),
+  ],
+  [
+    CHANNELS.syncImportDelta,
+    channel(isSyncImportDeltaArgs, (args: SyncImportDeltaArgs, deps) =>
+      deps.utility.request(CHANNELS.syncImportDelta, args),
+    ),
+  ],
+  [
+    CHANNELS.syncTrigger,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncTrigger, undefined),
+    ),
+  ],
+  // The offline file plane — the utility re-validates each payload
+  // against the same contract before touching disk or db.
+  [
+    CHANNELS.transferEnsureDir,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferEnsureDir, args),
+    ),
+  ],
+  [
+    CHANNELS.transferBegin,
+    channel(isTransferBeginArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferBegin, args),
+    ),
+  ],
+  [
+    CHANNELS.transferWrite,
+    channel(isTransferWriteArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferWrite, args),
+    ),
+  ],
+  [
+    CHANNELS.transferCommit,
+    channel(isTransferSinkArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferCommit, args),
+    ),
+  ],
+  [
+    CHANNELS.transferFinalize,
+    channel(isTransferFinalizeArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferFinalize, args),
+    ),
+  ],
+  [
+    CHANNELS.transferAbort,
+    channel(isTransferAbortArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferAbort, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStat,
+    channel(isTransferNameArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStat, args),
+    ),
+  ],
+  [
+    CHANNELS.transferRemove,
+    channel(isTransferNameArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferRemove, args),
+    ),
+  ],
+  [
+    CHANNELS.transferSweepPartials,
+    channel(isTransferSweepArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferSweepPartials, args),
+    ),
+  ],
+  [
+    CHANNELS.transferList,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferList, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStatus,
+    channel(isTransferSinkArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStatus, args),
+    ),
+  ],
+  [
+    CHANNELS.transferStats,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.transferStats, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadEnumerate,
+    channel(isTagreadEnumerateArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadEnumerate, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadFingerprint,
+    channel(isTagreadBatchArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadFingerprint, args),
+    ),
+  ],
+  [
+    CHANNELS.tagreadRead,
+    channel(isTagreadBatchArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.tagreadRead, args),
+    ),
+  ],
+  [
+    CHANNELS.localAdd,
+    channel(isLocalAddArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localAdd, args),
+    ),
+  ],
+  [
+    CHANNELS.localProbe,
+    channel(isLocalProbeArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localProbe, args),
+    ),
+  ],
+  [
+    CHANNELS.localList,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localList, args),
+    ),
+  ],
+  [
+    CHANNELS.localPlayback,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localPlayback, args),
+    ),
+  ],
+  [
+    CHANNELS.localSweep,
+    channel(noArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localSweep, args),
     ),
   ],
 ];

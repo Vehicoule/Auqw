@@ -23,6 +23,7 @@ import {
   JetBrainsMono_700Bold,
 } from '@expo-google-fonts/jetbrains-mono';
 import * as AuqwExpo from 'auqw-expo';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   CancellationSource,
   SearchSession,
@@ -44,6 +45,7 @@ import type {
   SearchState,
   SessionState,
   SourceRef,
+  SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
 import {
@@ -61,6 +63,7 @@ import {
   MiniPlayer,
   PlatformTabs,
   PlaylistScreen,
+  Pressable,
   ProviderPickerSheet,
   PushScreen,
   RowActionsSheet,
@@ -69,6 +72,7 @@ import {
   SheetScreen,
   StackItem,
   StageSheet,
+  SyncScreen,
   Text,
   ThemeProvider,
   TransferScreen,
@@ -87,6 +91,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  toSyncModel,
   toTrackRowModel,
   useTheme,
 } from '@auqw/ui-native';
@@ -125,6 +130,50 @@ const NAV_ITEMS: readonly NavItemModel[] = [
   { key: 'library', label: 'library' },
   { key: 'settings', label: 'settings' },
 ];
+
+/**
+ * The sync screen's QR scanner — expo-camera lives in the app (not
+ * ui-native), so the camera mounts here and the screen receives it
+ * through its renderScanner seam. Permission is requested lazily on
+ * first open; denied/restricted renders an honest prompt, never a
+ * dead black frame.
+ */
+function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
+  const theme = useTheme();
+  const [permission, requestPermission] = useCameraPermissions();
+  const consumed = useRef(false);
+  useEffect(() => {
+    if (permission !== null && !permission.granted && permission.canAskAgain) {
+      void requestPermission();
+    }
+  }, [permission, requestPermission]);
+  if (permission === null || !permission.granted) {
+    return (
+      <Pressable
+        onPress={() => void requestPermission()}
+        accessibilityLabel="grant camera access"
+        accessibilityRole="button"
+        style={{ padding: 14 }}
+      >
+        <Text variant="metadata" color="secondary">
+          camera access is needed to scan the pairing QR
+        </Text>
+      </Pressable>
+    );
+  }
+  return (
+    <CameraView
+      style={{ flex: 1 }}
+      barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+      onBarcodeScanned={(result) => {
+        if (!consumed.current && typeof result.data === 'string') {
+          consumed.current = true;
+          onScan(result.data);
+        }
+      }}
+    />
+  );
+}
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
 
@@ -388,7 +437,8 @@ type Overlay =
   | { readonly type: 'playlist'; readonly playlistId: string }
   | { readonly type: 'entity'; readonly ref: EntityRef }
   | { readonly type: 'corrections' }
-  | { readonly type: 'transfer' };
+  | { readonly type: 'transfer' }
+  | { readonly type: 'sync' };
 
 /** A pushed route on the native screen stack. */
 type OverlayEntry = { readonly key: string; readonly overlay: Overlay };
@@ -716,6 +766,25 @@ function Main({
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
+
+  // Slice-4 sync surface — null on iOS or when bring-up failed. The
+  // client's own subscription feeds status; a failed bring-up leaves
+  // the settings row disabled with 'unavailable', never a dead link.
+  const syncSurface = controller.sync();
+  const [syncStatus, setSyncStatus] = useState<SyncClientStatus | null>(
+    () => syncSurface?.client.status() ?? null,
+  );
+  const [pairing, setPairing] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
+  useEffect(() => {
+    if (syncSurface === null) {
+      return;
+    }
+    setSyncStatus(syncSurface.client.status());
+    return syncSurface.client.subscribe(setSyncStatus);
+    // The surface is stable for the controller's life — subscribe once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
 
   const catalogProvider =
     controller.providers.find(
@@ -1123,6 +1192,17 @@ function Main({
     }),
     [state, controller, attempts, pendingReviews],
   );
+  const syncModel = useMemo(
+    () =>
+      toSyncModel({
+        available: syncSurface !== null,
+        status: syncStatus,
+      }),
+    // syncSurface is stable per controller — syncStatus carries the
+    // updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [syncStatus, controller],
+  );
   const settingsModel = useMemo(
     () =>
       toSettingsModel(state.settings, diagnostics, {
@@ -1136,8 +1216,10 @@ function Main({
           ?.list()
           .map((s) => ({ sourceId: s.sourceId, label: s.label })),
         downloadCount: downloads.length,
+        syncSupported: syncSurface !== null,
+        syncLabel: syncModel.statusLabel,
       }),
-    [state, diagnostics, storageText, localTick, controller, downloads],
+    [state, diagnostics, storageText, localTick, controller, downloads, syncModel],
   );
 
   const playRecording = useCallback(
@@ -1253,6 +1335,10 @@ function Main({
         pushOverlay({ type: 'transfer' });
         return;
       }
+      if (key === 'sync') {
+        pushOverlay({ type: 'sync' });
+        return;
+      }
       if (key === 'addLocalFolder') {
         const local = controller.local();
         if (local === null) {
@@ -1336,6 +1422,73 @@ function Main({
       }
     },
     [session, state.settings, controller],
+  );
+
+  // ---- slice-4 LAN sync ------------------------------------------------
+  // Both pair paths and every peer op guard on the live client — the
+  // surface can be null (iOS / failed bring-up) behind an enabled row.
+  const runPair = useCallback(
+    (
+      request:
+        | { readonly payload: string }
+        | { readonly code: string; readonly endpoints: readonly string[] },
+    ) => {
+      const client = syncSurface?.client;
+      if (client === undefined || pairing) {
+        return;
+      }
+      setPairing(true);
+      setPairError(null);
+      void client
+        .pair(request, new CancellationSource().signal)
+        .then((result) => {
+          setPairing(false);
+          setPairError(result.ok ? null : result.error.message);
+        });
+    },
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller, pairing],
+  );
+  const onPairCode = useCallback(
+    (input: { code: string; host: string; port: number | null }) => {
+      if (input.port === null) {
+        return;
+      }
+      runPair({
+        code: input.code,
+        endpoints: [`${input.host}:${input.port}`],
+      });
+    },
+    [runPair],
+  );
+  const onPairPayload = useCallback(
+    (payload: string) => {
+      runPair({ payload });
+    },
+    [runPair],
+  );
+  const onSyncNow = useCallback(
+    (fp: string) => {
+      const client = syncSurface?.client;
+      if (client === undefined) {
+        return;
+      }
+      void client.syncNow(fp, new CancellationSource().signal);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller],
+  );
+  const onUnpair = useCallback(
+    (fp: string) => {
+      const client = syncSurface?.client;
+      if (client === undefined) {
+        return;
+      }
+      void client.unpair(fp, new CancellationSource().signal);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller],
   );
 
   const playback = state.playback;
@@ -2884,6 +3037,25 @@ function Main({
             onPickImportFile={onPickImportFile}
             onApplyImport={onApplyImport}
             onResetImport={onResetImport}
+          />
+        );
+      case 'sync':
+        return (
+          <SyncScreen
+            model={syncModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onPairCode={onPairCode}
+            onPairPayload={onPairPayload}
+            onSyncNow={onSyncNow}
+            onUnpair={onUnpair}
+            pairing={pairing}
+            pairError={pairError}
+            renderScanner={
+              Platform.OS === 'android'
+                ? (onScan) => <SyncScanner onScan={onScan} />
+                : undefined
+            }
           />
         );
       default:

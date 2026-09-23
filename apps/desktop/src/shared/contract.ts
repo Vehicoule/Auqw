@@ -155,11 +155,34 @@ export function isUtilityPingResult(
  * `host:plugins` — whether the native bindings loaded and which plugin
  * ids are live. `bindings` is a status, not a throw: the utility keeps
  * serving non-stream channels when the `.node` artifact is absent.
+ * `manifests` carries each loaded plugin's declared provider id +
+ * capability names verbatim — the renderer-side provider adapter
+ * re-validates them against the ABI capability set.
  */
+export type PluginManifestPayload = {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly capabilities: readonly string[];
+};
+
+export function isPluginManifestPayload(
+  value: unknown,
+): value is PluginManifestPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['pluginId', 'providerId', 'capabilities']) &&
+    isBoundedString(value['pluginId'], 128) &&
+    isBoundedString(value['providerId'], 128) &&
+    Array.isArray(value['capabilities']) &&
+    value['capabilities'].every((c) => isBoundedString(c, 64))
+  );
+}
+
 export type HostPluginsResult = {
   readonly bindings: 'loaded' | 'unavailable';
   readonly bindingsError?: string;
   readonly plugins: readonly string[];
+  readonly manifests: readonly PluginManifestPayload[];
 };
 
 export function isHostPluginsResult(
@@ -167,11 +190,13 @@ export function isHostPluginsResult(
 ): value is HostPluginsResult {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['bindings', 'bindingsError', 'plugins']) &&
+    hasOnlyKeys(value, ['bindings', 'bindingsError', 'plugins', 'manifests']) &&
     (value['bindings'] === 'loaded' || value['bindings'] === 'unavailable') &&
     isStringOrUndefined(value['bindingsError']) &&
     Array.isArray(value['plugins']) &&
-    value['plugins'].every((p) => isBoundedString(p, 128))
+    value['plugins'].every((p) => isBoundedString(p, 128)) &&
+    Array.isArray(value['manifests']) &&
+    value['manifests'].every(isPluginManifestPayload)
   );
 }
 
@@ -304,10 +329,48 @@ function isAttemptSummaryPayload(
  * `startPrepare`'s resolved outcome. `prepared` carries the minted
  * stream; `failed`/`superseded` carry the host's typed kind + message.
  */
+/**
+ * `startRequest`'s terminal outcome — `succeeded` carries the raw
+ * `done.result` JSON for the renderer adapter to decode, `failed`
+ * the host's typed kind + message.
+ */
+export type RequestOutcomePayload = {
+  readonly type: 'succeeded' | 'failed';
+  readonly resultJson?: string;
+  readonly kind?: string;
+  readonly message?: string;
+  readonly attempt: AttemptSummaryPayload;
+};
+
+export function isRequestOutcomePayload(
+  value: unknown,
+): value is RequestOutcomePayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'type',
+      'resultJson',
+      'kind',
+      'message',
+      'attempt',
+    ]) &&
+    (value['type'] === 'succeeded' || value['type'] === 'failed') &&
+    (value['resultJson'] === undefined ||
+      (typeof value['resultJson'] === 'string' &&
+        value['resultJson'].length <= 1_048_576)) &&
+    isStringOrUndefined(value['kind']) &&
+    isStringOrUndefined(value['message']) &&
+    isAttemptSummaryPayload(value['attempt'])
+  );
+}
+
 export type PrepareOutcomePayload = {
   readonly type: 'prepared' | 'failed' | 'superseded';
   readonly stream?: PreparedStreamPayload;
-  readonly superseded?: boolean;
+  // Session handles this prepare superseded or pruned (napi
+  // `PrepareOutcome.superseded: Vec<String>`) — handle routing drops
+  // them so a dead session can never serve a later attach.
+  readonly superseded?: readonly string[];
   readonly kind?: string;
   readonly message?: string;
   readonly attempt?: AttemptSummaryPayload;
@@ -331,8 +394,11 @@ export function isPrepareOutcomePayload(
       value['type'] === 'superseded') &&
     (value['stream'] === undefined ||
       isPreparedStreamPayload(value['stream'])) &&
+    // No length cap: the registry prunes unbounded terminal sets, and
+    // rejecting post-registration would strand the minted handle.
     (value['superseded'] === undefined ||
-      isBoolean(value['superseded'])) &&
+      (Array.isArray(value['superseded']) &&
+        value['superseded'].every((h) => isBoundedString(h, 256)))) &&
     isStringOrUndefined(value['kind']) &&
     isStringOrUndefined(value['message']) &&
     (value['attempt'] === undefined ||
@@ -516,6 +582,51 @@ export type StreamCancelArgs = { readonly requestId: string };
 export function isStreamCancelArgs(
   value: unknown,
 ): value is StreamCancelArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['requestId']) &&
+    isBoundedString(value['requestId'], 128)
+  );
+}
+
+/**
+ * `host:request` — any declared capability with a JSON object payload,
+ * mirroring the napi `startRequest` signature. The renderer mints the
+ * requestId so its cancel path can reach the host before the promise
+ * resolves.
+ */
+export type HostRequestArgs = {
+  readonly pluginId: string;
+  readonly capability: string;
+  readonly payloadJson: string;
+  readonly requestId: string;
+};
+
+export function isHostRequestArgs(
+  value: unknown,
+): value is HostRequestArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'pluginId',
+      'capability',
+      'payloadJson',
+      'requestId',
+    ]) &&
+    isBoundedString(value['pluginId'], 128) &&
+    isBoundedString(value['capability'], 64) &&
+    typeof value['payloadJson'] === 'string' &&
+    value['payloadJson'].length <= 65_536 &&
+    isBoundedString(value['requestId'], 128)
+  );
+}
+
+/** `host:cancel` — same requestId-scoped abort as `stream:cancel`. */
+export type HostCancelArgs = { readonly requestId: string };
+
+export function isHostCancelArgs(
+  value: unknown,
+): value is HostCancelArgs {
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ['requestId']) &&
@@ -712,6 +823,1102 @@ export type AuqwStorage = {
   readonly dropBackup: (tag: string) => Promise<void>;
 };
 
+/* ------------------------------------------------------------------ */
+/* Sync — LAN transport, pairing, device registry, delta seam.         */
+/* ------------------------------------------------------------------ */
+
+/** Cap on an opaque delta document — sync payloads must not balloon IPC. */
+export const MAX_SYNC_DOC_BYTES = 1_048_576;
+
+export type SyncListenerState =
+  | 'starting'
+  | 'listening'
+  | 'unavailable'
+  | 'disabled';
+
+export type SyncStatusResult = {
+  readonly listener: SyncListenerState;
+  /** `ip:port` to feed a pairing payload, or null when nothing is up. */
+  readonly endpoint: string | null;
+  readonly boundPort: number | null;
+  readonly advertise: 'off' | 'announcing' | 'unavailable';
+  readonly pairedDevices: number;
+  readonly sessions: number;
+  readonly lastSyncAt: number | null;
+  readonly engine: 'ready' | 'absent';
+  readonly name: string;
+  readonly fingerprint: string | null;
+};
+
+export function isSyncStatusResult(
+  value: unknown,
+): value is SyncStatusResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'listener',
+      'endpoint',
+      'boundPort',
+      'advertise',
+      'pairedDevices',
+      'sessions',
+      'lastSyncAt',
+      'engine',
+      'name',
+      'fingerprint',
+    ]) &&
+    (value['listener'] === 'starting' ||
+      value['listener'] === 'listening' ||
+      value['listener'] === 'unavailable' ||
+      value['listener'] === 'disabled') &&
+    (value['endpoint'] === null ||
+      isBoundedString(value['endpoint'], 128)) &&
+    (value['boundPort'] === null ||
+      isSafeNonNegativeInt(value['boundPort'])) &&
+    (value['advertise'] === 'off' ||
+      value['advertise'] === 'announcing' ||
+      value['advertise'] === 'unavailable') &&
+    isSafeNonNegativeInt(value['pairedDevices']) &&
+    isSafeNonNegativeInt(value['sessions']) &&
+    (value['lastSyncAt'] === null ||
+      isFiniteNumber(value['lastSyncAt'])) &&
+    (value['engine'] === 'ready' || value['engine'] === 'absent') &&
+    isBoundedString(value['name'], 128) &&
+    (value['fingerprint'] === null ||
+      isBoundedString(value['fingerprint'], 128))
+  );
+}
+
+export type SyncPairingResult = {
+  /** QR-payload text: JSON {v, endpoint, code, fp}. */
+  readonly payload: string;
+  /** The 6-digit typed path — same session as the QR payload. */
+  readonly code: string;
+  readonly expiresAt: number;
+};
+
+export function isSyncPairingResult(
+  value: unknown,
+): value is SyncPairingResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['payload', 'code', 'expiresAt']) &&
+    isBoundedString(value['payload'], 1_024) &&
+    typeof value['code'] === 'string' &&
+    /^[0-9]{6}$/.test(value['code']) &&
+    isFiniteNumber(value['expiresAt'])
+  );
+}
+
+export type SyncDeviceInfo = {
+  readonly id: string;
+  readonly name: string;
+  readonly pairedAt: number;
+  readonly lastSeenAt: number;
+};
+
+function isSyncDeviceInfo(value: unknown): value is SyncDeviceInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id', 'name', 'pairedAt', 'lastSeenAt']) &&
+    isBoundedString(value['id'], 64) &&
+    isBoundedString(value['name'], 128) &&
+    isFiniteNumber(value['pairedAt']) &&
+    isFiniteNumber(value['lastSeenAt'])
+  );
+}
+
+export type SyncDevicesResult = {
+  readonly devices: readonly SyncDeviceInfo[];
+};
+
+export function isSyncDevicesResult(
+  value: unknown,
+): value is SyncDevicesResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['devices']) &&
+    Array.isArray(value['devices']) &&
+    value['devices'].length <= 64 &&
+    value['devices'].every(isSyncDeviceInfo)
+  );
+}
+
+export type SyncUnpairArgs = { readonly id: string };
+
+export function isSyncUnpairArgs(
+  value: unknown,
+): value is SyncUnpairArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id']) &&
+    isBoundedString(value['id'], 64)
+  );
+}
+
+/**
+ * The strict JSON domain — values that survive a serialize/parse round
+ * trip unchanged. Electron IPC preserves `undefined` properties, sparse
+ * array slots, `NaN`, and ±Infinity that `JSON.stringify` silently
+ * rewrites or drops; accepting them here would validate one document
+ * while the sync engine receives a different one.
+ */
+const MAX_JSON_DEPTH = 64;
+
+/**
+ * A getter answers per-read — validation and serialization would
+ * observe different documents (a value accepted now can vanish or
+ * change on the wire). Only own enumerable DATA properties are stable
+ * enough to validate and then send. `toJSON` is the exception that
+ * escapes an enumerable-only scan: JSON.stringify invokes it whatever
+ * its enumerability, so a hidden hook would serialize a document
+ * validation never saw — reject a `toJSON` getter or function value.
+ */
+function hasNoEnumerableGetter(value: object): boolean {
+  // `toJSON` is honored wherever it sits on the prototype chain —
+  // Object.prototype/Array.prototype are the allowed protos, and a
+  // hook placed there rewrites the wire doc just like an own prop.
+  // The FIRST descriptor wins the stringify lookup: an inert
+  // non-function value shadows anything deeper and stays legal.
+  // The walk is cycle-marked and bounded — a proxy answering
+  // getPrototypeOf with itself or a fresh proxy would otherwise loop
+  // forever, and this cap is not covered by the value-depth bound.
+  const seen = new WeakSet<object>();
+  const MAX_PROTO_DEPTH = 16;
+  for (
+    let level: object | null = value, depth = 0;
+    level !== null;
+    level = Object.getPrototypeOf(level), depth += 1
+  ) {
+    if (depth > MAX_PROTO_DEPTH || seen.has(level)) {
+      return false;
+    }
+    seen.add(level);
+    const hook = Object.getOwnPropertyDescriptor(level, 'toJSON');
+    if (hook === undefined) {
+      continue;
+    }
+    if (
+      hook.get !== undefined ||
+      ('value' in hook && typeof hook.value === 'function')
+    ) {
+      return false;
+    }
+    break;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return Object.values(descriptors).every(
+    (desc) => desc.enumerable !== true || desc.get === undefined,
+  );
+}
+
+function isJsonValueInner(
+  value: unknown,
+  active: WeakSet<object>,
+  depth: number,
+): boolean {
+  if (value === null || typeof value === 'boolean') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+  if (typeof value === 'string') {
+    return true;
+  }
+  if (depth > MAX_JSON_DEPTH) {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    // `length` counts holes; keys enumerate real slots — a sparse
+    // array serializes to nulls it doesn't actually contain.
+    if (
+      Object.keys(value).length !== value.length ||
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
+    ) {
+      return false;
+    }
+    active.add(value);
+    try {
+      return value.every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
+  }
+  if (isRecord(value)) {
+    // Only plain objects — a Date, Map, or class instance carries no
+    // own enumerable slots yet serializes to a different domain (a
+    // Date becomes a string, a Map becomes {}).
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (
+      (proto !== Object.prototype && proto !== null) ||
+      active.has(value) ||
+      !hasNoEnumerableGetter(value)
+    ) {
+      return false;
+    }
+    active.add(value);
+    try {
+      return Object.values(value).every((entry) =>
+        isJsonValueInner(entry, active, depth + 1),
+      );
+    } finally {
+      active.delete(value);
+    }
+  }
+  return false;
+}
+
+export function isJsonValue(value: unknown): boolean {
+  // `active` marks the CURRENT path only — deleted on unwind — so a
+  // diamond of shared references still passes while a true cycle
+  // returns false instead of overflowing the stack. The depth cap
+  // bounds the recursion a hostile object graph can provoke.
+  return isJsonValueInner(value, new WeakSet<object>(), 0);
+}
+
+/**
+ * A JSON value whose serialized UTF-8 form fits `maxBytes`. The cap is
+ * BYTES on the wire — `encoded.length` counts UTF-16 code units, so
+ * non-ASCII payloads are measured with TextEncoder.
+ */
+function isBoundedJson(value: unknown, maxBytes: number): boolean {
+  // The whole validation sits inside the exception boundary — a
+  // malformed graph (proxy, throwing accessor) answers false, never
+  // an internal throw that lands as the wrong error kind.
+  try {
+    if (!isJsonValue(value)) {
+      return false;
+    }
+    const encoded = JSON.stringify(value);
+    return (
+      typeof encoded === 'string' &&
+      new TextEncoder().encode(encoded).length <= maxBytes
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opaque delta document: a JSON object or array that stays inside the
+ * cap — deltas are documents, not bare primitives.
+ */
+export function isSyncDeltaDoc(value: unknown): boolean {
+  return (
+    (isRecord(value) || Array.isArray(value)) &&
+    isBoundedJson(value, MAX_SYNC_DOC_BYTES)
+  );
+}
+
+export type SyncDeltasArgs = { readonly since: string };
+
+/**
+ * The serialized-cursor bound: `since` is `JSON.stringify(SyncCursor)`
+ * — a map of up to 512 device ids (each ≤128 chars) to sequences.
+ * Worst case is 512 entries × ~150 JSON chars ≈ 77 KB; round to
+ * 80 000 so a full cursor always fits.
+ */
+export const MAX_SYNC_CURSOR_CHARS = 80_000;
+
+export function isSyncDeltasArgs(
+  value: unknown,
+): value is SyncDeltasArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['since']) &&
+    // '' is a legal cursor — the engine reads it as "full snapshot".
+    typeof value['since'] === 'string' &&
+    value['since'].length <= MAX_SYNC_CURSOR_CHARS
+  );
+}
+
+export type SyncDeltasResult = { readonly delta: unknown };
+
+export function isSyncDeltasResult(
+  value: unknown,
+): value is SyncDeltasResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta']) &&
+    isSyncDeltaDoc(value['delta'])
+  );
+}
+
+export type SyncImportDeltaArgs = {
+  readonly delta: unknown;
+  readonly deviceId?: string;
+};
+
+export function isSyncImportDeltaArgs(
+  value: unknown,
+): value is SyncImportDeltaArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['delta', 'deviceId']) &&
+    isSyncDeltaDoc(value['delta']) &&
+    (value['deviceId'] === undefined ||
+      isBoundedString(value['deviceId'], 64))
+  );
+}
+
+export type SyncImportDeltaResult = { readonly result: unknown };
+
+export function isSyncImportDeltaResult(
+  value: unknown,
+): value is SyncImportDeltaResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['result']) &&
+    // The engine's apply receipt is `unknown` — any bounded JSON value
+    // (including `null`) is a valid result, not just full documents.
+    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+  );
+}
+
+export type SyncTriggerResult = {
+  readonly triggered: boolean;
+  readonly pending: boolean;
+};
+
+export function isSyncTriggerResult(
+  value: unknown,
+): value is SyncTriggerResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['triggered', 'pending']) &&
+    isBoolean(value['triggered']) &&
+    isBoolean(value['pending'])
+  );
+}
+
+/**
+ * `sync:localChanges` — domain edits the renderer already committed,
+ * pushed to the engine so it can stamp them into the change log. The
+ * doc mirrors the engine's `LocalWrite` shape with `kind` left a
+ * string: the whitelist check is the engine's own `validLocalWrite`,
+ * which runs per write before stamping — the boundary only owes the
+ * bounded-shape check below.
+ */
+export const MAX_SYNC_LOCAL_WRITES = 256;
+export const MAX_SYNC_FIELD_BYTES = 65_536;
+
+export type SyncLocalWriteDoc =
+  | {
+      readonly kind: string;
+      readonly recordId: string;
+      readonly field: string;
+      readonly value: unknown;
+    }
+  | {
+      readonly kind: string;
+      readonly recordId: string;
+      readonly tombstone: true;
+    };
+
+export function isSyncLocalWriteDoc(
+  value: unknown,
+): value is SyncLocalWriteDoc {
+  if (
+    !isRecord(value) ||
+    !isBoundedString(value['kind'], 64) ||
+    !isBoundedString(value['recordId'], 1024)
+  ) {
+    return false;
+  }
+  if (hasOnlyKeys(value, ['kind', 'recordId', 'tombstone'])) {
+    return value['tombstone'] === true;
+  }
+  return (
+    hasOnlyKeys(value, ['kind', 'recordId', 'field', 'value']) &&
+    isBoundedString(value['field'], 64) &&
+    isBoundedJson(value['value'], MAX_SYNC_FIELD_BYTES)
+  );
+}
+
+export type SyncLocalChangesArgs = {
+  readonly writes: readonly SyncLocalWriteDoc[];
+};
+
+export function isSyncLocalChangesArgs(
+  value: unknown,
+): value is SyncLocalChangesArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['writes']) &&
+    Array.isArray(value['writes']) &&
+    value['writes'].length > 0 &&
+    value['writes'].length <= MAX_SYNC_LOCAL_WRITES &&
+    value['writes'].every(isSyncLocalWriteDoc)
+  );
+}
+
+export type SyncLocalChangesResult = { readonly result: unknown };
+
+export function isSyncLocalChangesResult(
+  value: unknown,
+): value is SyncLocalChangesResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['result']) &&
+    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+  );
+}
+
+/**
+ * The renderer's `api.sync.*` — one method per `sync:*` channel; the
+ * utility's sync service answers them all and works plugin-free.
+ */
+export type AuqwSync = {
+  readonly status: () => Promise<SyncStatusResult>;
+  readonly pairing: () => Promise<SyncPairingResult>;
+  readonly devices: () => Promise<SyncDevicesResult>;
+  readonly unpair: (args: SyncUnpairArgs) => Promise<void>;
+  readonly deltas: (args: SyncDeltasArgs) => Promise<SyncDeltasResult>;
+  readonly importDelta: (
+    args: SyncImportDeltaArgs,
+  ) => Promise<SyncImportDeltaResult>;
+  readonly trigger: () => Promise<SyncTriggerResult>;
+  /**
+   * Commit-then-log: the engine stamps renderer-side domain edits so
+   * later deltas carry them. Call-site wiring lands with the sync
+   * emission leg — the channel + engine path exist now.
+   */
+  readonly localChanges: (
+    args: SyncLocalChangesArgs,
+  ) => Promise<SyncLocalChangesResult>;
+};
+
+/* ------------------------------------------------------------------ */
+/* Transfer file-plane + local index + tag-read payloads                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `transfer:*` — the `MediaTransferPort` file plane. A `begin` mints a
+ * sink id in the utility; writes are raw bytes riding base64; `commit`
+ * returns the durable byte offset (the resume point); `finalize`
+ * verifies an optional sha256 digest then atomically renames
+ * `name.part` over `name`. Destination names stay bare — the managed
+ * dir under userData is the only writable surface.
+ */
+export const MAX_TRANSFER_NAME = 512;
+// 4MiB decoded → ceil(4194304/3)*4 = 5,592,408 base64 chars.
+export const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
+export const MAX_SWEEP_KEEP = 65_536;
+export const MAX_LIST_ENTRIES = 65_536;
+
+export type TransferBeginArgs = {
+  readonly destPath: string;
+  readonly resumeAtBytes: number;
+};
+
+export function isTransferBeginArgs(
+  value: unknown,
+): value is TransferBeginArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['destPath', 'resumeAtBytes']) &&
+    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['resumeAtBytes'])
+  );
+}
+
+export type TransferBeginResult = { readonly sinkId: string };
+export type TransferSinkArgs = { readonly sinkId: string };
+
+export function isSinkId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value,
+    )
+  );
+}
+
+export function isTransferBeginResult(
+  value: unknown,
+): value is TransferBeginResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId']) &&
+    isSinkId(value['sinkId'])
+  );
+}
+
+export function isTransferSinkArgs(
+  value: unknown,
+): value is TransferSinkArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId']) &&
+    isSinkId(value['sinkId'])
+  );
+}
+
+export type TransferWriteArgs = {
+  readonly sinkId: string;
+  readonly data: string;
+};
+
+export function isTransferWriteArgs(
+  value: unknown,
+): value is TransferWriteArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'data']) &&
+    isSinkId(value['sinkId']) &&
+    typeof value['data'] === 'string' &&
+    value['data'].length <= MAX_TRANSFER_WRITE_BASE64
+  );
+}
+
+export type TransferCommitResult = { readonly offset: number };
+
+export function isTransferCommitResult(
+  value: unknown,
+): value is TransferCommitResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['offset']) &&
+    isSafeNonNegativeInt(value['offset'])
+  );
+}
+
+export type TransferFinalizeArgs = {
+  readonly sinkId: string;
+  readonly expected: string | null;
+};
+
+export function isTransferFinalizeArgs(
+  value: unknown,
+): value is TransferFinalizeArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'expected']) &&
+    isSinkId(value['sinkId']) &&
+    (value['expected'] === null ||
+      (typeof value['expected'] === 'string' &&
+        /^[0-9a-f]{64}$/.test(value['expected'])))
+  );
+}
+
+export type TransferFinalizeResult = { readonly digest: string };
+
+export function isTransferFinalizeResult(
+  value: unknown,
+): value is TransferFinalizeResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['digest']) &&
+    typeof value['digest'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(value['digest'])
+  );
+}
+
+export type TransferAbortArgs = {
+  readonly sinkId: string;
+  readonly keep: boolean;
+};
+
+export function isTransferAbortArgs(
+  value: unknown,
+): value is TransferAbortArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'keep']) &&
+    isSinkId(value['sinkId']) &&
+    isBoolean(value['keep'])
+  );
+}
+
+export type TransferNameArgs = { readonly name: string };
+
+export function isTransferNameArgs(
+  value: unknown,
+): value is TransferNameArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['name']) &&
+    isBoundedString(value['name'], MAX_TRANSFER_NAME)
+  );
+}
+
+export type TransferStatResult = {
+  readonly exists: boolean;
+  readonly bytes: number | null;
+};
+
+export function isTransferStatResult(
+  value: unknown,
+): value is TransferStatResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['exists', 'bytes']) &&
+    isBoolean(value['exists']) &&
+    (value['bytes'] === null || isSafeNonNegativeInt(value['bytes']))
+  );
+}
+
+export type TransferSweepArgs = { readonly keepPaths: readonly string[] };
+
+export function isTransferSweepArgs(
+  value: unknown,
+): value is TransferSweepArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['keepPaths']) &&
+    Array.isArray(value['keepPaths']) &&
+    value['keepPaths'].length <= MAX_SWEEP_KEEP &&
+    value['keepPaths'].every((name) =>
+      isBoundedString(name, MAX_TRANSFER_NAME),
+    )
+  );
+}
+
+export type TransferSweepResult = { readonly swept: number };
+
+export function isTransferSweepResult(
+  value: unknown,
+): value is TransferSweepResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['swept']) &&
+    isSafeNonNegativeInt(value['swept'])
+  );
+}
+
+export type TransferSinkInfo = {
+  readonly sinkId: string;
+  readonly destPath: string;
+  readonly committedBytes: number;
+  readonly openedMs: number;
+};
+
+export function isTransferSinkInfo(
+  value: unknown,
+): value is TransferSinkInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'destPath', 'committedBytes', 'openedMs']) &&
+    isSinkId(value['sinkId']) &&
+    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['committedBytes']) &&
+    isSafeNonNegativeInt(value['openedMs'])
+  );
+}
+
+export type TransferFileInfo = { readonly name: string; readonly bytes: number };
+
+export function isTransferFileInfo(
+  value: unknown,
+): value is TransferFileInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['name', 'bytes']) &&
+    isBoundedString(value['name'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['bytes'])
+  );
+}
+
+export type TransferListResult = {
+  readonly sinks: readonly TransferSinkInfo[];
+  readonly files: readonly TransferFileInfo[];
+};
+
+export function isTransferListResult(
+  value: unknown,
+): value is TransferListResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinks', 'files']) &&
+    Array.isArray(value['sinks']) &&
+    value['sinks'].length <= MAX_LIST_ENTRIES &&
+    value['sinks'].every(isTransferSinkInfo) &&
+    Array.isArray(value['files']) &&
+    value['files'].length <= MAX_LIST_ENTRIES &&
+    value['files'].every(isTransferFileInfo)
+  );
+}
+
+export type TransferStatusResult = TransferSinkInfo;
+
+export const isTransferStatusResult = isTransferSinkInfo;
+
+export type TransferStatsResult = {
+  readonly bytes: number;
+  readonly files: number;
+  readonly partials: number;
+  readonly freeBytes: number | null;
+};
+
+export function isTransferStatsResult(
+  value: unknown,
+): value is TransferStatsResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['bytes', 'files', 'partials', 'freeBytes']) &&
+    isSafeNonNegativeInt(value['bytes']) &&
+    isSafeNonNegativeInt(value['files']) &&
+    isSafeNonNegativeInt(value['partials']) &&
+    (value['freeBytes'] === null ||
+      isSafeNonNegativeInt(value['freeBytes']))
+  );
+}
+
+/**
+ * `tagread:*` — the `TagReaderPort` read plane for granted trees.
+ * `treeUri` is an opaque grant handle minted by `local:add`; every
+ * batch is bounded so a hostile or corrupted tree can't smuggle
+ * unbounded work across the boundary.
+ */
+export const MAX_TAGREAD_BATCH = 64;
+export const MAX_DOC_ID = 4096;
+export const MAX_ENUM_ENTRIES = 50_000;
+export const MAX_TAG_FIELD = 4096;
+
+export type TagreadEnumerateArgs = { readonly treeUri: string };
+
+export function isTagreadEnumerateArgs(
+  value: unknown,
+): value is TagreadEnumerateArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri']) &&
+    isBoundedString(value['treeUri'], MAX_DOC_ID)
+  );
+}
+
+export type LocalEntryPayload = {
+  readonly docId: string;
+  readonly name: string;
+  readonly size: number;
+  readonly mime: string;
+  readonly modifiedMs: number | null;
+};
+
+export function isLocalEntryPayload(
+  value: unknown,
+): value is LocalEntryPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['docId', 'name', 'size', 'mime', 'modifiedMs']) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    isBoundedString(value['name'], 1024) &&
+    isSafeNonNegativeInt(value['size']) &&
+    isBoundedString(value['mime'], 128) &&
+    (value['modifiedMs'] === null ||
+      isSafeNonNegativeInt(value['modifiedMs']))
+  );
+}
+
+export type TagreadEnumerateResult = {
+  readonly entries: readonly LocalEntryPayload[];
+};
+
+export function isTagreadEnumerateResult(
+  value: unknown,
+): value is TagreadEnumerateResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['entries']) &&
+    Array.isArray(value['entries']) &&
+    value['entries'].length <= MAX_ENUM_ENTRIES &&
+    value['entries'].every(isLocalEntryPayload)
+  );
+}
+
+export type TagreadBatchArgs = {
+  readonly treeUri: string;
+  readonly docIds: readonly string[];
+};
+
+export function isTagreadBatchArgs(
+  value: unknown,
+): value is TagreadBatchArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri', 'docIds']) &&
+    isBoundedString(value['treeUri'], MAX_DOC_ID) &&
+    Array.isArray(value['docIds']) &&
+    value['docIds'].length <= MAX_TAGREAD_BATCH &&
+    value['docIds'].every((id) => isBoundedString(id, MAX_DOC_ID))
+  );
+}
+
+export type FileFingerprintPayload = {
+  readonly docId: string;
+  readonly fingerprint: string;
+};
+
+export function isFileFingerprintPayload(
+  value: unknown,
+): value is FileFingerprintPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['docId', 'fingerprint']) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    isBoundedString(value['fingerprint'], 128)
+  );
+}
+
+export type TagreadFingerprintResult = {
+  readonly fingerprints: readonly (FileFingerprintPayload | null)[];
+};
+
+export function isTagreadFingerprintResult(
+  value: unknown,
+): value is TagreadFingerprintResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['fingerprints']) &&
+    Array.isArray(value['fingerprints']) &&
+    value['fingerprints'].length <= MAX_TAGREAD_BATCH &&
+    value['fingerprints'].every(
+      (fp) => fp === null || isFileFingerprintPayload(fp),
+    )
+  );
+}
+
+export type LocalTagsPayload = {
+  readonly docId: string;
+  readonly title: string | null;
+  readonly artist: string | null;
+  readonly album: string | null;
+  readonly durationMs: number | null;
+  readonly genre: string | null;
+};
+
+export function isLocalTagsPayload(
+  value: unknown,
+): value is LocalTagsPayload {
+  const tagField = (v: unknown) => v === null || isBoundedString(v, MAX_TAG_FIELD);
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'docId',
+      'title',
+      'artist',
+      'album',
+      'durationMs',
+      'genre',
+    ]) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    tagField(value['title']) &&
+    tagField(value['artist']) &&
+    tagField(value['album']) &&
+    tagField(value['genre']) &&
+    (value['durationMs'] === null ||
+      isSafeNonNegativeInt(value['durationMs']))
+  );
+}
+
+export type TagreadReadResult = {
+  readonly tags: readonly (LocalTagsPayload | null)[];
+};
+
+export function isTagreadReadResult(
+  value: unknown,
+): value is TagreadReadResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['tags']) &&
+    Array.isArray(value['tags']) &&
+    value['tags'].length <= MAX_TAGREAD_BATCH &&
+    value['tags'].every((t) => t === null || isLocalTagsPayload(t))
+  );
+}
+
+/**
+ * `local:*` — the desktop local-files surface. `local:add` validates
+ * renderer-picked paths and mints the treeUri/label descriptors the
+ * engine's `addFolder` commits; probe/playback back the renderer's
+ * `localPlaybackFor` hook; sweep is the startup integrity reporter.
+ */
+export const MAX_LOCAL_PATHS = 1024;
+export const MAX_LOCAL_PATH = 4096;
+export const MAX_PLAYBACK_ENTRIES = 100_000;
+
+export type LocalAddArgs = { readonly paths: readonly string[] };
+
+export function isLocalAddArgs(value: unknown): value is LocalAddArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['paths']) &&
+    Array.isArray(value['paths']) &&
+    value['paths'].length > 0 &&
+    value['paths'].length <= MAX_LOCAL_PATHS &&
+    value['paths'].every((p) => isBoundedString(p, MAX_LOCAL_PATH))
+  );
+}
+
+export type LocalPickPayload = {
+  readonly treeUri: string;
+  readonly label: string;
+  readonly kind: 'dir' | 'file';
+};
+
+export function isLocalPickPayload(
+  value: unknown,
+): value is LocalPickPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri', 'label', 'kind']) &&
+    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
+    isBoundedString(value['label'], 1024) &&
+    (value['kind'] === 'dir' || value['kind'] === 'file')
+  );
+}
+
+export type LocalAddResult = {
+  readonly picks: readonly LocalPickPayload[];
+};
+
+export function isLocalAddResult(
+  value: unknown,
+): value is LocalAddResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['picks']) &&
+    Array.isArray(value['picks']) &&
+    value['picks'].length <= MAX_LOCAL_PATHS &&
+    value['picks'].every(isLocalPickPayload)
+  );
+}
+
+export type LocalProbeArgs = { readonly recordingId: string };
+
+export function isLocalProbeArgs(
+  value: unknown,
+): value is LocalProbeArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['recordingId']) &&
+    isBoundedString(value['recordingId'], 512)
+  );
+}
+
+export type LocalProbeResult = { readonly uri: string | null };
+
+export function isLocalProbeResult(
+  value: unknown,
+): value is LocalProbeResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['uri']) &&
+    (value['uri'] === null ||
+      (isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
+        (value['uri'] as string).startsWith('file://')))
+  );
+}
+
+export type LocalSourcePayload = {
+  readonly sourceId: string;
+  readonly treeUri: string;
+  readonly label: string;
+  readonly addedMs: number;
+  readonly lastScanMs: number | null;
+  readonly fileCount: number;
+};
+
+export function isLocalSourcePayload(
+  value: unknown,
+): value is LocalSourcePayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'sourceId',
+      'treeUri',
+      'label',
+      'addedMs',
+      'lastScanMs',
+      'fileCount',
+    ]) &&
+    isBoundedString(value['sourceId'], 128) &&
+    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
+    isBoundedString(value['label'], 1024) &&
+    isSafeNonNegativeInt(value['addedMs']) &&
+    (value['lastScanMs'] === null ||
+      isSafeNonNegativeInt(value['lastScanMs'])) &&
+    isSafeNonNegativeInt(value['fileCount'])
+  );
+}
+
+export type LocalListResult = {
+  readonly sources: readonly LocalSourcePayload[];
+};
+
+export function isLocalListResult(
+  value: unknown,
+): value is LocalListResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sources']) &&
+    Array.isArray(value['sources']) &&
+    value['sources'].length <= MAX_LIST_ENTRIES &&
+    value['sources'].every(isLocalSourcePayload)
+  );
+}
+
+export type LocalPlaybackEntry = {
+  readonly recordingId: string;
+  readonly uri: string;
+};
+
+export function isLocalPlaybackEntry(
+  value: unknown,
+): value is LocalPlaybackEntry {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['recordingId', 'uri']) &&
+    isBoundedString(value['recordingId'], 512) &&
+    isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
+    (value['uri'] as string).startsWith('file://')
+  );
+}
+
+export type LocalPlaybackResult = {
+  readonly entries: readonly LocalPlaybackEntry[];
+};
+
+export function isLocalPlaybackResult(
+  value: unknown,
+): value is LocalPlaybackResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['entries']) &&
+    Array.isArray(value['entries']) &&
+    value['entries'].length <= MAX_PLAYBACK_ENTRIES &&
+    value['entries'].every(isLocalPlaybackEntry)
+  );
+}
+
+export type LocalSweepResult = {
+  readonly missing: number;
+  readonly sources: readonly { readonly sourceId: string; readonly missing: number }[];
+};
+
+export function isLocalSweepResult(
+  value: unknown,
+): value is LocalSweepResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['missing', 'sources']) &&
+    isSafeNonNegativeInt(value['missing']) &&
+    Array.isArray(value['sources']) &&
+    value['sources'].length <= MAX_LIST_ENTRIES &&
+    value['sources'].every(
+      (s) =>
+        isRecord(s) &&
+        hasOnlyKeys(s, ['sourceId', 'missing']) &&
+        isBoundedString(s['sourceId'], 128) &&
+        isSafeNonNegativeInt(s['missing']),
+    )
+  );
+}
+
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
  * with a validated payload and rejects with a `ShellError`-shaped value.
@@ -739,11 +1946,16 @@ export type AuqwApi = {
     readonly delete: (key: string) => Promise<void>;
   };
   readonly storage: AuqwStorage;
+  readonly sync: AuqwSync;
   readonly utility: {
     readonly ping: (message: string) => Promise<UtilityPingResult>;
   };
   readonly host: {
     readonly plugins: () => Promise<HostPluginsResult>;
+    readonly request: (
+      args: HostRequestArgs,
+    ) => Promise<RequestOutcomePayload>;
+    readonly cancelRequest: (args: HostCancelArgs) => Promise<void>;
   };
   readonly stream: {
     readonly prepare: (
@@ -762,6 +1974,54 @@ export type AuqwApi = {
     readonly marks: (args: StreamHandleArgs) => Promise<StreamMarksResult>;
     readonly cancel: (args: StreamCancelArgs) => Promise<void>;
     readonly channel: (args: StreamHandleArgs) => Promise<StreamPortLike>;
+  };
+  /**
+   * The `MediaTransferPort` file plane — sink lifecycle plus cache
+   * management. The `DownloadManager` engine drives these calls from
+   * the renderer exactly as it does the mobile adapter.
+   */
+  readonly transfer: {
+    readonly ensureDir: () => Promise<void>;
+    readonly begin: (args: TransferBeginArgs) => Promise<TransferBeginResult>;
+    readonly write: (args: TransferWriteArgs) => Promise<void>;
+    readonly commit: (args: TransferSinkArgs) => Promise<TransferCommitResult>;
+    readonly finalize: (
+      args: TransferFinalizeArgs,
+    ) => Promise<TransferFinalizeResult>;
+    readonly abort: (args: TransferAbortArgs) => Promise<void>;
+    readonly stat: (args: TransferNameArgs) => Promise<TransferStatResult>;
+    readonly remove: (args: TransferNameArgs) => Promise<void>;
+    readonly sweepPartials: (
+      args: TransferSweepArgs,
+    ) => Promise<TransferSweepResult>;
+    readonly list: () => Promise<TransferListResult>;
+    readonly status: (args: TransferSinkArgs) => Promise<TransferStatusResult>;
+    readonly stats: () => Promise<TransferStatsResult>;
+  };
+  /**
+   * The `TagReaderPort` read plane — enumerate/fingerprint/read against
+   * a granted treeUri only.
+   */
+  readonly tagread: {
+    readonly enumerate: (
+      args: TagreadEnumerateArgs,
+    ) => Promise<TagreadEnumerateResult>;
+    readonly fingerprint: (
+      args: TagreadBatchArgs,
+    ) => Promise<TagreadFingerprintResult>;
+    readonly read: (args: TagreadBatchArgs) => Promise<TagreadReadResult>;
+  };
+  /**
+   * Picked-path validation + playback probe + integrity sweep over the
+   * domain index the utility reads. `add` mints the descriptors the
+   * engine commits as `local_sources` rows via `addFolder`.
+   */
+  readonly local: {
+    readonly add: (args: LocalAddArgs) => Promise<LocalAddResult>;
+    readonly probe: (args: LocalProbeArgs) => Promise<LocalProbeResult>;
+    readonly list: () => Promise<LocalListResult>;
+    readonly playback: () => Promise<LocalPlaybackResult>;
+    readonly sweep: () => Promise<LocalSweepResult>;
   };
 };
 

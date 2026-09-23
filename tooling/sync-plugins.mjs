@@ -16,22 +16,55 @@
 import {
   createHash,
   createPublicKey,
+  randomBytes,
   verify as edVerify,
 } from 'node:crypto';
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCK = join(ROOT, 'providers.lock.json');
-const OUT = join(ROOT, 'apps/mobile/assets/plugins');
+// Optional first arg: output dir relative to the repo root (desktop's
+// packaged plugin set, for example). The default keeps the mobile path.
+const outArg = process.argv[2];
+const OUT = outArg === undefined ? join(ROOT, 'apps/mobile/assets/plugins') : resolve(ROOT, outArg);
+// relative() (not a string prefix check): a sibling named with the repo
+// prefix (Auqw-fake) starts with ROOT textually but resolves to '..',
+// and the repo root itself is never a valid output dir. '..' is matched
+// as a whole segment so an in-repo name like '..plugins' stays valid.
+const outRel = relative(ROOT, OUT);
+if (
+  outRel === '' ||
+  outRel === '..' ||
+  outRel.startsWith(`..${sep}`) ||
+  isAbsolute(outRel)
+) {
+  throw new Error(`sync-plugins: output dir must stay inside the repo: ${outArg}`);
+}
+// The spin conformance guest is a fuel-gate test plugin — ship it only
+// in the default sync (mobile gate) or behind --conformance, never in a
+// packaged consumer artifact's provider list.
+const syncSpin =
+  outArg === undefined || process.argv.includes('--conformance');
 
 // Resolve a lock-relative source path. On a case-sensitive filesystem a
 // sibling checkout may carry different casing than the lock expects
@@ -78,6 +111,48 @@ const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')
 
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
 mkdirSync(OUT, { recursive: true });
+// Stage next to OUT: same filesystem so the swap's renames stay atomic,
+// outside OUT so an abandoned stage can't enter a packaged recursive
+// copy, and mkdtemp-named so a reused PID can never resurrect a killed
+// run's leftovers into the live set. The exit hook cleans the live
+// stage on every path — a failed sync leaves the previous set
+// byte-identical. Stages abandoned by SIGKILL are reclaimed only when
+// the owner PID encoded in the name is provably dead — a suspended or
+// merely old stage is never touched, and PID reuse errs toward keeping
+// (inert residue, not lost work).
+for (const entry of readdirSync(dirname(OUT))) {
+  const owner = /^\.sync-stage-(\d+)-/.exec(entry)?.[1];
+  if (!owner) continue;
+  try {
+    process.kill(Number(owner), 0);
+  } catch (err) {
+    if (err.code === 'ESRCH') {
+      rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
+    }
+  }
+}
+// A `.sync-hold-<outhash>-*` dir is a complete previous provider set
+// parked by a swap that died before it finished publishing — the
+// resolved OUT path's hash is in the name, so sibling outputs sharing
+// this parent can never claim each other's backup no matter what the
+// out dir is called. When both it and OUT exist, OUT is already the
+// new set and the hold is inert residue; when the crash left OUT
+// missing or emptied, the hold goes back wholesale.
+const HOLD_PREFIX = `.sync-hold-${createHash('sha256').update(OUT).digest('hex').slice(0, 16)}-`;
+for (const entry of readdirSync(dirname(OUT))) {
+  if (!entry.startsWith(HOLD_PREFIX)) continue;
+  const hold = join(dirname(OUT), entry);
+  if (existsSync(OUT) && readdirSync(OUT).length > 0) {
+    rmSync(hold, { recursive: true, force: true });
+  } else {
+    rmSync(OUT, { recursive: true, force: true });
+    renameSync(hold, OUT);
+  }
+}
+const STAGE = mkdtempSync(join(dirname(OUT), `.sync-stage-${process.pid}-`));
+process.on('exit', () => {
+  rmSync(STAGE, { recursive: true, force: true });
+});
 
 const keyIdOf = (publicPem) =>
   createHash('sha256')
@@ -201,23 +276,58 @@ for (const plugin of lock.plugins) {
   }
   copyFileSync(
     wasmPath ?? join(releaseDir, `${plugin.id}-${plugin.version}.wasm`),
-    join(OUT, `${plugin.id}.wasm`),
+    join(STAGE, `${plugin.id}.wasm`),
   );
-  writeFileSync(join(OUT, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
+  writeFileSync(join(STAGE, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
   console.log(`synced ${plugin.id} ${plugin.version} ${plugin.digest.slice(0, 19)}…`);
 }
 
 // Spin conformance guest (fuel gate).
-const spinPath = join(ROOT, 'sdk/conformance/spin/spin.wasm');
-const spin = readFileSync(spinPath);
-const spinManifest = {
-  id: 'spin',
-  version: '0.1.0',
-  abi: lock.abi,
-  capabilities: ['playback.resolve'],
-  permissions: [],
-  artifact: { path: 'spin.wasm', digest: sha256(spin) },
-};
-copyFileSync(spinPath, join(OUT, 'spin.wasm'));
-writeFileSync(join(OUT, 'spin.manifest.json'), JSON.stringify(spinManifest));
-console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
+if (syncSpin) {
+  const spinPath = join(ROOT, 'sdk/conformance/spin/spin.wasm');
+  const spin = readFileSync(spinPath);
+  const spinManifest = {
+    id: 'spin',
+    version: '0.1.0',
+    abi: lock.abi,
+    capabilities: ['playback.resolve'],
+    permissions: [],
+    artifact: { path: 'spin.wasm', digest: sha256(spin) },
+  };
+  copyFileSync(spinPath, join(STAGE, 'spin.wasm'));
+  writeFileSync(join(STAGE, 'spin.manifest.json'), JSON.stringify(spinManifest));
+  console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
+}
+
+// Swap the verified set into OUT. Artifacts dropped from the lock must
+// not linger — packaged builds copy OUT wholesale — so the live set
+// moves aside wholesale too: non-artifacts are copied into STAGE first,
+// then OUT parks under a hold name and STAGE publishes in one rename
+// each. A kill between the two renames leaves the complete previous set
+// in the hold, which the recovery pass above restores on the next run —
+// OUT is never a partial provider set.
+for (const entry of readdirSync(OUT)) {
+  if (!entry.endsWith('.wasm') && !entry.endsWith('.manifest.json')) {
+    // cpSync, not copyFileSync: non-artifacts can be nested directories
+    // or symlinks, and verbatimSymlinks preserves a link as a link.
+    cpSync(join(OUT, entry), join(STAGE, entry), {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
+  }
+}
+const HOLD = join(
+  dirname(OUT),
+  `${HOLD_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`,
+);
+try {
+  renameSync(OUT, HOLD);
+  try {
+    renameSync(STAGE, OUT);
+  } catch (thrown) {
+    renameSync(HOLD, OUT);
+    throw thrown;
+  }
+} finally {
+  rmSync(HOLD, { recursive: true, force: true });
+}

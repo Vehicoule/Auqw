@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -29,6 +29,10 @@ export const KNOWN_TABLES: readonly string[] = Object.freeze([
   'downloads',
   'local_sources',
   'local_files',
+  'sync_log',
+  'sync_divergence',
+  'sync_watermarks',
+  'sync_meta',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -270,10 +274,43 @@ const MIGRATION_4: readonly string[] = [
   `ALTER TABLE local_files ADD COLUMN modified_ms INTEGER CHECK (modified_ms >= 0 OR modified_ms IS NULL)`,
 ];
 
+/**
+ * v4 -> v5: the SyncEngine's durable log (docs/specs/sync.md). Rows
+ * carry canonical append order implicitly via rowid — `seq` is the
+ * per-device watermark the engine stamps on each entry, NOT the table
+ * order. `sync_divergence.seq` mirrors it so the retention floor can
+ * drop rows below `dropDivergenceBefore` in one DELETE.
+ * (device_id, seq) and (history_id) uniqueness make a crash-replayed
+ * append idempotent via INSERT OR IGNORE.
+ */
+const MIGRATION_5: readonly string[] = [
+  `CREATE TABLE sync_log (
+  device_id TEXT NOT NULL,
+  seq INTEGER NOT NULL CHECK (seq >= 0),
+  entry_json TEXT NOT NULL,
+  UNIQUE (device_id, seq)
+)`,
+  `CREATE TABLE sync_divergence (
+  history_id TEXT NOT NULL UNIQUE,
+  seq INTEGER NOT NULL CHECK (seq >= 0),
+  row_json TEXT NOT NULL
+)`,
+  `CREATE INDEX sync_divergence_seq_idx ON sync_divergence(seq)`,
+  `CREATE TABLE sync_watermarks (
+  device_id TEXT PRIMARY KEY,
+  mark INTEGER NOT NULL CHECK (mark >= 0)
+)`,
+  `CREATE TABLE sync_meta (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
   Object.freeze([...MIGRATION_2]),
   Object.freeze([...MIGRATION_3]),
   Object.freeze([...MIGRATION_4]),
+  Object.freeze([...MIGRATION_5]),
 ]);

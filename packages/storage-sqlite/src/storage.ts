@@ -45,6 +45,7 @@ import type {
   SqlRow,
   SqlValue,
 } from './driver.ts';
+import { enqueueDriverTransaction } from './transaction-queue.ts';
 import {
   CURRENT_SCHEMA_VERSION,
   KNOWN_TABLES,
@@ -52,16 +53,6 @@ import {
 } from './migrations.ts';
 
 const ATTEMPT_CAP = 500;
-
-/**
- * Transaction tails keyed by driver: one driver is one connection, so
- * transactions serialize per driver even when several SqliteStorage
- * instances share it.
- */
-const TRANSACTION_TAILS = new WeakMap<
-  SqliteDriver,
-  { tail: Promise<void> }
->();
 
 /**
  * Initialize sections keyed by driver: probe, backup, and migrate are
@@ -158,25 +149,20 @@ export class SqliteStorage implements StoragePort {
 
   /**
    * One connection cannot run overlapping BEGIN/COMMIT sequences.
-   * The tail is keyed on the driver, not this instance: several
-   * SqliteStorage objects over one driver share its connection and
-   * must queue on the same tail.
+   * The tail is keyed on the driver, not this instance — it lives in
+   * transaction-queue.ts so the sync-log store shares the same queue
+   * when both sit on one database file.
    */
   #transaction<T>(
     work: (connection: SqliteConnection) => Promise<T>,
     signal: CancellationSignal,
   ): Promise<T> {
-    let slot = TRANSACTION_TAILS.get(this.#driver);
-    if (slot === undefined) {
-      slot = { tail: Promise.resolve() };
-      TRANSACTION_TAILS.set(this.#driver, slot);
-    }
-    const result = slot.tail.then(() => {
-      this.#check(signal);
-      return this.#driver.transaction(work, signal);
-    });
-    slot.tail = result.then(() => undefined, () => undefined);
-    return result;
+    return enqueueDriverTransaction(
+      this.#driver,
+      work,
+      signal,
+      (s) => this.#check(s),
+    );
   }
 
   #mapError(thrown: unknown, signal: CancellationSignal): AppError {

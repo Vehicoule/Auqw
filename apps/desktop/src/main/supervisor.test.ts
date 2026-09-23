@@ -4,7 +4,7 @@ import {
   assertDeepEqual,
   assertEqual,
 } from '@auqw/application/testing';
-import { isShellError } from '../shared/errors.ts';
+import { isShellError, shellError } from '../shared/errors.ts';
 import type { UtilityChildLike } from './supervisor.ts';
 import { createSupervisor } from './supervisor.ts';
 
@@ -240,5 +240,107 @@ export async function run(): Promise<void> {
     }
     assertEqual(sup.sendToHost({ kind: 'stream-pump' }), false,
       'post-shutdown refused');
+  }
+
+  // Utility→main service calls: a whitelisted channel gets its handler,
+  // the reply rides back as a normal response envelope; anything else
+  // is refused typed.
+  {
+    const kids: FakeChild[] = [];
+    const seen: unknown[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const c = new FakeChild();
+        kids.push(c);
+        return c;
+      },
+      baseBackoffMs: 5,
+      maxBackoffMs: 20,
+      services: {
+        'sync:keys': async (args) => {
+          seen.push(args);
+          return { identity: null };
+        },
+        'svc:boom': async () => {
+          throw new Error('raw boom');
+        },
+        'svc:typed': async () => {
+          throw shellError('unavailable', 'down');
+        },
+      },
+    });
+    try {
+      const spawnReq = sup.request('utility:ping', undefined);
+      const c = kids[0];
+      assert(c !== undefined);
+      c.emit('spawn');
+      // Inbound service call → handler → response posted back.
+      c.emit('message', { id: 50, channel: 'sync:keys', args: { op: 'identity-get' } });
+      await sleep(5);
+      const reply = c.posted[c.posted.length - 1] as {
+        id?: number;
+        ok?: boolean;
+        result?: unknown;
+      };
+      assertEqual(reply.id, 50, 'service reply correlates');
+      assertEqual(reply.ok, true);
+      assertDeepEqual(reply.result, { identity: null });
+      assertDeepEqual(seen[0], { op: 'identity-get' }, 'args forwarded');
+
+      // Unknown service channel → typed refusal, not silence.
+      c.emit('message', { id: 51, channel: 'evil:chan', args: {} });
+      await sleep(5);
+      const refused = c.posted[c.posted.length - 1] as {
+        id?: number;
+        ok?: boolean;
+        error?: { kind?: string };
+      };
+      assertEqual(refused.id, 51);
+      assertEqual(refused.ok, false);
+      assertEqual(refused.error?.kind, 'invalid-request');
+
+      // Handler throws map onto typed envelopes — never raw.
+      c.emit('message', { id: 52, channel: 'svc:boom', args: {} });
+      await sleep(5);
+      const raw = c.posted[c.posted.length - 1] as {
+        ok?: boolean;
+        error?: { kind?: string };
+      };
+      assertEqual(raw.ok, false);
+      assertEqual(raw.error?.kind, 'internal');
+      c.emit('message', { id: 53, channel: 'svc:typed', args: {} });
+      await sleep(5);
+      const typed = c.posted[c.posted.length - 1] as {
+        ok?: boolean;
+        error?: { kind?: string };
+      };
+      assertEqual(typed.ok, false);
+      assertEqual(typed.error?.kind, 'unavailable');
+
+      // A service-shaped message while main also awaits a response
+      // never collides — direction-scoped correlation. Same numeric id
+      // on both paths: the service reply must not settle the pending
+      // main→utility request.
+      const pending = sup.request('utility:ping', { message: 'x' });
+      const requestPost = c.posted[c.posted.length - 1] as { id?: number };
+      const pendingId = requestPost.id;
+      assert(typeof pendingId === 'number');
+      c.emit('message', { id: pendingId, channel: 'sync:keys', args: { op: 'device-list' } });
+      await sleep(5);
+      const serviceReply = c.posted[c.posted.length - 1] as {
+        id?: number;
+        ok?: boolean;
+      };
+      assertEqual(serviceReply.id, pendingId, 'service id shadows pending id harmlessly');
+      assertEqual(serviceReply.ok, true);
+      c.emit('message', { id: pendingId, ok: true, result: 'still-answered' });
+      assertEqual(await pending, 'still-answered');
+      // Settle the spawn request so shutdown doesn't leave it hanging.
+      const spawnPost = c.posted[0] as { id?: number };
+      c.emit('message', { id: spawnPost.id, ok: true, result: null });
+      await spawnReq;
+    } finally {
+      sup.shutdown();
+    }
   }
 }

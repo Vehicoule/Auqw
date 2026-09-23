@@ -47,5 +47,37 @@ await build({
   outfile: 'dist/renderer/index.js',
 });
 
+// The product UI — Session boot + ui-web screens. Same sandbox rules
+// as the dev harness bundle: iife, no node builtins, chrome152.
+await build({
+  bundle: true,
+  platform: 'browser',
+  target: 'chrome152',
+  format: 'iife',
+  sourcemap: true,
+  logLevel: 'warning',
+  // shared/local-paths.ts pulls node:url/node:path into this browser
+  // bundle — alias to the POSIX implementations in src/shared/posix-
+  // path.ts (URI math is POSIX-shaped on both sides). The utility
+  // bundle below keeps the real Node builtins.
+  alias: {
+    'node:url': './src/shared/posix-path.ts',
+    'node:path': './src/shared/posix-path.ts',
+  },
+  entryPoints: ['src/renderer/app.tsx'],
+  outfile: 'dist/renderer/app.js',
+});
+
 await copyFile('src/renderer/index.html', 'dist/renderer/index.html');
+await copyFile('src/renderer/app.html', 'dist/renderer/app.html');
+// The stylesheet is an export of @auqw/ui-web; the design-token sheet
+// is the package's generated css artifact (tracked, not bundled).
+await copyFile(
+  '../../packages/ui-web/src/styles.css',
+  'dist/renderer/styles.css',
+);
+await copyFile(
+  '../../packages/design-tokens/dist/tokens.css',
+  'dist/renderer/tokens.css',
+);
 console.log('desktop bundles written to dist/');

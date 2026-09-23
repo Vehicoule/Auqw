@@ -54,7 +54,7 @@ object AuqwTagReader {
 
   /**
    * Depth-first walk of the tree. Yields entries for files whose mime
-   * is audio/* (or unknown-but-audio-looking); directories recurse.
+   * is audio/<subtype> (or unknown-but-audio-looking); directories recurse.
    */
   fun enumerate(ctx: Context, treeUri: Uri): List<Map<String, Any?>> {
     val out = mutableListOf<Map<String, Any?>>()

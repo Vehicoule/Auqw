@@ -17,6 +17,7 @@ import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
+import { createSyncKeysHandler } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -27,7 +28,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const PRELOAD = join(here, '../preload/index.cjs');
 const UTILITY = join(here, '../utility/index.cjs');
-const RENDERER = join(here, '../renderer/index.html');
+// The product UI is the default window; the Phase-2 dev harness stays
+// reachable byte-for-byte for the E2E skills behind AUQW_DEV_HARNESS=1
+// (read here in main only — the sandboxed renderer never sees env).
+const RENDERER =
+  process.env['AUQW_DEV_HARNESS'] === '1'
+    ? join(here, '../renderer/index.html')
+    : join(here, '../renderer/app.html');
 
 /** Latest persisted window state — recreated windows reopen where the user left them. */
 type StateRef = { current: WindowState };
@@ -61,6 +68,11 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_REPO_ROOT',
     'AUQW_DEV_GATE',
     'AUQW_DB_PATH',
+    'AUQW_SYNC_HOST',
+    'AUQW_SYNC_PORT',
+    'AUQW_SYNC_DISABLED',
+    'AUQW_SYNC_NAME',
+    'AUQW_SYNC_NO_MDNS',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -82,6 +94,12 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     // may arm the dev-gate channel; packaged runs use resourcesPath.
     env['AUQW_REPO_ROOT'] = join(here, '../../../..');
     env['AUQW_DEV_GATE'] = '1';
+  } else {
+    // Packaged installs carry the locked provider set under
+    // resources/plugins (electron-builder.yml extraResources). An
+    // explicit AUQW_PLUGIN_DIR still wins — dev loops and harnesses
+    // point at their own sets.
+    env['AUQW_PLUGIN_DIR'] ??= join(process.resourcesPath, 'plugins');
   }
   return env;
 }
@@ -116,6 +134,15 @@ async function main(): Promise<void> {
         // into a process that loads native artifacts).
         env: utilityEnv(userDataPath),
       }),
+    // Utility→main service calls: safeStorage lives only in main, so
+    // sync identity + device key material rides `sync:keys` up to the
+    // SecureStore. The child gets no other main-process reach.
+    services: {
+      'sync:keys': createSyncKeysHandler({
+        secure,
+        dir: join(userDataPath, 'secure'),
+      }),
+    },
   });
 
   registerChannels(ipcMain, {
