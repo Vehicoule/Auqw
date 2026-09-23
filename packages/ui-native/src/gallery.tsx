@@ -41,6 +41,7 @@ import { QueueScreen } from './queue-screen.tsx';
 import { SettingsScreen } from './settings-screen.tsx';
 import { CorrectionsScreen } from './corrections-screen.tsx';
 import { TransferScreen } from './transfer-screen.tsx';
+import { SyncScreen } from './sync-screen.tsx';
 import { HomeScreen } from './home-screen.tsx';
 import {
   fixtureCollectionModels,
@@ -78,6 +79,10 @@ import {
   fixtureSearchStates,
   fixtureSettingsModel,
   fixtureSettingsModelDegraded,
+  fixtureSyncModelPaired,
+  fixtureSyncModelSyncing,
+  fixtureSyncModelUnavailable,
+  fixtureSyncModelUnpaired,
 } from '@auqw/ui-shared/fixtures';
 import type { ThemeName } from '@auqw/design-tokens';
 
@@ -957,6 +962,40 @@ function GalleryBody({
                 onPickImportFile={noop}
                 onApplyImport={noop}
                 onResetImport={noop}
+              />
+            </Frame>
+          </View>
+        ))}
+      </Section>
+
+      <Section
+        title="sync"
+        note="paired · syncing · unpaired · unavailable"
+      >
+        {(
+          [
+            ['paired', fixtureSyncModelPaired],
+            ['syncing', fixtureSyncModelSyncing],
+            ['unpaired', fixtureSyncModelUnpaired],
+            ['unavailable', fixtureSyncModelUnavailable],
+          ] as const
+        ).map(([label, model]) => (
+          <View key={label} style={{ marginBottom: theme.spacing.md }}>
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ marginBottom: 4 }}
+            >
+              {label}
+            </Text>
+            <Frame height={480}>
+              <SyncScreen
+                model={model}
+                onBack={noop}
+                onPairCode={noop}
+                onPairPayload={noop}
+                onSyncNow={noop}
+                onUnpair={noop}
               />
             </Frame>
           </View>

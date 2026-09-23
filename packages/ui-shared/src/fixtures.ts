@@ -16,12 +16,14 @@ import type {
   Recording,
   SessionPlayback,
   Settings,
+  SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
 import type { ThemeName } from '@auqw/design-tokens';
 import {
   toCollectionModel,
   toCorrectionsModel,
+  toSyncModel,
   toEntityModel,
   toImportPreviewModel,
   toLibraryModel,
@@ -49,6 +51,7 @@ import type {
   QueueModel,
   RadioModel,
   SearchStateModel,
+  SyncModel,
   TrackRowModel,
   TransferModel,
 } from './view-models.ts';
@@ -860,6 +863,76 @@ export const fixtureSettingsModelDegraded = toSettingsModel(
   fixtureDiagnosticsDegraded,
 );
 
+// ---- slice-4 LAN sync --------------------------------------------------
+
+const fixtureSyncFp =
+  'a3f1c92d5e47b80691ac4f2e8d0b6c53f71e09d28c4b5a6f3e2d1c0b9a8f7e6d5';
+
+const fixtureSyncStatusPaired: SyncClientStatus = {
+  deviceId: 'phone-fixture-1',
+  peers: [
+    {
+      peer: {
+        fp: fixtureSyncFp,
+        name: 'workstation',
+        endpoints: ['192.168.1.20:48715'],
+        pairedAt: 1_700_000_000_000,
+        lastSeenAt: 1_700_000_500_000,
+        peerCursor: { 'phone-fixture-1': 4 },
+        lastSyncAt: 1_700_000_500_000,
+      },
+      state: 'open',
+      syncing: false,
+    },
+    {
+      peer: {
+        fp: 'b4e2d01c6f58a91702bd5e3f9e1c7d64a82f10e39d5c6b7a4f3e2d1c0b9a8f7e6',
+        name: 'laptop',
+        endpoints: ['192.168.1.44:48715'],
+        pairedAt: 1_699_000_000_000,
+        lastSeenAt: 1_699_500_000_000,
+        peerCursor: {},
+      },
+      state: 'offline',
+      syncing: false,
+      lastError: {
+        kind: 'unavailable',
+        message: 'dial timed out',
+        retryable: true,
+      },
+    },
+  ],
+};
+
+export const fixtureSyncModelPaired: SyncModel = toSyncModel({
+  available: true,
+  status: fixtureSyncStatusPaired,
+});
+
+export const fixtureSyncModelSyncing: SyncModel = toSyncModel({
+  available: true,
+  status: {
+    deviceId: fixtureSyncStatusPaired.deviceId,
+    peers: [
+      {
+        peer: fixtureSyncStatusPaired.peers[0]!.peer,
+        state: 'open',
+        syncing: true,
+      },
+    ],
+  },
+});
+
+export const fixtureSyncModelUnpaired: SyncModel = toSyncModel({
+  available: true,
+  status: { deviceId: 'phone-fixture-1', peers: [] },
+});
+
+export const fixtureSyncModelUnavailable: SyncModel = toSyncModel({
+  available: false,
+  status: null,
+});
+
 export const fixtureHomeModel: HomeModel = {
   greeting: 'good evening',
   subline: 'wednesday · 3 new releases in your library',
@@ -1278,6 +1351,7 @@ export const galleryCoverage: GalleryCoverage = {
     'settings',
     'corrections',
     'transfer',
+    'sync',
     'home',
     'states',
     'progress',

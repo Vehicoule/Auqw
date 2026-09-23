@@ -23,6 +23,7 @@ import type {
   SessionPlayback,
   Settings,
   SourceRef,
+  SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
 import { topPlayed } from '@auqw/application';
@@ -500,6 +501,80 @@ export function toCorrectionsModel(input: {
     pendingCount: pending,
     resolvedCount: rows.length - pending,
     rows: visible,
+  };
+}
+
+// ---- LAN sync (docs/specs/sync.md, slice 4) --------------------------
+
+export type SyncPeerModel = {
+  /** Custody key — the desktop's pinned fingerprint. */
+  readonly key: string;
+  readonly name: string;
+  readonly state: 'offline' | 'connecting' | 'open';
+  readonly stateLabel: string;
+  readonly syncing: boolean;
+  /** 'last sync <iso>' — null before the first converged round. */
+  readonly lastSyncLabel: string | null;
+  /** First dialed endpoint — the honest 'where' for the row. */
+  readonly endpointLabel: string | null;
+  /** The typed error message from the last failed op, if any. */
+  readonly lastError: string | null;
+  readonly fpShort: string;
+};
+
+export type SyncModel = {
+  /** False where the platform lacks the socket seam (iOS today). */
+  readonly available: boolean;
+  /** This install's wire identity — null before bring-up resolves. */
+  readonly deviceId: string | null;
+  readonly peers: readonly SyncPeerModel[];
+  /** One-line summary for the settings row's value slot. */
+  readonly statusLabel: string;
+};
+
+export function toSyncModel(input: {
+  readonly available: boolean;
+  /** `client.status()` — null while bring-up is pending or failed. */
+  readonly status: SyncClientStatus | null;
+  /** Format one epoch-ms — locale-free short date or '—'. */
+  readonly formatSyncAt?: ((ms: number) => string | null) | undefined;
+}): SyncModel {
+  const fmt = input.formatSyncAt ?? formatExportDate;
+  const peers: SyncPeerModel[] = (input.status?.peers ?? []).map(
+    (view) => ({
+      key: view.peer.fp,
+      name: view.peer.name,
+      state: view.state,
+      stateLabel: view.syncing
+        ? 'syncing'
+        : view.state === 'open'
+          ? 'connected'
+          : view.state === 'connecting'
+            ? 'connecting'
+            : 'offline',
+      syncing: view.syncing,
+      lastSyncLabel:
+        view.peer.lastSyncAt === undefined
+          ? null
+          : `last sync ${fmt(view.peer.lastSyncAt) ?? '—'}`,
+      endpointLabel: view.peer.endpoints[0] ?? null,
+      lastError: view.lastError?.message ?? null,
+      fpShort: view.peer.fp.slice(0, 12),
+    }),
+  );
+  const open = peers.filter((p) => p.state === 'open').length;
+  return {
+    available: input.available,
+    deviceId: input.status?.deviceId ?? null,
+    peers,
+    statusLabel:
+      input.status === null
+        ? 'unavailable'
+        : peers.length === 0
+          ? 'not paired'
+          : open > 0
+            ? `${open} connected`
+            : `${peers.length} paired`,
   };
 }
 
@@ -1330,6 +1405,13 @@ export function toSettingsModel(
      * silently dead.
      */
     readonly localSupported?: boolean;
+    /**
+     * False where the platform has no LAN-sync socket seam (iOS
+     * today) — the row reports 'unavailable' and stays disabled.
+     */
+    readonly syncSupported?: boolean;
+    /** 'not paired' / 'N connected' / 'N paired' — the row's value. */
+    readonly syncLabel?: string | null;
   } = {},
 ): SettingsModel {
   return {
@@ -1449,6 +1531,16 @@ export function toSettingsModel(
         value: null,
         kind: 'navigation',
         enabled: media.localSupported !== false,
+      },
+      {
+        key: 'sync',
+        label: 'desktop sync',
+        value:
+          media.syncSupported === false
+            ? 'unavailable'
+            : (media.syncLabel ?? 'not paired'),
+        kind: 'navigation',
+        enabled: media.syncSupported !== false,
       },
       {
         key: 'exportLibrary',
