@@ -40,6 +40,7 @@ import {
   sourceRefRecordId,
   TOMBSTONE_FIELD,
 } from '../sync/sync-engine.ts';
+import { utf8ByteLength } from '../sync/sync-wire.ts';
 import {
   FakeClock,
   FakeLog,
@@ -4039,6 +4040,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ],
   ['emitUnsyncedRecoversCommitted', emitUnsyncedRecoversCommitted],
   ['disposeFinishesEmitTail', disposeFinishesEmitTail],
+  ['syncEmitChunkByteBound', syncEmitChunkByteBound],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -4166,6 +4168,42 @@ async function disposeFinishesEmitTail(): Promise<void> {
     ),
     'dispose drains the retained chunk before dying',
   );
+}
+
+// Review #46 round-9: emit chunks bound by encoded BYTES, not only
+// write count — a count-only bound could push ~16 MiB through one
+// send, overflowing the channel cap into a fake transport failure
+// after the engine already appended the batch.
+async function syncEmitChunkByteBound(): Promise<void> {
+  const recs = Array.from({ length: 2_600 }, (_, i) =>
+    recording(`r-${i}`, [ref('itunes', `s-${i}`)]),
+  );
+  const captured: (readonly LocalWrite[])[] = [];
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(
+    persisted({ recordings: recs }),
+    [],
+    undefined,
+    undefined,
+    port,
+  );
+  await restoreOk(r);
+  await r.session.emitUnsynced(new Map());
+  await pump();
+  assert(captured.length >= 2, 'oversized backlog splits by bytes');
+  for (const chunk of captured) {
+    const bytes = chunk.reduce(
+      (t, w) => t + utf8ByteLength(JSON.stringify(w)) + 1,
+      2,
+    );
+    assert(bytes <= 800 * 1024, 'each send stays under the bound');
+  }
+  assert(captured.flat().length > 0, 'writes actually emitted');
 }
 
 // Staged rebuild (Review #46 round-5): a dependent that materializes

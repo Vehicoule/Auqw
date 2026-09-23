@@ -2035,12 +2035,14 @@ export async function run(): Promise<void> {
         writes: [writeName('pl-c1', 'channel list')],
       });
       assert(changed.ok, `localChanges: ${JSON.stringify(changed)}`);
+      // Small ack: the channel returns the stamped count, not the
+      // serialized batch — the batch already landed, and echoing it
+      // could overflow the result cap into a fake transport failure
+      // (Review #46 round-9).
       const changedResult = changed.ok
-        ? (changed.value as {
-            result: readonly { outcome: { type: string } }[];
-          })
+        ? (changed.value as { accepted: number })
         : null;
-      assertEqual(changedResult?.result[0]?.outcome.type, 'applied');
+      assertEqual(changedResult?.accepted, 1);
 
       // A write outside the engine's whitelist fails the whole batch
       // typed — never a per-write reject riding inside an ok.
@@ -2632,6 +2634,97 @@ export async function run(): Promise<void> {
         }
       } finally {
         await restarted.service.close();
+      }
+    } finally {
+      await service.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— A spill line bigger than the page budget can never be served ——
+  // —— returning it as `remaining` forever would wedge every later ——
+  // —— projection. It consumes as poison: skipped bytes, dropped    ——
+  // —— flag set, and the drain still serves the lines behind it.   ——
+  // —— (Devin Review #46 round-9)                                  ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-poison-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const poison = JSON.stringify({ pad: 'p'.repeat(1_100_000) });
+    const tail = ['{"k":"a"}', '{"k":"b"}', '{"k":"c"}'];
+    await writeFile(spill, `${poison}\n${tail.join('\n')}\n`);
+
+    const desk = await testUtilityEngine('dsk-poison');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      // Page 1: the poison head self-advances the durable offset —
+      // nothing deliverable, but `remaining` stays honest so the
+      // drain loop keeps going instead of wedging on it.
+      const first = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(first.ok, 'drain failed');
+      if (!first.ok) {
+        return;
+      }
+      const page = first.value as {
+        outcomes: readonly unknown[];
+        dropped: boolean;
+        remaining: number;
+      };
+      assertEqual(
+        page.outcomes.length,
+        0,
+        'a poison-only page serves nothing — it self-advances',
+      );
+      assert(page.dropped, 'poison skip surfaces as dropped');
+      assertEqual(page.remaining, 3, 'the servable tail is still due');
+
+      // Page 2: the offset already passed the poison — the tail
+      // lands without re-scanning it.
+      const second = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(second.ok, 'second drain failed');
+      if (!second.ok) {
+        return;
+      }
+      const tail = second.value as {
+        outcomes: readonly unknown[];
+        remaining: number;
+      };
+      assertEqual(
+        tail.outcomes.length,
+        3,
+        'lines behind the poison still project',
+      );
+      assertEqual(tail.remaining, 0);
+
+      const acked = await invokeHandler(
+        service,
+        'sync:ackApplied',
+        undefined,
+      );
+      assert(acked.ok, 'ack failed');
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok);
+      if (again.ok) {
+        const next = again.value as { outcomes: readonly unknown[] };
+        assertEqual(
+          next.outcomes.length,
+          0,
+          'poison consumed — no re-serve loop',
+        );
       }
     } finally {
       await service.close();

@@ -192,16 +192,43 @@ export function syncedRecordKey(
 }
 
 /**
- * `materialize()` ordering rank — kinds other rows can depend on sort
- * first, so a paged consumer folding page-by-page meets every parent
- * before its dependents (Review #46 round-7). `settings` and every
- * dependent kind stay rank 1: no record looks up to them.
+ * `materialize()` ordering: each parent record sorts ADJACENT to the
+ * records its row needs to materialize, not merely before all
+ * dependents (Review #46 round-9). A recording's row is only valid
+ * with a source ref, so kinds that share a parent id interleave
+ * under that id — a byte-paged rebuild then holds at most one
+ * family's records pending at a page boundary instead of every
+ * recording waiting on the ref region (and evicting under the
+ * pending bound past ~2048). Tier-1 kinds (likes, playlist entries,
+ * play events, reviews, settings) reference parents only through
+ * their fields, so they sort after every complete family.
  */
-const MATERIALIZE_PARENT_RANK: Partial<Record<SyncRecordKind, number>> = {
-  recording: 0,
-  entity: 0,
-  playlist: 0,
-};
+const MATERIALIZE_GROUPED_KINDS: ReadonlySet<SyncRecordKind> = new Set([
+  'recording',
+  'recordingSourceRef',
+  'recordingMapping',
+  'playCount',
+  'entity',
+  'entitySourceRef',
+  'playlist',
+]);
+
+/**
+ * The parent id a grouped record belongs to: its own id for parent
+ * kinds, the first decoded component for composite ids (a source ref
+ * or mapping id embeds the recording id; an entity source ref embeds
+ * the entity id). playCount ids ARE the recording id already.
+ */
+function materializeGroup(kind: SyncRecordKind, recordId: string): string {
+  if (
+    kind === 'recordingSourceRef' ||
+    kind === 'recordingMapping' ||
+    kind === 'entitySourceRef'
+  ) {
+    return decodeRecordId(recordId)?.[0] ?? recordId;
+  }
+  return recordId;
+}
 
 export function entitySourceRefRecordId(
   entityId: string,
@@ -2211,15 +2238,18 @@ export async function createSyncEngine(
       });
     }
     out.sort((a, b) => {
-      // Parents before dependents: paged rebuild consumers fold each
-      // page as it arrives, so a dependent kind that sorts before its
-      // parent would sit pending across every parent page (and could
-      // evict under the retention bound). Within a rank, (kind,
-      // recordId) keeps the order total and deterministic.
-      const ra = MATERIALIZE_PARENT_RANK[a.kind] ?? 1;
-      const rb = MATERIALIZE_PARENT_RANK[b.kind] ?? 1;
-      if (ra !== rb) {
-        return ra - rb;
+      // (tier, group, kind, recordId): grouped families sort by their
+      // shared parent id so a page carries a recording WITH its refs;
+      // tier-1 dependents sort last, whole, after every parent exists.
+      const ta = MATERIALIZE_GROUPED_KINDS.has(a.kind) ? 0 : 1;
+      const tb = MATERIALIZE_GROUPED_KINDS.has(b.kind) ? 0 : 1;
+      if (ta !== tb) {
+        return ta - tb;
+      }
+      const ga = materializeGroup(a.kind, a.recordId);
+      const gb = materializeGroup(b.kind, b.recordId);
+      if (ga !== gb) {
+        return ga < gb ? -1 : 1;
       }
       if (a.kind !== b.kind) {
         return a.kind < b.kind ? -1 : 1;

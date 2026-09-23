@@ -1256,15 +1256,25 @@ export function isSyncLocalChangesArgs(
   );
 }
 
-export type SyncLocalChangesResult = { readonly result: unknown };
+/**
+ * The result is a small acknowledgement, not the per-write outcome
+ * list: callers only consume ok/err, and a results array of the same
+ * writes would re-serialize every committed value — a batch that
+ * passes field bounds could then exceed the doc cap and report a
+ * transport failure AFTER the engine already appended (Review #46
+ * round-9). `accepted` counts the stamped batch.
+ */
+export type SyncLocalChangesResult = { readonly accepted: number };
 
 export function isSyncLocalChangesResult(
   value: unknown,
 ): value is SyncLocalChangesResult {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['result']) &&
-    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+    hasOnlyKeys(value, ['accepted']) &&
+    typeof value['accepted'] === 'number' &&
+    Number.isSafeInteger(value['accepted']) &&
+    value['accepted'] >= 0
   );
 }
 

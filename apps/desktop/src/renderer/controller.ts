@@ -377,7 +377,7 @@ export async function createSessionController(
       localChanges: async (writes: readonly LocalWrite[]) => {
         try {
           const result = await api.sync.localChanges({ writes });
-          return ok(result.result);
+          return ok(result.accepted);
         } catch (thrown) {
           return err(shellToAppError(thrown));
         }

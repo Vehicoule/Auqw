@@ -3,6 +3,7 @@ import {
   SETTINGS_RECORD_ID,
   TOMBSTONE_FIELD,
   createSyncEngine,
+  decodeRecordId,
   isSyncDelta,
   likeRecordId,
   entitySourceRefRecordId,
@@ -1266,17 +1267,37 @@ function expectedMaterialize(
     rec.fields[first.field] = value;
   }
   const out = [...byRecord.values()];
-  const parentRank = (kind: string): number =>
-    kind === 'recording' || kind === 'entity' || kind === 'playlist'
-      ? 0
-      : 1;
+  const grouped = new Set([
+    'recording',
+    'recordingSourceRef',
+    'recordingMapping',
+    'playCount',
+    'entity',
+    'entitySourceRef',
+    'playlist',
+  ]);
+  const groupOf = (kind: string, recordId: string): string => {
+    if (
+      kind === 'recordingSourceRef' ||
+      kind === 'recordingMapping' ||
+      kind === 'entitySourceRef'
+    ) {
+      return decodeRecordId(recordId)?.[0] ?? recordId;
+    }
+    return recordId;
+  };
   out.sort((a, b) => {
-    // Mirrors the engine's parent-first materialize order (Review
-    // #46 round-7): parents before dependents, then (kind, recordId).
-    const ra = parentRank(a.kind);
-    const rb = parentRank(b.kind);
-    if (ra !== rb) {
-      return ra - rb;
+    // Mirrors the engine's grouped materialize order (Review #46
+    // round-9): (tier, parent group, kind, recordId).
+    const ta = grouped.has(a.kind) ? 0 : 1;
+    const tb = grouped.has(b.kind) ? 0 : 1;
+    if (ta !== tb) {
+      return ta - tb;
+    }
+    const ga = groupOf(a.kind, a.recordId);
+    const gb = groupOf(b.kind, b.recordId);
+    if (ga !== gb) {
+      return ga < gb ? -1 : 1;
     }
     if (a.kind !== b.kind) {
       return a.kind < b.kind ? -1 : 1;
@@ -1624,18 +1645,33 @@ async function materializeIncludesTombstones(): Promise<void> {
   );
 }
 
-// Review #46 round-7: materialize() orders parent kinds before the
-// dependent kinds that reference them — a paged rebuild consumer
-// folding page-by-page meets every parent before its dependents, so
-// a large library can't leave dependents pending past the retention
-// bound.
+// Review #46 round-9: materialize() interleaves each parent record
+// with the records its row needs — a recording's refs/mappings/count
+// sort INSIDE its own id group, so a byte-paged rebuild holds at
+// most one family's rows pending at a boundary instead of every
+// recording pending on the ref region past the retention bound.
+// Field-only dependents (likes, playlist entries, play events,
+// reviews) still sort last, after every complete family.
 async function materializeParentsFirst(): Promise<void> {
   const a = await makeEngine('a', 1_000);
+  const sr = { provider: 'itunes', kind: 'track', id: 's-1' } as const;
   await mustWrite(a.engine, {
     kind: 'recording',
     recordId: 'r1',
     field: 'title',
     value: 'song',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'song2',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recordingSourceRef',
+    recordId: sourceRefRecordId('r1', sr),
+    field: 'ref',
+    value: sr,
   });
   await mustWrite(a.engine, {
     kind: 'like',
@@ -1665,16 +1701,29 @@ async function materializeParentsFirst(): Promise<void> {
   const idx = (kind: string, recordId: string): number =>
     view.findIndex((r) => r.kind === kind && r.recordId === recordId);
   assert(idx('recording', 'r1') >= 0, 'recording materialized');
+  // The r1 family is contiguous: recording + ref + playCount land
+  // together, BEFORE the next family's group starts.
+  const r1Group = [
+    idx('recording', 'r1'),
+    idx('recordingSourceRef', sourceRefRecordId('r1', sr)),
+    idx('playCount', 'r1'),
+  ];
+  assert(
+    Math.max(...r1Group) - Math.min(...r1Group) === 2,
+    'recording family stays adjacent, not split across kinds',
+  );
+  assert(
+    idx('recording', 'r2') > Math.max(...r1Group),
+    'next group starts only after the whole r1 family',
+  );
   for (const [kind, recordId] of [
     ['like', likeRecordId('track', 'r1')],
-    ['playCount', 'r1'],
     ['playlistEntry', 'e1'],
   ] as const) {
     assert(
-      idx(kind, recordId) > idx('recording', 'r1') ||
-        (kind === 'playlistEntry' &&
-          idx(kind, recordId) > idx('playlist', 'pl1')),
-      `${kind} sorts after its parent`,
+      idx(kind, recordId) > idx('recording', 'r2') &&
+        idx(kind, recordId) > idx('playlist', 'pl1'),
+      `${kind} sorts after every complete family`,
     );
   }
   assert(

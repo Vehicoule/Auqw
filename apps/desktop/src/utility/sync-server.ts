@@ -505,19 +505,32 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     readonly served: readonly string[];
     readonly servedBytes: number;
     readonly totalLines: number;
+    readonly skippedLines: number;
   }> {
     const served: string[] = [];
     let servedBytes = 0;
     let totalLines = 0;
+    let skippedLines = 0;
     let fits = true;
     const take = (line: string): void => {
       totalLines += 1;
-      if (fits && servedBytes + Buffer.byteLength(line, 'utf8') + 1 <= budgetBytes) {
+      const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+      if (fits && servedBytes + lineBytes <= budgetBytes) {
         served.push(line);
-        servedBytes += Buffer.byteLength(line, 'utf8') + 1;
-      } else {
-        fits = false;
+        servedBytes += lineBytes;
+        return;
       }
+      if (served.length === 0 && servedBytes === 0) {
+        // Poison line: bigger than the whole page, so NO offset ever
+        // fits it — leaving it would wedge the drain forever
+        // (Review #46 round-9). Consume its bytes so the ack
+        // advances past it; the dropped flag surfaces the loss and
+        // the materialized reconcile rebuilds the row anyway.
+        servedBytes += lineBytes;
+        skippedLines += 1;
+        return;
+      }
+      fits = false;
     };
     const stream = createReadStream(path, { start: startOff });
     stream.setEncoding('utf8');
@@ -541,18 +554,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { served: [], servedBytes: 0, totalLines: 0 };
+        return { served: [], servedBytes: 0, totalLines: 0, skippedLines: 0 };
       }
       throw e;
     }
     if (carry.length > 0) {
-      totalLines += 1;
-      if (fits && servedBytes + Buffer.byteLength(carry, 'utf8') + 1 <= budgetBytes) {
-        served.push(carry);
-        servedBytes += Buffer.byteLength(carry, 'utf8');
-      }
+      take(carry);
     }
-    return { served, servedBytes, totalLines };
+    return { served, servedBytes, totalLines, skippedLines };
   }
 
   /** The ack sidecar: the byte offset the served prefix ends at. */
@@ -722,6 +731,15 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         const off = await readSpillOffset(offPath, path);
         const scan = await spillScan(path, off, budget - bytes);
         servedFileBytes = scan.servedBytes;
+        // A page that served ONLY poison skips holds nothing the
+        // renderer could commit — the durable offset advances now,
+        // inside the serialized tail, or the same line re-scans on
+        // every later drain (the ack path waits on served bytes;
+        // Review #46 round-9).
+        if (scan.skippedLines > 0 && scan.served.length === 0) {
+          servedFileBytes = 0;
+          await advanceSpillOffset(path, offPath, off + scan.servedBytes);
+        }
         for (const line of scan.served) {
           try {
             const parsed: unknown = JSON.parse(line);
@@ -737,7 +755,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             appliedDropped = true;
           }
         }
-        spilledBacklog = scan.totalLines - scan.served.length;
+        // Poison-skipped lines were consumed without being served —
+        // they are neither backlog nor deliverable; the dropped flag
+        // reports the loss honestly (materialized reconcile covers).
+        if (scan.skippedLines > 0) {
+          appliedDropped = true;
+        }
+        spilledBacklog =
+          scan.totalLines - scan.served.length - scan.skippedLines;
       });
       spillTail = drainFile.then(
         () => undefined,
@@ -777,6 +802,26 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   /**
+   * Advance the durable offset: persist the new position first, then
+   * compact the dead prefix once it dominates the file — linear
+   * recovery, never quadratic. Shared by the renderer ack and the
+   * drain's poison-skip self-advance.
+   */
+  async function advanceSpillOffset(
+    path: string,
+    offPath: string,
+    newOff: number,
+  ): Promise<void> {
+    await writeFile(offPath, String(newOff));
+    const size = await stat(path)
+      .then((s) => s.size)
+      .catch(() => 0);
+    if (newOff >= Math.max(1_048_576, size / 2)) {
+      await compactSpill(path, offPath, newOff);
+    }
+  }
+
+  /**
    * Consume the file bytes the most recent drain served — called by
    * the renderer only after its domain commit landed, so served
    * outcomes leave durable storage exactly once they're reflected
@@ -798,16 +843,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     const offPath = spillOffsetPath(path);
     const rewrite = spillTail.then(async () => {
       const off = await readSpillOffset(offPath, path);
-      const newOff = off + dropBytes;
-      // Persist the advanced offset first — durable before any
-      // compaction, so a crash leaves file + sidecar consistent.
-      await writeFile(offPath, String(newOff));
-      const size = await stat(path)
-        .then((s) => s.size)
-        .catch(() => 0);
-      if (newOff >= Math.max(1_048_576, size / 2)) {
-        await compactSpill(path, offPath, newOff);
-      }
+      await advanceSpillOffset(path, offPath, off + dropBytes);
     });
     spillTail = rewrite.then(
       () => undefined,
@@ -1697,8 +1733,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!result.ok) {
         throw engineError(result.error);
       }
+      // Small ack only — the caller discards per-write results, and
+      // echoing the appended batch would overflow the result cap
+      // after the writes already landed (Review #46 round-9).
       return checked(isSyncLocalChangesResult, 'sync:localChanges')({
-        result: result.value,
+        accepted: Array.isArray(result.value)
+          ? result.value.length
+          : args.writes.length,
       });
     },
 

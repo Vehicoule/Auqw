@@ -115,6 +115,7 @@ import {
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
 import type { SyncEmitInput } from '../sync/sync-projection.ts';
+import { utf8ByteLength } from '../sync/sync-wire.ts';
 import type {
   LocalWrite,
   MaterializedRecord,
@@ -252,6 +253,15 @@ const CANDIDATE_LIMIT = 25;
 const MAX_TICK_DELTA_MS = 2_500;
 /** Desktop's sync:localChanges channel caps one batch at 256 writes. */
 const SYNC_EMIT_CHUNK = 256;
+/**
+ * Emit chunks also bound by encoded size: the channel's result is a
+ * small ack, but the REQUEST itself must stay well under the wire
+ * doc cap — a count-only bound let ~16 MiB of writes ride one call
+ * (Review #46 round-9). One write can never exceed the field cap,
+ * so every write fits a fresh chunk alone; the head-drop branch is
+ * only a belt for a value that slips past its own field bound.
+ */
+const SYNC_EMIT_BYTES = 768 * 1024;
 /** Retained emit backlog bound — drop-oldest past it. */
 const SYNC_EMIT_PENDING_MAX = 2_048;
 /** Post-projection pending bound — unresolved inserts waiting on
@@ -1122,7 +1132,10 @@ export class Session {
       return;
     }
     while (this.#syncEmitPending.length > 0) {
-      const chunk = this.#syncEmitPending.slice(0, SYNC_EMIT_CHUNK);
+      const chunk = this.#syncEmitChunk();
+      if (chunk.length === 0) {
+        continue;
+      }
       const source = new CancellationSource();
       this.#opSources.add(source);
       let sent: Result<unknown>;
@@ -1137,10 +1150,12 @@ export class Session {
         this.#opSources.delete(source);
       }
       if (!sent.ok) {
-        // Retained: the chunk stays queued and the next emission
-        // retries it. The backlog bound applies HERE only — under a
-        // sustained send failure, drop-oldest caps memory while the
-        // fresh-writes path above never truncates a healthy commit.
+        // Retained: put the chunk back at the head so the next
+        // emission retries it. The backlog bound applies HERE only —
+        // under a sustained send failure, drop-oldest caps memory
+        // while the fresh-writes path above never truncates a
+        // healthy commit.
+        this.#syncEmitPending.unshift(...chunk);
         if (this.#syncEmitPending.length > SYNC_EMIT_PENDING_MAX) {
           this.#syncEmitPending.splice(
             0,
@@ -1161,8 +1176,48 @@ export class Session {
         this.#logWarn('sync emission failed; writes retained for retry');
         return;
       }
-      this.#syncEmitPending.splice(0, chunk.length);
+      // The chunk already left the queue when it was sliced — a
+      // failure above is the only path that re-queues nothing, and
+      // that path returns before here.
     }
+  }
+
+  /**
+   * Slice the head chunk by count AND encoded bytes — a batch that
+   * passes per-write field bounds can still overflow the wire doc
+   * cap when summed, and an oversized send reports as a transport
+   * failure while the engine append already landed, so the same
+   * writes would retry into an ever-growing log (Review #46
+   * round-9). A head write bigger than the whole budget can never
+   * fit — drop it with a typed warn rather than wedge the queue.
+   */
+  #syncEmitChunk(): LocalWrite[] {
+    const chunk: LocalWrite[] = [];
+    let bytes = 2; // '[]'
+    while (this.#syncEmitPending.length > 0) {
+      const write = this.#syncEmitPending[0];
+      if (write === undefined) {
+        break;
+      }
+      const size = utf8ByteLength(JSON.stringify(write)) + 1;
+      if (chunk.length === 0 && bytes + size > SYNC_EMIT_BYTES) {
+        this.#syncEmitPending.shift();
+        this.#logWarn(
+          'sync emission dropped an oversized write; cannot fit the channel bound',
+        );
+        continue;
+      }
+      if (
+        chunk.length >= SYNC_EMIT_CHUNK ||
+        bytes + size > SYNC_EMIT_BYTES
+      ) {
+        break;
+      }
+      this.#syncEmitPending.shift();
+      chunk.push(write);
+      bytes += size;
+    }
+    return chunk;
   }
 
   /**
