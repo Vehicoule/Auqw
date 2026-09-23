@@ -280,5 +280,35 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A write over the line bound fails typed, never lands ——
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    const fat = { ...entry(1), value: 'x'.repeat(21 * 1_048_576) };
+    const result = await opened.value.store.append(
+      { entries: [fat] },
+      ctx(),
+    );
+    assert(!result.ok, 'an over-bound write must reject');
+    if (!result.ok) {
+      assertEqual(result.error.kind, 'invalid-response');
+    }
+    // Nothing was written — reopen still parses only the header.
+    const reopened = await openSyncLogStore(path);
+    assert(reopened.ok);
+    if (reopened.ok) {
+      const loaded = await reopened.value.store.load(ctx());
+      assert(loaded.ok);
+      if (loaded.ok) {
+        assertEqual(loaded.value.entries.length, 0);
+      }
+    }
+  }
+
   console.log('sync-log tests passed');
 }

@@ -5,6 +5,7 @@ import {
   assertEqual,
   FakeSyncLogStore,
 } from '@auqw/application/testing';
+import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
 import { createClock, createIds, createLog } from '../renderer/runtime.ts';
 import {
   createUtilitySyncEngine,
@@ -155,6 +156,64 @@ export async function run(): Promise<void> {
     assert(!bad.ok, `batch should fail: ${JSON.stringify(bad)}`);
     if (!bad.ok) {
       assertEqual(bad.error.kind, 'not-applicable');
+    }
+  }
+
+  // —— Pages refit to the wire byte cap; the cursor still converges ——
+  {
+    const source = await engineAt('dsk-page');
+    // Whitelisted values cap at 512 chars — ~2k entries at max size
+    // overflows the 1 MiB doc bound at the default 10k-entry page.
+    const padding = 'p'.repeat(512);
+    const seed: ReturnType<typeof writeName>[] = [];
+    for (let i = 0; i < 2_000; i += 1) {
+      seed.push(writeName(`pl-${i}`, padding));
+    }
+    const seeded = await source.localChanges(seed, undefined);
+    assert(seeded.ok, `seed writes failed: ${JSON.stringify(seeded)}`);
+    const sink = await engineAt('dsk-recv');
+    const seen = new Set<string>();
+    let since = '';
+    let pages = 0;
+    for (;;) {
+      const exported = await source.port.exportDelta(since, undefined);
+      assert(exported.ok, `export failed: ${JSON.stringify(exported)}`);
+      if (!exported.ok) {
+        return;
+      }
+      const bytes = Buffer.byteLength(
+        JSON.stringify(exported.value),
+        'utf8',
+      );
+      assert(
+        bytes <= MAX_SYNC_DOC_BYTES,
+        `page ${pages} is ${bytes} bytes — over the wire bound`,
+      );
+      const delta = exported.value as SyncDelta;
+      for (const entry of delta.entries) {
+        seen.add(String(entry.recordId));
+      }
+      pages += 1;
+      assert(pages < 100, 'pagination did not converge');
+      if (!delta.more) {
+        break;
+      }
+      // The receiver advances its own contiguous mark by applying the
+      // page — that cursor is what it re-requests with.
+      const applied = await sink.port.applyDelta(
+        JSON.parse(JSON.stringify(exported.value)),
+        'dsk-wire',
+        undefined,
+      );
+      assert(applied.ok, `apply failed: ${JSON.stringify(applied)}`);
+      if (!applied.ok) {
+        return;
+      }
+      since = JSON.stringify((applied.value as ApplyResult).cursor);
+    }
+    assert(pages > 1, 'expected the oversized log to page');
+    for (let i = 0; i < 2_000; i += 1) {
+      assert(seen.has(`pl-${i}`), `entry pl-${i} never arrived`);
     }
   }
 

@@ -13,6 +13,13 @@ import type {
   SyncEngineDeps,
   SyncEnginePort,
 } from '@auqw/application';
+import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
+
+/**
+ * Starting page for `exportDelta` — the engine's own `MAX_DELTA_ENTRIES`
+ * cap; the byte-refit loop below shrinks it as needed.
+ */
+const MAX_EXPORT_PAGE = 10_000;
 
 /**
  * The utility-side engine adapter — `createSyncEngine` returns a
@@ -71,11 +78,35 @@ export async function createUtilitySyncEngine(
         }
         cursor = parsed;
       }
-      const delta = await engine.exportDelta(cursor, undefined, signal);
-      if (!delta.ok) {
-        return delta;
+      // The engine pages by entry count but the wire caps a doc at
+      // MAX_SYNC_DOC_BYTES — refit by halving the entry limit until the
+      // serialized doc ships, so a large log can never emit a page the
+      // receiver rejects (which would strand the cursor forever).
+      // 'more' stays honest: the engine sets it against the same limit
+      // it just applied.
+      let limit = MAX_EXPORT_PAGE;
+      for (;;) {
+        const delta = await engine.exportDelta(cursor, limit, signal);
+        if (!delta.ok) {
+          return delta;
+        }
+        const doc: unknown = JSON.parse(JSON.stringify(delta.value));
+        if (
+          Buffer.byteLength(JSON.stringify(doc), 'utf8') <=
+          MAX_SYNC_DOC_BYTES
+        ) {
+          return ok(doc);
+        }
+        if (limit === 1) {
+          return err(
+            appError(
+              'invalid-response',
+              'single sync entry exceeds the wire bound',
+            ),
+          );
+        }
+        limit = Math.max(1, Math.floor(limit / 2));
       }
-      return ok(JSON.parse(JSON.stringify(delta.value)));
     },
     async applyDelta(
       delta: unknown,

@@ -58,10 +58,14 @@ const DEVICE_PREFIX = 'dsk-';
 const DEVICE_HEX = 32;
 const MAX_DEVICE_ID = 128;
 /**
- * One serialized write line must stay well under a sane byte bound —
- * a single append is small; anything megabyte-plus is corrupt, not big.
+ * The bound every serialized write line must fit, shared by writer and
+ * reader so a successful append can never be truncated as corrupt on
+ * the next open. Sizing: the `sync:localChanges` channel admits
+ * 256 writes x 64 KiB field values (~17 MiB serialized once the engine
+ * stamps entries), and a socket-applied delta is capped by
+ * MAX_SYNC_DOC_BYTES (1 MiB). 20 MiB covers both producers with margin.
  */
-const MAX_LINE_BYTES = 4 * 1_048_576;
+const MAX_LINE_BYTES = 20 * 1_048_576;
 
 export type OpenedSyncLog = {
   readonly store: SyncLogStore;
@@ -274,6 +278,18 @@ function createStore(path: string): SyncLogStore {
         return Promise.resolve(err(appError('cancelled', 'cancelled')));
       }
       const line = `${JSON.stringify(write)}\n`;
+      if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+        // The reader rejects a line over this bound as corrupt — write
+        // nothing it would truncate on next open.
+        return Promise.resolve(
+          err(
+            appError(
+              'invalid-response',
+              'sync write exceeds the durable line bound',
+            ),
+          ),
+        );
+      }
       const run = tail.then(async (): Promise<Result<void>> => {
         // Recheck after acquiring the serialized turn — the engine can
         // resolve 'cancelled' while this append still queued behind a
