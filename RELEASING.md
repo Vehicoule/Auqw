@@ -1,7 +1,8 @@
 # Releasing auqw
 
-**Status: Open** — the alpha channel mechanics; signing decisions stay
-Open until `apps/mobile/PACKAGING.md` is ratified.
+**Status: Decided** — alpha channel mechanics (rows in
+`docs/decisions.md`); post-alpha signing and store channels stay Open
+in `apps/mobile/PACKAGING.md`.
 
 ## Scheme
 
