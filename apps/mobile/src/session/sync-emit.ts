@@ -50,14 +50,16 @@ export function createSyncEmit(opts: {
       pending.length > 0 ? [...pending, ...writes] : writes,
       signal,
     );
-    if (!stamped.ok) {
-      // localChangeBatch is atomic — a failed result means NOTHING
-      // submitted reached the log: requeue the whole batch in order
-      // (buffered prefix first, then this call's writes) or the fresh
-      // writes drop until a restart recovers them (Review #46
-      // round-11). The caller may retry the same writes — re-stamping
-      // is idempotent.
-      buffered.unshift(...pending, ...writes);
+    if (!stamped.ok && pending.length > 0) {
+      // localChangeBatch is atomic — a failed result means nothing
+      // submitted landed, so re-pend the buffered prefix: those
+      // writes were accepted while the surface was down and no other
+      // layer owns them. This call's `writes` are NOT re-pended here
+      // — the typed failure returns to the caller (Session's emit
+      // queue), which retains them itself; holding two copies would
+      // re-submit the failed writes twice per retry (Review #46
+      // round-12).
+      buffered.unshift(...pending);
       if (buffered.length > maxBuffered) {
         buffered.splice(0, buffered.length - maxBuffered);
       }

@@ -108,9 +108,10 @@ export async function runSyncEmit(): Promise<void> {
     assertDeepIds(slow.batches[2], ['c']);
   }
 
-  // A failed batch re-pends everything it submitted — the buffered
-  // prefix AND the call's own writes (localChangeBatch is atomic:
-  // nothing landed).
+  // A failed batch re-pends only its buffered prefix for the next
+  // emit — the call's own writes return a typed failure and their
+  // owner (Session's emit queue) retains them; re-pending both
+  // would double-submit on retry.
   {
     const live = fakeSurface();
     let up = false;
@@ -120,25 +121,17 @@ export async function runSyncEmit(): Promise<void> {
     live.failNext(appError('unavailable', 'log full'));
     const failed = await emit([write('b')]);
     assert(!failed.ok, 'failure surfaces typed');
-    // The flushed batch contained buffer+write; both re-pend.
+    // The flushed batch contained buffer+write; only 'a' re-pends.
     const retry = await emit([write('c')]);
     assert(retry.ok);
     const last = live.batches.at(-1);
-    assertDeepIds(last, ['a', 'b', 'c'], 're-pended batch leads retry');
-  }
-
-  // Same for a failure with an empty buffer — the call's writes
-  // re-pend instead of dropping outright.
-  {
-    const live = fakeSurface();
-    const emit = createSyncEmit({ surface: () => live });
+    assertDeepIds(last, ['a', 'c'], 're-pended prefix leads retry');
+    // The caller's chunk is not buffered a second time: a second
+    // failure of the same writes does not grow the adapter copy.
     live.failNext(appError('unavailable', 'log full'));
-    const failed = await emit([write('b')]);
-    assert(!failed.ok);
-    const retry = await emit([write('c')]);
-    assert(retry.ok);
-    const last = live.batches.at(-1);
-    assertDeepIds(last, ['b', 'c'], 'failed writes re-pend');
+    await emit([write('b')]);
+    await emit([write('d')]);
+    assertDeepIds(live.batches.at(-1), ['d'], 'no caller-copy growth');
   }
 
   // Drop-oldest bound while the surface never appears.
