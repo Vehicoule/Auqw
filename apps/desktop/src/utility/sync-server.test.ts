@@ -2501,7 +2501,11 @@ export async function run(): Promise<void> {
         : { outcomes: [] };
       assert(served.outcomes.length > 0, 'drain served outcomes');
 
-      const acked = await invokeHandler(service, 'sync:ackApplied');
+      const acked = await invokeHandler(
+        service,
+        'sync:ackApplied',
+        undefined,
+      );
       assert(acked.ok, 'ack failed');
 
       // The offset sidecar now records the consumed prefix; the JSONL
