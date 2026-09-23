@@ -147,8 +147,15 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     return deferred.promise;
   }
 
-  /** Settles the oldest pending download; false when none pending. */
+  /** Settles the oldest still-open download; false when none pending. */
   settleDownload(result: Result<{ bytes: number }>): boolean {
+    // Cancelled downloads resolved through their signal listener are
+    // already settled — a real aborted request is simply gone.
+    let head = this.#deferreds[0];
+    while (head !== undefined && head.settled) {
+      this.#deferreds.shift();
+      head = this.#deferreds[0];
+    }
     const deferred = this.#deferreds.shift();
     if (deferred === undefined) {
       return false;
