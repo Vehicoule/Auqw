@@ -48,7 +48,7 @@ import type {
 import { enqueueDriverTransaction } from './transaction-queue.ts';
 import {
   CURRENT_SCHEMA_VERSION,
-  KNOWN_TABLES,
+  KNOWN_SCHEMA_OBJECTS,
   MIGRATIONS,
 } from './migrations.ts';
 
@@ -221,15 +221,18 @@ export class SqliteStorage implements StoragePort {
           // migrations cannot get here: each migration is one
           // transaction and rolls back whole.
           const foreign = await conn.query<SqlRow>(
+            // SQLite names tables and indexes in one namespace, so a
+            // foreign index or a table shadowing a mid-migration
+            // throwaway (likes_new) collides just like a foreign
+            // table — probe every name any migration creates.
             // NOCASE: sqlite_master stores the creation-time spelling
             // but SQLite treats identifiers case-insensitively — a
             // foreign `Downloads` collides with `downloads` all the
             // same, and must reject as foreign, not die in-migration.
             `SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name COLLATE NOCASE IN (${KNOWN_TABLES.map(() => '?').join(',')})
+             WHERE name COLLATE NOCASE IN (${KNOWN_SCHEMA_OBJECTS.map(() => '?').join(',')})
              LIMIT 1`,
-            [...KNOWN_TABLES],
+            [...KNOWN_SCHEMA_OBJECTS],
             signal,
           );
           if (foreign.length > 0) {

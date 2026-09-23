@@ -314,3 +314,31 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_4]),
   Object.freeze([...MIGRATION_5]),
 ]);
+
+const CREATED_OBJECT_NAME =
+  /CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+const RENAMED_OBJECT_NAME =
+  /RENAME\s+TO\s+["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+
+/**
+ * Every schema-object name the migrations create or rename to —
+ * final tables, throwaways like `likes_new`, and named indexes.
+ * Derived from the SQL itself so a new migration cannot forget to
+ * declare its objects. The version-zero foreign-file probe rejects
+ * on any of these names: SQLite stores tables and indexes in one
+ * namespace, so a foreign index (or a table shadowing a mid-
+ * migration throwaway) collides just like a foreign table.
+ */
+export const KNOWN_SCHEMA_OBJECTS: readonly string[] = Object.freeze(
+  Array.from(
+    new Set(
+      MIGRATIONS.flat()
+        .flatMap((sql) => [
+          CREATED_OBJECT_NAME.exec(sql)?.[1],
+          RENAMED_OBJECT_NAME.exec(sql)?.[1],
+        ])
+        .filter((name): name is string => name !== undefined)
+        .concat(KNOWN_TABLES),
+    ),
+  ),
+);

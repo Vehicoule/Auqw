@@ -1461,6 +1461,38 @@ async function foreignNewestTablesRejected(): Promise<void> {
   }
 }
 
+// Non-table schema objects share the same namespace: a foreign
+// index named like one a migration creates (or a table shadowing a
+// mid-migration throwaway such as likes_new) would pass a
+// tables-only probe, then die inside the migration transaction
+// instead of rejecting cleanly.
+async function foreignSchemaObjectsRejected(): Promise<void> {
+  const indexCollision = new NodeSqliteDriver();
+  indexCollision.execScript(`
+    CREATE TABLE scratchpad (id TEXT PRIMARY KEY);
+    CREATE INDEX downloads_state_idx ON scratchpad(id);
+  `);
+  const indexInit = await new SqliteStorage(indexCollision, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(
+    !indexInit.ok && indexInit.error.kind === 'invalid-response',
+    'foreign index named like a migration index rejected at initialize',
+  );
+  indexCollision.close();
+
+  const shadow = new NodeSqliteDriver();
+  shadow.execScript(`CREATE TABLE likes_new (id TEXT PRIMARY KEY)`);
+  const shadowInit = await new SqliteStorage(shadow, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(
+    !shadowInit.ok && shadowInit.error.kind === 'invalid-response',
+    'foreign table shadowing a migration throwaway rejected',
+  );
+  shadow.close();
+}
+
 // 24. Unrelated user tables outside the schema's names are
 // tolerated: only a collision with a table this schema owns is
 // rejected.
@@ -1832,6 +1864,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['entityKindCrossCheck', entityKindCrossCheck],
   ['foreignSchemaRejected', foreignSchemaRejected],
   ['foreignNewestTablesRejected', foreignNewestTablesRejected],
+  ['foreignSchemaObjectsRejected', foreignSchemaObjectsRejected],
   ['unrelatedTablesTolerated', unrelatedTablesTolerated],
 ];
 
