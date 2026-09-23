@@ -24,6 +24,7 @@ import {
 } from '@expo-google-fonts/jetbrains-mono';
 import * as AuqwExpo from 'auqw-expo';
 import {
+  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
   CancellationSource,
   SearchSession,
   effectiveMapping,
@@ -49,6 +50,7 @@ import type {
 import {
   AddToPlaylistSheet,
   AppStack,
+  ArtworkResolverProvider,
   CollectionScreen,
   CorrectionsScreen,
   EmptyState,
@@ -91,6 +93,7 @@ import {
   useTheme,
 } from '@auqw/ui-native';
 import type {
+  ArtworkResolver,
   CollectionRowModel,
   CorrectionsFilter,
   DownloadChip,
@@ -133,6 +136,18 @@ const THEME_OPTIONS: readonly ProviderPickerOption[] = [
   { key: 'dark', label: 'dark', detail: 'tokyo night' },
   { key: 'light', label: 'light', detail: 'daylight' },
   { key: 'oled', label: 'oled', detail: 'true black' },
+];
+
+// On-disk artwork LRU sizes, MiB — inside the domain's 16 MiB–1 GiB
+// artworkCacheBytes bounds; 200 is the spec default (data.md).
+const ARTWORK_CACHE_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: '16', label: '16 mb', detail: 'minimum' },
+  { key: '64', label: '64 mb' },
+  { key: '128', label: '128 mb' },
+  { key: '200', label: '200 mb', detail: 'default' },
+  { key: '256', label: '256 mb' },
+  { key: '512', label: '512 mb' },
+  { key: '1024', label: '1024 mb', detail: 'maximum' },
 ];
 
 type Boot =
@@ -273,16 +288,32 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     () => controller.session.subscribe(setState),
     [controller],
   );
+  // Every Artwork in the tree resolves remote urls through the
+  // bounded on-disk cache; a failed lookup resolves to null and the
+  // component renders the remote url instead.
+  const resolveArtwork = useCallback<ArtworkResolver>(
+    (url, signal) =>
+      controller.artworkCache
+        .get(url, {
+          requestId: createIds().next('artwork'),
+          deadlineMs: createClock().nowMs() + 30_000,
+          signal,
+        })
+        .then((result) => (result.ok ? result.value.filePath : null)),
+    [controller],
+  );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
   // OS font scale feeds textScale — accessibility sizing isn't opt-in.
   const { fontScale } = useWindowDimensions();
   return (
     <ThemeProvider theme={theme} textScale={fontScale}>
-      {state.type === 'ready' ? (
-        <Main controller={controller} state={state} />
-      ) : (
-        <SessionGate state={state} controller={controller} />
-      )}
+      <ArtworkResolverProvider resolve={resolveArtwork}>
+        {state.type === 'ready' ? (
+          <Main controller={controller} state={state} />
+        ) : (
+          <SessionGate state={state} controller={controller} />
+        )}
+      </ArtworkResolverProvider>
     </ThemeProvider>
   );
 }
@@ -506,6 +537,8 @@ function Main({
   // would be a storage-schema decision, so they die with the app.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
+    useState(false);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Library-world overlay stack: pushed routes — collection list,
@@ -1303,6 +1336,10 @@ function Main({
               refreshLocal();
             }
           });
+        return;
+      }
+      if (key === 'artworkCacheBytes') {
+        setArtworkCachePickerOpen(true);
         return;
       }
       // storefront, quality, downloadStorage rows are display-only.
@@ -3142,6 +3179,48 @@ function Main({
                 setThemePickerOpen(false);
               }}
               onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {artworkCachePickerOpen && (
+          <SheetScreen
+            stackKey="sheet-artwork-cache"
+            onDismissed={() => setArtworkCachePickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="artwork cache"
+              options={ARTWORK_CACHE_OPTIONS}
+              selectedKey={`${Math.round(
+                (state.settings.artworkCacheBytes ??
+                  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
+                  (1024 * 1024),
+              )}`}
+              onPick={(key) => {
+                setArtworkCachePickerOpen(false);
+                const mib = Number(key);
+                if (!Number.isSafeInteger(mib)) {
+                  return;
+                }
+                const artworkCacheBytes = mib * 1024 * 1024;
+                const shrinking =
+                  artworkCacheBytes <
+                  (state.settings.artworkCacheBytes ??
+                    ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
+                void session
+                  .updateSettings({ ...state.settings, artworkCacheBytes })
+                  .then((updated) => {
+                    // A shrunken cap takes effect only once rows over
+                    // it are evicted — sweep after the commit lands.
+                    if (updated.ok && shrinking) {
+                      void controller.artworkCache.sweep({
+                        requestId: createIds().next('artwork-sweep'),
+                        deadlineMs: createClock().nowMs() + 60_000,
+                        signal: new CancellationSource().signal,
+                      });
+                    }
+                  });
+              }}
+              onDismiss={() => setArtworkCachePickerOpen(false)}
             />
           </SheetScreen>
         )}

@@ -1,6 +1,16 @@
 export { ThemeProvider, useTheme } from './theme.tsx';
 export type { Theme, ThemeProviderProps } from './theme.tsx';
 
+export {
+    ArtworkResolverProvider,
+    useArtworkResolver,
+    useResolvedArtworkUri,
+} from './artwork.tsx';
+export type {
+    ArtworkResolver,
+    ArtworkResolverProviderProps,
+} from './artwork.tsx';
+
 export * from '@auqw/ui-shared';
 
 export {
