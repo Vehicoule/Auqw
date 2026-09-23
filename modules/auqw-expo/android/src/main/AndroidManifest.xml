@@ -8,6 +8,9 @@
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <!-- setWakeMode(WAKE_MODE_LOCAL) on the warm player. -->
   <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <!-- LAN sync dials the desktop's listener over the local network
+       (docs/specs/sync.md) — plain TCP, client-side only. -->
+  <uses-permission android:name="android.permission.INTERNET" />
   <!-- API 33+: without it the MediaSession notification the service
        posts is silently dropped — lock-screen/SystemUI controls would
        have nothing to show. -->

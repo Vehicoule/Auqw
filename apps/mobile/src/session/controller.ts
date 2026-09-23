@@ -21,11 +21,12 @@ import type {
   Result,
   Settings,
 } from '@auqw/application';
-import { SqliteStorage } from '@auqw/storage-sqlite';
+import { SqliteStorage, SqliteSyncLogStore } from '@auqw/storage-sqlite';
 import type {
   AuqwConnectivityNative,
   AuqwDownloadsNative,
   AuqwExpoHostModuleLike,
+  AuqwSyncNative,
   AuqwTagReaderNative,
 } from '../adapters/auqw-expo-surface.ts';
 import { createExpoArtwork } from '../adapters/expo-artwork.ts';
@@ -42,6 +43,10 @@ import {
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createExpoTagReader } from '../adapters/expo-tag-reader.ts';
 import { createExpoTransfer } from '../adapters/expo-transfer.ts';
+import {
+  createExpoSync,
+  type ExpoSyncSurface,
+} from '../adapters/expo-sync.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
 
 // Metro asset requires must be static literals. All pairs are
@@ -98,6 +103,12 @@ export type SessionController = {
    */
   readonly local: () => LocalFileSource | null;
   readonly connectivity: ConnectivityPort;
+  /**
+   * Slice-4 LAN sync client — null when the platform lacks the seam
+   * (iOS) or custody/engine bring-up failed; the UI must render an
+   * honest 'sync unavailable' state, never a dead control.
+   */
+  readonly sync: () => ExpoSyncSurface | null;
   /**
    * Post-restore bring-up: loads persisted state once more, builds
    * the local source over it, and inits the download ledger. Call
@@ -170,7 +181,12 @@ export async function createSessionController(
   host: AuqwExpoHostModuleLike &
     AuqwConnectivityNative &
     AuqwTagReaderNative &
-    AuqwDownloadsNative,
+    AuqwDownloadsNative &
+    AuqwSyncNative & {
+      /** Module-exported presence check — false on iOS builds that
+       * lack the socket surface entirely. */
+      hasSyncSocket?: () => boolean;
+    },
   options: SessionControllerOptions = {},
 ): Promise<SessionController> {
   // Fuel config matches the Slice-0 gate values.
@@ -217,10 +233,16 @@ export async function createSessionController(
       manifestCapabilities(LYRICS_LRCLIB_MANIFEST),
     ),
   ];
+  const sqliteDriver = await createExpoSqliteDriver(options.databasePath);
   const storage = new SqliteStorage(
-    await createExpoSqliteDriver(options.databasePath),
+    sqliteDriver,
     DEFAULT_SETTINGS,
   );
+  // Sync-log tables ride the same file + driver — the shared
+  // transaction tail serializes sync writes with library writes.
+  const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
+  // Assembled in start() after restore: custody → engine → client.
+  let syncSurface: ExpoSyncSurface | null = null;
   const providerMap = new Map(providers.map((p) => [p.id, p]));
   const player = (options.player ?? ((map) => {
     return createExpoAudioPlayer({
@@ -408,6 +430,7 @@ export async function createSessionController(
     downloads,
     local: () => localSource,
     connectivity,
+    sync: () => syncSurface,
     async start(signal) {
       const loaded = await storage.load({
         requestId: ids.next('local-boot'),
@@ -547,6 +570,33 @@ export async function createSessionController(
       if (inited.ok) {
         session.connectivityChanged();
       }
+      // Slice-4 LAN sync: Android-only — iOS carries no socket seam.
+      // Built last so the sync tables exist (restore ran migrations)
+      // and the media owners are live before deltas can land. A
+      // failed bring-up stays null — the settings row reports
+      // 'unavailable' honestly instead of shipping a dead control.
+      if (
+        Platform.OS === 'android' &&
+        host.hasSyncSocket?.() === true &&
+        !signal.cancelled
+      ) {
+        const built = await createExpoSync({
+          host,
+          logStore: syncLogStore,
+          ids,
+          clock,
+          log,
+        });
+        if (built.ok) {
+          syncSurface = built.value;
+        } else {
+          void log.write({
+            level: 'warn',
+            message: `sync bring-up failed: ${built.error.kind} — ${built.error.message}`,
+            atMs: clock.nowMs(),
+          });
+        }
+      }
     },
     rehydrateMedia,
     async replaceLibrary(text, signal) {
@@ -597,6 +647,12 @@ export async function createSessionController(
       }
     },
     async dispose() {
+      // Sync goes down first — bye frames flush while the sockets
+      // still answer; a live session must never outlive its client.
+      if (syncSurface !== null) {
+        await syncSurface.client.close();
+        syncSurface = null;
+      }
       // Stop while the FGS subscriber is still attached — it emits the
       // zero-active update as stop demotes the last transferring row.
       await downloads.stop(new CancellationSource().signal);

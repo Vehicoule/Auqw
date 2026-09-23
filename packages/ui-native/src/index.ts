@@ -115,6 +115,9 @@ export type { CorrectionsScreenProps } from './corrections-screen.tsx';
 export { TransferScreen } from './transfer-screen.tsx';
 export type { TransferScreenProps } from './transfer-screen.tsx';
 
+export { SyncScreen } from './sync-screen.tsx';
+export type { SyncScreenProps } from './sync-screen.tsx';
+
 export { HomeScreen } from './home-screen.tsx';
 export type { HomeScreenProps } from './home-screen.tsx';
 
