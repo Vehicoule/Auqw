@@ -21,6 +21,7 @@ import {
 } from 'node:crypto';
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -130,12 +131,16 @@ for (const entry of readdirSync(dirname(OUT))) {
     }
   }
 }
-// A `.sync-hold-*` dir is a complete previous provider set parked by a
-// swap that died before it finished publishing. When both it and OUT
-// exist, OUT is already the new set and the hold is inert residue; when
-// the crash left OUT missing or emptied, the hold goes back wholesale.
+// A `.sync-hold-<outhash>-*` dir is a complete previous provider set
+// parked by a swap that died before it finished publishing — the
+// resolved OUT path's hash is in the name, so sibling outputs sharing
+// this parent can never claim each other's backup no matter what the
+// out dir is called. When both it and OUT exist, OUT is already the
+// new set and the hold is inert residue; when the crash left OUT
+// missing or emptied, the hold goes back wholesale.
+const HOLD_PREFIX = `.sync-hold-${createHash('sha256').update(OUT).digest('hex').slice(0, 16)}-`;
 for (const entry of readdirSync(dirname(OUT))) {
-  if (!entry.startsWith('.sync-hold-')) continue;
+  if (!entry.startsWith(HOLD_PREFIX)) continue;
   const hold = join(dirname(OUT), entry);
   if (existsSync(OUT) && readdirSync(OUT).length > 0) {
     rmSync(hold, { recursive: true, force: true });
@@ -303,12 +308,17 @@ if (syncSpin) {
 // OUT is never a partial provider set.
 for (const entry of readdirSync(OUT)) {
   if (!entry.endsWith('.wasm') && !entry.endsWith('.manifest.json')) {
-    copyFileSync(join(OUT, entry), join(STAGE, entry));
+    // cpSync, not copyFileSync: non-artifacts can be nested directories
+    // or symlinks, and verbatimSymlinks preserves a link as a link.
+    cpSync(join(OUT, entry), join(STAGE, entry), {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
   }
 }
 const HOLD = join(
   dirname(OUT),
-  `.sync-hold-${process.pid}-${randomBytes(4).toString('hex')}`,
+  `${HOLD_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`,
 );
 try {
   renameSync(OUT, HOLD);
