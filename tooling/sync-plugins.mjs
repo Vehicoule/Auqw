@@ -16,6 +16,7 @@
 import {
   createHash,
   createPublicKey,
+  randomBytes,
   verify as edVerify,
 } from 'node:crypto';
 import {
@@ -27,7 +28,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -128,6 +128,20 @@ for (const entry of readdirSync(dirname(OUT))) {
     if (err.code === 'ESRCH') {
       rmSync(join(dirname(OUT), entry), { recursive: true, force: true });
     }
+  }
+}
+// A `.sync-hold-*` dir is a complete previous provider set parked by a
+// swap that died before it finished publishing. When both it and OUT
+// exist, OUT is already the new set and the hold is inert residue; when
+// the crash left OUT missing or emptied, the hold goes back wholesale.
+for (const entry of readdirSync(dirname(OUT))) {
+  if (!entry.startsWith('.sync-hold-')) continue;
+  const hold = join(dirname(OUT), entry);
+  if (existsSync(OUT) && readdirSync(OUT).length > 0) {
+    rmSync(hold, { recursive: true, force: true });
+  } else {
+    rmSync(OUT, { recursive: true, force: true });
+    renameSync(hold, OUT);
   }
 }
 const STAGE = mkdtempSync(join(dirname(OUT), `.sync-stage-${process.pid}-`));
@@ -280,15 +294,30 @@ if (syncSpin) {
   console.log(`synced spin ${spinManifest.artifact.digest.slice(0, 19)}…`);
 }
 
-// Swap the verified set into OUT: prune stale artifacts (a provider
-// dropped from the lock must not linger — packaged builds copy OUT
-// wholesale and load everything they find), then move the staged files
-// in. Non-artifact files in OUT are left alone.
+// Swap the verified set into OUT. Artifacts dropped from the lock must
+// not linger — packaged builds copy OUT wholesale — so the live set
+// moves aside wholesale too: non-artifacts are copied into STAGE first,
+// then OUT parks under a hold name and STAGE publishes in one rename
+// each. A kill between the two renames leaves the complete previous set
+// in the hold, which the recovery pass above restores on the next run —
+// OUT is never a partial provider set.
 for (const entry of readdirSync(OUT)) {
-  if (entry.endsWith('.wasm') || entry.endsWith('.manifest.json')) {
-    unlinkSync(join(OUT, entry));
+  if (!entry.endsWith('.wasm') && !entry.endsWith('.manifest.json')) {
+    copyFileSync(join(OUT, entry), join(STAGE, entry));
   }
 }
-for (const entry of readdirSync(STAGE)) {
-  renameSync(join(STAGE, entry), join(OUT, entry));
+const HOLD = join(
+  dirname(OUT),
+  `.sync-hold-${process.pid}-${randomBytes(4).toString('hex')}`,
+);
+try {
+  renameSync(OUT, HOLD);
+  try {
+    renameSync(STAGE, OUT);
+  } catch (thrown) {
+    renameSync(HOLD, OUT);
+    throw thrown;
+  }
+} finally {
+  rmSync(HOLD, { recursive: true, force: true });
 }
