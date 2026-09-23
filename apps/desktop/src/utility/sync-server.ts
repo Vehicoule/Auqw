@@ -457,10 +457,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
   }
 
-  function sendSealed(session: Session, msg: unknown): void {
+  /** True iff a frame was accepted by the pump — callers that key
+   *  state off delivery (pendingSync marks) must not clear on a dead
+   *  socket where the kick never went out. */
+  function sendSealed(session: Session, msg: unknown): boolean {
     const codec = session.codec;
     if (codec === null) {
-      return;
+      return false;
     }
     const plain = Buffer.from(JSON.stringify(msg), 'utf8');
     if (plain.length + SEAL_OVERHEAD > session.pump.maxPayload) {
@@ -472,10 +475,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         JSON.stringify({ t: 'error', code: 'too-large' }),
         'utf8',
       );
-      session.pump.send(codec.seal(err));
-      return;
+      return session.pump.send(codec.seal(err));
     }
-    session.pump.send(codec.seal(plain));
+    return session.pump.send(codec.seal(plain));
   }
 
   function killSession(session: Session): void {
@@ -521,9 +523,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     kickStaleFp(session);
     if (
       session.deviceId !== null &&
-      pendingSync.delete(session.deviceId)
+      pendingSync.has(session.deviceId) &&
+      sendSealed(session, { t: 'sync-request' })
     ) {
-      sendSealed(session, { t: 'sync-request' });
+      pendingSync.delete(session.deviceId);
     }
   }
 
@@ -1171,9 +1174,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       let sent = false;
       for (const session of sessions) {
         if (session.phase === 'open' && session.deviceId !== null) {
-          sendSealed(session, { t: 'sync-request' });
-          sent = true;
-          pendingSync.delete(session.deviceId);
+          // The mark clears only when the kick is accepted — a socket
+          // dying mid-trigger must leave the device pending so its next
+          // connection still gets the sync-request.
+          if (sendSealed(session, { t: 'sync-request' })) {
+            sent = true;
+            pendingSync.delete(session.deviceId);
+          }
         }
       }
       // A dead registry is NOT an empty one — after the live kick the

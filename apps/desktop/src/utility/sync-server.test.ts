@@ -1612,6 +1612,58 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— An undelivered kick keeps the device pending until it lands ——
+  {
+    const keys = createMemoryKeys();
+    const { service, port } = await startService({ keys });
+    try {
+      const pairing = await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-pending1',
+        name: 'pending',
+      });
+      const c1 = await dial(port);
+      const h1 = await phoneHandshake(c1, peer, pairing.fp);
+      c1.send(sealJson(h1.codec, { t: 'pair', code: pairing.code }));
+      await c1.recv();
+      c1.close();
+      await new Promise((r) => setTimeout(r, 20));
+      // Trigger with the device gone: the kick has no live socket, so
+      // the pending mark must survive — not clear on a dead send.
+      const first = await invokeHandler(service, 'sync:trigger', undefined);
+      assert(
+        first.ok &&
+          isRecord(first.value) &&
+          first.value['pending'] === true,
+        `offline device stays pending, got ${JSON.stringify(first)}`,
+      );
+      // Reconnect: enterOpen's kick must deliver AND clear the mark.
+      const c2 = await dial(port);
+      const h2 = await phoneHandshake(c2, peer, pairing.fp);
+      c2.send(sealJson(h2.codec, { t: 'resume' }));
+      const welcome = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(welcome) && welcome['t'] === 'welcome',
+        'resume succeeds for the pending device',
+      );
+      const kick = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(kick) && kick['t'] === 'sync-request',
+        `reconnect delivers the held kick, got ${JSON.stringify(kick)}`,
+      );
+      const second = await invokeHandler(service, 'sync:trigger', undefined);
+      assert(
+        second.ok &&
+          isRecord(second.value) &&
+          second.value['pending'] === false,
+        'delivered kick cleared the pending mark',
+      );
+      c2.close();
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— A contract-max delta doc crosses the wire both ways ——
   {
     const bigDoc = {
