@@ -37,43 +37,51 @@ export function useArtworkResolver(): ArtworkResolver | null {
 }
 
 /**
- * The uri an artwork image should render: the remote url immediately,
- * swapped for the cache-local file once the resolver lands. Without
- * a provider (or for non-cacheable urls) the remote url is used
- * throughout. The in-flight lookup is cancelled when the url changes
- * or the component unmounts; `resetResolved` lets the render path
- * drop back to remote when a cached file turns out unreadable (the
+ * What an artwork image should render. `pending` is true while the
+ * resolver is looking up a cacheable url — the render path shows its
+ * placeholder then, never the remote url: giving `Image` the remote
+ * source up front would double-fetch every cache miss (one request
+ * from the component, one from the cache's own downloader). On a
+ * hit the file uri lands quickly; on a miss or failure `uri` falls
+ * back to the remote url as exactly one source. `markRemote` lets
+ * the render path drop a cached file that turns out unreadable (the
  * cache dir is OS-reclaimable, so an entry can outlive its file).
  */
 export function useResolvedArtworkUri(url: string | null): {
   readonly uri: string | null;
-  readonly resetResolved: () => void;
+  readonly pending: boolean;
+  readonly markRemote: () => void;
 } {
   const resolve = useArtworkResolver();
-  // Tag the resolution with the url it was made for — a late landing
+  // Tag the outcome with the url it was made for — a late landing
   // from a superseded url is ignored without a state reset effect.
-  const [resolved, setResolved] = useState<{
+  const [outcome, setOutcome] = useState<{
     readonly url: string;
-    readonly uri: string;
+    /** Cache-local uri, or null when the lookup produced no file. */
+    readonly uri: string | null;
   } | null>(null);
+  const cacheable =
+    resolve !== null && url !== null && url.startsWith('https://');
   useEffect(() => {
-    if (resolve === null || url === null || !url.startsWith('https://')) {
+    if (!cacheable || url === null) {
       return;
     }
     const source = new CancellationSource();
     void resolve(url, source.signal)
-      .then((fileUri) => {
-        if (fileUri !== null && !source.signal.cancelled) {
-          setResolved({ url, uri: fileUri });
-        }
-      })
-      .catch(() => {
-        // A resolver breach resolves to nothing — remote renders.
-      });
+      .then((fileUri) => setOutcome({ url, uri: fileUri }))
+      .catch(() => setOutcome({ url, uri: null }));
     return () => source.cancel();
-  }, [url, resolve]);
+  }, [url, resolve, cacheable]);
   return {
-    uri: resolved !== null && resolved.url === url ? resolved.uri : url,
-    resetResolved: () => setResolved(null),
+    uri:
+      outcome !== null && outcome.url === url && outcome.uri !== null
+        ? outcome.uri
+        : url,
+    pending: cacheable && (outcome === null || outcome.url !== url),
+    markRemote: () => {
+      if (url !== null) {
+        setOutcome({ url, uri: null });
+      }
+    },
   };
 }

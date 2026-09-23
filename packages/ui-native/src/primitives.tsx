@@ -308,7 +308,7 @@ export function Artwork({
   style,
 }: ArtworkProps) {
   const theme = useTheme();
-  const { uri, resetResolved } = useResolvedArtworkUri(url);
+  const { uri, pending, markRemote } = useResolvedArtworkUri(url);
   const r = cornerRadius ?? theme.radius.thumb;
   return (
     <View
@@ -341,7 +341,7 @@ export function Artwork({
         >
           <Spinner size={fill ? 24 : Math.max(10, size * 0.3)} />
         </View>
-      ) : url === null ? (
+      ) : url === null || pending ? (
         monogram !== null && monogram !== undefined && monogram !== '' ? (
           <RNText
             // Monogram size is pure geometry — never font-scale it.
@@ -372,7 +372,7 @@ export function Artwork({
               : { width: size, height: size }
           }
           resizeMode="cover"
-          onError={resetResolved}
+          onError={markRemote}
           accessibilityIgnoresInvertColors
         />
       )}
