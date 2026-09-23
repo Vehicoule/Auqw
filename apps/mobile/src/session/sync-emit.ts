@@ -50,10 +50,14 @@ export function createSyncEmit(opts: {
       pending.length > 0 ? [...pending, ...writes] : writes,
       signal,
     );
-    if (!stamped.ok && pending.length > 0) {
-      // Keep the buffered prefix for the next call — its writes never
-      // reached the log.
-      buffered.unshift(...pending);
+    if (!stamped.ok) {
+      // localChangeBatch is atomic — a failed result means NOTHING
+      // submitted reached the log: requeue the whole batch in order
+      // (buffered prefix first, then this call's writes) or the fresh
+      // writes drop until a restart recovers them (Review #46
+      // round-11). The caller may retry the same writes — re-stamping
+      // is idempotent.
+      buffered.unshift(...pending, ...writes);
       if (buffered.length > maxBuffered) {
         buffered.splice(0, buffered.length - maxBuffered);
       }

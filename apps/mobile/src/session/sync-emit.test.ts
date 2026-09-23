@@ -108,7 +108,9 @@ export async function runSyncEmit(): Promise<void> {
     assertDeepIds(slow.batches[2], ['c']);
   }
 
-  // A failed batch re-pends its buffered prefix for the next emit.
+  // A failed batch re-pends everything it submitted — the buffered
+  // prefix AND the call's own writes (localChangeBatch is atomic:
+  // nothing landed).
   {
     const live = fakeSurface();
     let up = false;
@@ -118,11 +120,25 @@ export async function runSyncEmit(): Promise<void> {
     live.failNext(appError('unavailable', 'log full'));
     const failed = await emit([write('b')]);
     assert(!failed.ok, 'failure surfaces typed');
-    // The flushed batch contained buffer+write; 'a' re-pends.
+    // The flushed batch contained buffer+write; both re-pend.
     const retry = await emit([write('c')]);
     assert(retry.ok);
     const last = live.batches.at(-1);
-    assertDeepIds(last, ['a', 'c'], 're-pended prefix leads retry');
+    assertDeepIds(last, ['a', 'b', 'c'], 're-pended batch leads retry');
+  }
+
+  // Same for a failure with an empty buffer — the call's writes
+  // re-pend instead of dropping outright.
+  {
+    const live = fakeSurface();
+    const emit = createSyncEmit({ surface: () => live });
+    live.failNext(appError('unavailable', 'log full'));
+    const failed = await emit([write('b')]);
+    assert(!failed.ok);
+    const retry = await emit([write('c')]);
+    assert(retry.ok);
+    const last = live.batches.at(-1);
+    assertDeepIds(last, ['b', 'c'], 'failed writes re-pend');
   }
 
   // Drop-oldest bound while the surface never appears.
