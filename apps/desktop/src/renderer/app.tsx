@@ -90,6 +90,7 @@ import type {
   SyncPairingResult,
   SyncStatusResult,
 } from '../shared/contract.ts';
+import { isSyncDeltaDoc } from '../shared/contract.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
@@ -917,7 +918,9 @@ function Main({
         const docs: readonly unknown[] = Array.isArray(parsed)
           ? parsed
           : [parsed];
-        if (!docs.every(isSyncDelta)) {
+        if (
+          !docs.every((d) => isSyncDelta(d) && isSyncDeltaDoc(d))
+        ) {
           return;
         }
         for (const delta of docs) {
