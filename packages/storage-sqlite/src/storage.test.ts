@@ -1442,7 +1442,24 @@ async function foreignSchemaRejected(): Promise<void> {
   driver.close();
 }
 
-// 23. Unrelated user tables outside the schema's names are
+// 23. The same rejection covers the tables the newest migrations
+// own — a foreign file holding only slice-3 tables is still
+// foreign, and KNOWN_TABLES must name them all.
+async function foreignNewestTablesRejected(): Promise<void> {
+  for (const table of ['downloads', 'local_sources', 'local_files']) {
+    const driver = new NodeSqliteDriver();
+    driver.execScript(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`);
+    const storage = new SqliteStorage(driver, SETTINGS);
+    const init = await storage.initialize(ctx().context);
+    assert(
+      !init.ok && init.error.kind === 'invalid-response',
+      `foreign ${table} table rejected at initialize`,
+    );
+    driver.close();
+  }
+}
+
+// 24. Unrelated user tables outside the schema's names are
 // tolerated: only a collision with a table this schema owns is
 // rejected.
 async function unrelatedTablesTolerated(): Promise<void> {
@@ -1812,6 +1829,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['exportOwnedUnsafeTimestamp', exportOwnedUnsafeTimestamp],
   ['entityKindCrossCheck', entityKindCrossCheck],
   ['foreignSchemaRejected', foreignSchemaRejected],
+  ['foreignNewestTablesRejected', foreignNewestTablesRejected],
   ['unrelatedTablesTolerated', unrelatedTablesTolerated],
 ];
 

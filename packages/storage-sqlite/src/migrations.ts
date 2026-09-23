@@ -26,6 +26,9 @@ export const KNOWN_TABLES: readonly string[] = Object.freeze([
   'match_reviews',
   'lyrics_cache',
   'artwork_cache',
+  'downloads',
+  'local_sources',
+  'local_files',
 ]);
 
 const MIGRATION_1: readonly string[] = [
