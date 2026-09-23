@@ -9,6 +9,7 @@ import {
 import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
+  LOCAL_PROVIDER,
   SearchSession,
   previewImport,
 } from '@auqw/application';
@@ -453,11 +454,14 @@ function Main({
 
   // Offline honesty for remote paths: with connectivity explicitly
   // down nothing streams — every row's play affordance waits instead
-  // of firing a remote attempt (no owned-bytes surface on desktop
-  // until Phase 4).
+  // of firing a remote attempt. Owned bytes are the exception: a row
+  // the local playback probe resolves (download ledger or local
+  // files) stays playable offline.
   const canPlay = useCallback(
-    (_recordingId: string): boolean => online !== false,
-    [online],
+    (recordingId: string): boolean =>
+      online !== false ||
+      controller.localPlaybackFor(recordingId) !== null,
+    [online, controller],
   );
 
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -492,6 +496,20 @@ function Main({
     readonly SyncDeviceInfo[]
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
+  // The sheet's 'expires in Nm' label is a render-time read — tick
+  // while an offer is open so the countdown doesn't freeze between
+  // sync polls.
+  const [pairingTick, setPairingTick] = useState(0);
+  useEffect(() => {
+    if (pairing === null) {
+      return;
+    }
+    const timer = window.setInterval(
+      () => setPairingTick((n) => n + 1),
+      15_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [pairing]);
   const syncRefresh = useCallback(() => {
     const { sync } = window.auqw;
     void sync
@@ -818,8 +836,9 @@ function Main({
     [state.settings, diagnostics],
   );
   const syncModel = useMemo(
-    () => toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
-    [syncStatus, syncDevices, pairing],
+    () =>
+      toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
+    [syncStatus, syncDevices, pairing, pairingTick],
   );
 
   const onPairDevice = useCallback(() => {
@@ -887,22 +906,40 @@ function Main({
   // Mirrors QueueEngine.next()/previous() targeting: next → index+1
   // (never wraps); previous → restart current when positionMs>3s or
   // at index 0, else index−1. The gate sees the same target the
-  // engine would land on.
+  // engine would land on — an owned target still advances offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
-      if (online === false) {
+      const { occurrences, currentOccurrenceId, positionMs } =
+        state.queue;
+      const index = occurrences.findIndex(
+        (o) => o.occurrenceId === currentOccurrenceId,
+      );
+      if (index < 0) {
+        return;
+      }
+      const target =
+        occurrences[
+          method === 'next'
+            ? index + 1
+            : positionMs > 3_000 || index === 0
+              ? index
+              : index - 1
+        ];
+      if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
       void (method === 'next' ? session.next() : session.previous());
     },
-    [online, session],
+    [session, state.queue, canPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
   // the materialized recording plays only when a stream can resolve —
-  // nothing owned exists on desktop yet, so offline blocks them all.
+  // the exception is a meta already file-backed by the 'local'
+  // provider.
   const canPlayMeta = useCallback(
-    (_meta: TrackMetadata): boolean => online !== false,
+    (meta: TrackMetadata): boolean =>
+      online !== false || meta.sourceRef.provider === LOCAL_PROVIDER,
     [online],
   );
 
@@ -1287,28 +1324,29 @@ function Main({
       return;
     }
     setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
-    void session.importLibrary(text).then(async (result) => {
-      if (!result.ok) {
+    // replaceLibrary drains downloads before the swap and rehydrates
+    // the media owners after — a live runner could otherwise
+    // repersist a ledger row the import removed.
+    void controller
+      .replaceLibrary(text, new CancellationSource().signal)
+      .then((result) => {
+        if (!result.ok) {
+          setTransfer((prev) => ({
+            ...prev,
+            importPhase: 'error',
+            importDetail: result.error.message,
+          }));
+          return;
+        }
+        importText.current = null;
+        const counts = result.value.counts;
         setTransfer((prev) => ({
           ...prev,
-          importPhase: 'error',
-          importDetail: result.error.message,
+          importPhase: 'done',
+          importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
         }));
-        return;
-      }
-      // The import swapped the whole library — reload the media
-      // owners (download ledger + local source) off the new rows so
-      // playback never resolves through a stale owner.
-      await controller.rehydrateMedia(new CancellationSource().signal);
-      importText.current = null;
-      const counts = result.value.counts;
-      setTransfer((prev) => ({
-        ...prev,
-        importPhase: 'done',
-        importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
-      }));
-    });
-  }, [session]);
+      });
+  }, [controller]);
 
   const onResetImport = useCallback(() => {
     importText.current = null;

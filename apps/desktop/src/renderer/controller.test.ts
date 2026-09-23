@@ -94,6 +94,7 @@ type Rig = {
   snapshotResult: { readonly online: boolean };
   transferStat: { readonly exists: boolean; readonly bytes: number | null };
   transferSwept: number;
+  transferRemoved: string[];
   transferStats: {
     readonly bytes: number;
     readonly files: number;
@@ -127,6 +128,7 @@ function fakeApi(): Rig {
     snapshotResult: { online: true },
     transferStat: { exists: true, bytes: null },
     transferSwept: 0,
+    transferRemoved: [],
     transferStats: { bytes: 0, files: 0, partials: 0, freeBytes: null },
     api: {
       app: {
@@ -210,7 +212,10 @@ function fakeApi(): Rig {
         finalize: () => Promise.reject(new Error('seam: inject transfer')),
         abort: () => Promise.resolve(),
         stat: () => Promise.resolve(rig.transferStat),
-        remove: () => Promise.resolve(),
+        remove: (args: { readonly name: string }) => {
+          rig.transferRemoved.push(args.name);
+          return Promise.resolve();
+        },
         sweepPartials: () =>
           Promise.resolve({ swept: rig.transferSwept }),
         list: () => Promise.resolve({ sinks: [], files: [] }),
@@ -783,6 +788,86 @@ async function vanishedDownloadHonest(): Promise<void> {
   await controller.dispose();
 }
 
+// 14. `localPlaybackFor` is the same probe the session resolves
+// through — the offline play gate reads it directly.
+async function localPlaybackProbe(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  rig.transferStat = { exists: true, bytes: 100 };
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [
+          rec('rec-dl', 'provider'),
+          rec('rec-remote', 'provider'),
+        ],
+        downloads: [downloadRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  await pump(); // let the meta probe land
+  assertEqual(
+    controller.localPlaybackFor('rec-dl'),
+    'file:///tmp/auqw-test/media/dl-1',
+    'owned download exposes its file URI',
+  );
+  assertEqual(
+    controller.localPlaybackFor('rec-remote'),
+    null,
+    'a provider-only recording stays remote',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
+// 15. `replaceLibrary` drains downloads before the swap and deletes
+// the captured files — a live ledger can't resurrect removed rows.
+async function replaceLibraryDrainsDownloads(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  rig.transferStat = { exists: true, bytes: 100 };
+  const controller = await createSessionController(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [rec('rec-dl', 'provider')],
+        downloads: [downloadRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  assertEqual(controller.downloads.fileFor('rec-dl'), 'dl-1');
+  // An import doc minted off an empty library — no downloads section.
+  const rigEmpty = fakeApi();
+  const empty = await createSessionController(rigEmpty.api, {
+    storage: new FakeStorage(
+      persisted({ recordings: [rec('rec-dl', 'provider')] }),
+    ),
+    player: new FakePlayer(),
+    providers: defaultProviders(),
+  });
+  const exported = await empty.session.exportLibrary();
+  assert(exported.ok, 'export failed');
+  await empty.dispose();
+
+  const replaced = await controller.replaceLibrary(
+    exported.value.json,
+    new CancellationSource().signal,
+  );
+  assert(replaced.ok, `replaceLibrary: ${JSON.stringify(replaced)}`);
+  assertEqual(rig.transferRemoved.length, 1, 'old ledger file deletes');
+  assertEqual(rig.transferRemoved[0], 'dl-1');
+  assertEqual(
+    controller.downloads.fileFor('rec-dl'),
+    null,
+    'the imported doc has no downloads — the row is gone',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['providersFromManifests', providersFromManifests],
   ['unavailableBindings', unavailableBindings],
@@ -797,6 +882,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['localFileResolvesUri', localFileResolvesUri],
   ['rehydrateAfterImport', rehydrateAfterImport],
   ['vanishedDownloadHonest', vanishedDownloadHonest],
+  ['localPlaybackProbe', localPlaybackProbe],
+  ['replaceLibraryDrainsDownloads', replaceLibraryDrainsDownloads],
 ];
 
 export async function run(): Promise<void> {

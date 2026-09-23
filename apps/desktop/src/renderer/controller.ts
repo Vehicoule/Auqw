@@ -4,6 +4,7 @@ import {
   DownloadManager,
   err,
   LocalFileSource,
+  previewImport,
   Session,
 } from '@auqw/application';
 import type {
@@ -217,11 +218,26 @@ export type SessionController = {
    */
   readonly subscribeOnline: (listener: (online: boolean) => void) => () => void;
   /**
+   * The same probe the session resolves offline playback through —
+   * UI gates read it so an owned local row stays playable without
+   * connectivity (a remote ref still honestly refuses).
+   */
+  readonly localPlaybackFor: (recordingId: string) => string | null;
+  /**
    * Re-loads persisted state into the media owners after a
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
    */
   rehydrateMedia(signal: CancellationSignal): Promise<void>;
+  /**
+   * Whole-library replace with the file plane drained first — a live
+   * transfer runner would otherwise repersist a ledger row the import
+   * just swapped out. Mirrors the mobile replaceLibrary flow.
+   */
+  replaceLibrary(
+    text: string,
+    signal: CancellationSignal,
+  ): ReturnType<Session['importLibrary']>;
   dispose(): Promise<void>;
 };
 
@@ -332,6 +348,8 @@ export async function createSessionController(
   // the fallback seed. Every transition re-runs the session's
   // connectivity reconciliation.
   let lastOnline = true;
+  const localPlaybackFor = (id: string): string | null =>
+    probe?.(id) ?? uriForHook(id);
   const session = new Session({
     storage,
     player,
@@ -343,7 +361,7 @@ export async function createSessionController(
     // `probe`/`localSource` are closure boxes — both fill in after
     // construction (probe on the meta round-trip, localSource at
     // rehydrate) and are read on every probe.
-    localPlaybackFor: (id) => probe?.(id) ?? uriForHook(id),
+    localPlaybackFor,
     isOnline: () => lastOnline,
   });
   type ReadyState = Extract<
@@ -562,7 +580,55 @@ export async function createSessionController(
     connectivity,
     isOnline: () => lastOnline,
     subscribeOnline,
+    localPlaybackFor,
     rehydrateMedia,
+    async replaceLibrary(text, signal) {
+      // Validate BEFORE the drain: a malformed document must not
+      // destroy existing downloads. Session.importLibrary revalidates
+      // for the atomic commit regardless.
+      const previewed = previewImport(text);
+      if (!previewed.ok) {
+        return previewed;
+      }
+      // Drain first: a live runner could repersist a row the import
+      // is about to swap out from under it. Capture the ledger NOW —
+      // on success its rows are gone from storage, so the captured
+      // file paths are the only reference to the old bytes.
+      const priorRows = downloads.records();
+      const stopped = await downloads.stop(signal);
+      if (!stopped.ok) {
+        void log.write({
+          level: 'warn',
+          message: `pre-import stop failed: ${stopped.error.kind}`,
+          atMs: clock.nowMs(),
+        });
+        return err(stopped.error);
+      }
+      try {
+        const imported = await session.importLibrary(text);
+        if (imported.ok) {
+          // The swap landed — delete the old ledger's files by their
+          // captured paths. A failed import instead leaves the ledger
+          // untouched; the finally's rehydrate resumes its rows.
+          for (const row of priorRows) {
+            const removed = await transfer.removeFile(row.filePath, signal);
+            if (!removed.ok) {
+              void log.write({
+                level: 'warn',
+                message: `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+            }
+          }
+        }
+        return imported;
+      } finally {
+        // Whatever landed — success, or a storage failure — the
+        // manager re-inits off the persisted ledger so it can never
+        // sit stopped with a stale row map.
+        await rehydrateMedia(signal);
+      }
+    },
     async dispose() {
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);

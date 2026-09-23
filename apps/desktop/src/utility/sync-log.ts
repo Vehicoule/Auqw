@@ -275,6 +275,12 @@ function createStore(path: string): SyncLogStore {
       }
       const line = `${JSON.stringify(write)}\n`;
       const run = tail.then(async (): Promise<Result<void>> => {
+        // Recheck after acquiring the serialized turn — the engine can
+        // resolve 'cancelled' while this append still queued behind a
+        // sibling; a cancelled write must never become durable.
+        if (context.signal.cancelled) {
+          return err(appError('cancelled', 'cancelled'));
+        }
         let handle;
         try {
           await appendFile(path, line, 'utf8');

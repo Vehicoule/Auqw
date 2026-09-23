@@ -1110,6 +1110,14 @@ export function isSyncDeltaDoc(value: unknown): boolean {
 
 export type SyncDeltasArgs = { readonly since: string };
 
+/**
+ * The serialized-cursor bound: `since` is `JSON.stringify(SyncCursor)`
+ * — a map of up to 512 device ids (each ≤128 chars) to sequences.
+ * Worst case is 512 entries × ~150 JSON chars ≈ 77 KB; round to
+ * 80 000 so a full cursor always fits.
+ */
+export const MAX_SYNC_CURSOR_CHARS = 80_000;
+
 export function isSyncDeltasArgs(
   value: unknown,
 ): value is SyncDeltasArgs {
@@ -1118,7 +1126,7 @@ export function isSyncDeltasArgs(
     hasOnlyKeys(value, ['since']) &&
     // '' is a legal cursor — the engine reads it as "full snapshot".
     typeof value['since'] === 'string' &&
-    value['since'].length <= 256
+    value['since'].length <= MAX_SYNC_CURSOR_CHARS
   );
 }
 

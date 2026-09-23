@@ -14,6 +14,7 @@ import {
   isRecord,
 } from '../shared/check.ts';
 import {
+  MAX_SYNC_CURSOR_CHARS,
   MAX_SYNC_DOC_BYTES,
   isSyncDeltasArgs,
   isSyncDeltasResult,
@@ -262,7 +263,7 @@ function isSyncReq(
     hasOnlyKeys(value, ['t', 'since', 'delta']) &&
     value['t'] === 'sync' &&
     typeof value['since'] === 'string' &&
-    value['since'].length <= 256 &&
+    value['since'].length <= MAX_SYNC_CURSOR_CHARS &&
     (value['delta'] === undefined || isSyncDeltaDoc(value['delta']))
   );
 }
