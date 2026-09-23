@@ -430,6 +430,10 @@ async function coalescedConcurrentGets(): Promise<void> {
   assertEqual(r.fetch.calls.length, 4);
   s7.cancel();
   s8.cancel();
+  // A get landing synchronously after the last waiter left — while
+  // the cancelled record still sits in the map — must start fresh
+  // work; joining the dead record could only answer cancelled.
+  const p9 = r.cache.get(D, ctx());
   const [r7, r8] = await Promise.all([p7, p8]);
   assert(!r7.ok && !r8.ok, 'empty waiter set cancels the work');
   assertEqual(
@@ -437,6 +441,15 @@ async function coalescedConcurrentGets(): Promise<void> {
     0,
     'abandoned download caches nothing',
   );
+  await pump();
+  assertEqual(
+    r.fetch.calls.length,
+    5,
+    'late get must restart, not join cancelled work',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 1 * MB })));
+  const r9 = await p9;
+  assert(r9.ok && r9.value.filePath === destOf(D));
 }
 
 async function cancellation(): Promise<void> {

@@ -561,9 +561,13 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         err(appError('cancelled', 'cancelled')),
       );
     }
-    // Concurrent gets for the same url coalesce onto one download.
+    // Concurrent gets for the same url coalesce onto one download —
+    // except a record whose work is already cancelled but not yet
+    // unwound: joining it could only ever answer cancelled, so a
+    // fresh record takes over (the abandoned one deletes itself by
+    // identity check and cannot clobber the replacement).
     const pending = inflight.get(url);
-    if (pending !== undefined) {
+    if (pending !== undefined && !pending.work.signal.cancelled) {
       return waitFor(pending, context);
     }
     // Placeholder replaced before the record is published to the map.
