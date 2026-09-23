@@ -26,7 +26,7 @@ import type {
   SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
-import { topPlayed } from '@auqw/application';
+import { ARTWORK_CACHE_BUDGET_DEFAULT_BYTES, topPlayed } from '@auqw/application';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -1485,6 +1485,18 @@ export function toSettingsModel(
         label: 'download storage',
         value: media.storageText ?? '—',
         kind: 'value',
+        enabled: true,
+      },
+      {
+        // Bounded LRU on disk (data.md ~200 MB) — the value is the
+        // configured cap; picking a new one commits it and sweeps.
+        key: 'artworkCacheBytes',
+        label: 'artwork cache',
+        value: `${Math.round(
+          (settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
+            (1024 * 1024),
+        )} mb`,
+        kind: 'navigation',
         enabled: true,
       },
       {

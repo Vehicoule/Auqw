@@ -478,6 +478,20 @@ function testLibraryAndSettings(): void {
   const model = toSettingsModel(fixtureSettings, fixtureDiagnostics);
   const prefetch = model.rows.find((r) => r.key === 'prefetch');
   assert(prefetch !== undefined && prefetch.kind === 'toggle');
+  const cacheRow = model.rows.find((r) => r.key === 'artworkCacheBytes');
+  assert(
+    cacheRow !== undefined && cacheRow.kind === 'navigation',
+    'artwork cache row navigates to a budget picker',
+  );
+  assertEqual(cacheRow?.value, '200 mb');
+  const capped = toSettingsModel(
+    { ...fixtureSettings, artworkCacheBytes: 64 * 1024 * 1024 },
+    fixtureDiagnostics,
+  );
+  assertEqual(
+    capped.rows.find((r) => r.key === 'artworkCacheBytes')?.value,
+    '64 mb',
+  );
   // Platforms without a tag-reader surface (iOS) disable the
   // local-folder actions — they stay visible, never dead-tappable.
   const unsupported = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
