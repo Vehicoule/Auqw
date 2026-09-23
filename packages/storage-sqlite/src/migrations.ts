@@ -26,6 +26,9 @@ export const KNOWN_TABLES: readonly string[] = Object.freeze([
   'match_reviews',
   'lyrics_cache',
   'artwork_cache',
+  'downloads',
+  'local_sources',
+  'local_files',
   'sync_log',
   'sync_divergence',
   'sync_watermarks',
@@ -311,3 +314,60 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_4]),
   Object.freeze([...MIGRATION_5]),
 ]);
+
+const CREATED_OBJECT_NAME =
+  /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+const RENAMED_OBJECT_NAME =
+  /RENAME\s+TO\s+["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+
+/**
+ * Namespaces SQLite collides names within: tables, views, and
+ * indexes share one ('object'); triggers live in their own and may
+ * reuse an object name without colliding.
+ */
+export type SchemaObjectKind = 'object' | 'trigger';
+
+/**
+ * Every schema-object name the migrations create or rename to —
+ * final tables, throwaways like `likes_new`, and named indexes —
+ * tagged with its collision namespace. Derived from the SQL itself
+ * so a new migration cannot forget to declare its objects. The
+ * version-zero foreign-file probe rejects only same-namespace
+ * collisions: a foreign `downloads_state_idx` index collides with
+ * our `CREATE INDEX`, a foreign `downloads` trigger does not.
+ */
+export const KNOWN_SCHEMA_OBJECTS: readonly {
+  readonly kind: SchemaObjectKind;
+  readonly name: string;
+}[] = Object.freeze(
+  Array.from(
+    new Map(
+      MIGRATIONS.flat()
+        .flatMap((sql) => {
+          const created = CREATED_OBJECT_NAME.exec(sql);
+          const renamed = RENAMED_OBJECT_NAME.exec(sql);
+          return [
+            created !== null
+              ? {
+                  kind: ((created[1] ?? '').toUpperCase() === 'TRIGGER'
+                    ? 'trigger'
+                    : 'object') as SchemaObjectKind,
+                  name: created[2] as string,
+                }
+              : undefined,
+            renamed !== null
+              ? ({ kind: 'object', name: renamed[1] } as const)
+              : undefined,
+          ];
+        })
+        .filter(
+          (entry): entry is { kind: SchemaObjectKind; name: string } =>
+            entry !== undefined,
+        )
+        .concat(
+          KNOWN_TABLES.map((name) => ({ kind: 'object' as const, name })),
+        )
+        .map((entry) => [`${entry.kind}:${entry.name}`, entry] as const),
+    ).values(),
+  ),
+);

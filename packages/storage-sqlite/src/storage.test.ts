@@ -1442,7 +1442,73 @@ async function foreignSchemaRejected(): Promise<void> {
   driver.close();
 }
 
-// 23. Unrelated user tables outside the schema's names are
+// 23. The same rejection covers the tables the newest migrations
+// own — a foreign file holding only slice-3 tables is still
+// foreign, and KNOWN_TABLES must name them all. Case doesn't dodge
+// the probe either: SQLite identifiers are case-insensitive, so a
+// foreign "Downloads" would collide in-migration just the same.
+async function foreignNewestTablesRejected(): Promise<void> {
+  for (const table of ['downloads', 'Local_Sources', 'local_files']) {
+    const driver = new NodeSqliteDriver();
+    driver.execScript(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`);
+    const storage = new SqliteStorage(driver, SETTINGS);
+    const init = await storage.initialize(ctx().context);
+    assert(
+      !init.ok && init.error.kind === 'invalid-response',
+      `foreign ${table} table rejected at initialize`,
+    );
+    driver.close();
+  }
+}
+
+// Non-table schema objects share the same namespace: a foreign
+// index named like one a migration creates (or a table shadowing a
+// mid-migration throwaway such as likes_new) would pass a
+// tables-only probe, then die inside the migration transaction
+// instead of rejecting cleanly.
+async function foreignSchemaObjectsRejected(): Promise<void> {
+  const indexCollision = new NodeSqliteDriver();
+  indexCollision.execScript(`
+    CREATE TABLE scratchpad (id TEXT PRIMARY KEY);
+    CREATE INDEX downloads_state_idx ON scratchpad(id);
+  `);
+  const indexInit = await new SqliteStorage(indexCollision, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(
+    !indexInit.ok && indexInit.error.kind === 'invalid-response',
+    'foreign index named like a migration index rejected at initialize',
+  );
+  indexCollision.close();
+
+  const shadow = new NodeSqliteDriver();
+  shadow.execScript(`CREATE TABLE likes_new (id TEXT PRIMARY KEY)`);
+  const shadowInit = await new SqliteStorage(shadow, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(
+    !shadowInit.ok && shadowInit.error.kind === 'invalid-response',
+    'foreign table shadowing a migration throwaway rejected',
+  );
+  shadow.close();
+
+  // Triggers live in their own namespace — a trigger reusing a
+  // migration object name doesn't collide with any CREATE, so the
+  // file must migrate rather than reject.
+  const trigger = new NodeSqliteDriver();
+  trigger.execScript(`
+    CREATE TABLE scratchpad (id TEXT PRIMARY KEY, note TEXT);
+    CREATE TRIGGER downloads AFTER INSERT ON scratchpad
+      BEGIN SELECT 1; END;
+  `);
+  const triggerInit = await new SqliteStorage(trigger, SETTINGS).initialize(
+    ctx().context,
+  );
+  assert(triggerInit.ok, 'same-named trigger does not block initialize');
+  trigger.close();
+}
+
+// 24. Unrelated user tables outside the schema's names are
 // tolerated: only a collision with a table this schema owns is
 // rejected.
 async function unrelatedTablesTolerated(): Promise<void> {
@@ -1812,6 +1878,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['exportOwnedUnsafeTimestamp', exportOwnedUnsafeTimestamp],
   ['entityKindCrossCheck', entityKindCrossCheck],
   ['foreignSchemaRejected', foreignSchemaRejected],
+  ['foreignNewestTablesRejected', foreignNewestTablesRejected],
+  ['foreignSchemaObjectsRejected', foreignSchemaObjectsRejected],
   ['unrelatedTablesTolerated', unrelatedTablesTolerated],
 ];
 

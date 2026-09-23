@@ -48,11 +48,33 @@ import type {
 import { enqueueDriverTransaction } from './transaction-queue.ts';
 import {
   CURRENT_SCHEMA_VERSION,
-  KNOWN_TABLES,
+  KNOWN_SCHEMA_OBJECTS,
   MIGRATIONS,
 } from './migrations.ts';
 
 const ATTEMPT_CAP = 500;
+
+// Names SQLite collides within — tables, views, and indexes share
+// one namespace; triggers are separate. The version-zero probe
+// rejects a foreign file only when it holds an object that would
+// actually block a migration's CREATE.
+const FOREIGN_OBJECT_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'object',
+).map((o) => o.name);
+const FOREIGN_TRIGGER_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'trigger',
+).map((o) => o.name);
+const FOREIGN_PROBE_SQL =
+  `SELECT name FROM sqlite_master WHERE ` +
+  `(type IN ('table','index','view') AND name COLLATE NOCASE IN (${FOREIGN_OBJECT_NAMES.map(() => '?').join(',')}))` +
+  (FOREIGN_TRIGGER_NAMES.length > 0
+    ? ` OR (type = 'trigger' AND name COLLATE NOCASE IN (${FOREIGN_TRIGGER_NAMES.map(() => '?').join(',')}))`
+    : '') +
+  ` LIMIT 1`;
+const FOREIGN_PROBE_PARAMS = [
+  ...FOREIGN_OBJECT_NAMES,
+  ...FOREIGN_TRIGGER_NAMES,
+];
 
 /**
  * Initialize sections keyed by driver: probe, backup, and migrate are
@@ -221,11 +243,12 @@ export class SqliteStorage implements StoragePort {
           // migrations cannot get here: each migration is one
           // transaction and rolls back whole.
           const foreign = await conn.query<SqlRow>(
-            `SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name IN (${KNOWN_TABLES.map(() => '?').join(',')})
-             LIMIT 1`,
-            [...KNOWN_TABLES],
+            // NOCASE: sqlite_master stores the creation-time spelling
+            // but SQLite treats identifiers case-insensitively — a
+            // foreign `Downloads` collides with `downloads` all the
+            // same, and must reject as foreign, not die in-migration.
+            FOREIGN_PROBE_SQL,
+            FOREIGN_PROBE_PARAMS,
             signal,
           );
           if (foreign.length > 0) {
