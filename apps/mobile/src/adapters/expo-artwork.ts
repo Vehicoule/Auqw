@@ -168,7 +168,10 @@ export function createExpoArtwork(
         if (temp.exists) {
           temp.delete();
         }
-        temp.create();
+        // `File.create` throws when the parent is missing — the
+        // artwork dir is OS-reclaimable, so intermediates rebuild it
+        // on every write rather than only at session init.
+        temp.create({ intermediates: true });
         const handle = temp.open(FileMode.WriteOnly);
         try {
           handle.writeBytes(body);
