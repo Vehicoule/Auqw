@@ -10,7 +10,6 @@ import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
   LOCAL_PROVIDER,
-  MAX_DELTA_ENTRIES,
   SearchSession,
   isSyncDelta,
   previewImport,
@@ -18,7 +17,6 @@ import {
 import type {
   AppError,
   AttemptTrace,
-  ChangeEntry,
   EntityPage,
   EntityRef,
   LyricsSheet,
@@ -864,12 +862,11 @@ function Main({
     void (async () => {
       // Large logs page over the wire — `more` means follow up with a
       // cursor covering what the page shipped (exported seqs plus the
-      // exporter's known-absent claims), or the clipboard copy
-      // silently drops every later page.
-      const entries: ChangeEntry[] = [];
-      const skipped: Record<string, number[]> = {};
+      // exporter's known-absent claims). Every page is itself a valid
+      // SyncDelta, so the clipboard carries one doc or, past the
+      // envelope caps, an array of docs the importer applies in order.
+      const docs: SyncDelta[] = [];
       const covered: Record<string, number> = {};
-      let doc: SyncDelta | null = null;
       for (;;) {
         const page = await window.auqw.sync.deltas({
           since: JSON.stringify(covered),
@@ -877,14 +874,8 @@ function Main({
         if (!isSyncDelta(page.delta)) {
           return; // a malformed page ships nothing honest
         }
-        doc = page.delta;
-        // The merged doc must stay a valid SyncDelta — stop before a
-        // page would overflow the entry cap and leave `more` honest so
-        // the importer knows the log continues past what shipped.
-        if (entries.length + doc.entries.length > MAX_DELTA_ENTRIES) {
-          doc = { ...doc, more: true };
-          break;
-        }
+        const doc = page.delta;
+        docs.push(doc);
         let advanced = false;
         for (const entry of doc.entries) {
           if (typeof entry.seq !== 'number' || entry.seq < 0) {
@@ -895,11 +886,7 @@ function Main({
             advanced = true;
           }
         }
-        entries.push(...doc.entries);
         for (const [dev, seqs] of Object.entries(doc.skipped)) {
-          skipped[dev] = [...new Set([...(skipped[dev] ?? []), ...seqs])]
-            .sort((a, b) => a - b)
-            .slice(0, MAX_DELTA_ENTRIES);
           for (const seq of seqs) {
             if (seq > (covered[dev] ?? -1)) {
               covered[dev] = seq;
@@ -913,20 +900,25 @@ function Main({
           break;
         }
       }
-      if (doc === null) {
-        return;
-      }
       await navigator.clipboard.writeText(
-        JSON.stringify({ ...doc, entries, skipped, more: doc.more }),
+        JSON.stringify(docs.length === 1 ? docs[0] : docs),
       );
     })().catch(() => undefined);
   }, []);
   const onImportDelta = useCallback(() => {
     void navigator.clipboard
       .readText()
-      .then((text) =>
-        window.auqw.sync.importDelta({ delta: JSON.parse(text) }),
-      )
+      .then(async (text) => {
+        const parsed: unknown = JSON.parse(text);
+        // Multi-page exports land as an array — apply each doc in
+        // order; a single-doc payload applies as before.
+        const docs: readonly unknown[] = Array.isArray(parsed)
+          ? parsed
+          : [parsed];
+        for (const delta of docs) {
+          await window.auqw.sync.importDelta({ delta });
+        }
+      })
       .then(syncRefresh)
       .catch(() => {
         // A non-JSON or invalid clipboard payload lands nowhere — the
