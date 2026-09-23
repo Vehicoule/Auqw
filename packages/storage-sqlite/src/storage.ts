@@ -235,9 +235,13 @@ export class SqliteStorage implements StoragePort {
           // migrations cannot get here: each migration is one
           // transaction and rolls back whole.
           const foreign = await conn.query<SqlRow>(
+            // NOCASE: sqlite_master stores the creation-time spelling
+            // but SQLite treats identifiers case-insensitively — a
+            // foreign `Downloads` collides with `downloads` all the
+            // same, and must reject as foreign, not die in-migration.
             `SELECT name FROM sqlite_master
              WHERE type = 'table'
-               AND name IN (${KNOWN_TABLES.map(() => '?').join(',')})
+               AND name COLLATE NOCASE IN (${KNOWN_TABLES.map(() => '?').join(',')})
              LIMIT 1`,
             [...KNOWN_TABLES],
             signal,

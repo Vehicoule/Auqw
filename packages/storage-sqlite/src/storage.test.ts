@@ -1444,9 +1444,11 @@ async function foreignSchemaRejected(): Promise<void> {
 
 // 23. The same rejection covers the tables the newest migrations
 // own — a foreign file holding only slice-3 tables is still
-// foreign, and KNOWN_TABLES must name them all.
+// foreign, and KNOWN_TABLES must name them all. Case doesn't dodge
+// the probe either: SQLite identifiers are case-insensitive, so a
+// foreign "Downloads" would collide in-migration just the same.
 async function foreignNewestTablesRejected(): Promise<void> {
-  for (const table of ['downloads', 'local_sources', 'local_files']) {
+  for (const table of ['downloads', 'Local_Sources', 'local_files']) {
     const driver = new NodeSqliteDriver();
     driver.execScript(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`);
     const storage = new SqliteStorage(driver, SETTINGS);
