@@ -333,13 +333,13 @@ export async function createSessionController(
       );
     },
     resolvePlayback: (ref, input, context) => {
-      const provider = providerMap.get(
-        readyOr((s) => s.settings.playbackProvider, DEFAULT_SETTINGS.playbackProvider),
-      );
+      // Mint + re-mint route through the row's own sourceRef provider —
+      // it alone can serve the same encoding at the durable offset.
+      const provider = providerMap.get(ref.provider);
       if (provider === undefined) {
         return Promise.resolve({
           ok: false as const,
-          error: appError('unavailable', 'playback provider not loaded'),
+          error: appError('unavailable', 'download provider not loaded'),
         });
       }
       return provider.resolvePlayback(
