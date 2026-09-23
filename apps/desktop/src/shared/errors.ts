@@ -10,6 +10,8 @@ export type ShellErrorKind =
   | 'cancelled'
   | 'corrupt-state'
   | 'io-error'
+  | 'permission-denied'
+  | 'storage-full'
   | 'internal';
 
 export type ShellError = {
@@ -42,6 +44,8 @@ const ERROR_KINDS: ReadonlySet<string> = new Set([
   'cancelled',
   'corrupt-state',
   'io-error',
+  'permission-denied',
+  'storage-full',
   'internal',
 ]);
 
