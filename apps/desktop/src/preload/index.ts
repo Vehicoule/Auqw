@@ -4,6 +4,11 @@ import { CHANNELS } from '../shared/channels.ts';
 import {
   isAppMeta,
   isHostPluginsResult,
+  isLocalAddResult,
+  isLocalListResult,
+  isLocalPlaybackResult,
+  isLocalProbeResult,
+  isLocalSweepResult,
   isNetEvent,
   isPrepareOutcomePayload,
   isPreparedStreamPayload,
@@ -23,6 +28,17 @@ import {
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
+  isTagreadEnumerateResult,
+  isTagreadFingerprintResult,
+  isTagreadReadResult,
+  isTransferBeginResult,
+  isTransferCommitResult,
+  isTransferFinalizeResult,
+  isTransferListResult,
+  isTransferStatResult,
+  isTransferStatsResult,
+  isTransferStatusResult,
+  isTransferSweepResult,
   isUndefinedResult,
   isUtilityPingResult,
 } from '../shared/contract.ts';
@@ -314,6 +330,62 @@ const api: AuqwApi = {
     cancel: (args) =>
       invoke(CHANNELS.streamCancel, args, isUndefinedResult),
     channel: (args) => channelPort(args.handle),
+  },
+  transfer: {
+    ensureDir: () =>
+      invoke(CHANNELS.transferEnsureDir, undefined, isUndefinedResult),
+    begin: (args) =>
+      invoke(CHANNELS.transferBegin, args, isTransferBeginResult),
+    write: (args) =>
+      invoke(CHANNELS.transferWrite, args, isUndefinedResult),
+    commit: (args) =>
+      invoke(CHANNELS.transferCommit, args, isTransferCommitResult),
+    finalize: (args) =>
+      invoke(CHANNELS.transferFinalize, args, isTransferFinalizeResult),
+    abort: (args) =>
+      invoke(CHANNELS.transferAbort, args, isUndefinedResult),
+    stat: (args) =>
+      invoke(CHANNELS.transferStat, args, isTransferStatResult),
+    remove: (args) =>
+      invoke(CHANNELS.transferRemove, args, isUndefinedResult),
+    sweepPartials: (args) =>
+      invoke(
+        CHANNELS.transferSweepPartials,
+        args,
+        isTransferSweepResult,
+      ),
+    list: () =>
+      invoke(CHANNELS.transferList, undefined, isTransferListResult),
+    status: (args) =>
+      invoke(CHANNELS.transferStatus, args, isTransferStatusResult),
+    stats: () =>
+      invoke(CHANNELS.transferStats, undefined, isTransferStatsResult),
+  },
+  tagread: {
+    enumerate: (args) =>
+      invoke(
+        CHANNELS.tagreadEnumerate,
+        args,
+        isTagreadEnumerateResult,
+      ),
+    fingerprint: (args) =>
+      invoke(
+        CHANNELS.tagreadFingerprint,
+        args,
+        isTagreadFingerprintResult,
+      ),
+    read: (args) =>
+      invoke(CHANNELS.tagreadRead, args, isTagreadReadResult),
+  },
+  local: {
+    add: (args) => invoke(CHANNELS.localAdd, args, isLocalAddResult),
+    probe: (args) =>
+      invoke(CHANNELS.localProbe, args, isLocalProbeResult),
+    list: () => invoke(CHANNELS.localList, undefined, isLocalListResult),
+    playback: () =>
+      invoke(CHANNELS.localPlayback, undefined, isLocalPlaybackResult),
+    sweep: () =>
+      invoke(CHANNELS.localSweep, undefined, isLocalSweepResult),
   },
 };
 

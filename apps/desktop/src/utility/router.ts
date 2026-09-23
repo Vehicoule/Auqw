@@ -20,6 +20,7 @@ const STUB_FAMILIES: readonly string[] = [
   'sync:',
   'transfer:',
   'tagread:',
+  'local:',
 ];
 
 function handlePing(args: unknown): Promise<unknown> {

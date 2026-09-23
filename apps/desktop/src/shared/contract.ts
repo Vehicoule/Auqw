@@ -1197,6 +1197,633 @@ export type AuqwSync = {
   readonly trigger: () => Promise<SyncTriggerResult>;
 };
 
+/* ------------------------------------------------------------------ */
+/* Transfer file-plane + local index + tag-read payloads                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `transfer:*` — the `MediaTransferPort` file plane. A `begin` mints a
+ * sink id in the utility; writes are raw bytes riding base64; `commit`
+ * returns the durable byte offset (the resume point); `finalize`
+ * verifies an optional sha256 digest then atomically renames
+ * `name.part` over `name`. Destination names stay bare — the managed
+ * dir under userData is the only writable surface.
+ */
+export const MAX_TRANSFER_NAME = 512;
+// 4MiB decoded → ceil(4194304/3)*4 = 5,592,408 base64 chars.
+export const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
+export const MAX_SWEEP_KEEP = 65_536;
+export const MAX_LIST_ENTRIES = 65_536;
+
+export type TransferBeginArgs = {
+  readonly destPath: string;
+  readonly resumeAtBytes: number;
+};
+
+export function isTransferBeginArgs(
+  value: unknown,
+): value is TransferBeginArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['destPath', 'resumeAtBytes']) &&
+    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['resumeAtBytes'])
+  );
+}
+
+export type TransferBeginResult = { readonly sinkId: string };
+export type TransferSinkArgs = { readonly sinkId: string };
+
+export function isSinkId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value,
+    )
+  );
+}
+
+export function isTransferBeginResult(
+  value: unknown,
+): value is TransferBeginResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId']) &&
+    isSinkId(value['sinkId'])
+  );
+}
+
+export function isTransferSinkArgs(
+  value: unknown,
+): value is TransferSinkArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId']) &&
+    isSinkId(value['sinkId'])
+  );
+}
+
+export type TransferWriteArgs = {
+  readonly sinkId: string;
+  readonly data: string;
+};
+
+export function isTransferWriteArgs(
+  value: unknown,
+): value is TransferWriteArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'data']) &&
+    isSinkId(value['sinkId']) &&
+    typeof value['data'] === 'string' &&
+    value['data'].length <= MAX_TRANSFER_WRITE_BASE64
+  );
+}
+
+export type TransferCommitResult = { readonly offset: number };
+
+export function isTransferCommitResult(
+  value: unknown,
+): value is TransferCommitResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['offset']) &&
+    isSafeNonNegativeInt(value['offset'])
+  );
+}
+
+export type TransferFinalizeArgs = {
+  readonly sinkId: string;
+  readonly expected: string | null;
+};
+
+export function isTransferFinalizeArgs(
+  value: unknown,
+): value is TransferFinalizeArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'expected']) &&
+    isSinkId(value['sinkId']) &&
+    (value['expected'] === null ||
+      (typeof value['expected'] === 'string' &&
+        /^[0-9a-f]{64}$/.test(value['expected'])))
+  );
+}
+
+export type TransferFinalizeResult = { readonly digest: string };
+
+export function isTransferFinalizeResult(
+  value: unknown,
+): value is TransferFinalizeResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['digest']) &&
+    typeof value['digest'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(value['digest'])
+  );
+}
+
+export type TransferAbortArgs = {
+  readonly sinkId: string;
+  readonly keep: boolean;
+};
+
+export function isTransferAbortArgs(
+  value: unknown,
+): value is TransferAbortArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'keep']) &&
+    isSinkId(value['sinkId']) &&
+    isBoolean(value['keep'])
+  );
+}
+
+export type TransferNameArgs = { readonly name: string };
+
+export function isTransferNameArgs(
+  value: unknown,
+): value is TransferNameArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['name']) &&
+    isBoundedString(value['name'], MAX_TRANSFER_NAME)
+  );
+}
+
+export type TransferStatResult = {
+  readonly exists: boolean;
+  readonly bytes: number | null;
+};
+
+export function isTransferStatResult(
+  value: unknown,
+): value is TransferStatResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['exists', 'bytes']) &&
+    isBoolean(value['exists']) &&
+    (value['bytes'] === null || isSafeNonNegativeInt(value['bytes']))
+  );
+}
+
+export type TransferSweepArgs = { readonly keepPaths: readonly string[] };
+
+export function isTransferSweepArgs(
+  value: unknown,
+): value is TransferSweepArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['keepPaths']) &&
+    Array.isArray(value['keepPaths']) &&
+    value['keepPaths'].length <= MAX_SWEEP_KEEP &&
+    value['keepPaths'].every((name) =>
+      isBoundedString(name, MAX_TRANSFER_NAME),
+    )
+  );
+}
+
+export type TransferSweepResult = { readonly swept: number };
+
+export function isTransferSweepResult(
+  value: unknown,
+): value is TransferSweepResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['swept']) &&
+    isSafeNonNegativeInt(value['swept'])
+  );
+}
+
+export type TransferSinkInfo = {
+  readonly sinkId: string;
+  readonly destPath: string;
+  readonly committedBytes: number;
+  readonly openedMs: number;
+};
+
+export function isTransferSinkInfo(
+  value: unknown,
+): value is TransferSinkInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinkId', 'destPath', 'committedBytes', 'openedMs']) &&
+    isSinkId(value['sinkId']) &&
+    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['committedBytes']) &&
+    isSafeNonNegativeInt(value['openedMs'])
+  );
+}
+
+export type TransferFileInfo = { readonly name: string; readonly bytes: number };
+
+export function isTransferFileInfo(
+  value: unknown,
+): value is TransferFileInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['name', 'bytes']) &&
+    isBoundedString(value['name'], MAX_TRANSFER_NAME) &&
+    isSafeNonNegativeInt(value['bytes'])
+  );
+}
+
+export type TransferListResult = {
+  readonly sinks: readonly TransferSinkInfo[];
+  readonly files: readonly TransferFileInfo[];
+};
+
+export function isTransferListResult(
+  value: unknown,
+): value is TransferListResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sinks', 'files']) &&
+    Array.isArray(value['sinks']) &&
+    value['sinks'].length <= MAX_LIST_ENTRIES &&
+    value['sinks'].every(isTransferSinkInfo) &&
+    Array.isArray(value['files']) &&
+    value['files'].length <= MAX_LIST_ENTRIES &&
+    value['files'].every(isTransferFileInfo)
+  );
+}
+
+export type TransferStatusResult = TransferSinkInfo;
+
+export const isTransferStatusResult = isTransferSinkInfo;
+
+export type TransferStatsResult = {
+  readonly bytes: number;
+  readonly files: number;
+  readonly partials: number;
+  readonly freeBytes: number | null;
+};
+
+export function isTransferStatsResult(
+  value: unknown,
+): value is TransferStatsResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['bytes', 'files', 'partials', 'freeBytes']) &&
+    isSafeNonNegativeInt(value['bytes']) &&
+    isSafeNonNegativeInt(value['files']) &&
+    isSafeNonNegativeInt(value['partials']) &&
+    (value['freeBytes'] === null ||
+      isSafeNonNegativeInt(value['freeBytes']))
+  );
+}
+
+/**
+ * `tagread:*` — the `TagReaderPort` read plane for granted trees.
+ * `treeUri` is an opaque grant handle minted by `local:add`; every
+ * batch is bounded so a hostile or corrupted tree can't smuggle
+ * unbounded work across the boundary.
+ */
+export const MAX_TAGREAD_BATCH = 64;
+export const MAX_DOC_ID = 4096;
+export const MAX_ENUM_ENTRIES = 50_000;
+export const MAX_TAG_FIELD = 4096;
+
+export type TagreadEnumerateArgs = { readonly treeUri: string };
+
+export function isTagreadEnumerateArgs(
+  value: unknown,
+): value is TagreadEnumerateArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri']) &&
+    isBoundedString(value['treeUri'], MAX_DOC_ID)
+  );
+}
+
+export type LocalEntryPayload = {
+  readonly docId: string;
+  readonly name: string;
+  readonly size: number;
+  readonly mime: string;
+  readonly modifiedMs: number | null;
+};
+
+export function isLocalEntryPayload(
+  value: unknown,
+): value is LocalEntryPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['docId', 'name', 'size', 'mime', 'modifiedMs']) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    isBoundedString(value['name'], 1024) &&
+    isSafeNonNegativeInt(value['size']) &&
+    isBoundedString(value['mime'], 128) &&
+    (value['modifiedMs'] === null ||
+      isSafeNonNegativeInt(value['modifiedMs']))
+  );
+}
+
+export type TagreadEnumerateResult = {
+  readonly entries: readonly LocalEntryPayload[];
+};
+
+export function isTagreadEnumerateResult(
+  value: unknown,
+): value is TagreadEnumerateResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['entries']) &&
+    Array.isArray(value['entries']) &&
+    value['entries'].length <= MAX_ENUM_ENTRIES &&
+    value['entries'].every(isLocalEntryPayload)
+  );
+}
+
+export type TagreadBatchArgs = {
+  readonly treeUri: string;
+  readonly docIds: readonly string[];
+};
+
+export function isTagreadBatchArgs(
+  value: unknown,
+): value is TagreadBatchArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri', 'docIds']) &&
+    isBoundedString(value['treeUri'], MAX_DOC_ID) &&
+    Array.isArray(value['docIds']) &&
+    value['docIds'].length <= MAX_TAGREAD_BATCH &&
+    value['docIds'].every((id) => isBoundedString(id, MAX_DOC_ID))
+  );
+}
+
+export type FileFingerprintPayload = {
+  readonly docId: string;
+  readonly fingerprint: string;
+};
+
+export function isFileFingerprintPayload(
+  value: unknown,
+): value is FileFingerprintPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['docId', 'fingerprint']) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    isBoundedString(value['fingerprint'], 128)
+  );
+}
+
+export type TagreadFingerprintResult = {
+  readonly fingerprints: readonly (FileFingerprintPayload | null)[];
+};
+
+export function isTagreadFingerprintResult(
+  value: unknown,
+): value is TagreadFingerprintResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['fingerprints']) &&
+    Array.isArray(value['fingerprints']) &&
+    value['fingerprints'].length <= MAX_TAGREAD_BATCH &&
+    value['fingerprints'].every(
+      (fp) => fp === null || isFileFingerprintPayload(fp),
+    )
+  );
+}
+
+export type LocalTagsPayload = {
+  readonly docId: string;
+  readonly title: string | null;
+  readonly artist: string | null;
+  readonly album: string | null;
+  readonly durationMs: number | null;
+  readonly genre: string | null;
+};
+
+export function isLocalTagsPayload(
+  value: unknown,
+): value is LocalTagsPayload {
+  const tagField = (v: unknown) => v === null || isBoundedString(v, MAX_TAG_FIELD);
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'docId',
+      'title',
+      'artist',
+      'album',
+      'durationMs',
+      'genre',
+    ]) &&
+    isBoundedString(value['docId'], MAX_DOC_ID) &&
+    tagField(value['title']) &&
+    tagField(value['artist']) &&
+    tagField(value['album']) &&
+    tagField(value['genre']) &&
+    (value['durationMs'] === null ||
+      isSafeNonNegativeInt(value['durationMs']))
+  );
+}
+
+export type TagreadReadResult = {
+  readonly tags: readonly (LocalTagsPayload | null)[];
+};
+
+export function isTagreadReadResult(
+  value: unknown,
+): value is TagreadReadResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['tags']) &&
+    Array.isArray(value['tags']) &&
+    value['tags'].length <= MAX_TAGREAD_BATCH &&
+    value['tags'].every((t) => t === null || isLocalTagsPayload(t))
+  );
+}
+
+/**
+ * `local:*` — the desktop local-files surface. `local:add` validates
+ * renderer-picked paths and mints the treeUri/label descriptors the
+ * engine's `addFolder` commits; probe/playback back the renderer's
+ * `localPlaybackFor` hook; sweep is the startup integrity reporter.
+ */
+export const MAX_LOCAL_PATHS = 1024;
+export const MAX_LOCAL_PATH = 4096;
+export const MAX_PLAYBACK_ENTRIES = 100_000;
+
+export type LocalAddArgs = { readonly paths: readonly string[] };
+
+export function isLocalAddArgs(value: unknown): value is LocalAddArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['paths']) &&
+    Array.isArray(value['paths']) &&
+    value['paths'].length > 0 &&
+    value['paths'].length <= MAX_LOCAL_PATHS &&
+    value['paths'].every((p) => isBoundedString(p, MAX_LOCAL_PATH))
+  );
+}
+
+export type LocalPickPayload = {
+  readonly treeUri: string;
+  readonly label: string;
+  readonly kind: 'dir' | 'file';
+};
+
+export function isLocalPickPayload(
+  value: unknown,
+): value is LocalPickPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['treeUri', 'label', 'kind']) &&
+    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
+    isBoundedString(value['label'], 1024) &&
+    (value['kind'] === 'dir' || value['kind'] === 'file')
+  );
+}
+
+export type LocalAddResult = {
+  readonly picks: readonly LocalPickPayload[];
+};
+
+export function isLocalAddResult(
+  value: unknown,
+): value is LocalAddResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['picks']) &&
+    Array.isArray(value['picks']) &&
+    value['picks'].length <= MAX_LOCAL_PATHS &&
+    value['picks'].every(isLocalPickPayload)
+  );
+}
+
+export type LocalProbeArgs = { readonly recordingId: string };
+
+export function isLocalProbeArgs(
+  value: unknown,
+): value is LocalProbeArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['recordingId']) &&
+    isBoundedString(value['recordingId'], 512)
+  );
+}
+
+export type LocalProbeResult = { readonly uri: string | null };
+
+export function isLocalProbeResult(
+  value: unknown,
+): value is LocalProbeResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['uri']) &&
+    (value['uri'] === null ||
+      (isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
+        (value['uri'] as string).startsWith('file://')))
+  );
+}
+
+export type LocalSourcePayload = {
+  readonly sourceId: string;
+  readonly treeUri: string;
+  readonly label: string;
+  readonly addedMs: number;
+  readonly lastScanMs: number | null;
+  readonly fileCount: number;
+};
+
+export function isLocalSourcePayload(
+  value: unknown,
+): value is LocalSourcePayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'sourceId',
+      'treeUri',
+      'label',
+      'addedMs',
+      'lastScanMs',
+      'fileCount',
+    ]) &&
+    isBoundedString(value['sourceId'], 128) &&
+    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
+    isBoundedString(value['label'], 1024) &&
+    isSafeNonNegativeInt(value['addedMs']) &&
+    (value['lastScanMs'] === null ||
+      isSafeNonNegativeInt(value['lastScanMs'])) &&
+    isSafeNonNegativeInt(value['fileCount'])
+  );
+}
+
+export type LocalListResult = {
+  readonly sources: readonly LocalSourcePayload[];
+};
+
+export function isLocalListResult(
+  value: unknown,
+): value is LocalListResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sources']) &&
+    Array.isArray(value['sources']) &&
+    value['sources'].length <= MAX_LIST_ENTRIES &&
+    value['sources'].every(isLocalSourcePayload)
+  );
+}
+
+export type LocalPlaybackEntry = {
+  readonly recordingId: string;
+  readonly uri: string;
+};
+
+export function isLocalPlaybackEntry(
+  value: unknown,
+): value is LocalPlaybackEntry {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['recordingId', 'uri']) &&
+    isBoundedString(value['recordingId'], 512) &&
+    isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
+    (value['uri'] as string).startsWith('file://')
+  );
+}
+
+export type LocalPlaybackResult = {
+  readonly entries: readonly LocalPlaybackEntry[];
+};
+
+export function isLocalPlaybackResult(
+  value: unknown,
+): value is LocalPlaybackResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['entries']) &&
+    Array.isArray(value['entries']) &&
+    value['entries'].length <= MAX_PLAYBACK_ENTRIES &&
+    value['entries'].every(isLocalPlaybackEntry)
+  );
+}
+
+export type LocalSweepResult = {
+  readonly missing: number;
+  readonly sources: readonly { readonly sourceId: string; readonly missing: number }[];
+};
+
+export function isLocalSweepResult(
+  value: unknown,
+): value is LocalSweepResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['missing', 'sources']) &&
+    isSafeNonNegativeInt(value['missing']) &&
+    Array.isArray(value['sources']) &&
+    value['sources'].length <= MAX_LIST_ENTRIES &&
+    value['sources'].every(
+      (s) =>
+        isRecord(s) &&
+        hasOnlyKeys(s, ['sourceId', 'missing']) &&
+        isBoundedString(s['sourceId'], 128) &&
+        isSafeNonNegativeInt(s['missing']),
+    )
+  );
+}
+
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
  * with a validated payload and rejects with a `ShellError`-shaped value.
@@ -1252,6 +1879,54 @@ export type AuqwApi = {
     readonly marks: (args: StreamHandleArgs) => Promise<StreamMarksResult>;
     readonly cancel: (args: StreamCancelArgs) => Promise<void>;
     readonly channel: (args: StreamHandleArgs) => Promise<StreamPortLike>;
+  };
+  /**
+   * The `MediaTransferPort` file plane — sink lifecycle plus cache
+   * management. The `DownloadManager` engine drives these calls from
+   * the renderer exactly as it does the mobile adapter.
+   */
+  readonly transfer: {
+    readonly ensureDir: () => Promise<void>;
+    readonly begin: (args: TransferBeginArgs) => Promise<TransferBeginResult>;
+    readonly write: (args: TransferWriteArgs) => Promise<void>;
+    readonly commit: (args: TransferSinkArgs) => Promise<TransferCommitResult>;
+    readonly finalize: (
+      args: TransferFinalizeArgs,
+    ) => Promise<TransferFinalizeResult>;
+    readonly abort: (args: TransferAbortArgs) => Promise<void>;
+    readonly stat: (args: TransferNameArgs) => Promise<TransferStatResult>;
+    readonly remove: (args: TransferNameArgs) => Promise<void>;
+    readonly sweepPartials: (
+      args: TransferSweepArgs,
+    ) => Promise<TransferSweepResult>;
+    readonly list: () => Promise<TransferListResult>;
+    readonly status: (args: TransferSinkArgs) => Promise<TransferStatusResult>;
+    readonly stats: () => Promise<TransferStatsResult>;
+  };
+  /**
+   * The `TagReaderPort` read plane — enumerate/fingerprint/read against
+   * a granted treeUri only.
+   */
+  readonly tagread: {
+    readonly enumerate: (
+      args: TagreadEnumerateArgs,
+    ) => Promise<TagreadEnumerateResult>;
+    readonly fingerprint: (
+      args: TagreadBatchArgs,
+    ) => Promise<TagreadFingerprintResult>;
+    readonly read: (args: TagreadBatchArgs) => Promise<TagreadReadResult>;
+  };
+  /**
+   * Picked-path validation + playback probe + integrity sweep over the
+   * domain index the utility reads. `add` mints the descriptors the
+   * engine commits as `local_sources` rows via `addFolder`.
+   */
+  readonly local: {
+    readonly add: (args: LocalAddArgs) => Promise<LocalAddResult>;
+    readonly probe: (args: LocalProbeArgs) => Promise<LocalProbeResult>;
+    readonly list: () => Promise<LocalListResult>;
+    readonly playback: () => Promise<LocalPlaybackResult>;
+    readonly sweep: () => Promise<LocalSweepResult>;
   };
 };
 
