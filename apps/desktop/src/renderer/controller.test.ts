@@ -170,6 +170,33 @@ function fakeApi(): Rig {
         cancel: () => Promise.reject(new Error('seam: inject player')),
         channel: () => Promise.reject(new Error('seam: inject player')),
       },
+      transfer: {
+        ensureDir: () => Promise.reject(new Error('seam: inject transfer')),
+        begin: () => Promise.reject(new Error('seam: inject transfer')),
+        write: () => Promise.reject(new Error('seam: inject transfer')),
+        commit: () => Promise.reject(new Error('seam: inject transfer')),
+        finalize: () => Promise.reject(new Error('seam: inject transfer')),
+        abort: () => Promise.reject(new Error('seam: inject transfer')),
+        stat: () => Promise.reject(new Error('seam: inject transfer')),
+        remove: () => Promise.reject(new Error('seam: inject transfer')),
+        sweepPartials: () =>
+          Promise.reject(new Error('seam: inject transfer')),
+        list: () => Promise.reject(new Error('seam: inject transfer')),
+        status: () => Promise.reject(new Error('seam: inject transfer')),
+        stats: () => Promise.reject(new Error('seam: inject transfer')),
+      },
+      tagread: {
+        enumerate: () => Promise.reject(new Error('seam: inject tagread')),
+        fingerprint: () => Promise.reject(new Error('seam: inject tagread')),
+        read: () => Promise.reject(new Error('seam: inject tagread')),
+      },
+      local: {
+        add: () => Promise.reject(new Error('seam: inject local')),
+        probe: () => Promise.reject(new Error('seam: inject local')),
+        list: () => Promise.reject(new Error('seam: inject local')),
+        playback: () => Promise.reject(new Error('seam: inject local')),
+        sweep: () => Promise.reject(new Error('seam: inject local')),
+      },
     },
   };
   return rig;
