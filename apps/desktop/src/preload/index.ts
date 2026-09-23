@@ -22,8 +22,10 @@ import {
   isStreamServeUrlResult,
   isStringArray,
   isStringOrNull,
+  isSyncAppliedEvent,
   isSyncDeltasResult,
   isSyncDevicesResult,
+  isSyncDrainAppliedResult,
   isSyncImportDeltaResult,
   isSyncLocalChangesResult,
   isSyncPairingResult,
@@ -52,9 +54,11 @@ import type {
   StorageExecuteResult,
   StorageQueryResult,
   StreamPortLike,
+  SyncAppliedEvent,
   SyncDeltasArgs,
   SyncDeltasResult,
   SyncDevicesResult,
+  SyncDrainAppliedResult,
   SyncImportDeltaArgs,
   SyncImportDeltaResult,
   SyncLocalChangesArgs,
@@ -309,6 +313,30 @@ const api: AuqwApi = {
         args,
         isSyncLocalChangesResult,
       ),
+    drainApplied: (): Promise<SyncDrainAppliedResult> =>
+      invoke(
+        CHANNELS.syncDrainApplied,
+        undefined,
+        isSyncDrainAppliedResult,
+      ),
+    onApplied: (
+      listener: (event: SyncAppliedEvent) => void,
+    ): (() => void) => {
+      const wrapped = (
+        _event: IpcRendererEvent,
+        payload: unknown,
+      ): void => {
+        if (isSyncAppliedEvent(payload)) {
+          listener(payload);
+        }
+      };
+      ipcRenderer.on(CHANNELS.syncApplied, wrapped);
+      ipcRenderer.send(CHANNELS.syncAppliedSubscribe);
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.syncApplied, wrapped);
+        ipcRenderer.send(CHANNELS.syncAppliedUnsubscribe);
+      };
+    },
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>

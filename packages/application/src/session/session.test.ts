@@ -23,7 +23,23 @@ import { CancellationSource } from '../cancellation.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { ProviderPort } from '../ports/provider.ts';
 import { Session } from './session.ts';
-import type { ReadySession, SessionState } from './session.ts';
+import type {
+  ReadySession,
+  SessionState,
+  SyncEmitPort,
+} from './session.ts';
+import type {
+  ChangeEntry,
+  LocalWrite,
+  MergeOutcome,
+  SyncRecordKind,
+} from '../sync/sync-engine.ts';
+import {
+  likeRecordId,
+  SETTINGS_RECORD_ID,
+  sourceRefRecordId,
+  TOMBSTONE_FIELD,
+} from '../sync/sync-engine.ts';
 import {
   FakeClock,
   FakeLog,
@@ -154,6 +170,7 @@ function rig(
   extraProviders: ProviderPort[] = [],
   localPlayback?: Map<string, string>,
   online?: () => boolean,
+  sync?: SyncEmitPort,
 ): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
@@ -174,6 +191,7 @@ function rig(
     defaults: SETTINGS,
     localPlaybackFor: (recordingId) => localPlayback?.get(recordingId) ?? null,
     isOnline: online ?? (() => true),
+    ...(sync !== undefined ? { sync } : {}),
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -3528,6 +3546,228 @@ async function enqueueCommitFailureHonest(): Promise<void> {
   );
 }
 
+// ---- sync projection seam -------------------------------------------------
+
+let syncSeq = 0;
+
+function syncEntry(
+  kind: SyncRecordKind,
+  recordId: string,
+  field: string,
+  value: unknown,
+  opts: { l?: number; device?: string } = {},
+): ChangeEntry {
+  syncSeq += 1;
+  return {
+    kind,
+    recordId,
+    field,
+    value,
+    tombstone: false,
+    hlc: { l: opts.l ?? 100, c: syncSeq },
+    deviceId: opts.device ?? 'device-remote',
+    seq: syncSeq,
+  };
+}
+
+function syncTombstone(
+  kind: SyncRecordKind,
+  recordId: string,
+  opts: { l?: number; device?: string } = {},
+): ChangeEntry {
+  return {
+    ...syncEntry(kind, recordId, TOMBSTONE_FIELD, null, opts),
+    tombstone: true,
+  };
+}
+
+function appliedOutcome(
+  entry: ChangeEntry,
+  displaced: readonly ChangeEntry[] = [],
+): MergeOutcome {
+  return { type: 'applied', entry, displaced };
+}
+
+async function syncEmitAfterCommit(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: {
+    writes: readonly LocalWrite[];
+    commitsSeen: number;
+  }[] = [];
+  let r: Rig | undefined;
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push({
+        writes,
+        commitsSeen: r?.storage.commits.length ?? -1,
+      });
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  r = rig(base, [], undefined, undefined, port);
+  await restoreOk(r);
+  const before = r.storage.commits.length;
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  const writes = captured
+    .flatMap((c) => c.writes)
+    .filter((w) => w.kind === 'like');
+  assert(writes.length > 0, 'like write emitted');
+  assertEqual(
+    writes[0]?.recordId,
+    likeRecordId('track', 'r1'),
+    'like write keyed by likeRecordId',
+  );
+  // Emission rides the post-commit hook: the domain commit is already
+  // durable when the port sees the writes.
+  assert(
+    captured.every((c) => c.commitsSeen > before),
+    'emit observed strictly after the domain commit',
+  );
+}
+
+async function syncEmitFailureKeepsDomainWrite(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const failing: SyncEmitPort = {
+    localChanges: () =>
+      Promise.resolve(err(appError('unavailable', 'emit offline'))),
+  };
+  const r = rig(base, [], undefined, undefined, failing);
+  await restoreOk(r);
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  // The emit failed but the domain write landed — the change log is
+  // async catch-up, never a rollback.
+  assert(
+    readyOf(r).likes.some(
+      (l) => l.entityKind === 'track' && l.targetId === 'r1',
+    ),
+    'like landed despite emit failure',
+  );
+  assert(
+    readyOf(r).persistenceError !== undefined,
+    'emit failure surfaces as persistenceError',
+  );
+  assert(
+    r.log.entries.some(
+      (e) => e.level === 'warn' && e.message.includes('sync emission'),
+    ),
+    'emit failure logs a typed warning',
+  );
+}
+
+async function applySyncedEntriesRemoteInsert(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const sr = ref('itunes', 't-remote');
+  const outcomes: MergeOutcome[] = [
+    appliedOutcome(syncEntry('recording', 'r-remote', 'title', 'Remote')),
+    appliedOutcome(
+      syncEntry(
+        'recordingSourceRef',
+        sourceRefRecordId('r-remote', sr),
+        'ref',
+        sr,
+      ),
+    ),
+  ];
+  const result = await r.session.applySyncedEntries(outcomes);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  const landed = readyOf(r).recordings.find((rec) => rec.id === 'r-remote');
+  assert(landed !== undefined, 'remote recording mirrors into state');
+  assertEqual(landed?.title, 'Remote');
+  // Partial field set materializes with domain defaults.
+  assertEqual(landed?.album, null);
+  assertEqual(landed?.provenance, 'provider');
+  const stored = await r.storage.load({
+    requestId: 'verify',
+    deadlineMs: Number.MAX_SAFE_INTEGER,
+    signal: new CancellationSource().signal,
+  });
+  assert(
+    stored.ok &&
+      stored.value.recordings.some((rec) => rec.id === 'r-remote'),
+    'remote recording commits to storage',
+  );
+}
+
+async function applySyncedEntriesTombstoneRemoves(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+      playCounts: [{ recordingId: 'r1', count: 4, lastMs: 10 }],
+    }),
+  );
+  await restoreOk(r);
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncTombstone('recording', 'r1')),
+  ]);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  assertEqual(
+    readyOf(r).recordings.length,
+    0,
+    'tombstone removes the recording',
+  );
+  assertEqual(
+    readyOf(r).likes.length,
+    0,
+    'dependent like drops with the recording',
+  );
+  assertEqual(
+    readyOf(r).playCounts.length,
+    0,
+    'dependent play count drops with the recording',
+  );
+}
+
+async function applySyncedEntriesSupersededKeepsRow(): Promise<void> {
+  const r = rig(
+    persisted({ recordings: [recording('r1', [ref('itunes', 'i1')])] }),
+  );
+  await restoreOk(r);
+  const loser = syncEntry('recording', 'r1', 'title', 'Remote Rename', {
+    l: 90,
+  });
+  const winner = syncEntry('recording', 'r1', 'title', 'Winner', { l: 95 });
+  const outcome: MergeOutcome = {
+    type: 'superseded',
+    entry: loser,
+    winner,
+  };
+  const result = await r.session.applySyncedEntries([outcome]);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  assertEqual(
+    readyOf(r).recordings[0]?.title,
+    'Song r1',
+    'superseded entry never overwrites the domain row',
+  );
+  assert(
+    r.log.entries.some(
+      (e) =>
+        e.level === 'warn' && e.message.includes('non-applied outcomes'),
+    ),
+    'dropped outcome logs divergence',
+  );
+}
+
+async function applySyncedEntriesRequiresReady(): Promise<void> {
+  const r = rig(persisted({}));
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('recording', 'r1', 'title', 'T')),
+  ]);
+  assert(!result.ok, 'apply before restore must fail typed');
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pauseDuringPreparing', pauseDuringPreparing],
   ['seekDuringPreparing', seekDuringPreparing],
@@ -3590,6 +3830,15 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['offlineProjectionNulls', offlineProjectionNulls],
   ['offlinePinnedOwnedStillPlays', offlinePinnedOwnedStillPlays],
   ['connectivityEdgeReprojects', connectivityEdgeReprojects],
+  ['syncEmitAfterCommit', syncEmitAfterCommit],
+  ['syncEmitFailureKeepsDomainWrite', syncEmitFailureKeepsDomainWrite],
+  ['applySyncedEntriesRemoteInsert', applySyncedEntriesRemoteInsert],
+  ['applySyncedEntriesTombstoneRemoves', applySyncedEntriesTombstoneRemoves],
+  [
+    'applySyncedEntriesSupersededKeepsRow',
+    applySyncedEntriesSupersededKeepsRow,
+  ],
+  ['applySyncedEntriesRequiresReady', applySyncedEntriesRequiresReady],
 ] as const;
 
 // Offline + unowned: the attempt must fail 'unavailable' BEFORE any

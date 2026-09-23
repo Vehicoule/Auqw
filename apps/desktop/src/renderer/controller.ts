@@ -4,6 +4,7 @@ import {
   DownloadManager,
   err,
   LocalFileSource,
+  ok,
   previewImport,
   Session,
 } from '@auqw/application';
@@ -12,7 +13,9 @@ import type {
   ClockPort,
   ConnectivityPort,
   IdPort,
+  LocalWrite,
   LogPort,
+  MergeOutcome,
   PlayerPort,
   ProviderCapability,
   QueueSnapshot,
@@ -34,6 +37,7 @@ import {
 import type { PluginProvider } from './provider.ts';
 import { createSqliteDriver } from './sqlite-driver.ts';
 import { createClock, createIds, createLog } from './runtime.ts';
+import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike } from './web-player.ts';
 
@@ -363,6 +367,20 @@ export async function createSessionController(
     // rehydrate) and are read on every probe.
     localPlaybackFor,
     isOnline: () => lastOnline,
+    // Commit-then-log: every syncable domain write emits mapped
+    // LocalWrites here post-commit; the utility stamps them into the
+    // change log so this device's edits reach peers. Best-effort —
+    // the session surfaces a failed emit, never rolls the write back.
+    sync: {
+      localChanges: async (writes: readonly LocalWrite[]) => {
+        try {
+          const result = await api.sync.localChanges({ writes });
+          return ok(result.result);
+        } catch (thrown) {
+          return err(shellToAppError(thrown));
+        }
+      },
+    },
   });
   type ReadyState = Extract<
     ReturnType<Session['snapshot']>,
@@ -550,6 +568,49 @@ export async function createSessionController(
       // fabricated offline.
     });
 
+  // Remote-applied merge outcomes ride the utility's drain channel —
+  // project them into the domain db once at boot and again on every
+  // `sync:applied` push. The loop re-drains until the outbox empties
+  // (each pull is byte-bounded); a failed projection stays queued in
+  // the session's own pending buffer, so it retries on the next drain.
+  // Gate drains until the session is ready: applySyncedEntries runs a
+  // storage segment and keeps failed outcomes only inside `ready` — a
+  // pre-restore apply would drop them, so `sync:applied` pushes that
+  // arrive early simply leave the utility's outbox queued for the
+  // boot drain below.
+  let drainArmed = false;
+  let unsubscribeApplied: () => void = () => {};
+  const drainApplied = async (): Promise<void> => {
+    for (;;) {
+      const batch = await api.sync.drainApplied();
+      if (batch.outcomes.length > 0) {
+        const applied = await session.applySyncedEntries(
+          batch.outcomes as readonly MergeOutcome[],
+        );
+        if (!applied.ok) {
+          void log.write({
+            level: 'warn',
+            message: `sync apply failed: ${applied.error.kind}`,
+            atMs: clock.nowMs(),
+          });
+          return;
+        }
+      }
+      if (batch.remaining === 0) {
+        return;
+      }
+    }
+  };
+  try {
+    unsubscribeApplied = api.sync.onApplied(() => {
+      if (drainArmed) {
+        void drainApplied().catch(() => undefined);
+      }
+    });
+  } catch {
+    // Push-less sync surface — the boot drain still runs.
+  }
+
   // restore() never throws — its Result surfaces through session state
   // as 'restore-failed'.
   await session.restore();
@@ -569,6 +630,11 @@ export async function createSessionController(
   // projected remote refs — replay the truth now that owned files
   // resolve.
   session.connectivityChanged();
+
+  // Arm the drain last: the session is ready, media owners hold the
+  // committed rows, and anything queued during boot folds now.
+  drainArmed = true;
+  void drainApplied().catch(() => undefined);
 
   return {
     session,
@@ -630,6 +696,7 @@ export async function createSessionController(
       }
     },
     async dispose() {
+      unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);
       for (const unsub of mediaUnsubs.splice(0)) {

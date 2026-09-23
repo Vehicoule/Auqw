@@ -7,6 +7,7 @@ import {
   DownloadManager,
   err,
   LocalFileSource,
+  ok,
   previewImport,
   Session,
 } from '@auqw/application';
@@ -15,6 +16,7 @@ import type {
   CancellationSignal,
   ConnectivityPort,
   ImportPreview,
+  LocalWrite,
   PlayerPort,
   ProviderPort,
   QueueSnapshot,
@@ -243,6 +245,13 @@ export async function createSessionController(
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
+  // Pre-surface emission buffer: domain edits made before the engine
+  // exists (or while its bring-up is still in flight) queue here and
+  // flush through one localChangeBatch once the surface lands — a
+  // drop-oldest bound keeps a never-syncable platform (iOS, web
+  // build) from growing memory forever.
+  const SYNC_PRE_SURFACE_MAX = 2_048;
+  const preSurfaceWrites: LocalWrite[] = [];
   const providerMap = new Map(providers.map((p) => [p.id, p]));
   const player = (options.player ?? ((map) => {
     return createExpoAudioPlayer({
@@ -296,6 +305,42 @@ export async function createSessionController(
           isOnline: () => lastOnline,
         }
       : {}),
+    // Commit-then-log over the in-process engine: every syncable
+    // domain write emits mapped LocalWrites here post-commit. While
+    // the surface is absent the writes buffer (drop-oldest) so
+    // pre-bring-up edits still reach the log on first emit; a failed
+    // flush re-pends the buffer — the session retains the fresh
+    // writes itself.
+    sync: {
+      localChanges: async (writes: readonly LocalWrite[], signal) => {
+        const surface = syncSurface;
+        if (surface === null) {
+          preSurfaceWrites.push(...writes);
+          if (preSurfaceWrites.length > SYNC_PRE_SURFACE_MAX) {
+            preSurfaceWrites.splice(
+              0,
+              preSurfaceWrites.length - SYNC_PRE_SURFACE_MAX,
+            );
+          }
+          return ok(undefined);
+        }
+        const pending = preSurfaceWrites.splice(0);
+        const stamped = await surface.engine.localChangeBatch(
+          pending.length > 0 ? [...pending, ...writes] : writes,
+          signal,
+        );
+        if (!stamped.ok && pending.length > 0) {
+          preSurfaceWrites.unshift(...pending);
+          if (preSurfaceWrites.length > SYNC_PRE_SURFACE_MAX) {
+            preSurfaceWrites.splice(
+              0,
+              preSurfaceWrites.length - SYNC_PRE_SURFACE_MAX,
+            );
+          }
+        }
+        return stamped;
+      },
+    },
   });
   type ReadyState = Extract<
     ReturnType<Session['snapshot']>,
@@ -586,6 +631,23 @@ export async function createSessionController(
           ids,
           clock,
           log,
+          // Every inbound merge — syncNow pages and any other
+          // applyDelta path — projects onto the domain here. The
+          // session keeps failed outcomes pending itself.
+          onApplied: (applied) => {
+            void session
+              .applySyncedEntries(applied.outcomes)
+              .then((result) => {
+                if (!result.ok) {
+                  void log.write({
+                    level: 'warn',
+                    message: `sync apply failed: ${result.error.kind}`,
+                    atMs: clock.nowMs(),
+                  });
+                }
+              })
+              .catch(() => undefined);
+          },
         });
         if (built.ok) {
           syncSurface = built.value;

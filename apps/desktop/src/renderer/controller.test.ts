@@ -177,6 +177,9 @@ function fakeApi(): Rig {
         trigger: () => Promise.reject(new Error('seam: inject sync')),
         localChanges: () =>
           Promise.reject(new Error('seam: inject sync')),
+        drainApplied: () =>
+          Promise.reject(new Error('seam: inject sync')),
+        onApplied: () => () => {},
       },
       utility: {
         ping: () => Promise.reject(new Error('unused')),

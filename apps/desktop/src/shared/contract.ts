@@ -1269,6 +1269,51 @@ export function isSyncLocalChangesResult(
 }
 
 /**
+ * `sync:applied` — the utility→main→renderer push that remote-applied
+ * merge outcomes are waiting in the drain outbox. The renderer still
+ * pulls `sync:drainApplied`; the event only says how deep the queue is.
+ */
+export type SyncAppliedEvent = { readonly pending: number };
+
+export function isSyncAppliedEvent(
+  value: unknown,
+): value is SyncAppliedEvent {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['pending']) &&
+    isSafeNonNegativeInt(value['pending']) &&
+    value['pending'] <= 1_000_000
+  );
+}
+
+/**
+ * `sync:drainApplied` — one byte-bounded pull off the applied-outcome
+ * outbox. `outcomes` carries merge outcomes verbatim (the projection
+ * validates entry shapes itself); `dropped` reports outbox overflow
+ * since the previous drain; `remaining` drives the drain loop.
+ */
+export type SyncDrainAppliedResult = {
+  readonly outcomes: readonly unknown[];
+  readonly dropped: boolean;
+  readonly remaining: number;
+};
+
+export function isSyncDrainAppliedResult(
+  value: unknown,
+): value is SyncDrainAppliedResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['outcomes', 'dropped', 'remaining']) &&
+    Array.isArray(value['outcomes']) &&
+    value['outcomes'].every(isJsonValue) &&
+    isBoundedJson(value['outcomes'], MAX_SYNC_DOC_BYTES) &&
+    isBoolean(value['dropped']) &&
+    isSafeNonNegativeInt(value['remaining']) &&
+    value['remaining'] <= 1_000_000
+  );
+}
+
+/**
  * The renderer's `api.sync.*` — one method per `sync:*` channel; the
  * utility's sync service answers them all and works plugin-free.
  */
@@ -1290,6 +1335,19 @@ export type AuqwSync = {
   readonly localChanges: (
     args: SyncLocalChangesArgs,
   ) => Promise<SyncLocalChangesResult>;
+  /**
+   * Pull side of the applied-outcome seam: returns one bounded chunk;
+   * call until `remaining` is 0 (the `onApplied` push prompts it).
+   */
+  readonly drainApplied: () => Promise<SyncDrainAppliedResult>;
+  /**
+   * Push side — the utility posts `sync:applied` through main after
+   * every applyDelta; subscribing also warrants a first manual drain
+   * (outbox contents can predate the subscriber).
+   */
+  readonly onApplied: (
+    listener: (event: SyncAppliedEvent) => void,
+  ) => () => void;
 };
 
 /* ------------------------------------------------------------------ */

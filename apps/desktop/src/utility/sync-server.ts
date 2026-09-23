@@ -16,10 +16,12 @@ import {
 import {
   MAX_SYNC_CURSOR_CHARS,
   MAX_SYNC_DOC_BYTES,
+  isJsonValue,
   isSyncDeltasArgs,
   isSyncDeltasResult,
   isSyncDeltaDoc,
   isSyncDevicesResult,
+  isSyncDrainAppliedResult,
   isSyncImportDeltaArgs,
   isSyncImportDeltaResult,
   isSyncLocalChangesArgs,
@@ -123,6 +125,14 @@ export type SyncServiceDeps = {
     writes: readonly unknown[],
     signal?: CancellationSignal,
   ) => Promise<Result<unknown>>;
+  /**
+   * Push seam toward the renderer: after every successful applyDelta
+   * the applied merge outcomes queue into a bounded outbox, and this
+   * is invoked with the current queue depth so main can broadcast
+   * `sync:applied`. Errors are swallowed — the pull drain still
+   * reaches the same queue.
+   */
+  readonly notifyApplied?: (pending: number) => unknown;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
@@ -435,6 +445,91 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const ready = new Promise<SyncStatusResult>((resolve) => {
     resolveReady = resolve;
   });
+
+  /* ------------- applied-outcome outbox (renderer drain) ---------- */
+  /**
+   * Every successful applyDelta's 'applied' merge outcomes queue
+   * here until the renderer pulls `sync:drainApplied`. Flat FIFO,
+   * drop-oldest with a `dropped` flag so a deep queue degrades to a
+   * typed loss report instead of unbounded memory — the renderer's
+   * domain db is reconcilable by re-importing the peer's delta.
+   */
+  const APPLIED_OUTBOX_MAX = 4_096;
+  const appliedOutbox: unknown[] = [];
+  let appliedDropped = false;
+
+  function recordApplied(result: unknown): void {
+    if (!isRecord(result) || !Array.isArray(result['outcomes'])) {
+      return;
+    }
+    let pushed = 0;
+    for (const outcome of result['outcomes']) {
+      if (
+        !isRecord(outcome) ||
+        outcome['type'] !== 'applied' ||
+        !isJsonValue(outcome)
+      ) {
+        continue;
+      }
+      appliedOutbox.push(outcome);
+      pushed += 1;
+    }
+    if (appliedOutbox.length > APPLIED_OUTBOX_MAX) {
+      appliedOutbox.splice(0, appliedOutbox.length - APPLIED_OUTBOX_MAX);
+      appliedDropped = true;
+    }
+    if (pushed > 0) {
+      try {
+        void Promise.resolve(
+          deps.notifyApplied?.(appliedOutbox.length),
+        ).catch(() => undefined);
+      } catch {
+        // The push path is a hint — the pull drain never depends on it.
+      }
+    }
+  }
+
+  /**
+   * One byte-bounded pull: pack outcomes until the encoded payload
+   * would approach `MAX_SYNC_DOC_BYTES`, leaving headroom for the
+   * envelope keys. Oversized single entries drop with the flag set —
+   * a queue entry that can never serialize is exactly what the bound
+   * exists for.
+   */
+  function drainAppliedChunk(): {
+    readonly outcomes: readonly unknown[];
+    readonly dropped: boolean;
+    readonly remaining: number;
+  } {
+    const budget = MAX_SYNC_DOC_BYTES - 16_384;
+    const chunk: unknown[] = [];
+    let bytes = 2; // '[]'
+    while (appliedOutbox.length > 0) {
+      const next = appliedOutbox[0];
+      let size = 0;
+      try {
+        size = JSON.stringify(next).length + 1;
+      } catch {
+        appliedOutbox.shift();
+        appliedDropped = true;
+        continue;
+      }
+      if (bytes + size > budget) {
+        if (chunk.length === 0) {
+          appliedOutbox.shift();
+          appliedDropped = true;
+          continue;
+        }
+        break;
+      }
+      appliedOutbox.shift();
+      bytes += size;
+      chunk.push(next);
+    }
+    const dropped = appliedDropped;
+    appliedDropped = false;
+    return { outcomes: chunk, dropped, remaining: appliedOutbox.length };
+  }
 
   /**
    * Every `ip:port` a phone could try, best first — `endpoint()`
@@ -837,6 +932,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
               });
               return;
             }
+            recordApplied(applied.value);
           }
           const exported = await engine.exportDelta(
             msg.since,
@@ -1187,6 +1283,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!applied.ok) {
         throw engineError(applied.error);
       }
+      recordApplied(applied.value);
       return checked(isSyncImportDeltaResult, 'sync:importDelta')({
         result: applied.value,
       });
@@ -1260,6 +1357,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         result: result.value,
       });
     },
+
+    'sync:drainApplied': async () =>
+      checked(isSyncDrainAppliedResult, 'sync:drainApplied')(
+        drainAppliedChunk(),
+      ),
   };
 
   const started = start()

@@ -13,10 +13,13 @@ import type { BrowserWindowConstructorOptions, WebContents } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ShellError } from '../shared/errors.ts';
+import { shellError } from '../shared/errors.ts';
+import { isSyncAppliedEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
+import { createAppliedPushService } from './sync-events.ts';
 import { createSyncKeysHandler } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -126,6 +129,7 @@ async function main(): Promise<void> {
   const netService = createNetService({
     readOnline: () => net.isOnline(),
   });
+  const appliedPush = createAppliedPushService();
   const supervisor = createSupervisor({
     fork: () =>
       utilityProcess.fork(UTILITY, [], {
@@ -142,6 +146,18 @@ async function main(): Promise<void> {
         secure,
         dir: join(userDataPath, 'secure'),
       }),
+      // Utility→main→renderer push: the sync service posts after every
+      // applyDelta; subscribed renderers pull sync:drainApplied on it.
+      'sync:applied': async (args) => {
+        if (!isSyncAppliedEvent(args)) {
+          throw shellError(
+            'invalid-request',
+            'sync:applied expects {pending}',
+          );
+        }
+        appliedPush.notify(args);
+        return undefined;
+      },
     },
   });
 
@@ -177,6 +193,7 @@ async function main(): Promise<void> {
       return result.canceled ? [] : result.filePaths;
     },
     net: netService,
+    syncApplied: appliedPush,
     secure,
     utility: supervisor,
     // Brokers the stream pump channel — the utility child gets one end
@@ -217,6 +234,7 @@ async function main(): Promise<void> {
   });
   app.on('will-quit', () => {
     netService.stop();
+    appliedPush.stop();
     supervisor.shutdown();
   });
 }

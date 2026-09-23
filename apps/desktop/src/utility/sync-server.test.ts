@@ -2156,4 +2156,162 @@ export async function run(): Promise<void> {
       await service.close();
     }
   }
+
+  // —— Applied outbox: applied outcomes queue → drainApplied pages ——
+  // The renderer pulls the outbox in byte-bounded chunks; both bounds
+  // (drop-oldest cap + per-chunk byte budget) get exercised by one
+  // oversized import.
+  {
+    const desk = await testUtilityEngine('dsk-outbox');
+    const notified: number[] = [];
+    const { service } = await startService({
+      engine: desk.port,
+      notifyApplied: (pending: number) => {
+        notified.push(pending);
+      },
+    });
+    try {
+      // Nothing applied yet — the drain answers honestly empty.
+      const empty = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assertDeepEqual(
+        empty.ok ? empty.value : null,
+        { outcomes: [], dropped: false, remaining: 0 },
+        'empty drain reports empty',
+      );
+
+      // A phone-built delta imports through importDelta — each applied
+      // outcome lands in the outbox and fires notifyApplied.
+      const phone = await testUtilityEngine('phone-outbox');
+      await phone.localChanges(
+        [writeName('pl-ob', 'outbox list')],
+        undefined,
+      );
+      const phoneDelta = await phone.port.exportDelta('', undefined);
+      assert(phoneDelta.ok);
+      if (!phoneDelta.ok) {
+        return;
+      }
+      const imported = await invokeHandler(service, 'sync:importDelta', {
+        delta: JSON.parse(JSON.stringify(phoneDelta.value)),
+      });
+      assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+      assert(notified.length > 0, 'notifyApplied fired for the outbox');
+
+      const drained = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(drained.ok);
+      const first = drained.ok
+        ? (drained.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          })
+        : null;
+      assert(first !== null);
+      assert(first.outcomes.length > 0, 'applied outcomes drained');
+      assert(
+        first.outcomes.every(
+          (o) => isRecord(o) && o['type'] === 'applied',
+        ),
+        'only applied outcomes queue',
+      );
+      assertEqual(first.dropped, false);
+      assertEqual(first.remaining, 0, 'outbox consumed fully');
+
+      // The pull consumed them — a second drain is empty again.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assertDeepEqual(
+        again.ok ? again.value : null,
+        { outcomes: [], dropped: false, remaining: 0 },
+        'second drain empty',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Outbox bounds: >4096 applied + ~700 B entries force both the ——
+  // —— drop-oldest flag and a multi-chunk byte-budgeted drain.      ——
+  {
+    const desk = await testUtilityEngine('dsk-bounds');
+    const { service } = await startService({ engine: desk.port });
+    try {
+      const phone = await testUtilityEngine('phone-bounds');
+      // 4_200 writes, ~512-char values → ~2.9 MB of applied outcomes,
+      // past both the 4_096 cap and the ~1 MB chunk budget. Each
+      // importDelta call itself stays under the doc byte cap — the
+      // cursor walks the phone's log in slices.
+      const pad = 'x'.repeat(480);
+      let since = '';
+      // 500-entry pages: the importDelta RESULT carries entries AND
+      // outcomes, so a page this size stays inside the doc byte cap.
+      for (let i = 0; i < 4_200; i += 500) {
+        for (let j = i; j < i + 500 && j < 4_200; j += 256) {
+          const batch = Array.from(
+            { length: Math.min(256, 4_200 - j) },
+            (_, k) => writeName(`pl-b${j + k}`, `${pad}-${j + k}`),
+          );
+          const wrote = await phone.localChanges(batch, undefined);
+          assert(wrote.ok, 'bulk localChanges failed');
+        }
+        const page = await phone.port.exportDelta(since, undefined);
+        assert(page.ok);
+        if (!page.ok) {
+          return;
+        }
+        const imported = await invokeHandler(
+          service,
+          'sync:importDelta',
+          {
+            delta: JSON.parse(JSON.stringify(page.value)),
+          },
+        );
+        assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+        since = JSON.stringify((page.value as SyncDelta).cursor);
+      }
+
+      let total = 0;
+      let sawDropped = false;
+      let chunks = 0;
+      for (;;) {
+        const drained = await invokeHandler(
+          service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok, 'drain failed');
+        if (!drained.ok) {
+          return;
+        }
+        const page = drained.value as {
+          outcomes: readonly unknown[];
+          dropped: boolean;
+          remaining: number;
+        };
+        total += page.outcomes.length;
+        sawDropped ||= page.dropped;
+        chunks += 1;
+        if (page.remaining === 0) {
+          break;
+        }
+        assert(chunks < 64, 'drain must terminate');
+      }
+      assert(sawDropped, 'drop-oldest flag surfaced');
+      assert(chunks > 1, 'byte budget paged the drain');
+      assertEqual(total, 4_096, 'outbox kept only the capped tail');
+    } finally {
+      await service.close();
+    }
+  }
 }

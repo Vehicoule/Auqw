@@ -183,6 +183,16 @@ if (port === null) {
             }
             return utility.localChanges(writes, signal);
           },
+          // Renderer-facing push: the applied-outcome outbox depth
+          // rides the whitelisted `sync:applied` service call into
+          // main, which broadcasts to subscribed renderers.
+          notifyApplied: (pending) =>
+            serviceClient
+              .request('sync:applied', { pending })
+              .then(
+                () => undefined,
+                () => undefined,
+              ),
         }),
     advertise:
       process.env['AUQW_SYNC_NO_MDNS'] === '1'

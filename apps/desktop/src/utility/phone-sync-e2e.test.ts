@@ -6,10 +6,18 @@ import {
   assertDeepEqual,
   assertEqual,
 } from '@auqw/application/testing';
-import { FakeSyncLogStore, FakeLog, SequenceIds } from '@auqw/application/testing';
+import {
+  FakeSyncLogStore,
+  FakeLog,
+  FakePlayer,
+  FakeProvider,
+  FakeStorage,
+  SequenceIds,
+} from '@auqw/application/testing';
 import type {
   CancellationSignal,
   ClockPort,
+  MergeOutcome,
   Result,
   SyncClientKeys,
   SyncEngine,
@@ -26,6 +34,7 @@ import {
   ensureSyncIdentity,
   err,
   ok,
+  Session,
 } from '@auqw/application';
 import {
   base64Decode,
@@ -483,6 +492,116 @@ async function resumeSync(): Promise<void> {
   }
 }
 
+// The convergence proof: a phone write rides the wire into the desk
+// engine, queues in the applied outbox, drains through the IPC seam,
+// and materializes into a REAL application Session's sections — the
+// exact renderer path (sync:drainApplied → session.applySyncedEntries).
+async function drainProjectsIntoSession(): Promise<void> {
+  const deskEngine = await realEngine('desk-e2e-5');
+  const { service, port } = await startService(deskEngine);
+  const phoneKeys = memoryClientKeys();
+  const phoneEngine = await realEngine('phone-e2e-5');
+  const client = await makeClient({
+    engine: phoneEngine,
+    keys: phoneKeys,
+    deviceId: 'phone-e2e-5',
+  });
+  // A real Session on the desk's persisted state — the same object
+  // the renderer controller drives.
+  const session = new Session({
+    storage: new FakeStorage({
+      recordings: [],
+      likes: [],
+      entities: [],
+      entitySourceRefs: [],
+      playlists: [],
+      playlistEntries: [],
+      playHistory: [],
+      playCounts: [],
+      matchReviews: [],
+      lyricsCache: [],
+      artworkCache: [],
+      downloads: [],
+      localSources: [],
+      localFiles: [],
+      queue: {
+        revision: 0,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+      settings: {
+        catalogProvider: 'itunes',
+        playbackProvider: 'youtube-music',
+        storefront: 'US',
+        qualityKbps: 256,
+        theme: 'system',
+        prefetch: true,
+      },
+    }),
+    player: new FakePlayer(),
+    providers: [
+      new FakeProvider('itunes'),
+      new FakeProvider('youtube-music'),
+    ],
+    clock: realClock,
+    ids: new SequenceIds(),
+    log: new FakeLog(),
+    defaults: {
+      catalogProvider: 'itunes',
+      playbackProvider: 'youtube-music',
+      storefront: 'US',
+      qualityKbps: 256,
+      theme: 'system',
+      prefetch: true,
+    },
+    localPlaybackFor: () => null,
+    isOnline: () => true,
+  });
+  try {
+    const restored = await session.restore();
+    assert(restored.ok, 'session restore failed');
+    const payload = await pairingPayload(service);
+    const paired = await client.pair({ payload });
+    assert(paired.ok);
+
+    // Phone edit → wire → desk merge (the socket applyDelta path
+    // feeds the outbox).
+    await seedEntry(phoneEngine, 'pl-phone', 'from-phone');
+    const round = await client.syncNow(paired.value.fp);
+    assert(round.ok, `syncNow failed: ${JSON.stringify(round)}`);
+
+    // Drain until empty — the renderer's loop shape.
+    const drained: MergeOutcome[] = [];
+    for (;;) {
+      const handler = service.handlers['sync:drainApplied'];
+      assert(handler !== undefined);
+      const page: unknown = await handler(undefined);
+      assert(isRecord(page));
+      for (const outcome of page['outcomes'] as unknown[]) {
+        drained.push(outcome as MergeOutcome);
+      }
+      if ((page['remaining'] as number) === 0) {
+        break;
+      }
+    }
+    assert(drained.length > 0, 'applied outcomes queued for drain');
+
+    const applied = await session.applySyncedEntries(drained);
+    assert(applied.ok, `applySyncedEntries: ${JSON.stringify(applied)}`);
+    const state = session.snapshot();
+    assert(state.type === 'ready');
+    const list = state.playlists.find((p) => p.playlistId === 'pl-phone');
+    assert(list !== undefined, 'remote playlist materialized');
+    assertEqual(list?.name, 'from-phone');
+  } finally {
+    await client.close();
+    await service.close();
+    await session.dispose();
+  }
+}
+
 // devices + unpair round out the session lifecycle.
 async function devicesAndUnpair(): Promise<void> {
   const deskEngine = await realEngine('desk-e2e-4');
@@ -521,6 +640,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairAndConverge', pairAndConverge],
   ['wrongCodeRejected', wrongCodeRejected],
   ['resumeSync', resumeSync],
+  ['drainProjectsIntoSession', drainProjectsIntoSession],
   ['devicesAndUnpair', devicesAndUnpair],
 ];
 

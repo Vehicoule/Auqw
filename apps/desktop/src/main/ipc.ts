@@ -45,6 +45,7 @@ import {
   isStreamReadArgs,
   isSyncDeltasArgs,
   isSyncImportDeltaArgs,
+  isSyncLocalChangesArgs,
   isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
@@ -103,6 +104,11 @@ export interface IpcMainLike {
  */
 export interface ChannelDeps {
   readonly meta: () => AppMeta;
+  /** `sync:applied` push registry — refcounted like `net`. */
+  readonly syncApplied: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
   readonly pickFolder: (
     args: PickFolderArgs,
     sender: NetSender,
@@ -425,6 +431,18 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
       deps.utility.request(CHANNELS.syncTrigger, undefined),
     ),
   ],
+  [
+    CHANNELS.syncLocalChanges,
+    channel(isSyncLocalChangesArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.syncLocalChanges, args),
+    ),
+  ],
+  [
+    CHANNELS.syncDrainApplied,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncDrainApplied, undefined),
+    ),
+  ],
   // The offline file plane — the utility re-validates each payload
   // against the same contract before touching disk or db.
   [
@@ -683,5 +701,11 @@ export function registerChannels(
   });
   ipcMain.on(CHANNELS.netUnsubscribe, (event) => {
     deps.net.detach(event.sender);
+  });
+  ipcMain.on(CHANNELS.syncAppliedSubscribe, (event) => {
+    deps.syncApplied.attach(event.sender);
+  });
+  ipcMain.on(CHANNELS.syncAppliedUnsubscribe, (event) => {
+    deps.syncApplied.detach(event.sender);
   });
 }

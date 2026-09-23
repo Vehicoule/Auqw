@@ -118,6 +118,10 @@ export async function run(): Promise<void> {
       pickFolder: () => Promise.resolve('/picked/dir'),
       pickFiles: () => Promise.resolve(['/a.mp3', '/b.flac']),
       net,
+      syncApplied: {
+        attach: () => undefined,
+        detach: () => undefined,
+      },
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {
         request: (channel, args) => {

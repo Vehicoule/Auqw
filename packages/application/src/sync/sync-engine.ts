@@ -186,6 +186,38 @@ export function entitySourceRefRecordId(
   return encodeRecordId([entityId, provider]);
 }
 
+/**
+ * Inverse of `encodeRecordId`: parses the `len:component` stream back
+ * into its exact parts. Returns null on any malformed shape — a bad
+ * length prefix, a truncated component, or a dangling separator —
+ * since only a well-formed id can decode to identity parts.
+ */
+export function decodeRecordId(recordId: string): readonly string[] | null {
+  const parts: string[] = [];
+  let pos = 0;
+  while (pos < recordId.length) {
+    const colon = recordId.indexOf(':', pos);
+    if (colon < 0) {
+      return null;
+    }
+    const rawLen = recordId.slice(pos, colon);
+    if (rawLen.length === 0 || !/^\d+$/.test(rawLen)) {
+      return null;
+    }
+    const len = Number.parseInt(rawLen, 10);
+    if (!Number.isSafeInteger(len) || len < 0) {
+      return null;
+    }
+    const start = colon + 1;
+    if (start + len > recordId.length) {
+      return null;
+    }
+    parts.push(recordId.slice(start, start + len));
+    pos = start + len;
+  }
+  return parts;
+}
+
 // ---- wire types -----------------------------------------------------------
 
 /**

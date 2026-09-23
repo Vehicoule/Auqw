@@ -105,6 +105,16 @@ import type {
 import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import {
+  emissionWrites,
+  importEmissionWrites,
+  projectAppliedEntries,
+  recordingDeleteWrites,
+  recordingUpsertWrites,
+  reviewSyncWrites,
+} from '../sync/sync-projection.ts';
+import type { SyncEmitInput } from '../sync/sync-projection.ts';
+import type { LocalWrite, MergeOutcome } from '../sync/sync-engine.ts';
+import {
   isRadioPage,
   planRadioPage,
   publishRadio,
@@ -167,6 +177,22 @@ export type SessionState =
   | { readonly type: 'restore-failed'; readonly error: AppError }
   | ReadySession;
 
+/**
+ * The sync emission seam: after a successful syncable commit the
+ * session hands the mapped `LocalWrite`s here — the desktop wraps
+ * `auqw.sync.localChanges` through preload, mobile wraps the
+ * in-process engine's `localChangeBatch`. Best-effort by contract:
+ * the domain write is already durable, so a failed emit only leaves
+ * the change log behind — it catches up on the next drain, never a
+ * domain rollback.
+ */
+export type SyncEmitPort = {
+  localChanges(
+    writes: readonly LocalWrite[],
+    signal?: CancellationSignal,
+  ): Promise<Result<unknown>>;
+};
+
 export type SessionDeps = {
   readonly storage: StoragePort;
   readonly player: PlayerPort;
@@ -175,6 +201,13 @@ export type SessionDeps = {
   readonly ids: IdPort;
   readonly log: LogPort;
   readonly defaults: Settings;
+  /**
+   * Optional: when present, every successful syncable commit emits
+   * its writes through this port and `applySyncedEntries` projects
+   * remote merge outcomes into the domain. Platforms without a sync
+   * surface omit it — emission is then a no-op.
+   */
+  readonly sync?: SyncEmitPort;
   /**
    * Slice-3 offline hook: returns a playable local URI (file:// or
    * content://) when the recording has `available` bytes on disk or
@@ -200,6 +233,12 @@ const CANDIDATE_LIMIT = 25;
 // Status ticks fire ~1 s; a position delta above this between ticks
 // is a seek/jump, not played time.
 const MAX_TICK_DELTA_MS = 2_500;
+/** Desktop's sync:localChanges channel caps one batch at 256 writes. */
+const SYNC_EMIT_CHUNK = 256;
+/** Retained emit backlog bound — drop-oldest past it. */
+const SYNC_EMIT_PENDING_MAX = 2_048;
+/** Remote outcomes held for refold — drop-newest past it. */
+const SYNC_APPLY_PENDING_MAX = 2_048;
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -307,10 +346,67 @@ type Ready = {
   playback: SessionPlayback;
   radio: RadioTailRecord | null;
   persistenceError: AppError | undefined;
+  /**
+   * Remote merge outcomes whose records still can't materialize
+   * (a field or a parent row hasn't arrived) — refolded on every
+   * drain, dropped when the record lands or its fold is superseded
+   * by a durable state change (import resets it with the library).
+   */
+  syncPending: MergeOutcome[];
 };
 
 function playlistSections(r: Ready): PlaylistState {
   return { playlists: r.playlists, entries: r.playlistEntries };
+}
+
+/** The committed sections emission diffs a batch against. */
+function syncEmitInput(r: Ready): SyncEmitInput {
+  return {
+    recordings: r.recordings,
+    likes: r.likes,
+    entities: r.entities,
+    entitySourceRefs: r.entitySourceRefs,
+    playlists: r.playlists,
+    playlistEntries: r.playlistEntries,
+    playHistory: r.playHistory,
+    playCounts: r.playCounts,
+    settings: r.settings,
+  };
+}
+
+function appliedOutcomeKey(outcome: MergeOutcome): string {
+  if (outcome.type !== 'applied') {
+    return '';
+  }
+  const entry = outcome.entry;
+  return `${entry.deviceId}${entry.hlc.l}${entry.hlc.c}`;
+}
+
+/**
+ * Only 'applied' outcomes feed the fold; dedupe by entry key so a
+ * redelivered outcome can't double-apply, and bound the hold so a
+ * permanently unmaterializable record can't grow memory.
+ */
+function boundSyncPending(
+  outcomes: readonly MergeOutcome[],
+): MergeOutcome[] {
+  const seen = new Set<string>();
+  const out: MergeOutcome[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.type !== 'applied') {
+      continue;
+    }
+    const key = appliedOutcomeKey(outcome);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(outcome);
+    if (out.length >= SYNC_APPLY_PENDING_MAX) {
+      break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -459,6 +555,16 @@ export class Session {
   #mappingSource: CancellationSource | null = null;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
+  readonly #sync: SyncEmitPort | undefined;
+  /**
+   * Emitted writes waiting on the emit port — session-scoped so an
+   * import's Ready swap can't strand them. Drained FIFO, chunked to
+   * the desktop channel's write cap; a failed drain keeps the chunk
+   * for the next emission. Drop-oldest bound: a permanently dead
+   * port degrades to the newest writes, never unbounded memory.
+   */
+  #syncEmitPending: LocalWrite[] = [];
+  #syncTail: Promise<void> = Promise.resolve();
   #restorePromise: Promise<Result<void>> | null = null;
 
   constructor(deps: SessionDeps) {
@@ -495,6 +601,7 @@ export class Session {
     this.#log = deps.log;
     this.#localPlaybackFor = deps.localPlaybackFor ?? (() => null);
     this.#isOnline = deps.isOnline ?? (() => true);
+    this.#sync = deps.sync;
     this.#corrections = createCorrections({
       storage: deps.storage,
       ids: deps.ids,
@@ -702,6 +809,11 @@ export class Session {
             evaluated.queue.revision,
           );
         }
+        if (committed.ok) {
+          // Post-commit and best-effort: emission never rolls the
+          // domain write back — it only feeds the change log.
+          this.#emitSync(emissionWrites(syncEmitInput(generation), evaluated));
+        }
         return committed;
       });
     } finally {
@@ -765,6 +877,9 @@ export class Session {
             );
           }
           r.persistenceError = undefined;
+          // Same post-commit seam as #persist — `r` still holds the
+          // pre-apply sections the batch diffs against.
+          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
         }
         const outcome = apply(r);
         this.#publish();
@@ -878,6 +993,231 @@ export class Session {
     this.#maybeGrowRadio();
   }
 
+  // ---- sync emission ------------------------------------------------
+  //
+  // Emission is post-commit and best-effort: the domain write is
+  // already durable, so a failed emit leaves the change log behind
+  // — never a rollback. Writes queue onto `#syncEmitPending` and a
+  // single tail drains them to the emit port in channel-sized chunks.
+
+  /**
+   * Queue the mapped writes and kick the drain. Called inside the
+   * storage segment right after a successful syncable commit — the
+   * drain itself is async port work, so it never holds the tail.
+   */
+  #emitSync(writes: readonly LocalWrite[]): void {
+    if (this.#sync === undefined || this.#disposed || writes.length === 0) {
+      return;
+    }
+    this.#syncEmitPending.push(...writes);
+    if (this.#syncEmitPending.length > SYNC_EMIT_PENDING_MAX) {
+      this.#syncEmitPending.splice(
+        0,
+        this.#syncEmitPending.length - SYNC_EMIT_PENDING_MAX,
+      );
+      this.#logWarn('sync emission backlog overflowed; oldest writes dropped');
+    }
+    this.#own(this.#drainSyncEmit());
+  }
+
+  #drainSyncEmit(): Promise<void> {
+    const work = this.#syncTail.then(() => this.#drainEmitPending());
+    this.#syncTail = work.then(() => undefined, () => undefined);
+    return work;
+  }
+
+  async #drainEmitPending(): Promise<void> {
+    const sync = this.#sync;
+    if (sync === undefined) {
+      return;
+    }
+    while (this.#syncEmitPending.length > 0) {
+      const chunk = this.#syncEmitPending.slice(0, SYNC_EMIT_CHUNK);
+      const source = new CancellationSource();
+      this.#opSources.add(source);
+      let sent: Result<unknown>;
+      try {
+        const deadlineMs = this.#deadline();
+        sent = await this.#withDeadline(
+          () => sync.localChanges(chunk, source.signal),
+          deadlineMs,
+          source,
+        );
+      } finally {
+        this.#opSources.delete(source);
+      }
+      if (!sent.ok) {
+        // Retained: the chunk stays queued and the next emission
+        // retries it. Surface through the persist-owned channel —
+        // the domain writes already landed, so this reports the
+        // truth: the change log is behind, not the library.
+        const r = this.#ready;
+        if (r !== null) {
+          r.persistenceError = sent.error;
+          this.#publish();
+        }
+        this.#logWarn('sync emission failed; writes retained for retry');
+        return;
+      }
+      this.#syncEmitPending.splice(0, chunk.length);
+    }
+  }
+
+  /**
+   * The inbound half: fold remote merge outcomes onto the domain.
+   * Runs a storage segment (the same serialization a review op gets):
+   * load → project → commit → mirror → publish. The commit is atomic,
+   * so a failure re-pends the whole folded union for the next drain
+   * — refolding is idempotent. Never emits: remote writes are not
+   * local writes.
+   */
+  async applySyncedEntries(
+    outcomes: readonly MergeOutcome[],
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const generation = ready.value;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const r = this.#ready;
+        if (r === null || r !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        const deadlineMs = this.#deadline();
+        const loaded = await this.#withDeadline(
+          () =>
+            this.#storage.load(
+              this.#newContext('load', deadlineMs, source.signal),
+            ),
+          deadlineMs,
+          source,
+        );
+        if (!loaded.ok) {
+          r.persistenceError = loaded.error;
+          this.#publish();
+          return err(loaded.error);
+        }
+        if (!isPersistedState(loaded.value)) {
+          const error = appError(
+            'invalid-response',
+            'persisted state failed validation',
+          );
+          r.persistenceError = error;
+          this.#publish();
+          return err(error);
+        }
+        const data = loaded.value;
+        // Refold earlier pending outcomes with the new ones — a
+        // parent row landing this drain unblocks a held insert.
+        const superseded = outcomes.filter(
+          (o) => o.type !== 'applied',
+        ).length;
+        if (superseded > 0) {
+          // Losing entries keep the domain row — divergence history
+          // owns them; the log notes the drop without record ids.
+          this.#logWarn(
+            `sync projection dropped ${superseded} non-applied outcomes`,
+          );
+        }
+        const union = boundSyncPending([...r.syncPending, ...outcomes]);
+        const projection = projectAppliedEntries(union, {
+          recordings: r.recordings,
+          likes: r.likes,
+          entities: r.entities,
+          entitySourceRefs: r.entitySourceRefs,
+          playlists: r.playlists,
+          playlistEntries: r.playlistEntries,
+          playHistory: r.playHistory,
+          playCounts: r.playCounts,
+          matchReviews: data.matchReviews,
+          lyricsCache: data.lyricsCache,
+          downloads: data.downloads,
+          localFiles: data.localFiles,
+          queue: r.queue.snapshot(),
+          settings: r.settings,
+        });
+        for (const skip of projection.skipped) {
+          this.#logWarn(`sync projection skipped ${skip.kind} record`);
+        }
+        const batch = projection.batch;
+        if (Object.keys(batch).length === 0) {
+          r.syncPending = boundSyncPending(projection.pending);
+          return ok(undefined);
+        }
+        const committed = await this.#withDeadline(
+          () =>
+            this.#storage.commit(
+              batch,
+              this.#newContext('persist', deadlineMs, source.signal),
+            ),
+          deadlineMs,
+          source,
+        );
+        if (!committed.ok) {
+          r.persistenceError = committed.error;
+          this.#publish();
+          // Nothing landed — refold the whole union next drain.
+          r.syncPending = boundSyncPending(union);
+          return err(committed.error);
+        }
+        r.syncPending = boundSyncPending(projection.pending);
+        if (batch.recordingsMerge !== undefined) {
+          r.recordings = [...batch.recordingsMerge(r.recordings)];
+        }
+        if (batch.likes !== undefined) {
+          r.likes = [...batch.likes];
+        }
+        if (batch.entities !== undefined) {
+          r.entities = [...batch.entities];
+        }
+        if (batch.entitySourceRefs !== undefined) {
+          r.entitySourceRefs = [...batch.entitySourceRefs];
+        }
+        if (batch.playlists !== undefined) {
+          r.playlists = [...batch.playlists];
+        }
+        if (batch.playlistEntries !== undefined) {
+          r.playlistEntries = [...batch.playlistEntries];
+        }
+        if (batch.playHistory !== undefined) {
+          r.playHistory = [...batch.playHistory];
+        }
+        if (batch.playCounts !== undefined) {
+          r.playCounts = [...batch.playCounts];
+        }
+        if (batch.lyricsCache !== undefined) {
+          r.lyricsCache = [...batch.lyricsCache];
+        }
+        if (batch.settings !== undefined) {
+          r.settings = { ...batch.settings };
+        }
+        if (batch.queue !== undefined) {
+          r.queue = new QueueEngine(batch.queue);
+          r.queueCommittedRev = Math.max(
+            r.queueCommittedRev,
+            batch.queue.revision,
+          );
+          // A queued #persistQueue holding the old engine must
+          // supersede — its revision math no longer describes
+          // this queue.
+          r.queueEpoch += 1;
+        }
+        r.persistenceError = undefined;
+        this.#derived();
+        this.#publish();
+        return ok(undefined);
+      });
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
   // ---- restore ----------------------------------------------------
 
   async restore(): Promise<Result<void>> {
@@ -960,6 +1300,7 @@ export class Session {
       playback: { type: 'idle' },
       radio: null,
       persistenceError: undefined,
+      syncPending: [],
     };
     // Restore never starts the player; it always restores paused.
     queue.restorePaused();
@@ -1027,6 +1368,7 @@ export class Session {
       return ready;
     }
     const r = ready.value;
+    const prevRows = r.recordings;
     // Only local rows are adopted — a foreign row would overwrite a
     // catalog mutation a racing op just made in memory.
     const committed = localRows.filter((rec) => rec.provenance === 'local');
@@ -1034,7 +1376,7 @@ export class Session {
     const byId = new Map(committed.map((rec) => [rec.id, rec]));
     const known = new Set<string>();
     const merged: Recording[] = [];
-    for (const rec of r.recordings) {
+    for (const rec of prevRows) {
       known.add(rec.id);
       if (rec.provenance === 'local' && !committedIds.has(rec.id)) {
         continue;
@@ -1047,6 +1389,28 @@ export class Session {
       }
     }
     r.recordings = merged;
+    // The domain's only recording-delete path: file removals must
+    // tombstone remotely, adopted rows upsert.
+    if (this.#sync !== undefined) {
+      const prevById = new Map(prevRows.map((rec) => [rec.id, rec]));
+      const writes: LocalWrite[] = [];
+      for (const rec of committed) {
+        if (prevById.get(rec.id) !== rec) {
+          writes.push(...recordingUpsertWrites(rec, prevById.get(rec.id)));
+        }
+      }
+      for (const rec of prevRows) {
+        if (rec.provenance === 'local' && !committedIds.has(rec.id)) {
+          writes.push(
+            ...recordingDeleteWrites(rec, {
+              playlistEntries: r.playlistEntries,
+              playHistory: r.playHistory,
+            }),
+          );
+        }
+      }
+      this.#emitSync(writes);
+    }
     this.#publish();
     this.#derived();
     return ok(undefined);
@@ -1848,6 +2212,8 @@ export class Session {
       } finally {
         this.#opSources.delete(reloadSource);
       }
+      const affectedId = result.value.recordingId;
+      const prevRec = r.recordings.find((rec) => rec.id === affectedId);
       if (reloaded.ok && isPersistedState(reloaded.value)) {
         // Merge, never replace: a concurrent recording mutation on
         // another tail may sit between its in-memory mirror and its
@@ -1860,7 +2226,6 @@ export class Session {
         // the tail.
         const committed = reloaded.value.recordings;
         const byId = new Map(committed.map((rec) => [rec.id, rec]));
-        const affectedId = result.value.recordingId;
         const seen = new Set<string>();
         const merged: Recording[] = [];
         for (const rec of r.recordings) {
@@ -1875,11 +2240,22 @@ export class Session {
           }
         }
         r.recordings = merged;
+        // Emit the committed recording (it carries the verdict's
+        // mapping change) plus the review row — corrections commits
+        // inside `op`, outside the #persist diff.
+        const committedRec = byId.get(affectedId);
+        if (committedRec !== undefined) {
+          this.#emitSync(recordingUpsertWrites(committedRec, prevRec));
+        }
       } else {
         r.persistenceError = reloaded.ok
           ? appError('invalid-response', 'reload after review failed validation')
           : reloaded.error;
+        if (prevRec !== undefined) {
+          this.#emitSync(recordingUpsertWrites(prevRec));
+        }
       }
+      this.#emitSync(reviewSyncWrites(result.value));
       this.#publish();
       this.#derived();
       return result;
@@ -2088,6 +2464,10 @@ export class Session {
       }
       const deadlineMs = this.#deadline();
       const context = this.#newContext('import', deadlineMs, source.signal);
+      // The whole imported owned set goes out as one emission — the
+      // writes mint inside the segment against the library being
+      // replaced, then flush after the swap+restore lands.
+      let importWrites: LocalWrite[] = [];
       // The swap runs as a segment on the storage tail: every writer
       // queued ahead commits first and is rolled forward, and a
       // writer that staged against the old Ready and commits behind
@@ -2103,6 +2483,13 @@ export class Session {
         // writer observes #ready === null and supersedes instead of
         // committing old-generation sections over the imported rows.
         if (result.ok) {
+          const prevReady = this.#ready;
+          if (prevReady !== null) {
+            importWrites = importEmissionWrites(
+              syncEmitInput(prevReady),
+              preview.value.doc,
+            );
+          }
           this.#ready = null;
           this.#state = { type: 'unhydrated' };
         }
@@ -2118,6 +2505,7 @@ export class Session {
       if (!restored.ok) {
         return restored;
       }
+      this.#emitSync(importWrites);
       return ok(preview.value);
     } finally {
       this.#opSources.delete(source);
