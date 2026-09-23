@@ -117,13 +117,13 @@ export async function createExpoSync(
     }
     return ok({ client, engine: engine.value, deviceId });
   } catch (thrown) {
-    // Raw native exception text can carry paths or stack detail — the
-    // typed boundary gets a stable message; the original goes to the
-    // log sink, whose own redaction applies.
+    // Native exception text can carry paths, URLs, or stack detail and
+    // the log sink performs no redaction — neither the typed error nor
+    // the log may quote it; the kind survives as the only signal.
     const mapped = nativeError(thrown);
     void deps.log.write({
       level: 'error',
-      message: `sync init: ${mapped.message}`,
+      message: `sync init failed (${mapped.kind})`,
       atMs: deps.clock.nowMs(),
     });
     return err(appError(mapped.kind, 'sync initialization failed'));
