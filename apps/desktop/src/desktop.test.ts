@@ -22,6 +22,8 @@ import { run as runLocalPaths } from './shared/local-paths.test.ts';
 import { run as runTagReader } from './renderer/tag-reader.test.ts';
 import { run as runTransferPort } from './renderer/transfer-port.test.ts';
 import { run as runLocalPlayback } from './renderer/local-playback.test.ts';
+import { run as runProvider } from './renderer/provider.test.ts';
+import { run as runController } from './renderer/controller.test.ts';
 
 runEnvelope();
 await runRouter();
@@ -47,4 +49,6 @@ runLocalPaths();
 await runTagReader();
 await runTransferPort();
 runLocalPlayback();
+await runProvider();
+await runController();
 console.log('desktop shell tests passed');

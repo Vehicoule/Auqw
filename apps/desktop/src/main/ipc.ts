@@ -1,6 +1,8 @@
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   AppMeta,
+  HostCancelArgs,
+  HostRequestArgs,
   PickFilesArgs,
   PickFolderArgs,
   SecureDeleteArgs,
@@ -18,6 +20,8 @@ import type {
 import {
   isLocalAddArgs,
   isLocalProbeArgs,
+  isHostCancelArgs,
+  isHostRequestArgs,
   isPickFilesArgs,
   isPickFolderArgs,
   isSecureDeleteArgs,
@@ -199,6 +203,18 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.hostPlugins,
     channel(noArgs, (_args, deps) =>
       deps.utility.request(CHANNELS.hostPlugins, undefined),
+    ),
+  ],
+  [
+    CHANNELS.hostRequest,
+    channel(isHostRequestArgs, (args: HostRequestArgs, deps) =>
+      deps.utility.request(CHANNELS.hostRequest, args),
+    ),
+  ],
+  [
+    CHANNELS.hostCancel,
+    channel(isHostCancelArgs, (args: HostCancelArgs, deps) =>
+      deps.utility.request(CHANNELS.hostCancel, args),
     ),
   ],
   [

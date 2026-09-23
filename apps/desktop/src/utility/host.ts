@@ -8,7 +8,10 @@ import {
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { shellError } from '../shared/errors.ts';
-import type { HostPluginsResult } from '../shared/contract.ts';
+import type {
+  HostPluginsResult,
+  PluginManifestPayload,
+} from '../shared/contract.ts';
 
 /**
  * The napi `.node` module's export surface (mirrors `crates/node-
@@ -30,10 +33,16 @@ export type NodeBindingsModule = {
 
 /** The subset of the napi `PluginHost` the stream channels call. */
 export type PluginHostLike = {
-  loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
+  loadPlugin(wasm: Buffer, manifestJson: string): Promise<string>;
   startPrepare(
     pluginId: string,
     sourceRef: string,
+    requestId: string,
+  ): Promise<unknown>;
+  startRequest(
+    pluginId: string,
+    capability: string,
+    payloadJson: string,
     requestId: string,
   ): Promise<unknown>;
   cancel(requestId: string): void;
@@ -134,6 +143,48 @@ export function bindingsCandidates(
  * stream call — not utility boot — pays the load, and the status stays
  * inspectable via `host:plugins`.
  */
+/** A loaded plugin + the manifest fields the renderer needs to build
+ * its provider adapters — `id` and `capabilities` verbatim from the
+ * manifest JSON (the adapter re-validates capability names against
+ * the ABI set; unknown names never survive `startRequest` anyway).
+ */
+export type LoadedPlugin = {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly capabilities: readonly string[];
+};
+
+/** Manifest `id` + `capabilities` extraction — bounded-shape read, no
+ * ABI knowledge: undeclared fields fall back to the file stem + an
+ * empty capability list, and a malformed manifest skips the pair at
+ * load time anyway.
+ */
+function manifestFields(
+  manifestJson: string,
+  stem: string,
+): { providerId: string; capabilities: readonly string[] } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(manifestJson);
+  } catch {
+    return { providerId: stem, capabilities: [] };
+  }
+  if (typeof raw !== 'object' || raw === null) {
+    return { providerId: stem, capabilities: [] };
+  }
+  const record = raw as Record<string, unknown>;
+  const providerId =
+    typeof record['id'] === 'string' && record['id'].length <= 128
+      ? record['id']
+      : stem;
+  const capabilities = Array.isArray(record['capabilities'])
+    ? (record['capabilities'] as unknown[]).filter(
+        (c): c is string => typeof c === 'string' && c.length <= 64,
+      )
+    : [];
+  return { providerId, capabilities };
+}
+
 export function createHostRuntime(opts: {
   env: HostEnv;
   resourcesPath?: string | undefined;
@@ -153,7 +204,7 @@ export function createHostRuntime(opts: {
 
   let host: PluginHostLike | null = null;
   let bindingsError: string | undefined;
-  let pluginsReady: Promise<readonly string[]> | null = null;
+  let pluginsReady: Promise<readonly LoadedPlugin[]> | null = null;
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -222,7 +273,7 @@ export function createHostRuntime(opts: {
 
   async function loadPluginDir(
     h: PluginHostLike,
-  ): Promise<readonly string[]> {
+  ): Promise<readonly LoadedPlugin[]> {
     const dir = opts.env.AUQW_PLUGIN_DIR;
     if (dir === undefined || dir === '') {
       return [];
@@ -231,7 +282,7 @@ export function createHostRuntime(opts: {
       .list(dir)
       .filter((name) => name.endsWith('.manifest.json'))
       .sort();
-    const loaded: string[] = [];
+    const loaded: LoadedPlugin[] = [];
     for (const manifestName of manifests) {
       const stem = manifestName.slice(0, -'.manifest.json'.length);
       const wasmPath = join(dir, `${stem}.wasm`);
@@ -241,11 +292,13 @@ export function createHostRuntime(opts: {
       try {
         const wasm = fs.read(wasmPath);
         const manifest = fs.read(join(dir, manifestName)).toString('utf8');
-        const pluginId = await h.loadPlugin(
-          wasm.toString('base64'),
-          manifest,
-        );
-        loaded.push(pluginId);
+        const pluginId = await h.loadPlugin(wasm, manifest);
+        const fields = manifestFields(manifest, stem);
+        loaded.push({
+          pluginId,
+          providerId: fields.providerId,
+          capabilities: fields.capabilities,
+        });
       } catch {
         // A malformed pair is skipped, not fatal — other pairs still load.
       }
@@ -253,7 +306,7 @@ export function createHostRuntime(opts: {
     return loaded;
   }
 
-  async function ready(): Promise<readonly string[]> {
+  async function ready(): Promise<readonly LoadedPlugin[]> {
     if (pluginsReady === null) {
       const pending = loadPluginDir(ensureHost());
       pluginsReady = pending;
@@ -272,15 +325,27 @@ export function createHostRuntime(opts: {
     host(): PluginHostLike {
       return ensureHost();
     },
-    pluginsReady: ready,
+    pluginsReady(): Promise<readonly string[]> {
+      return ready().then((loaded) => loaded.map((p) => p.pluginId));
+    },
     async status(): Promise<HostPluginsResult> {
       try {
-        const plugins = await ready();
-        return { bindings: 'loaded', plugins };
+        const loaded = await ready();
+        const manifests: PluginManifestPayload[] = loaded.map((p) => ({
+          pluginId: p.pluginId,
+          providerId: p.providerId,
+          capabilities: p.capabilities,
+        }));
+        return {
+          bindings: 'loaded',
+          plugins: loaded.map((p) => p.pluginId),
+          manifests,
+        };
       } catch {
         const result: HostPluginsResult = {
           bindings: 'unavailable',
           plugins: [],
+          manifests: [],
         };
         if (bindingsError !== undefined) {
           return { ...result, bindingsError };

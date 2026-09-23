@@ -155,11 +155,34 @@ export function isUtilityPingResult(
  * `host:plugins` — whether the native bindings loaded and which plugin
  * ids are live. `bindings` is a status, not a throw: the utility keeps
  * serving non-stream channels when the `.node` artifact is absent.
+ * `manifests` carries each loaded plugin's declared provider id +
+ * capability names verbatim — the renderer-side provider adapter
+ * re-validates them against the ABI capability set.
  */
+export type PluginManifestPayload = {
+  readonly pluginId: string;
+  readonly providerId: string;
+  readonly capabilities: readonly string[];
+};
+
+export function isPluginManifestPayload(
+  value: unknown,
+): value is PluginManifestPayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['pluginId', 'providerId', 'capabilities']) &&
+    isBoundedString(value['pluginId'], 128) &&
+    isBoundedString(value['providerId'], 128) &&
+    Array.isArray(value['capabilities']) &&
+    value['capabilities'].every((c) => isBoundedString(c, 64))
+  );
+}
+
 export type HostPluginsResult = {
   readonly bindings: 'loaded' | 'unavailable';
   readonly bindingsError?: string;
   readonly plugins: readonly string[];
+  readonly manifests: readonly PluginManifestPayload[];
 };
 
 export function isHostPluginsResult(
@@ -167,11 +190,13 @@ export function isHostPluginsResult(
 ): value is HostPluginsResult {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['bindings', 'bindingsError', 'plugins']) &&
+    hasOnlyKeys(value, ['bindings', 'bindingsError', 'plugins', 'manifests']) &&
     (value['bindings'] === 'loaded' || value['bindings'] === 'unavailable') &&
     isStringOrUndefined(value['bindingsError']) &&
     Array.isArray(value['plugins']) &&
-    value['plugins'].every((p) => isBoundedString(p, 128))
+    value['plugins'].every((p) => isBoundedString(p, 128)) &&
+    Array.isArray(value['manifests']) &&
+    value['manifests'].every(isPluginManifestPayload)
   );
 }
 
@@ -304,6 +329,41 @@ function isAttemptSummaryPayload(
  * `startPrepare`'s resolved outcome. `prepared` carries the minted
  * stream; `failed`/`superseded` carry the host's typed kind + message.
  */
+/**
+ * `startRequest`'s terminal outcome — `succeeded` carries the raw
+ * `done.result` JSON for the renderer adapter to decode, `failed`
+ * the host's typed kind + message.
+ */
+export type RequestOutcomePayload = {
+  readonly type: 'succeeded' | 'failed';
+  readonly resultJson?: string;
+  readonly kind?: string;
+  readonly message?: string;
+  readonly attempt: AttemptSummaryPayload;
+};
+
+export function isRequestOutcomePayload(
+  value: unknown,
+): value is RequestOutcomePayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'type',
+      'resultJson',
+      'kind',
+      'message',
+      'attempt',
+    ]) &&
+    (value['type'] === 'succeeded' || value['type'] === 'failed') &&
+    (value['resultJson'] === undefined ||
+      (typeof value['resultJson'] === 'string' &&
+        value['resultJson'].length <= 1_048_576)) &&
+    isStringOrUndefined(value['kind']) &&
+    isStringOrUndefined(value['message']) &&
+    isAttemptSummaryPayload(value['attempt'])
+  );
+}
+
 export type PrepareOutcomePayload = {
   readonly type: 'prepared' | 'failed' | 'superseded';
   readonly stream?: PreparedStreamPayload;
@@ -516,6 +576,51 @@ export type StreamCancelArgs = { readonly requestId: string };
 export function isStreamCancelArgs(
   value: unknown,
 ): value is StreamCancelArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['requestId']) &&
+    isBoundedString(value['requestId'], 128)
+  );
+}
+
+/**
+ * `host:request` — any declared capability with a JSON object payload,
+ * mirroring the napi `startRequest` signature. The renderer mints the
+ * requestId so its cancel path can reach the host before the promise
+ * resolves.
+ */
+export type HostRequestArgs = {
+  readonly pluginId: string;
+  readonly capability: string;
+  readonly payloadJson: string;
+  readonly requestId: string;
+};
+
+export function isHostRequestArgs(
+  value: unknown,
+): value is HostRequestArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'pluginId',
+      'capability',
+      'payloadJson',
+      'requestId',
+    ]) &&
+    isBoundedString(value['pluginId'], 128) &&
+    isBoundedString(value['capability'], 64) &&
+    typeof value['payloadJson'] === 'string' &&
+    value['payloadJson'].length <= 65_536 &&
+    isBoundedString(value['requestId'], 128)
+  );
+}
+
+/** `host:cancel` — same requestId-scoped abort as `stream:cancel`. */
+export type HostCancelArgs = { readonly requestId: string };
+
+export function isHostCancelArgs(
+  value: unknown,
+): value is HostCancelArgs {
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ['requestId']) &&
@@ -1371,6 +1476,10 @@ export type AuqwApi = {
   };
   readonly host: {
     readonly plugins: () => Promise<HostPluginsResult>;
+    readonly request: (
+      args: HostRequestArgs,
+    ) => Promise<RequestOutcomePayload>;
+    readonly cancelRequest: (args: HostCancelArgs) => Promise<void>;
   };
   readonly stream: {
     readonly prepare: (

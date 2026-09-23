@@ -114,6 +114,16 @@ importers:
         version: 6.0.3
 
   apps/desktop:
+    dependencies:
+      '@auqw/ui-web':
+        specifier: workspace:*
+        version: link:../../packages/ui-web
+      react:
+        specifier: 19.2.3
+        version: 19.2.3
+      react-dom:
+        specifier: 19.2.3
+        version: 19.2.3(react@19.2.3)
     devDependencies:
       '@auqw/application':
         specifier: workspace:*
@@ -124,6 +134,12 @@ importers:
       '@types/node':
         specifier: 26.6.1
         version: 26.6.1
+      '@types/react':
+        specifier: ~19.2.2
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: ~19.2.3
+        version: 19.2.7(@types/react@19.2.18)
       electron:
         specifier: 44.3.0
         version: 44.3.0(supports-color@8.1.1)

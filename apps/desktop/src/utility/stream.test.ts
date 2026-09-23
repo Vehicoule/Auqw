@@ -14,6 +14,22 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
         stream: { handle: 'h1', mime: 'audio/mp4' },
       };
     },
+    async startRequest() {
+      return {
+        type: 'succeeded',
+        resultJson: '{"items":[]}',
+        attempt: {
+          requestId: 'req-1',
+          steps: 1,
+          httpCalls: 0,
+          bytes: 0,
+          fuelUsed: 1,
+          elapsedMs: 1,
+          httpTrace: [],
+          guestLog: [],
+        },
+      };
+    },
     cancel() {},
     devPrepareUrl() {
       return { handle: 'h2', mime: 'audio/webm' };
@@ -50,7 +66,11 @@ function fakeRuntime(host: PluginHostLike, devGateEnabled = true) {
         return Promise.resolve(['a', 'b']);
       },
       status: () =>
-        Promise.resolve({ bindings: 'loaded', plugins: ['a', 'b'] }),
+        Promise.resolve({
+          bindings: 'loaded',
+          plugins: ['a', 'b'],
+          manifests: [],
+        }),
       devGateEnabled,
     }),
   };
@@ -76,6 +96,41 @@ export async function run(): Promise<void> {
     'host:plugins reports status',
   );
   assertEqual(runtime.calls.length, 0, 'status does not force a load');
+
+  // host:request validates args, forwards, re-validates the outcome.
+  const done = await handlers['host:request']?.({
+    pluginId: 'deezer',
+    capability: 'catalog.search',
+    payloadJson: '{"query":"x"}',
+    requestId: 'req-1',
+  });
+  assert(
+    isRecord(done) &&
+      done['type'] === 'succeeded' &&
+      done['resultJson'] === '{"items":[]}',
+    'request outcome passes through',
+  );
+  try {
+    await handlers['host:request']?.({ pluginId: 'x' });
+    assert(false, 'bad request args must reject');
+  } catch (thrown) {
+    assert(
+      isRecord(thrown) && thrown['kind'] === 'invalid-request',
+      'bad args → invalid-request',
+    );
+  }
+
+  // host:cancel forwards the request id to the host's abort path.
+  let cancelled = '';
+  const cancelRuntime = fakeRuntime(
+    fakeHost({
+      cancel: (id: string) => {
+        cancelled = id;
+      },
+    }),
+  );
+  await cancelRuntime.handlers['host:cancel']?.({ requestId: 'req-9' });
+  assertEqual(cancelled, 'req-9');
 
   // stream:prepare validates args, forwards, re-validates the outcome.
   const prepared = await handlers['stream:prepare']?.({
