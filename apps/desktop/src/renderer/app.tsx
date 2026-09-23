@@ -911,10 +911,15 @@ function Main({
       .then(async (text) => {
         const parsed: unknown = JSON.parse(text);
         // Multi-page exports land as an array — apply each doc in
-        // order; a single-doc payload applies as before.
+        // order; a single-doc payload applies as before. Validate the
+        // whole batch first: a malformed element must not strand a
+        // partially imported array.
         const docs: readonly unknown[] = Array.isArray(parsed)
           ? parsed
           : [parsed];
+        if (!docs.every(isSyncDelta)) {
+          return;
+        }
         for (const delta of docs) {
           await window.auqw.sync.importDelta({ delta });
         }
