@@ -127,6 +127,14 @@ export type SyncProjection = {
   readonly batch: StorageBatch;
   /** Applied outcomes for records still awaiting required fields. */
   readonly pending: readonly MergeOutcome[];
+  /**
+   * Materialized records that could not materialize this pass — a
+   * dependent whose parent has not arrived yet (a rebuild page may
+   * order it before the parent). The caller retains them and unions
+   * them into the next `projectMaterialized` call — paged rebuilds
+   * stay memory-bounded without dropping cross-page dependents.
+   */
+  readonly pendingRecords: readonly MaterializedRecord[];
   /** Records that can never materialize — log these (kind only). */
   readonly skipped: readonly ProjectionSkip[];
   readonly changedKinds: readonly SyncRecordKind[];
@@ -826,6 +834,8 @@ type RecordFold = {
   /** 'sum' field → this drain's count delta against the domain row. */
   readonly sumDeltas: Map<string, number>;
   readonly outcomes: AppliedOutcome[];
+  /** Materialized rebuild only: the source record to retain on pend. */
+  readonly pendingRecord?: MaterializedRecord;
   /** Earliest hlc.l folded — createdMs fallback for new rows. */
   minL: number;
   /**
@@ -1007,6 +1017,7 @@ export function projectMaterialized(
       fields,
       sumDeltas: new Map(),
       outcomes: [],
+      pendingRecord: rec,
       minL: 0,
       absolute: true,
     });
@@ -1024,8 +1035,12 @@ function finishProjection(
     folds.get(`${kind}${KEY_SEP}${recordId}`);
 
   const changedKinds = new Set<SyncRecordKind>();
+  const pendingRecords: MaterializedRecord[] = [];
   const pend = (fold: RecordFold): void => {
     pending.push(...fold.outcomes);
+    if (fold.pendingRecord !== undefined) {
+      pendingRecords.push(fold.pendingRecord);
+    }
   };
 
   // ---- recordings ----------------------------------------------------------
@@ -1046,6 +1061,7 @@ function finishProjection(
   const recordingPlans = new Map<string, RecordingPlan>();
   /** outcomes keyed by recordingId — for pending re-queue. */
   const recordingOutcomes = new Map<string, AppliedOutcome[]>();
+  const recordingPendRecords = new Map<string, MaterializedRecord[]>();
   const planFor = (recordingId: string): RecordingPlan => {
     let plan = recordingPlans.get(recordingId);
     if (plan === undefined) {
@@ -1067,6 +1083,11 @@ function finishProjection(
     const list = recordingOutcomes.get(recordingId) ?? [];
     list.push(...fold.outcomes);
     recordingOutcomes.set(recordingId, list);
+    if (fold.pendingRecord !== undefined) {
+      const recs = recordingPendRecords.get(recordingId) ?? [];
+      recs.push(fold.pendingRecord);
+      recordingPendRecords.set(recordingId, recs);
+    }
   };
 
   for (const fold of folds.values()) {
@@ -1256,6 +1277,10 @@ function finishProjection(
         const list = recordingOutcomes.get(id);
         if (list !== undefined) {
           pending.push(...list);
+        }
+        const recs = recordingPendRecords.get(id);
+        if (recs !== undefined) {
+          pendingRecords.push(...recs);
         }
       }
       continue;
@@ -1995,6 +2020,7 @@ function finishProjection(
   return {
     batch,
     pending,
+    pendingRecords,
     skipped,
     changedKinds: [...changedKinds],
   };

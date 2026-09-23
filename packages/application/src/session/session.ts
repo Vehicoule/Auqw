@@ -372,6 +372,14 @@ type Ready = {
    * by a durable state change (import resets it with the library).
    */
   syncPending: MergeOutcome[];
+  /**
+   * Materialized rebuild records that could not materialize yet (a
+   * dependent whose parent has not arrived — paged rebuilds can order
+   * dependents first). Retained and unioned into the next
+   * `applyMaterializedEntries` call — memory stays page-bounded
+   * without dropping cross-page dependents (Review #46).
+   */
+  materializedPending: MaterializedRecord[];
 };
 
 function playlistSections(r: Ready): PlaylistState {
@@ -446,6 +454,48 @@ function retainSyncPending(
   );
   if (retained.length < eligible) {
     warn('sync pending bound evicted applied outcomes');
+  }
+  return retained;
+}
+
+/**
+ * Bound + dedupe materialized pending: same (kind, recordId) re-served
+ * is a newer snapshot — last wins; evictions drop the OLDEST pending
+ * record and warn, matching the outcome-side bound.
+ */
+function boundMaterializedPending(
+  records: readonly MaterializedRecord[],
+): MaterializedRecord[] {
+  const seen = new Set<string>();
+  const out: MaterializedRecord[] = [];
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    const rec = records[i];
+    if (rec === undefined) {
+      continue;
+    }
+    const key = `${rec.kind}\u001f${rec.recordId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.unshift(rec);
+    if (out.length >= SYNC_APPLY_PENDING_MAX) {
+      break;
+    }
+  }
+  return out;
+}
+
+function retainMaterializedPending(
+  union: readonly MaterializedRecord[],
+  warn: (message: string) => void,
+): MaterializedRecord[] {
+  const retained = boundMaterializedPending(union);
+  const eligible = new Set(
+    union.map((rec) => `${rec.kind}\u001f${rec.recordId}`),
+  ).size;
+  if (retained.length < eligible) {
+    warn('sync materialized pending bound evicted records');
   }
   return retained;
 }
@@ -1281,7 +1331,12 @@ export class Session {
           return err(error);
         }
         const data = loaded.value;
-        const projection = projectMaterialized(records, {
+        const warn = (m: string): void => this.#logWarn(m);
+        // Union retained pending with the fresh page — a dependent
+        // that pended on an earlier page folds again here and lands
+        // once its parent arrives (same key, fresher record wins).
+        const union = [...r.materializedPending, ...records];
+        const projection = projectMaterialized(union, {
           recordings: r.recordings,
           likes: r.likes,
           entities: r.entities,
@@ -1302,11 +1357,28 @@ export class Session {
         }
         const batch = { ...projection.batch };
         if (Object.keys(batch).length === 0) {
+          r.materializedPending = boundMaterializedPending(
+            projection.pendingRecords,
+          );
           r.persistenceError = undefined;
           this.#publish();
           return ok(SYNC_APPLY_STABLE);
         }
-        return this.#commitSyncProjection(r, batch, source, deadlineMs);
+        const applied = await this.#commitSyncProjection(
+          r,
+          batch,
+          source,
+          deadlineMs,
+        );
+        if (!applied.ok) {
+          // Nothing landed — the union refolds on the next call.
+          r.materializedPending = retainMaterializedPending(union, warn);
+          return applied;
+        }
+        r.materializedPending = boundMaterializedPending(
+          projection.pendingRecords,
+        );
+        return applied;
       });
     } finally {
       this.#opSources.delete(source);
@@ -1499,6 +1571,7 @@ export class Session {
       radio: null,
       persistenceError: undefined,
       syncPending: [],
+      materializedPending: [],
     };
     // Restore never starts the player; it always restores paused.
     queue.restorePaused();

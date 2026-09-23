@@ -1250,6 +1250,59 @@ function testProjectMaterialized(): void {
   );
 }
 
+// Staged projection (Review #46): a dependent materialized ahead of
+// its parent lands nowhere — it rides `pendingRecords` into the next
+// call and lands once the parent arrives, instead of either dropping
+// or forcing the whole materialized view into memory at once.
+function testProjectMaterializedPending(): void {
+  const current = projInput({ recordings: [], likes: [] });
+  const likeRec: MaterializedRecord = {
+    kind: 'like',
+    recordId: likeRecordId('track', 'r-x'),
+    fields: {
+      like: { entityKind: 'track', targetId: 'r-x', likedAtMs: 7 },
+    },
+  };
+  const first = projectMaterialized([likeRec], current);
+  assertEqual(
+    first.batch.likes,
+    undefined,
+    'dependent before parent lands nothing',
+  );
+  assertDeepEqual(
+    first.pendingRecords,
+    [likeRec],
+    'unmaterializable record rides pending',
+  );
+  const parentRef = ref('itunes', 'x-1');
+  const second = projectMaterialized(
+    [
+      ...first.pendingRecords,
+      {
+        kind: 'recording',
+        recordId: 'r-x',
+        fields: { title: 'X', artist: 'X', album: 'A', durationMs: 1 },
+      },
+      {
+        kind: 'recordingSourceRef',
+        recordId: sourceRefRecordId('r-x', parentRef),
+        fields: { ref: parentRef },
+      },
+    ],
+    projInput({ recordings: [], likes: [] }),
+  );
+  assertDeepEqual(
+    second.batch.likes,
+    [{ entityKind: 'track', targetId: 'r-x', likedAtMs: 7 }],
+    'retained dependent lands once the parent arrives',
+  );
+  assertDeepEqual(
+    second.pendingRecords,
+    [],
+    'resolved dependents leave pending',
+  );
+}
+
 // A playlistEntry tombstone deletes the existing row (Devin Review
 // #46 — the existing-row loop must not re-push it).
 function testEntryTombstoneRemoves(): void {
@@ -1296,5 +1349,6 @@ export function run(): void {
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
   testProjectMaterialized();
+  testProjectMaterializedPending();
   testEntryTombstoneRemoves();
 }

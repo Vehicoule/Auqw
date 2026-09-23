@@ -4033,6 +4033,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'applyMaterializedEntriesRestores',
     applyMaterializedEntriesRestores,
   ],
+  [
+    'applyMaterializedPendingAcrossCalls',
+    applyMaterializedPendingAcrossCalls,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -4071,6 +4075,51 @@ async function applyMaterializedEntriesRestores(): Promise<void> {
   assert(
     readyOf(r).likes.some((l) => l.targetId === 'r1'),
     'unsynced like survives the rebuild',
+  );
+}
+
+// Staged rebuild (Review #46 round-5): a dependent that materializes
+// ahead of its parent rides the session's retained pending — the next
+// call re-folds it and lands it once the parent arrives, instead of
+// dropping it or holding the whole view in memory at once.
+async function applyMaterializedPendingAcrossCalls(): Promise<void> {
+  const r = rig(persisted({ recordings: [], likes: [] }));
+  await restoreOk(r);
+  const first = await r.session.applyMaterializedEntries([
+    {
+      kind: 'like',
+      recordId: likeRecordId('track', 'r-mat'),
+      fields: {
+        like: { entityKind: 'track', targetId: 'r-mat', likedAtMs: 9 },
+      },
+    },
+  ]);
+  assert(first.ok, 'first materialized call failed');
+  await pump();
+  assert(
+    !readyOf(r).likes.some((l) => l.targetId === 'r-mat'),
+    'dependent before parent lands nothing',
+  );
+  const sr = ref('itunes', 't-mat2');
+  const second = await r.session.applyMaterializedEntries([
+    {
+      kind: 'recording',
+      recordId: 'r-mat',
+      fields: { title: 'Mat Song', artist: 'M' },
+    },
+    {
+      kind: 'recordingSourceRef',
+      recordId: sourceRefRecordId('r-mat', sr),
+      fields: { ref: sr },
+    },
+  ]);
+  assert(second.ok, 'second materialized call failed');
+  await pump();
+  const like = readyOf(r).likes.find((l) => l.targetId === 'r-mat');
+  assertEqual(
+    like?.likedAtMs,
+    9,
+    'retained dependent lands once the parent arrives',
   );
 }
 

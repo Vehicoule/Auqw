@@ -591,35 +591,37 @@ export async function createSessionController(
   let unsubscribeApplied: () => void = () => {};
   const APPLY_RETRY_MAX = 3;
   const APPLY_RETRY_MS = 400;
+  const ACK_RETRY_MAX = 3;
+  const ACK_RETRY_MS = 800;
+  let ackRetries = 0;
   const reconcileMaterialized = async (): Promise<void> => {
-    // Accumulate the whole paged view BEFORE projecting: records sort
-    // by kind, so a dependent (like/playCount/playEvent) can page ahead
-    // of its recording — projecting per page would drop dependents whose
-    // parents haven't arrived (Review #46). The IPC stays byte-paged;
-    // the apply is one batch so parent/dependent land atomically.
-    const records: MaterializedRecord[] = [];
+    // Staged, not accumulated: each byte-bounded page applies on its
+    // own and records that can't materialize yet (a dependent paging
+    // ahead of its parent) ride the session's retained pending into
+    // the next page's fold — memory stays page-bounded while the
+    // cross-page ordering resolves itself (Review #46).
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
-      records.push(...(page.records as readonly MaterializedRecord[]));
+      if (page.records.length > 0) {
+        const applied = await session.applyMaterializedEntries(
+          page.records as readonly MaterializedRecord[],
+        );
+        if (!applied.ok) {
+          void log.write({
+            level: 'warn',
+            message: `sync reconcile failed: ${applied.error.kind}`,
+            atMs: clock.nowMs(),
+          });
+          return;
+        }
+        if (applied.value.rehydrateMedia) {
+          void rehydrateMedia(new CancellationSource().signal);
+        }
+      }
       if (page.nextOffset === null) {
-        break;
+        return;
       }
       offset = page.nextOffset;
-    }
-    if (records.length === 0) {
-      return;
-    }
-    const applied = await session.applyMaterializedEntries(records);
-    if (!applied.ok) {
-      void log.write({
-        level: 'warn',
-        message: `sync reconcile failed: ${applied.error.kind}`,
-        atMs: clock.nowMs(),
-      });
-      return;
-    }
-    if (applied.value.rehydrateMedia) {
-      void rehydrateMedia(new CancellationSource().signal);
     }
   };
   const drainApplied = async (): Promise<void> => {
@@ -673,23 +675,35 @@ export async function createSessionController(
             });
             return;
           }
+          if (applied.value.rehydrateMedia) {
+            // Remote rows rewrote the media sections — the owners hold
+            // their own snapshots. The commit already landed, so this
+            // runs regardless of how the durable ack fares below.
+            void rehydrateMedia(new CancellationSource().signal);
+          }
           // Commit landed — durable lines may go now. A failed ack
           // stops the drain: the file still holds the served prefix,
           // so the next page would just re-serve this one forever
-          // (Review #46). The next `sync:applied` push or restart
-          // re-arms and replays idempotently.
+          // (Review #46). One bounded delayed re-arm covers a
+          // transient rewrite failure without hot-looping a dead disk;
+          // a persistent one still waits for the next push/restart.
           const acked = await api.sync
             .ackApplied()
             .then(() => true)
             .catch(() => false);
           if (!acked) {
+            if (ackRetries < ACK_RETRY_MAX && !disposed) {
+              ackRetries += 1;
+              const delay = ACK_RETRY_MS * ackRetries;
+              setTimeout(() => {
+                if (!disposed) {
+                  void drainApplied().catch(() => undefined);
+                }
+              }, delay);
+            }
             return;
           }
-          if (applied.value.rehydrateMedia) {
-            // Remote rows rewrote the media sections — the owners hold
-            // their own snapshots and must not keep deleted rows.
-            void rehydrateMedia(new CancellationSource().signal);
-          }
+          ackRetries = 0;
         }
         if (batch.remaining === 0) {
           break;
