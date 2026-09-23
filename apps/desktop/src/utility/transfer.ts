@@ -148,6 +148,23 @@ async function writeAll(
   }
 }
 
+/**
+ * fs probe outcome: `null` only when the path is provably absent
+ * (ENOENT/ENOTDIR). Anything else is typed — a transient failure
+ * must never masquerade as absence: callers read a missing answer as
+ * "delete the ledger row" or "resume from zero", both destructive.
+ */
+function absentOrThrow(thrown: unknown): null {
+  const code = errorCode(thrown);
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return null;
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    throw shellError('permission-denied', 'path is not readable');
+  }
+  throw shellError('io-error', 'path could not be read');
+}
+
 /** Maps a thrown fs failure to a typed shell error — ENOSPC preserves its storage-full semantics. */
 function asIo(message: string, thrown: unknown): never {
   if (isShellError(thrown)) {
@@ -298,7 +315,7 @@ export function createTransferService(
     destPath: string,
     resumeAtBytes: number,
   ): Promise<void> {
-    const part = await stat(partAbs).catch(() => null);
+    const part = await stat(partAbs).catch(absentOrThrow);
     if (resumeAtBytes > 0) {
       if (part === null) {
         throw shellError(
@@ -522,16 +539,7 @@ export function createTransferService(
     // Only a genuinely-absent name reports exists:false — any other
     // stat failure would let DownloadManager read a live file as
     // missing and remove it with its ledger row.
-    const info = await stat(abs).catch((thrown) => {
-      const code = errorCode(thrown);
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return null;
-      }
-      if (code === 'EACCES' || code === 'EPERM') {
-        throw shellError('permission-denied', 'stat failed — not readable');
-      }
-      throw shellError('io-error', 'stat failed');
-    });
+    const info = await stat(abs).catch(absentOrThrow);
     if (info === null) {
       return { exists: false, bytes: null };
     }
@@ -599,6 +607,38 @@ export function createTransferService(
    * reaches a scan.
    */
   async function sweepOrphans(): Promise<number> {
+    let entries;
+    try {
+      entries = await readdir(dir());
+    } catch {
+      return 0;
+    }
+    // Resolve `.replace` backups before any publish work this boot —
+    // and before ANY ledger access: a live destination means the
+    // crashed publish landed and the backup is stale; a missing one
+    // means the incumbent was parked and never restored — put it
+    // back. Recovery depends only on the media dir, so an index
+    // outage must not leave recoverable bytes invisible as a missing
+    // destination (integrity init would then discard the row).
+    for (const name of entries) {
+      if (!name.endsWith(REPLACE_SUFFIX)) {
+        continue;
+      }
+      const backupAbs = join(dir(), name);
+      const baseAbs = join(dir(), name.slice(0, -REPLACE_SUFFIX.length));
+      try {
+        const base = await stat(baseAbs).catch(() => null);
+        if (base === null) {
+          await rename(backupAbs, baseAbs);
+        } else {
+          await rm(backupAbs, { force: true });
+        }
+      } catch {
+        // Best-effort — a stuck backup is retried next boot.
+      }
+    }
+    // `.part` orphans need the ledger: a transient index failure
+    // skips only deletion — the backup restore above already ran.
     const keep = new Set<string>();
     let db: DatabaseSync | null = null;
     try {
@@ -631,33 +671,6 @@ export function createTransferService(
           // resumable progress on a transient index failure.
           return 0;
         }
-      }
-    }
-    let entries;
-    try {
-      entries = await readdir(dir());
-    } catch {
-      return 0;
-    }
-    // Resolve `.replace` backups before any publish work this boot:
-    // a live destination means the crashed publish landed and the
-    // backup is stale; a missing one means the incumbent was parked
-    // and never restored — put it back.
-    for (const name of entries) {
-      if (!name.endsWith(REPLACE_SUFFIX)) {
-        continue;
-      }
-      const backupAbs = join(dir(), name);
-      const baseAbs = join(dir(), name.slice(0, -REPLACE_SUFFIX.length));
-      try {
-        const base = await stat(baseAbs).catch(() => null);
-        if (base === null) {
-          await rename(backupAbs, baseAbs);
-        } else {
-          await rm(backupAbs, { force: true });
-        }
-      } catch {
-        // Best-effort — a stuck backup is retried next boot.
       }
     }
     const cutoff = Date.now() - ORPHAN_MIN_AGE_MS;
@@ -710,21 +723,34 @@ export function createTransferService(
     let bytes = 0;
     let files = 0;
     let partials = 0;
+    let names: readonly string[];
     try {
-      for (const name of await readdir(dir())) {
-        const info = await stat(join(dir(), name)).catch(() => null);
-        if (info === null || !info.isFile()) {
-          continue;
-        }
-        bytes += info.size;
-        if (name.endsWith(PART_SUFFIX) || name.endsWith(REPLACE_SUFFIX)) {
-          partials += 1;
-        } else {
-          files += 1;
-        }
+      names = await readdir(dir());
+    } catch (thrown) {
+      const code = errorCode(thrown);
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // No dir yet — zeroed stats are the honest answer.
+        names = [];
+      } else if (code === 'EACCES' || code === 'EPERM') {
+        throw shellError(
+          'permission-denied',
+          'media dir is not readable',
+        );
+      } else {
+        throw shellError('io-error', 'media dir could not be read');
       }
-    } catch {
-      // No dir yet — zeroed stats are the honest answer.
+    }
+    for (const name of names) {
+      const info = await stat(join(dir(), name)).catch(absentOrThrow);
+      if (info === null || !info.isFile()) {
+        continue;
+      }
+      bytes += info.size;
+      if (name.endsWith(PART_SUFFIX) || name.endsWith(REPLACE_SUFFIX)) {
+        partials += 1;
+      } else {
+        files += 1;
+      }
     }
     let freeBytes: number | null = null;
     try {

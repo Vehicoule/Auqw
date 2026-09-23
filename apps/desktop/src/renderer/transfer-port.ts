@@ -178,14 +178,25 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     }
 
     async finalize(expected: string | null): Promise<Result<string>> {
-      const result = await raced(
-        api.transfer.finalize({ sinkId: this.#id, expected }),
-        this.#signal,
-      );
+      const call = api.transfer.finalize({ sinkId: this.#id, expected });
+      const result = await raced(call, this.#signal);
       this.#closed = true;
       this.#unsubscribe();
       if (result.t === 'cancelled') {
+        // Utility ops serialize per sink, so the signal-armed abort
+        // queued behind this finalize — once the shared teardown
+        // lands the publish attempt is settled either way, and its
+        // own outcome is authoritative: a published file reports
+        // success or the engine would redownload over a completed
+        // destination. Only a failed publish reports cancelled.
         await this.#afterTeardown();
+        const settled = await call.then(
+          (value) => ({ t: 'ok' as const, value }),
+          (thrown) => ({ t: 'failed' as const, thrown }),
+        );
+        if (settled.t === 'ok') {
+          return ok(settled.value.digest);
+        }
         return err(appError('cancelled', 'cancelled'));
       }
       if (result.t === 'failed') {

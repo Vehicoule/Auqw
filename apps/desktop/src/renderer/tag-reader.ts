@@ -72,12 +72,22 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
     }
     try {
       const picked = await api.dialog.pickFolder('Add a local folder');
+      const afterDialog = ifCancelled(signal);
+      if (afterDialog !== null) {
+        return afterDialog;
+      }
       if (picked === null) {
         return err(appError('no-result', 'picker cancelled'));
       }
       // `local:add` validates + realpaths the pick and mints the
-      // grant descriptor — the engine commits it on addFolder.
+      // grant descriptor — the engine commits it on addFolder. A
+      // cancel that landed during either await must not let the pick
+      // through: addFolder commits every successful result.
       const { picks } = await api.local.add({ paths: [picked] });
+      const afterAdd = ifCancelled(signal);
+      if (afterAdd !== null) {
+        return afterAdd;
+      }
       const first = picks[0];
       if (first === undefined || first.kind !== 'dir') {
         return err(
@@ -99,10 +109,18 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
     }
     try {
       const paths = await api.dialog.pickFiles('Add local files', true);
+      const afterDialog = ifCancelled(signal);
+      if (afterDialog !== null) {
+        return afterDialog;
+      }
       if (paths.length === 0) {
         return err(appError('no-result', 'picker cancelled'));
       }
       const { picks } = await api.local.add({ paths: [...paths] });
+      const afterAdd = ifCancelled(signal);
+      if (afterAdd !== null) {
+        return afterAdd;
+      }
       const folders = picks.map(toPick);
       for (const pick of folders) {
         staged.push(pick);
