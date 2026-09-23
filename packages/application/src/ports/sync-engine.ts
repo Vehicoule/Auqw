@@ -2,7 +2,7 @@ import type { CancellationSignal } from '../cancellation.ts';
 import type { Result } from '../errors.ts';
 
 /**
- * The merge engine the LAN transport drives. The transport owns the
+ * The merge-engine seam the LAN transport drives. The transport owns the
  * wire — framing, handshake, device registry, AEAD session — and hands
  * this port opaque delta *documents*: what a delta IS and how it merges
  * is the engine's domain (change-log merge per docs/specs/sync.md), not
@@ -15,7 +15,7 @@ import type { Result } from '../errors.ts';
  * the transport cancels it, letting the engine stop merge work nobody
  * will read. Optional so trivial engines can ignore it.
  */
-export interface SyncEngine {
+export interface SyncEnginePort {
   /**
    * Emit the delta document covering everything the engine knows after
    * `since`; an empty `since` means a full snapshot.

@@ -28,7 +28,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const PRELOAD = join(here, '../preload/index.cjs');
 const UTILITY = join(here, '../utility/index.cjs');
-const RENDERER = join(here, '../renderer/index.html');
+// The product UI is the default window; the Phase-2 dev harness stays
+// reachable byte-for-byte for the E2E skills behind AUQW_DEV_HARNESS=1
+// (read here in main only — the sandboxed renderer never sees env).
+const RENDERER =
+  process.env['AUQW_DEV_HARNESS'] === '1'
+    ? join(here, '../renderer/index.html')
+    : join(here, '../renderer/app.html');
 
 /** Latest persisted window state — recreated windows reopen where the user left them. */
 type StateRef = { current: WindowState };

@@ -4,7 +4,7 @@ import { networkInterfaces } from 'node:os';
 import {
   CancellationSource,
   type AppError,
-  type SyncEngine,
+  type SyncEnginePort,
 } from '@auqw/application';
 import {
   hasOnlyKeys,
@@ -104,7 +104,7 @@ export type SyncServiceDeps = {
    * The merge engine — absent until the engine leg lands; delta
    * channels answer typed 'unavailable', pairing still works.
    */
-  readonly engine?: SyncEngine;
+  readonly engine?: SyncEnginePort;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */

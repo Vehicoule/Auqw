@@ -13,7 +13,7 @@ import {
 import {
   ok,
   type Result,
-  type SyncEngine,
+  type SyncEnginePort,
 } from '@auqw/application';
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
@@ -166,7 +166,7 @@ async function pairingCode(service: SyncService): Promise<PairingPayload> {
 }
 
 /** Engine double: echoes since and records applied deltas. */
-function createEchoEngine(): SyncEngine & {
+function createEchoEngine(): SyncEnginePort & {
   applied: { delta: unknown; deviceId: string }[];
 } {
   const applied: { delta: unknown; deviceId: string }[] = [];

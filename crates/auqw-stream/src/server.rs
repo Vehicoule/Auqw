@@ -974,6 +974,32 @@ mod tests {
         (server, reg, url, info.handle, dir)
     }
 
+    /// Wait for the head fill to commit — the pump races the first
+    /// conn's attach: a demand or attached fill landing before the
+    /// head replies are spent pops a scripted `206` at the wrong
+    /// offset and the session dies `InvalidResponse` (`502`), while
+    /// the same request arriving after the head commits sees only
+    /// post-head script steps. `head_ready_ms` is stamped by the
+    /// commit that closes the head window.
+    fn head_ready(reg: &StreamRegistry, handle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if reg
+                .phase_marks(handle)
+                .unwrap_or_else(|e| panic!("marks: {e}"))
+                .head_ready_ms
+                .is_some()
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "head fill never covered head_bytes"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// The default script: the head fill fetches `chunk_bytes`-sized
     /// ranges — 8 replies of 128 B cover the whole 1024-byte resource.
     /// A reply larger than the request is a pump `InvalidResponse`.
@@ -1202,7 +1228,8 @@ mod tests {
         let info = reg
             .prepare(source(), Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
@@ -1236,7 +1263,8 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
@@ -1316,6 +1344,7 @@ mod tests {
         head_drained(&fetch, 8).await;
         // Conn B opens a range past the cached head and parks on the
         // hung fetch; conn A completes on cached bytes and ends.
+        head_ready(&reg, &info.handle);
         let (tx, rx) = std::sync::mpsc::channel();
         let b_url = url.clone();
         let b = thread::spawn(move || {
@@ -1385,7 +1414,8 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
@@ -1438,7 +1468,8 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
@@ -1499,10 +1530,12 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
+        head_ready(&reg, &info.handle);
         let r = http(&url, "GET", &[]);
         assert_eq!(r.status, 200);
         assert_eq!(r.body.len(), 1024, "full body must arrive before FIN");
@@ -1551,7 +1584,8 @@ mod tests {
         let info = reg
             .prepare(src, Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));
@@ -1610,7 +1644,8 @@ mod tests {
         let info = reg
             .prepare(source(), Arc::new(StaticRemint))
             .unwrap_or_else(|e| panic!("prepare: {e}"));
-        let server = StreamServer::start(reg).unwrap_or_else(|e| panic!("server: {e}"));
+        let server =
+            StreamServer::start(Arc::clone(&reg)).unwrap_or_else(|e| panic!("server: {e}"));
         let url = server
             .serve(&info.handle)
             .unwrap_or_else(|e| panic!("serve: {e}"));

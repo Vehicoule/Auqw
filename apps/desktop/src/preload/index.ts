@@ -7,6 +7,7 @@ import {
   isNetEvent,
   isPrepareOutcomePayload,
   isPreparedStreamPayload,
+  isRequestOutcomePayload,
   isStorageBeginResult,
   isStorageExecuteResult,
   isStorageQueryResult,
@@ -288,6 +289,10 @@ const api: AuqwApi = {
   },
   host: {
     plugins: () => invoke(CHANNELS.hostPlugins, undefined, isHostPluginsResult),
+    request: (args) =>
+      invoke(CHANNELS.hostRequest, args, isRequestOutcomePayload),
+    cancelRequest: (args) =>
+      invoke(CHANNELS.hostCancel, args, isUndefinedResult),
   },
   stream: {
     prepare: (args) =>
