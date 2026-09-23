@@ -34,15 +34,19 @@ export function fileURLToPath(uri: string): string {
 }
 
 export function pathToFileURL(absPath: string): { href: string } {
+  // Windows APIs hand back backslashes (`C:\Users\…`, `\\nas\…`) —
+  // normalize first or the drive colon encodes as %3A and the URL
+  // stops being a file URI anything can resolve.
+  const normalized = absPath.replace(/\\/g, '/');
   const encodeTail = (p: string): string =>
     p
       .split('/')
       .map((seg) => encodeURIComponent(seg))
       .join('/');
-  if (absPath.startsWith('//')) {
+  if (normalized.startsWith('//')) {
     // UNC root `//host/share` — the host rides as the URL hostname,
     // unencoded like the drive colon below.
-    const rest = absPath.slice(2);
+    const rest = normalized.slice(2);
     const slash = rest.indexOf('/');
     const host = slash === -1 ? rest : rest.slice(0, slash);
     const tail = slash === -1 ? '' : rest.slice(slash);
@@ -51,10 +55,10 @@ export function pathToFileURL(absPath: string): { href: string } {
   // A drive-qualified path keeps its colon literal — `C:/x` →
   // `file:///C:/x`, never `C%3A`.
   const drive =
-    absPath.length > 2 &&
-    WINDOWS_DRIVE.test(absPath.slice(0, 2)) &&
-    absPath[2] === '/';
-  const encoded = absPath
+    normalized.length > 2 &&
+    WINDOWS_DRIVE.test(normalized.slice(0, 2)) &&
+    normalized[2] === '/';
+  const encoded = normalized
     .split('/')
     .map((seg, i) => (i === 0 && drive ? seg : encodeURIComponent(seg)))
     .join('/');

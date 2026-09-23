@@ -32,6 +32,18 @@ export function run(): void {
     'file:///D:/x%20y',
     'drive round-trip is stable',
   );
+  // Windows returns `C:\…` from its own APIs — the encoder normalizes
+  // backslashes so the drive colon never reaches %3A.
+  assertEqual(
+    pathToFileURL('C:\\Music\\rips').href,
+    'file:///C:/Music/rips',
+    'backslash drive normalizes',
+  );
+  assertEqual(
+    pathToFileURL('\\\\nas\\share\\a.wav').href,
+    'file://nas/share/a.wav',
+    'backslash UNC normalizes',
+  );
 
   // UNC grants keep their host as the root.
   assertEqual(

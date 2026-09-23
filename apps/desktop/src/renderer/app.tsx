@@ -11,11 +11,13 @@ import {
   CancellationSource,
   LOCAL_PROVIDER,
   SearchSession,
+  isSyncDelta,
   previewImport,
 } from '@auqw/application';
 import type {
   AppError,
   AttemptTrace,
+  ChangeEntry,
   EntityPage,
   EntityRef,
   LyricsSheet,
@@ -857,10 +859,55 @@ function Main({
     void window.auqw.sync.trigger().then(syncRefresh);
   }, [syncRefresh]);
   const onExportDelta = useCallback(() => {
-    // '' is the honest full-snapshot cursor — a device-importable doc.
-    void window.auqw.sync.deltas({ since: '' }).then((result) => {
-      void navigator.clipboard.writeText(JSON.stringify(result.delta));
-    });
+    void (async () => {
+      // Large logs page over the wire — `more` means follow up with a
+      // cursor covering what the page shipped (exported seqs plus the
+      // exporter's known-absent claims), or the clipboard copy
+      // silently drops every later page.
+      const entries: ChangeEntry[] = [];
+      const skipped: Record<string, number[]> = {};
+      const covered: Record<string, number> = {};
+      let doc: unknown;
+      for (;;) {
+        const page = await window.auqw.sync.deltas({
+          since: JSON.stringify(covered),
+        });
+        doc = page.delta;
+        if (!isSyncDelta(doc)) {
+          return; // a malformed page ships nothing honest
+        }
+        let advanced = false;
+        for (const entry of doc.entries) {
+          if (typeof entry.seq !== 'number' || entry.seq < 0) {
+            return;
+          }
+          if (entry.seq > (covered[entry.deviceId] ?? -1)) {
+            covered[entry.deviceId] = entry.seq;
+            advanced = true;
+          }
+        }
+        entries.push(...doc.entries);
+        for (const [dev, seqs] of Object.entries(doc.skipped)) {
+          skipped[dev] = [...new Set([...(skipped[dev] ?? []), ...seqs])].sort(
+            (a, b) => a - b,
+          );
+          for (const seq of seqs) {
+            if (seq > (covered[dev] ?? -1)) {
+              covered[dev] = seq;
+              advanced = true;
+            }
+          }
+        }
+        // `more` with no new coverage would re-ask the same window —
+        // ship what the pages gave rather than spin.
+        if (!doc.more || !advanced) {
+          break;
+        }
+      }
+      await navigator.clipboard.writeText(
+        JSON.stringify({ ...doc, entries, skipped, more: false }),
+      );
+    })().catch(() => undefined);
   }, []);
   const onImportDelta = useCallback(() => {
     void navigator.clipboard
