@@ -218,7 +218,17 @@ function DownloadButton({
   readonly iconSize?: number | undefined;
 }) {
   if (download === null) {
-    return null;
+    // Surfaces without a download ledger show the affordance honestly
+    // disabled rather than hiding it (IconButton off when no onPress).
+    return (
+      <IconButton
+        icon="download"
+        size={size}
+        iconSize={iconSize}
+        color="var(--text-secondary)"
+        ariaLabel="download — not available yet"
+      />
+    );
   }
   return (
     <IconButton
@@ -361,7 +371,7 @@ export function StageModes({
                 </Text>
               )}
             </div>
-            {(download !== null || onAddToPlaylist !== undefined) && (
+            {(download !== null || onDownload !== undefined || onAddToPlaylist !== undefined) && (
               <div className="uw-stage__meta-actions">
                 <DownloadButton
                   download={download}
