@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auqw — omarchy shell · unified WCO</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* ===== omarchy tokens — three schemes ===== */
+  .t-dark{
+    --bg:#1a1b26; --bg-stage:#13141c; --bg-deep:#0e0e14; --bg-raise:#24283b;
+    --fg:#a9b1d6; --fg-bright:#c0caf5; --fg-muted:#828ab3;
+    --divider:#414868; --hair:rgba(169,177,214,.12);
+    --accent:#7aa2f7; --accent-soft:rgba(122,162,247,.15);
+    --sel:#292e42; --warn:#e0af68; --pink:#f7768e;
+    --fg08:rgba(169,177,214,.07); --fg18:rgba(169,177,214,.16);
+    --fg25:rgba(169,177,214,.25); --fg40:rgba(169,177,214,.40);
+    --glass:rgba(20,21,29,.55);
+  }
+  .t-light{
+    --bg:#f5f6fa; --bg-stage:#eceef4; --bg-deep:#dfe2ec; --bg-raise:#ffffff;
+    --fg:#343a52; --fg-bright:#222840; --fg-muted:#575d85;
+    --divider:#c4c8d8; --hair:rgba(52,58,82,.12);
+    --accent:#1a5ac8; --accent-soft:rgba(26,90,200,.14);
+    --sel:#d3d9f0; --warn:#8a6524; --pink:#b24a60;
+    --fg08:rgba(52,58,82,.05); --fg18:rgba(52,58,82,.12);
+    --fg25:rgba(52,58,82,.24); --fg40:rgba(52,58,82,.40);
+    --glass:rgba(255,255,255,.55);
+  }
+  .t-oled{
+    --bg:#000000; --bg-stage:#06060a; --bg-deep:#000000; --bg-raise:#12131a;
+    --fg:#a9b1d6; --fg-bright:#c0caf5; --fg-muted:#828ab3;
+    --divider:#23253a; --hair:rgba(169,177,214,.11);
+    --accent:#7aa2f7; --accent-soft:rgba(122,162,247,.15);
+    --sel:#1c1f31; --warn:#e0af68; --pink:#f7768e;
+    --fg08:rgba(169,177,214,.07); --fg18:rgba(169,177,214,.16);
+    --fg25:rgba(169,177,214,.25); --fg40:rgba(169,177,214,.40);
+    --glass:rgba(14,15,22,.6);
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--r-ctl:6px;--r-float:12px;--r-thumb:5px}
+  body{background:#08090f;color:#a9b1d6;font-family:'JetBrains Mono',ui-monospace,monospace;
+       font-size:12px;padding:48px 36px 96px;-webkit-font-smoothing:antialiased}
+  header,.rowset,.cap,.foot{max-width:1180px;margin:0 auto}
+  h1{font-weight:700;font-size:19px;color:#c0caf5;letter-spacing:-.01em}
+  h1 span{color:#565f89}
+  .sub{color:#565f89;margin-top:8px;font-size:11.5px;line-height:1.75;max-width:920px}
+  .sub b{color:#a9b1d6;font-weight:500}
+  .label{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#565f89;margin:0 0 10px}
+  .label em{color:#7aa2f7;font-style:normal;text-transform:none;letter-spacing:.02em}
+  .rowset{margin-top:48px}
+
+  svg.ic{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.6;
+         stroke-linecap:round;flex:none;display:block}
+  svg.ic.fill{fill:currentColor;stroke:none}
+
+  /* ===== window — no titlebar band; stage runs to the top edge ===== */
+  .win{width:1040px;border:1px solid var(--divider);background:var(--bg);
+       display:flex;margin-bottom:52px;overflow:hidden}
+  .win.t-oled{border-color:#33364f}
+  .chrome-mac{border-radius:10px}
+  .chrome-win{border-radius:8px}
+  .chrome-linux{border-radius:8px}
+
+  /* ----- stage: full-height recessed column ----- */
+  .stage{width:340px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
+         display:flex;flex-direction:column;padding:0 20px 16px}
+  .stage-top{height:56px;flex:none;display:flex;align-items:center;justify-content:center;
+             position:relative}
+  .tl{position:absolute;left:0;top:50%;transform:translateY(-50%);display:flex;gap:8px}
+  .tl i{width:12px;height:12px;border-radius:50%}
+  .tl i:nth-child(1){background:#ff5f57}.tl i:nth-child(2){background:#febc2e}.tl i:nth-child(3){background:#28c840}
+
+  .tb{display:flex;align-items:center;gap:7px;color:var(--fg-muted);font-size:10.5px;
+      padding:6px 10px;background:transparent;border:none;font-family:inherit;border-radius:var(--r-ctl)}
+  .tb:hover{background:var(--fg08);color:var(--fg)}
+  .tb .caret{width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;
+             transform:rotate(45deg) translate(-1px,-1px);opacity:.7}
+  .stage-top .side{position:absolute;right:0;top:50%;transform:translateY(-50%)}
+
+  .art{width:100%;aspect-ratio:1;position:relative;overflow:hidden;border-radius:var(--r-thumb)}
+  .art .cv{position:absolute;inset:0}
+  .cov-eye{background:radial-gradient(ellipse 68% 30% at 50% 46%,#dfe9ee 0%,#7fd8e8 16%,#b31fd8 32%,transparent 58%),#e00d0d}
+  .cov-petit{background:linear-gradient(180deg,#f4f2ee 0%,#e8e4de 60%,#d9d2c8 100%)}
+  .cov-drac{background:linear-gradient(160deg,#1b2b4a 0%,#0d1420 55%,#060a10 100%)}
+  .cov-mala{background:linear-gradient(150deg,#ff2e63 0%,#b3125e 55%,#3d0a2e 100%)}
+  .cov-rel{background:linear-gradient(200deg,#c9d4e8 0%,#5f7494 45%,#1a2030 100%)}
+  .cov-none{background:var(--bg-raise);display:flex;align-items:center;justify-content:center;color:var(--fg-muted)}
+
+  .t-meta{display:flex;align-items:flex-start;margin-top:16px;gap:8px}
+  .t-meta .tt{flex:1;min-width:0}
+  .t-meta h3{color:var(--fg-bright);font-size:16px;font-weight:700;letter-spacing:-.015em}
+  .t-meta .a{color:var(--fg);font-size:11.5px;margin-top:4px}
+  .t-meta .al{color:var(--fg-muted);font-size:10px;margin-top:3px}
+  .iconbt{display:flex;gap:2px}
+  .ib{width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+      color:var(--fg-muted);border-radius:var(--r-ctl)}
+  .ib:hover{background:var(--fg08);color:var(--fg)}
+  .ib.liked{color:var(--pink)}
+  .ib.liked .ic{fill:currentColor}
+
+  .wf{display:flex;align-items:center;justify-content:space-between;height:46px;margin-top:14px}
+  .wf i{flex:none;width:3px;background:var(--fg18);border-radius:1.5px}
+  .wf i.on{background:var(--accent)}
+  .wf-t{display:flex;justify-content:space-between;color:var(--fg-muted);font-size:10px;
+        margin-top:5px;font-variant-numeric:tabular-nums}
+
+  .transport{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px}
+  .tbt{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
+       color:var(--fg-muted);border:none;background:transparent;border-radius:var(--r-ctl)}
+  .tbt:hover{background:var(--fg08);color:var(--fg)}
+  .tbt.main{width:36px;height:36px;color:var(--fg)}
+  .tbt.play{width:48px;height:48px;background:var(--fg-bright);color:var(--bg);
+            border-radius:var(--r-ctl)}
+  .tbt.play:hover{background:var(--fg)}
+  .tbt.play .ic{width:18px;height:18px}
+  .vol{display:flex;align-items:center;gap:10px;margin-top:12px;color:var(--fg-muted)}
+  .vol .vl{flex:1;height:3px;background:var(--fg18);position:relative;border-radius:2px}
+  .vol .vl i{position:absolute;left:0;top:0;bottom:0;width:62%;background:var(--fg-muted);border-radius:2px}
+  .vol .vl u{position:absolute;left:62%;top:50%;transform:translate(-50%,-50%);
+             width:11px;height:11px;background:var(--fg);text-decoration:none;border-radius:50%}
+  .seg{margin-top:auto;display:flex;gap:2px;background:var(--fg08);padding:3px;
+       border-radius:var(--r-ctl)}
+  .seg span{display:flex;align-items:center;justify-content:center;gap:7px;flex:1;
+            padding:7px 0;font-size:10.5px;color:var(--fg-muted);border-radius:4px}
+  .seg span.on{background:var(--bg-raise);color:var(--fg-bright);font-weight:700}
+  .seg .ic{width:12px;height:12px}
+
+  /* lyrics mode — the stage swaps its body, chrome stays */
+  .lmeta{display:flex;align-items:flex-start;gap:8px;margin-top:4px}
+  .lmeta .tt{flex:1}
+  .lmeta h3{color:var(--fg-bright);font-size:15px;font-weight:700}
+  .lmeta .ls{color:var(--fg-muted);font-size:10px;margin-top:3px}
+  .lyr-wrap{flex:1;position:relative;overflow:hidden;margin:8px -6px 0}
+  .lyr{padding:0 6px}
+  .lyr div{padding:9px 8px;font-size:11.5px;color:var(--fg-muted);line-height:1.5;border-radius:var(--r-ctl)}
+  .lyr div.on{color:var(--accent);font-weight:700}
+  .lyr div:hover{background:var(--fg08);color:var(--fg)}
+  .lbar{position:absolute;right:0;top:8%;width:3px;height:38%;background:var(--fg18);border-radius:2px}
+
+  /* ----- world: toolbar is just the first row of the column ----- */
+  .world{flex:1;display:flex;flex-direction:column;min-width:0}
+  .toolbar{height:56px;flex:none;display:flex;align-items:center;gap:8px;
+           padding:0 16px 0 20px;position:relative}
+  .navtabs{position:absolute;left:50%;transform:translateX(-50%);
+           display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:var(--r-ctl)}
+  .navtabs span{display:flex;align-items:center;gap:7px;padding:5px 14px;font-size:11px;
+                color:var(--fg-muted);border-radius:4px}
+  .navtabs span:hover{color:var(--fg)}
+  .navtabs span.on{background:var(--bg-raise);color:var(--fg-bright);font-weight:700}
+  .navtabs .ic{width:13px;height:13px}
+  .tright{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .caps{display:flex;align-self:stretch;margin:-16px -16px -16px 4px;align-items:stretch}
+  .caps span{width:46px;display:flex;align-items:center;justify-content:center;color:var(--fg-muted)}
+  .caps span:hover{background:var(--fg08);color:var(--fg)}
+  .caps span.x:hover{background:#e81123;color:#fff}
+  .caps svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1.2}
+  .chrome-linux .caps span{width:38px;border-left:1px solid var(--hair)}
+
+  .wbody{flex:1;padding:12px 24px 24px;overflow:hidden}
+  /* search = icon in the toolbar that expands into a field (GTK pattern) */
+  .srch{display:flex;align-items:center;gap:8px;height:32px;width:32px;overflow:hidden;
+        color:var(--fg-muted);padding:0 8px;border-radius:var(--r-ctl);
+        transition:width .18s ease,background .15s}
+  .srch:hover{background:var(--fg08);color:var(--fg)}
+  .srch>.ic{flex:none}
+  .srch input{border:none;background:none;color:var(--fg);font:10.5px inherit;outline:none;
+              width:0;opacity:0;transition:opacity .12s}
+  .srch kbd{font:9.5px inherit;color:var(--fg-muted);border:1px solid var(--hair);
+            padding:2px 6px;border-radius:4px;background:var(--bg);opacity:0;transition:opacity .12s}
+  .srch:focus-within{width:216px;background:var(--fg08);color:var(--fg)}
+  .srch.open{flex:1;margin:0 6px;background:var(--fg08);color:var(--fg)}
+  .srch:focus-within input,.srch.open input{width:100%;opacity:1}
+  .srch:focus-within kbd,.srch.open kbd{opacity:1}
+
+  .greet{color:var(--fg-bright);font-size:20px;font-weight:700;letter-spacing:-.02em;margin-top:8px}
+  .greet-sub{color:var(--fg-muted);font-size:10.5px;margin:5px 0 4px}
+  .sech{display:flex;align-items:baseline;margin:22px 0 12px}
+  .sech h4{color:var(--fg-bright);font-size:12.5px;font-weight:700}
+  .sech .ss{color:var(--fg-muted);font-size:10px;margin-left:10px}
+  .sech .chev{margin-left:auto;display:flex;gap:6px}
+  .sech .chev span{display:flex;align-items:center;padding:4px 8px;color:var(--fg-muted);border-radius:var(--r-ctl)}
+  .sech .chev span:hover{background:var(--fg08);color:var(--fg)}
+  .sech .chev .ic{width:11px;height:11px}
+  .rail{display:flex;gap:16px;overflow:hidden}
+  .card{width:126px;flex:none}
+  .card .cv{width:126px;height:126px;border-radius:var(--r-thumb);position:relative;overflow:hidden}
+  .card .ct{font-size:11px;color:var(--fg);margin-top:8px;font-weight:500}
+  .card .ca{font-size:9.5px;color:var(--fg-muted);margin-top:2px}
+  .transport .lk{color:var(--fg-muted)}
+  .transport .lk.on{color:var(--pink)}
+  .transport .lk.on .ic{fill:currentColor}
+  .chips{display:flex;gap:6px;margin:6px 0 14px}
+  .chips span{font-size:10px;color:var(--fg-muted);padding:5px 12px;border-radius:20px;
+              background:var(--fg08)}
+  .chips span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
+  .artists{display:flex;gap:16px;margin-top:4px}
+  .artists figure{width:76px;text-align:center}
+  .artists .av{width:76px;height:76px;border-radius:50%;position:relative;overflow:hidden}
+  .artists figcaption{font-size:9.5px;color:var(--fg-muted);margin-top:6px}
+
+  /* library — collections 2×2 + ownable grid + artists */
+  .coll{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  .ctile{display:flex;align-items:center;gap:10px;background:var(--bg-raise);
+         border-radius:var(--r-ctl);padding:12px;color:var(--fg)}
+  .ctile:hover{background:var(--fg08)}
+  .ctile>.ic{color:var(--accent);width:15px;height:15px;flex:none}
+  .ctile .n{font-size:11px;font-weight:600}
+  .ctile small{display:block;color:var(--fg-muted);font-size:9px;font-weight:400;margin-top:2px}
+  .ctile .pb{margin-left:auto;width:28px;height:28px;border-radius:50%;flex:none;
+             display:flex;align-items:center;justify-content:center;
+             background:var(--fg08);color:var(--fg-muted)}
+  .ctile .pb .ic{width:11px;height:11px}
+  .ctile.hot .pb{background:var(--accent);color:var(--bg)}
+  .librow{display:flex;align-items:center;gap:10px;margin:22px 0 12px}
+  .librow h4{color:var(--fg-bright);font-size:12.5px;font-weight:700}
+  .librow .chips{margin:0}
+  .vt{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .vt .tb{padding:5px 8px}
+  .vt .tb .ic{width:13px;height:13px}
+  .vt .tb.on{background:var(--fg18);color:var(--fg-bright)}
+  .lgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .lcard .lcv{height:118px;border-radius:var(--r-thumb);position:relative;overflow:hidden}
+  .lcard .lcv .b{position:absolute;right:8px;bottom:8px;display:flex;align-items:center;gap:5px;
+                 background:var(--glass);backdrop-filter:blur(8px);color:var(--fg-bright);
+                 font-size:9px;padding:3px 8px;border-radius:10px}
+  .lcard .lt{font-size:11px;color:var(--fg);font-weight:600;margin-top:8px}
+  .lcard .lc{font-size:9.5px;color:var(--fg-muted);margin-top:2px}
+  .newpl{height:118px;border:1.5px dashed var(--fg25);border-radius:var(--r-thumb);
+         display:flex;flex-direction:column;align-items:center;justify-content:center;
+         gap:8px;color:var(--fg-muted)}
+  .newpl:hover{border-color:var(--accent);color:var(--accent)}
+  .newpl .ic{width:16px;height:16px}
+
+  /* unified track-row anatomy — same on desktop and mobile:
+     thumb (eq overlay when playing) · title + version · length · state · add */
+  .rows .r{display:flex;align-items:center;gap:12px;height:40px;padding:0 8px;font-size:11.5px;
+           border-radius:var(--r-ctl)}
+  .rows .r:hover{background:var(--fg08)}
+  .rows .r .thumb{width:28px;height:28px;flex:none;border-radius:4px;overflow:hidden;position:relative}
+  .rows .r .thumb .eqw{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+                       background:rgba(0,0,0,.45)}
+  .rows .r .t{flex:1;min-width:0;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rows .r .t em{color:var(--fg-muted);font-style:normal}
+  .rows .r .l{color:var(--fg-muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .rows .r .s{display:flex;gap:2px;color:var(--fg-muted)}
+  .rows .r .s .ib{width:26px;height:26px}
+  .rows .r .s .ib .ic{width:12.5px;height:12.5px}
+  .rows .r.play{background:var(--accent-soft)}
+  .rows .r.play .t{color:var(--accent);font-weight:700}
+  .rows .r.unav .t,.rows .r.unav .l{color:var(--fg-muted)}
+  .rows .r.unav .warn{color:var(--warn)}
+  .rows .r.unav .thumb{opacity:.4}
+
+  /* animated equalizer — the "organic icons" demo: bars, not a static glyph */
+  .eq{display:inline-flex;align-items:flex-end;gap:2px;height:11px}
+  .eq i{width:2.5px;background:var(--accent);border-radius:1px;
+        animation:eqb .9s ease-in-out infinite}
+  .eq i:nth-child(2){animation-delay:.25s}
+  .eq i:nth-child(3){animation-delay:.5s}
+  @keyframes eqb{0%,100%{height:30%}50%{height:100%}}
+
+  /* ===== adaptive scheme demo — user palettes mapped through the ramp ===== */
+  /* derived schemes: stage/deep/raise = luminance steps off bg; hairlines = fg alphas;
+     accent-soft = accent @~14%; text roles carried verbatim from the source palette */
+  .t-gruvbox{--bg:#282828;--bg-stage:#1d2021;--bg-deep:#141617;--bg-raise:#3c3836;
+    --fg:#ebdbb2;--fg-bright:#fbf1c7;--fg-muted:#928374;--divider:#3c3836;
+    --hair:rgba(235,219,178,.12);--accent:#83a598;--accent-soft:rgba(131,165,152,.15);
+    --warn:#fabd2f;--pink:#fb4934;--fg08:rgba(235,219,178,.07);--fg18:rgba(235,219,178,.16)}
+  .t-catppuccin{--bg:#1e1e2e;--bg-stage:#181825;--bg-deep:#11111b;--bg-raise:#313244;
+    --fg:#cdd6f4;--fg-bright:#eff1f5;--fg-muted:#a6adc8;--divider:#45475a;
+    --hair:rgba(205,214,244,.12);--accent:#89b4fa;--accent-soft:rgba(137,180,250,.15);
+    --warn:#f9e2af;--pink:#f38ba8;--fg08:rgba(205,214,244,.07);--fg18:rgba(205,214,244,.16)}
+  .t-rosepine{--bg:#191724;--bg-stage:#1f1d2e;--bg-deep:#13111c;--bg-raise:#26233a;
+    --fg:#e0def4;--fg-bright:#f4efff;--fg-muted:#908caa;--divider:#2a2738;
+    --hair:rgba(224,222,244,.12);--accent:#9ccfd8;--accent-soft:rgba(156,207,216,.15);
+    --warn:#f6c177;--pink:#eb6f92;--fg08:rgba(224,222,244,.07);--fg18:rgba(224,222,244,.16)}
+
+  .palset{display:flex;gap:18px;flex-wrap:wrap}
+  .pal{width:264px;border:1px solid var(--divider);border-radius:8px;overflow:hidden;
+       background:var(--bg);display:flex;flex-direction:column}
+  .pal .pt{height:32px;display:flex;align-items:center;gap:7px;padding:0 12px;
+           color:var(--fg-muted);font-size:9.5px;background:var(--bg)}
+  .pal .pt .ic{width:12px;height:12px}
+  .pal .pb{flex:1;display:flex;gap:12px;padding:14px;align-items:center;background:var(--bg-stage)}
+  .pal .pa{width:84px;height:84px;border-radius:var(--r-thumb);flex:none;position:relative;overflow:hidden}
+  .pal .pm{flex:1;min-width:0}
+  .pal .pm b{display:block;color:var(--fg-bright);font-size:11.5px}
+  .pal .pm span{display:block;color:var(--fg-muted);font-size:9px;margin-top:3px}
+  .pal .pwf{margin-top:10px;height:3px;background:var(--fg18);border-radius:2px;position:relative}
+  .pal .pwf i{position:absolute;left:0;top:0;bottom:0;width:54%;background:var(--accent);border-radius:2px}
+  .pal .ptr{display:flex;align-items:center;gap:9px;margin-top:11px;color:var(--fg-muted)}
+  .pal .ptr .ic{width:12px;height:12px}
+  .pal .ptr .pp{width:26px;height:26px;border-radius:var(--r-ctl);background:var(--fg-bright);
+                color:var(--bg);display:flex;align-items:center;justify-content:center}
+  .pal .ptr .pp .ic{width:11px;height:11px}
+  .pal .ptr .lk{color:var(--pink)} .pal .ptr .lk .ic{fill:currentColor}
+
+  /* ===== phones ===== */
+  .phones{display:flex;gap:22px;align-items:flex-end;flex-wrap:wrap}
+  .phone{width:264px;height:572px;border:1px solid var(--divider);background:var(--bg);
+         display:flex;flex-direction:column;position:relative;overflow:hidden}
+  .phone-android{border-radius:22px}
+  .phone-ios{border-radius:34px}
+  .status{height:28px;flex:none;display:flex;align-items:center;justify-content:space-between;
+          padding:0 16px;color:var(--fg-muted);font-size:10px}
+  .status .sigs{display:flex;align-items:center;gap:5px}
+  .status .sigs svg{height:9px;stroke:currentColor;fill:none;stroke-width:1.4}
+  .status .sigs .batt rect:first-child{fill:none}
+  .status .sigs .batt rect:nth-child(2){fill:currentColor;stroke:none}
+  .msearch{margin:2px 14px 10px;background:var(--fg08);padding:8px 11px;color:var(--fg-muted);
+           font-size:10.5px;display:flex;gap:8px;align-items:center;border-radius:20px}
+  .mrows{flex:1;overflow:hidden;padding:0 6px}
+  .mrows .r{display:flex;align-items:center;gap:11px;height:50px;padding:0 8px;border-radius:var(--r-ctl)}
+  .mrows .r .thumb{width:40px;height:40px;flex:none;border-radius:var(--r-thumb);overflow:hidden;position:relative}
+  .mrows .r .thumb .eqw{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+                        background:rgba(0,0,0,.45)}
+  .mrows .r .t{flex:1;min-width:0;font-size:11.5px;color:var(--fg);font-weight:500}
+  .mrows .r .t small{display:block;color:var(--fg-muted);font-size:9.5px;font-weight:400;margin-top:2px}
+  .mrows .r.play .t{color:var(--accent);font-weight:700}
+  .mrows .r.unav .t,.mrows .r.unav small{color:var(--fg-muted)}
+  .mrows .r.unav .warn{color:var(--warn)}
+  .mrows .r.unav .thumb{opacity:.4}
+  .mrows .r .s{display:flex;color:var(--fg-muted)}
+  .mrows .r .s .ib{width:30px;height:30px}
+  .mrows .r .s .ib .ic{width:14px;height:14px}
+
+  /* sheets: two auto margins split the free space — art | air | meta | air |
+     waveform+transport+seg anchored at the bottom */
+  .sheet .t-meta{margin-top:auto}
+  .sheet .wf{margin-top:auto}
+  .sheet .transport{gap:6px}
+  .sheet .seg{margin-top:12px}
+
+  /* OpenTune-style floating mini-player: art left (progress ring) · title/artist · like + resume */
+  .mini{flex:none;margin:0 10px 8px;background:var(--bg-raise);border:1px solid var(--hair);
+        border-radius:var(--r-float);position:relative}
+  .mini .in{display:flex;align-items:center;gap:10px;height:52px;padding:0 7px}
+  .mini .tw{width:48px;height:48px;flex:none;position:relative}
+  .mini .thumb{width:38px;height:38px;border-radius:7px;overflow:hidden;position:absolute;
+               top:50%;left:50%;transform:translate(-50%,-50%)}
+  .mini .ring{position:absolute;inset:0;pointer-events:none}
+  .mini .mt{flex:1;min-width:0}
+  .mini .mt b{display:block;font-weight:600;color:var(--fg-bright);font-size:11.5px;
+              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini .mt span{color:var(--fg-muted);font-size:9px}
+  .mini .ib{width:30px;height:30px}
+  .mini .mbt{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
+             border:none;color:var(--fg);background:transparent;border-radius:var(--r-ctl)}
+  .mini .mbt .ic{width:16px;height:16px}
+  /* M3E mini: resume is a tonal pill — iOS: a glass circle */
+  .phone-android .mini .mbt.play{background:var(--accent-soft);color:var(--accent);border-radius:12px}
+  .phone-ios .mini .mbt.play{border:1px solid var(--hair);border-radius:50%;
+                             background:rgba(255,255,255,.12);backdrop-filter:blur(8px)}
+  .mini.glass{background:var(--glass);backdrop-filter:blur(14px)}
+
+  /* M3E navbar (Android) — tall bar, wide pill indicator */
+  .natnav{flex:none;background:var(--bg-deep);display:flex;padding:8px 0 10px}
+  .natnav div{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+              color:var(--fg-muted);font-size:9.5px}
+  .natnav .icw{min-width:56px;height:30px;display:flex;align-items:center;justify-content:center;
+              border-radius:15px;padding:0 14px}
+  .natnav div.on{color:var(--accent);font-weight:700}
+  .natnav div.on .icw{background:var(--accent-soft)}
+  .gesture{height:14px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--bg-deep)}
+  .gesture i{width:96px;height:4px;border-radius:2px;background:var(--fg25)}
+  .phone-ios .gesture{background:transparent}
+
+  /* iOS liquid glass — floating translucent capsule over the content */
+  .glassnav{flex:none;margin:0 14px 8px;background:var(--glass);
+            border:1px solid var(--hair);border-radius:24px;
+            display:flex;padding:6px;backdrop-filter:blur(14px)}
+  .glassnav div{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;
+              color:var(--fg-muted);font-size:9px}
+  .glassnav .icw{min-width:44px;height:26px;display:flex;align-items:center;justify-content:center;
+              border-radius:13px;padding:0 10px}
+  .glassnav div.on{color:var(--accent);font-weight:700}
+  .glassnav div.on .icw{background:var(--accent-soft)}
+
+  /* expanded stage sheet */
+  .sheet{position:absolute;inset:0;background:var(--bg-stage);display:flex;flex-direction:column;
+         padding:0 20px 16px;z-index:4}
+  .grab{display:flex;flex-direction:column;align-items:center;padding-top:32px}
+  .grab i{width:36px;height:4px;border-radius:2px;background:var(--fg40)}
+  .sheet .art{margin-top:12px}
+  .sheet .transport{margin-top:12px}
+
+  /* platform media controls */
+  /* Android — M3 Expressive: filled accent squircle play, tonal prev/next */
+  .transport.m3e .tbt{border-radius:12px}
+  .transport.m3e .tbt.main{background:var(--bg-raise);border-radius:12px}
+  .transport.m3e .tbt.play{background:var(--accent);color:var(--bg);width:56px;height:44px;border-radius:16px}
+  .transport.m3e .tbt.play:hover{background:var(--accent)}
+  /* iOS — liquid glass: translucent circles */
+  .transport.ios .tbt{border-radius:50%}
+  .transport.ios .tbt.main{background:var(--glass);backdrop-filter:blur(10px);
+                           border:1px solid var(--hair);border-radius:50%}
+  .transport.ios .tbt.play{background:var(--glass);backdrop-filter:blur(10px);
+                           border:1px solid var(--hair);color:var(--fg-bright);
+                           width:56px;height:56px;border-radius:50%}
+
+  .arrow{display:flex;align-items:center;color:#565f89;font-size:9px;letter-spacing:.14em;
+         writing-mode:vertical-rl;align-self:center;text-transform:uppercase}
+  .cap{margin-top:12px;color:#565f89;font-size:10.5px;line-height:1.75}
+  .cap b{color:#a9b1d6;font-weight:500}
+  .foot{margin-top:48px;border-top:1px solid #414868;padding-top:16px;
+        color:#565f89;font-size:10px;line-height:1.8}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="4" height="14"/><rect x="13.5" y="5" width="4" height="14"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M17 5v14L7 12z"/><rect x="5" y="5" width="2" height="14"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M7 5v14l10-7z"/><rect x="17" y="5" width="2" height="14"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M4 6h4l9 12h5m0 0-3-3m3 3-3 3M4 18h4l2.5-3.3M14.5 9.3 16 7.5h5m0 0-3-3m3 3-3 3"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 4l3 3-3 3M20 7H7a3 3 0 0 0-3 3v1M7 20l-3-3 3-3M4 17h13a3 3 0 0 0 3-3v-1"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-8-4.7-8-10a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 20 10c0 5.3-8 10-8 10z"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M4 19h16"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5.5 5.5"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6l-5 4z"/><path d="M16.5 9a4.5 4.5 0 0 1 0 6"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="10"/><path d="M9 19h6"/></symbol>
+  <symbol id="i-side" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14"/><path d="M14 5v14"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8h-5v-5H9v5H4z"/></symbol>
+  <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></symbol>
+  <symbol id="i-lib" viewBox="0 0 24 24"><path d="M5 5v14M9.5 5v14M14 6l5 1.2L16 19l-5-1.2z"/></symbol>
+  <symbol id="i-sett" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M6 6l2 2m8 8 2 2M18 6l-2 2M8 16l-2 2"/></symbol>
+  <symbol id="i-listplus" viewBox="0 0 24 24"><path d="M4 6h12M4 11h12M4 16h7m4 0h6m-3-3v6"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="5" y="5" width="6" height="6" rx="1"/><rect x="13" y="5" width="6" height="6" rx="1"/><rect x="5" y="13" width="6" height="6" rx="1"/><rect x="13" y="13" width="6" height="6" rx="1"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24"><path d="M5 8h10M5 12h14M5 16h7"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 3 20h18zM12 10v4m0 3v.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3.5 2"/></symbol>
+  <symbol id="i-lyr" viewBox="0 0 24 24"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></symbol>
+  <symbol id="i-que" viewBox="0 0 24 24"><path d="M5 6h14M5 11h14M5 16h9"/><path d="M17 14v6m0 0-2-2m2 2 2-2"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s-6.5-5.6-6.5-10.4A6.5 6.5 0 0 1 12 4a6.5 6.5 0 0 1 6.5 6.6C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10.5" r="2.3"/></symbol>
+  <symbol id="i-chl" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+  <symbol id="i-chr" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+  <symbol id="c-min" viewBox="0 0 10 10"><path d="M1 5h8"/></symbol>
+  <symbol id="c-max" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></symbol>
+  <symbol id="c-x" viewBox="0 0 10 10"><path d="M1.5 1.5l7 7m0-7-7 7"/></symbol>
+</svg>
+
+<header>
+  <h1>auqw <span>/ omarchy shell — unified WCO · organic icons</span></h1>
+  <p class="sub">
+    No titlebar band — the Stage column runs to the top edge, output device <b>centered</b> in its
+    strip; the World's first row is its toolbar. Search is a full-width field inside World (it
+    can't collide with chrome). Track rows share <b>one anatomy across platforms</b>: artwork left
+    (live eq overlay when playing), title · version, length, state + add-to-playlist right.
+    Mobile is platform-native: M3E navbar + controls on Android, liquid glass on iOS.
+  </p>
+</header>
+
+<div class="rowset">
+
+  <!-- ================= DARK · macOS · home ================= -->
+  <div class="label">Desktop — tokyo-night · <em>macOS — lights left, output centered</em> · home</div>
+  <div class="win t-dark chrome-mac">
+    <div class="stage">
+      <div class="stage-top">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>macbook pro<span class="caret"></span></button>
+        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
+      </div>
+      <div class="art"><div class="cv cov-eye"></div></div>
+      <div class="t-meta">
+        <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+        <div class="iconbt">
+          <span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span>
+          <span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span>
+        </div>
+      </div>
+      <div class="wf" data-p="0.5"></div>
+      <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
+      <div class="transport">
+        <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
+        <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+      </div>
+      <div class="vol"><svg class="ic"><use href="#i-vol"/></svg><div class="vl"><i></i><u></u></div></div>
+      <div class="seg">
+        <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
+        <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
+        <span><svg class="ic"><use href="#i-que"/></svg>queue</span>
+      </div>
+    </div>
+    <div class="world">
+      <div class="toolbar">
+        <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌘K</kbd></div>
+        <div class="navtabs">
+          <span class="on"><svg class="ic"><use href="#i-home"/></svg>home</span>
+          <span><svg class="ic"><use href="#i-compass"/></svg>explore</span>
+          <span><svg class="ic"><use href="#i-lib"/></svg>library</span>
+        </div>
+        <div class="tright">
+          <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
+        </div>
+      </div>
+      <div class="wbody">
+        <div class="greet">good evening</div>
+        <div class="greet-sub">wednesday · 3 new releases in your library</div>
+        <div class="sech"><h4>jump back in</h4><span class="ss">pick up where you left off</span>
+          <span class="chev"><span><svg class="ic"><use href="#i-chl"/></svg></span><span><svg class="ic"><use href="#i-chr"/></svg></span></span></div>
+        <div class="rail">
+          <div class="card"><div class="cv cov-eye"></div><div class="ct">Self Aware</div><div class="ca">Temper City</div></div>
+          <div class="card"><div class="cv cov-petit"></div><div class="ct">Le Petit Pêcheur</div><div class="ca">Manon Lisa</div></div>
+          <div class="card"><div class="cv cov-drac"></div><div class="ct">Dracula</div><div class="ca">Tame Impala</div></div>
+          <div class="card"><div class="cv cov-mala"></div><div class="ct">Maladie</div><div class="ca">Mauvais Djo</div></div>
+          <div class="card"><div class="cv cov-rel"></div><div class="ct">New Religion</div><div class="ca">—</div></div>
+        </div>
+        <div class="sech"><h4>your playlists</h4><span class="ss">in your collection</span>
+          <span class="chev"><span><svg class="ic"><use href="#i-chl"/></svg></span><span><svg class="ic"><use href="#i-chr"/></svg></span></span></div>
+        <div class="rail">
+          <div class="card"><div class="cv cov-rel"></div><div class="ct">test</div><div class="ca">user playlist · 3</div></div>
+          <div class="card"><div class="cv cov-drac"></div><div class="ct">late night drives</div><div class="ca">album · tame impala</div></div>
+          <div class="card"><div class="cv cov-mala"></div><div class="ct">morning slow</div><div class="ca">user playlist · 28</div></div>
+          <div class="card"><div class="cv cov-petit"></div><div class="ct">french touch</div><div class="ca">user playlist · 41</div></div>
+          <div class="card"><div class="cv cov-eye"></div><div class="ct">static bloom</div><div class="ca">album · temper city</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= LIGHT · Windows · library ================= -->
+  <div class="label">Desktop — light · <em>Windows — caption buttons overlay the world</em> · library</div>
+  <div class="win t-light chrome-win">
+    <div class="stage">
+      <div class="stage-top">
+        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>speakers<span class="caret"></span></button>
+        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
+      </div>
+      <div class="art"><div class="cv cov-eye"></div></div>
+      <div class="t-meta">
+        <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+        <div class="iconbt">
+          <span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span>
+          <span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span>
+        </div>
+      </div>
+      <div class="wf" data-p="0.5"></div>
+      <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
+      <div class="transport">
+        <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
+        <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+      </div>
+      <div class="vol"><svg class="ic"><use href="#i-vol"/></svg><div class="vl"><i></i><u></u></div></div>
+      <div class="seg">
+        <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
+        <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
+        <span><svg class="ic"><use href="#i-que"/></svg>queue</span>
+      </div>
+    </div>
+    <div class="world">
+      <div class="toolbar">
+        <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌃K</kbd></div>
+        <div class="navtabs">
+          <span><svg class="ic"><use href="#i-home"/></svg>home</span>
+          <span><svg class="ic"><use href="#i-compass"/></svg>explore</span>
+          <span class="on"><svg class="ic"><use href="#i-lib"/></svg>library</span>
+        </div>
+        <div class="tright">
+          <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
+          <div class="caps">
+            <span><svg><use href="#c-min"/></svg></span>
+            <span><svg><use href="#c-max"/></svg></span>
+            <span class="x"><svg><use href="#c-x"/></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="wbody">
+        <div class="coll">
+          <div class="ctile hot"><svg class="ic"><use href="#i-heart"/></svg><div class="n">liked songs<small>16 tracks · 1 hr</small></div><span class="pb"><svg class="ic fill"><use href="#i-play"/></svg></span></div>
+          <div class="ctile"><svg class="ic"><use href="#i-dl"/></svg><div class="n">downloads<small>14 tracks · 54 MB</small></div><span class="pb"><svg class="ic fill"><use href="#i-play"/></svg></span></div>
+          <div class="ctile"><svg class="ic"><use href="#i-note"/></svg><div class="n">top 50<small>rotation</small></div><span class="pb"><svg class="ic fill"><use href="#i-play"/></svg></span></div>
+          <div class="ctile"><svg class="ic"><use href="#i-clock"/></svg><div class="n">history<small>1 320 tracks</small></div><span class="pb"><svg class="ic fill"><use href="#i-play"/></svg></span></div>
+        </div>
+        <div class="librow">
+          <h4>your library</h4>
+          <div class="chips"><span class="on">all</span><span>playlists</span><span>albums</span><span>artists</span><span>downloaded</span></div>
+          <div class="vt">
+            <button class="tb"><svg class="ic"><use href="#i-sort"/></svg></button>
+            <button class="tb on"><svg class="ic"><use href="#i-grid"/></svg></button>
+            <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
+          </div>
+        </div>
+        <div class="lgrid">
+          <div class="lcard"><div class="lcv"><div class="cv cov-rel" style="position:absolute;inset:0"></div><div class="b"><svg class="ic" style="width:9px;height:9px"><use href="#i-listplus"/></svg>3</div></div><div class="lt">test</div><div class="lc">user playlist · 3 tracks</div></div>
+          <div class="lcard"><div class="lcv"><div class="cv cov-drac" style="position:absolute;inset:0"></div><div class="b"><svg class="ic" style="width:9px;height:9px"><use href="#i-dl"/></svg>12</div></div><div class="lt">late night drives</div><div class="lc">album · tame impala</div></div>
+          <div class="lcard"><div class="lcv"><div class="cv cov-mala" style="position:absolute;inset:0"></div><div class="b"><svg class="ic" style="width:9px;height:9px"><use href="#i-listplus"/></svg>28</div></div><div class="lt">morning slow</div><div class="lc">user playlist · 28 tracks</div></div>
+          <div class="newpl"><svg class="ic"><use href="#i-listplus"/></svg>new playlist</div>
+        </div>
+        <div class="sech"><h4>followed artists</h4>
+          <span class="chev"><span><svg class="ic"><use href="#i-chl"/></svg></span><span><svg class="ic"><use href="#i-chr"/></svg></span></span></div>
+        <div class="artists">
+          <figure><div class="av cov-drac"></div><figcaption>tame impala</figcaption></figure>
+          <figure><div class="av cov-mala"></div><figcaption>mauvais djo</figcaption></figure>
+          <figure><div class="av cov-rel"></div><figcaption>manon lisa</figcaption></figure>
+        </div>
+        <div class="sech"><h4>recently added</h4><span class="ss">this week</span></div>
+        <div class="rows">
+          <div class="r"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div><span class="t">Static Bloom <em>· temper city</em></span><span class="l">2:44</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-petit" style="position:absolute;inset:0"></div></div><span class="t">Le Petit Pêcheur <em>· manon lisa</em></span><span class="l">3:41</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Borderline <em>· tame impala</em></span><span class="l">3:57</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= OLED · Linux · explore · stage=lyrics ================= -->
+  <div class="label">Desktop — oled · <em>Linux — caption buttons overlay the world</em> · explore · stage in lyrics mode</div>
+  <div class="win t-oled chrome-linux">
+    <div class="stage">
+      <div class="stage-top">
+        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>pipewire<span class="caret"></span></button>
+        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
+      </div>
+      <div class="lmeta">
+        <div class="tt"><h3>Self Aware</h3><div class="ls">Temper City · estimated timing</div></div>
+        <div class="iconbt">
+          <span class="ib"><svg class="ic"><use href="#i-pin"/></svg></span>
+        </div>
+      </div>
+      <div class="lyr-wrap">
+        <div class="lyr">
+          <div>(Oh)</div>
+          <div>(Oh)</div>
+          <div>No smoke with no fire</div>
+          <div>No silence if there's no sound</div>
+          <div>One way or another</div>
+          <div>You're going to put me out</div>
+          <div>Drinks flowing like water</div>
+          <div class="on">Too drunk to turn off the light</div>
+          <div>Stay under the covers</div>
+          <div>Who knows how we'll end the night</div>
+          <div>Just don't hang your hopes on me</div>
+          <div>I wanna feel something</div>
+          <div>God, you look so pretty</div>
+          <div>When you tell me that you love me</div>
+        </div>
+        <div class="lbar"></div>
+      </div>
+      <div class="seg">
+        <span><svg class="ic"><use href="#i-note"/></svg>player</span>
+        <span class="on"><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
+        <span><svg class="ic"><use href="#i-que"/></svg>queue</span>
+      </div>
+    </div>
+    <div class="world">
+      <div class="toolbar">
+        <div class="srch open"><svg class="ic"><use href="#i-search"/></svg><input value="roads portishead"><kbd>esc</kbd></div>
+        <div class="tright">
+          <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
+          <div class="caps">
+            <span><svg><use href="#c-min"/></svg></span>
+            <span><svg><use href="#c-max"/></svg></span>
+            <span class="x"><svg><use href="#c-x"/></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="wbody">
+        <div class="sech" style="margin-top:8px"><h4>results</h4><span class="ss">youtube-music · 14 matches</span></div>
+        <div class="rows">
+          <div class="r play"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div><div class="eqw"><span class="eq"><i></i><i></i><i></i></span></div></div><span class="t">Roads <em>· live at roskilde ’94</em></span><span class="l">4:57</span><span class="s"><span class="ib" style="color:var(--pink)"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Roads <em>· dummy</em></span><span class="l">5:02</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-rel" style="position:absolute;inset:0"></div></div><span class="t">Roads <em>· remastered</em></span><span class="l">5:03</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r unav"><div class="thumb"><div class="cv cov-none" style="position:absolute;inset:0"><svg class="ic"><use href="#i-note"/></svg></div></div><span class="t">Roads <em>· unavailable</em></span><span class="l">—</span><span class="s"><span class="ib warn"><svg class="ic"><use href="#i-warn"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-mala" style="position:absolute;inset:0"></div></div><span class="t">Glory Box <em>· dummy</em></span><span class="l">5:06</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-petit" style="position:absolute;inset:0"></div></div><span class="t">Sour Times <em>· dummy</em></span><span class="l">4:11</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Wandering Star <em>· live ’94</em></span><span class="l">4:55</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-rel" style="position:absolute;inset:0"></div></div><span class="t">Numb <em>· dummy</em></span><span class="l">3:54</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div><span class="t">Mysterons <em>· dummy</em></span><span class="l">5:02</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-mala" style="position:absolute;inset:0"></div></div><span class="t">Strangers <em>· dummy</em></span><span class="l">3:55</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-petit" style="position:absolute;inset:0"></div></div><span class="t">It Could Be Sweet <em>· dummy</em></span><span class="l">4:12</span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= MOBILE ================= -->
+<div class="rowset">
+  <div>
+    <div class="label">Mobile — <em>android: M3E navbar + controls</em> · <em>iOS: liquid glass</em> · floating mini-player → stage sheet</div>
+    <div class="phones">
+
+      <!-- Android / M3E — list -->
+      <div class="phone phone-android t-dark">
+        <div class="status"><span>21:44</span><span>auqw</span><span class="sigs"><svg width="14" viewBox="0 0 16 10"><path d="M1 9V7M5 9V5M9 9V3M13 9V1"/></svg><svg width="13" viewBox="0 0 16 10"><path d="M8 9l1-1M4.5 6.5a5 5 0 0 1 7 0M2 4a8.5 8.5 0 0 1 12 0"/></svg><svg class="batt" width="20" viewBox="0 0 24 10"><rect x="1" y="1.5" width="18" height="7" rx="1.5"/><rect x="2.5" y="3" width="12" height="4"/><path d="M22 3.5v3"/></svg></span></div>
+        <div class="msearch"><svg class="ic"><use href="#i-search"/></svg>search</div>
+        <div class="mrows">
+          <div class="r play"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div><div class="eqw"><span class="eq"><i></i><i></i><i></i></span></div></div><span class="t">Self Aware<small>temper city · 3:00</small></span><span class="s"><span class="ib" style="color:var(--pink)"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-petit" style="position:absolute;inset:0"></div></div><span class="t">Le Petit Pêcheur<small>manon lisa · 3:41</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Dracula<small>tame impala · 4:02</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-mala" style="position:absolute;inset:0"></div></div><span class="t">Maladie<small>mauvais djo · 2:58</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r unav"><div class="thumb"><div class="cv cov-none" style="position:absolute;inset:0"><svg class="ic"><use href="#i-note"/></svg></div></div><span class="t">Roads<small>unavailable</small></span><span class="s"><span class="ib warn"><svg class="ic"><use href="#i-warn"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-rel" style="position:absolute;inset:0"></div></div><span class="t">New Religion<small>3:31</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div><span class="t">Static Bloom<small>temper city · 2:44</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Borderline<small>tame impala · 3:57</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+        </div>
+        <div class="mini">
+          <div class="in">
+            <div class="tw">
+              <div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div>
+              <svg class="ring" viewBox="0 0 52 52" data-p="0.54">
+                <path class="track" fill="none" stroke="var(--fg18)" stroke-width="2.5"/>
+                <path class="wavyring" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="mt"><b>Self Aware</b><span>Temper City</span></div>
+            <span class="ib liked"><svg class="ic"><use href="#i-heart"/></svg></span>
+            <button class="mbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+          </div>
+        </div>
+        <div class="natnav">
+          <div class="on"><span class="icw"><svg class="ic"><use href="#i-home"/></svg></span>home</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-compass"/></svg></span>explore</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-lib"/></svg></span>library</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-sett"/></svg></span>settings</div>
+        </div>
+        <div class="gesture"><i></i></div>
+      </div>
+
+      <div class="arrow">tap / swipe-up ⟶</div>
+
+      <!-- Android sheet — M3E controls -->
+      <div class="phone phone-android t-dark">
+        <div class="sheet">
+          <div class="grab"><i></i></div>
+          <div class="art"><div class="cv cov-eye"></div></div>
+          <div class="t-meta">
+            <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+            <div class="iconbt"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></div>
+          </div>
+          <div class="wf" data-p="0.5"></div>
+          <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
+          <div class="transport m3e">
+            <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+            <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
+            <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+            <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
+            <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+          </div>
+          <div class="seg">
+            <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
+            <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
+            <span><svg class="ic"><use href="#i-que"/></svg>queue</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- iOS — list, liquid glass -->
+      <div class="phone phone-ios t-light">
+        <div class="status"><span>21:44</span><span>auqw</span><span class="sigs"><svg width="14" viewBox="0 0 16 10"><path d="M1 9V7M5 9V5M9 9V3M13 9V1"/></svg><svg width="13" viewBox="0 0 16 10"><path d="M8 9l1-1M4.5 6.5a5 5 0 0 1 7 0M2 4a8.5 8.5 0 0 1 12 0"/></svg><svg class="batt" width="20" viewBox="0 0 24 10"><rect x="1" y="1.5" width="18" height="7" rx="1.5"/><rect x="2.5" y="3" width="12" height="4"/><path d="M22 3.5v3"/></svg></span></div>
+        <div class="msearch"><svg class="ic"><use href="#i-search"/></svg>search</div>
+        <div class="mrows">
+          <div class="r play"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div><div class="eqw"><span class="eq"><i></i><i></i><i></i></span></div></div><span class="t">Self Aware<small>temper city · 3:00</small></span><span class="s"><span class="ib" style="color:var(--pink)"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-petit" style="position:absolute;inset:0"></div></div><span class="t">Le Petit Pêcheur<small>manon lisa · 3:41</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Dracula<small>tame impala · 4:02</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-mala" style="position:absolute;inset:0"></div></div><span class="t">Maladie<small>mauvais djo · 2:58</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r unav"><div class="thumb"><div class="cv cov-none" style="position:absolute;inset:0"><svg class="ic"><use href="#i-note"/></svg></div></div><span class="t">Roads<small>unavailable</small></span><span class="s"><span class="ib warn"><svg class="ic"><use href="#i-warn"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-rel" style="position:absolute;inset:0"></div></div><span class="t">New Religion<small>3:31</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div><span class="t">Static Bloom<small>temper city · 2:44</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+          <div class="r"><div class="thumb"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div><span class="t">Borderline<small>tame impala · 3:57</small></span><span class="s"><span class="ib"><svg class="ic"><use href="#i-heart"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></span></div>
+        </div>
+        <div class="mini glass">
+          <div class="in">
+            <div class="tw">
+              <div class="thumb"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div>
+              <svg class="ring" viewBox="0 0 52 52" data-p="0.54">
+                <path class="track" fill="none" stroke="var(--fg18)" stroke-width="1.5"/>
+                <path class="arc" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="mt"><b>Self Aware</b><span>Temper City</span></div>
+            <span class="ib liked"><svg class="ic"><use href="#i-heart"/></svg></span>
+            <button class="mbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+          </div>
+        </div>
+        <div class="glassnav">
+          <div class="on"><span class="icw"><svg class="ic"><use href="#i-home"/></svg></span>home</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-compass"/></svg></span>explore</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-lib"/></svg></span>library</div>
+          <div><span class="icw"><svg class="ic"><use href="#i-sett"/></svg></span>settings</div>
+        </div>
+        <div class="gesture"><i></i></div>
+      </div>
+
+      <div class="arrow">tap / swipe-up ⟶</div>
+
+      <!-- iOS sheet — liquid glass controls -->
+      <div class="phone phone-ios t-dark">
+        <div class="sheet">
+          <div class="grab"><i></i></div>
+          <div class="art"><div class="cv cov-eye"></div></div>
+          <div class="t-meta">
+            <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+            <div class="iconbt"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></div>
+          </div>
+          <div class="wf" data-p="0.5"></div>
+          <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
+          <div class="transport ios">
+            <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+            <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
+            <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+            <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
+            <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+          </div>
+          <div class="seg">
+            <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
+            <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
+            <span><svg class="ic"><use href="#i-que"/></svg>queue</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">
+      One row anatomy everywhere — <b>thumb (eq overlay when playing) · title · version · length ·
+      state · add</b>. Mini-player is OpenTune-style: artwork left hugged by a <b>squared progress
+      ring</b> (wavy M3E outline on Android, thin arc on iOS — artwork stays square), <b>like +
+      resume</b> right, swipe sideways to skip, tap/swipe-up to open. Media controls go platform-native: <b>M3E on Android</b>
+      (filled accent squircle play, tonal prev/next) vs <b>liquid glass on iOS</b> (translucent
+      circles, real blur — OS chrome, not app surface). Navbars: M3 Expressive bar vs floating
+      glass capsule; settings is the 4th tab.
+    </div>
+  </div>
+</div>
+
+<!-- ================= ADAPTIVE SCHEME ================= -->
+<div class="rowset">
+  <div>
+    <div class="label">Adaptive scheme — <em>user palette → auqw ramp</em> · deferred, post-release</div>
+    <div class="palset">
+      <div class="pal t-gruvbox">
+        <div class="pt"><svg class="ic"><use href="#i-out"/></svg>gruvbox · colors.toml</div>
+        <div class="pb">
+          <div class="pa"><div class="cv cov-eye" style="position:absolute;inset:0"></div></div>
+          <div class="pm">
+            <b>Self Aware</b><span>Temper City · 2024</span>
+            <div class="pwf"><i></i></div>
+            <div class="ptr">
+              <span class="lk"><svg class="ic"><use href="#i-heart"/></svg></span>
+              <svg class="ic fill"><use href="#i-prev"/></svg>
+              <span class="pp"><svg class="ic fill"><use href="#i-pause"/></svg></span>
+              <svg class="ic fill"><use href="#i-next"/></svg>
+              <svg class="ic"><use href="#i-repeat"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pal t-catppuccin">
+        <div class="pt"><svg class="ic"><use href="#i-out"/></svg>catppuccin mocha · colors.toml</div>
+        <div class="pb">
+          <div class="pa"><div class="cv cov-drac" style="position:absolute;inset:0"></div></div>
+          <div class="pm">
+            <b>Dracula</b><span>Tame Impala · 2025</span>
+            <div class="pwf"><i></i></div>
+            <div class="ptr">
+              <svg class="ic"><use href="#i-heart"/></svg>
+              <svg class="ic fill"><use href="#i-prev"/></svg>
+              <span class="pp"><svg class="ic fill"><use href="#i-pause"/></svg></span>
+              <svg class="ic fill"><use href="#i-next"/></svg>
+              <svg class="ic"><use href="#i-repeat"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pal t-rosepine">
+        <div class="pt"><svg class="ic"><use href="#i-out"/></svg>rosé pine · colors.toml</div>
+        <div class="pb">
+          <div class="pa"><div class="cv cov-mala" style="position:absolute;inset:0"></div></div>
+          <div class="pm">
+            <b>Maladie</b><span>Mauvais Djo · 2024</span>
+            <div class="pwf"><i></i></div>
+            <div class="ptr">
+              <svg class="ic"><use href="#i-heart"/></svg>
+              <svg class="ic fill"><use href="#i-prev"/></svg>
+              <span class="pp"><svg class="ic fill"><use href="#i-pause"/></svg></span>
+              <svg class="ic fill"><use href="#i-next"/></svg>
+              <svg class="ic"><use href="#i-repeat"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">
+      Same components, different source palettes — each card is an omarchy <b>colors.toml</b>
+      mapped through the palette→ramp generator: <b>stage/deep/raise</b> = luminance steps off bg,
+      hairlines = fg alphas, accent-soft = accent @~14%, text roles verbatim from the source.
+      A contrast guard nudges any derived role under 4.5:1 toward the source, else falls back to a
+      built-in scheme. Sources per platform: omarchy colors.toml · KDE kdeglobals · portal/OS
+      accent (GNOME 47+, Windows, macOS) · Material You on Android.
+    </div>
+  </div>
+</div>
+
+<div class="foot">
+  WCO — <code>titleBarStyle: 'hidden'</code> + <code>titleBarOverlay</code> themed per scheme.
+  Stage top strip (56 px, same line as the toolbar) centers the output-device pill; macOS
+  lights pin to its left, the sidebar-collapse button to its right. World toolbar =
+  search icon · centered nav tabs · menu · (win/linux caption buttons). Search is the GTK pattern: the icon expands into a field — when open it takes the
+  toolbar's width and the nav tabs step aside (see the OLED frame), so nothing ever overlaps.
+  <br><br>
+  library — collections grid (liked · downloads · top 50 · history, play affordance on each) →
+  your library (filter chips + sort + grid/list toggle + new-playlist card) → followed artists →
+  recently added (shared row anatomy).
+  Own design in the same language — not the GTK page.
+  <br><br>
+  Stage modes — the segmented switch swaps the body: <b>player</b> (art → meta → waveform →
+  transport → volume) / <b>lyrics</b> (title + sync state + scrollable lines, active in accent,
+  estimated timing labeled honestly) / <b>queue</b>. Same chrome on mobile's expanded sheet.
+  <br><br>
+  icons — custom-rendered, motion by contract: eq bars on the playing thumb (live here), heart
+  fill-in, play⇄pause morph, rotate (sync), bounce (like). Radius ladder: frames 0–8 (per OS) ·
+  controls 6 · floating 12 · thumbs 5 · OS pills full. Accent #7aa2f7 = active/progress only;
+  play = solid fg-bright on desktop; liked = pink.
+</div>
+
+<script>
+const PAT=[14,24,38,52,34,62,44,28,42,68,52,36,26,40,58,72,54,40,30,44,62,50,36,24,38,56,64,44,30,18];
+document.querySelectorAll('.wf').forEach(el=>{
+  const p=parseFloat(el.dataset.p||'0.5');
+  PAT.forEach((h,i)=>{
+    const b=document.createElement('i');
+    b.style.height=h+'%';
+    if(i/PAT.length<p) b.className='on';
+    el.appendChild(b);
+  });
+});
+
+/* squared progress rings hugging the artwork — a rounded-rect path, not a circle.
+   Android: the same path displaced along its normals by a sine wave (M3E wavy).
+   iOS: the clean squared arc. Progress starts top-center, sweeps clockwise. */
+const SQ='M26 3 L38 3 Q49 3 49 14 L49 38 Q49 49 38 49 L14 49 Q3 49 3 38 L3 14 Q3 3 14 3 Z';
+const NS='http://www.w3.org/2000/svg';
+document.querySelectorAll('.ring').forEach(svg=>{
+  const p=parseFloat(svg.dataset.p||'0.5');
+  const tmp=document.createElementNS(NS,'path');
+  tmp.setAttribute('d',SQ);
+  const L=tmp.getTotalLength();
+  const track=svg.querySelector('.track');
+  if(track) track.setAttribute('d',SQ);
+  const wavy=svg.querySelector('.wavyring');
+  if(wavy){
+    const amp=1.2, waves=10, n=160; let d='';
+    for(let i=0;i<=n;i++){
+      const s=i/n*L;
+      const pt=tmp.getPointAtLength(s);
+      const a=tmp.getPointAtLength(Math.min(s+0.8,L)), b=tmp.getPointAtLength(Math.max(s-0.8,0));
+      let tx=a.x-b.x, ty=a.y-b.y; const m=Math.hypot(tx,ty)||1;
+      const off=amp*Math.sin(s/L*2*Math.PI*waves);
+      d+=(i?'L':'M')+(pt.x-ty/m*off).toFixed(2)+' '+(pt.y+tx/m*off).toFixed(2);
+    }
+    wavy.setAttribute('d',d);
+    const wl=wavy.getTotalLength();
+    wavy.setAttribute('stroke-dasharray',`${p*wl} ${wl}`);
+  }
+  const arc=svg.querySelector('.arc');
+  if(arc){ arc.setAttribute('d',SQ); arc.setAttribute('stroke-dasharray',`${p*L} ${L}`); }
+});
+</script>
+</body>
+</html>
