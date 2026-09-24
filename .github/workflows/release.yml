@@ -46,6 +46,18 @@ jobs:
           # Same-org public repos read fine under GITHUB_TOKEN; a
           # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
           token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      # Git for Windows checks out text files CRLF — sync-plugins then
+      # hashes manifest bytes that no longer match provenance. The repo
+      # .gitattributes pins LF going forward; renormalize this checkout
+      # until the plugins repo carries its own .gitattributes too.
+      - name: LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          for repo in auqw auqw-plugins; do
+            git -C "$repo" config core.autocrlf false
+            git -C "$repo" rm --cached -r -q .
+            git -C "$repo" reset --hard -q HEAD
+          done
       # Pinned rustup over a toolchain action — one less node-runtime
       # dep, identical result.
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0

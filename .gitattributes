@@ -1,0 +1,6 @@
+# Every text file checks out LF on every platform. Git-for-Windows
+# defaults core.autocrlf=true, which rewrites text files to CRLF in the
+# working tree — tooling that hashes raw file bytes (sync-plugins'
+# manifest/provenance digests) then mismatches. Keep the working tree
+# byte-identical everywhere.
+* text=auto eol=lf
