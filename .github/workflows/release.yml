@@ -141,7 +141,9 @@ jobs:
       # Alpha signing key lives in repo secrets — decoded to a runner
       # temp file, never committed. A release must never silently ship
       # debug-signed: missing secrets fail the job (the plugin's no-env
-      # debug fallback is for local builds only).
+      # debug fallback is for local builds only). Only the keystore
+      # *path* enters shared env — passwords stay step-scoped so later
+      # build scripts can't read them.
       - name: alpha signing key
         env:
           AUQW_ALPHA_KEYSTORE_B64: ${{ secrets.AUQW_ALPHA_KEYSTORE_B64 }}
@@ -155,11 +157,7 @@ jobs:
             exit 1
           fi
           echo "$AUQW_ALPHA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/alpha.keystore"
-          {
-            echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore"
-            echo "AUQW_ALPHA_STORE_PASSWORD=$AUQW_ALPHA_STORE_PASSWORD"
-            echo "AUQW_ALPHA_KEY_PASSWORD=$AUQW_ALPHA_KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
+          echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore" >> "$GITHUB_ENV"
       - name: android inputs (bindings + plugins)
         working-directory: auqw
         run: |
@@ -175,11 +173,13 @@ jobs:
           pnpm --dir apps/mobile exec expo prebuild --platform android
       - name: build release APK
         working-directory: auqw/apps/mobile
-        # assembleRelease embeds the JS bundle — the APK is standalone
-        # (a debug APK is a dev client that needs Metro on the device).
-        # Signing: the with-alpha-signing config plugin points release
-        # at the secret-decoded keystore → one identity across alpha
-        # builds (debug signing when the secrets are absent).
+        # Passwords only here — step-scoped so the bindings/plugin steps
+        # above never see them. assembleRelease embeds the JS bundle —
+        # the APK is standalone (a debug APK is a dev client that needs
+        # Metro on the device).
+        env:
+          AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
+          AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
         run: |
           cd android && ./gradlew assembleRelease
           cd .. && mv \

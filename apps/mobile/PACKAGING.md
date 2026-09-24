@@ -13,11 +13,12 @@ gitignored). **Alpha already signs**: `plugins/with-alpha-signing.cjs`
 injects `signingConfigs.alpha` when `AUQW_ALPHA_KEYSTORE_FILE` is set —
 the release workflow decodes the keystore from the
 `AUQW_ALPHA_KEYSTORE_B64` repo secret (credentials never enter the
-repo; missing secrets fall back to debug signing) and repoints the
-release buildType — shipping `assembleRelease` APKs under one
-consistent alpha identity. What stays Open below is only the
-post-alpha signing story (real upload key, distribution channel). iOS
-is post-release —
+repo, passwords stay step-scoped; missing secrets *fail the release
+job* rather than ship a debug-signed APK — only local builds without
+env fall back to debug signing) and repoints the release buildType —
+shipping `assembleRelease` APKs under one consistent alpha identity.
+What stays Open below is only the post-alpha signing story (real
+upload key, distribution channel). iOS is post-release —
 the provisional `expo-audio` path stays until the native seam lands,
 and App Store signing needs an Apple Developer account anyway; not
 covered here.
