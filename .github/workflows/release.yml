@@ -182,13 +182,16 @@ jobs:
           AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
         run: |
           cd android && ./gradlew assembleRelease
-          cd .. && mv \
-            android/app/build/outputs/apk/release/app-release.apk \
-            "auqw-${VERSION#v}-android-release.apk"
+          cd .. && for apk in android/app/build/outputs/apk/release/app-*-release.apk; do
+            name=$(basename "$apk")
+            abi=${name#app-}; abi=${abi%-release.apk}
+            mv "$apk" "auqw-${VERSION#v}-android-${abi}.apk"
+          done
+          ls -la auqw-*-android-*.apk
       - uses: actions/upload-artifact@v7
         with:
           name: android-packages
-          path: auqw/apps/mobile/auqw-*-android-release.apk
+          path: auqw/apps/mobile/auqw-*-android-*.apk
 
   release:
     needs: [desktop, android]
