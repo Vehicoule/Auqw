@@ -174,6 +174,45 @@ export async function run(): Promise<void> {
   assertEqual(recovered.body['poToken'], 'tok-back');
   await flaky.close();
 
+  // A stale session is disposed the moment its reuse horizon passes,
+  // BEFORE the replacement build runs — a failed refresh must not
+  // keep the expired session's interpreter timers firing.
+  let staleDispose = 0;
+  let staleBuilds = 0;
+  const stale = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: async (): Promise<PotSession> => {
+      staleBuilds += 1;
+      if (staleBuilds === 1) {
+        return {
+          mint: async () => 'tok-old',
+          expiresAtMs: now.ms + 60_000,
+          dispose: () => {
+            staleDispose += 1;
+          },
+        };
+      }
+      throw new Error('youtube still down');
+    },
+  });
+  const sport = await stale.bind();
+  assert(sport !== null);
+  const sbase = `http://127.0.0.1:${sport}`;
+  assertEqual(
+    (await post(sbase, JSON.stringify({ content_binding: 'x' }))).status,
+    200,
+  );
+  // Past the horizon; the rebuild fails — the stale session must
+  // already be gone, not retained until a later success.
+  now.ms += 61_000;
+  assertEqual(
+    (await post(sbase, JSON.stringify({ content_binding: 'x' }))).status,
+    503,
+  );
+  assertEqual(staleDispose, 1, 'stale session leaked through failed refresh');
+  await stale.close();
+
   // A mint-time failure drops the session — the next mint rebuilds.
   let dropBuilds = 0;
   const dropper = createPotService({

@@ -1,13 +1,28 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fork } from 'node:child_process';
+import { fork, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { assert, assertEqual } from '@auqw/application/testing';
 import {
   createProcessMinter,
   HttpError,
   wireError,
 } from './pot-minter-engine.ts';
+
+/** A ChildProcess stand-in — drives the supersede ordering directly. */
+function fakeProc(): ChildProcess & { sent: unknown[] } {
+  const emitter = new EventEmitter();
+  const sent: unknown[] = [];
+  const proc = emitter as unknown as ChildProcess & { sent: unknown[] };
+  proc.sent = sent;
+  proc.send = ((msg: unknown) => {
+    sent.push(msg);
+    return true;
+  }) as ChildProcess['send'];
+  proc.kill = () => true;
+  return proc;
+}
 
 /**
  * The IPC transport against a real forked stub child (a .mjs script
@@ -93,6 +108,48 @@ export async function run(): Promise<void> {
     } finally {
       rmSync(deadDir, { recursive: true, force: true });
     }
+
+    // A superseded child's late 'exit' must not reject pendings on
+    // the replacement: A errors → B spawns → A exits → B's request
+    // still resolves off B's own reply.
+    const procs: (ChildProcess & { sent: unknown[] })[] = [];
+    const gen = createProcessMinter({
+      childModule: stub,
+      spawn: () => {
+        const proc = fakeProc();
+        procs.push(proc);
+        return proc;
+      },
+    });
+    // Spawn is lazy — the first request creates A.
+    const firstBuild = gen.buildSession();
+    const first = procs[0];
+    assert(first !== undefined, 'first child not spawned');
+    const firstReq = first.sent[0] as { id: number };
+    first.emit('message', {
+      id: firstReq.id,
+      ok: true,
+      value: { sessionId: 1, expiresAtMs: 1 },
+    });
+    await firstBuild;
+    // A's 'error' retires it; the next request spawns B.
+    first.emit('error', new Error('ipc hiccup'));
+    const pending = gen.buildSession();
+    assert(procs.length === 2, 'replacement child not spawned');
+    const second = procs[1];
+    assert(second !== undefined, 'second child missing');
+    const req = second.sent[0] as { id: number; op: string };
+    // Now A's exit lands — under the old shared failAll it would
+    // have rejected B's pending request.
+    first.emit('exit');
+    second.emit('message', {
+      id: req.id,
+      ok: true,
+      value: { sessionId: 7, expiresAtMs: 9999 },
+    });
+    const recovered = await pending;
+    assertEqual(recovered.expiresAtMs, 9999);
+    await gen.close();
 
     // wireError passes HttpError fields through; foreign exceptions
     // collapse to the generic line (no upstream material crossing).

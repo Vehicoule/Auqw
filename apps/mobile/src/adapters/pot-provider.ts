@@ -2,10 +2,12 @@ import { parseEndpoint } from '@auqw/application';
 
 /**
  * Pick the paired desktop's bundled POT provider URL from a set of
- * SyncPeer records (`pot` is `host:port`). Most recently seen peer
- * wins; a missing/stale/corrupt field degrades to undefined — the
- * caller decides the fallback (env override, then the anonymous
- * resolve ladder).
+ * SyncPeer records (`pot` is `host:port`). The most recently seen
+ * peer THAT CARRIES a pot wins — a newer peer without `pot` can't
+ * mint and must not suppress an older peer that can; a
+ * missing/stale/corrupt field degrades to undefined — the caller
+ * decides the fallback (env override, then the anonymous resolve
+ * ladder).
  *
  * Pure and native-free on purpose: the unit-test graph resolves
  * this module on bare node, where the SecureStore adapter's expo

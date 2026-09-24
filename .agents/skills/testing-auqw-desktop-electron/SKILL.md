@@ -185,7 +185,6 @@ contains `dist/electron` — including one that later launches electron with
 env vars on the same line. Write launcher scripts to a file (or run the
 kill as its own command).
 
-||||||| 4ccc375
 ## Sync / LAN-pairing legs (Slice 4)
 
 - The utility-process sync server binds `0.0.0.0` on an **ephemeral port** —

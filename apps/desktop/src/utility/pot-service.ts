@@ -82,22 +82,15 @@ const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
 /**
  * The BotGuard interpreter is remote code evaluated inside the vm
  * context — a poisoned homepage could redirect it to an attacker
- * script. It is only ever served from Google surface hosts
- * (www.google.com/js/th/… on the live page); anything else fails
- * closed.
+ * script. It is only ever declared on Google's own BotGuard origin
+ * (www.google.com/js/th/… on the live page); exact hosts only — a
+ * broad suffix family would let a subdomain surface executable code
+ * the page never vouched for.
  */
-const INTERPRETER_HOST_SUFFIXES = [
-  'google.com',
-  'youtube.com',
-  'gstatic.com',
-  'googleapis.com',
-];
+const INTERPRETER_HOSTS = ['www.google.com', 'www.youtube.com'];
 
 function isAllowedInterpreterHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  return INTERPRETER_HOST_SUFFIXES.some(
-    (root) => host === root || host.endsWith(`.${root}`),
-  );
+  return INTERPRETER_HOSTS.includes(hostname.toLowerCase());
 }
 
 export type FetchResponse = {
@@ -184,6 +177,7 @@ type MintResult = {
 function botGuardSandbox(
   ytcfg: unknown,
   fetchImpl: FetchLike,
+  allowedFetchHost: string,
 ): { globals: Record<string, unknown>; dispose(): void } {
   const noOp = (): undefined => undefined;
   const elementStub = (): Record<string, unknown> => ({
@@ -222,10 +216,11 @@ function botGuardSandbox(
     timers.delete(handle);
     clearTimeout(handle);
   };
-  // The interpreter's network surface is capped to the same host
-  // allowlist the interpreter URL itself passed — https only,
-  // no redirect following (a 30x could still escape the list), and
-  // bounded per session in both call count and response size.
+  // The interpreter's network surface is capped to exact hosts (its
+  // own origin + the homepage), read-only methods, no caller body,
+  // allowlisted headers only, https only, no redirect following (a
+  // 30x could still escape the list), and bounded per session in
+  // both call count and response size.
   // The response handed to the interpreter is a FACADE — the upstream
   // Response is never mutated (its .body is a getter-only slot on a
   // real Response, so assigning it would throw; pipeThrough on the
@@ -372,6 +367,20 @@ function botGuardSandbox(
     return facade;
   };
   let sandboxFetches = 0;
+  // Header fields the interpreter may legitimately set on a probe —
+  // everything else (auth-ish or tracking headers) is dropped.
+  const SANDBOX_HEADER_ALLOW = new Set([
+    'accept',
+    'accept-language',
+    'content-type',
+  ]);
+  // The remote code's whole network surface is the two origins this
+  // flow already provably uses — the interpreter's own host and the
+  // homepage it rode in on — exact hosts, nothing wider.
+  const sandboxFetchHosts = new Set([
+    allowedFetchHost.toLowerCase(),
+    new URL(HOMEPAGE).hostname,
+  ]);
   const sandboxFetch = (
     input: unknown,
     init?: unknown,
@@ -386,10 +395,18 @@ function botGuardSandbox(
     }
     if (
       parsed.protocol !== 'https:' ||
-      !isAllowedInterpreterHost(parsed.hostname)
+      !sandboxFetchHosts.has(parsed.hostname.toLowerCase())
     ) {
       return Promise.reject(
         new TypeError('pot: sandboxed fetch host not allowed'),
+      );
+    }
+    const initMethod = (init as RequestInit | undefined)?.method;
+    const method =
+      typeof initMethod === 'string' ? initMethod.toUpperCase() : 'GET';
+    if (method !== 'GET' && method !== 'HEAD') {
+      return Promise.reject(
+        new TypeError('pot: sandboxed fetch method not allowed'),
       );
     }
     if (sandboxFetches >= SANDBOX_FETCH_MAX_CALLS) {
@@ -398,8 +415,25 @@ function botGuardSandbox(
       );
     }
     sandboxFetches += 1;
+    // Caller-chosen method/body/headers are all dropped: read-only
+    // fetches carrying no payload keep the grant as narrow as the
+    // mechanism needs.
+    const headers: Record<string, string> = {};
+    const initHeaders = (init as RequestInit | undefined)?.headers;
+    if (isRecord(initHeaders)) {
+      for (const [name, value] of Object.entries(initHeaders)) {
+        if (
+          SANDBOX_HEADER_ALLOW.has(name.toLowerCase()) &&
+          typeof value === 'string' &&
+          value.length <= 512
+        ) {
+          headers[name.toLowerCase()] = value;
+        }
+      }
+    }
     return fetchImpl(parsed.href, {
-      ...(init as RequestInit | undefined),
+      method,
+      headers,
       redirect: 'error',
       // Same deadline discipline as the host legs — an in-context
       // fetch must not outlive the mint it's serving.
@@ -700,7 +734,11 @@ export async function buildBotGuardSession(
     { redirect: 'error' },
     MAX_UPSTREAM_CHARS,
   );
-  const sandbox = botGuardSandbox(ytcfg, fetchImpl);
+  const sandbox = botGuardSandbox(
+    ytcfg,
+    fetchImpl,
+    new URL(challenge.interpreterUrl).hostname,
+  );
   try {
     return await mintSession(
       challenge,
@@ -882,6 +920,13 @@ export function createPotService(opts: PotServiceDeps): PotService {
     ) {
       return Promise.resolve(session);
     }
+    // The stale session can never serve again — release it up front.
+    // Waiting for the replacement's success (or for close) would keep
+    // an expired session's interpreter timers firing through every
+    // failed refresh.
+    const stale = session;
+    session = null;
+    stale?.dispose?.();
     // An in-flight rebuild coalesces every concurrent caller —
     // the cooldown check only gates NEW builds.
     if (sessionPending !== null) {
@@ -908,9 +953,7 @@ export function createPotService(opts: PotServiceDeps): PotService {
           built.dispose?.();
           throw new HttpError(503, 'unavailable', 'pot: service closed');
         }
-        const replaced = session;
         session = built;
-        replaced?.dispose?.();
         lastFailureAt = 0;
         return built;
       } catch (thrown) {

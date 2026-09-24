@@ -162,16 +162,24 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
   let child: ChildProcess | null = null;
   let closed = false;
   let nextReqId = 1;
+  // Requests belong to the child they were sent to — a superseded
+  // child's exit rejects only ITS pendings, never the replacement's.
   const pending = new Map<
     number,
-    { resolve: (value: unknown) => void; reject: (err: Error) => void }
+    {
+      proc: ChildProcess;
+      resolve: (value: unknown) => void;
+      reject: (err: Error) => void;
+    }
   >();
 
-  const failAll = (err: Error): void => {
-    for (const { reject } of pending.values()) {
-      reject(err);
+  const failProc = (proc: ChildProcess, err: Error): void => {
+    for (const [id, waiter] of pending) {
+      if (waiter.proc === proc) {
+        pending.delete(id);
+        waiter.reject(err);
+      }
     }
-    pending.clear();
   };
 
   const kill = (): void => {
@@ -180,7 +188,7 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
     if (dead !== null) {
       dead.removeAllListeners();
       dead.kill('SIGKILL');
-      failAll(new HttpError(503, 'unavailable', 'pot: minter exited'));
+      failProc(dead, new HttpError(503, 'unavailable', 'pot: minter exited'));
     }
   };
 
@@ -222,14 +230,20 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
         if (child === proc) {
           child = null;
         }
-        failAll(new HttpError(503, 'unavailable', 'pot: minter exited'));
+        failProc(
+          proc,
+          new HttpError(503, 'unavailable', 'pot: minter exited'),
+        );
       });
       proc.on('error', () => {
         // Spawn failure / IPC channel fault — same as an exit.
         if (child === proc) {
           child = null;
         }
-        failAll(new HttpError(503, 'unavailable', 'pot: minter failed'));
+        failProc(
+          proc,
+          new HttpError(503, 'unavailable', 'pot: minter failed'),
+        );
       });
     }
     return child;
@@ -256,18 +270,20 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
           new HttpError(503, 'unavailable', 'pot: minter op timed out'),
         );
       }, timeoutMs);
-      pending.set(id, {
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: (err) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      });
       try {
-        ensure().send({ ...msg, id } as MinterRequest);
+        const target = ensure();
+        pending.set(id, {
+          proc: target,
+          resolve: (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          reject: (err) => {
+            clearTimeout(timer);
+            reject(err);
+          },
+        });
+        target.send({ ...msg, id } as MinterRequest);
       } catch (thrown) {
         clearTimeout(timer);
         pending.delete(id);
