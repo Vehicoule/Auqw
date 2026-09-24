@@ -98,6 +98,47 @@ recording so reviewers see range pulls live.
   206 + `Content-Range: bytes a-b/SIZE` + `Accept-Ranges: bytes`;
   out-of-range → 416 + `Content-Range: bytes */SIZE`.
 
+## Sync / LAN-pairing legs (Slice 4)
+
+- The utility-process sync server binds `0.0.0.0` on an **ephemeral port** —
+  read it from the settings sync panel's `this device` row (`ip:port`), not
+  from code. It needs `org.freedesktop.secrets` (gnome-keyring) up or
+  safeStorage fails and no sync identity can mint — launch with
+  `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-addr)` + a live keyring daemon
+  and `--password-store=gnome-libsecret`.
+- `sync:pairing` IPC mints a 6-digit offer (90s TTL, single-slot — each mint
+  replaces the last). The `pair a device` settings row may not visibly open
+  the PairingSheet at clipped heights; as a fallback mint from devtools:
+  `window.auqw.sync.pairing().then(o=>document.title='C'+o.code)` then read
+  the title via `wmctrl -l`. Reject reasons map client-side: 'no-pairing' /
+  'pairing-expired' both render as 'no live pairing window on the desktop'.
+- Emulator→host path: the emulator reaches the host listener at
+  `10.0.2.2:<port>`; mDNS will never cross the NAT, so the typed-code +
+  manual-endpoint form is the only path (it exists in
+  `packages/ui-native/src/sync-screen.tsx` — code/address/port + `pair`).
+- **Gboard floating toolbar trap**: focusing a phone TextInput pops a
+  floating toolbar that can overlay the `pair` button; `input tap` then hits
+  the toolbar, not the button — silent no-op while a stale error label makes
+  it look like a failed attempt. Press `keyevent 111` (ESCAPE) after typing
+  to dismiss it, then verify the button is unobscured before tapping.
+- The sync journal is on disk at `~/.config/auqw-desktop/sync-log.jsonl` —
+  one delta doc per line with `entries[]` + `watermarks`; diff it to prove a
+  round applied (`cursor` shows both device ids after a real sync).
+- `copy delta` / `paste delta` (delta exchange row in the settings sync
+  panel) round-trips the whole journal via clipboard — `xclip -o -selection
+  clipboard > file` to capture, `xclip -i < file` to re-seed before pasting
+  (clipboard dies when the owning app quits). Fresh-profile check:
+  `rm -rf ~/.config/auqw-desktop` → relaunch → paste delta → library
+  collections repopulate.
+- ui-web clipping bug: `.uw-screen{flex-column}` + `.uw-card{overflow:hidden}`
+  invisibly clips trailing settings rows + the transfer preview's
+  `apply import` when the CSS viewport is short — rows exist in the DOM but
+  paint nothing. Workaround: `ctrl+minus` zoom-out until they paint.
+- Desktop `import library` file-pick has no cancel recovery — if the GTK
+  dialog closes without a file, `importPhase` latches `reading` and
+  `choose file…` stays disabled forever. Recovery: `ctrl+r` renderer reload
+  (the utility listener survives the reload).
+
 ## Devin Secrets Needed
 
 None — the napi artifact is a local cargo build output.

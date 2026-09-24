@@ -274,6 +274,13 @@
 .uw-screen[data-scroll='false'] {
   overflow: hidden;
 }
+/* Scrollable screens: children keep their natural height so the
+   scroller can reach every row — a flex item with overflow:hidden
+   (uw-card) would otherwise shrink below its content and clip the
+   trailing rows the scroll should reveal. */
+.uw-screen[data-scroll='true'] > * {
+  flex-shrink: 0;
+}
 .uw-list {
   display: flex;
   flex-direction: column;
@@ -1463,4 +1470,34 @@
   position: relative;
   display: flex;
   flex-direction: column;
+}
+
+/* ---- pairing sheet ------------------------------------------------ */
+
+.uw-pairing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+  text-align: center;
+}
+.uw-pairing__qr {
+  /* literal white: a scanner's quiet zone isn't a theme token */
+  background: white;
+  padding: var(--spacing-md);
+  border-radius: var(--radius-float);
+  line-height: 0;
+}
+.uw-pairing__code {
+  font-size: 32px;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+}
+.uw-pairing__endpoint {
+  font-variant-numeric: tabular-nums;
+}
+.uw-pairing__payload {
+  word-break: break-all;
+  opacity: 0.6;
 }

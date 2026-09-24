@@ -5,6 +5,7 @@ import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
 import { sheetKeyAction } from './keyboard.ts';
+import { QrCode } from './qr-code.tsx';
 
 /**
  * Sheet building blocks: the content frame (title row + actions) plus
@@ -390,9 +391,9 @@ export function AddToPlaylistSheet({
 }
 
 /**
- * The pairing offer: the 6-digit code for the typed path plus the QR
- * payload string for the scan path (no QR rendering dependency — the
- * payload copies verbatim for the phone to consume). `expiresLabel`
+ * The pairing offer: the QR the phone scans, and below it the typed
+ * path — the 6-digit code plus this device's `address:port`. The raw
+ * payload stays one copy away for non-camera flows. `expiresLabel`
  * counts down to the offer's expiry.
  */
 export function PairingSheet({
@@ -407,6 +408,12 @@ export function PairingSheet({
   return (
     <SheetScaffold title="pair a device" onDismiss={onDismiss}>
       <div className="uw-pairing">
+        <div className="uw-pairing__qr">
+          <QrCode data={pairing.payload} />
+        </div>
+        <Text variant="metadata" color="secondary">
+          scan with the app on the other device
+        </Text>
         <Text
           variant="title"
           color="bright"
@@ -416,15 +423,15 @@ export function PairingSheet({
           {pairing.code}
         </Text>
         <Text variant="metadata" color="secondary">
-          enter this code on the other device · {pairing.expiresLabel}
-        </Text>
-        <Text
-          variant="metadata"
-          color="secondary"
-          numberOfLines={4}
-          className="uw-pairing__payload"
-        >
-          {pairing.payload}
+          …or type the code and address{' '}
+          <Text
+            variant="metadata"
+            color="primary"
+            className="uw-pairing__endpoint"
+          >
+            {pairing.endpointLabel}
+          </Text>{' '}
+          · {pairing.expiresLabel}
         </Text>
         <Pressable
           onPress={onCopyPayload}

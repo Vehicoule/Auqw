@@ -91,6 +91,7 @@ import type {
   SyncStatusResult,
 } from '../shared/contract.ts';
 import { isSyncDeltaDoc } from '../shared/contract.ts';
+import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
@@ -499,6 +500,7 @@ function Main({
     readonly SyncDeviceInfo[]
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
+  const [pairingError, setPairingError] = useState<string | null>(null);
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
   // sync polls.
@@ -840,15 +842,35 @@ function Main({
   );
   const syncModel = useMemo(
     () =>
-      toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
-    [syncStatus, syncDevices, pairing, pairingTick],
+      toSyncPanel(
+        syncStatus,
+        syncDevices,
+        pairing,
+        Date.now(),
+        pairingError,
+      ),
+    [syncStatus, syncDevices, pairing, pairingTick, pairingError],
   );
 
   const onPairDevice = useCallback(() => {
     void window.auqw.sync
       .pairing()
-      .then((offer) => setPairing(offer))
-      .catch(() => setPairing(null));
+      .then((offer) => {
+        setPairing(offer);
+        setPairingError(null);
+      })
+      // A mint failure (listener down, no LAN address) must surface —
+      // a silent reject leaves the row looking dead-clicked.
+      .catch((thrown: unknown) => {
+        setPairing(null);
+        setPairingError(
+          isShellError(thrown)
+            ? thrown.message
+            : thrown instanceof Error
+              ? thrown.message
+              : 'could not mint a pairing offer',
+        );
+      });
   }, []);
   const onUnpairDevice = useCallback(
     (deviceId: string) => {
@@ -1322,18 +1344,6 @@ function Main({
     });
   }, [session]);
 
-  const onPickImportFile = useCallback(() => {
-    setTransfer((prev) => ({
-      ...prev,
-      importPhase: 'reading',
-      importDetail: null,
-      preview: null,
-    }));
-    // The hidden file input carries the picker; its change event
-    // continues the flow below.
-    importInput.current?.click();
-  }, []);
-
   const onImportFileChosen = useCallback(
     (file: globalThis.File | null) => {
       if (file === null) {
@@ -1376,6 +1386,56 @@ function Main({
     },
     [],
   );
+
+  const onPickImportFile = useCallback(() => {
+    setTransfer((prev) => ({
+      ...prev,
+      importPhase: 'reading',
+      importDetail: null,
+      preview: null,
+    }));
+    // showOpenFilePicker resolves a cancel as AbortError — the hidden
+    // input path (fallback) can't observe cancel, but it stays for
+    // webviews where the picker API is absent.
+    const picker = (
+      window as unknown as {
+        showOpenFilePicker?: (options: {
+          multiple?: boolean;
+          types?: readonly {
+            description?: string;
+            accept: Record<string, readonly string[]>;
+          }[];
+        }) => Promise<readonly { getFile(): Promise<globalThis.File> }[]>;
+      }
+    ).showOpenFilePicker;
+    if (picker === undefined) {
+      importInput.current?.click();
+      return;
+    }
+    void picker
+      .call(window, {
+        types: [
+          {
+            description: 'auqw library export',
+            accept: { 'application/json': ['.json'] },
+          },
+        ],
+        multiple: false,
+      })
+      .then(async (handles) => {
+        const handle = handles[0];
+        return handle === undefined ? null : handle.getFile();
+      })
+      .then((file) => onImportFileChosen(file))
+      .catch((thrown: unknown) => {
+        if (thrown instanceof DOMException && thrown.name === 'AbortError') {
+          setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+          return;
+        }
+        // Picker rejected for a real reason — fall back to the input.
+        importInput.current?.click();
+      });
+  }, [onImportFileChosen]);
 
   const onApplyImport = useCallback(() => {
     const text = importText.current;
