@@ -107,11 +107,18 @@ recording so reviewers see range pulls live.
   `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-addr)` + a live keyring daemon
   and `--password-store=gnome-libsecret`.
 - `sync:pairing` IPC mints a 6-digit offer (90s TTL, single-slot — each mint
-  replaces the last). The `pair a device` settings row may not visibly open
-  the PairingSheet at clipped heights; as a fallback mint from devtools:
+  replaces the last). On `s4/alpha-fixes`+ the `pair a device` row opens a
+  real sheet: QR (uqr single-path SVG, decodable with `zbarimg -q --raw`
+  on a zoomed screenshot), big PIN, `…or type the code and address ip:port
+  · expires in 2m`, `copy payload`; mint failures surface inline under the
+  row as `pairErrorLabel`. Fallback mint via devtools still works:
   `window.auqw.sync.pairing().then(o=>document.title='C'+o.code)` then read
   the title via `wmctrl -l`. Reject reasons map client-side: 'no-pairing' /
   'pairing-expired' both render as 'no live pairing window on the desktop'.
+  STALE-ERROR TRAP: that error text persists in the phone UI until the next
+  attempt lands — a tap that MISSES the pair button leaves the old error
+  looking like a fresh rejection. Confirm each attempt actually fired (peer
+  row state changes, or desktop sessions count), don't trust the label.
 - Emulator→host path: the emulator reaches the host listener at
   `10.0.2.2:<port>`; mDNS will never cross the NAT, so the typed-code +
   manual-endpoint form is the only path (it exists in
@@ -121,6 +128,28 @@ recording so reviewers see range pulls live.
   the toolbar, not the button — silent no-op while a stale error label makes
   it look like a failed attempt. Press `keyevent 111` (ESCAPE) after typing
   to dismiss it, then verify the button is unobscured before tapping.
+  SECOND TRAP: the `pair` button MOVES when the keyboard opens/closes —
+  compute tap coordinates from the CURRENT screencap, not a stale one
+  (adb screencap px → device px scale ≈1.53 on a 1080×2400 screen in a
+  706-px-wide PNG).
+- Phone TextInput quirks: `input text "10.0.2.2"` may drop the periods
+  (only `10` lands) — type digits via `input text` and periods via
+  `input keyevent 56` (KEYCODE_PERIOD), then screencap to verify before
+  tapping pair.
+- Emulator launch needs `kvm` group membership on this box even though
+  /dev/kvm exists: `sudo -n gpasswd -a ubuntu kvm` once, then run the
+  emulator via `sg kvm -c "DISPLAY=:0 $HOME/Android/Sdk/emulator/emulator
+  -avd auqw -gpu swiftshader_indirect -no-snapshot"` — `sg` applies the
+  group without a re-login. `x86_64 emulation requires hardware
+  acceleration` + silent death otherwise.
+- Release APKs are per-ABI after the split (`outputs/apk/release/
+  app-<abi>-release.apk`). R8/shrink can break JNI-reflected classes —
+  smoke-test a release APK, don't assume debug parity: install + launch +
+  `adb logcat` for `UnsatisfiedLinkError`/`NoClassDefFoundError`. Real
+  catch on this branch: R8 stripped JNA's `com.sun.jna.Pointer.peer` (the
+  .so ships, the Java field doesn't survive `-dontwarn` alone) → dead on
+  boot, fixed by `-keep class com.sun.jna.** { *; }` +
+  `-keepclassmembers` appended by `with-release-abis.cjs`.
 - The sync journal is on disk at `~/.config/auqw-desktop/sync-log.jsonl` —
   one delta doc per line with `entries[]` + `watermarks`; diff it to prove a
   round applied (`cursor` shows both device ids after a real sync).
@@ -130,14 +159,26 @@ recording so reviewers see range pulls live.
   (clipboard dies when the owning app quits). Fresh-profile check:
   `rm -rf ~/.config/auqw-desktop` → relaunch → paste delta → library
   collections repopulate.
-- ui-web clipping bug: `.uw-screen{flex-column}` + `.uw-card{overflow:hidden}`
+- ui-web clipping bug (FIXED on `s4/alpha-fixes`+, present on earlier
+  branches): `.uw-screen{flex-column}` + `.uw-card{overflow:hidden}`
   invisibly clips trailing settings rows + the transfer preview's
   `apply import` when the CSS viewport is short — rows exist in the DOM but
-  paint nothing. Workaround: `ctrl+minus` zoom-out until they paint.
-- Desktop `import library` file-pick has no cancel recovery — if the GTK
-  dialog closes without a file, `importPhase` latches `reading` and
-  `choose file…` stays disabled forever. Recovery: `ctrl+r` renderer reload
-  (the utility listener survives the reload).
+  paint nothing. Workaround on old branches: `ctrl+minus` zoom-out.
+- Desktop `import library` cancel latch (FIXED on `s4/alpha-fixes`+):
+  cancelling the GTK dialog now resets `importPhase` to `idle` — the
+  `showOpenFilePicker` AbortError path (the one Electron always takes,
+  Chromium ≥86) and the hidden-input fallback `cancel` event (webviews
+  without the API) both recover. On older branches a cancelled pick latches
+  `reading` forever; recovery was `ctrl+r` renderer reload.
+- Phone-side LogBox noise: tapping catalog results fires uncaught promise
+  rejections — artwork cache race `FileSystemFile.move` →
+  `NoSuchFileException …/cache/artwork/<hash>.img.dl`. In dev builds they
+  surface as red LogBox toasts that eat screen space and taps; dismiss via
+  the toast's X or `keyevent 4` to close the expanded LogBox.
+- youtube-music resolve bot-checks on datacenter IPs — expected, NOT a
+  regression. Verify it surfaces cleanly: tapping a track opens the player
+  sheet which shows the typed inline error `guest failure (transient):
+  transient: bot-check` — that's the correct surface, not a crash.
 
 ## Devin Secrets Needed
 
