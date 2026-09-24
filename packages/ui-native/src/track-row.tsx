@@ -42,9 +42,17 @@ export function TrackRow({
 }: TrackRowProps) {
   const theme = useTheme();
   const unavailable = row.state !== 'available';
+  // The mobile anatomy folds the trailing `artist · len` into the
+  // small line — there is no separate duration column (preview
+  // `.mrows .r .t small`).
   const sub =
     row.note ??
-    [badge, row.artist, row.versionLabel]
+    [
+      badge,
+      row.artist,
+      row.versionLabel,
+      row.durationMs === null ? null : formatClock(row.durationMs),
+    ]
       .filter((part): part is string => part !== null && part !== '')
       .join(' · ');
   return (
@@ -186,14 +194,6 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        <Text
-          variant="metadata"
-          color="secondary"
-          numeric
-          style={{ minWidth: 34 * theme.textScale, textAlign: 'right' }}
-        >
-          {formatClock(row.durationMs)}
-        </Text>
         {row.download !== null && (
           <View
             style={{

@@ -1181,8 +1181,12 @@ function testTrackRowTextScale(): void {
     'track rows must grow to fit 200% title and metadata lines',
   );
   assert(
-    source.includes('minWidth: 34 * theme.textScale'),
-    'the duration column must stay on one line at 200% text',
+    source.includes('formatClock(row.durationMs)'),
+    'the `artist · len` small line must carry the track duration',
+  );
+  assert(
+    (source.match(/numberOfLines={1}/g)?.length ?? 0) >= 2,
+    'title and `artist · len` lines must stay on one line at 200% text',
   );
 }
 
