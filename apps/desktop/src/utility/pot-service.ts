@@ -105,6 +105,8 @@ export type FetchLike = (
 export type PotSession = {
   mint(contentBinding: string): Promise<string>;
   readonly expiresAtMs: number;
+  /** Releases resources held by the session (in-VM timers). */
+  readonly dispose?: () => void;
 };
 
 export type PotServiceDeps = {
@@ -176,7 +178,7 @@ class HttpError extends Error {
 function botGuardSandbox(
   ytcfg: unknown,
   fetchImpl: FetchLike,
-): Record<string, unknown> {
+): { globals: Record<string, unknown>; dispose(): void } {
   const noOp = (): undefined => undefined;
   const elementStub = (): Record<string, unknown> => ({
     getContext: () => null,
@@ -191,6 +193,60 @@ function botGuardSandbox(
     addEventListener: noOp,
     removeEventListener: noOp,
   });
+  // Timers the interpreter schedules land on the host loop — track
+  // the handles so a dropped session can't leave callbacks firing.
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const trackTimeout = (
+    cb: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ): ReturnType<typeof setTimeout> => {
+    const handle = setTimeout(
+      (...inner: unknown[]) => {
+        timers.delete(handle);
+        cb(...inner);
+      },
+      ms,
+      ...args,
+    );
+    timers.add(handle);
+    return handle;
+  };
+  const untrack = (handle: ReturnType<typeof setTimeout>): void => {
+    timers.delete(handle);
+    clearTimeout(handle);
+  };
+  // The interpreter's network surface is capped to the same host
+  // allowlist the interpreter URL itself passed — https only,
+  // no redirect following (a 30x could still escape the list).
+  const sandboxFetch = (
+    input: unknown,
+    init?: unknown,
+  ): Promise<FetchResponse> => {
+    let parsed: URL;
+    try {
+      parsed = new URL(String(input), HOMEPAGE);
+    } catch {
+      return Promise.reject(
+        new TypeError('pot: sandboxed fetch url unparsable'),
+      );
+    }
+    if (
+      parsed.protocol !== 'https:' ||
+      !isAllowedInterpreterHost(parsed.hostname)
+    ) {
+      return Promise.reject(
+        new TypeError('pot: sandboxed fetch host not allowed'),
+      );
+    }
+    return fetchImpl(parsed.href, {
+      ...(init as RequestInit | undefined),
+      redirect: 'error',
+      // Same deadline discipline as the host legs — an in-context
+      // fetch must not outlive the mint it's serving.
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  };
   const sandbox: Record<string, unknown> = {
     navigator: {
       userAgent: HOMEPAGE_UA,
@@ -243,8 +299,8 @@ function botGuardSandbox(
     addEventListener: noOp,
     removeEventListener: noOp,
     dispatchEvent: () => true,
-    requestAnimationFrame: (cb: () => void) => setTimeout(cb, 0),
-    cancelAnimationFrame: clearTimeout,
+    requestAnimationFrame: (cb: () => void) => trackTimeout(cb, 0),
+    cancelAnimationFrame: untrack,
     localStorage: new Map<string, string>(),
     sessionStorage: new Map<string, string>(),
     history: { length: 1, pushState: noOp, replaceState: noOp },
@@ -256,8 +312,7 @@ function botGuardSandbox(
   // Host-realm capabilities the interpreter legitimately uses —
   // timers, encoders, crypto, fetch. Passed deliberately, not ambient.
   const hostGlobals: Record<string, unknown> = {
-    fetch: (input: unknown, init?: unknown) =>
-      fetchImpl(String(input), init as RequestInit | undefined),
+    fetch: sandboxFetch,
     crypto: globalThis.crypto,
     performance: globalThis.performance,
     TextEncoder,
@@ -268,10 +323,18 @@ function botGuardSandbox(
     URLSearchParams,
     AbortController,
     AbortSignal,
-    setTimeout,
-    clearTimeout,
-    setInterval,
-    clearInterval,
+    setTimeout: trackTimeout,
+    clearTimeout: untrack,
+    setInterval: (
+      cb: (...args: unknown[]) => void,
+      ms?: number,
+      ...args: unknown[]
+    ) => {
+      const handle = setInterval(cb, ms, ...args);
+      timers.add(handle);
+      return handle;
+    },
+    clearInterval: untrack,
     queueMicrotask,
     console,
     setImmediate: globalThis.setImmediate,
@@ -313,7 +376,15 @@ function botGuardSandbox(
   sandbox['parent'] = sandbox;
   sandbox['frames'] = sandbox;
   sandbox['globalThis'] = sandbox;
-  return sandbox;
+  return {
+    globals: sandbox,
+    dispose(): void {
+      for (const handle of timers) {
+        clearTimeout(handle);
+      }
+      timers.clear();
+    },
+  };
 }
 
 /**
@@ -465,7 +536,30 @@ async function buildBotGuardSession(
     { redirect: 'error' },
     MAX_UPSTREAM_CHARS,
   );
-  const ctx = vm.createContext(botGuardSandbox(ytcfg, fetchImpl));
+  const sandbox = botGuardSandbox(ytcfg, fetchImpl);
+  try {
+    return await mintSession(
+      challenge,
+      interpreterJs,
+      sandbox,
+      fetchImpl,
+      nowMs,
+    );
+  } catch (thrown) {
+    // A failed build would otherwise orphan the vm context's timers.
+    sandbox.dispose();
+    throw thrown;
+  }
+}
+
+async function mintSession(
+  challenge: ChallengeData,
+  interpreterJs: string,
+  sandbox: { globals: Record<string, unknown>; dispose(): void },
+  fetchImpl: FetchLike,
+  nowMs: () => number,
+): Promise<PotSession> {
+  const ctx = vm.createContext(sandbox.globals);
   vm.runInContext(interpreterJs, ctx, { timeout: VM_RUN_TIMEOUT_MS });
   const client = await BotGuardClient.create({
     program: challenge.program,
@@ -547,6 +641,7 @@ async function buildBotGuardSession(
       mint: (contentBinding) =>
         minter.mintAsWebsafeString(contentBinding),
       expiresAtMs,
+      dispose: () => sandbox.dispose(),
     };
   }
   // No integrity token — the websafe fallback is session-bound.
@@ -555,7 +650,11 @@ async function buildBotGuardSession(
     websafeFallbackToken.length > 0
   ) {
     const token = websafeFallbackToken;
-    return { mint: async () => token, expiresAtMs };
+    return {
+      mint: async () => token,
+      expiresAtMs,
+      dispose: () => sandbox.dispose(),
+    };
   }
   throw new HttpError(
     503,
@@ -620,7 +719,9 @@ export function createPotService(opts: PotServiceDeps): PotService {
     sessionPending = (async () => {
       try {
         const built = await sessionFactory();
+        const replaced = session;
         session = built;
+        replaced?.dispose?.();
         lastFailureAt = 0;
         return built;
       } catch (thrown) {
@@ -655,6 +756,7 @@ export function createPotService(opts: PotServiceDeps): PotService {
       // corpse. The thrown value stays taxonomy-shaped.
       if (session === active) {
         session = null;
+        active.dispose?.();
       }
       throw thrown instanceof HttpError
         ? thrown
@@ -849,6 +951,8 @@ export function createPotService(opts: PotServiceDeps): PotService {
     },
     async close() {
       closing = true;
+      session?.dispose?.();
+      session = null;
       const srv = server;
       server = null;
       boundPort = null;

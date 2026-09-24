@@ -1123,6 +1123,13 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             peers.set(fp, refreshed);
             const persisted = await deps.keys.peerPut(refreshed, signal);
             if (!persisted.ok) {
+              // Memory ran ahead of disk while the session stays
+              // open — the next syncNow would reuse it, skip the
+              // welcome, and never retry the write (a relaunch
+              // restores the stale port). Restore the record and
+              // drop the session so the next connect re-welcomes.
+              peers.set(fp, peer);
+              killSession(session, persisted.error);
               return err(persisted.error);
             }
             peer = refreshed;

