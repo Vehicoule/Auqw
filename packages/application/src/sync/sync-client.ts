@@ -964,11 +964,18 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     peers.set(stored.fp, stored);
     const persisted = await deps.keys.peerPut(stored, signal);
     if (!persisted.ok) {
-      // Custody on disk still holds the prior record — keep the
-      // in-memory map consistent with it or the peer vanishes until
-      // the next restart re-hydrates.
-      if (existing !== undefined) {
-        peers.set(stored.fp, existing);
+      // A custody write can fail AFTER the record leg committed (the
+      // index read/write is a separate store hit) — don't guess which
+      // record survived. Read custody back and hold whatever disk
+      // actually has; when the read-back itself fails (cancelled
+      // signal, store outage) fall back to the prior record, which is
+      // the only one that could still be on disk.
+      const custody = await deps.keys.peerList(signal);
+      const actual = custody.ok
+        ? custody.value.find((p) => p.fp === stored.fp)
+        : existing;
+      if (actual !== undefined) {
+        peers.set(stored.fp, actual);
       } else {
         peers.delete(stored.fp);
       }

@@ -172,12 +172,14 @@ function fakeCrypto(opts: { identity?: SyncIdentity } = {}): SyncClientCrypto {
 function fakeKeys(): SyncClientKeys & {
   peers: Map<string, SyncPeer>;
   failPeerPut: boolean;
+  failPeerPutAfterRecord: boolean;
 } {
   const peers = new Map<string, SyncPeer>();
   let identity: { deviceId: string; identity: SyncIdentity } | null = null;
   const keys = {
     peers,
     failPeerPut: false,
+    failPeerPutAfterRecord: false,
     identityGet: () => Promise.resolve(ok(identity)),
     identitySet: (record: { deviceId: string; identity: SyncIdentity }) => {
       identity = record;
@@ -185,6 +187,14 @@ function fakeKeys(): SyncClientKeys & {
     },
     peerList: () => Promise.resolve(ok([...peers.values()])),
     peerPut: (peer: SyncPeer) => {
+      if (keys.failPeerPutAfterRecord) {
+        // Commits the record, then fails the index leg — the partial
+        // failure secure custody can produce.
+        peers.set(peer.fp, peer);
+        return Promise.resolve(
+          err(appError('unavailable', 'sync: custody index failed')),
+        );
+      }
       if (keys.failPeerPut) {
         return Promise.resolve(
           err(appError('unavailable', 'sync: custody write failed')),
@@ -897,13 +907,16 @@ async function rePairKeepsWatermark(): Promise<void> {
   await client.close();
 }
 
-// 21. A custody-write failure on RE-PAIR must restore the prior
-// in-memory record — disk still holds it, so the peer must not
-// vanish until restart re-hydrates.
+// 21. A custody-write failure on RE-PAIR rolls memory back to what
+// custody actually holds — total failure keeps the prior record,
+// a partial commit (record written, index leg failed) keeps the new
+// one. Guessing either way desyncs memory from disk until restart.
 async function failedRePairKeepsPeer(): Promise<void> {
-  const { client, keys } = await rig();
+  const { client, keys, clock } = await rig();
   const paired = await client.pair({ payload: qrPayload() });
   assert(paired.ok);
+
+  // Nothing committed — the prior record survives; the peer stays.
   keys.failPeerPut = true;
   const again = await client.pair({ payload: qrPayload() });
   assert(!again.ok, 're-pair should fail on custody write');
@@ -914,6 +927,23 @@ async function failedRePairKeepsPeer(): Promise<void> {
     'prior peer hidden until restart',
   );
   keys.failPeerPut = false;
+
+  // Record committed, index leg failed — custody holds the NEW
+  // record; memory must show it too, not the stale prior one.
+  clock.advance(5_000);
+  keys.failPeerPutAfterRecord = true;
+  const partial = await client.pair({ payload: qrPayload() });
+  assert(!partial.ok, 'partial custody failure should surface');
+  const visible = client
+    .status()
+    .peers.find((v) => v.peer.fp === SERVER_FP);
+  assert(visible !== undefined, 'peer vanished on partial failure');
+  assertEqual(
+    visible.peer.lastSeenAt,
+    keys.peers.get(SERVER_FP)?.lastSeenAt,
+    'memory restored a record custody no longer holds',
+  );
+  keys.failPeerPutAfterRecord = false;
   await client.close();
 }
 
