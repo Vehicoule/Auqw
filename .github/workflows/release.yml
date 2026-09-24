@@ -130,7 +130,7 @@ jobs:
       # otherwise collide on a single SHA256SUMS.txt asset.
       - name: checksums
         working-directory: auqw/apps/desktop/dist-packages
-        run: node ../../tooling/checksums.mjs . "SHA256SUMS-${{ runner.os }}.txt"
+        run: node ../../../tooling/checksums.mjs . "SHA256SUMS-${{ runner.os }}.txt"
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-packages-${{ runner.os }}
