@@ -1102,7 +1102,14 @@ function Main({
   // picks match no catalog row). A failed gate is not 'playing'.
   const playingRef = useMemo((): SourceRef | null => {
     const playback = state.playback;
-    if (playback.type === 'idle' || playback.type === 'failed') {
+    // Only an engaged attempt marks — paused keeps its loaded ref but
+    // is not 'playing' (the queue surface drops its mark on the same
+    // moment); a failed gate never marked at all.
+    if (
+      playback.type === 'idle' ||
+      playback.type === 'paused' ||
+      playback.type === 'failed'
+    ) {
       return null;
     }
     return playback.ref ?? null;
