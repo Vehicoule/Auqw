@@ -136,6 +136,54 @@ recording so reviewers see range pulls live.
   while it shows. Dismiss it (its X, or `keyevent 4`) before tapping
   bottom-of-list rows.
 
+## Page selection + provider/plugin path
+
+- `AUQW_DEV_HARNESS=1` in the launch env selects the dev-gate harness
+  (`index.html`, the UI documented above); without it the window loads the
+  product UI (`app.html`) — a different surface (search/home/settings).
+- Plugins do NOT load in dev mode unless you pass
+  `AUQW_PLUGIN_DIR=/abs/path/to/apps/desktop/plugins` — main only defaults it
+  for packaged builds. Without it `#provider` stays empty and the provider
+  path logs `prepare failed — no plugins loaded`.
+- youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
+  (e.g. `kJQP7kiw5Fk`), not a URL.
+- `Ctrl+Shift+I` opens devtools in the window; the preload surface is then
+  callable directly (`window.auqw.sync.pairing()`, `.status()`, `.stream.*`)
+  — the fastest way to hit IPC paths with no UI control in the harness.
+
+## Sync/pairing needs a secrets backend on this box
+
+The pairing path is gated: `sync:pairing` throws
+`unavailable — sync listener is unavailable` until the LAN listener binds,
+and binding first needs the sync identity — a `sync:keys` custody round-trip
+through main's `safeStorage`. With no `DBUS_SESSION_BUS_ADDRESS` and no
+keyring running, `safeStorage.isEncryptionAvailable()` is false and custody
+fails `unavailable` (status `fingerprint: null`). `--password-store=basic`
+does NOT fix it on this box (Electron ignores it here). Working recipe:
+
+```bash
+dbus-run-session -- bash -c 'echo "" | gnome-keyring-daemon --unlock --components=secrets || gnome-keyring-daemon --start --components=secrets; exec env DISPLAY=:0 AUQW_DEV_HARNESS=1 AUQW_NODE_BINDINGS=… AUQW_PLUGIN_DIR=… <electron> <appdir> --no-sandbox --password-store=gnome-libsecret'
+```
+
+With secrets on the bus, custody succeeds, TWO wildcard listeners appear
+(sync + pot), and `sync:pairing` returns a payload. The state survives
+launches (`~/.config/auqw-desktop/secure/`); fresh userData needs a fresh
+identity mint (a few extra seconds).
+
+## Discriminating the utility's listeners
+
+The utility binds two `0.0.0.0:<ephemeral>` sockets — the POT service and
+the sync listener. `GET /ping` answers `{"ok":true}` ONLY on the pot port;
+the sync listener answers nothing. `POST /get_pot` confirms (200 + token).
+`ss -tlnp` shows both owned by the `node.mojom.NodeService` child PID.
+
+## FOOTGUN reinforcement
+
+The pgrep footgun above applies to ANY compound command whose own cmdline
+contains `dist/electron` — including one that later launches electron with
+env vars on the same line. Write launcher scripts to a file (or run the
+kill as its own command).
+
 ## Devin Secrets Needed
 
 None — the napi artifact is a local cargo build output.
