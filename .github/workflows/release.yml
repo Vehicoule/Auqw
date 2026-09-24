@@ -136,6 +136,9 @@ jobs:
       - name: publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job — gh resolves the repo from GH_REPO,
+          # not the (absent) working tree.
+          GH_REPO: ${{ github.repository }}
         run: |
           flags=()
           # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
