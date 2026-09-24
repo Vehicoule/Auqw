@@ -280,11 +280,22 @@ const MIN_WINDOW_HEIGHT = 560;
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   const state = stateRef.current;
+  // The layout minimums still have to fit on the target display — a
+  // work area smaller than the floor gets the smaller value so the
+  // window can always be resized wholly on-screen.
+  const area = screen.getDisplayMatching({
+    x: state.x ?? 0,
+    y: state.y ?? 0,
+    width: state.width,
+    height: state.height,
+  }).workArea;
+  const minWidth = Math.min(MIN_WINDOW_WIDTH, Math.max(area.width, 200));
+  const minHeight = Math.min(MIN_WINDOW_HEIGHT, Math.max(area.height, 200));
   const options: BrowserWindowConstructorOptions = {
-    width: Math.max(state.width, MIN_WINDOW_WIDTH),
-    height: Math.max(state.height, MIN_WINDOW_HEIGHT),
-    minWidth: MIN_WINDOW_WIDTH,
-    minHeight: MIN_WINDOW_HEIGHT,
+    width: Math.max(state.width, minWidth),
+    height: Math.max(state.height, minHeight),
+    minWidth,
+    minHeight,
     title: 'auqw',
     titleBarStyle: 'hidden',
     titleBarOverlay: titleBarOverlay(
