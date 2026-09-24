@@ -32,7 +32,7 @@ git push origin v0.0.1-alpha.1
 | Job | Produces |
 |-----|----------|
 | `desktop` | `auqw-<ver>-linux-x86_64.AppImage`, `.tar.gz`, `.flatpak` + `SHA256SUMS.txt` |
-| `android` | `auqw-<ver>-android-release.apk` (`assembleRelease`, alpha-signed — standalone, upgrade-installs across alphas; not Play-ready) |
+| `android` | `auqw-<ver>-android-arm64-v8a.apk` + `auqw-<ver>-android-x86_64.apk` (`assembleRelease`, alpha-signed, per-ABI splits — standalone, upgrade-installs across alphas; not Play-ready) |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
 
 ## Downloads

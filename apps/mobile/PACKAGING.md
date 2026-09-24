@@ -137,9 +137,10 @@ real upload key never enters the repo.
    the standard AGP recipe — also works; either way secrets stay out of
    git.)
 
-4. `./android/gradlew -p android assembleRelease` →
-   `android/app/build/outputs/apk/release/app-release.apk` (signed,
-   installable); `bundleRelease` → `app-release.aab` for Play.
+4. `./android/gradlew -p android assembleRelease` → per-ABI outputs
+   `android/app/build/outputs/apk/release/app-{arm64-v8a,x86_64}-release.apk`
+   (signed, installable — no universal APK is produced);
+   `bundleRelease` → `app-release.aab` for Play (bundles stay universal).
 
 ## Signing strategy — what to ratify
 
