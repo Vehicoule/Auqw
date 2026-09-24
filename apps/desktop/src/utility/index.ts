@@ -112,6 +112,15 @@ if (port === null) {
     potOverride === undefined
       ? pot.bind().catch(() => null)
       : Promise.resolve(null);
+  // A failed startup bind is retryable — re-kick it on each read so
+  // a transient failure heals without a utility restart. The current
+  // caller still gets "no provider"; the NEXT host construction or
+  // pairing mint sees the retried port.
+  const potRetry = (): void => {
+    if (pot.port() === null) {
+      void pot.bind().catch(() => null);
+    }
+  };
   const runtime = createHostRuntime({
     env: process.env,
     resourcesPath:
@@ -119,7 +128,13 @@ if (port === null) {
         ? process.resourcesPath
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
-    potProviderUrl: () => pot.loopbackUrl(),
+    potProviderUrl: () => {
+      const url = pot.loopbackUrl();
+      if (url === null) {
+        potRetry();
+      }
+      return url;
+    },
   });
   // The database path arrives from main in the fork environment —
   // `AUQW_DB_PATH` points under userData; the service opens lazily on
@@ -179,7 +194,15 @@ if (port === null) {
       : {}),
     ...(syncPort !== undefined ? { port: syncPort } : {}),
     ...(potOverride === undefined
-      ? { potPort: () => pot.port() }
+      ? {
+          potPort: () => {
+            const bound = pot.port();
+            if (bound === null) {
+              potRetry();
+            }
+            return bound;
+          },
+        }
       : {}),
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),

@@ -65,6 +65,26 @@ const HOMEPAGE_UA =
 const HOMEPAGE = 'https://www.youtube.com';
 /** Long-lived public Innertube request key — shared with bgutil. */
 const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
+/**
+ * The BotGuard interpreter is remote code evaluated inside the vm
+ * context — a poisoned homepage could redirect it to an attacker
+ * script. It is only ever served from Google surface hosts
+ * (www.google.com/js/th/… on the live page); anything else fails
+ * closed.
+ */
+const INTERPRETER_HOST_SUFFIXES = [
+  'google.com',
+  'youtube.com',
+  'gstatic.com',
+  'googleapis.com',
+];
+
+function isAllowedInterpreterHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return INTERPRETER_HOST_SUFFIXES.some(
+    (root) => host === root || host.endsWith(`.${root}`),
+  );
+}
 
 export type FetchResponse = {
   readonly ok: boolean;
@@ -387,8 +407,35 @@ async function challengeFromHomepage(
       'pot: bgChallenge missing program/globalName/interpreter',
     );
   }
+  // Protocol-relative `//host/path` on the live page — normalize to
+  // https and fail closed on a non-Google destination before the
+  // fetch ever fires.
+  let interpreter: URL;
+  try {
+    interpreter = new URL(interpUrl, HOMEPAGE);
+  } catch {
+    throw new HttpError(
+      503,
+      'unavailable',
+      'pot: bgChallenge interpreter URL unparsable',
+    );
+  }
+  if (
+    interpreter.protocol !== 'https:' ||
+    !isAllowedInterpreterHost(interpreter.hostname)
+  ) {
+    throw new HttpError(
+      503,
+      'unavailable',
+      'pot: bgChallenge interpreter host not allowed',
+    );
+  }
   return {
-    challenge: { program, globalName, interpreterUrl: interpUrl },
+    challenge: {
+      program,
+      globalName,
+      interpreterUrl: interpreter.href,
+    },
     ytcfg,
   };
 }
@@ -401,7 +448,7 @@ async function buildBotGuardSession(
   const { challenge, ytcfg } = await challengeFromHomepage(fetchImpl);
   const interpreterJs = await fetchTextCapped(
     fetchImpl,
-    `https:${challenge.interpreterUrl}`,
+    challenge.interpreterUrl,
     'interpreter',
     undefined,
     MAX_UPSTREAM_CHARS,
@@ -447,6 +494,27 @@ async function buildBotGuardSession(
       : DEFAULT_SESSION_TTL_MS;
   const expiresAtMs = nowMs() + ttlMs;
   if (typeof integrityToken === 'string' && integrityToken.length > 0) {
+    // The snapshot's getMinter is a vm-realm function, and the
+    // mintCallback it returns is too — `instanceof Function` inside
+    // WebPoMinter is host-realm, so both legs get a host-realm
+    // async wrapper before the mint.
+    const rawGetMinter = webPoSignalOutput[0];
+    const signalOut: WebPoSignalOutput =
+      typeof rawGetMinter === 'function'
+        ? [
+            async (key: Uint8Array) => {
+              const cb = await rawGetMinter(key);
+              if (typeof cb !== 'function') {
+                throw new HttpError(
+                  503,
+                  'unavailable',
+                  'pot: minter callback missing',
+                );
+              }
+              return async (binding: Uint8Array) => cb(binding);
+            },
+          ]
+        : webPoSignalOutput;
     const minter = await WebPoMinter.create(
       {
         integrityToken,
@@ -458,7 +526,7 @@ async function buildBotGuardSession(
             ? websafeFallbackToken
             : '',
       },
-      webPoSignalOutput,
+      signalOut,
     );
     return {
       mint: (contentBinding) =>

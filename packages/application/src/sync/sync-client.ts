@@ -531,7 +531,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   async function dial(
     endpoints: readonly SyncEndpoint[],
     signal?: CancellationSignal,
-  ): Promise<Result<SyncSocket>> {
+  ): Promise<Result<{ socket: SyncSocket; endpoint: SyncEndpoint }>> {
     let lastError: AppError = appError(
       'unavailable',
       'sync: no usable endpoints',
@@ -547,7 +547,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         ...(signal !== undefined ? { signal } : {}),
       });
       if (connected.ok) {
-        return connected;
+        return ok({ socket: connected.value, endpoint: ep });
       }
       lastError = connected.error;
     }
@@ -563,7 +563,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     code?: string;
     pinnedFp?: string;
     signal?: CancellationSignal;
-  }): Promise<Result<{ session: ClientSession; welcome: WelcomeMsg }>> {
+  }): Promise<
+    Result<{
+      session: ClientSession;
+      welcome: WelcomeMsg;
+      /** The endpoint dial actually connected through. */
+      endpoint: SyncEndpoint;
+    }>
+  > {
     const parsed: SyncEndpoint[] = [];
     for (const raw of opts.endpoints) {
       const ep = parseEndpoint(raw);
@@ -576,16 +583,17 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         appError('invalid-message', 'sync: no usable endpoint in pair spec'),
       );
     }
-    const socket = await dial(parsed, opts.signal);
-    if (!socket.ok) {
-      return socket;
+    const dialed = await dial(parsed, opts.signal);
+    if (!dialed.ok) {
+      return err(dialed.error);
     }
+    const socket = dialed.value.socket;
     const handshake = deps.crypto.begin({ deviceId: deps.deviceId, name });
     const session: ClientSession = {
       peerFp: opts.pinnedFp ?? '',
-      socket: socket.value,
+      socket,
       pump: attachSyncPump({
-        socket: socket.value,
+        socket,
         maxPayload: HANDSHAKE_CAP,
         onFrame: (payload) => routeFrame(session, payload),
         onClose: (reason) =>
@@ -660,7 +668,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     }
     session.phase = 'open';
     keepalive(session);
-    return ok({ session, welcome: replied.value });
+    return ok({
+      session,
+      welcome: replied.value,
+      endpoint: dialed.value.endpoint,
+    });
   }
 
   /* --------------------------- keepalive --------------------------- */
@@ -896,7 +908,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     if (!opened.ok) {
       return err(opened.error);
     }
-    const { session, welcome } = opened.value;
+    const { session, welcome, endpoint } = opened.value;
+    // The payload's `pot` advertises the minter on the PRIMARY sync
+    // host — the phone may have connected through a different one
+    // (VPN first, Wi-Fi second). Rebase onto the host that actually
+    // answered so the stored endpoint is the reachable one; a IPv6
+    // dial keeps the advertised host verbatim (the minter is IPv4
+    // only — the payload's host is the best available).
+    let storedPot: string | undefined;
+    if (pot !== undefined) {
+      const parsed = parseEndpoint(pot);
+      storedPot =
+        parsed !== null && !endpoint.host.includes(':')
+          ? `${endpoint.host}:${parsed.port}`
+          : pot;
+    }
     const stored: SyncPeer = {
       fp: session.peerFp,
       name: welcome.name,
@@ -904,7 +930,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       pairedAt: welcome.device.pairedAt,
       lastSeenAt: deps.clock.nowMs(),
       peerCursor: {},
-      ...(pot !== undefined ? { pot } : {}),
+      ...(storedPot !== undefined ? { pot: storedPot } : {}),
     };
     const prior = sessions.get(stored.fp);
     if (prior !== undefined && prior !== session) {

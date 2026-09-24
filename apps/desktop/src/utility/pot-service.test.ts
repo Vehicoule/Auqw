@@ -1,6 +1,7 @@
 import { assert, assertEqual } from '@auqw/application/testing';
 import {
   createPotService,
+  type FetchLike,
   type PotSession,
 } from './pot-service.ts';
 
@@ -207,4 +208,162 @@ export async function run(): Promise<void> {
   assertEqual(rebuilt.body['poToken'], 'tok-new');
   assertEqual(dropBuilds, 2, 'failed session was reused');
   await dropper.close();
+
+  /* ------- protocol-leg fixtures (real BotGuard flow, fake wire) ------ */
+
+  const interpreterJs = `
+    globalThis.TR = {
+      a: async function (program, setupCb) {
+        const asyncSnapshot = function (cb, argsArr) {
+          // getMinter -> mintCallback (bytes->bytes) — mirrors the
+          // real webPoSignalOutput contract.
+          argsArr[2].push(async function () {
+            return async function (binding) {
+              return new Uint8Array([binding.length & 255, 42]);
+            };
+          });
+          cb(['snap', 1]);
+        };
+        setupCb(
+          asyncSnapshot,
+          function () {},
+          function () {},
+          function () {},
+        );
+        return [asyncSnapshot];
+      },
+    };
+  `;
+
+  function homepageWith(interpreterUrl: string): string {
+    return (
+      `<!doctype html><html><script>ytcfg.set({"EVENT_ID":"ev"});` +
+      `</script><script>window.ytAtN({"R":{"bgChallenge":{` +
+      `"program":"1+1","globalName":"TR","interpreterUrl":{` +
+      `"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":` +
+      `"${interpreterUrl}"}}}});</script></html>`
+    );
+  }
+
+  function fakeWire(
+    interpreterUrl: string,
+    generateIt: string,
+  ): { impl: FetchLike; urls: string[] } {
+    const urls: string[] = [];
+    const impl: FetchLike = async (url) => {
+      urls.push(url);
+      if (url === 'https://www.youtube.com') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => homepageWith(interpreterUrl),
+        };
+      }
+      if (url.includes('GenerateIT')) {
+        return { ok: true, status: 200, text: async () => generateIt };
+      }
+      if (url === `https://www.google.com/js/th/fake.js`) {
+        return { ok: true, status: 200, text: async () => interpreterJs };
+      }
+      return { ok: false, status: 404, text: async () => '' };
+    };
+    return { impl, urls };
+  }
+
+  // websafe fallback path — GenerateIT declines an integrity token.
+  const fallbackWire = fakeWire(
+    '//www.google.com/js/th/fake.js',
+    '[null, 3600, 0, "RkFMTEJBQ0s"]',
+  );
+  const fbSvc = createPotService({
+    fetchImpl: fallbackWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const fbPort = await fbSvc.bind();
+  assert(fbPort !== null);
+  const fbRes = await post(
+    `http://127.0.0.1:${fbPort}`,
+    JSON.stringify({ content_binding: 'vid1' }),
+  );
+  assertEqual(fbRes.status, 200);
+  assert(isRecord(fbRes.body));
+  assertEqual(fbRes.body['poToken'], 'RkFMTEJBQ0s');
+  assertEqual(fallbackWire.urls.length, 3, 'expected 3 legs');
+  assertEqual(fallbackWire.urls[0], 'https://www.youtube.com');
+  assertEqual(
+    fallbackWire.urls[1],
+    'https://www.google.com/js/th/fake.js',
+  );
+  assert(
+    (fallbackWire.urls[2] ?? '').includes('GenerateIT'),
+    'third leg is not GenerateIT',
+  );
+  await fbSvc.close();
+
+  // integrity-token path — WebPoMinter mints per binding.
+  const itWire = fakeWire(
+    '//www.google.com/js/th/fake.js',
+    '["aXRrZW4", 3600, 0, "fb"]',
+  );
+  const itSvc = createPotService({
+    fetchImpl: itWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const itPort = await itSvc.bind();
+  assert(itPort !== null);
+  const itRes = await post(
+    `http://127.0.0.1:${itPort}`,
+    JSON.stringify({ content_binding: 'kJQP7kiw5Fk' }),
+  );
+  assertEqual(itRes.status, 200);
+  assert(isRecord(itRes.body));
+  // binding length 11 -> bytes [11, 42] -> btoa -> "Cyo="
+  assertEqual(itRes.body['poToken'], 'Cyo=');
+  await itSvc.close();
+
+  // A poisoned homepage pointing the interpreter off-Google fails
+  // closed — the hostile leg is never fetched.
+  const evilWire = fakeWire(
+    '//attacker.example/x.js',
+    '[null, 3600, 0, "fb"]',
+  );
+  const evilSvc = createPotService({
+    fetchImpl: evilWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const evilPort = await evilSvc.bind();
+  assert(evilPort !== null);
+  const evilRes = await post(
+    `http://127.0.0.1:${evilPort}`,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  assertEqual(evilRes.status, 503);
+  assertEqual(
+    evilWire.urls.length,
+    1,
+    'interpreter fetched from an unlisted host',
+  );
+  await evilSvc.close();
+
+  // Homepage without a ytAtN challenge -> typed 503.
+  const bareSvc = createPotService({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '<html>no challenge</html>',
+    }),
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const barePort = await bareSvc.bind();
+  assert(barePort !== null);
+  const bareRes = await post(
+    `http://127.0.0.1:${barePort}`,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  assertEqual(bareRes.status, 503);
+  await bareSvc.close();
 }
