@@ -59,13 +59,20 @@ jobs:
           key: electron-${{ hashFiles('auqw/pnpm-lock.yaml') }}
           restore-keys: electron-
       # The flathub runtime/SDK/BaseApp install is GBs each run — the
-      # flatpak user repo + builder cache survive in these two dirs.
+      # flatpak user repo + builder cache survive in these two dirs. The
+      # key rotates weekly: restore-keys pulls last week's snapshot, the
+      # post-install `flatpak update` refreshes refs, and the new key
+      # persists the refreshed snapshot — a fixed key would restore the
+      # first saved state forever.
+      - id: flatpak-period
+        run: echo "period=$(date +%Y-%U)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: |
             ~/.local/share/flatpak
             ~/.flatpak-builder
-          key: flatpak-24.08-${{ runner.os }}
+          key: flatpak-24.08-${{ runner.os }}-${{ steps.flatpak-period.outputs.period }}
+          restore-keys: flatpak-24.08-${{ runner.os }}-
       - name: flatpak toolchain
         run: |
           sudo apt-get update
