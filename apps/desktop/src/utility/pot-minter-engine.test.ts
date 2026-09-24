@@ -1,6 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { assert, assertEqual } from '@auqw/application/testing';
@@ -8,19 +13,27 @@ import {
   createProcessMinter,
   HttpError,
   wireError,
+  type MinterReply,
 } from './pot-minter-engine.ts';
 
 /** A ChildProcess stand-in — drives the supersede ordering directly. */
-function fakeProc(): ChildProcess & { sent: unknown[] } {
+function fakeProc(): ChildProcess & { sent: unknown[]; kills: number } {
   const emitter = new EventEmitter();
   const sent: unknown[] = [];
-  const proc = emitter as unknown as ChildProcess & { sent: unknown[] };
+  const proc = emitter as unknown as ChildProcess & {
+    sent: unknown[];
+    kills: number;
+  };
   proc.sent = sent;
+  proc.kills = 0;
   proc.send = ((msg: unknown) => {
     sent.push(msg);
     return true;
   }) as ChildProcess['send'];
-  proc.kill = () => true;
+  proc.kill = () => {
+    proc.kills += 1;
+    return true;
+  };
   return proc;
 }
 
@@ -150,6 +163,99 @@ export async function run(): Promise<void> {
     const recovered = await pending;
     assertEqual(recovered.expiresAtMs, 9999);
     await gen.close();
+
+    // A wedged op times out and kills ITS child — the engine then
+    // respawns a clean one for the next request rather than staying
+    // stranded behind the corpse.
+    const wedged: (ChildProcess & { sent: unknown[]; kills: number })[] =
+      [];
+    const timed = createProcessMinter({
+      childModule: stub,
+      spawn: () => {
+        const proc = fakeProc();
+        wedged.push(proc);
+        return proc;
+      },
+      requestTimeoutMs: 40,
+    });
+    const wedgedBuild = timed.buildSession();
+    const wedgedProc = wedged[0];
+    assert(wedgedProc !== undefined, 'wedged child not spawned');
+    await wedgedBuild.then(
+      () => {
+        throw new Error('wedged build should reject');
+      },
+      (err: unknown) => {
+        assert(err instanceof HttpError, 'timeout error not HttpError');
+        assert(
+          err.message.includes('timed out'),
+          'wedged build did not time out',
+        );
+      },
+    );
+    assertEqual(wedgedProc.kills, 1, 'timeout killed the wedged child');
+    const retry = timed.buildSession();
+    const nextProc = wedged[1];
+    assert(nextProc !== undefined, 'no replacement spawned');
+    const nextReq = nextProc.sent[0] as { id: number };
+    nextProc.emit('message', {
+      id: nextReq.id,
+      ok: true,
+      value: { sessionId: 3, expiresAtMs: 5 },
+    });
+    await retry;
+    assertEqual(nextProc.kills, 0, 'replacement child untouched');
+    await timed.close();
+
+    // The REAL bundled child entry — packaging/startup coverage a
+    // stub can't give. Skipped when `pnpm build` hasn't produced the
+    // artifact (typecheck/test alone don't build).
+    const bundled = join(
+      dirname(process.argv[1] ?? '.'),
+      '../dist/utility/pot-minter-child.cjs',
+    );
+    if (existsSync(bundled)) {
+      const real = fork(bundled, {
+        execArgv: [],
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      });
+      try {
+        const awaitReply = (id: number): Promise<MinterReply> =>
+          new Promise((resolve, reject) => {
+            const timer = setTimeout(
+              () => reject(new Error('bundled child silent')),
+              10_000,
+            );
+            const onMsg = (m: unknown): void => {
+              const reply = m as MinterReply;
+              if (reply.id === id) {
+                clearTimeout(timer);
+                real.off('message', onMsg);
+                resolve(reply);
+              }
+            };
+            real.on('message', onMsg);
+          });
+        const mintWait = awaitReply(1);
+        real.send({
+          id: 1,
+          op: 'mint',
+          sessionId: 999,
+          contentBinding: 'x',
+        });
+        const mintReply = await mintWait;
+        assert(!mintReply.ok, 'unknown session mint should fail');
+        if (!mintReply.ok) {
+          assertEqual(mintReply.error.status, 503);
+          assertEqual(mintReply.error.kind, 'unavailable');
+        }
+        const disposeWait = awaitReply(2);
+        real.send({ id: 2, op: 'dispose', sessionId: 999 });
+        assert((await disposeWait).ok, 'dispose should answer ok');
+      } finally {
+        real.kill('SIGKILL');
+      }
+    }
 
     // wireError passes HttpError fields through; foreign exceptions
     // collapse to the generic line (no upstream material crossing).

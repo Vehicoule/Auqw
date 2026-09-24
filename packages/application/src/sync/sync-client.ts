@@ -940,13 +940,20 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     // advertisement — authoritative over the QR payload's copy and
     // the only channel a typed-code pairing learns it through.
     const storedPot = rebasePot(welcome.pot ?? pot, endpoint.host);
+    const existing = peers.get(session.peerFp);
     const stored: SyncPeer = {
       fp: session.peerFp,
       name: welcome.name,
       endpoints: endpoints.filter((ep) => parseEndpoint(ep) !== null),
       pairedAt: welcome.device.pairedAt,
       lastSeenAt: deps.clock.nowMs(),
-      peerCursor: {},
+      // A same-fingerprint re-pair refreshes endpoints/pot but keeps
+      // the watermark — an emptied cursor resends acknowledged
+      // entries on the next round.
+      peerCursor: existing?.peerCursor ?? {},
+      ...(existing?.lastSyncAt !== undefined
+        ? { lastSyncAt: existing.lastSyncAt }
+        : {}),
       ...(storedPot !== undefined ? { pot: storedPot } : {}),
     };
     const prior = sessions.get(stored.fp);

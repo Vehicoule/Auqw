@@ -182,13 +182,22 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
     }
   };
 
+  // Kills ONE child — clears `child` only while it still IS this
+  // proc, so a replacement already serving new requests is never
+  // touched. Safe on an already-dead proc: kill() is a no-op there
+  // and its pendings were rejected when it died.
+  const killProc = (proc: ChildProcess): void => {
+    if (child === proc) {
+      child = null;
+    }
+    proc.removeAllListeners();
+    proc.kill('SIGKILL');
+    failProc(proc, new HttpError(503, 'unavailable', 'pot: minter exited'));
+  };
+
   const kill = (): void => {
-    const dead = child;
-    child = null;
-    if (dead !== null) {
-      dead.removeAllListeners();
-      dead.kill('SIGKILL');
-      failProc(dead, new HttpError(503, 'unavailable', 'pot: minter exited'));
+    if (child !== null) {
+      killProc(child);
     }
   };
 
@@ -260,29 +269,39 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
 
   function request(msg: RequestBody): Promise<unknown> {
     const id = nextReqId++;
+    let target: ChildProcess;
+    try {
+      target = ensure();
+    } catch (thrown) {
+      return Promise.reject(
+        thrown instanceof HttpError
+          ? thrown
+          : new HttpError(503, 'unavailable', 'pot: minter send failed'),
+      );
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        // A wedged child can't be trusted again — kill it so the
-        // next build respawns a clean one.
-        kill();
+        // A wedged child can't be trusted again — kill THAT child,
+        // not whatever is current: a replacement may already serve
+        // new requests and must not pay for this one's stall.
+        killProc(target);
         reject(
           new HttpError(503, 'unavailable', 'pot: minter op timed out'),
         );
       }, timeoutMs);
+      pending.set(id, {
+        proc: target,
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
       try {
-        const target = ensure();
-        pending.set(id, {
-          proc: target,
-          resolve: (value) => {
-            clearTimeout(timer);
-            resolve(value);
-          },
-          reject: (err) => {
-            clearTimeout(timer);
-            reject(err);
-          },
-        });
         target.send({ ...msg, id } as MinterRequest);
       } catch (thrown) {
         clearTimeout(timer);

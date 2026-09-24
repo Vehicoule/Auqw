@@ -844,6 +844,59 @@ async function incompleteRoundFailsHonest(): Promise<void> {
   await client.close();
 }
 
+// 20. Re-pairing the same fingerprint is the advertised way to
+// refresh stale endpoints/pot — it must keep the sync watermark so
+// the next round doesn't resend acknowledged entries.
+async function rePairKeepsWatermark(): Promise<void> {
+  const { client, clientEngine, serverEngine, keys } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  assert(
+    (
+      await clientEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-phone',
+        field: 'name',
+        value: 'Phone Mix',
+      })
+    ).ok,
+  );
+  assert(
+    (
+      await serverEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-desk',
+        field: 'name',
+        value: 'Desk Mix',
+      })
+    ).ok,
+  );
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(outcome.ok, 'first round converges');
+  const before = keys.peers.get(SERVER_FP);
+  assert(before !== undefined, 'peer persisted');
+  assert(
+    Object.keys(before.peerCursor).length > 0,
+    'watermark present after round',
+  );
+  assert(before.lastSyncAt !== undefined, 'lastSyncAt stamped');
+  const again = await client.pair({ payload: qrPayload() });
+  assert(again.ok, 're-pair resolves');
+  const after = keys.peers.get(SERVER_FP);
+  assert(after !== undefined);
+  assertDeepEqual(
+    after.peerCursor,
+    before.peerCursor,
+    'peerCursor survived re-pair',
+  );
+  assertEqual(
+    after.lastSyncAt,
+    before.lastSyncAt,
+    'lastSyncAt survived re-pair',
+  );
+  await client.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -864,6 +917,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
   ['oversizedExportPaginates', oversizedExportPaginates],
   ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
+  ['rePairKeepsWatermark', rePairKeepsWatermark],
 ];
 
 export async function run(): Promise<void> {
