@@ -24,9 +24,11 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-      # A failed platform must not cancel the others — partial release
-      # bundles are still publishable.
-      fail-fast: false
+      # All-or-nothing publish: `needs: [desktop, android]` gates the
+      # release job on the whole matrix, so one failed platform blocks
+      # the release until fixed — a partial asset set is never a
+      # release. fail-fast stays default: the first failure cancels
+      # the other legs rather than paying for dead builds.
     runs-on: ${{ matrix.os }}
     defaults:
       run:
