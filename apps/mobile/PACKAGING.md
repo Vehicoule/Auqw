@@ -10,11 +10,14 @@ Current state: `app.config.ts` pins `com.vehicoule.auqw`; the release
 workflow stamps the version from the git tag. No `eas.json`, no
 checked-in `android/` (CNG — `expo prebuild` regenerates it,
 gitignored). **Alpha already signs**: `plugins/with-alpha-signing.cjs`
-injects `signingConfigs.alpha` pointing at the committed
-`keystores/alpha.keystore` and repoints the release buildType — the
-release workflow ships `assembleRelease` APKs under one consistent
-alpha identity. What stays Open below is only the post-alpha signing
-story (real upload key, distribution channel). iOS is post-release —
+injects `signingConfigs.alpha` when `AUQW_ALPHA_KEYSTORE_FILE` is set —
+the release workflow decodes the keystore from the
+`AUQW_ALPHA_KEYSTORE_B64` repo secret (credentials never enter the
+repo; missing secrets fall back to debug signing) and repoints the
+release buildType — shipping `assembleRelease` APKs under one
+consistent alpha identity. What stays Open below is only the
+post-alpha signing story (real upload key, distribution channel). iOS
+is post-release —
 the provisional `expo-audio` path stays until the native seam lands,
 and App Store signing needs an Apple Developer account anyway; not
 covered here.
@@ -82,10 +85,10 @@ Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
 config from somewhere — AGP's default release buildType carries none.
 Because `android/` is regenerated, signing config lives in a **config
 plugin**, not a hand-edit. The alpha channel already implements the
-simplest variant of this recipe (`with-alpha-signing.cjs` + a committed
-keystore); the `keystore.properties` design below is the same plugin
-shape pointed at an *external* key, which is what a real upload key
-needs.
+env-fed variant of this recipe (`with-alpha-signing.cjs` reading a
+CI-secret keystore); the `keystore.properties` design below is the same
+plugin shape pointed at a developer-local key file — either way the
+real upload key never enters the repo.
 
 1. One-time, outside the repo:
 

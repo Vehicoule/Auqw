@@ -47,10 +47,12 @@ ships; for alpha, link the tag page.
 - **Desktop signing**: alpha ships unsigned binaries + `SHA256SUMS.txt`.
   Signing/notarization reopens when a distribution channel is picked.
 - **Android signing**: alpha ships an `assembleRelease` APK signed
-  with the repo-held `apps/mobile/keystores/alpha.keystore` (wired by
-  the `with-alpha-signing` config plugin — RN's `debug.keystore`
-  convention, one identity across CI runs so installs upgrade cleanly).
-  A real upload key waits on the Path A (EAS) vs Path B (local Gradle)
+  with an alpha keystore decoded from the `AUQW_ALPHA_KEYSTORE_B64`
+  repo secret (+ `AUQW_ALPHA_STORE_PASSWORD` / `AUQW_ALPHA_KEY_PASSWORD`),
+  wired by the `with-alpha-signing` config plugin — credentials never
+  enter the repo; one identity across CI runs so installs upgrade
+  cleanly; missing secrets degrade to AGP's debug signing. A real
+  upload key waits on the Path A (EAS) vs Path B (local Gradle)
   ratification.
 - **auqw-plugins checkout**: private plugins repos need a
   `PLUGINS_CHECKOUT_TOKEN` PAT secret; public reads under
