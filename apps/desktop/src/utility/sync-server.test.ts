@@ -33,7 +33,11 @@ import {
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
-import { createTestPeer, type SessionCodec } from './sync-crypto.ts';
+import {
+  createTestPeer,
+  fingerprintOf,
+  type SessionCodec,
+} from './sync-crypto.ts';
 import {
   createMemoryKeys,
   type SyncDeviceRecord,
@@ -440,6 +444,101 @@ export async function run(): Promise<void> {
         1,
         'live registration survives the expired re-pair',
       );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A consume-losing pair restores the records its write displaced ——
+  {
+    const inner = createMemoryKeys();
+    // Hold the pair handler open right after its registry write so a
+    // fresh sync:pairing mint — minted off the pair lock — can retire
+    // the pending code mid-flight: consume loses, and the rollback
+    // must restore the record the write overwrote instead of leaving
+    // the registry gutted.
+    let releaseWrite: () => void = () => undefined;
+    const writeHold = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let holdPuts = false;
+    const gatedKeys: SyncKeys & {
+      records: Map<string, SyncDeviceRecord>;
+    } = {
+      ...inner,
+      records: inner.records,
+      async devicePut(record) {
+        await inner.devicePut(record);
+        if (holdPuts) {
+          holdPuts = false;
+          await writeHold;
+        }
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: gatedKeys,
+      endpointHost: '127.0.0.1',
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assert(status.boundPort !== null);
+      const port = status.boundPort;
+
+      // An established phone — the incumbent a losing pair clobbers.
+      const p1 = await pairingCode(service);
+      const first = await pairPhone({
+        port,
+        deviceId: 'phone-old',
+        code: p1.code,
+        fp: p1.fp,
+      });
+      const incumbent = inner.records.get('phone-old');
+      assert(incumbent !== undefined, 'incumbent registered');
+      first.client.close();
+
+      const p2 = await pairingCode(service);
+      // Same device id under a fresh device key: the pair's put
+      // overwrites the incumbent record outright.
+      const c = await dial(port);
+      const rogue = createTestPeer({
+        deviceId: 'phone-old',
+        name: 'rogue',
+      });
+      const hs = await phoneHandshake(c, rogue, p2.fp);
+      assertEqual(hs.registered, false, 'new key is unregistered');
+      const rogueFp = fingerprintOf(rogue.identity.pub);
+      holdPuts = true;
+      c.send(sealJson(hs.codec, { t: 'pair', code: p2.code }));
+      // Wait for the gated write to land (the incumbent's fp is
+      // displaced) before minting the code away.
+      for (
+        let i = 0;
+        i < 200 && inner.records.get('phone-old')?.fp === incumbent.fp;
+        i += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(
+        inner.records.get('phone-old')?.fp === rogueFp &&
+          inner.records.get('phone-old')?.fp !== incumbent.fp,
+        'pair write overwrote the incumbent',
+      );
+      // Retire the pending code while the write holds — consume now
+      // loses even though peek passed.
+      await pairingCode(service);
+      releaseWrite();
+      const reply = await openJson(hs.codec, await c.recv());
+      assertDeepEqual(reply, { t: 'reject', reason: 'no-pairing' });
+      // Rollback deleted the half-registered record AND restored the
+      // incumbent it had displaced.
+      const restored = inner.records.get('phone-old');
+      assert(restored !== undefined, 'incumbent record restored');
+      assertEqual(restored.fp, incumbent.fp);
+      assertEqual(inner.records.size, 1, 'no shadow records remain');
+      c.close();
     } finally {
       await service.close();
     }
