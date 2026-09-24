@@ -1096,51 +1096,17 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state, downloads, downloadChipFor, online, controller, localTick],
   );
-  // The ref the player resolved for the current recording — catalog
-  // rows mark 'playing' only when their own sourceRef IS this ref
-  // (the preview draws the accent row + eq overlay inside result
-  // lists).
+  // The ref the player actually resolved for the live attempt —
+  // published on the playback snapshot, so a pin, a verdict, or
+  // owned bytes each mark exactly the row they resolved to (local
+  // picks match no catalog row). A failed gate is not 'playing'.
   const playingRef = useMemo((): SourceRef | null => {
-    // Only a live attempt marks a row — a failed gate is not 'playing'.
     const playback = state.playback;
     if (playback.type === 'idle' || playback.type === 'failed') {
       return null;
     }
-    const recordingId = playback.recordingId;
-    const recording = state.recordings.find((r) => r.id === recordingId);
-    if (recording === undefined) {
-      return null;
-    }
-    // Mirror Session.#pickRef so the marked row is the ref the player
-    // actually resolved: offline resolves owned bytes (no catalog row
-    // matches); an active-provider pin wins verbatim; owned bytes
-    // beat auto-picks; then the mapping verdict; then any unvetoed
-    // provider ref.
-    if (online === false) {
-      return null;
-    }
-    const provider = state.settings.playbackProvider;
-    const current = state.queue.occurrences.find(
-      (o) => o.occurrenceId === state.queue.currentOccurrenceId,
-    );
-    if (current?.selectedRef?.provider === provider) {
-      return current.selectedRef;
-    }
-    if (isOwned(recording.id)) {
-      return null;
-    }
-    const mapped = effectiveMapping(recording, provider);
-    if (mapped !== null) {
-      return mapped.ref;
-    }
-    return (
-      recording.sourceRefs.find(
-        (s) =>
-          s.provider === provider &&
-          !isRefRejected(recording.mappings, s),
-      ) ?? null
-    );
-  }, [state, online, isOwned]);
+    return playback.ref ?? null;
+  }, [state.playback]);
 
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
@@ -1357,6 +1323,17 @@ function Main({
 
   // ---- play actions ------------------------------------------------
 
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
   // The ambiguous-match gate parks candidates in a review the user
   // must resolve — retrying the press only fails the same way, so a
   // play that hits the gate opens the review surface instead of
@@ -1364,15 +1341,18 @@ function Main({
   const reportPlay = useCallback(
     (action: string, result: Result<unknown>) => {
       reportResult(action, result);
-      if (
-        !result.ok &&
-        isMatchGate(result.error) &&
-        overlay?.type !== 'corrections'
-      ) {
-        pushOverlay({ type: 'corrections' });
+      if (!result.ok && isMatchGate(result.error)) {
+        // Land the user on the fresh pending row: a stale 'resolved'
+        // filter or an already-open screen would hide it, so the
+        // route always selects pending and reloads.
+        setReviewFilter('pending');
+        loadReviews();
+        if (overlay?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
+        }
       }
     },
-    [pushOverlay, overlay],
+    [pushOverlay, overlay, loadReviews],
   );
 
   const playRecording = useCallback(
@@ -1813,17 +1793,6 @@ function Main({
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
 
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.

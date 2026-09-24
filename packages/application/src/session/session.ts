@@ -40,6 +40,7 @@ import type {
 import {
   createCorrections,
   effectiveMapping,
+  isMatchGate,
   isRefRejected,
   MATCH_GATE_MESSAGE,
 } from '../library/corrections.ts';
@@ -139,6 +140,8 @@ export type SessionPlayback =
     readonly recordingId: string;
     readonly occurrenceId: string;
     readonly identity: PlaybackIdentity;
+    /** The resolved source once the pick finalizes — undefined until then. */
+    readonly ref?: SourceRef;
     readonly requestId?: string;
   }
   | {
@@ -146,6 +149,8 @@ export type SessionPlayback =
     readonly recordingId: string;
     readonly occurrenceId: string;
     readonly identity: PlaybackIdentity;
+    /** The source ref this attempt resolved and is actually playing. */
+    readonly ref?: SourceRef;
     readonly handle: string;
     readonly positionMs: number;
     readonly durationMs?: number;
@@ -325,6 +330,8 @@ type ActiveAttempt = {
   identity: PlaybackIdentity;
   readonly recordingId: string;
   readonly occurrenceId: string;
+  /** The ref #pickRef resolved — surfaces on SessionPlayback so consumers mark the row actually playing. */
+  ref?: SourceRef;
   readonly source: CancellationSource;
   readonly deadlineMs: number;
   requestId?: string;
@@ -2507,7 +2514,26 @@ export class Session {
     return this.#reviewOp(
       (signal) => this.#corrections.confirm(reviewId, candidateIndex, signal),
       context,
-    );
+    ).then(async (result) => {
+      // A gated play attempt parked this review and left playback
+      // failed — the confirm IS the retry, so resume the blocked
+      // occurrence when it is the one that gated. The verdict is in
+      // the reloaded recording, so the re-attempt resolves straight
+      // to it. A retry failure lands as the new playback error; the
+      // confirm itself stays a success.
+      const playback = this.#ready?.playback;
+      if (
+        result.ok &&
+        playback !== undefined &&
+        playback.type === 'failed' &&
+        playback.occurrenceId !== null &&
+        playback.recordingId === result.value.recordingId &&
+        isMatchGate(playback.error)
+      ) {
+        await this.playOccurrence(playback.occurrenceId);
+      }
+      return result;
+    });
   }
 
   rejectReview(
@@ -3769,6 +3795,19 @@ export class Session {
       await this.#failAttempt(attempt, error);
       return err(error);
     }
+    // The pick is final here — consumers read `playback.ref` to mark
+    // the catalog row the player actually resolved (a local pick
+    // matches none, an already-running stream keeps its own ref).
+    attempt.ref = ref;
+    const r2 = this.#ready;
+    if (
+      r2 !== null &&
+      r2.playback.type === 'preparing' &&
+      attemptEq(r2.playback.identity, attempt.identity)
+    ) {
+      r2.playback = { ...r2.playback, ref };
+      this.#publish();
+    }
     if (this.#isStale(attempt)) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
@@ -3813,7 +3852,11 @@ export class Session {
       ready2.playback.type === 'preparing' &&
       attemptEq(ready2.playback.identity, attempt.identity)
     ) {
-      ready2.playback = { ...ready2.playback, requestId: prepared.value };
+      ready2.playback = {
+        ...ready2.playback,
+        requestId: prepared.value,
+        ref,
+      };
       this.#publish();
     }
     if (!attempt.preparedHandled) {
@@ -4134,6 +4177,7 @@ export class Session {
       identity: attempt.identity,
       handle: attempt.handle,
       positionMs: r.queue.snapshot().positionMs,
+      ...(attempt.ref === undefined ? {} : { ref: attempt.ref }),
       ...(durationMs === undefined ? {} : { durationMs }),
     };
     this.#publish();
@@ -4328,6 +4372,7 @@ export class Session {
         identity: active.identity,
         handle: active.handle,
         positionMs: event.positionMs,
+        ...(active.ref === undefined ? {} : { ref: active.ref }),
         ...(event.durationMs === undefined
           ? {}
           : { durationMs: event.durationMs }),
