@@ -104,7 +104,13 @@ if (port === null) {
   // external provider instead — then this never binds and pairing
   // advertises nothing. The bind rides the startup gate below so a
   // QR minted early can't advertise a dead endpoint.
-  const potOverride = process.env['AUQW_POT_PROVIDER_URL'];
+  // An empty override reads as "unset" — `VAR=` in a launch env must
+  // not suppress the bundled minter into a provider-less state.
+  const potOverrideEnv = process.env['AUQW_POT_PROVIDER_URL'];
+  const potOverride =
+    potOverrideEnv !== undefined && potOverrideEnv.trim() !== ''
+      ? potOverrideEnv
+      : undefined;
   const pot = createPotService({
     log: (line) => console.warn(`[auqw] ${line}`),
   });

@@ -114,8 +114,9 @@ recording so reviewers see range pulls live.
   proves whether a phone resolve actually consulted the minter.
 - `potProviderUrl` is a ONE-SHOT `createHost` input (App.tsx) — pairing
   must precede app boot: pair → `am force-stop` + relaunch → resolve.
-  A stale peer record (old port) must be `unpair`ed first; same-fingerprint
-  re-pair updates endpoints+pot in place.
+  A stale peer record (old port) heals on re-pair or resume — the
+  same-fingerprint record is updated in place (endpoints + welcome pot),
+  no unpair needed.
 - Branch JS that changes the host-call shape breaks a stale APK with a
   UniFFI `Structure.getFieldOrder() … does not provide enough names`
   crash at `createHost` — rebuild bindings (`build-android-bindings.sh`)

@@ -45,6 +45,10 @@ const MAX_BINDING_CHARS = 512;
 /** Token bucket: mints are per-resolve, never hot-path. */
 const RATE_LIMIT_PER_SEC = 4;
 const RATE_LIMIT_BURST = 8;
+/** Bound on distinct rate-limit clients — the aggregate ceiling. */
+const MAX_RATE_CLIENTS = 256;
+/** Idle client buckets are reclaimed past this age. */
+const CLIENT_BUCKET_IDLE_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const VM_RUN_TIMEOUT_MS = 10_000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -116,6 +120,12 @@ export type PotServiceDeps = {
   readonly log?: (line: string) => void;
   readonly rateLimitPerSec?: number;
   readonly rateLimitBurst?: number;
+  /**
+   * Rate-limit client identity — defaults to the socket peer
+   * address so one LAN abuser starves only itself; tests inject
+   * a deterministic key.
+   */
+  readonly clientKey?: (req: IncomingMessage) => string;
 };
 
 export type PotService = {
@@ -450,7 +460,9 @@ async function buildBotGuardSession(
     fetchImpl,
     challenge.interpreterUrl,
     'interpreter',
-    undefined,
+    // Fail closed on redirects — the host allowlist covers the URL
+    // the page declared, not wherever a 30x might land.
+    { redirect: 'error' },
     MAX_UPSTREAM_CHARS,
   );
   const ctx = vm.createContext(botGuardSandbox(ytcfg, fetchImpl));
@@ -473,6 +485,9 @@ async function buildBotGuardSession(
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify([REQUEST_KEY, snapshot]),
+      // Same rule: a redirect would re-post the snapshot to a
+      // destination the challenge never vouched for.
+      redirect: 'error',
     },
     65_536,
   );
@@ -568,8 +583,15 @@ export function createPotService(opts: PotServiceDeps): PotService {
   let session: PotSession | null = null;
   let sessionPending: Promise<PotSession> | null = null;
   let lastFailureAt = 0;
-  let tokens = rateBurst;
-  let lastRefillAt = nowMs();
+  const clientKey =
+    opts.clientKey ??
+    ((req: IncomingMessage) => req.socket.remoteAddress ?? 'unknown');
+  // Per-source token buckets — a shared global bucket would let any
+  // unpaired LAN client drain the quota and 429 real playback.
+  const clientBuckets = new Map<
+    string,
+    { tokens: number; refillAt: number }
+  >();
 
   function ensureSession(): Promise<PotSession> {
     if (
@@ -644,18 +666,33 @@ export function createPotService(opts: PotServiceDeps): PotService {
     return { poToken, expiresAtMs: active.expiresAtMs };
   }
 
-  function admit(): boolean {
+  function admit(clientId: string): boolean {
     const now = nowMs();
-    const elapsed = Math.max(0, now - lastRefillAt);
-    lastRefillAt = now;
-    tokens = Math.min(
+    let bucket = clientBuckets.get(clientId);
+    if (bucket === undefined) {
+      if (clientBuckets.size >= MAX_RATE_CLIENTS) {
+        for (const [key, entry] of clientBuckets) {
+          if (now - entry.refillAt > CLIENT_BUCKET_IDLE_MS) {
+            clientBuckets.delete(key);
+          }
+        }
+        if (clientBuckets.size >= MAX_RATE_CLIENTS) {
+          return false;
+        }
+      }
+      bucket = { tokens: rateBurst, refillAt: now };
+      clientBuckets.set(clientId, bucket);
+    }
+    const elapsed = Math.max(0, now - bucket.refillAt);
+    bucket.refillAt = now;
+    bucket.tokens = Math.min(
       rateBurst,
-      tokens + (elapsed / 1_000) * ratePerSec,
+      bucket.tokens + (elapsed / 1_000) * ratePerSec,
     );
-    if (tokens < 1) {
+    if (bucket.tokens < 1) {
       return false;
     }
-    tokens -= 1;
+    bucket.tokens -= 1;
     return true;
   }
 
@@ -701,7 +738,7 @@ export function createPotService(opts: PotServiceDeps): PotService {
       reply(res, 404, { error: 'not-found' });
       return;
     }
-    if (!admit()) {
+    if (!admit(clientKey(req))) {
       reply(res, 429, { error: 'rate-limit' });
       return;
     }
@@ -713,13 +750,17 @@ export function createPotService(opts: PotServiceDeps): PotService {
       if (bytes > MAX_BODY_BYTES) {
         // Unread body bytes would corrupt the next pipelined
         // request — answer, then close the connection for real.
+        // Destroy only after the 413 actually flushes; an immediate
+        // destroy races the queued response and resets instead.
+        // (req.socket detaches before 'finish' — capture it now.)
+        const sock = req.socket;
+        res.once('finish', () => sock.destroy());
         reply(
           res,
           413,
           { error: 'invalid-request' },
           { connection: 'close' },
         );
-        req.socket.destroy();
         return;
       }
       chunks.push(buf);
@@ -780,6 +821,13 @@ export function createPotService(opts: PotServiceDeps): PotService {
           resolve(null);
         });
         srv.listen({ host: '0.0.0.0', port: 0 }, () => {
+          // close() can land while listen is still pending — don't
+          // resurrect a listener into post-shutdown state.
+          if (closing) {
+            srv.close();
+            resolve(null);
+            return;
+          }
           const address = srv.address();
           boundPort =
             address !== null && typeof address === 'object'

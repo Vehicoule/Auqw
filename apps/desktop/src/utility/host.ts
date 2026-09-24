@@ -236,8 +236,14 @@ export function createHostRuntime(opts: {
     try {
       const mod = requireFn(stageArtifact(found));
       const userData = opts.env.AUQW_USER_DATA ?? process.cwd();
+      // An empty override reads as unset — otherwise it would both
+      // skip the bundled service's loopback URL AND fail the host's
+      // own URL validation, leaving playback with no provider.
+      const envPotUrl = opts.env.AUQW_POT_PROVIDER_URL;
       const potUrl =
-        opts.env.AUQW_POT_PROVIDER_URL ?? opts.potProviderUrl?.() ?? undefined;
+        (envPotUrl !== undefined && envPotUrl.trim() !== ''
+          ? envPotUrl
+          : opts.potProviderUrl?.()) ?? undefined;
       host = new mod.PluginHost({
         fuelPerEntry: FUEL_PER_ENTRY,
         fuelTotal: FUEL_TOTAL,

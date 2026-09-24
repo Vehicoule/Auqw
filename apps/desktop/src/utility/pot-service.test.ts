@@ -248,10 +248,16 @@ export async function run(): Promise<void> {
   function fakeWire(
     interpreterUrl: string,
     generateIt: string,
-  ): { impl: FetchLike; urls: string[] } {
+  ): {
+    impl: FetchLike;
+    urls: string[];
+    inits: (RequestInit | undefined)[];
+  } {
     const urls: string[] = [];
-    const impl: FetchLike = async (url) => {
+    const inits: (RequestInit | undefined)[] = [];
+    const impl: FetchLike = async (url, init) => {
       urls.push(url);
+      inits.push(init);
       if (url === 'https://www.youtube.com') {
         return {
           ok: true,
@@ -267,7 +273,7 @@ export async function run(): Promise<void> {
       }
       return { ok: false, status: 404, text: async () => '' };
     };
-    return { impl, urls };
+    return { impl, urls, inits };
   }
 
   // websafe fallback path — GenerateIT declines an integrity token.
@@ -299,6 +305,11 @@ export async function run(): Promise<void> {
     (fallbackWire.urls[2] ?? '').includes('GenerateIT'),
     'third leg is not GenerateIT',
   );
+  // Redirects fail closed on the legs where they matter — the
+  // allowlist covers the declared URL, not a 30x destination, and a
+  // re-posted GenerateIT body would leak snapshot material.
+  assertEqual(fallbackWire.inits[1]?.redirect, 'error');
+  assertEqual(fallbackWire.inits[2]?.redirect, 'error');
   await fbSvc.close();
 
   // integrity-token path — WebPoMinter mints per binding.
@@ -366,4 +377,63 @@ export async function run(): Promise<void> {
   );
   assertEqual(bareRes.status, 503);
   await bareSvc.close();
+
+  // Rate limiting is per-client — client A draining its own bucket
+  // cannot starve client B.
+  const keyed = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    rateLimitPerSec: 0,
+    rateLimitBurst: 2,
+    clientKey: (req) => {
+      const header = req.headers['x-test-client'];
+      return typeof header === 'string' ? header : 'anon';
+    },
+    session: async (): Promise<PotSession> => ({
+      mint: async () => 'tok',
+      expiresAtMs: now.ms + 60_000,
+    }),
+  });
+  const kport = await keyed.bind();
+  assert(kport !== null);
+  const kbase = `http://127.0.0.1:${kport}`;
+  const postAs = async (client: string): Promise<Response> => {
+    const res = await fetch(`${kbase}/get_pot`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-client': client,
+      },
+      body: JSON.stringify({ content_binding: 'v' }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  assertEqual((await postAs('A')).status, 200);
+  assertEqual((await postAs('A')).status, 200);
+  assertEqual((await postAs('A')).status, 429);
+  assertEqual(
+    (await postAs('B')).status,
+    200,
+    'one client starved another',
+  );
+  await keyed.close();
+
+  // close() racing a still-pending bind resolves null and leaves no
+  // resurrected listener behind.
+  const racer = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: async (): Promise<PotSession> => ({
+      mint: async () => 'tok',
+      expiresAtMs: now.ms + 60_000,
+    }),
+  });
+  const racingBind = racer.bind();
+  await racer.close();
+  assertEqual(
+    await racingBind,
+    null,
+    'close during bind resurrected a listener',
+  );
+  assertEqual(racer.port(), null);
 }
