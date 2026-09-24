@@ -603,15 +603,62 @@ async function fetchTextCapped(
       `pot: ${leg} answered ${resp.status}`,
     );
   }
-  const text = await resp.text();
-  if (text.length > maxChars) {
-    throw new HttpError(
-      503,
-      'unavailable',
-      `pot: ${leg} response oversized`,
-    );
+  return boundedText(resp, maxChars, leg);
+}
+
+type StreamedResponse = FetchResponse & {
+  body?: ReadableStream<Uint8Array> | null;
+};
+
+/**
+ * Body read bounded WHILE it streams — `resp.text()` would buffer the
+ * whole upstream body before the cap could reject it, and these
+ * callers run inside the dedicated minter child where an oversized
+ * homepage/interpreter response is the child's memory ceiling.
+ * Injected test responses carry no `.body`; those bound the string
+ * they hand back instead.
+ */
+async function boundedText(
+  resp: FetchResponse,
+  maxChars: number,
+  leg: string,
+): Promise<string> {
+  const body = (resp as StreamedResponse).body;
+  if (body === null || body === undefined) {
+    const text = await resp.text();
+    if (text.length > maxChars) {
+      throw new HttpError(
+        503,
+        'unavailable',
+        `pot: ${leg} response oversized`,
+      );
+    }
+    return text;
   }
-  return text;
+  const oversized = (): HttpError =>
+    new HttpError(503, 'unavailable', `pot: ${leg} response oversized`);
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let seen = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      seen += value.byteLength;
+      if (seen > maxChars) {
+        void reader.cancel();
+        throw oversized();
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  parts.push(decoder.decode());
+  return parts.join('');
 }
 
 /**

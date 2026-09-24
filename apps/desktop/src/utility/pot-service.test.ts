@@ -1,4 +1,5 @@
 import { assert, assertEqual } from '@auqw/application/testing';
+import type { FetchResponse } from './pot-service.ts';
 import {
   createPotService,
   type FetchLike,
@@ -503,6 +504,36 @@ export async function run(): Promise<void> {
     'interpreter fetched from an unlisted host',
   );
   await evilSvc.close();
+
+  // An oversized upstream body is rejected MID-READ — the cap must
+  // bite while the body streams, not after it buffers whole in the
+  // minter child's memory. This stream never ends: an unbounded
+  // text() read would hang here forever.
+  let pulls = 0;
+  const streamBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(256 * 1_024));
+    },
+  });
+  const bigWire: FetchLike = async () =>
+    new Response(streamBody, { status: 200 }) as FetchResponse;
+  const bigSvc = createPotService({
+    fetchImpl: bigWire,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const bigPort = await bigSvc.bind();
+  assert(bigPort !== null);
+  const bigRes = await post(
+    `http://127.0.0.1:${bigPort}`,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  assertEqual(bigRes.status, 503);
+  // 8 MiB cap at 256 KiB chunks ends ~33 pulls in — far under any
+  // buffered-read horizon.
+  assert(pulls < 64, `cap did not bite mid-stream (${pulls} pulls)`);
+  await bigSvc.close();
 
   // The bounded response keeps the full Response contract — an
   // interpreter reading .json() works, and its follow-up marker

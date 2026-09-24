@@ -897,6 +897,26 @@ async function rePairKeepsWatermark(): Promise<void> {
   await client.close();
 }
 
+// 21. A custody-write failure on RE-PAIR must restore the prior
+// in-memory record — disk still holds it, so the peer must not
+// vanish until restart re-hydrates.
+async function failedRePairKeepsPeer(): Promise<void> {
+  const { client, keys } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  keys.failPeerPut = true;
+  const again = await client.pair({ payload: qrPayload() });
+  assert(!again.ok, 're-pair should fail on custody write');
+  assert(keys.peers.has(SERVER_FP), 'disk record lost');
+  assertEqual(
+    client.status().peers.length,
+    1,
+    'prior peer hidden until restart',
+  );
+  keys.failPeerPut = false;
+  await client.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -918,6 +938,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['oversizedExportPaginates', oversizedExportPaginates],
   ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
   ['rePairKeepsWatermark', rePairKeepsWatermark],
+  ['failedRePairKeepsPeer', failedRePairKeepsPeer],
 ];
 
 export async function run(): Promise<void> {

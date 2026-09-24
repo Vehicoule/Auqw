@@ -964,7 +964,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     peers.set(stored.fp, stored);
     const persisted = await deps.keys.peerPut(stored, signal);
     if (!persisted.ok) {
-      peers.delete(stored.fp);
+      // Custody on disk still holds the prior record — keep the
+      // in-memory map consistent with it or the peer vanishes until
+      // the next restart re-hydrates.
+      if (existing !== undefined) {
+        peers.set(stored.fp, existing);
+      } else {
+        peers.delete(stored.fp);
+      }
       sessions.delete(stored.fp);
       killSession(session, persisted.error);
       return persisted;
