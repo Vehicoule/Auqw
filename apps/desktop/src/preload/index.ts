@@ -207,6 +207,11 @@ const api: AuqwApi = {
     meta: (): Promise<AppMeta> =>
       invoke(CHANNELS.appMeta, undefined, isAppMeta),
   },
+  chrome: {
+    setScheme: (scheme): void => {
+      ipcRenderer.send(CHANNELS.chromeScheme, scheme);
+    },
+  },
   dialog: {
     pickFolder: (title?: string): Promise<string | null> =>
       invoke(

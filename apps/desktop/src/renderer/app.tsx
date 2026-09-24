@@ -72,6 +72,7 @@ import {
   toSearchRowModel,
   toSettingsModel,
   toSyncPanel,
+  useTheme,
 } from '@auqw/ui-web';
 import type {
   CollectionRowModel,
@@ -215,6 +216,7 @@ function Shell({ controller }: { readonly controller: SessionController }) {
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
   return (
     <ThemeProvider theme={theme}>
+      <ChromeSchemeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -222,6 +224,16 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       )}
     </ThemeProvider>
   );
+}
+
+/** Pushes the resolved scheme to main so the titlebar overlay
+    matches the canvas even when the user picked an explicit scheme. */
+function ChromeSchemeReporter(): null {
+  const { scheme } = useTheme();
+  useEffect(() => {
+    window.auqw.chrome.setScheme(scheme);
+  }, [scheme]);
+  return null;
 }
 
 function SessionGate({

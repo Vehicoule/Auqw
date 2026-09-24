@@ -2050,6 +2050,11 @@ export type AuqwApi = {
   readonly app: {
     readonly meta: () => Promise<AppMeta>;
   };
+  readonly chrome: {
+    /** Reports the resolved ui-web scheme so main can re-tint the
+        titlebar overlay. One-way send; nothing to await. */
+    readonly setScheme: (scheme: 'dark' | 'light' | 'oled') => void;
+  };
   readonly dialog: {
     readonly pickFolder: (
       title?: string,
