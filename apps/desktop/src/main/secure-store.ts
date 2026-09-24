@@ -29,6 +29,7 @@ export function createSecureStore(opts: {
   safeStorage: SafeStorageLike;
 }): SecureStore {
   const { dir, safeStorage } = opts;
+  let stagingSeq = 0;
 
   function fileFor(key: string): string {
     return join(dir, `${key}.b64`);
@@ -73,8 +74,12 @@ export function createSecureStore(opts: {
       const encrypted = Buffer.from(safeStorage.encryptString(value));
       const target = fileFor(key);
       // tmp + rename: a crash mid-write leaves a torn file that reads
-      // back corrupt-state forever — publish only complete files.
-      const staging = `${target}.tmp`;
+      // back corrupt-state forever — publish only complete files. The
+      // staging name is unique per call: two overlapping sets would
+      // share one tmp path and a rename could publish the other's
+      // half-written bytes.
+      stagingSeq += 1;
+      const staging = `${target}.${process.pid}.${stagingSeq}.tmp`;
       try {
         await mkdir(dir, { recursive: true });
         await writeFile(staging, encrypted.toString('base64'), 'utf8');

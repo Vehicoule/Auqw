@@ -108,11 +108,16 @@ function toCount(value: number | bigint): number {
  * `PRAGMA foreign_keys = ON`; anything else is refused.
  */
 const PRAGMA_FOREIGN_KEYS_ON = /^pragma\s+foreign_keys\s*=\s*on\s*;?$/i;
-const STATEMENT_HEAD = /^(?:\s|--[^\n]*\n|\/\*[^]*?\*\/\s*)*([a-z]+)/i;
+// `;` counts as trivia: prepare() skips leading empty statements, so
+// ';ATTACH' would otherwise reach the driver under an empty head.
+const STATEMENT_HEAD = /^(?:[\s;]|--[^\n]*\n|\/\*[^]*?\*\/)*([a-z]+)/i;
 const BLOCKED_HEADS = new Set(['attach', 'detach', 'vacuum', 'pragma']);
 
 function checkStatement(sql: string): void {
   const keyword = (STATEMENT_HEAD.exec(sql)?.[1] ?? '').toLowerCase();
+  if (keyword === '') {
+    throw shellError('invalid-request', 'statement has no head keyword');
+  }
   if (!BLOCKED_HEADS.has(keyword)) {
     return;
   }

@@ -1,10 +1,23 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assert, assertEqual } from '@auqw/application/testing';
+import {
+  assert,
+  assertDeepEqual,
+  assertEqual,
+} from '@auqw/application/testing';
 import { isShellError } from '../shared/errors.ts';
 import { createSecureStore, type SafeStorageLike } from './secure-store.ts';
-import { createSyncKeysHandler } from './sync-keys.ts';
+import {
+  createSyncKeysHandler,
+  migrateSyncCustody,
+} from './sync-keys.ts';
 import {
   fingerprintOf,
   generateIdentity,
@@ -194,6 +207,56 @@ export async function run(): Promise<void> {
     });
     await assertThrowsKind(sealed({ op: 'identity-get' }), 'unavailable');
     await assertThrowsKind(sealed({ op: 'device-list' }), 'unavailable');
+
+    // custody migration: pre-split installs kept sync entries in the
+    // renderer-facing dir — they move, non-sync entries stay put, and
+    // an existing destination entry wins.
+    const oldDir = join(root, 'legacy-secure');
+    const newDir = join(root, 'sync-secure');
+    const oldStore = createSecureStore({ dir: oldDir, safeStorage: WORKING });
+    const legacyIdentity = generateIdentity();
+    await oldStore.set('auqw.sync.identity', JSON.stringify(legacyIdentity));
+    const phone = device('dev-legacy01');
+    await oldStore.set(`auqw.sync.device.${phone.id}`, JSON.stringify(phone));
+    await oldStore.set('session.token', 'renderer-owned');
+    mkdirSync(newDir, { recursive: true });
+    const keptNew = device('dev-newer001');
+    await createSecureStore({ dir: newDir, safeStorage: WORKING }).set(
+      `auqw.sync.device.${keptNew.id}`,
+      JSON.stringify(keptNew),
+    );
+
+    await migrateSyncCustody(oldDir, newDir);
+
+    assert(!existsSync(join(oldDir, 'auqw.sync.identity.b64')));
+    assert(!existsSync(join(oldDir, `auqw.sync.device.${phone.id}.b64`)));
+    assert(
+      existsSync(join(oldDir, 'session.token.b64')),
+      'non-sync entries stay in the renderer-facing dir',
+    );
+    const migrated = createSyncKeysHandler({
+      secure: createSecureStore({ dir: newDir, safeStorage: WORKING }),
+      dir: newDir,
+    });
+    const gotBack = (await migrated({ op: 'identity-get' })) as {
+      identity: { pub: string } | null;
+    };
+    assertEqual(
+      gotBack.identity?.pub,
+      legacyIdentity.pub,
+      'identity migrated',
+    );
+    const devicesListed = (await migrated({ op: 'device-list' })) as {
+      devices: SyncDeviceRecord[];
+    };
+    assertDeepEqual(
+      devicesListed.devices.map((d) => d.id).sort(),
+      ['dev-legacy01', 'dev-newer001'].sort(),
+      'migrated + pre-existing devices both readable',
+    );
+    // Re-running is idempotent — an upgrade that raced a first boot
+    // doesn't clobber the destination.
+    await migrateSyncCustody(oldDir, newDir);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

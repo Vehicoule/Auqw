@@ -277,11 +277,13 @@ async function readTags(
       artist: boundedField(meta.common.artist ?? meta.common.artists?.[0]),
       album: boundedField(meta.common.album),
       durationMs:
-        // A garbage duration (NaN, negative) can't survive the
-        // response schema — a bare round poisons the whole batch.
+        // A garbage duration (NaN, negative, or one that outgrows the
+        // schema's safe-int bound) can't survive the response schema —
+        // a bare round poisons the whole batch.
         meta.format.duration !== undefined &&
           Number.isFinite(meta.format.duration) &&
-          meta.format.duration >= 0
+          meta.format.duration >= 0 &&
+          Number.isSafeInteger(Math.round(meta.format.duration * 1000))
           ? Math.round(meta.format.duration * 1000)
           : null,
       genre: boundedField(meta.common.genre?.[0]),

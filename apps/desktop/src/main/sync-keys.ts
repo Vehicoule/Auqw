@@ -1,4 +1,5 @@
-import { readdir } from 'node:fs/promises';
+import { access, readdir, rename } from 'node:fs/promises';
+import { join } from 'node:path';
 import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import type { SecureStore } from './secure-store.ts';
@@ -24,6 +25,55 @@ import {
 
 const IDENTITY_KEY = 'auqw.sync.identity';
 const DEVICE_PREFIX = 'auqw.sync.device.';
+const SYNC_KEY_PREFIX = 'auqw.sync.';
+
+/**
+ * One-time custody move: builds before the `sync-secure` dir existed
+ * stored sync entries next to renderer-reachable keys. Relocating the
+ * ciphertext files preserves pairings across the upgrade — nothing is
+ * decrypted, so a plain rename carries each entry. Existing entries in
+ * the destination win; a partially migrated earlier boot just
+ * continues. A failed read of the old dir means a pre-split install
+ * never paired — nothing to move.
+ */
+export async function migrateSyncCustody(
+  fromDir: string,
+  toDir: string,
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(fromDir);
+  } catch (thrown) {
+    if (errorCode(thrown) === 'ENOENT') {
+      return;
+    }
+    throw shellError('io-error', 'legacy secure dir could not be listed');
+  }
+  for (const file of files) {
+    if (!file.startsWith(SYNC_KEY_PREFIX) || !file.endsWith('.b64')) {
+      continue;
+    }
+    const dest = join(toDir, file);
+    try {
+      // Destination wins: rename would silently overwrite on POSIX, so
+      // check first — a partially migrated earlier boot must not
+      // clobber what the new custody dir already holds.
+      await access(dest);
+      continue;
+    } catch (thrown) {
+      if (errorCode(thrown) !== 'ENOENT') {
+        throw shellError('io-error', 'sync key migration failed');
+      }
+    }
+    try {
+      await rename(join(fromDir, file), dest);
+    } catch (thrown) {
+      if (errorCode(thrown) !== 'ENOENT') {
+        throw shellError('io-error', 'sync key migration failed');
+      }
+    }
+  }
+}
 
 function deviceKey(id: string): string {
   return `${DEVICE_PREFIX}${id}`;

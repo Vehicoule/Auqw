@@ -20,7 +20,10 @@ import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
 import { createAppliedPushService } from './sync-events.ts';
-import { createSyncKeysHandler } from './sync-keys.ts';
+import {
+  createSyncKeysHandler,
+  migrateSyncCustody,
+} from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -133,6 +136,9 @@ async function main(): Promise<void> {
   // only the renderer-facing store, so the pairing identity and device
   // records are never readable or writable from the sandboxed renderer.
   const syncSecureDir = join(userDataPath, 'sync-secure');
+  // Pre-split builds kept sync entries in the renderer-facing dir —
+  // carry them over so an upgrade doesn't orphan existing pairings.
+  await migrateSyncCustody(join(userDataPath, 'secure'), syncSecureDir);
   const syncSecure = createSecureStore({
     dir: syncSecureDir,
     safeStorage,

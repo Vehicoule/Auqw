@@ -191,11 +191,14 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      const wrote = await writeJsonStore(peerKey(peer.fp), peer);
-      if (!wrote.ok) {
-        return wrote;
-      }
+      // Record + index inside one lock: a racing peerDelete between
+      // the two writes would remove the freshly indexed record and
+      // leave the pairing half-visible.
       return withIndexLock(async () => {
+        const wrote = await writeJsonStore(peerKey(peer.fp), peer);
+        if (!wrote.ok) {
+          return wrote;
+        }
         const indexRead = await readJsonStore(PEER_INDEX_KEY);
         if (!indexRead.ok) {
           return indexRead;
@@ -213,29 +216,30 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      // Index before the record: a failed delete then leaves an
-      // unreferenced record (inert — the index drives listing) rather
-      // than a stale index entry every peerList reads forever.
-      const wrote = await withIndexLock(async () => {
+      // Index before the record, both inside the lock: a failed delete
+      // leaves an unreferenced record (inert — the index drives
+      // listing) rather than a stale index entry every peerList reads
+      // forever, and a racing peerPut can't interleave between them.
+      return withIndexLock(async () => {
         const indexRead = await readJsonStore(PEER_INDEX_KEY);
         if (!indexRead.ok) {
           return indexRead;
         }
         const fps = isFpList(indexRead.value) ? indexRead.value : [];
-        return writeJsonStore(
+        const wrote = await writeJsonStore(
           PEER_INDEX_KEY,
           fps.filter((f) => f !== fp),
         );
+        if (!wrote.ok) {
+          return wrote;
+        }
+        try {
+          await deleteItemAsync(peerKey(fp));
+        } catch (thrown) {
+          return err(nativeError(thrown));
+        }
+        return ok(undefined);
       });
-      if (!wrote.ok) {
-        return wrote;
-      }
-      try {
-        await deleteItemAsync(peerKey(fp));
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-      return ok(undefined);
     },
   };
 }

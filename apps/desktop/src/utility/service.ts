@@ -97,6 +97,15 @@ export function createServiceClient(opts: {
         return false;
       }
       if (!isUtilityResponse(raw)) {
+        // Malformed, but names an outstanding call — settle it now
+        // rather than leaving the caller to wait out the timeout.
+        if (typeof raw['id'] === 'number' && pending.has(raw['id'])) {
+          settle(raw['id'], (slot) =>
+            slot.reject(
+              shellError('invalid-response', 'malformed service reply'),
+            ),
+          );
+        }
         return true;
       }
       const response: UtilityResponse = raw;

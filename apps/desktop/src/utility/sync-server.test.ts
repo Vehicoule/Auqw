@@ -403,6 +403,48 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Expired re-pair keeps the live registration ——
+  // A code that lapses between mint and consume rolls back its half-
+  // written record — but a re-pair for an id already registered must
+  // NOT delete the still-valid prior registration.
+  {
+    const { service, keys, port } = await startService({
+      codeTtlMs: 100,
+    });
+    try {
+      const first = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'dev-repair-01',
+        code: first.code,
+        fp: first.fp,
+      });
+      client.close();
+      assertEqual(keys.records.size, 1, 'first pair registered');
+
+      // Second code lapses before the pair frame lands — consume
+      // fails and the rollback must restore, not unpair.
+      const second = await pairingCode(service);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const client2 = await dial(port);
+      const peer = createTestPeer({
+        deviceId: 'dev-repair-01',
+        name: 'pixel-test',
+      });
+      const { codec } = await phoneHandshake(client2, peer, second.fp);
+      client2.send(sealJson(codec, { t: 'pair', code: second.code }));
+      const reply = await openJson(codec, await client2.recv());
+      assertDeepEqual(reply, { t: 'reject', reason: 'pairing-expired' });
+      assertEqual(
+        keys.records.size,
+        1,
+        'live registration survives the expired re-pair',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Attempt cap: wrong-code budget is per remote address ——
   // Loopback can't fake distinct source IPs, so what this proves is:
   // the shared pool is gone — misses count against the attacker's

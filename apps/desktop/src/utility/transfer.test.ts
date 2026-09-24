@@ -332,6 +332,29 @@ export async function run(): Promise<void> {
     });
     assert(removeAfter.ok, 'remove resolves once the sink is gone');
 
+    // A begin racing a removal refuses — it can't write a `.part`
+    // the in-flight unlink would delete out from under it.
+    const racing = call(CHANNELS.transferRemove, { name: 'race.mp4' });
+    const deniedBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'race.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(
+      !deniedBegin.ok && deniedBegin.error?.kind === 'unavailable',
+      'begin refuses a name mid-removal',
+    );
+    await racing;
+    const postRace = await call(CHANNELS.transferBegin, {
+      destPath: 'race.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(postRace.ok, 'begin resolves once the removal lands');
+    const postRaceSink = (postRace.result as { sinkId: string }).sinkId;
+    await call(CHANNELS.transferAbort, {
+      sinkId: postRaceSink,
+      keep: false,
+    });
+
     // keep: true retains the partial for a later resume.
     const keepable = await call(CHANNELS.transferBegin, {
       destPath: 'keep.mp4',

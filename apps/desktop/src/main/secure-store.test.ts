@@ -61,6 +61,25 @@ export async function run(): Promise<void> {
     // Deleting a missing key is not an error.
     await store.delete('session.token');
 
+    // Concurrent sets on one key never share a staging path — every
+    // published file is complete, whichever rename lands last.
+    await Promise.all([
+      store.set('race.key', 'a'),
+      store.set('race.key', 'bb'),
+      store.set('race.key', 'ccc'),
+    ]);
+    const raced = await store.get('race.key');
+    assert(
+      raced === 'a' || raced === 'bb' || raced === 'ccc',
+      `concurrent set published a complete value, got ${raced}`,
+    );
+    assertEqual(
+      readdirSync(join(dir, 'secure')).filter((f) => f.endsWith('.tmp'))
+        .length,
+      0,
+      'no staging residue after concurrent sets',
+    );
+
     // Corrupt content surfaces typed errors.
     writeFileSync(join(dir, 'secure', 'bad.b64'), '\u0000\u0001!!!', 'utf8');
     await assertThrowsKind(store.get('bad'), 'corrupt-state');

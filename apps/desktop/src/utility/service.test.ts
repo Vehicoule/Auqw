@@ -73,6 +73,13 @@ export async function run(): Promise<void> {
   const hanging = client.request('sync:keys', { op: 'device-list' });
   await assertRejectsKind(hanging, 'io-error');
 
+  // A malformed reply that names an outstanding id settles the call
+  // immediately — the caller gets invalid-response, not the timeout.
+  const duped = client.request('sync:keys', { op: 'device-list' });
+  const dupedId = (posted[posted.length - 1] as { id?: number }).id;
+  assertEqual(client.onMessage({ id: dupedId, ok: 'yes' }), true);
+  await assertRejectsKind(duped, 'invalid-response');
+
   // isServiceCall recognizes exactly the request shape.
   assert(isServiceCall({ id: 1, channel: 'sync:keys', args: { op: 'x' } }));
   assert(!isServiceCall({ id: 1, ok: true, result: null }));

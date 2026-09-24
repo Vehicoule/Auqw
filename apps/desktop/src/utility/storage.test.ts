@@ -234,6 +234,12 @@ export async function run(): Promise<void> {
       'PRAGMA journal_mode = DELETE',
       '-- peek\nATTACH DATABASE x AS y',
       '/* c */ pragma foreign_keys = off',
+      // leading empty statements — prepare() skips them, so the gate
+      // must too: ';ATTACH' would otherwise run under an empty head
+      ';ATTACH DATABASE x AS y',
+      ';; VACUUM',
+      '/* c */; ATTACH x AS y',
+      '; PRAGMA journal_mode = OFF',
     ]) {
       const res = await execute(gated, sql);
       assert(
