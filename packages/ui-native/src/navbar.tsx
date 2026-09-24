@@ -35,7 +35,8 @@ export function AndroidNavbar({
       <View
         accessibilityRole="tablist"
         style={{
-          backgroundColor: theme.colors.deep,
+          // M3 surfaceContainer — a hair lighter than the canvas
+          backgroundColor: theme.colors.raised,
           flexDirection: 'row',
           paddingTop: theme.spacing.sm,
           paddingBottom: 10,
