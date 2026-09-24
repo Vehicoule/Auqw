@@ -139,22 +139,27 @@ jobs:
       # Caches gradle deps + wrapper downloads between runs.
       - uses: gradle/actions/setup-gradle@v6
       # Alpha signing key lives in repo secrets — decoded to a runner
-      # temp file, never committed. Missing secrets degrade to AGP's
-      # stock debug signing so the build still produces an APK.
+      # temp file, never committed. A release must never silently ship
+      # debug-signed: missing secrets fail the job (the plugin's no-env
+      # debug fallback is for local builds only).
       - name: alpha signing key
         env:
           AUQW_ALPHA_KEYSTORE_B64: ${{ secrets.AUQW_ALPHA_KEYSTORE_B64 }}
           AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
           AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
         run: |
-          if [ -n "$AUQW_ALPHA_KEYSTORE_B64" ]; then
-            echo "$AUQW_ALPHA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/alpha.keystore"
-            {
-              echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore"
-              echo "AUQW_ALPHA_STORE_PASSWORD=$AUQW_ALPHA_STORE_PASSWORD"
-              echo "AUQW_ALPHA_KEY_PASSWORD=$AUQW_ALPHA_KEY_PASSWORD"
-            } >> "$GITHUB_ENV"
+          if [ -z "$AUQW_ALPHA_KEYSTORE_B64" ] || \
+             [ -z "$AUQW_ALPHA_STORE_PASSWORD" ] || \
+             [ -z "$AUQW_ALPHA_KEY_PASSWORD" ]; then
+            echo '::error::AUQW_ALPHA_* secrets missing — refusing to publish a debug-signed release APK' >&2
+            exit 1
           fi
+          echo "$AUQW_ALPHA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/alpha.keystore"
+          {
+            echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore"
+            echo "AUQW_ALPHA_STORE_PASSWORD=$AUQW_ALPHA_STORE_PASSWORD"
+            echo "AUQW_ALPHA_KEY_PASSWORD=$AUQW_ALPHA_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
       - name: android inputs (bindings + plugins)
         working-directory: auqw
         run: |

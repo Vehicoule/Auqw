@@ -51,9 +51,10 @@ ships; for alpha, link the tag page.
   repo secret (+ `AUQW_ALPHA_STORE_PASSWORD` / `AUQW_ALPHA_KEY_PASSWORD`),
   wired by the `with-alpha-signing` config plugin — credentials never
   enter the repo; one identity across CI runs so installs upgrade
-  cleanly; missing secrets degrade to AGP's debug signing. A real
-  upload key waits on the Path A (EAS) vs Path B (local Gradle)
-  ratification.
+  cleanly; missing secrets fail the release job rather than publish a
+  debug-signed APK (the plugin's no-env debug fallback is for local
+  builds only). A real upload key waits on the Path A (EAS) vs Path B
+  (local Gradle) ratification.
 - **auqw-plugins checkout**: private plugins repos need a
   `PLUGINS_CHECKOUT_TOKEN` PAT secret; public reads under
   `GITHUB_TOKEN`.
