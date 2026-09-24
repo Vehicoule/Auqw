@@ -224,9 +224,12 @@ function botGuardSandbox(
   // allowlist the interpreter URL itself passed — https only,
   // no redirect following (a 30x could still escape the list), and
   // bounded per session in both call count and response size.
-  // Only the body-reading methods are shadowed under the size cap —
-  // every other Response property passes through so the interpreter's
-  // .json()/.arrayBuffer()/.clone() usage keeps working.
+  // The response handed to the interpreter is a FACADE — the upstream
+  // Response is never mutated (its .body is a getter-only slot on a
+  // real Response, so assigning it would throw; pipeThrough on the
+  // original would lock the stream the bound readers need). Every
+  // body read — text/json/arrayBuffer/blob and a direct .body stream
+  // — counts bytes through the one shared reader and budget.
   type FullResponse = FetchResponse & {
     text: () => Promise<string>;
     json?: () => Promise<unknown>;
@@ -238,70 +241,133 @@ function botGuardSandbox(
   };
   const boundedResponse = (resp: FetchResponse): FetchResponse => {
     const full = resp as FullResponse;
-    // Bind the originals BEFORE shadowing — the shadows re-enter them.
-    const readText = resp.text.bind(resp);
-    const readBuffer =
-      typeof full.arrayBuffer === 'function'
-        ? full.arrayBuffer.bind(resp)
-        : undefined;
-    const cappedText = async (): Promise<string> => {
-      const text = await readText();
-      if (text.length > SANDBOX_FETCH_MAX_CHARS) {
-        throw new TypeError('pot: sandboxed fetch response oversized');
+    const oversized = (): TypeError =>
+      new TypeError('pot: sandboxed fetch response oversized');
+    let seen = 0;
+    let reader: ReadableStreamDefaultReader<unknown> | null = null;
+    const takeReader = (): ReadableStreamDefaultReader<unknown> | null => {
+      const src = full.body;
+      if (reader === null && src !== null && src !== undefined) {
+        reader = src.getReader();
       }
-      return text;
+      return reader;
     };
-    const cappedBuffer = async (): Promise<ArrayBuffer> => {
-      if (readBuffer === undefined) {
-        return new TextEncoder().encode(await cappedText())
-          .buffer as ArrayBuffer;
+    const readBounded = async (): Promise<Uint8Array> => {
+      const r = takeReader();
+      if (r === null) {
+        // Bodyless or literal response — bound the string it gives.
+        const text = await resp.text();
+        if (text.length > SANDBOX_FETCH_MAX_CHARS) {
+          throw oversized();
+        }
+        return new TextEncoder().encode(text);
       }
-      const buf = await readBuffer();
-      if (buf.byteLength > SANDBOX_FETCH_MAX_CHARS) {
-        throw new TypeError('pot: sandboxed fetch response oversized');
+      const parts: Uint8Array[] = [];
+      for (;;) {
+        const { done, value } = await r.read();
+        if (done) {
+          break;
+        }
+        const bytes =
+          value instanceof Uint8Array
+            ? value
+            : new Uint8Array(value as ArrayBuffer);
+        seen += bytes.byteLength;
+        if (seen > SANDBOX_FETCH_MAX_CHARS) {
+          void r.cancel();
+          throw oversized();
+        }
+        parts.push(bytes);
       }
-      return buf;
+      const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) {
+        out.set(part, offset);
+        offset += part.byteLength;
+      }
+      return out;
     };
-    // A direct `.body` stream read would bypass the byte cap — count
-    // through a transform so the bound holds however the body is read
-    // (the bound text/arrayBuffer reads consume this stream too).
-    if (
-      full.body !== null &&
-      full.body !== undefined &&
-      typeof full.body.pipeThrough === 'function'
-    ) {
-      let seen = 0;
-      full.body = full.body.pipeThrough(
-        new TransformStream({
-          transform(chunk: unknown, controller): void {
-            seen +=
-              chunk instanceof Uint8Array || chunk instanceof ArrayBuffer
-                ? chunk.byteLength
-                : 0;
-            if (seen > SANDBOX_FETCH_MAX_CHARS) {
-              controller.error(
-                new TypeError('pot: sandboxed fetch response oversized'),
-              );
-              return;
-            }
-            controller.enqueue(chunk);
-          },
+    const textBounded = async (): Promise<string> =>
+      new TextDecoder().decode(await readBounded());
+    const mime =
+      typeof full.headers?.get === 'function'
+        ? (full.headers.get('content-type') ?? '')
+        : '';
+    // highWaterMark 0 — a default-depth stream would pull EAGERLY at
+    // construction, locking the upstream reader and pre-reading a
+    // chunk into its own queue before the interpreter reads anything.
+    const bodyStream = new ReadableStream(
+      {
+        async pull(controller): Promise<void> {
+          const r = takeReader();
+          if (r === null) {
+            controller.close();
+            return;
+          }
+          const { done, value } = await r.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          seen +=
+            value instanceof Uint8Array || value instanceof ArrayBuffer
+              ? value.byteLength
+              : 0;
+          if (seen > SANDBOX_FETCH_MAX_CHARS) {
+            void r.cancel();
+            controller.error(oversized());
+            return;
+          }
+          controller.enqueue(value);
+        },
+        cancel(reason): Promise<void> {
+          const r = takeReader();
+          return r === null ? Promise.resolve() : r.cancel(reason);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const facade = {
+      ok: full.ok,
+      status: full.status,
+      text: textBounded,
+      json: async (): Promise<unknown> => JSON.parse(await textBounded()),
+      arrayBuffer: async (): Promise<ArrayBuffer> =>
+        (await readBounded()).buffer as ArrayBuffer,
+      blob: async (): Promise<Blob> =>
+        new Blob([(await readBounded()).buffer as ArrayBuffer], {
+          type: mime,
         }),
-      );
-    }
-    full.text = cappedText;
-    full.json = async () => JSON.parse(await cappedText());
-    full.arrayBuffer = cappedBuffer;
-    if (typeof full.blob === 'function') {
-      const mime = full.headers?.get('content-type') ?? '';
-      full.blob = async () =>
-        new Blob([await cappedBuffer()], { type: mime });
+      get body() {
+        return (full.body ?? null) === null ? null : bodyStream;
+      },
+    } as FetchResponse & Record<string, unknown>;
+    // Everything else delegates — methods bind to the upstream
+    // response so headers/url/type/bodyUsed behave normally.
+    for (const prop of [
+      'statusText',
+      'headers',
+      'url',
+      'redirected',
+      'type',
+      'bodyUsed',
+    ]) {
+      Object.defineProperty(facade, prop, {
+        enumerable: true,
+        get: () => {
+          const value: unknown = Reflect.get(full, prop);
+          return typeof value === 'function'
+            ? (value as (...args: unknown[]) => unknown).bind(resp)
+            : value;
+        },
+      });
     }
     if (typeof full.clone === 'function') {
       const cloneUpstream = full.clone.bind(resp);
-      full.clone = () => boundedResponse(cloneUpstream());
+      facade['clone'] = () => boundedResponse(cloneUpstream());
     }
-    return full;
+    return facade;
   };
   let sandboxFetches = 0;
   const sandboxFetch = (

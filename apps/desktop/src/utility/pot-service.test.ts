@@ -273,35 +273,32 @@ export async function run(): Promise<void> {
     const impl: FetchLike = async (url, init) => {
       urls.push(url);
       inits.push(init);
+      // Real Response objects — the fixture exercises the same
+      // getter-only .body/stream shape the production fetch returns.
       if (url === 'https://www.youtube.com') {
-        return {
-          ok: true,
+        return new Response(homepageWith(interpreterUrl), {
           status: 200,
-          text: async () => homepageWith(interpreterUrl),
-        };
+        });
       }
       if (url.includes('GenerateIT')) {
-        return { ok: true, status: 200, text: async () => generateIt };
+        return new Response(generateIt, { status: 200 });
       }
       if (url === `https://www.google.com/js/th/fake.js`) {
-        return { ok: true, status: 200, text: async () => script };
+        return new Response(script, { status: 200 });
       }
       if (url === 'https://www.youtube.com/json') {
-        return { ok: true, status: 200, text: async () => '{"a":1}' };
+        return new Response('{"a":1}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       if (url === 'https://www.youtube.com/blob-json') {
-        return {
-          ok: true,
+        return new Response('x', {
           status: 200,
-          text: async () => 'x',
-          headers: {
-            get: (name: string) =>
-              name === 'content-type' ? 'application/json' : null,
-          },
-          blob: async () => new Blob(['x'], { type: 'application/json' }),
-        };
+          headers: { 'content-type': 'application/json' },
+        });
       }
-      return { ok: false, status: 404, text: async () => '' };
+      return new Response('', { status: 404 });
     };
     return { impl, urls, inits };
   }
@@ -417,7 +414,14 @@ export async function run(): Promise<void> {
               function () {},
               function () {},
             );
-          }, function () {});
+          }, function (e) {
+            fetch(
+              'https://www.youtube.com/json-err-' +
+                encodeURIComponent(
+                  String(e && (e.stack || e.message)).slice(0, 90)
+                )
+            ).then(function () {}, function () {});
+          });
           fetch('https://www.youtube.com/blob-json').then(function (r) {
             return r.blob();
           }).then(function (b) {
@@ -465,7 +469,7 @@ export async function run(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert(
     contractWire.urls.some((u) => u.endsWith('/json-ok')),
-    'sandboxed response lost the Response contract (json() failed)',
+    `sandboxed response lost the Response contract (json() failed): ${contractWire.urls.join(' | ')}`,
   );
   assert(
     contractWire.urls.some((u) => u.endsWith('/blob-ok')),
