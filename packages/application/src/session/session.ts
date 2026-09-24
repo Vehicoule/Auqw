@@ -4688,6 +4688,25 @@ export class Session {
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
       );
+      // The service resolved this item's ref when the projection was
+      // installed — carry it verbatim into the adopted attempt so the
+      // playing mark reflects what the service actually attached.
+      // Re-deriving now could name a different ref: mappings may have
+      // changed since the projection was built.
+      const projected = projection?.items.find(
+        (item) => item.occurrenceId === toId,
+      );
+      const projProvider = projected?.provider ?? null;
+      const projRefId = projected?.sourceRef ?? null;
+      const toRecording = r.recordings.find(
+        (rec) => rec.id === occurrence?.recordingId,
+      );
+      const adoptedRef: SourceRef | undefined =
+        projProvider === null || projRefId === null
+          ? undefined
+          : toRecording?.sourceRefs.find(
+                (s) => s.provider === projProvider && s.id === projRefId,
+              ) ?? { provider: projProvider, kind: 'track', id: projRefId };
       // Statuses continue to echo the immutable service projection until
       // app intent installs a new one; reconciliation alone must not re-key it.
       const identity = event.identity;
@@ -4695,6 +4714,7 @@ export class Session {
         identity,
         recordingId: occurrence?.recordingId ?? '',
         occurrenceId: toId,
+        ...(adoptedRef === undefined ? {} : { ref: adoptedRef }),
         source: new CancellationSource(),
         deadlineMs: this.#deadline(),
         handle: event.handle,
@@ -4713,6 +4733,7 @@ export class Session {
         identity,
         handle: event.handle,
         positionMs: event.positionMs,
+        ...(adoptedRef === undefined ? {} : { ref: adoptedRef }),
       };
     } else {
       r.playback = { type: 'idle' };
