@@ -186,10 +186,14 @@ async fn run(inv: Invocation) -> Result<Value, GuestError> {
                 .into_iter()
                 .filter(|m| {
                     query.is_empty()
-                        || [m["title"].as_str(), m["artist"].as_str(), m["album"].as_str()]
-                            .iter()
-                            .flatten()
-                            .any(|s| s.to_lowercase().contains(&query))
+                        || [
+                            m["title"].as_str(),
+                            m["artist"].as_str(),
+                            m["album"].as_str(),
+                        ]
+                        .iter()
+                        .flatten()
+                        .any(|s| s.to_lowercase().contains(&query))
                 })
                 .collect();
             Ok(json!({ "items": items, "storefront": "US" }))
