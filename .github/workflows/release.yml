@@ -25,30 +25,47 @@ jobs:
     steps:
       # providers.lock.json resolves `release:../auqw-plugins/...` —
       # the plugins repo must sit as a sibling of the Auqw checkout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: auqw
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
           # Same-org public repos read fine under GITHUB_TOKEN; a
           # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
           token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.0
+      # Pinned rustup over a toolchain action — one less node-runtime
+      # dep, identical result.
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: auqw/pnpm-lock.yaml
+      # electron-builder downloads the Electron dist + packaging tools
+      # on every build — both dirs cache cleanly.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ hashFiles('auqw/pnpm-lock.yaml') }}
+          restore-keys: electron-
+      # The flathub runtime/SDK/BaseApp install is GBs each run — the
+      # flatpak user repo + builder cache survive in these two dirs.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.flatpak-builder
+          key: flatpak-24.08-${{ runner.os }}
       - name: flatpak toolchain
         run: |
           sudo apt-get update
@@ -69,7 +86,7 @@ jobs:
       - name: checksums
         working-directory: auqw/apps/desktop/dist-packages
         run: sha256sum auqw-* > SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-packages
           # auqw-* globs only the shipped files — dist-packages also
@@ -82,30 +99,35 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: auqw
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
           token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.0
-          targets: aarch64-linux-android, x86_64-linux-android
+      - run: |
+          rustup toolchain install 1.98.0 --profile minimal \
+            --target aarch64-linux-android --target x86_64-linux-android
+          rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: auqw/pnpm-lock.yaml
-      - run: cargo install cargo-ndk --locked
+      # Prebuilt cargo-ndk — `cargo install` compiles it from source.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # Caches gradle deps + wrapper downloads between runs.
+      - uses: gradle/actions/setup-gradle@v6
       - name: android inputs (bindings + plugins)
         working-directory: auqw
         run: |
@@ -119,23 +141,27 @@ jobs:
           node tooling/stamp-version.mjs --check "${VERSION#v}"
           node tooling/sync-plugins.mjs
           pnpm --dir apps/mobile exec expo prebuild --platform android
-      - name: build debug APK
+      - name: build release APK
         working-directory: auqw/apps/mobile
+        # assembleRelease embeds the JS bundle — the APK is standalone
+        # (a debug APK is a dev client that needs Metro on the device).
+        # Signing: repo-held alpha keystore via the with-alpha-signing
+        # config plugin → one identity across alpha builds.
         run: |
-          cd android && ./gradlew assembleDebug
+          cd android && ./gradlew assembleRelease
           cd .. && mv \
-            android/app/build/outputs/apk/debug/app-debug.apk \
-            "auqw-${VERSION#v}-android-debug.apk"
-      - uses: actions/upload-artifact@v4
+            android/app/build/outputs/apk/release/app-release.apk \
+            "auqw-${VERSION#v}-android-release.apk"
+      - uses: actions/upload-artifact@v7
         with:
           name: android-packages
-          path: auqw/apps/mobile/auqw-*-android-debug.apk
+          path: auqw/apps/mobile/auqw-*-android-release.apk
 
   release:
     needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: publish prerelease
