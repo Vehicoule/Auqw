@@ -271,11 +271,20 @@ function isSchemeName(value: unknown): value is SchemeName {
   return value === 'dark' || value === 'light' || value === 'oled';
 }
 
+// The shell needs the 340px stage column plus a usable world toolbar;
+// below this either column would strand the other's controls. Persisted
+// bounds can be older/narrower than the current layout, so both the
+// constructor and the min clamps apply.
+const MIN_WINDOW_WIDTH = 760;
+const MIN_WINDOW_HEIGHT = 560;
+
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   const state = stateRef.current;
   const options: BrowserWindowConstructorOptions = {
-    width: state.width,
-    height: state.height,
+    width: Math.max(state.width, MIN_WINDOW_WIDTH),
+    height: Math.max(state.height, MIN_WINDOW_HEIGHT),
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     title: 'auqw',
     titleBarStyle: 'hidden',
     titleBarOverlay: titleBarOverlay(

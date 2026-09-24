@@ -1911,6 +1911,9 @@ function Main({
   const onMenuAction = useCallback(
     (key: string) => {
       setMenuOpen(false);
+      // Every menu action leaves the search surface — the field must
+      // not stay open over settings/overlays the action navigates to.
+      setSearchOpen(false);
       switch (key) {
         case 'settings':
           setTab('settings');

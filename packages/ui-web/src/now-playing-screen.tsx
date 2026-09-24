@@ -263,6 +263,61 @@ function DownloadButton({
   );
 }
 
+/** The queue mode body — tools row + the list. Shared by the live stage
+ *  and the idle stage so the reorder affordance is reachable in both. */
+function QueuePane({
+  queue,
+  queueReordering = false,
+  queueScrollEnabled = true,
+  onPressQueueItem,
+  onRemoveQueueItem,
+  onToggleQueueReorder,
+  onMoveQueueItem,
+  onMoveQueueItemTo,
+}: Pick<
+  NowPlayingScreenProps,
+  | 'queue'
+  | 'queueReordering'
+  | 'queueScrollEnabled'
+  | 'onPressQueueItem'
+  | 'onRemoveQueueItem'
+  | 'onToggleQueueReorder'
+  | 'onMoveQueueItem'
+  | 'onMoveQueueItemTo'
+>) {
+  if (queue === undefined) {
+    return <EmptyState title="queue is empty" icon="queue" />;
+  }
+  return (
+    <>
+      {onToggleQueueReorder !== undefined && (
+        <div className="uw-stage__queue-tools">
+          <IconButton
+            icon="drag-handle"
+            size={32}
+            iconSize={14}
+            color={
+              queueReordering ? 'var(--accent)' : 'var(--text-secondary)'
+            }
+            ariaLabel={queueReordering ? 'done reordering' : 'reorder queue'}
+            active={queueReordering}
+            onPress={onToggleQueueReorder}
+          />
+        </div>
+      )}
+      <QueueList
+        queue={queue}
+        reordering={queueReordering}
+        scrollEnabled={queueScrollEnabled}
+        onPressItem={onPressQueueItem}
+        onRemoveItem={onRemoveQueueItem}
+        onMoveItem={onMoveQueueItem}
+        onMoveItemTo={onMoveQueueItemTo}
+      />
+    </>
+  );
+}
+
 export type NowPlayingScreenProps = {
   readonly player: PlayerModel;
   readonly mode?: StageMode | undefined;
@@ -536,40 +591,16 @@ export function StageModes({
       )}
       {mode === 'queue' && (
         <div className="uw-stage__queue">
-          {queue === undefined ? (
-            <EmptyState title="queue is empty" icon="queue" />
-          ) : (
-            <>
-              {onToggleQueueReorder !== undefined && (
-                <div className="uw-stage__queue-tools">
-                  <IconButton
-                    icon="drag-handle"
-                    size={32}
-                    iconSize={14}
-                    color={
-                      queueReordering
-                        ? 'var(--accent)'
-                        : 'var(--text-secondary)'
-                    }
-                    ariaLabel={
-                      queueReordering ? 'done reordering' : 'reorder queue'
-                    }
-                    active={queueReordering}
-                    onPress={onToggleQueueReorder}
-                  />
-                </div>
-              )}
-              <QueueList
-                queue={queue}
-                reordering={queueReordering}
-                scrollEnabled={queueScrollEnabled}
-                onPressItem={onPressQueueItem}
-                onRemoveItem={onRemoveQueueItem}
-                onMoveItem={onMoveQueueItem}
-                onMoveItemTo={onMoveQueueItemTo}
-              />
-            </>
-          )}
+          <QueuePane
+            queue={queue}
+            queueReordering={queueReordering}
+            queueScrollEnabled={queueScrollEnabled}
+            onPressQueueItem={onPressQueueItem}
+            onRemoveQueueItem={onRemoveQueueItem}
+            onToggleQueueReorder={onToggleQueueReorder}
+            onMoveQueueItem={onMoveQueueItem}
+            onMoveQueueItemTo={onMoveQueueItemTo}
+          />
         </div>
       )}
     </>
@@ -676,19 +707,16 @@ export function StageColumn({
           )}
           {activeMode === 'queue' && (
             <div className="uw-stage__queue">
-              {queue === undefined ? (
-                <EmptyState title="queue is empty" icon="queue" />
-              ) : (
-                <QueueList
-                  queue={queue}
-                  reordering={queueReordering}
-                  scrollEnabled={queueScrollEnabled}
-                  onPressItem={onPressQueueItem}
-                  onRemoveItem={onRemoveQueueItem}
-                  onMoveItem={onMoveQueueItem}
-                  onMoveItemTo={onMoveQueueItemTo}
-                />
-              )}
+              <QueuePane
+                queue={queue}
+                queueReordering={queueReordering}
+                queueScrollEnabled={queueScrollEnabled}
+                onPressQueueItem={onPressQueueItem}
+                onRemoveQueueItem={onRemoveQueueItem}
+                onToggleQueueReorder={onToggleQueueReorder}
+                onMoveQueueItem={onMoveQueueItem}
+                onMoveQueueItemTo={onMoveQueueItemTo}
+              />
             </div>
           )}
         </>
