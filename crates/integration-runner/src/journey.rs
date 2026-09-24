@@ -468,6 +468,10 @@ mod tests {
             .await
     }
 
+    fn misses(c: &CannedHttp) -> Vec<String> {
+        c.misses.lock().map(|m| m.clone()).unwrap_or_default()
+    }
+
     #[tokio::test]
     async fn send_serves_canonical_response_on_full_match() {
         let c = canned(vec![upstream("videoplayback", &[("range", "bytes=0-")])]);
@@ -479,24 +483,29 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(out.unwrap().body, vec![1, 2, 3]);
-        assert!(c.misses.lock().unwrap().is_empty());
+        let Ok(resp) = out else {
+            panic!("expected canned response");
+        };
+        assert_eq!(resp.body, vec![1, 2, 3]);
+        assert!(misses(&c).is_empty());
     }
 
     #[tokio::test]
     async fn send_refuses_and_records_header_violation() {
         let c = canned(vec![upstream("videoplayback", &[("range", "bytes=0-")])]);
-        let err = send(
+        let out = send(
             &c,
             req(
                 "https://h/videoplayback?sig=SECRET",
                 &[("Range", "bytes=99-")],
             ),
         )
-        .await
-        .unwrap_err();
+        .await;
+        let Err(err) = out else {
+            panic!("expected refusal");
+        };
         assert_eq!(err.kind, HttpErrorKind::Transient);
-        let misses = c.misses.lock().unwrap().clone();
+        let misses = misses(&c);
         assert_eq!(
             misses,
             vec!["https://h/videoplayback (header range: assertion failed)"]
@@ -508,14 +517,12 @@ mod tests {
     #[tokio::test]
     async fn send_records_uncanned_url() {
         let c = canned(vec![upstream("videoplayback", &[])]);
-        let err = send(&c, req("https://elsewhere.example/x", &[]))
-            .await
-            .unwrap_err();
+        let out = send(&c, req("https://elsewhere.example/x", &[])).await;
+        let Err(err) = out else {
+            panic!("expected refusal");
+        };
         assert_eq!(err.kind, HttpErrorKind::Transient);
-        assert_eq!(
-            c.misses.lock().unwrap().clone(),
-            vec!["https://elsewhere.example/x"]
-        );
+        assert_eq!(misses(&c), vec!["https://elsewhere.example/x"]);
     }
 
     #[test]
