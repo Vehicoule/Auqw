@@ -183,3 +183,9 @@ jobs:
           notes=$(gh api "repos/$GH_REPO/releases/generate-notes" \
             -f tag_name="$VERSION" -q .body)
           gh release edit "$VERSION" --notes "$notes"
+          # A leftover draft publishes only now — after every asset and
+          # note update succeeded — so a failed retry never ships a
+          # half-populated release.
+          if [ "$(gh release view "$VERSION" --json isDraft -q .isDraft)" = "true" ]; then
+            gh release edit "$VERSION" --draft=false
+          fi
