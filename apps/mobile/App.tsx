@@ -1196,6 +1196,7 @@ function Main({
             note: 'local',
             playing:
               state.playback.type !== 'idle' &&
+              state.playback.type !== 'paused' &&
               state.playback.type !== 'failed' &&
               state.playback.recordingId === rec.id,
           }),
