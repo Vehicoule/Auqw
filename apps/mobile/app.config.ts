@@ -35,6 +35,10 @@ const config: ExpoConfig = {
       },
     ],
     'expo-sqlite',
+    // CI-secret alpha keystore → release builds sign with one stable
+    // identity across CI runs (upgrade-install between alphas works);
+    // no env → stock debug signing for local builds.
+    './plugins/with-alpha-signing.cjs',
     [
       'expo-navigation-bar',
       {

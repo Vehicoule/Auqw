@@ -25,30 +25,54 @@ jobs:
     steps:
       # providers.lock.json resolves `release:../auqw-plugins/...` —
       # the plugins repo must sit as a sibling of the Auqw checkout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: auqw
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
           # Same-org public repos read fine under GITHUB_TOKEN; a
           # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
           token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.0
+      # Pinned rustup over a toolchain action — one less node-runtime
+      # dep, identical result.
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: auqw/pnpm-lock.yaml
+      # electron-builder downloads the Electron dist + packaging tools
+      # on every build — both dirs cache cleanly.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ hashFiles('auqw/pnpm-lock.yaml') }}
+          restore-keys: electron-
+      # The flathub runtime/SDK/BaseApp install is GBs each run — the
+      # flatpak user repo + builder cache survive in these two dirs. The
+      # key rotates weekly: restore-keys pulls last week's snapshot, the
+      # post-install `flatpak update` refreshes refs, and the new key
+      # persists the refreshed snapshot — a fixed key would restore the
+      # first saved state forever.
+      - id: flatpak-period
+        run: echo "period=$(date +%Y-%U)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.flatpak-builder
+          key: flatpak-24.08-${{ runner.os }}-${{ steps.flatpak-period.outputs.period }}
+          restore-keys: flatpak-24.08-${{ runner.os }}-
       - name: flatpak toolchain
         run: |
           sudo apt-get update
@@ -58,6 +82,9 @@ jobs:
             org.freedesktop.Platform/x86_64/24.08 \
             org.freedesktop.Sdk/x86_64/24.08 \
             org.electronjs.Electron2.BaseApp/x86_64/24.08
+          # The cache key is fixed — without an explicit update, warm
+          # restores would pin stale runtime refs forever.
+          flatpak update --user -y
       - name: build desktop packages
         working-directory: auqw
         run: |
@@ -69,7 +96,7 @@ jobs:
       - name: checksums
         working-directory: auqw/apps/desktop/dist-packages
         run: sha256sum auqw-* > SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-packages
           # auqw-* globs only the shipped files — dist-packages also
@@ -82,30 +109,55 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: auqw
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
           token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.0
-          targets: aarch64-linux-android, x86_64-linux-android
+      - run: |
+          rustup toolchain install 1.98.0 --profile minimal \
+            --target aarch64-linux-android --target x86_64-linux-android
+          rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: auqw/pnpm-lock.yaml
-      - run: cargo install cargo-ndk --locked
+      # Prebuilt cargo-ndk — `cargo install` compiles it from source.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # Caches gradle deps + wrapper downloads between runs.
+      - uses: gradle/actions/setup-gradle@v6
+      # Alpha signing key lives in repo secrets — decoded to a runner
+      # temp file, never committed. A release must never silently ship
+      # debug-signed: missing secrets fail the job (the plugin's no-env
+      # debug fallback is for local builds only). Only the keystore
+      # *path* enters shared env — passwords stay step-scoped so later
+      # build scripts can't read them.
+      - name: alpha signing key
+        env:
+          AUQW_ALPHA_KEYSTORE_B64: ${{ secrets.AUQW_ALPHA_KEYSTORE_B64 }}
+          AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
+          AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
+        run: |
+          if [ -z "$AUQW_ALPHA_KEYSTORE_B64" ] || \
+             [ -z "$AUQW_ALPHA_STORE_PASSWORD" ] || \
+             [ -z "$AUQW_ALPHA_KEY_PASSWORD" ]; then
+            echo '::error::AUQW_ALPHA_* secrets missing — refusing to publish a debug-signed release APK' >&2
+            exit 1
+          fi
+          echo "$AUQW_ALPHA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/alpha.keystore"
+          echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore" >> "$GITHUB_ENV"
       - name: android inputs (bindings + plugins)
         working-directory: auqw
         run: |
@@ -119,23 +171,30 @@ jobs:
           node tooling/stamp-version.mjs --check "${VERSION#v}"
           node tooling/sync-plugins.mjs
           pnpm --dir apps/mobile exec expo prebuild --platform android
-      - name: build debug APK
+      - name: build release APK
         working-directory: auqw/apps/mobile
+        # Passwords only here — step-scoped so the bindings/plugin steps
+        # above never see them. assembleRelease embeds the JS bundle —
+        # the APK is standalone (a debug APK is a dev client that needs
+        # Metro on the device).
+        env:
+          AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
+          AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
         run: |
-          cd android && ./gradlew assembleDebug
+          cd android && ./gradlew assembleRelease
           cd .. && mv \
-            android/app/build/outputs/apk/debug/app-debug.apk \
-            "auqw-${VERSION#v}-android-debug.apk"
-      - uses: actions/upload-artifact@v4
+            android/app/build/outputs/apk/release/app-release.apk \
+            "auqw-${VERSION#v}-android-release.apk"
+      - uses: actions/upload-artifact@v7
         with:
           name: android-packages
-          path: auqw/apps/mobile/auqw-*-android-debug.apk
+          path: auqw/apps/mobile/auqw-*-android-release.apk
 
   release:
     needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: publish prerelease

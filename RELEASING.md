@@ -32,7 +32,7 @@ git push origin v0.0.1-alpha.1
 | Job | Produces |
 |-----|----------|
 | `desktop` | `auqw-<ver>-linux-x86_64.AppImage`, `.tar.gz`, `.flatpak` + `SHA256SUMS.txt` |
-| `android` | `auqw-<ver>-android-debug.apk` (debug-signed — installable, not Play-ready) |
+| `android` | `auqw-<ver>-android-release.apk` (`assembleRelease`, alpha-signed — standalone, upgrade-installs across alphas; not Play-ready) |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
 
 ## Downloads
@@ -46,8 +46,15 @@ ships; for alpha, link the tag page.
 
 - **Desktop signing**: alpha ships unsigned binaries + `SHA256SUMS.txt`.
   Signing/notarization reopens when a distribution channel is picked.
-- **Android signing**: alpha ships the debug-signed APK. A real upload
-  key waits on the Path A (EAS) vs Path B (local Gradle) ratification.
+- **Android signing**: alpha ships an `assembleRelease` APK signed
+  with an alpha keystore decoded from the `AUQW_ALPHA_KEYSTORE_B64`
+  repo secret (+ `AUQW_ALPHA_STORE_PASSWORD` / `AUQW_ALPHA_KEY_PASSWORD`),
+  wired by the `with-alpha-signing` config plugin — credentials never
+  enter the repo; one identity across CI runs so installs upgrade
+  cleanly; missing secrets fail the release job rather than publish a
+  debug-signed APK (the plugin's no-env debug fallback is for local
+  builds only). A real upload key waits on the Path A (EAS) vs Path B
+  (local Gradle) ratification.
 - **auqw-plugins checkout**: private plugins repos need a
   `PLUGINS_CHECKOUT_TOKEN` PAT secret; public reads under
   `GITHUB_TOKEN`.
