@@ -75,6 +75,9 @@ jobs:
             org.freedesktop.Platform/x86_64/24.08 \
             org.freedesktop.Sdk/x86_64/24.08 \
             org.electronjs.Electron2.BaseApp/x86_64/24.08
+          # The cache key is fixed — without an explicit update, warm
+          # restores would pin stale runtime refs forever.
+          flatpak update --user -y
       - name: build desktop packages
         working-directory: auqw
         run: |

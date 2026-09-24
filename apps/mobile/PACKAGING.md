@@ -6,15 +6,18 @@ is a proposal, not a settled choice; each carries its reopen condition.
 Once ratified, the picked path moves into the decision log and this doc
 keeps only the how-to.
 
-Current state: `app.config.ts` pins `com.vehicoule.auqw` / `version: 0.1.0`;
-no `eas.json`, no checked-in `android/` (CNG — `expo prebuild` regenerates
-it, gitignored). A debug APK already builds locally per `README.md`
-(`build-android-bindings.sh` → `pnpm install` → `pnpm sync-plugins` →
-`expo prebuild` → `./android/gradlew assembleDebug`). This doc is the
-path from there to a signed installable artifact. iOS is post-release —
-the provisional `expo-audio` path stays until the native seam lands, and
-App Store signing needs an Apple Developer account anyway; not covered
-here.
+Current state: `app.config.ts` pins `com.vehicoule.auqw`; the release
+workflow stamps the version from the git tag. No `eas.json`, no
+checked-in `android/` (CNG — `expo prebuild` regenerates it,
+gitignored). **Alpha already signs**: `plugins/with-alpha-signing.cjs`
+injects `signingConfigs.alpha` pointing at the committed
+`keystores/alpha.keystore` and repoints the release buildType — the
+release workflow ships `assembleRelease` APKs under one consistent
+alpha identity. What stays Open below is only the post-alpha signing
+story (real upload key, distribution channel). iOS is post-release —
+the provisional `expo-audio` path stays until the native seam lands,
+and App Store signing needs an Apple Developer account anyway; not
+covered here.
 
 ## Build inputs (unchanged by signing choice)
 
@@ -75,10 +78,14 @@ Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
 
 ## Path B — fully local (no EAS account)
 
-`./gradlew assembleRelease` on the prebuilt project is unsigned by
-default — Gradle's release signing config must come from somewhere.
+`./gradlew assembleRelease` on the prebuilt project needs a signing
+config from somewhere — AGP's default release buildType carries none.
 Because `android/` is regenerated, signing config lives in a **config
-plugin**, not a hand-edit:
+plugin**, not a hand-edit. The alpha channel already implements the
+simplest variant of this recipe (`with-alpha-signing.cjs` + a committed
+keystore); the `keystore.properties` design below is the same plugin
+shape pointed at an *external* key, which is what a real upload key
+needs.
 
 1. One-time, outside the repo:
 
