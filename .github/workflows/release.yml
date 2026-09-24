@@ -149,18 +149,37 @@ jobs:
           # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
           # bare v*.*.* publishes stable.
           if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          if gh release view "$VERSION" >/dev/null 2>&1; then
-            # Rerun on a published release: refresh its assets in place
-            # (--clobber replaces same-named files) so a failed upload
-            # can't strand the tag with no downloads.
-            gh release upload "$VERSION" --clobber \
-              artifacts/desktop-packages/* \
-              artifacts/android-packages/*
-          else
+          # Verify the desktop bundle before any of it goes public — the
+          # checksum file is itself a release asset.
+          (cd artifacts/desktop-packages && sha256sum -c SHA256SUMS.txt)
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
             gh release create "$VERSION" \
               --title "$VERSION" \
               --generate-notes \
               "${flags[@]}" \
               artifacts/desktop-packages/* \
               artifacts/android-packages/*
+            exit 0
           fi
+          # Rerun on a published release. Never delete the release: a
+          # failed attempt must leave existing downloads serving. Assets
+          # refresh in place (bounded retries shrink the per-asset
+          # clobber window); obsolete names prune only after uploads
+          # succeed; notes regenerate since the tag may have moved.
+          for attempt in 1 2 3; do
+            if gh release upload "$VERSION" --clobber \
+              artifacts/desktop-packages/* \
+              artifacts/android-packages/*; then break; fi
+            [ "$attempt" -lt 3 ] || exit 1
+          done
+          mapfile -t names < <(basename -a artifacts/desktop-packages/* artifacts/android-packages/*)
+          gh release view "$VERSION" --json assets -q '.assets[].name' \
+            | while read -r old; do
+                case " ${names[*]} " in
+                  *" $old "*) ;;
+                  *) gh release delete-asset "$VERSION" "$old" --yes ;;
+                esac
+              done
+          notes=$(gh api "repos/$GH_REPO/releases/generate-notes" \
+            -f tag_name="$VERSION" -q .body)
+          gh release edit "$VERSION" --notes "$notes"
