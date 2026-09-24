@@ -193,7 +193,7 @@ function LibraryCard({
       ariaLabel={label}
       className="uw-libcard uw-libcard--grid"
     >
-      <Artwork url={card.artworkUrl} size={104} dimmed={!openable} />
+      <Artwork url={card.artworkUrl} size={132} dimmed={!openable} />
       <Text variant="body" color="primary" numberOfLines={1}>
         {card.title}
       </Text>
@@ -429,7 +429,7 @@ export function LibraryScreen({
                   ariaLabel={artist.name}
                   className="uw-artist"
                 >
-                  <Artwork url={artist.artworkUrl} size={76} cornerRadius={38} />
+                  <Artwork url={artist.artworkUrl} size={96} cornerRadius={48} />
                   <Text
                     variant="metadata"
                     color="secondary"

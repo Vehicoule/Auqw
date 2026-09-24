@@ -27,6 +27,7 @@
     "typescript": "~6.0.3"
   },
   "dependencies": {
+    "@auqw/design-tokens": "workspace:*",
     "@auqw/ui-web": "workspace:*",
     "react": "19.2.3",
     "react-dom": "19.2.3"

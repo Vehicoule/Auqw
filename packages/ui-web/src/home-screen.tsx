@@ -99,7 +99,7 @@ function Rail({
               ariaLabel={`${card.title}${card.subtitle === null ? '' : `, ${card.subtitle}`}`}
               className="uw-rail__card"
             >
-              <Artwork url={card.artworkUrl} size={112} />
+              <Artwork url={card.artworkUrl} size={136} />
               <Text variant="body" color="primary" numberOfLines={1}>
                 {card.title}
               </Text>

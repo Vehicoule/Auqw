@@ -139,6 +139,9 @@ function fakeApi(): Rig {
             userDataPath: '/tmp/auqw-test',
           }),
       },
+      chrome: {
+        setScheme: () => {},
+      },
       dialog: {
         pickFolder: () => Promise.resolve(null),
         pickFiles: () => Promise.resolve([]),

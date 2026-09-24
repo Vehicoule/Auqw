@@ -65,6 +65,9 @@ export const CHANNELS = {
   tagreadEnumerate: 'tagread:enumerate',
   tagreadFingerprint: 'tagread:fingerprint',
   tagreadRead: 'tagread:read',
+  /** Renderer→main fire-and-forget: resolved ui-web scheme for the
+      titlebar overlay. */
+  chromeScheme: 'chrome:scheme',
   localAdd: 'local:add',
   localProbe: 'local:probe',
   localList: 'local:list',

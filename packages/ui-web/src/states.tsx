@@ -26,7 +26,9 @@ function StateShell({
 }) {
   return (
     <div className="uw-state" role={role} data-state={tone}>
-      <Icon name={icon} size={22} color={`var(--${tone === 'secondary' ? 'text-secondary' : tone})`} />
+      <span className="uw-state__icon">
+        <Icon name={icon} size={22} color={`var(--${tone === 'secondary' ? 'text-secondary' : tone})`} />
+      </span>
       <Text variant="title" color="primary">
         {title}
       </Text>
@@ -43,7 +45,9 @@ function StateShell({
 export function LoadingState({ title = 'loading', hint = null }: StateViewProps) {
   return (
     <div className="uw-state" role="status" aria-live="polite">
-      <Spinner size={22} />
+      <span className="uw-state__icon">
+        <Spinner size={22} />
+      </span>
       <Text variant="title" color="primary">
         {title}
       </Text>
