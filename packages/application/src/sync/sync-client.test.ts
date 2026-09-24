@@ -173,19 +173,33 @@ function fakeKeys(): SyncClientKeys & {
   peers: Map<string, SyncPeer>;
   failPeerPut: boolean;
   failPeerPutAfterRecord: boolean;
+  seed: (peer: SyncPeer) => void;
 } {
+  // Records and the index are separate stores in real custody — the
+  // index drives listing, so a record committed without its index
+  // entry is orphaned and unlisted.
   const peers = new Map<string, SyncPeer>();
+  const index = new Set<string>();
   let identity: { deviceId: string; identity: SyncIdentity } | null = null;
   const keys = {
     peers,
     failPeerPut: false,
     failPeerPutAfterRecord: false,
+    // Seed a fully committed record — both stores, like a prior
+    // successful peerPut (direct map writes would orphan it).
+    seed: (peer: SyncPeer): void => {
+      peers.set(peer.fp, peer);
+      index.add(peer.fp);
+    },
     identityGet: () => Promise.resolve(ok(identity)),
     identitySet: (record: { deviceId: string; identity: SyncIdentity }) => {
       identity = record;
       return Promise.resolve(ok(undefined));
     },
-    peerList: () => Promise.resolve(ok([...peers.values()])),
+    peerList: () =>
+      Promise.resolve(
+        ok([...peers.values()].filter((p) => index.has(p.fp))),
+      ),
     peerPut: (peer: SyncPeer) => {
       if (keys.failPeerPutAfterRecord) {
         // Commits the record, then fails the index leg — the partial
@@ -201,9 +215,11 @@ function fakeKeys(): SyncClientKeys & {
         );
       }
       peers.set(peer.fp, peer);
+      index.add(peer.fp);
       return Promise.resolve(ok(undefined));
     },
     peerDelete: (fp: string) => {
+      index.delete(fp);
       peers.delete(fp);
       return Promise.resolve(ok(undefined));
     },
@@ -522,7 +538,7 @@ async function pairRejectMapsError(): Promise<void> {
 // permission-denied before any auth frame leaves.
 async function pinnedFingerprintMismatch(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set('c'.repeat(64), {
+  keys.seed({
     fp: 'c'.repeat(64),
     name: 'old',
     endpoints: [ENDPOINT],
@@ -635,7 +651,7 @@ async function unpairSaysByeAndForgets(): Promise<void> {
 // the stale custody record locally.
 async function resumeUnpairedDropsCustody(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -692,7 +708,7 @@ async function keepalivePings(): Promise<void> {
 // (createExpoSync awaits peers() before exposing the surface).
 async function restartHydratesPeers(): Promise<void> {
   const { client, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -717,7 +733,7 @@ async function restartHydratesPeers(): Promise<void> {
 // rounds serialized on the single session.
 async function concurrentSyncSharesOneDial(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -740,7 +756,7 @@ async function concurrentSyncSharesOneDial(): Promise<void> {
 // request — the next op redials a clean session.
 async function timeoutKillsSessionAndRedials(): Promise<void> {
   const { client, server, clock, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -782,7 +798,7 @@ async function closeDisposesSocketPort(): Promise<void> {
 // later success clears it.
 async function failedRoundSurfacesLastError(): Promise<void> {
   const { client, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -837,7 +853,7 @@ async function oversizedExportPaginates(): Promise<void> {
 // read as converged — the round reports budget-exceeded on the view.
 async function incompleteRoundFailsHonest(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -945,6 +961,24 @@ async function failedRePairKeepsPeer(): Promise<void> {
   );
   keys.failPeerPutAfterRecord = false;
   await client.close();
+
+  // A FIRST pair whose record commits without its index entry is
+  // unlistable in real custody — the read-back must treat the peer
+  // as hidden (matching what a restart would re-hydrate).
+  const fresh = await rig();
+  fresh.keys.failPeerPutAfterRecord = true;
+  const orphan = await fresh.client.pair({ payload: qrPayload() });
+  assert(!orphan.ok, 'orphaned first pair should surface');
+  assert(
+    fresh.keys.peers.has(SERVER_FP),
+    'committed record missing from custody',
+  );
+  assertEqual(
+    fresh.client.status().peers.length,
+    0,
+    'unindexed peer visible in memory',
+  );
+  await fresh.client.close();
 }
 
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
