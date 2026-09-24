@@ -98,6 +98,44 @@ recording so reviewers see range pulls live.
   206 + `Content-Range: bytes a-b/SIZE` + `Accept-Ranges: bytes`;
   out-of-range → 416 + `Content-Range: bytes */SIZE`.
 
+## POT minter legs (s4/pot-service)
+
+- The desktop utility binds a SECOND `0.0.0.0:ephemeral` listener for the
+  bundled poToken minter (bgutil `/get_pot`). Tell the two ports apart by
+  probing: `curl -s -X POST -d '{}' http://127.0.0.1:<port>/get_pot` → the
+  minter answers `400 pot: content_binding must be a bounded string`;
+  the sync port won't answer HTTP at all.
+- The pairing offer + welcome carry `pot` = `<endpoints()[0]>:<minterport>`
+  (visible in the copied payload JSON). The client `rebasePot`s it onto the
+  DIALED host — a phone pairing via `10.0.2.2` stores `10.0.2.2:<pot>` and
+  the emulator reaches it fine (`nc -w 3 10.0.2.2 <pot>` exit 0). Phone→pot
+  traffic appears on the host as `lo 127.0.0.1→127.0.0.1` (emulator NAT
+  rewrites 10.0.2.2 to host loopback) — `tcpdump -i any -nn port <pot>`
+  proves whether a phone resolve actually consulted the minter.
+- `potProviderUrl` is a ONE-SHOT `createHost` input (App.tsx) — pairing
+  must precede app boot: pair → `am force-stop` + relaunch → resolve.
+  A stale peer record (old port) must be `unpair`ed first; same-fingerprint
+  re-pair updates endpoints+pot in place.
+- Branch JS that changes the host-call shape breaks a stale APK with a
+  UniFFI `Structure.getFieldOrder() … does not provide enough names`
+  crash at `createHost` — rebuild bindings (`build-android-bindings.sh`)
+  + `assembleDebug` on the branch. Metro also caches `app.config.ts`
+  plugin resolution across branch switches — `expo start --clear` or the
+  app 500s on deleted plugin files (e.g. `with-release-abis.cjs`).
+- First playback needs the Android media-notification permission granted
+  (`Allow Auqw to send notifications?`) — until allowed, Media3 won't
+  start and the play button stays inert.
+- A queue occurrence that failed `match requires confirmation` (ambiguous
+  domain match — the youtube-music SEARCH already succeeded, proving the
+  minter worked upstream) does NOT retry on play-press — it stays a dead
+  item. Dismiss the mini-player (swipe it down) and pick a different
+  track, or clear it from the queue tab. Resolve via settings →
+  `match reviews` → pick a candidate → re-tap the row.
+- The 'Open debugger to view warnings' toast has an invisible hitbox over
+  the bottom rows — taps on `desktop sync`/`match reviews` silently die
+  while it shows. Dismiss it (its X, or `keyevent 4`) before tapping
+  bottom-of-list rows.
+
 ## Devin Secrets Needed
 
 None — the napi artifact is a local cargo build output.
