@@ -124,7 +124,17 @@ if (port === null) {
   // pairing mint sees the retried port.
   const potRetry = (): void => {
     if (pot.port() === null) {
-      void pot.bind().catch(() => null);
+      void pot
+        .bind()
+        .then((bound) => {
+          // A host constructed while the bind was down cached no
+          // provider — push the retry's port into it so desktop
+          // playback can mint without a utility restart.
+          if (bound !== null) {
+            runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+          }
+        })
+        .catch(() => null);
     }
   };
   const runtime = createHostRuntime({

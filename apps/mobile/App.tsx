@@ -114,7 +114,8 @@ import type {
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
-import { discoveredPotProviderUrl } from './src/adapters/pot-provider.ts';
+import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
+import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
 import { devRoute } from './src/dev-routes.ts';
 import { appFilePath, runSeamLink } from './seam-dev.ts';
@@ -820,8 +821,21 @@ function Main({
     if (syncSurface === null) {
       return;
     }
-    setSyncStatus(syncSurface.client.status());
-    return syncSurface.client.subscribe(setSyncStatus);
+    const applyStatus = (status: SyncClientStatus) => {
+      setSyncStatus(status);
+      // Live provider update: createHost's potProviderUrl is
+      // boot-time, but peers keep changing — a mid-session pair
+      // brings the desktop's endpoint, an unpair or a
+      // welcome-carried refresh clears/replaces it. Same source
+      // order as boot: discovered peer > env override > none.
+      controller.setPotProvider(
+        potProviderUrlFromPeers(status.peers.map((view) => view.peer)) ??
+          POT_PROVIDER_URL ??
+          null,
+      );
+    };
+    applyStatus(syncSurface.client.status());
+    return syncSurface.client.subscribe(applyStatus);
     // The surface is stable for the controller's life — subscribe once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);

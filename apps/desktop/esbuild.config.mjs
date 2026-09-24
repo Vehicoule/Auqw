@@ -36,6 +36,16 @@ await build({
   outfile: 'dist/utility/index.cjs',
 });
 
+// The POT minter child — remote BotGuard interpreter code runs in this
+// dedicated process, never the utility's. Bundled beside the utility
+// entry (child_process.fork target); asarUnpack covers dist/utility/**.
+await build({
+  ...nodeBundle,
+  format: 'cjs',
+  entryPoints: ['src/utility/pot-minter-child.ts'],
+  outfile: 'dist/utility/pot-minter-child.cjs',
+});
+
 await build({
   bundle: true,
   platform: 'browser',

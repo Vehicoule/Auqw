@@ -367,7 +367,11 @@ pub struct PluginHost {
     http: Arc<ReqwestClient>,
     kv: Arc<dyn KeyValueStore>,
     budgets: Budgets,
-    pot_provider_url: Option<String>,
+    /// Base URL of the PO-token provider, updatable at runtime via
+    /// [`PluginHost::set_pot_provider`] — a pairing or minter-retry
+    /// landing after construction must not leave the running host
+    /// anonymous until restart.
+    pot_provider_url: Arc<RwLock<Option<String>>>,
     /// Surface `prefer` hint merged into every `playback.resolve`.
     prefer: Option<Vec<String>>,
     /// App-held OAuth access token merged as `access_token` into every
@@ -512,7 +516,7 @@ impl PluginHost {
             http: Arc::new(http),
             kv,
             budgets,
-            pot_provider_url: config.pot_provider_url,
+            pot_provider_url: Arc::new(RwLock::new(config.pot_provider_url)),
             prefer: sanitize_prefer(config.prefer),
             auth_token: Arc::new(RwLock::new(valid_auth_token(config.auth_token))),
             stream,
@@ -537,6 +541,20 @@ impl PluginHost {
     pub fn set_auth_token(&self, token: Option<String>) {
         if let Ok(mut slot) = self.auth_token.write() {
             *slot = valid_auth_token(token);
+        }
+    }
+
+    /// Set or clear the base URL of the bgutil-compatible PO-token
+    /// provider (`POST {url}/get_pot`). Resolves read the slot when
+    /// their invocation spawns, so an update applies without
+    /// recreating the host — a phone that pairs mid-session or a
+    /// minter bind retry both land here. Empty or whitespace-only
+    /// values normalize to `None` exactly as `invoke` intake does;
+    /// `None` leaves `pot_token` requests answered `unsupported`.
+    /// Never logged.
+    pub fn set_pot_provider(&self, url: Option<String>) {
+        if let Ok(mut slot) = self.pot_provider_url.write() {
+            *slot = url;
         }
     }
 
@@ -776,6 +794,11 @@ impl PluginHost {
     pub fn run_spin(&self, wasm: Vec<u8>, manifest_json: String) -> Result<SpinReport, HostError> {
         let plugin = parse_manifest_and_load(&wasm, &manifest_json, &self.budgets)?;
         let clock = SystemClock;
+        let pot_url = self
+            .pot_provider_url
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
         let invocation = self.runtime.block_on(invoke(
             &plugin,
             "playback.resolve",
@@ -786,7 +809,7 @@ impl PluginHost {
                 http: &*self.http,
                 kv: Arc::clone(&self.kv),
                 clock: &clock,
-                pot_provider: self.pot_provider_url.as_deref(),
+                pot_provider: pot_url.as_deref(),
             },
         ));
         let (result, attempt) = invocation.into_parts();
@@ -920,11 +943,14 @@ impl PluginHost {
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
-        let pot_provider = self.pot_provider_url.clone();
+        let pot_provider = Arc::clone(&self.pot_provider_url);
         let cancels = Arc::clone(&self.cancels);
         let rid = request_id.clone();
         self.runtime.spawn(async move {
             let clock = SystemClock;
+            // Read at spawn time: an invocation admitted before the
+            // update still picks it up once its task runs.
+            let pot_url = pot_provider.read().ok().and_then(|slot| slot.clone());
             let invocation = invoke(
                 &plugin,
                 &capability,
@@ -935,7 +961,7 @@ impl PluginHost {
                     http: &*http,
                     kv,
                     clock: &clock,
-                    pot_provider: pot_provider.as_deref(),
+                    pot_provider: pot_url.as_deref(),
                 },
             )
             .await;

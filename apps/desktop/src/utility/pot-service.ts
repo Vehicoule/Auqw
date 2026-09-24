@@ -10,7 +10,11 @@ import { WebPoMinter } from 'bgutils-js/webpo';
 import { buildURL, getHeaders, parseLooseJSON } from 'bgutils-js/utils';
 import type { WebPoSignalOutput } from 'bgutils-js/shared-types';
 import { isBoundedString, isRecord } from '../shared/check.ts';
-import type { ShellError } from '../shared/errors.ts';
+import {
+  createProcessMinter,
+  HttpError,
+  type MinterEngine,
+} from './pot-minter-engine.ts';
 
 /**
  * Bundled proof-of-origin-token provider (bgutil `/get_pot`
@@ -166,16 +170,6 @@ type MintResult = {
   expiresAtMs: number;
 };
 
-class HttpError extends Error {
-  readonly status: number;
-  readonly kind: ShellError['kind'];
-
-  constructor(status: number, kind: ShellError['kind'], message: string) {
-    super(message);
-    this.status = status;
-    this.kind = kind;
-  }
-}
 
 /* -------------------------- BotGuard flow -------------------------- */
 
@@ -684,8 +678,13 @@ async function challengeFromHomepage(
   };
 }
 
-/** BotGuard session build: homepage → interpreter → vm → GenerateIT. */
-async function buildBotGuardSession(
+/**
+ * BotGuard session build: homepage → interpreter → vm → GenerateIT.
+ * Exported for the minter child entry (`pot-minter-child.ts`) — it
+ * is the whole reason the child exists: this remote-JS flow runs in
+ * a dedicated process, never in the utility's address space.
+ */
+export async function buildBotGuardSession(
   fetchImpl: FetchLike,
   nowMs: () => number,
 ): Promise<PotSession> {
@@ -837,8 +836,21 @@ export function createPotService(opts: PotServiceDeps): PotService {
   const fetchImpl: FetchLike = opts.fetchImpl ?? fetch;
   const nowMs = opts.nowMs ?? Date.now;
   const log = opts.log ?? ((): void => undefined);
-  const sessionFactory =
-    opts.session ?? (() => buildBotGuardSession(fetchImpl, nowMs));
+  // The default mint path runs the BotGuard flow in a dedicated
+  // child process — remote interpreter code never shares this
+  // utility's address space (node:vm is an isolation boundary, not
+  // a security one). The in-process path stays as the test/dev
+  // seam: any injected fetchImpl or session selects it, so no unit
+  // test spawns a child.
+  const engine: MinterEngine | null =
+    opts.session === undefined && opts.fetchImpl === undefined
+      ? createProcessMinter({ log })
+      : null;
+  const sessionFactory: () => Promise<PotSession> =
+    opts.session ??
+    (engine !== null
+      ? () => engine.buildSession()
+      : () => buildBotGuardSession(fetchImpl, nowMs));
   const ratePerSec = opts.rateLimitPerSec ?? RATE_LIMIT_PER_SEC;
   const rateBurst = opts.rateLimitBurst ?? RATE_LIMIT_BURST;
 
@@ -1140,6 +1152,9 @@ export function createPotService(opts: PotServiceDeps): PotService {
       const srv = server;
       server = null;
       boundPort = null;
+      // The minter child dies with the service — its sessions' vm
+      // timers are inside it, and 'disconnect' unloads them there.
+      await engine?.close();
       if (srv === null) {
         return;
       }

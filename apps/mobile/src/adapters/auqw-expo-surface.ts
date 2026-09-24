@@ -176,6 +176,13 @@ export type AuqwExpoLike = AuqwExpoHostLike &
   AuqwExpoPlayerLike & {
     createHost(config: AuqwExpoHostConfig): Promise<void>;
     setAuthToken(token: string | null): void;
+    /**
+     * Live PO-token provider update — resolves read the host's slot
+     * at invocation spawn, so a pairing or unpairing that lands after
+     * `createHost` applies without recreating the host. `null`
+     * restores the anonymous resolve ladder.
+     */
+    setPotProvider(url: string | null): void;
     loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   };
 
@@ -186,6 +193,8 @@ export type AuqwExpoLike = AuqwExpoHostLike &
 export type AuqwExpoHostModuleLike = AuqwExpoHostLike & {
   createHost(config: AuqwExpoHostConfig): Promise<void>;
   setAuthToken(token: string | null): void;
+  /** Live PO-token provider update — see `AuqwExpoLike.setPotProvider`. */
+  setPotProvider(url: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
 };
 

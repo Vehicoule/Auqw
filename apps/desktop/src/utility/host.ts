@@ -64,6 +64,13 @@ export type PluginHostLike = {
   streamClose(handle: string): void;
   streamRelease(handle: string): void;
   streamPhaseMarks(handle: string): unknown;
+  /**
+   * napi `set_pot_provider(&self, url: Option<String>)` — updates
+   * the provider slot resolves read at invocation spawn, so a
+   * minter bind retry landing after construction still reaches the
+   * running host. `null` restores anonymous resolves.
+   */
+  setPotProvider(url: string | null): void;
 };
 
 /** Fuel budgets match the mobile host's values (200M/entry, 2G total). */
@@ -206,6 +213,12 @@ export function createHostRuntime(opts: {
   potProviderUrl?: () => string | null;
 }): {
   host(): PluginHostLike;
+  /**
+   * The already-constructed host or null — never builds one. For
+   * late-arriving updates (`setPotProvider` after a minter bind
+   * retry) that must not force bindings to load.
+   */
+  hostIfLoaded(): PluginHostLike | null;
   pluginsReady(): Promise<readonly string[]>;
   status(): Promise<HostPluginsResult>;
 } {
@@ -348,6 +361,9 @@ export function createHostRuntime(opts: {
   return {
     host(): PluginHostLike {
       return ensureHost();
+    },
+    hostIfLoaded(): PluginHostLike | null {
+      return host;
     },
     pluginsReady(): Promise<readonly string[]> {
       return ready().then((loaded) => loaded.map((p) => p.pluginId));
