@@ -55,31 +55,38 @@ fn default_status() -> u16 {
 }
 
 /// First violated request-header assertion, if any: `name`
-/// matches case-insensitively and the value must contain the
-/// declared substring.
+/// matches case-insensitively and ANY of its values may carry the
+/// declared substring (repeated headers are legal on the wire).
+/// Diagnostics name the header but never values — the spec's
+/// assertion and the request's credentials both stay out of logs.
 fn header_miss(
     req: &HttpRequest,
     want: &BTreeMap<String, String>,
 ) -> Option<String> {
-    for (name, needle) in want {
-        let got = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str());
-        match got {
-            Some(v) if v.contains(needle.as_str()) => {}
-            Some(v) => {
-                return Some(format!(
-                    "header {name}: expected to contain {needle:?}, got {v:?}"
-                ));
+    'outer: for (name, needle) in want {
+        let mut present = false;
+        for (k, v) in &req.headers {
+            if !k.eq_ignore_ascii_case(name) {
+                continue;
             }
-            None => {
-                return Some(format!("header {name}: missing"));
+            present = true;
+            if v.contains(needle.as_str()) {
+                continue 'outer;
             }
         }
+        return Some(if present {
+            format!("header {name}: assertion failed")
+        } else {
+            format!("header {name}: missing")
+        });
     }
     None
+}
+
+/// URL minus query and fragment — signed params and token-bearing
+/// query strings never reach logs or guest-visible errors.
+fn safe_url(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
 }
 
 #[derive(Deserialize)]
@@ -127,7 +134,9 @@ pub fn load_journeys(dir: &Path) -> Result<Vec<Journey>, String> {
 }
 
 /// Scripted network: upstreams matched by `url_contains` in declared
-/// order. Misses and their URLs are recorded for the report.
+/// order. Misses (URLs with query stripped) are recorded for the
+/// report and fail the journey — the guest call only sees a typed
+/// transient error, never the request's credentials.
 struct CannedHttp {
     upstreams: Vec<Upstream>,
     bodies: Vec<Vec<u8>>,
@@ -182,7 +191,7 @@ impl HttpClient for CannedHttp {
             Some(i) => {
                 let up = &self.upstreams[i];
                 if let Some(miss) = header_miss(&req, &up.request_headers) {
-                    let url = req.url.clone();
+                    let url = safe_url(&req.url).to_string();
                     if let Ok(mut misses) = self.misses.lock() {
                         misses.push(format!("{url} ({miss})"));
                     }
@@ -350,6 +359,17 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
                 passed = false;
                 detail = format!("http calls {calls} exceeded cap {cap}");
             }
+        }
+    }
+    // Every outbound request must be canned: a miss the guest
+    // absorbed still means the script left a hole — absorbable
+    // transient errors can't let a spec pass against a request it
+    // never declared (a failed header assertion above all).
+    if passed {
+        let misses = http.misses.lock().map(|m| m.clone()).unwrap_or_default();
+        if !misses.is_empty() {
+            passed = false;
+            detail = format!("uncanned upstreams: {}", misses.join("; "));
         }
     }
     if passed {
