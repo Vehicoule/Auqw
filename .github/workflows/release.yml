@@ -149,12 +149,18 @@ jobs:
           # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
           # bare v*.*.* publishes stable.
           if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          # A moved tag re-runs this job — replace any same-tag release
-          # left by a prior attempt instead of dying on `already exists`.
-          gh release delete "$VERSION" --yes 2>/dev/null || true
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --generate-notes \
-            "${flags[@]}" \
-            artifacts/desktop-packages/* \
-            artifacts/android-packages/*
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            # Rerun on a published release: refresh its assets in place
+            # (--clobber replaces same-named files) so a failed upload
+            # can't strand the tag with no downloads.
+            gh release upload "$VERSION" --clobber \
+              artifacts/desktop-packages/* \
+              artifacts/android-packages/*
+          else
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              "${flags[@]}" \
+              artifacts/desktop-packages/* \
+              artifacts/android-packages/*
+          fi
