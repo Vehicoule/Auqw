@@ -233,6 +233,8 @@ function botGuardSandbox(
     arrayBuffer?: () => Promise<ArrayBuffer>;
     blob?: () => Promise<Blob>;
     clone?: () => FetchResponse;
+    headers?: { get(name: string): string | null };
+    body?: ReadableStream | null;
   };
   const boundedResponse = (resp: FetchResponse): FetchResponse => {
     const full = resp as FullResponse;
@@ -260,11 +262,40 @@ function botGuardSandbox(
       }
       return buf;
     };
+    // A direct `.body` stream read would bypass the byte cap — count
+    // through a transform so the bound holds however the body is read
+    // (the bound text/arrayBuffer reads consume this stream too).
+    if (
+      full.body !== null &&
+      full.body !== undefined &&
+      typeof full.body.pipeThrough === 'function'
+    ) {
+      let seen = 0;
+      full.body = full.body.pipeThrough(
+        new TransformStream({
+          transform(chunk: unknown, controller): void {
+            seen +=
+              chunk instanceof Uint8Array || chunk instanceof ArrayBuffer
+                ? chunk.byteLength
+                : 0;
+            if (seen > SANDBOX_FETCH_MAX_CHARS) {
+              controller.error(
+                new TypeError('pot: sandboxed fetch response oversized'),
+              );
+              return;
+            }
+            controller.enqueue(chunk);
+          },
+        }),
+      );
+    }
     full.text = cappedText;
     full.json = async () => JSON.parse(await cappedText());
     full.arrayBuffer = cappedBuffer;
     if (typeof full.blob === 'function') {
-      full.blob = async () => new Blob([await cappedBuffer()]);
+      const mime = full.headers?.get('content-type') ?? '';
+      full.blob = async () =>
+        new Blob([await cappedBuffer()], { type: mime });
     }
     if (typeof full.clone === 'function') {
       const cloneUpstream = full.clone.bind(resp);

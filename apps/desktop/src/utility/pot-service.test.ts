@@ -289,6 +289,18 @@ export async function run(): Promise<void> {
       if (url === 'https://www.youtube.com/json') {
         return { ok: true, status: 200, text: async () => '{"a":1}' };
       }
+      if (url === 'https://www.youtube.com/blob-json') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => 'x',
+          headers: {
+            get: (name: string) =>
+              name === 'content-type' ? 'application/json' : null,
+          },
+          blob: async () => new Blob(['x'], { type: 'application/json' }),
+        };
+      }
       return { ok: false, status: 404, text: async () => '' };
     };
     return { impl, urls, inits };
@@ -406,6 +418,16 @@ export async function run(): Promise<void> {
               function () {},
             );
           }, function () {});
+          fetch('https://www.youtube.com/blob-json').then(function (r) {
+            return r.blob();
+          }).then(function (b) {
+            if (b && b.type === 'application/json') {
+              fetch('https://www.youtube.com/blob-ok').then(
+                function () {},
+                function () {},
+              );
+            }
+          }, function () {});
           cb(['snap', 1]);
         };
         setupCb(
@@ -444,6 +466,10 @@ export async function run(): Promise<void> {
   assert(
     contractWire.urls.some((u) => u.endsWith('/json-ok')),
     'sandboxed response lost the Response contract (json() failed)',
+  );
+  assert(
+    contractWire.urls.some((u) => u.endsWith('/blob-ok')),
+    'sandboxed blob() dropped the response MIME type',
   );
   await contractSvc.close();
 
