@@ -78,6 +78,15 @@ name = "auqw-conformance-echo"
 version = "0.1.0"
 
 [[package]]
+name = "auqw-conformance-fixture"
+version = "0.1.0"
+dependencies = [
+ "auqw-guest-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "auqw-conformance-scenario"
 version = "0.1.0"
 dependencies = [

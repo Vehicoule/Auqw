@@ -8,6 +8,7 @@ members = [
     "crates/node-bindings",
     "crates/plugin-host",
     "sdk/conformance/echo",
+    "sdk/conformance/fixture",
     "sdk/conformance/scenario",
     "sdk/conformance/spin",
     "sdk/rust",
