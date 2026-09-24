@@ -113,6 +113,13 @@ export type SessionController = {
    */
   readonly sync: () => ExpoSyncSurface | null;
   /**
+   * Live PO-token provider update on the running plugin host —
+   * resolves read the slot at invocation spawn, so a pairing or
+   * unpairing landing after construction applies without a host
+   * recreate. `null` restores the anonymous resolve ladder.
+   */
+  setPotProvider(url: string | null): void;
+  /**
    * Post-restore bring-up: loads persisted state once more, builds
    * the local source over it, and inits the download ledger. Call
    * after `session.restore()` — storage commits must not interleave
@@ -454,6 +461,7 @@ export async function createSessionController(
     local: () => localSource,
     connectivity,
     sync: () => syncSurface,
+    setPotProvider: (url) => host.setPotProvider(url),
     async start(signal) {
       const loaded = await storage.load({
         requestId: ids.next('local-boot'),

@@ -84,6 +84,7 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_SYNC_DISABLED',
     'AUQW_SYNC_NAME',
     'AUQW_SYNC_NO_MDNS',
+    'AUQW_POT_PROVIDER_URL',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {

@@ -90,7 +90,9 @@ function isSyncPeerRecord(value: unknown): value is SyncPeer {
     isRecord(cursor) &&
     Object.values(cursor).every((m) => typeof m === 'number') &&
     (value['lastSyncAt'] === undefined ||
-      typeof value['lastSyncAt'] === 'number')
+      typeof value['lastSyncAt'] === 'number') &&
+    (value['pot'] === undefined ||
+      (typeof value['pot'] === 'string' && value['pot'].length <= 320))
   );
 }
 

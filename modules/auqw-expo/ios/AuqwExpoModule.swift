@@ -104,6 +104,15 @@ public class AuqwExpoModule: Module {
       h.setAuthToken(token: token)
     }
 
+    // Live PO-token provider update — resolves read the host's slot
+    // at invocation spawn, so a pairing or unpairing landing after
+    // createHost applies without a host recreate. nil restores the
+    // anonymous resolve ladder.
+    Function("setPotProvider") { (url: String?) in
+      let h = try self.requireHost()
+      h.setPotProvider(url: url)
+    }
+
     AsyncFunction("loadPlugin") { (wasmBase64: String, manifestJson: String) -> String in
       let h = try self.requireHost()
       guard let wasm = Data(base64Encoded: wasmBase64) else {

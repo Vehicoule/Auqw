@@ -269,6 +269,13 @@ type AuqwExpoEvents = {
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   createHost(config: HostConfig): Promise<void>;
   setAuthToken(token: string | null): void;
+  /**
+   * Live PO-token provider update — resolves read the host's slot
+   * at invocation spawn, so a pairing or unpairing landing after
+   * createHost applies without a host recreate. null restores the
+   * anonymous resolve ladder.
+   */
+  setPotProvider(url: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   startResolve(pluginId: string, sourceRef: string): Promise<string>;
   startRequest(pluginId: string, capability: string, payloadJson: string): Promise<string>;
@@ -350,6 +357,17 @@ export function createHost(config: HostConfig): Promise<void> {
  */
 export function setAuthToken(token: string | null): void {
   native.setAuthToken(token);
+}
+
+/**
+ * Set or clear the bgutil-compatible PO-token provider URL on the
+ * running host (`POST {url}/get_pot`). Resolves read the slot at
+ * invocation spawn — a mid-session pairing or a welcome-carried
+ * endpoint refresh reaches the host without a recreate, and `null`
+ * restores the anonymous ladder. Never logged.
+ */
+export function setPotProvider(url: string | null): void {
+  native.setPotProvider(url);
 }
 
 export function loadPlugin(wasmBase64: string, manifestJson: string): Promise<string> {

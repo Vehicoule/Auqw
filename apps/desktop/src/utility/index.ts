@@ -4,6 +4,7 @@ import { isRecord } from '../shared/check.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createStreamPump, type PumpPort } from './bytes.ts';
 import { createHostRuntime } from './host.ts';
+import { createPotService } from './pot-service.ts';
 import { createUtilityRouter } from './router.ts';
 import { createServiceClient } from './service.ts';
 import { createIndexDb } from './index-db.ts';
@@ -97,6 +98,46 @@ if (port === null) {
   // entry any other way is a wiring bug, not a usable mode.
   process.exitCode = 1;
 } else {
+  // The bundled POT minter (bgutil /get_pot): a LAN-visible service
+  // the plugin host mints through and the phone discovers via the
+  // pairing payload. AUQW_POT_PROVIDER_URL points the host at an
+  // external provider instead — then this never binds and pairing
+  // advertises nothing. The bind rides the startup gate below so a
+  // QR minted early can't advertise a dead endpoint.
+  // An empty override reads as "unset" — `VAR=` in a launch env must
+  // not suppress the bundled minter into a provider-less state.
+  const potOverrideEnv = process.env['AUQW_POT_PROVIDER_URL'];
+  const potOverride =
+    potOverrideEnv !== undefined && potOverrideEnv.trim() !== ''
+      ? potOverrideEnv
+      : undefined;
+  const pot = createPotService({
+    log: (line) => console.warn(`[auqw] ${line}`),
+  });
+  const potBound: Promise<number | null> =
+    potOverride === undefined
+      ? pot.bind().catch(() => null)
+      : Promise.resolve(null);
+  // A failed startup bind is retryable — re-kick it on each read so
+  // a transient failure heals without a utility restart. The current
+  // caller still gets "no provider"; a retried bind is pushed into
+  // the live host through setPotProvider and read by future host
+  // constructions through the config callback.
+  const potRetry = (): void => {
+    if (pot.port() === null) {
+      void pot
+        .bind()
+        .then((bound) => {
+          // A host constructed while the bind was down cached no
+          // provider — push the retry's port into it so desktop
+          // playback can mint without a utility restart.
+          if (bound !== null) {
+            runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+          }
+        })
+        .catch(() => null);
+    }
+  };
   const runtime = createHostRuntime({
     env: process.env,
     resourcesPath:
@@ -104,6 +145,13 @@ if (port === null) {
         ? process.resourcesPath
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
+    potProviderUrl: () => {
+      const url = pot.loopbackUrl();
+      if (url === null) {
+        potRetry();
+      }
+      return url;
+    },
   });
   // The database path arrives from main in the fork environment —
   // `AUQW_DB_PATH` points under userData; the service opens lazily on
@@ -162,6 +210,17 @@ if (port === null) {
       ? { endpointHost: syncHost }
       : {}),
     ...(syncPort !== undefined ? { port: syncPort } : {}),
+    ...(potOverride === undefined
+      ? {
+          potPort: () => {
+            const bound = pot.port();
+            if (bound === null) {
+              potRetry();
+            }
+            return bound;
+          },
+        }
+      : {}),
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),
     keys: createServiceKeys(serviceClient.request),
@@ -227,32 +286,34 @@ if (port === null) {
   // Startup integrity resolves before the port starts delivering:
   // `.replace` recovery renames and the orphan reap can only race
   // publishes or reconciles once requests arrive, so the port waits
-  // for the sweep rather than trusting it to finish first.
-  void transfer
-    .sweepOrphans()
-    .catch(() => undefined)
-    .then(() => {
-      port.on('message', (event) => {
-        const raw: unknown = event.data;
-        if (serviceClient.onMessage(raw)) {
+  // for the sweep rather than trusting it to finish first. The pot
+  // bind rides the same gate — a `sync:pairing` payload minted
+  // before it resolves would advertise an endpoint that isn't there.
+  void Promise.all([
+    transfer.sweepOrphans().catch(() => undefined),
+    potBound,
+  ]).then(() => {
+    port.on('message', (event) => {
+      const raw: unknown = event.data;
+      if (serviceClient.onMessage(raw)) {
+        return;
+      }
+      if (isStreamPumpAttach(raw)) {
+        const transfer = event.ports?.[0];
+        if (transfer === undefined) {
           return;
         }
-        if (isStreamPumpAttach(raw)) {
-          const transfer = event.ports?.[0];
-          if (transfer === undefined) {
-            return;
-          }
-          createStreamPump({
-            host: runtime.host,
-            handle: raw.handle,
-            port: transfer as PumpPort,
-          });
-          return;
-        }
-        void respond(port, raw, route);
-      });
-      port.start();
+        createStreamPump({
+          host: runtime.host,
+          handle: raw.handle,
+          port: transfer as PumpPort,
+        });
+        return;
+      }
+      void respond(port, raw, route);
     });
+    port.start();
+  });
   // The supervisor kills the child outright on shutdown; when the
   // platform delivers SIGTERM first, drain what this entry owns — the
   // listener, sessions, and the mDNS announce — instead of letting
@@ -260,6 +321,7 @@ if (port === null) {
   // TerminateProcess: no signal, forced teardown stands.)
   process.on('SIGTERM', () => {
     serviceClient.close();
+    void pot.close().catch(() => undefined);
     void syncService
       .close()
       .catch(() => undefined)

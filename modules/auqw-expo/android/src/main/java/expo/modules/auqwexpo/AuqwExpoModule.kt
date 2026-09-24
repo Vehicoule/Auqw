@@ -548,6 +548,17 @@ class AuqwExpoModule : Module() {
       h.setAuthToken(token)
     }
 
+    /**
+     * Live PO-token provider update — resolves read the host's slot
+     * at invocation spawn, so a pairing or unpairing landing after
+     * createHost applies without a host recreate. null restores the
+     * anonymous resolve ladder.
+     */
+    Function("setPotProvider") { url: String? ->
+      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      h.setPotProvider(url)
+    }
+
     AsyncFunction("loadPlugin") { wasmBase64: String, manifestJson: String ->
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       val wasm = Base64.decode(wasmBase64, Base64.DEFAULT)

@@ -4,6 +4,7 @@ import { run as runRuntime } from './adapters/runtime.test.ts';
 import { run as runRangeDownload } from './adapters/range-download.test.ts';
 import { run as runConnectivity } from './adapters/expo-connectivity.test.ts';
 import { run as runExpoSync } from './adapters/expo-sync.test.ts';
+import { run as runPotProvider } from './adapters/pot-provider.test.ts';
 import { runSyncEmit } from './session/sync-emit.test.ts';
 import { devRoute } from './dev-routes.ts';
 
@@ -40,6 +41,7 @@ await runRuntime();
 await runRangeDownload();
 await runConnectivity();
 await runExpoSync();
+runPotProvider();
 await runSyncEmit();
 console.log('mobile shell tests passed');
 

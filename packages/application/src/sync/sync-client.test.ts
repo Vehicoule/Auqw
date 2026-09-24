@@ -172,28 +172,54 @@ function fakeCrypto(opts: { identity?: SyncIdentity } = {}): SyncClientCrypto {
 function fakeKeys(): SyncClientKeys & {
   peers: Map<string, SyncPeer>;
   failPeerPut: boolean;
+  failPeerPutAfterRecord: boolean;
+  seed: (peer: SyncPeer) => void;
 } {
+  // Records and the index are separate stores in real custody — the
+  // index drives listing, so a record committed without its index
+  // entry is orphaned and unlisted.
   const peers = new Map<string, SyncPeer>();
+  const index = new Set<string>();
   let identity: { deviceId: string; identity: SyncIdentity } | null = null;
   const keys = {
     peers,
     failPeerPut: false,
+    failPeerPutAfterRecord: false,
+    // Seed a fully committed record — both stores, like a prior
+    // successful peerPut (direct map writes would orphan it).
+    seed: (peer: SyncPeer): void => {
+      peers.set(peer.fp, peer);
+      index.add(peer.fp);
+    },
     identityGet: () => Promise.resolve(ok(identity)),
     identitySet: (record: { deviceId: string; identity: SyncIdentity }) => {
       identity = record;
       return Promise.resolve(ok(undefined));
     },
-    peerList: () => Promise.resolve(ok([...peers.values()])),
+    peerList: () =>
+      Promise.resolve(
+        ok([...peers.values()].filter((p) => index.has(p.fp))),
+      ),
     peerPut: (peer: SyncPeer) => {
+      if (keys.failPeerPutAfterRecord) {
+        // Commits the record, then fails the index leg — the partial
+        // failure secure custody can produce.
+        peers.set(peer.fp, peer);
+        return Promise.resolve(
+          err(appError('unavailable', 'sync: custody index failed')),
+        );
+      }
       if (keys.failPeerPut) {
         return Promise.resolve(
           err(appError('unavailable', 'sync: custody write failed')),
         );
       }
       peers.set(peer.fp, peer);
+      index.add(peer.fp);
       return Promise.resolve(ok(undefined));
     },
     peerDelete: (fp: string) => {
+      index.delete(fp);
       peers.delete(fp);
       return Promise.resolve(ok(undefined));
     },
@@ -512,7 +538,7 @@ async function pairRejectMapsError(): Promise<void> {
 // permission-denied before any auth frame leaves.
 async function pinnedFingerprintMismatch(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set('c'.repeat(64), {
+  keys.seed({
     fp: 'c'.repeat(64),
     name: 'old',
     endpoints: [ENDPOINT],
@@ -625,7 +651,7 @@ async function unpairSaysByeAndForgets(): Promise<void> {
 // the stale custody record locally.
 async function resumeUnpairedDropsCustody(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -682,7 +708,7 @@ async function keepalivePings(): Promise<void> {
 // (createExpoSync awaits peers() before exposing the surface).
 async function restartHydratesPeers(): Promise<void> {
   const { client, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -707,7 +733,7 @@ async function restartHydratesPeers(): Promise<void> {
 // rounds serialized on the single session.
 async function concurrentSyncSharesOneDial(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -730,7 +756,7 @@ async function concurrentSyncSharesOneDial(): Promise<void> {
 // request — the next op redials a clean session.
 async function timeoutKillsSessionAndRedials(): Promise<void> {
   const { client, server, clock, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -772,7 +798,7 @@ async function closeDisposesSocketPort(): Promise<void> {
 // later success clears it.
 async function failedRoundSurfacesLastError(): Promise<void> {
   const { client, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -827,7 +853,7 @@ async function oversizedExportPaginates(): Promise<void> {
 // read as converged — the round reports budget-exceeded on the view.
 async function incompleteRoundFailsHonest(): Promise<void> {
   const { client, server, keys } = await rig();
-  keys.peers.set(SERVER_FP, {
+  keys.seed({
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -842,6 +868,117 @@ async function incompleteRoundFailsHonest(): Promise<void> {
   assert(view !== undefined && view.state === 'open', 'session survived');
   assertEqual(view.lastError?.kind, 'budget-exceeded');
   await client.close();
+}
+
+// 20. Re-pairing the same fingerprint is the advertised way to
+// refresh stale endpoints/pot — it must keep the sync watermark so
+// the next round doesn't resend acknowledged entries.
+async function rePairKeepsWatermark(): Promise<void> {
+  const { client, clientEngine, serverEngine, keys } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  assert(
+    (
+      await clientEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-phone',
+        field: 'name',
+        value: 'Phone Mix',
+      })
+    ).ok,
+  );
+  assert(
+    (
+      await serverEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-desk',
+        field: 'name',
+        value: 'Desk Mix',
+      })
+    ).ok,
+  );
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(outcome.ok, 'first round converges');
+  const before = keys.peers.get(SERVER_FP);
+  assert(before !== undefined, 'peer persisted');
+  assert(
+    Object.keys(before.peerCursor).length > 0,
+    'watermark present after round',
+  );
+  assert(before.lastSyncAt !== undefined, 'lastSyncAt stamped');
+  const again = await client.pair({ payload: qrPayload() });
+  assert(again.ok, 're-pair resolves');
+  const after = keys.peers.get(SERVER_FP);
+  assert(after !== undefined);
+  assertDeepEqual(
+    after.peerCursor,
+    before.peerCursor,
+    'peerCursor survived re-pair',
+  );
+  assertEqual(
+    after.lastSyncAt,
+    before.lastSyncAt,
+    'lastSyncAt survived re-pair',
+  );
+  await client.close();
+}
+
+// 21. A custody-write failure on RE-PAIR rolls memory back to what
+// custody actually holds — total failure keeps the prior record,
+// a partial commit (record written, index leg failed) keeps the new
+// one. Guessing either way desyncs memory from disk until restart.
+async function failedRePairKeepsPeer(): Promise<void> {
+  const { client, keys, clock } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+
+  // Nothing committed — the prior record survives; the peer stays.
+  keys.failPeerPut = true;
+  const again = await client.pair({ payload: qrPayload() });
+  assert(!again.ok, 're-pair should fail on custody write');
+  assert(keys.peers.has(SERVER_FP), 'disk record lost');
+  assertEqual(
+    client.status().peers.length,
+    1,
+    'prior peer hidden until restart',
+  );
+  keys.failPeerPut = false;
+
+  // Record committed, index leg failed — custody holds the NEW
+  // record; memory must show it too, not the stale prior one.
+  clock.advance(5_000);
+  keys.failPeerPutAfterRecord = true;
+  const partial = await client.pair({ payload: qrPayload() });
+  assert(!partial.ok, 'partial custody failure should surface');
+  const visible = client
+    .status()
+    .peers.find((v) => v.peer.fp === SERVER_FP);
+  assert(visible !== undefined, 'peer vanished on partial failure');
+  assertEqual(
+    visible.peer.lastSeenAt,
+    keys.peers.get(SERVER_FP)?.lastSeenAt,
+    'memory restored a record custody no longer holds',
+  );
+  keys.failPeerPutAfterRecord = false;
+  await client.close();
+
+  // A FIRST pair whose record commits without its index entry is
+  // unlistable in real custody — the read-back must treat the peer
+  // as hidden (matching what a restart would re-hydrate).
+  const fresh = await rig();
+  fresh.keys.failPeerPutAfterRecord = true;
+  const orphan = await fresh.client.pair({ payload: qrPayload() });
+  assert(!orphan.ok, 'orphaned first pair should surface');
+  assert(
+    fresh.keys.peers.has(SERVER_FP),
+    'committed record missing from custody',
+  );
+  assertEqual(
+    fresh.client.status().peers.length,
+    0,
+    'unindexed peer visible in memory',
+  );
+  await fresh.client.close();
 }
 
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
@@ -864,6 +1001,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
   ['oversizedExportPaginates', oversizedExportPaginates],
   ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
+  ['rePairKeepsWatermark', rePairKeepsWatermark],
+  ['failedRePairKeepsPeer', failedRePairKeepsPeer],
 ];
 
 export async function run(): Promise<void> {

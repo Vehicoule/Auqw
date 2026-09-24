@@ -85,6 +85,7 @@ export async function run(): Promise<void> {
     streamPhaseMarks() {
       return {};
     },
+    setPotProvider() {},
   };
   const fakeModule: NodeBindingsModule = {
     PluginHost: class {

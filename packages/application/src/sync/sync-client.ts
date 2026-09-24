@@ -195,6 +195,27 @@ const MAX_SYNC_PAGES = 64;
 const MAX_EXPORT_PAGE = 10_000;
 
 /**
+ * An advertised `pot` names the minter on the server's PRIMARY sync
+ * host, but the phone may have connected through a different one
+ * (VPN first, Wi-Fi second). Rebase onto the host that actually
+ * answered so the stored endpoint is the reachable one; an IPv6
+ * dial keeps the advertised host verbatim — the minter binds IPv4
+ * only, so the advertised host is the best available there.
+ */
+function rebasePot(
+  pot: string | undefined,
+  dialedHost: string,
+): string | undefined {
+  if (pot === undefined) {
+    return undefined;
+  }
+  const parsed = parseEndpoint(pot);
+  return parsed !== null && !dialedHost.includes(':')
+    ? `${dialedHost}:${parsed.port}`
+    : pot;
+}
+
+/**
  * Mint-or-load the phone's sync identity — the deviceId the wire
  * hello claims AND the one every engine entry stamps. Resolved before
  * engine construction so both share one id.
@@ -248,7 +269,13 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   /** In-flight dials keyed by fp — concurrent syncNow shares one. */
   const connecting = new Map<
     string,
-    Promise<Result<{ session: ClientSession; welcome: WelcomeMsg }>>
+    Promise<
+      Result<{
+        session: ClientSession;
+        welcome: WelcomeMsg;
+        endpoint: SyncEndpoint;
+      }>
+    >
   >();
   const listeners = new Set<(status: SyncClientStatus) => void>();
   let peersLoaded = false;
@@ -531,7 +558,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   async function dial(
     endpoints: readonly SyncEndpoint[],
     signal?: CancellationSignal,
-  ): Promise<Result<SyncSocket>> {
+  ): Promise<Result<{ socket: SyncSocket; endpoint: SyncEndpoint }>> {
     let lastError: AppError = appError(
       'unavailable',
       'sync: no usable endpoints',
@@ -547,7 +574,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         ...(signal !== undefined ? { signal } : {}),
       });
       if (connected.ok) {
-        return connected;
+        return ok({ socket: connected.value, endpoint: ep });
       }
       lastError = connected.error;
     }
@@ -563,7 +590,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     code?: string;
     pinnedFp?: string;
     signal?: CancellationSignal;
-  }): Promise<Result<{ session: ClientSession; welcome: WelcomeMsg }>> {
+  }): Promise<
+    Result<{
+      session: ClientSession;
+      welcome: WelcomeMsg;
+      /** The endpoint dial actually connected through. */
+      endpoint: SyncEndpoint;
+    }>
+  > {
     const parsed: SyncEndpoint[] = [];
     for (const raw of opts.endpoints) {
       const ep = parseEndpoint(raw);
@@ -576,16 +610,17 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         appError('invalid-message', 'sync: no usable endpoint in pair spec'),
       );
     }
-    const socket = await dial(parsed, opts.signal);
-    if (!socket.ok) {
-      return socket;
+    const dialed = await dial(parsed, opts.signal);
+    if (!dialed.ok) {
+      return err(dialed.error);
     }
+    const socket = dialed.value.socket;
     const handshake = deps.crypto.begin({ deviceId: deps.deviceId, name });
     const session: ClientSession = {
       peerFp: opts.pinnedFp ?? '',
-      socket: socket.value,
+      socket,
       pump: attachSyncPump({
-        socket: socket.value,
+        socket,
         maxPayload: HANDSHAKE_CAP,
         onFrame: (payload) => routeFrame(session, payload),
         onClose: (reason) =>
@@ -660,7 +695,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     }
     session.phase = 'open';
     keepalive(session);
-    return ok({ session, welcome: replied.value });
+    return ok({
+      session,
+      welcome: replied.value,
+      endpoint: dialed.value.endpoint,
+    });
   }
 
   /* --------------------------- keepalive --------------------------- */
@@ -884,6 +923,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     endpoints: readonly string[],
     code: string,
     pinnedFp: string | undefined,
+    pot: string | undefined,
     signal?: CancellationSignal,
   ): Promise<Result<SyncPeer>> {
     const opened = await openSession({
@@ -895,14 +935,26 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     if (!opened.ok) {
       return err(opened.error);
     }
-    const { session, welcome } = opened.value;
+    const { session, welcome, endpoint } = opened.value;
+    // The welcome's `pot` is the answering server's own
+    // advertisement — authoritative over the QR payload's copy and
+    // the only channel a typed-code pairing learns it through.
+    const storedPot = rebasePot(welcome.pot ?? pot, endpoint.host);
+    const existing = peers.get(session.peerFp);
     const stored: SyncPeer = {
       fp: session.peerFp,
       name: welcome.name,
       endpoints: endpoints.filter((ep) => parseEndpoint(ep) !== null),
       pairedAt: welcome.device.pairedAt,
       lastSeenAt: deps.clock.nowMs(),
-      peerCursor: {},
+      // A same-fingerprint re-pair refreshes endpoints/pot but keeps
+      // the watermark — an emptied cursor resends acknowledged
+      // entries on the next round.
+      peerCursor: existing?.peerCursor ?? {},
+      ...(existing?.lastSyncAt !== undefined
+        ? { lastSyncAt: existing.lastSyncAt }
+        : {}),
+      ...(storedPot !== undefined ? { pot: storedPot } : {}),
     };
     const prior = sessions.get(stored.fp);
     if (prior !== undefined && prior !== session) {
@@ -912,7 +964,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     peers.set(stored.fp, stored);
     const persisted = await deps.keys.peerPut(stored, signal);
     if (!persisted.ok) {
-      peers.delete(stored.fp);
+      // A custody write can fail AFTER the record leg committed (the
+      // index read/write is a separate store hit) — don't guess which
+      // record survived. Read custody back and hold whatever disk
+      // actually has; when the read-back itself fails (cancelled
+      // signal, store outage) fall back to the prior record, which is
+      // the only one that could still be on disk.
+      const custody = await deps.keys.peerList(signal);
+      const actual = custody.ok
+        ? custody.value.find((p) => p.fp === stored.fp)
+        : existing;
+      if (actual !== undefined) {
+        peers.set(stored.fp, actual);
+      } else {
+        peers.delete(stored.fp);
+      }
       sessions.delete(stored.fp);
       killSession(session, persisted.error);
       return persisted;
@@ -966,14 +1032,20 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           decoded.endpoints !== undefined && decoded.endpoints.length > 0
             ? decoded.endpoints
             : [decoded.endpoint];
-        return pairOp(endpoints, decoded.code, decoded.fp, signal);
+        return pairOp(
+          endpoints,
+          decoded.code,
+          decoded.fp,
+          decoded.pot,
+          signal,
+        );
       }
       if (!PAIR_CODE_PATTERN.test(opts.code)) {
         return err(
           appError('invalid-message', 'sync: pairing code must be 6 digits'),
         );
       }
-      return pairOp(opts.endpoints, opts.code, undefined, signal);
+      return pairOp(opts.endpoints, opts.code, undefined, undefined, signal);
     },
 
     async syncNow(fp, signal) {
@@ -984,7 +1056,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       if (!loaded.ok) {
         return loaded;
       }
-      const peer = peers.get(fp);
+      let peer = peers.get(fp);
       if (peer === undefined) {
         return err(appError('not-found', 'sync: unknown peer fingerprint'));
       }
@@ -1051,6 +1123,37 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             return err(
               appError('auth-required', 'sync: device re-bound remotely'),
             );
+          }
+          // The welcome's pot is connection-authoritative: a desktop
+          // that rebound its ephemeral minter port advertises the new
+          // one here, healing a stale record without a re-pair. A
+          // missing advertisement clears the stored endpoint — a pot
+          // can only ever have come from a minter-capable desktop, so
+          // absence means the minter is gone (failed bind or
+          // external-provider override), not that the server is old.
+          const welcomePot = rebasePot(
+            opened.value.welcome.pot,
+            opened.value.endpoint.host,
+          );
+          if (welcomePot !== peer.pot) {
+            const { pot: _stale, ...rest } = peer;
+            const refreshed: SyncPeer =
+              welcomePot === undefined
+                ? rest
+                : { ...rest, pot: welcomePot };
+            peers.set(fp, refreshed);
+            const persisted = await deps.keys.peerPut(refreshed, signal);
+            if (!persisted.ok) {
+              // Memory ran ahead of disk while the session stays
+              // open — the next syncNow would reuse it, skip the
+              // welcome, and never retry the write (a relaunch
+              // restores the stale port). Restore the record and
+              // drop the session so the next connect re-welcomes.
+              peers.set(fp, peer);
+              killSession(session, persisted.error);
+              return err(persisted.error);
+            }
+            peer = refreshed;
           }
         }
       }
