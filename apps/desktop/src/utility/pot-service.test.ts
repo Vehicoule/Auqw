@@ -221,6 +221,14 @@ export async function run(): Promise<void> {
             function () {},
             function () {},
           );
+          // The sandbox fetch budget: 40 allowed-host attempts must
+          // stop at the per-session cap (32) — urls[] counts the hits.
+          for (var i = 0; i < 40; i++) {
+            fetch('https://www.youtube.com/probe').then(
+              function () {},
+              function () {},
+            );
+          }
           // getMinter -> mintCallback (bytes->bytes) — mirrors the
           // real webPoSignalOutput contract.
           argsArr[2].push(async function () {
@@ -301,26 +309,34 @@ export async function run(): Promise<void> {
   assertEqual(fbRes.status, 200);
   assert(isRecord(fbRes.body));
   assertEqual(fbRes.body['poToken'], 'RkFMTEJBQ0s');
-  assertEqual(fallbackWire.urls.length, 3, 'expected 3 legs');
+  // Wire order: homepage, interpreter, then the capped probe flood,
+  // then GenerateIT once the snapshot completes.
   assertEqual(fallbackWire.urls[0], 'https://www.youtube.com');
   assertEqual(
     fallbackWire.urls[1],
     'https://www.google.com/js/th/fake.js',
   );
-  assert(
-    (fallbackWire.urls[2] ?? '').includes('GenerateIT'),
-    'third leg is not GenerateIT',
+  const generateItHit = fallbackWire.urls.findIndex((u) =>
+    u.includes('GenerateIT'),
   );
+  assert(generateItHit > 1, 'GenerateIT leg never fired');
   // Redirects fail closed on the legs where they matter — the
   // allowlist covers the declared URL, not a 30x destination, and a
   // re-posted GenerateIT body would leak snapshot material.
   assertEqual(fallbackWire.inits[1]?.redirect, 'error');
-  assertEqual(fallbackWire.inits[2]?.redirect, 'error');
+  assertEqual(fallbackWire.inits[generateItHit]?.redirect, 'error');
   // The interpreter's sandboxed fetch attempt at an off-list host
   // never reached the wire.
   assert(
     !fallbackWire.urls.some((u) => u.includes('evil.example')),
     'sandboxed fetch escaped the host allowlist',
+  );
+  // And its 40 allowed-host probes stopped at the session budget —
+  // exactly SANDBOX_FETCH_MAX_CALLS (32) reached the wire.
+  assertEqual(
+    fallbackWire.urls.filter((u) => u.endsWith('/probe')).length,
+    32,
+    'sandboxed fetch exceeded the session budget',
   );
   await fbSvc.close();
 
@@ -448,4 +464,41 @@ export async function run(): Promise<void> {
     'close during bind resurrected a listener',
   );
   assertEqual(racer.port(), null);
+
+  // close() racing a still-pending session build disposes the fresh
+  // session rather than installing timers the close already missed.
+  let disposeCalls = 0;
+  let releaseBuild: ((session: PotSession) => void) | undefined;
+  const buildGate = new Promise<PotSession>((resolve) => {
+    releaseBuild = resolve;
+  });
+  const racer2 = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: () => buildGate,
+  });
+  const port2 = await racer2.bind();
+  assert(port2 !== null, 'second racer bind returned no port');
+  const pendingPost = post(
+    `http://127.0.0.1:${port2}`,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const closingNow = racer2.close();
+  releaseBuild?.({
+    mint: async () => 'tok',
+    expiresAtMs: now.ms + 60_000,
+    dispose: () => {
+      disposeCalls += 1;
+    },
+  });
+  const lateResp = await pendingPost.catch(() => null);
+  await closingNow;
+  // The socket may die on closeAllConnections before the 503 writes —
+  // either way no token was minted.
+  assert(
+    lateResp === null || lateResp.status >= 400,
+    'close-during-build mint succeeded',
+  );
+  assertEqual(disposeCalls, 1, 'close-during-build leaked a session');
 }

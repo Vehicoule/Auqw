@@ -56,6 +56,10 @@ const SNAPSHOT_TIMEOUT_MS = 15_000;
 const MAX_UPSTREAM_CHARS = 8 * 1_024 * 1_024;
 /** Re-attempt spacing after a failed session build. */
 const FAILURE_COOLDOWN_MS = 15_000;
+/** Per-session bound on interpreter-driven fetches + per-response size —
+ * remote code gets a budget, not the host's whole network. */
+const SANDBOX_FETCH_MAX_CALLS = 32;
+const SANDBOX_FETCH_MAX_CHARS = 1_024 * 1_024;
 /** Refresh before GenerateIT's `estimatedTtlSecs` actually ends. */
 const SESSION_MARGIN_MS = 60_000;
 const DEFAULT_SESSION_TTL_MS = 21_600 * 1_000;
@@ -218,7 +222,9 @@ function botGuardSandbox(
   };
   // The interpreter's network surface is capped to the same host
   // allowlist the interpreter URL itself passed — https only,
-  // no redirect following (a 30x could still escape the list).
+  // no redirect following (a 30x could still escape the list), and
+  // bounded per session in both call count and response size.
+  let sandboxFetches = 0;
   const sandboxFetch = (
     input: unknown,
     init?: unknown,
@@ -239,13 +245,29 @@ function botGuardSandbox(
         new TypeError('pot: sandboxed fetch host not allowed'),
       );
     }
+    if (sandboxFetches >= SANDBOX_FETCH_MAX_CALLS) {
+      return Promise.reject(
+        new TypeError('pot: sandboxed fetch budget exhausted'),
+      );
+    }
+    sandboxFetches += 1;
     return fetchImpl(parsed.href, {
       ...(init as RequestInit | undefined),
       redirect: 'error',
       // Same deadline discipline as the host legs — an in-context
       // fetch must not outlive the mint it's serving.
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    }).then((resp) => ({
+      ok: resp.ok,
+      status: resp.status,
+      text: async () => {
+        const text = await resp.text();
+        if (text.length > SANDBOX_FETCH_MAX_CHARS) {
+          throw new TypeError('pot: sandboxed fetch response oversized');
+        }
+        return text;
+      },
+    }));
   };
   const sandbox: Record<string, unknown> = {
     navigator: {
@@ -719,6 +741,12 @@ export function createPotService(opts: PotServiceDeps): PotService {
     sessionPending = (async () => {
       try {
         const built = await sessionFactory();
+        if (closing) {
+          // The service shut down mid-build — drop the fresh session
+          // rather than install timers the close already missed.
+          built.dispose?.();
+          throw new HttpError(503, 'unavailable', 'pot: service closed');
+        }
         const replaced = session;
         session = built;
         replaced?.dispose?.();
