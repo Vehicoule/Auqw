@@ -4,15 +4,20 @@ import {
   DownloadManager,
   err,
   LocalFileSource,
+  ok,
   previewImport,
   Session,
+  syncedRecordKey,
 } from '@auqw/application';
 import type {
   CancellationSignal,
   ClockPort,
   ConnectivityPort,
   IdPort,
+  LocalWrite,
   LogPort,
+  MaterializedRecord,
+  MergeOutcome,
   PlayerPort,
   ProviderCapability,
   QueueSnapshot,
@@ -34,6 +39,7 @@ import {
 import type { PluginProvider } from './provider.ts';
 import { createSqliteDriver } from './sqlite-driver.ts';
 import { createClock, createIds, createLog } from './runtime.ts';
+import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike } from './web-player.ts';
 
@@ -363,6 +369,20 @@ export async function createSessionController(
     // rehydrate) and are read on every probe.
     localPlaybackFor,
     isOnline: () => lastOnline,
+    // Commit-then-log: every syncable domain write emits mapped
+    // LocalWrites here post-commit; the utility stamps them into the
+    // change log so this device's edits reach peers. Best-effort —
+    // the session surfaces a failed emit, never rolls the write back.
+    sync: {
+      localChanges: async (writes: readonly LocalWrite[]) => {
+        try {
+          const result = await api.sync.localChanges({ writes });
+          return ok(result.accepted);
+        } catch (thrown) {
+          return err(shellToAppError(thrown));
+        }
+      },
+    },
   });
   type ReadyState = Extract<
     ReturnType<Session['snapshot']>,
@@ -550,6 +570,200 @@ export async function createSessionController(
       // fabricated offline.
     });
 
+  // Remote-applied merge outcomes ride the utility's drain channel —
+  // project them into the domain db once at boot and again on every
+  // `sync:applied` push. The drain is a PEEK: served file lines stay
+  // durable until `sync:ackApplied` confirms the domain commit landed,
+  // so a crash between pull and commit replays instead of losing (the
+  // projector's materialized snapshots make replay idempotent). A
+  // failed projection stays queued in the session's own pending buffer
+  // AND on disk — the retry loop refolds it, or the next drain
+  // re-serves it.
+  // Gate drains until the session is ready: applySyncedEntries runs a
+  // storage segment and keeps failed outcomes only inside `ready` — a
+  // pre-restore apply would drop them, so `sync:applied` pushes that
+  // arrive early simply leave the utility's outbox queued for the
+  // boot drain below. Concurrent drains serialize through `draining` —
+  // two drains must never ack-overlap the same file prefix.
+  let drainArmed = false;
+  let draining = false;
+  let drainAgain = false;
+  let disposed = false;
+  let unsubscribeApplied: () => void = () => {};
+  const APPLY_RETRY_MAX = 3;
+  const APPLY_RETRY_MS = 400;
+  const ACK_RETRY_MAX = 3;
+  const ACK_RETRY_MS = 800;
+  let ackRetries = 0;
+  const reconcileMaterialized = async (
+    emitDiff = false,
+  ): Promise<void> => {
+    // Staged, not accumulated: each byte-bounded page applies on its
+    // own and records that can't materialize yet (a dependent paging
+    // ahead of its parent) ride the session's retained pending into
+    // the next page's fold — memory stays page-bounded while the
+    // cross-page ordering resolves itself (Review #46).
+    const synced = new Map<string, Record<string, unknown>>();
+    for (let offset = 0; ; ) {
+      const page = await api.sync.materialized({ offset });
+      for (const rec of page.records as readonly MaterializedRecord[]) {
+        synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
+      }
+      if (page.records.length > 0) {
+        let applied = await session.applyMaterializedEntries(
+          page.records as readonly MaterializedRecord[],
+        );
+        // A failed apply keeps the served page in the session's
+        // retained pending — refold with bounded retries rather than
+        // drop the recovery page until the next reconcile (Review
+        // #46).
+        for (
+          let attempt = 0;
+          !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
+          attempt += 1
+        ) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
+          );
+          if (disposed) {
+            return;
+          }
+          applied = await session.applyMaterializedEntries([]);
+        }
+        if (!applied.ok) {
+          void log.write({
+            level: 'warn',
+            message: `sync reconcile failed: ${applied.error.kind}`,
+            atMs: clock.nowMs(),
+          });
+          return;
+        }
+        if (applied.value.rehydrateMedia) {
+          void rehydrateMedia(new CancellationSource().signal);
+        }
+      }
+      if (page.nextOffset === null) {
+        // Boot-diff recovery: the session's emit queue is
+        // memory-only, so committed writes lost to shutdown or a
+        // dead port re-emit against the materialized (kind,
+        // recordId)→fields map the pass just walked — absent
+        // records AND stale field values, upserts only (Review
+        // #46). Runs only on a complete pass; an early exit leaves
+        // the map partial and would double-emit still-synced rows.
+        if (emitDiff && !disposed) {
+          await session.emitUnsynced(synced).catch(() => undefined);
+        }
+        return;
+      }
+      offset = page.nextOffset;
+    }
+  };
+  const drainApplied = async (): Promise<void> => {
+    if (draining) {
+      // A second pull while one is mid-flight would re-peek the same
+      // file prefix and ack it twice — serialize instead.
+      drainAgain = true;
+      return;
+    }
+    draining = true;
+    try {
+      let reconcileNeeded = false;
+      for (;;) {
+        const batch = await api.sync.drainApplied();
+        if (batch.dropped) {
+          reconcileNeeded = true;
+          void log.write({
+            level: 'warn',
+            message:
+              'sync applied outbox reported dropped outcomes; reconciling from the materialized log view',
+            atMs: clock.nowMs(),
+          });
+        }
+        if (batch.outcomes.length > 0) {
+          let applied = await session.applySyncedEntries(
+            batch.outcomes as readonly MergeOutcome[],
+          );
+          // A failed projection stays in the session's pending, so
+          // refold with bounded retries. The file lines stay unacked
+          // — the next drain re-serves them if this never commits.
+          // Disposing or exhausting attempts exits; the next
+          // `sync:applied` push re-arms.
+          for (
+            let attempt = 0;
+            !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
+            attempt += 1
+          ) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
+            );
+            if (disposed) {
+              return;
+            }
+            applied = await session.applySyncedEntries([]);
+          }
+          if (!applied.ok) {
+            void log.write({
+              level: 'warn',
+              message: `sync apply failed: ${applied.error.kind}`,
+              atMs: clock.nowMs(),
+            });
+            return;
+          }
+          if (applied.value.rehydrateMedia) {
+            // Remote rows rewrote the media sections — the owners hold
+            // their own snapshots. The commit already landed, so this
+            // runs regardless of how the durable ack fares below.
+            void rehydrateMedia(new CancellationSource().signal);
+          }
+          // Commit landed — durable lines may go now. A failed ack
+          // stops the drain: the file still holds the served prefix,
+          // so the next page would just re-serve this one forever
+          // (Review #46). One bounded delayed re-arm covers a
+          // transient rewrite failure without hot-looping a dead disk;
+          // a persistent one still waits for the next push/restart.
+          const acked = await api.sync
+            .ackApplied()
+            .then(() => true)
+            .catch(() => false);
+          if (!acked) {
+            if (ackRetries < ACK_RETRY_MAX && !disposed) {
+              ackRetries += 1;
+              const delay = ACK_RETRY_MS * ackRetries;
+              setTimeout(() => {
+                if (!disposed) {
+                  void drainApplied().catch(() => undefined);
+                }
+              }, delay);
+            }
+            return;
+          }
+          ackRetries = 0;
+        }
+        if (batch.remaining === 0) {
+          break;
+        }
+      }
+      if (reconcileNeeded && !disposed) {
+        await reconcileMaterialized();
+      }
+    } finally {
+      draining = false;
+      if (drainAgain && !disposed) {
+        drainAgain = false;
+        void drainApplied().catch(() => undefined);
+      }
+    }
+  };
+  try {
+    unsubscribeApplied = api.sync.onApplied(() => {
+      if (drainArmed) {
+        void drainApplied().catch(() => undefined);
+      }
+    });
+  } catch {
+    // Push-less sync surface — the boot drain still runs.
+  }
+
   // restore() never throws — its Result surfaces through session state
   // as 'restore-failed'.
   await session.restore();
@@ -569,6 +783,19 @@ export async function createSessionController(
   // projected remote refs — replay the truth now that owned files
   // resolve.
   session.connectivityChanged();
+
+  // Arm the drain last: the session is ready, media owners hold the
+  // committed rows, and anything queued during boot folds now. The
+  // boot pass then reconciles from the engine's materialized view —
+  // the durable recovery net for outcome work lost in any previous
+  // life (drained-then-crashed, evicted, or pre-durability versions).
+  drainArmed = true;
+  void drainApplied()
+    // Boot only: the pass diffs domain-vs-synced to recover committed
+    // writes a past shutdown stranded in the memory-only emit queue
+    // (Review #46).
+    .then(() => reconcileMaterialized(true))
+    .catch(() => undefined);
 
   return {
     session,
@@ -630,6 +857,8 @@ export async function createSessionController(
       }
     },
     async dispose() {
+      disposed = true;
+      unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);
       for (const unsub of mediaUnsubs.splice(0)) {

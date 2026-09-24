@@ -320,6 +320,19 @@ export function utf8Encode(input: string): Uint8Array {
   return new Uint8Array(out);
 }
 
+/** UTF-8 byte count without encoding — for size budgets. */
+export function utf8ByteLength(input: string): number {
+  let bytes = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const cp = input.codePointAt(i) ?? 0;
+    if (cp > 0xffff) {
+      i += 1;
+    }
+    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
 /** Replacement-char decode — malformed bytes never throw. */
 export function utf8Decode(bytes: Uint8Array): string {
   const cps: number[] = [];

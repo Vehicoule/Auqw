@@ -40,5 +40,8 @@ export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
       }
       return engine.applyDelta(delta, signal);
     },
+    materialize(): readonly unknown[] {
+      return engine.materialize();
+    },
   };
 }

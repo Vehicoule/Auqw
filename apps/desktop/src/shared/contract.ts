@@ -1256,15 +1256,110 @@ export function isSyncLocalChangesArgs(
   );
 }
 
-export type SyncLocalChangesResult = { readonly result: unknown };
+/**
+ * The result is a small acknowledgement, not the per-write outcome
+ * list: callers only consume ok/err, and a results array of the same
+ * writes would re-serialize every committed value — a batch that
+ * passes field bounds could then exceed the doc cap and report a
+ * transport failure AFTER the engine already appended (Review #46
+ * round-9). `accepted` counts the stamped batch.
+ */
+export type SyncLocalChangesResult = { readonly accepted: number };
 
 export function isSyncLocalChangesResult(
   value: unknown,
 ): value is SyncLocalChangesResult {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['result']) &&
-    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
+    hasOnlyKeys(value, ['accepted']) &&
+    typeof value['accepted'] === 'number' &&
+    Number.isSafeInteger(value['accepted']) &&
+    value['accepted'] >= 0
+  );
+}
+
+/**
+ * `sync:applied` — the utility→main→renderer push that remote-applied
+ * merge outcomes are waiting in the drain outbox. The renderer still
+ * pulls `sync:drainApplied`; the event only says how deep the queue is.
+ */
+export type SyncAppliedEvent = { readonly pending: number };
+
+export function isSyncAppliedEvent(
+  value: unknown,
+): value is SyncAppliedEvent {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['pending']) &&
+    isSafeNonNegativeInt(value['pending']) &&
+    value['pending'] <= 1_000_000
+  );
+}
+
+/**
+ * `sync:drainApplied` — one byte-bounded pull off the applied-outcome
+ * outbox. `outcomes` carries merge outcomes verbatim (the projection
+ * validates entry shapes itself); `dropped` reports outbox overflow
+ * since the previous drain; `remaining` drives the drain loop.
+ */
+export type SyncDrainAppliedResult = {
+  readonly outcomes: readonly unknown[];
+  readonly dropped: boolean;
+  readonly remaining: number;
+};
+
+export function isSyncDrainAppliedResult(
+  value: unknown,
+): value is SyncDrainAppliedResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['outcomes', 'dropped', 'remaining']) &&
+    Array.isArray(value['outcomes']) &&
+    value['outcomes'].every(isJsonValue) &&
+    isBoundedJson(value['outcomes'], MAX_SYNC_DOC_BYTES) &&
+    isBoolean(value['dropped']) &&
+    isSafeNonNegativeInt(value['remaining']) &&
+    value['remaining'] <= 1_000_000
+  );
+}
+
+/**
+ * `sync:materialized` — paged pull of the engine's materialized
+ * record view. `records` are opaque `{kind, recordId, fields}`
+ * JSON — the session validates each via `isMaterializedRecord`;
+ * `nextOffset` continues the pull, `null` ends it.
+ */
+export type SyncMaterializedArgs = {
+  readonly offset: number;
+};
+
+export function isSyncMaterializedArgs(
+  value: unknown,
+): value is SyncMaterializedArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['offset']) &&
+    isSafeNonNegativeInt(value['offset']) &&
+    value['offset'] <= 1_000_000
+  );
+}
+
+export type SyncMaterializedResult = {
+  readonly records: readonly unknown[];
+  readonly nextOffset: number | null;
+};
+
+export function isSyncMaterializedResult(
+  value: unknown,
+): value is SyncMaterializedResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['records', 'nextOffset']) &&
+    Array.isArray(value['records']) &&
+    value['records'].every(isJsonValue) &&
+    isBoundedJson(value['records'], MAX_SYNC_DOC_BYTES) &&
+    (value['nextOffset'] === null ||
+      isSafeNonNegativeInt(value['nextOffset']))
   );
 }
 
@@ -1290,6 +1385,31 @@ export type AuqwSync = {
   readonly localChanges: (
     args: SyncLocalChangesArgs,
   ) => Promise<SyncLocalChangesResult>;
+  /**
+   * Pull side of the applied-outcome seam: returns one bounded chunk;
+   * call until `remaining` is 0 (the `onApplied` push prompts it).
+   * The pull is a PEEK — the durable copy leaves only via ackApplied
+   * after the renderer's domain commit lands.
+   */
+  readonly drainApplied: () => Promise<SyncDrainAppliedResult>;
+  /** Consume the outcomes the last drain served — post-commit ack. */
+  readonly ackApplied: () => Promise<void>;
+  /**
+   * Durable recovery: paged pull of the engine's materialized record
+   * view for sessions that lost outcome streams (drained-then-crashed,
+   * evicted from a bound). Loop until `nextOffset` is null.
+   */
+  readonly materialized: (
+    args: SyncMaterializedArgs,
+  ) => Promise<SyncMaterializedResult>;
+  /**
+   * Push side — the utility posts `sync:applied` through main after
+   * every applyDelta; subscribing also warrants a first manual drain
+   * (outbox contents can predate the subscriber).
+   */
+  readonly onApplied: (
+    listener: (event: SyncAppliedEvent) => void,
+  ) => () => void;
 };
 
 /* ------------------------------------------------------------------ */

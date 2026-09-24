@@ -5,6 +5,9 @@ import {
 } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assert,
   assertDeepEqual,
@@ -2032,12 +2035,14 @@ export async function run(): Promise<void> {
         writes: [writeName('pl-c1', 'channel list')],
       });
       assert(changed.ok, `localChanges: ${JSON.stringify(changed)}`);
+      // Small ack: the channel returns the stamped count, not the
+      // serialized batch — the batch already landed, and echoing it
+      // could overflow the result cap into a fake transport failure
+      // (Review #46 round-9).
       const changedResult = changed.ok
-        ? (changed.value as {
-            result: readonly { outcome: { type: string } }[];
-          })
+        ? (changed.value as { accepted: number })
         : null;
-      assertEqual(changedResult?.result[0]?.outcome.type, 'applied');
+      assertEqual(changedResult?.accepted, 1);
 
       // A write outside the engine's whitelist fails the whole batch
       // typed — never a per-write reject riding inside an ok.
@@ -2154,6 +2159,612 @@ export async function run(): Promise<void> {
       assertEqual(deltas.error.kind, 'unavailable');
     } finally {
       await service.close();
+    }
+  }
+
+  // —— Applied outbox: applied outcomes queue → drainApplied pages ——
+  // The renderer pulls the outbox in byte-bounded chunks; both bounds
+  // (drop-oldest cap + per-chunk byte budget) get exercised by one
+  // oversized import.
+  {
+    const desk = await testUtilityEngine('dsk-outbox');
+    const notified: number[] = [];
+    const { service } = await startService({
+      engine: desk.port,
+      notifyApplied: (pending: number) => {
+        notified.push(pending);
+      },
+    });
+    try {
+      // Nothing applied yet — the drain answers honestly empty.
+      const empty = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assertDeepEqual(
+        empty.ok ? empty.value : null,
+        { outcomes: [], dropped: false, remaining: 0 },
+        'empty drain reports empty',
+      );
+
+      // A phone-built delta imports through importDelta — each applied
+      // outcome lands in the outbox and fires notifyApplied.
+      const phone = await testUtilityEngine('phone-outbox');
+      await phone.localChanges(
+        [writeName('pl-ob', 'outbox list')],
+        undefined,
+      );
+      const phoneDelta = await phone.port.exportDelta('', undefined);
+      assert(phoneDelta.ok);
+      if (!phoneDelta.ok) {
+        return;
+      }
+      const imported = await invokeHandler(service, 'sync:importDelta', {
+        delta: JSON.parse(JSON.stringify(phoneDelta.value)),
+      });
+      assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+      assert(notified.length > 0, 'notifyApplied fired for the outbox');
+
+      const drained = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(drained.ok);
+      const first = drained.ok
+        ? (drained.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          })
+        : null;
+      assert(first !== null);
+      assert(first.outcomes.length > 0, 'applied outcomes drained');
+      assert(
+        first.outcomes.every(
+          (o) => isRecord(o) && o['type'] === 'applied',
+        ),
+        'only applied outcomes queue',
+      );
+      assertEqual(first.dropped, false);
+      assertEqual(first.remaining, 0, 'outbox consumed fully');
+
+      // The pull consumed them — a second drain is empty again.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assertDeepEqual(
+        again.ok ? again.value : null,
+        { outcomes: [], dropped: false, remaining: 0 },
+        'second drain empty',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Outbox bounds: >4096 applied + ~700 B entries force both the ——
+  // —— drop-oldest flag and a multi-chunk byte-budgeted drain.      ——
+  {
+    const desk = await testUtilityEngine('dsk-bounds');
+    const { service } = await startService({ engine: desk.port });
+    try {
+      const phone = await testUtilityEngine('phone-bounds');
+      // 4_200 writes, ~512-char values → ~2.9 MB of applied outcomes,
+      // past both the 4_096 cap and the ~1 MB chunk budget. Each
+      // importDelta call itself stays under the doc byte cap — the
+      // cursor walks the phone's log in slices.
+      const pad = 'x'.repeat(480);
+      let since = '';
+      // 500-entry pages: the importDelta RESULT carries entries AND
+      // outcomes, so a page this size stays inside the doc byte cap.
+      for (let i = 0; i < 4_200; i += 500) {
+        for (let j = i; j < i + 500 && j < 4_200; j += 256) {
+          const batch = Array.from(
+            { length: Math.min(256, 4_200 - j) },
+            (_, k) => writeName(`pl-b${j + k}`, `${pad}-${j + k}`),
+          );
+          const wrote = await phone.localChanges(batch, undefined);
+          assert(wrote.ok, 'bulk localChanges failed');
+        }
+        const page = await phone.port.exportDelta(since, undefined);
+        assert(page.ok);
+        if (!page.ok) {
+          return;
+        }
+        const imported = await invokeHandler(
+          service,
+          'sync:importDelta',
+          {
+            delta: JSON.parse(JSON.stringify(page.value)),
+          },
+        );
+        assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+        since = JSON.stringify((page.value as SyncDelta).cursor);
+      }
+
+      let total = 0;
+      let sawDropped = false;
+      let chunks = 0;
+      for (;;) {
+        const drained = await invokeHandler(
+          service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok, 'drain failed');
+        if (!drained.ok) {
+          return;
+        }
+        const page = drained.value as {
+          outcomes: readonly unknown[];
+          dropped: boolean;
+          remaining: number;
+        };
+        total += page.outcomes.length;
+        sawDropped ||= page.dropped;
+        chunks += 1;
+        if (page.remaining === 0) {
+          break;
+        }
+        assert(chunks < 64, 'drain must terminate');
+      }
+      assert(sawDropped, 'drop-oldest flag surfaced');
+      assert(chunks > 1, 'byte budget paged the drain');
+      assertEqual(total, 4_096, 'outbox kept only the capped tail');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Durable spill: every applied outcome writes through to ——
+  // —— sync-applied.jsonl before the import acks, drain PEEKS and ——
+  // —— ack consumes — a fresh service inherits the backlog across ——
+  // —— a restart (Devin Review #46).                           ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const desk = await testUtilityEngine('dsk-spill');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const phone = await testUtilityEngine('phone-spill');
+      // 6_500 applied outcomes all write through to the JSONL file
+      // — more than one drain page's byte budget (~1 MB ≈ ~1_700
+      // outcomes), so a file remainder survives for the restarted
+      // service.
+      const pad = 'x'.repeat(480);
+      let since = '';
+      for (let i = 0; i < 6_500; i += 500) {
+        for (let j = i; j < i + 500 && j < 6_500; j += 256) {
+          const batch = Array.from(
+            { length: Math.min(256, 6_500 - j) },
+            (_, k) => writeName(`pl-s${j + k}`, `${pad}-${j + k}`),
+          );
+          const wrote = await phone.localChanges(batch, undefined);
+          assert(wrote.ok, 'bulk localChanges failed');
+        }
+        const page = await phone.port.exportDelta(since, undefined);
+        assert(page.ok);
+        if (!page.ok) {
+          return;
+        }
+        const imported = await invokeHandler(
+          service,
+          'sync:importDelta',
+          {
+            delta: JSON.parse(JSON.stringify(page.value)),
+          },
+        );
+        assert(imported.ok, `importDelta: ${JSON.stringify(imported)}`);
+        since = JSON.stringify((page.value as SyncDelta).cursor);
+      }
+
+      const spilledFile = await stat(spill).catch(() => null);
+      assert(spilledFile !== null, 'spill file written');
+
+      // One drain on the first service: byte budget pages it and
+      // leaves a file remainder. The drain is a peek — no ack — so
+      // the file keeps every served line for the restarted service.
+      const first = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(first.ok, 'first drain failed');
+      const firstPage = first.ok
+        ? (first.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          })
+        : null;
+      assert(firstPage !== null);
+      assert(
+        firstPage.outcomes.length > 0,
+        'first drain served outcomes',
+      );
+      assert(firstPage.remaining > 0, 'backlog remains after page');
+      // An un-acked second drain re-serves the same file prefix —
+      // the peek consumed nothing.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok, 'repeat drain failed');
+      if (again.ok) {
+        const againPage = again.value as {
+          outcomes: readonly unknown[];
+        };
+        assertEqual(
+          againPage.outcomes.length,
+          firstPage.outcomes.length,
+          'un-acked drain re-serves the same prefix',
+        );
+      }
+      await service.close();
+
+      // A fresh service on the same spill path inherits the backlog —
+      // its own volatile outbox is empty, so anything it serves came
+      // from the durable file.
+      const restarted = await startService({
+        engine: desk.port,
+        appliedSpillPath: spill,
+      });
+      try {
+        let rest = 0;
+        let restDropped = false;
+        for (;;) {
+          const drained = await invokeHandler(
+            restarted.service,
+            'sync:drainApplied',
+            undefined,
+          );
+          assert(drained.ok, 'restarted drain failed');
+          if (!drained.ok) {
+            return;
+          }
+          const page = drained.value as {
+            outcomes: readonly unknown[];
+            dropped: boolean;
+            remaining: number;
+          };
+          rest += page.outcomes.length;
+          restDropped ||= page.dropped;
+          // The peek only leaves disk at ack — consume each page so
+          // the next drain serves the next segment.
+          const acked = await invokeHandler(
+            restarted.service,
+            'sync:ackApplied',
+            undefined,
+          );
+          assert(acked.ok, 'restarted ack failed');
+          if (page.remaining === 0) {
+            break;
+          }
+        }
+        assert(rest > 0, 'restarted service drained spilled backlog');
+        assert(!restDropped, 'durable path reports nothing dropped');
+        const tail = await stat(spill);
+        assertEqual(tail.size, 0, 'ack consumed the spill file');
+      } finally {
+        await restarted.service.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— Ack persists a byte-offset sidecar instead of rewriting the ——
+  // —— file: post-ack drains serve only the tail past the offset ——
+  // —— (Devin Review #46 round-6).                            ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-off-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const desk = await testUtilityEngine('dsk-off');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const phone = await testUtilityEngine('phone-off');
+      for (const name of ['pl-off-a', 'pl-off-b', 'pl-off-c']) {
+        const wrote = await phone.localChanges(
+          [writeName(name, name)],
+          undefined,
+        );
+        assert(wrote.ok, 'localChanges failed');
+      }
+      const page = await phone.port.exportDelta('', undefined);
+      assert(page.ok);
+      if (!page.ok) {
+        return;
+      }
+      const imported = await invokeHandler(service, 'sync:importDelta', {
+        delta: JSON.parse(JSON.stringify(page.value)),
+      });
+      assert(imported.ok, 'importDelta failed');
+
+      const before = await stat(spill);
+      const drained = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(drained.ok, 'drain failed');
+      const served = drained.ok
+        ? (drained.value as { outcomes: readonly unknown[] })
+        : { outcomes: [] };
+      assert(served.outcomes.length > 0, 'drain served outcomes');
+
+      const acked = await invokeHandler(
+        service,
+        'sync:ackApplied',
+        undefined,
+      );
+      assert(acked.ok, 'ack failed');
+
+      // The offset sidecar now records the consumed prefix; the JSONL
+      // is untouched — below the compaction threshold it keeps its
+      // full contents (a stale offset self-heals via off > size).
+      const offRaw = await readFile(`${spill}.off`, 'utf8');
+      assertEqual(
+        Number.parseInt(offRaw.trim(), 10),
+        before.size,
+        'sidecar offset covers every served byte',
+      );
+      const after = await stat(spill);
+      assertEqual(
+        after.size,
+        before.size,
+        'ack under the compaction threshold leaves the file alone',
+      );
+
+      // A post-ack drain serves nothing — the offset skipped every
+      // consumed line; another import lands past the offset.
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok, 'post-ack drain failed');
+      if (again.ok) {
+        const page2 = again.value as {
+          outcomes: readonly unknown[];
+          remaining: number;
+        };
+        assertEqual(
+          page2.outcomes.length,
+          0,
+          'acked lines never re-serve',
+        );
+        assertEqual(page2.remaining, 0, 'backlog fully consumed');
+      }
+    } finally {
+      await service.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— Compaction commits sidecar(0) BEFORE the data rename, so the ——
+  // —— only reachable post-compact generation is {off: 0, new file}; ——
+  // —— a stale positive offset can never sit beside the compacted  ——
+  // —— layout and skip unserved rows (Devin Review #46 round-8).   ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-gen-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    // ~1.2 MB of parseable JSON lines — a backlog big enough that the
+    // second ack crosses the 1 MiB compaction watermark.
+    const pad = 'x'.repeat(48_000);
+    const lines: string[] = [];
+    for (let i = 0; i < 24; i += 1) {
+      lines.push(JSON.stringify({ pad, i }));
+    }
+    await writeFile(spill, `${lines.join('\n')}\n`);
+    const seeded = await stat(spill);
+    assert(seeded.size > 1_048_576, 'seeded backlog crosses the watermark');
+
+    const desk = await testUtilityEngine('dsk-gen');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      for (;;) {
+        const drained = await invokeHandler(
+          service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok, 'drain failed');
+        if (!drained.ok) {
+          return;
+        }
+        const page = drained.value as { remaining: number };
+        const acked = await invokeHandler(
+          service,
+          'sync:ackApplied',
+          undefined,
+        );
+        assert(acked.ok, 'ack failed');
+        if (page.remaining === 0) {
+          break;
+        }
+      }
+      // Whole backlog acked → the compacted generation is {off: 0,
+      // empty file}: the zero sidecar commits before the data rename,
+      // so a crash mid-compact re-serves (never skips) old rows.
+      const offRaw = await readFile(`${spill}.off`, 'utf8');
+      assertEqual(
+        Number.parseInt(offRaw.trim(), 10),
+        0,
+        'compacted generation commits a zero offset',
+      );
+      const tail = await stat(spill);
+      assertEqual(tail.size, 0, 'compacted file holds only the unacked tail');
+
+      const restarted = await startService({
+        engine: desk.port,
+        appliedSpillPath: spill,
+      });
+      try {
+        const drained = await invokeHandler(
+          restarted.service,
+          'sync:drainApplied',
+          undefined,
+        );
+        assert(drained.ok);
+        if (drained.ok) {
+          const page = drained.value as {
+            outcomes: readonly unknown[];
+            remaining: number;
+          };
+          assertEqual(
+            page.outcomes.length,
+            0,
+            'no stale offset skips — compacted file drains empty',
+          );
+          assertEqual(page.remaining, 0);
+        }
+      } finally {
+        await restarted.service.close();
+      }
+    } finally {
+      await service.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— A spill line bigger than the page budget can never be served ——
+  // —— returning it as `remaining` forever would wedge every later ——
+  // —— projection. It consumes as poison: skipped bytes, dropped    ——
+  // —— flag set, and the drain still serves the lines behind it.   ——
+  // —— (Devin Review #46 round-9)                                  ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-poison-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const poison = JSON.stringify({ pad: 'p'.repeat(1_100_000) });
+    const tail = ['{"k":"a"}', '{"k":"b"}', '{"k":"c"}'];
+    await writeFile(spill, `${poison}\n${tail.join('\n')}\n`);
+
+    const desk = await testUtilityEngine('dsk-poison');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      // Page 1: the poison head self-advances the durable offset —
+      // nothing deliverable, but `remaining` stays honest so the
+      // drain loop keeps going instead of wedging on it.
+      const first = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(first.ok, 'drain failed');
+      if (!first.ok) {
+        return;
+      }
+      const page = first.value as {
+        outcomes: readonly unknown[];
+        dropped: boolean;
+        remaining: number;
+      };
+      assertEqual(
+        page.outcomes.length,
+        0,
+        'a poison-only page serves nothing — it self-advances',
+      );
+      assert(page.dropped, 'poison skip surfaces as dropped');
+      assertEqual(page.remaining, 3, 'the servable tail is still due');
+
+      // Page 2: the offset already passed the poison — the tail
+      // lands without re-scanning it.
+      const second = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(second.ok, 'second drain failed');
+      if (!second.ok) {
+        return;
+      }
+      const tail = second.value as {
+        outcomes: readonly unknown[];
+        remaining: number;
+      };
+      assertEqual(
+        tail.outcomes.length,
+        3,
+        'lines behind the poison still project',
+      );
+      assertEqual(tail.remaining, 0);
+
+      const acked = await invokeHandler(
+        service,
+        'sync:ackApplied',
+        undefined,
+      );
+      assert(acked.ok, 'ack failed');
+      const again = await invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      assert(again.ok);
+      if (again.ok) {
+        const next = again.value as { outcomes: readonly unknown[] };
+        assertEqual(
+          next.outcomes.length,
+          0,
+          'poison consumed — no re-serve loop',
+        );
+      }
+    } finally {
+      await service.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // —— close() must settle the spill tail: a drain already on the ——
+  // —— chain finishes its offset advance before close() resolves   ——
+  // —— (Devin Review #46 round-10).                                ——
+  {
+    const dir = await mkdtemp(join(tmpdir(), 'auqw-spill-close-'));
+    const spill = join(dir, 'sync-applied.jsonl');
+    const poison = JSON.stringify({ pad: 'p'.repeat(1_100_000) });
+    await writeFile(spill, `${poison}\n{"k":"a"}\n`);
+
+    const desk = await testUtilityEngine('dsk-close');
+    const { service } = await startService({
+      engine: desk.port,
+      appliedSpillPath: spill,
+    });
+    try {
+      const drainPromise = invokeHandler(
+        service,
+        'sync:drainApplied',
+        undefined,
+      );
+      // close() while the drain's tail work may still be queued —
+      // the poison self-advance + compaction must land before
+      // close() resolves.
+      await service.close();
+      await drainPromise.catch(() => undefined);
+      const settled = await stat(spill);
+      assertEqual(
+        settled.size,
+        10,
+        'in-flight spill work settled before close resolved',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   }
 }

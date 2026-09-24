@@ -22,10 +22,13 @@ import {
   isStreamServeUrlResult,
   isStringArray,
   isStringOrNull,
+  isSyncAppliedEvent,
   isSyncDeltasResult,
   isSyncDevicesResult,
+  isSyncDrainAppliedResult,
   isSyncImportDeltaResult,
   isSyncLocalChangesResult,
+  isSyncMaterializedResult,
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
@@ -52,13 +55,17 @@ import type {
   StorageExecuteResult,
   StorageQueryResult,
   StreamPortLike,
+  SyncAppliedEvent,
   SyncDeltasArgs,
   SyncDeltasResult,
   SyncDevicesResult,
+  SyncDrainAppliedResult,
   SyncImportDeltaArgs,
   SyncImportDeltaResult,
   SyncLocalChangesArgs,
   SyncLocalChangesResult,
+  SyncMaterializedArgs,
+  SyncMaterializedResult,
   SyncPairingResult,
   SyncStatusResult,
   SyncTriggerResult,
@@ -309,6 +316,40 @@ const api: AuqwApi = {
         args,
         isSyncLocalChangesResult,
       ),
+    drainApplied: (): Promise<SyncDrainAppliedResult> =>
+      invoke(
+        CHANNELS.syncDrainApplied,
+        undefined,
+        isSyncDrainAppliedResult,
+      ),
+    ackApplied: (): Promise<void> =>
+      invoke(CHANNELS.syncAckApplied, undefined, isUndefinedResult),
+    materialized: (
+      args: SyncMaterializedArgs,
+    ): Promise<SyncMaterializedResult> =>
+      invoke(
+        CHANNELS.syncMaterialized,
+        args,
+        isSyncMaterializedResult,
+      ),
+    onApplied: (
+      listener: (event: SyncAppliedEvent) => void,
+    ): (() => void) => {
+      const wrapped = (
+        _event: IpcRendererEvent,
+        payload: unknown,
+      ): void => {
+        if (isSyncAppliedEvent(payload)) {
+          listener(payload);
+        }
+      };
+      ipcRenderer.on(CHANNELS.syncApplied, wrapped);
+      ipcRenderer.send(CHANNELS.syncAppliedSubscribe);
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.syncApplied, wrapped);
+        ipcRenderer.send(CHANNELS.syncAppliedUnsubscribe);
+      };
+    },
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>

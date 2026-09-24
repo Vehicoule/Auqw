@@ -34,4 +34,12 @@ export interface SyncEnginePort {
     deviceId: string,
     signal?: CancellationSignal,
   ): Promise<Result<unknown>>;
+  /**
+   * Optional: the engine's materialized record view — every record's
+   * surviving fields post-merge. Transport-level recovery pulls this
+   * to rebuild projection state a drained outcome stream lost; ports
+   * that can't materialize omit it and the caller skips recovery.
+   * Records are opaque JSON (`{kind, recordId, fields}`).
+   */
+  materialize?(): readonly unknown[];
 }
