@@ -3,6 +3,7 @@ import {
   SETTINGS_RECORD_ID,
   TOMBSTONE_FIELD,
   createSyncEngine,
+  decodeRecordId,
   isSyncDelta,
   likeRecordId,
   entitySourceRefRecordId,
@@ -389,8 +390,9 @@ async function tombstoneRules(): Promise<void> {
   // Reordered delivery: tombstone first, then the older write.
   await mustApply(b.engine, delta([tomb]));
   await mustApply(b.engine, delta([write]));
-  // The older write stays dead.
-  assertEqual(materialized(b.engine, 'recording', 'r1'), undefined);
+  // The older write stays dead — materialize() reports the winning
+  // tombstone as an empty-field record ('synced then deleted').
+  assertDeepEqual(materialized(b.engine, 'recording', 'r1'), {});
   // Its value is preserved in divergence.
   const rows = b.engine.divergenceHistory();
   assertEqual(rows.length, 1);
@@ -413,14 +415,14 @@ async function tombstoneRules(): Promise<void> {
     b.engine,
     delta([rawTombstone('recording', 'r2', { l: 6, c: 0 })]),
   );
-  assertEqual(materialized(b.engine, 'recording', 'r2'), undefined);
+  assertDeepEqual(materialized(b.engine, 'recording', 'r2'), {});
 
   // A still-newer tombstone beats the field that outlived the first.
   await mustApply(
     b.engine,
     delta([rawTombstone('recording', 'r1', { l: 40, c: 0 })]),
   );
-  assertEqual(materialized(b.engine, 'recording', 'r1'), undefined);
+  assertDeepEqual(materialized(b.engine, 'recording', 'r1'), {});
 }
 
 async function whitelistOnApply(): Promise<void> {
@@ -645,6 +647,60 @@ async function restoreLoser(): Promise<void> {
   assertEqual(missing.ok ? '' : missing.error.kind, 'not-found');
 }
 
+// Review #46 round-8: a divergence-stored loser for a 'sum' field is
+// already a per-device component — restoreLoser must stamp it
+// verbatim, not translate it through the aggregate-assertion path a
+// second time (which would double-subtract the remote share).
+async function restoreLoserSumComponent(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  // b's component of 5 is the nonzero remote share a's sums carry.
+  await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  const bDoc = await b.engine.exportDelta();
+  assert(bDoc.ok);
+  await mustApply(a.engine, bDoc.value);
+  // a asserts aggregate 8 → component 3; then asserts 20 → component
+  // 15, whose larger value displaces the 3 into divergence.
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 8,
+  });
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 20,
+  });
+  const row = a.engine
+    .divergenceHistory()
+    .find((d) => d.kind === 'playCount');
+  assert(row !== undefined, "a's displaced component preserved");
+  assertEqual(row.loser.value, 3);
+  const restored = await a.engine.restoreLoser(row.historyId);
+  assert(restored.ok);
+  // The stored component enters the log verbatim — translating it
+  // again would clamp 3 − 5 to 0 and mangle the durable entry.
+  assertEqual(restored.value.entry.value, 3);
+  // The 3-component loses its own merge to the live 15 — restoring a
+  // dominated component changes nothing materialized, but the logged
+  // entry itself is the honest stored value.
+  const view = a.engine
+    .materialize()
+    .find((r) => r.kind === 'playCount' && r.recordId === 'r1');
+  assertDeepEqual(
+    view?.fields['count'],
+    20,
+    'dominated restore leaves the materialized sum',
+  );
+}
+
 async function tombstoneRestore(): Promise<void> {
   const a = await makeEngine('a', 5_000);
   await mustApply(
@@ -670,7 +726,7 @@ async function tombstoneRestore(): Promise<void> {
   assert(restored.ok);
   assertEqual(restored.value.outcome.type, 'applied');
   // Fresh delete stamp wins: the record stays deleted.
-  assertEqual(materialized(a.engine, 'recording', 'r1'), undefined);
+  assertDeepEqual(materialized(a.engine, 'recording', 'r1'), {});
 }
 
 async function hydration(): Promise<void> {
@@ -1176,6 +1232,19 @@ function expectedMaterialize(
     string,
     { kind: string; recordId: string; fields: Record<string, unknown> }
   >();
+  // materialize() reports every record the merge ever saw — a winning
+  // tombstone leaves an empty-field row that means 'synced then
+  // deleted', distinct from a record that never arrived.
+  for (const e of entries) {
+    const key = recordKey(e);
+    if (!byRecord.has(key)) {
+      byRecord.set(key, {
+        kind: e.kind,
+        recordId: e.recordId,
+        fields: {},
+      });
+    }
+  }
   for (const parts of slotWinners.values()) {
     const first = parts[0];
     if (first === undefined) {
@@ -1198,7 +1267,38 @@ function expectedMaterialize(
     rec.fields[first.field] = value;
   }
   const out = [...byRecord.values()];
+  const grouped = new Set([
+    'recording',
+    'recordingSourceRef',
+    'recordingMapping',
+    'playCount',
+    'entity',
+    'entitySourceRef',
+    'playlist',
+  ]);
+  const groupOf = (kind: string, recordId: string): string => {
+    if (
+      kind === 'recordingSourceRef' ||
+      kind === 'recordingMapping' ||
+      kind === 'entitySourceRef'
+    ) {
+      return decodeRecordId(recordId)?.[0] ?? recordId;
+    }
+    return recordId;
+  };
   out.sort((a, b) => {
+    // Mirrors the engine's grouped materialize order (Review #46
+    // round-9): (tier, parent group, kind, recordId).
+    const ta = grouped.has(a.kind) ? 0 : 1;
+    const tb = grouped.has(b.kind) ? 0 : 1;
+    if (ta !== tb) {
+      return ta - tb;
+    }
+    const ga = groupOf(a.kind, a.recordId);
+    const gb = groupOf(b.kind, b.recordId);
+    if (ga !== gb) {
+      return ga < gb ? -1 : 1;
+    }
     if (a.kind !== b.kind) {
       return a.kind < b.kind ? -1 : 1;
     }
@@ -1417,8 +1517,10 @@ async function concurrentPlayCounts(): Promise<void> {
   // 'sum' merge: a count is a cumulative aggregate — a scalar max
   // silently loses concurrent increments (two devices at 5 each log
   // a play → both publish 6 → max keeps 6 although 7 plays happened).
-  // The write convention is the device's OWN counter; the merge sums
-  // per-device components.
+  // The write convention asserts the AGGREGATE the caller wants —
+  // the engine translates it into this device's component (target
+  // minus the remote share it already merged), so a domain row's
+  // merged total can be emitted verbatim without double-counting.
   const a = await makeEngine('a', 1_000);
   const b = await makeEngine('b', 2_000);
   const baseline = await mustWrite(a.engine, {
@@ -1428,7 +1530,9 @@ async function concurrentPlayCounts(): Promise<void> {
     value: 5,
   });
   await mustApply(b.engine, delta([baseline]));
-  // A plays once (own total 6); B plays for the first time (own total 1).
+  // A plays once → asserts its materialized 5 + 1 = 6 (stamps a's
+  // component 6, displacing 5). B plays once → asserts the same
+  // aggregate 6; with a's 5 already merged, b's component stamps 1.
   await mustWrite(a.engine, {
     kind: 'playCount',
     recordId: 'r1',
@@ -1439,7 +1543,7 @@ async function concurrentPlayCounts(): Promise<void> {
     kind: 'playCount',
     recordId: 'r1',
     field: 'count',
-    value: 1,
+    value: 6,
   });
   const aToB = await a.engine.exportDelta();
   const bToA = await b.engine.exportDelta();
@@ -1460,6 +1564,171 @@ async function concurrentPlayCounts(): Promise<void> {
         r.field === 'count' && r.loser.value === 5 && !r.loser.tombstone,
     ),
     'own-component loser preserved',
+  );
+}
+
+// Devin Review #46 round-3 (UoTZ): 'sum' writes assert the desired
+// AGGREGATE — the engine stamps this device's component as
+// (target − remote share), so a domain row can be emitted verbatim.
+async function sumWriteAssertsAggregate(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  const base = await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  const appliedB = await mustApply(b.engine, delta([base]));
+  // Applied outcomes carry the post-merge materialized snapshot —
+  // absolute field truth the projector can project verbatim (UoQ3).
+  const baseOutcome = appliedB.outcomes.find(
+    (o) => o.type === 'applied' && o.entry.recordId === 'r1',
+  );
+  assertDeepEqual(
+    baseOutcome?.type === 'applied' ? baseOutcome.record : undefined,
+    { kind: 'playCount', recordId: 'r1', fields: { count: 5 } },
+    'applied outcome carries materialized snapshot',
+  );
+  // b merged a's 5. b asserts aggregate 8 → its component stamps 3.
+  const write = await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 8,
+  });
+  assertEqual(
+    write.value,
+    3,
+    'component = asserted aggregate − remote share',
+  );
+  // A target below the remote share clamps to 0 — never negative.
+  const low = await mustWrite(b.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 2,
+  });
+  assertEqual(low.value, 0, 'below remote share clamps to 0');
+}
+
+// Review #46 round-4: materialize() includes tombstoned records as
+// empty-field rows — a deletion must be distinguishable from a record
+// that was never synced (absent entirely), or the materialized rebuild
+// path keeps stale rows forever.
+async function materializeIncludesTombstones(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 2_000);
+  const write = await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r-del',
+    field: 'title',
+    value: 'Gone',
+  });
+  const tomb = rawTombstone('recording', 'r-del', {
+    l: write.hlc.l + 1,
+    c: 0,
+  });
+  await mustApply(b.engine, delta([write, tomb]));
+  const view = b.engine.materialize();
+  const deleted = view.find(
+    (r) => r.kind === 'recording' && r.recordId === 'r-del',
+  );
+  assertDeepEqual(
+    deleted,
+    { kind: 'recording', recordId: 'r-del', fields: {} },
+    'winning tombstone surfaces as an empty record',
+  );
+  assert(
+    view.find((r) => r.recordId === 'r-never') === undefined,
+    'a record never synced stays absent, not empty',
+  );
+}
+
+// Review #46 round-9: materialize() interleaves each parent record
+// with the records its row needs — a recording's refs/mappings/count
+// sort INSIDE its own id group, so a byte-paged rebuild holds at
+// most one family's rows pending at a boundary instead of every
+// recording pending on the ref region past the retention bound.
+// Field-only dependents (likes, playlist entries, play events,
+// reviews) still sort last, after every complete family.
+async function materializeParentsFirst(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const sr = { provider: 'itunes', kind: 'track', id: 's-1' } as const;
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'song',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'song2',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recordingSourceRef',
+    recordId: sourceRefRecordId('r1', sr),
+    field: 'ref',
+    value: sr,
+  });
+  await mustWrite(a.engine, {
+    kind: 'like',
+    recordId: likeRecordId('track', 'r1'),
+    field: 'like',
+    value: { entityKind: 'track', targetId: 'r1', likedAtMs: 1 },
+  });
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 3,
+  });
+  await mustWrite(a.engine, {
+    kind: 'playlist',
+    recordId: 'pl1',
+    field: 'name',
+    value: 'mix',
+  });
+  await mustWrite(a.engine, {
+    kind: 'playlistEntry',
+    recordId: 'e1',
+    field: 'playlistId',
+    value: 'pl1',
+  });
+  const view = a.engine.materialize();
+  const idx = (kind: string, recordId: string): number =>
+    view.findIndex((r) => r.kind === kind && r.recordId === recordId);
+  assert(idx('recording', 'r1') >= 0, 'recording materialized');
+  // The r1 family is contiguous: recording + ref + playCount land
+  // together, BEFORE the next family's group starts.
+  const r1Group = [
+    idx('recording', 'r1'),
+    idx('recordingSourceRef', sourceRefRecordId('r1', sr)),
+    idx('playCount', 'r1'),
+  ];
+  assert(
+    Math.max(...r1Group) - Math.min(...r1Group) === 2,
+    'recording family stays adjacent, not split across kinds',
+  );
+  assert(
+    idx('recording', 'r2') > Math.max(...r1Group),
+    'next group starts only after the whole r1 family',
+  );
+  for (const [kind, recordId] of [
+    ['like', likeRecordId('track', 'r1')],
+    ['playlistEntry', 'e1'],
+  ] as const) {
+    assert(
+      idx(kind, recordId) > idx('recording', 'r2') &&
+        idx(kind, recordId) > idx('playlist', 'pl1'),
+      `${kind} sorts after every complete family`,
+    );
+  }
+  assert(
+    idx('playlist', 'pl1') < idx('playlistEntry', 'e1'),
+    'playlist sorts before its entries',
   );
 }
 
@@ -2075,6 +2344,10 @@ export async function run(): Promise<void> {
   await remoteMutationImmunity();
   await hydrateRepairsDivergence();
   await concurrentPlayCounts();
+  await sumWriteAssertsAggregate();
+  await materializeIncludesTombstones();
+  await materializeParentsFirst();
+  await restoreLoserSumComponent();
   await expiredHistoryPagination();
   await relayedSkipListing();
   await unclaimedHoleNotExported();

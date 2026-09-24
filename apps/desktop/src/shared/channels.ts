@@ -43,6 +43,13 @@ export const CHANNELS = {
   syncImportDelta: 'sync:importDelta',
   syncTrigger: 'sync:trigger',
   syncLocalChanges: 'sync:localChanges',
+  syncDrainApplied: 'sync:drainApplied',
+  syncAckApplied: 'sync:ackApplied',
+  syncMaterialized: 'sync:materialized',
+  /** Main→renderer push: applied sync outcomes are queued for drain. */
+  syncApplied: 'sync:applied',
+  syncAppliedSubscribe: 'sync:appliedSubscribe',
+  syncAppliedUnsubscribe: 'sync:appliedUnsubscribe',
   transferEnsureDir: 'transfer:ensureDir',
   transferBegin: 'transfer:begin',
   transferWrite: 'transfer:write',
