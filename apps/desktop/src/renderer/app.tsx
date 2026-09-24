@@ -287,7 +287,9 @@ function toSearchModel(state: SearchState): SearchStateModel {
       return {
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         query: state.query,
-        results: state.page.items.map(toSearchRowModel),
+        results: state.page.items.map((meta, index) =>
+          toSearchRowModel(meta, index),
+        ),
         providerId: null,
         message: state.refreshError?.message ?? null,
         retryable: false,

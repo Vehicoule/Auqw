@@ -398,7 +398,10 @@ function SessionGate({
   );
 }
 
-function toSearchModel(state: SearchState): SearchStateModel {
+function toSearchModel(
+  state: SearchState,
+  playingRef: SourceRef | null = null,
+): SearchStateModel {
   switch (state.type) {
     case 'idle':
       return {
@@ -431,7 +434,9 @@ function toSearchModel(state: SearchState): SearchStateModel {
       return {
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         query: state.query,
-        results: state.page.items.map(toSearchRowModel),
+        results: state.page.items.map((meta, index) =>
+          toSearchRowModel(meta, index, playingRef),
+        ),
         providerId: null,
         message: state.refreshError?.message ?? null,
         retryable: false,
@@ -1091,6 +1096,34 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state, downloads, downloadChipFor, online, controller, localTick],
   );
+  // The ref the player resolved for the current recording — catalog
+  // rows mark 'playing' only when their own sourceRef IS this ref
+  // (the preview draws the accent row + eq overlay inside result
+  // lists).
+  const playingRef = useMemo((): SourceRef | null => {
+    // Only a live attempt marks a row — a failed gate is not 'playing'.
+    const playback = state.playback;
+    if (playback.type === 'idle' || playback.type === 'failed') {
+      return null;
+    }
+    const recordingId = playback.recordingId;
+    const recording = state.recordings.find((r) => r.id === recordingId);
+    if (recording === undefined) {
+      return null;
+    }
+    const mapped = effectiveMapping(
+      recording,
+      state.settings.playbackProvider,
+    );
+    if (mapped !== null) {
+      return mapped.ref;
+    }
+    const current = state.queue.occurrences.find(
+      (o) => o.occurrenceId === state.queue.currentOccurrenceId,
+    );
+    return current?.selectedRef ?? recording.sourceRefs[0] ?? null;
+  }, [state]);
+
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
       toEntityModel({
@@ -1099,8 +1132,9 @@ function Main({
         likes: state.likes,
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
+        playingRef,
       }),
-    [state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs, playingRef],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1169,6 +1203,10 @@ function Main({
             key: `local:${rec.id}`,
             liked: liked.has(rec.id),
             note: 'local',
+            playing:
+              state.playback.type !== 'idle' &&
+              state.playback.type !== 'failed' &&
+              state.playback.recordingId === rec.id,
           }),
         );
         if (rows.length >= 25) {
@@ -1181,7 +1219,7 @@ function Main({
     // removed folder's recordings persist but must stop matching.
   }, [searchState, state.recordings, state.likes, controller, localTick]);
   const searchModel = useMemo(() => {
-    const base = toSearchModel(searchState);
+    const base = toSearchModel(searchState, playingRef);
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
     }
@@ -1193,7 +1231,7 @@ function Main({
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults]);
+  }, [searchState, localResults, playingRef]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
