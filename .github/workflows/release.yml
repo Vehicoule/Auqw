@@ -1,0 +1,145 @@
+name: release
+
+# A `v*` tag is the release. The tag carries the full semver
+# (v0.0.1-alpha.1, v0.0.1) — tooling/stamp-version.mjs writes it into
+# the release-facing manifests before any build runs, so artifacts
+# always identify their own tag and the repo manifests just track the
+# in-development line.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      # providers.lock.json resolves `release:../auqw-plugins/...` —
+      # the plugins repo must sit as a sibling of the Auqw checkout.
+      - uses: actions/checkout@v4
+        with:
+          path: auqw
+      - uses: actions/checkout@v4
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          # Same-org public repos read fine under GITHUB_TOKEN; a
+          # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: auqw/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: auqw/pnpm-lock.yaml
+      - name: flatpak toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform/x86_64/24.08 \
+            org.freedesktop.Sdk/x86_64/24.08 \
+            org.electronjs.Electron2.BaseApp/x86_64/24.08
+      - name: build desktop packages
+        working-directory: auqw
+        run: |
+          pnpm install --frozen-lockfile
+          node tooling/stamp-version.mjs "$VERSION"
+          node tooling/stamp-version.mjs --check "${VERSION#v}"
+          node tooling/sync-plugins.mjs apps/desktop/plugins
+          pnpm --dir apps/desktop run dist
+      - name: checksums
+        working-directory: auqw/apps/desktop/dist-packages
+        run: sha256sum auqw-* > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-packages
+          path: auqw/apps/desktop/dist-packages/*
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: auqw
+      - uses: actions/checkout@v4
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: auqw/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: auqw/pnpm-lock.yaml
+      - run: cargo install cargo-ndk --locked
+      - name: android inputs (bindings + plugins)
+        working-directory: auqw
+        run: |
+          # ubuntu-latest ships several NDKs under the SDK — the
+          # bindings script defaults to a macOS path, so point it at
+          # the highest installed here.
+          export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
+          ./tooling/build-android-bindings.sh
+          pnpm install --frozen-lockfile
+          node tooling/stamp-version.mjs "$VERSION"
+          node tooling/stamp-version.mjs --check "${VERSION#v}"
+          node tooling/sync-plugins.mjs
+          pnpm --dir apps/mobile exec expo prebuild --platform android
+      - name: build debug APK
+        working-directory: auqw/apps/mobile
+        run: |
+          cd android && ./gradlew assembleDebug
+          cd .. && mv \
+            android/app/build/outputs/apk/debug/app-debug.apk \
+            "auqw-${VERSION#v}-android-debug.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-packages
+          path: auqw/apps/mobile/auqw-*-android-debug.apk
+
+  release:
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
+          # bare v*.*.* publishes stable.
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --generate-notes \
+            "${flags[@]}" \
+            artifacts/desktop-packages/* \
+            artifacts/android-packages/*
