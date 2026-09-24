@@ -31,9 +31,15 @@ git push origin v0.0.1-alpha.1
 
 | Job | Produces |
 |-----|----------|
-| `desktop` | `auqw-<ver>-linux-x86_64.AppImage`, `.tar.gz`, `.flatpak` + `SHA256SUMS.txt` |
+| `desktop` (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.tar.gz`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg`, `.zip` · win: `auqw-<ver>-win-x64.exe` (nsis installer), `-portable.exe` — each OS dir gets its own `SHA256SUMS.txt` |
 | `android` | `auqw-<ver>-android-arm64-v8a.apk` + `auqw-<ver>-android-x86_64.apk` (`assembleRelease`, alpha-signed, per-ABI splits — standalone, upgrade-installs across alphas; not Play-ready) |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
+
+macOS and Windows artifacts ship **unsigned** (same parked signing
+decision as Linux): macOS Gatekeeper quarantine clears with
+`xattr -dr com.apple.quarantine auqw.app`, Windows SmartScreen warns
+via "More info → Run anyway". macOS runs build for Apple silicon only —
+Intel macs get no alpha artifact until a universal/signing decision.
 
 ## Downloads
 
