@@ -738,6 +738,7 @@ export function toTrackRowModel(
 export function toSearchRowModel(
   metadata: TrackMetadata,
   index: number,
+  playingRef?: SourceRef | null,
 ): TrackRowModel {
   return {
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}:${index}`,
@@ -747,7 +748,15 @@ export function toSearchRowModel(
     durationMs: metadata.durationMs,
     artworkUrl: pickArtworkUrl(metadata.artwork),
     liked: false,
-    playing: false,
+    // A catalog row marks playing only when its own sourceRef is the
+    // ref the player resolved — the accent row + eq overlay the
+    // preview draws inside result lists.
+    playing:
+      playingRef !== null &&
+      playingRef !== undefined &&
+      metadata.sourceRef.provider === playingRef.provider &&
+      metadata.sourceRef.kind === playingRef.kind &&
+      metadata.sourceRef.id === playingRef.id,
     state: 'available',
     note: null,
     download: null,
@@ -1290,6 +1299,7 @@ export function toEntityModel(input: {
   readonly likes: readonly Like[];
   readonly entitySourceRefs: readonly EntitySourceRef[];
   readonly loadingMore?: boolean | undefined;
+  readonly playingRef?: SourceRef | null | undefined;
 }): EntityScreenModel {
   const { page, error } = input;
   if (page === null) {
@@ -1328,7 +1338,9 @@ export function toEntityModel(input: {
     complete: page.complete,
     liked,
     canLike: entityId !== null,
-    items: page.items.map((meta, index) => toSearchRowModel(meta, index)),
+    items: page.items.map((meta, index) =>
+      toSearchRowModel(meta, index, input.playingRef),
+    ),
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,
     // A refresh error while content stays surfaces as a flagged note.

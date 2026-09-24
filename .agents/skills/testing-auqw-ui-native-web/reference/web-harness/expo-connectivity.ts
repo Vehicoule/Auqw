@@ -7,7 +7,6 @@ import type {
   ConnectivitySnapshot,
 } from '@auqw/application';
 import { ok } from '@auqw/application';
-// @ts-expect-error — resolved by the Metro alias, not the package.
 import * as Native from 'auqw-expo';
 
 export function createExpoConnectivity(): ConnectivityPort {

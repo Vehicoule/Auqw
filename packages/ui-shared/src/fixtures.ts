@@ -628,7 +628,9 @@ export const fixtureSearchStates: readonly SearchStateModel[] = [
   {
     phase: 'ready',
     query: 'roads portishead',
-    results: fixtureSearchResults.map(toSearchRowModel),
+    results: fixtureSearchResults.map((meta, index) =>
+      toSearchRowModel(meta, index),
+    ),
     providerId: 'youtube-music',
     message: null,
     retryable: false,

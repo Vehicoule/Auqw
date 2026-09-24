@@ -35,7 +35,10 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
       return remap('expo-audio.ts');
     }
   }
-  return defaultResolve !== undefined
+  // metro ≥0.84 may set resolver.resolveRequest to a non-function
+  // object — only call it when it is actually callable, else fall
+  // back to the resolution context's default resolver.
+  return typeof defaultResolve === 'function'
     ? defaultResolve(context, moduleName, platform)
     : context.resolveRequest(context, moduleName, platform);
 };

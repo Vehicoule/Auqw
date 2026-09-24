@@ -42,11 +42,23 @@ export function TrackRow({
 }: TrackRowProps) {
   const theme = useTheme();
   const unavailable = row.state !== 'available';
+  // The mobile anatomy folds the trailing `artist · len` into the
+  // small line — there is no separate duration column (preview
+  // `.mrows .r .t small`). A state note replaces the line outright
+  // on unavailable rows (`unavailable`); a provenance note like
+  // `local` leads it instead of swallowing artist + len.
   const sub =
-    row.note ??
-    [badge, row.artist, row.versionLabel]
-      .filter((part): part is string => part !== null && part !== '')
-      .join(' · ');
+    unavailable && row.note !== null
+      ? row.note
+      : [
+          row.note,
+          badge,
+          row.artist,
+          row.versionLabel,
+          row.durationMs === null ? null : formatClock(row.durationMs),
+        ]
+          .filter((part): part is string => part !== null && part !== '')
+          .join(' · ');
   return (
     <View
       style={{
@@ -186,14 +198,6 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        <Text
-          variant="metadata"
-          color="secondary"
-          numeric
-          style={{ minWidth: 34 * theme.textScale, textAlign: 'right' }}
-        >
-          {formatClock(row.durationMs)}
-        </Text>
         {row.download !== null && (
           <View
             style={{

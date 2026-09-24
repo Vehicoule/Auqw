@@ -179,10 +179,13 @@ export function createExpoArtwork(
           handle.close();
         }
         const dest = new File(destPath);
-        if (dest.exists) {
-          dest.delete();
-        }
-        temp.move(dest);
+        // The finalize stays synchronous end to end: an awaited-free
+        // `move` let a racing download for the same entry consume the
+        // shared `.dl` temp first and escaped as an uncaught promise
+        // rejection. One JS turn keeps create→write→move atomic, and
+        // `overwrite` removes the delete-then-move gap at the entry
+        // path — the winning write replaces the file in place.
+        temp.moveSync(dest, { overwrite: true });
         return ok({ bytes: body.byteLength });
       } catch (thrown) {
         if (

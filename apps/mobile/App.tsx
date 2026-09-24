@@ -29,6 +29,7 @@ import {
   CancellationSource,
   SearchSession,
   effectiveMapping,
+  isMatchGate,
   isRefRejected,
   previewImport,
 } from '@auqw/application';
@@ -397,7 +398,10 @@ function SessionGate({
   );
 }
 
-function toSearchModel(state: SearchState): SearchStateModel {
+function toSearchModel(
+  state: SearchState,
+  playingRef: SourceRef | null = null,
+): SearchStateModel {
   switch (state.type) {
     case 'idle':
       return {
@@ -430,7 +434,9 @@ function toSearchModel(state: SearchState): SearchStateModel {
       return {
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         query: state.query,
-        results: state.page.items.map(toSearchRowModel),
+        results: state.page.items.map((meta, index) =>
+          toSearchRowModel(meta, index, playingRef),
+        ),
         providerId: null,
         message: state.refreshError?.message ?? null,
         retryable: false,
@@ -1090,6 +1096,25 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state, downloads, downloadChipFor, online, controller, localTick],
   );
+  // The ref the player actually resolved for the live attempt —
+  // published on the playback snapshot, so a pin, a verdict, or
+  // owned bytes each mark exactly the row they resolved to (local
+  // picks match no catalog row). A failed gate is not 'playing'.
+  const playingRef = useMemo((): SourceRef | null => {
+    const playback = state.playback;
+    // Only an engaged attempt marks — paused keeps its loaded ref but
+    // is not 'playing' (the queue surface drops its mark on the same
+    // moment); a failed gate never marked at all.
+    if (
+      playback.type === 'idle' ||
+      playback.type === 'paused' ||
+      playback.type === 'failed'
+    ) {
+      return null;
+    }
+    return playback.ref ?? null;
+  }, [state.playback]);
+
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
       toEntityModel({
@@ -1098,8 +1123,9 @@ function Main({
         likes: state.likes,
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
+        playingRef,
       }),
-    [state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs, playingRef],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1168,6 +1194,11 @@ function Main({
             key: `local:${rec.id}`,
             liked: liked.has(rec.id),
             note: 'local',
+            playing:
+              state.playback.type !== 'idle' &&
+              state.playback.type !== 'paused' &&
+              state.playback.type !== 'failed' &&
+              state.playback.recordingId === rec.id,
           }),
         );
         if (rows.length >= 25) {
@@ -1178,9 +1209,17 @@ function Main({
     return rows;
     // localTick re-reads local.uriFor after a folder mutation — a
     // removed folder's recordings persist but must stop matching.
-  }, [searchState, state.recordings, state.likes, controller, localTick]);
+    // state.playback is read for the per-row playing mark.
+  }, [
+    searchState,
+    state.recordings,
+    state.likes,
+    state.playback,
+    controller,
+    localTick,
+  ]);
   const searchModel = useMemo(() => {
-    const base = toSearchModel(searchState);
+    const base = toSearchModel(searchState, playingRef);
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
     }
@@ -1192,7 +1231,7 @@ function Main({
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults]);
+  }, [searchState, localResults, playingRef]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
@@ -1255,17 +1294,88 @@ function Main({
     [state, diagnostics, storageText, localTick, controller, downloads, syncModel],
   );
 
+  // ---- library world: overlay routes ------------------------------
+
+  const pushOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack((stack) => [
+      ...stack,
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
+  }, []);
+
+  const resetOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack([
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
+  }, []);
+
+  /** Pop the top route — every screen's own back affordance. */
+  const closeOverlay = useCallback(() => {
+    setOverlayStack((stack) => stack.slice(0, -1));
+  }, []);
+
+  /** Native gesture/back dismissal removes a screen and all above it. */
+  const dismissOverlay = useCallback((key: string) => {
+    setOverlayStack((stack) => {
+      const index = stack.findIndex((entry) => entry.key === key);
+      return index === -1 ? stack : stack.slice(0, index);
+    });
+  }, []);
+
+  const clearOverlays = useCallback(() => {
+    setOverlayStack([]);
+    setEntityFetches({});
+  }, []);
+
+  // ---- play actions ------------------------------------------------
+
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
+  // The ambiguous-match gate parks candidates in a review the user
+  // must resolve — retrying the press only fails the same way, so a
+  // play that hits the gate opens the review surface instead of
+  // dying quietly on a dead queue item.
+  const reportPlay = useCallback(
+    (action: string, result: Result<unknown>) => {
+      reportResult(action, result);
+      if (!result.ok && isMatchGate(result.error)) {
+        // Land the user on the fresh pending row: a stale 'resolved'
+        // filter or an already-open screen would hide it, so the
+        // route always selects pending and reloads.
+        setReviewFilter('pending');
+        loadReviews();
+        if (overlay?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
+        }
+      }
+    },
+    [pushOverlay, overlay, loadReviews],
+  );
+
   const playRecording = useCallback(
     async (recordingId: string) => {
       if (!canPlay(recordingId)) {
         return;
       }
       const enqueued = await session.enqueueRecording(recordingId);
-      if (enqueued.ok) {
-        await session.playOccurrence(enqueued.value);
+      if (!enqueued.ok) {
+        reportResult('enqueue track', enqueued);
+        return;
       }
+      reportPlay('play', await session.playOccurrence(enqueued.value));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1278,9 +1388,9 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
-      void session.playOccurrence(occurrenceId);
+      void session.playOccurrence(occurrenceId).then((r) => reportPlay('play', r));
     },
-    [session, state.queue, canPlay],
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Mirrors QueueEngine.next()/previous() targeting: next → index+1
@@ -1304,9 +1414,11 @@ function Main({
           return;
         }
       }
-      void (method === 'next' ? session.next() : session.previous());
+      void (method === 'next' ? session.next() : session.previous()).then(
+        (r) => reportPlay(method, r),
+      );
     },
-    [online, state.queue, isOwned, session],
+    [online, state.queue, isOwned, session, reportPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
@@ -1341,10 +1453,10 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void session.addAndPlay(meta);
+        void session.addAndPlay(meta).then((r) => reportPlay('play result', r));
       }
     },
-    [session, canPlayMeta, playRecording, query, recordRecentSearch],
+    [session, canPlayMeta, playRecording, query, recordRecentSearch, reportPlay],
   );
 
   const onSettingsSelect = useCallback(
@@ -1543,8 +1655,10 @@ function Main({
       return;
     }
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    void (playing ? session.pause() : session.resume());
-  }, [session, playing, currentRecordingId, canPlay]);
+    void (playing ? session.pause() : session.resume()).then((r) =>
+      reportPlay(playing ? 'pause' : 'resume', r),
+    );
+  }, [session, playing, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -1687,17 +1801,6 @@ function Main({
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
 
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.
@@ -1923,40 +2026,7 @@ function Main({
     [providerSlot, session, state.settings],
   );
 
-  // ---- library world: overlay routes + entity fetch --------------
-
-  const pushOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack((stack) => [
-      ...stack,
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  const resetOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack([
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  /** Pop the top route — every screen's own back affordance. */
-  const closeOverlay = useCallback(() => {
-    setOverlayStack((stack) => stack.slice(0, -1));
-  }, []);
-
-  /** Native gesture/back dismissal removes a screen and all above it. */
-  const dismissOverlay = useCallback((key: string) => {
-    setOverlayStack((stack) => {
-      const index = stack.findIndex((entry) => entry.key === key);
-      return index === -1 ? stack : stack.slice(0, index);
-    });
-  }, []);
-
-  const clearOverlays = useCallback(() => {
-    setOverlayStack([]);
-    setEntityFetches({});
-  }, []);
+  // ---- library world: entity fetch ----------------------------------
 
   const loadEntityPage = useCallback(
     (ref: EntityRef) => {
@@ -2133,14 +2203,16 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((row) => ({
-          recordingId: row.recordingId,
-          selectedRef: null,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((row) => ({
+            recordingId: row.recordingId,
+            selectedRef: null,
+          })),
+        )
+        .then((r) => reportPlay('play collection', r));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const playPlaylist = useCallback(
@@ -2154,18 +2226,20 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((entry) => ({
-          recordingId: entry.recordingId,
-          // A provider pin beats owned bytes in #pickRef — drop it
-          // when bytes exist so downloads actually get played.
-          selectedRef: isOwned(entry.recordingId)
-            ? null
-            : entry.selectedRef,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((entry) => ({
+            recordingId: entry.recordingId,
+            // A provider pin beats owned bytes in #pickRef — drop it
+            // when bytes exist so downloads actually get played.
+            selectedRef: isOwned(entry.recordingId)
+              ? null
+              : entry.selectedRef,
+          })),
+        )
+        .then((r) => reportPlay('play playlist', r));
     },
-    [session, isOwned, canPlay],
+    [session, isOwned, canPlay, reportPlay],
   );
 
   const playlistDownloadFor = useCallback(
@@ -2373,8 +2447,22 @@ function Main({
   // review?list|confirm=&candidate=|reject=|undo=, transfer?export|
   // import=<path>|apply-import, download?i=N|downloads, local-add|
   // local-rescan|local-list, airplane. Never ships in release bundles.
-  const journeyDeps = useRef({ session, search, state, controller, downloadRefFor });
-  journeyDeps.current = { session, search, state, controller, downloadRefFor };
+  const journeyDeps = useRef({
+    session,
+    search,
+    state,
+    controller,
+    downloadRefFor,
+    reportPlay,
+  });
+  journeyDeps.current = {
+    session,
+    search,
+    state,
+    controller,
+    downloadRefFor,
+    reportPlay,
+  };
   useEffect(() => {
     if (!__DEV__) {
       return undefined;
@@ -2406,6 +2494,7 @@ function Main({
         state: st,
         controller: ctl,
         downloadRefFor: refFor,
+        reportPlay,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
@@ -2475,21 +2564,21 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s.addAndPlay(meta).then((r) => reportResult('play result', r));
+            void s.addAndPlay(meta).then((r) => reportPlay('play result', r));
           }
           break;
         }
         case 'next':
-          void s.next().then((r) => reportResult('next', r));
+          void s.next().then((r) => reportPlay('next', r));
           break;
         case 'previous':
-          void s.previous().then((r) => reportResult('previous', r));
+          void s.previous().then((r) => reportPlay('previous', r));
           break;
         case 'pause':
           void s.pause().then((r) => reportResult('pause', r));
           break;
         case 'resume':
-          void s.resume().then((r) => reportResult('resume', r));
+          void s.resume().then((r) => reportPlay('resume', r));
           break;
         case 'like-current':
           if (st.type === 'ready' && st.playback.type !== 'idle') {
@@ -2894,7 +2983,9 @@ function Main({
             model={homeModel}
             topInset={topInset}
             onPressCard={(card) => void playRecording(card.key)}
-            onResume={() => void session.resume()}
+            onResume={() =>
+              void session.resume().then((r) => reportPlay('resume', r))
+            }
           />
         );
     }
@@ -2949,14 +3040,16 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
-              void session.playRecordings([
-                {
-                  recordingId: entry.recordingId,
-                  selectedRef: isOwned(entry.recordingId)
-                    ? null
-                    : entry.selectedRef,
-                },
-              ]);
+              void session
+                .playRecordings([
+                  {
+                    recordingId: entry.recordingId,
+                    selectedRef: isOwned(entry.recordingId)
+                      ? null
+                      : entry.selectedRef,
+                  },
+                ])
+                .then((r) => reportPlay('play playlist entry', r));
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
@@ -3012,7 +3105,9 @@ function Main({
                 .filter(
                   (m): m is TrackMetadata => m !== undefined,
                 );
-              void session.playMetadata(metas);
+              void session
+                .playMetadata(metas)
+                .then((r) => reportPlay('play all', r));
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
@@ -3020,7 +3115,9 @@ function Main({
                 .filter(
                   (m): m is TrackMetadata => m !== undefined,
                 );
-              void session.playMetadata(metas, { shuffle: true });
+              void session
+                .playMetadata(metas, { shuffle: true })
+                .then((r) => reportPlay('shuffle all', r));
             }}
             onToggleLike={
               entityId === null
@@ -3031,7 +3128,9 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                void session.addAndPlay(meta);
+                void session
+                  .addAndPlay(meta)
+                  .then((r) => reportPlay('play result', r));
               }
             }}
             onContext={(row) => {

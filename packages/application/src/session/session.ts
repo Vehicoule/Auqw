@@ -40,7 +40,9 @@ import type {
 import {
   createCorrections,
   effectiveMapping,
+  isMatchGate,
   isRefRejected,
+  MATCH_GATE_MESSAGE,
 } from '../library/corrections.ts';
 import type {
   Corrections,
@@ -138,6 +140,8 @@ export type SessionPlayback =
     readonly recordingId: string;
     readonly occurrenceId: string;
     readonly identity: PlaybackIdentity;
+    /** The resolved source once the pick finalizes — undefined until then. */
+    readonly ref?: SourceRef;
     readonly requestId?: string;
   }
   | {
@@ -145,6 +149,8 @@ export type SessionPlayback =
     readonly recordingId: string;
     readonly occurrenceId: string;
     readonly identity: PlaybackIdentity;
+    /** The source ref this attempt resolved and is actually playing. */
+    readonly ref?: SourceRef;
     readonly handle: string;
     readonly positionMs: number;
     readonly durationMs?: number;
@@ -324,6 +330,8 @@ type ActiveAttempt = {
   identity: PlaybackIdentity;
   readonly recordingId: string;
   readonly occurrenceId: string;
+  /** The ref #pickRef resolved — surfaces on SessionPlayback so consumers mark the row actually playing. */
+  ref?: SourceRef;
   readonly source: CancellationSource;
   readonly deadlineMs: number;
   requestId?: string;
@@ -2506,7 +2514,26 @@ export class Session {
     return this.#reviewOp(
       (signal) => this.#corrections.confirm(reviewId, candidateIndex, signal),
       context,
-    );
+    ).then(async (result) => {
+      // A gated play attempt parked this review and left playback
+      // failed — the confirm IS the retry, so resume the blocked
+      // occurrence when it is the one that gated. The verdict is in
+      // the reloaded recording, so the re-attempt resolves straight
+      // to it. A retry failure lands as the new playback error; the
+      // confirm itself stays a success.
+      const playback = this.#ready?.playback;
+      if (
+        result.ok &&
+        playback !== undefined &&
+        playback.type === 'failed' &&
+        playback.occurrenceId !== null &&
+        playback.recordingId === result.value.recordingId &&
+        isMatchGate(playback.error)
+      ) {
+        await this.playOccurrence(playback.occurrenceId);
+      }
+      return result;
+    });
   }
 
   rejectReview(
@@ -3768,6 +3795,19 @@ export class Session {
       await this.#failAttempt(attempt, error);
       return err(error);
     }
+    // The pick is final here — consumers read `playback.ref` to mark
+    // the catalog row the player actually resolved (a local pick
+    // matches none, an already-running stream keeps its own ref).
+    attempt.ref = ref;
+    const r2 = this.#ready;
+    if (
+      r2 !== null &&
+      r2.playback.type === 'preparing' &&
+      attemptEq(r2.playback.identity, attempt.identity)
+    ) {
+      r2.playback = { ...r2.playback, ref };
+      this.#publish();
+    }
     if (this.#isStale(attempt)) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
@@ -3812,7 +3852,11 @@ export class Session {
       ready2.playback.type === 'preparing' &&
       attemptEq(ready2.playback.identity, attempt.identity)
     ) {
-      ready2.playback = { ...ready2.playback, requestId: prepared.value };
+      ready2.playback = {
+        ...ready2.playback,
+        requestId: prepared.value,
+        ref,
+      };
       this.#publish();
     }
     if (!attempt.preparedHandled) {
@@ -3878,8 +3922,10 @@ export class Session {
     }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
-      // fails honestly. The enqueue is best-effort — a review-write
-      // failure must not mask the match outcome.
+      // fails honestly. The gate is emitted only once a review
+      // actually exists — reporting it on a failed write would route
+      // resolve surfaces to an empty queue, so the storage error is
+      // what the attempt returns instead.
       const enqueued = await this.#enqueueStorage(() =>
         this.#corrections.enqueueReview(
           recording.id,
@@ -3892,8 +3938,10 @@ export class Session {
       );
       if (!enqueued.ok) {
         this.#logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
+        await this.#failAttempt(attempt, enqueued.error);
+        return err(enqueued.error);
       }
-      const error = appError('unavailable', 'match requires confirmation');
+      const error = appError('unavailable', MATCH_GATE_MESSAGE);
       await this.#failAttempt(attempt, error);
       return err(error);
     }
@@ -4129,6 +4177,7 @@ export class Session {
       identity: attempt.identity,
       handle: attempt.handle,
       positionMs: r.queue.snapshot().positionMs,
+      ...(attempt.ref === undefined ? {} : { ref: attempt.ref }),
       ...(durationMs === undefined ? {} : { durationMs }),
     };
     this.#publish();
@@ -4323,6 +4372,7 @@ export class Session {
         identity: active.identity,
         handle: active.handle,
         positionMs: event.positionMs,
+        ...(active.ref === undefined ? {} : { ref: active.ref }),
         ...(event.durationMs === undefined
           ? {}
           : { durationMs: event.durationMs }),
@@ -4638,6 +4688,25 @@ export class Session {
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
       );
+      // The service resolved this item's ref when the projection was
+      // installed — carry it verbatim into the adopted attempt so the
+      // playing mark reflects what the service actually attached.
+      // Re-deriving now could name a different ref: mappings may have
+      // changed since the projection was built.
+      const projected = projection?.items.find(
+        (item) => item.occurrenceId === toId,
+      );
+      const projProvider = projected?.provider ?? null;
+      const projRefId = projected?.sourceRef ?? null;
+      const toRecording = r.recordings.find(
+        (rec) => rec.id === occurrence?.recordingId,
+      );
+      const adoptedRef: SourceRef | undefined =
+        projProvider === null || projRefId === null
+          ? undefined
+          : toRecording?.sourceRefs.find(
+                (s) => s.provider === projProvider && s.id === projRefId,
+              ) ?? { provider: projProvider, kind: 'track', id: projRefId };
       // Statuses continue to echo the immutable service projection until
       // app intent installs a new one; reconciliation alone must not re-key it.
       const identity = event.identity;
@@ -4645,6 +4714,7 @@ export class Session {
         identity,
         recordingId: occurrence?.recordingId ?? '',
         occurrenceId: toId,
+        ...(adoptedRef === undefined ? {} : { ref: adoptedRef }),
         source: new CancellationSource(),
         deadlineMs: this.#deadline(),
         handle: event.handle,
@@ -4663,6 +4733,7 @@ export class Session {
         identity,
         handle: event.handle,
         positionMs: event.positionMs,
+        ...(adoptedRef === undefined ? {} : { ref: adoptedRef }),
       };
     } else {
       r.playback = { type: 'idle' };
