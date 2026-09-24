@@ -890,10 +890,12 @@ export function isSyncStatusResult(
 }
 
 export type SyncPairingResult = {
-  /** QR-payload text: JSON {v, endpoint, code, fp}. */
+  /** QR-payload text: JSON {v, endpoint, endpoints, code, fp}. */
   readonly payload: string;
   /** The 6-digit typed path — same session as the QR payload. */
   readonly code: string;
+  /** Primary `ip:port` for the typed path — shown next to the code. */
+  readonly endpoint: string;
   readonly expiresAt: number;
 };
 
@@ -902,10 +904,11 @@ export function isSyncPairingResult(
 ): value is SyncPairingResult {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['payload', 'code', 'expiresAt']) &&
+    hasOnlyKeys(value, ['payload', 'code', 'endpoint', 'expiresAt']) &&
     isBoundedString(value['payload'], 1_024) &&
     typeof value['code'] === 'string' &&
     /^[0-9]{6}$/.test(value['code']) &&
+    isBoundedString(value['endpoint'], 64) &&
     isFiniteNumber(value['expiresAt'])
   );
 }

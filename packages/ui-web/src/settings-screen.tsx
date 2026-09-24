@@ -339,6 +339,17 @@ export function SettingsScreen({
                 color="var(--text-secondary)"
               />
             </Pressable>
+            {sync.pairErrorLabel !== null && (
+              <div className="uw-diag-row">
+                <Text
+                  variant="metadata"
+                  color="warn"
+                  className="uw-diag-row__k"
+                >
+                  {sync.pairErrorLabel}
+                </Text>
+              </div>
+            )}
             <Hairline />
             <Pressable
               onPress={onSyncNow}

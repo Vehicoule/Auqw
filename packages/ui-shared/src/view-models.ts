@@ -1604,6 +1604,8 @@ export type SyncDeviceInput = {
 export type SyncPairingInput = {
   readonly payload: string;
   readonly code: string;
+  /** Primary `ip:port` — the typed path needs it shown next to the code. */
+  readonly endpoint: string;
   readonly expiresAt: number;
 };
 
@@ -1634,6 +1636,8 @@ export type SyncStatusModel = {
 export type PairingModel = {
   readonly code: string;
   readonly payload: string;
+  /** `ip:port` the typed code path dials. */
+  readonly endpointLabel: string;
   /** 'expires in 4m' counting down to the offer's expiry; 'expired' past it. */
   readonly expiresLabel: string;
 };
@@ -1642,6 +1646,8 @@ export type SyncPanelModel = {
   readonly status: SyncStatusModel | null;
   readonly devices: readonly SyncDeviceModel[];
   readonly pairing: PairingModel | null;
+  /** Last pairing-mint failure (listener down, no address) — null when fine. */
+  readonly pairErrorLabel: string | null;
 };
 
 /** Relative-time label: 'just now' / '5m' / '2h' / '3d' / ISO date. */
@@ -1687,8 +1693,10 @@ export function toSyncPanel(
   devices: readonly SyncDeviceInput[],
   pairing: SyncPairingInput | null,
   nowMs: number,
+  pairError: string | null = null,
 ): SyncPanelModel {
   return {
+    pairErrorLabel: pairError,
     status:
       status === null
         ? null
@@ -1720,6 +1728,7 @@ export function toSyncPanel(
         : {
             code: pairing.code,
             payload: pairing.payload,
+            endpointLabel: pairing.endpoint,
             expiresLabel: formatExpiry(pairing.expiresAt, nowMs),
           },
   };

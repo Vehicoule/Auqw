@@ -35,6 +35,13 @@ const config: ExpoConfig = {
       },
     ],
     'expo-sqlite',
+    // CI-secret alpha keystore → release builds sign with one stable
+    // identity across CI runs (upgrade-install between alphas works);
+    // no env → stock debug signing for local builds.
+    './plugins/with-alpha-signing.cjs',
+    // release APK splits per ABI (arm64-v8a + x86_64) + R8/shrink —
+    // the 153 MB alpha.2 was half dead-arch libs and unminified dex.
+    './plugins/with-release-abis.cjs',
     [
       'expo-navigation-bar',
       {

@@ -1600,6 +1600,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return checked(isSyncPairingResult, 'sync:pairing')({
         payload,
         code,
+        endpoint: ep,
         expiresAt,
       });
     },

@@ -102,16 +102,15 @@ for (const rel of [
 
 const configPath = join(ROOT, 'apps/mobile/app.config.ts');
 const config = readFileSync(configPath, 'utf8');
-const stamped = config.replace(
-  /^(\s*version: ')[^']+(',\s*)$/m,
-  `$1${version}$2`,
-);
-if (stamped === config) {
+const FIELD = /^(\s*version: ')[^']+(',\s*)$/m;
+// Existence, not change — stamping the version the file already
+// carries is an idempotent no-op, not a missing-field failure.
+if (!FIELD.test(config)) {
   console.error(
     'stamp-version: version field not found in app.config.ts',
   );
   process.exit(1);
 }
-writeFileSync(configPath, stamped);
+writeFileSync(configPath, config.replace(FIELD, `$1${version}$2`));
 
 console.log(`stamped ${version}`);

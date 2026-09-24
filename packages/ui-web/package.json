@@ -14,7 +14,8 @@
   "dependencies": {
     "@auqw/application": "workspace:*",
     "@auqw/design-tokens": "workspace:*",
-    "@auqw/ui-shared": "workspace:*"
+    "@auqw/ui-shared": "workspace:*",
+    "uqr": "0.1.2"
   },
   "peerDependencies": {
     "react": "*",
