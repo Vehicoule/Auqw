@@ -120,8 +120,9 @@ if (port === null) {
       : Promise.resolve(null);
   // A failed startup bind is retryable — re-kick it on each read so
   // a transient failure heals without a utility restart. The current
-  // caller still gets "no provider"; the NEXT host construction or
-  // pairing mint sees the retried port.
+  // caller still gets "no provider"; a retried bind is pushed into
+  // the live host through setPotProvider and read by future host
+  // constructions through the config callback.
   const potRetry = (): void => {
     if (pot.port() === null) {
       void pot

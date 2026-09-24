@@ -25,13 +25,15 @@ import {
  *
  * Minting mirrors bgutil-ytdlp-pot-provider: fetch the YouTube
  * homepage for a self-consistent (ytcfg, ytAtN bgChallenge) pair,
- * evaluate the BotGuard interpreter inside a `node:vm` context
- * (never this utility's own globalThis — remote JS runs sandboxed),
- * snapshot it, trade the snapshot for an integrity token at
- * GenerateIT, then mint per-binding tokens through WebPoMinter.
- * When GenerateIT declines a token, the websafe fallback token is
- * session-bound and served as-is (verified: one token resolved two
- * different video ids, ttl ~43200s).
+ * evaluate the BotGuard interpreter inside a `node:vm` context in a
+ * dedicated minter child process (`pot-minter-engine.ts` — a vm is
+ * isolation, not a security boundary, so remote JS never shares the
+ * utility's address space), snapshot it, trade the snapshot for an
+ * integrity token at GenerateIT, then mint per-binding tokens
+ * through WebPoMinter. When GenerateIT declines a token, the
+ * websafe fallback token is session-bound and served as-is
+ * (verified: one token resolved two different video ids,
+ * ttl ~43200s).
  *
  * The bind is intentionally on the wildcard address: a phone that
  * paired over LAN shares this host's public IP, so desktop-minted
