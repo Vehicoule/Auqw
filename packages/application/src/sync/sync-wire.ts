@@ -83,6 +83,13 @@ export type WelcomeMsg = {
   readonly device: SyncDeviceRecord;
   /** The server's display name. */
   readonly name: string;
+  /**
+   * The server's bundled POT provider (`host:port`), sent on the
+   * connection that actually answered — the authoritative
+   * advertisement, refreshed every welcome so a rebound minter
+   * port heals the stored peer record.
+   */
+  readonly pot?: string;
 };
 
 export type RejectMsg = { readonly t: 'reject'; readonly reason: string };
@@ -189,10 +196,12 @@ export function isSyncDeviceRecord(
 export function isWelcomeMsg(value: unknown): value is WelcomeMsg {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ['t', 'device', 'name']) &&
+    hasKeys(value, ['t', 'device', 'name'], ['pot']) &&
     value['t'] === 'welcome' &&
     isSyncDeviceRecord(value['device']) &&
-    isString(value['name'], DEVICE_NAME_MAX)
+    isString(value['name'], DEVICE_NAME_MAX) &&
+    (value['pot'] === undefined ||
+      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
   );
 }
 

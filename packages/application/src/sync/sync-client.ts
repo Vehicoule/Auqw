@@ -195,6 +195,27 @@ const MAX_SYNC_PAGES = 64;
 const MAX_EXPORT_PAGE = 10_000;
 
 /**
+ * An advertised `pot` names the minter on the server's PRIMARY sync
+ * host, but the phone may have connected through a different one
+ * (VPN first, Wi-Fi second). Rebase onto the host that actually
+ * answered so the stored endpoint is the reachable one; an IPv6
+ * dial keeps the advertised host verbatim — the minter binds IPv4
+ * only, so the advertised host is the best available there.
+ */
+function rebasePot(
+  pot: string | undefined,
+  dialedHost: string,
+): string | undefined {
+  if (pot === undefined) {
+    return undefined;
+  }
+  const parsed = parseEndpoint(pot);
+  return parsed !== null && !dialedHost.includes(':')
+    ? `${dialedHost}:${parsed.port}`
+    : pot;
+}
+
+/**
  * Mint-or-load the phone's sync identity — the deviceId the wire
  * hello claims AND the one every engine entry stamps. Resolved before
  * engine construction so both share one id.
@@ -248,7 +269,13 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   /** In-flight dials keyed by fp — concurrent syncNow shares one. */
   const connecting = new Map<
     string,
-    Promise<Result<{ session: ClientSession; welcome: WelcomeMsg }>>
+    Promise<
+      Result<{
+        session: ClientSession;
+        welcome: WelcomeMsg;
+        endpoint: SyncEndpoint;
+      }>
+    >
   >();
   const listeners = new Set<(status: SyncClientStatus) => void>();
   let peersLoaded = false;
@@ -909,20 +936,10 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       return err(opened.error);
     }
     const { session, welcome, endpoint } = opened.value;
-    // The payload's `pot` advertises the minter on the PRIMARY sync
-    // host — the phone may have connected through a different one
-    // (VPN first, Wi-Fi second). Rebase onto the host that actually
-    // answered so the stored endpoint is the reachable one; a IPv6
-    // dial keeps the advertised host verbatim (the minter is IPv4
-    // only — the payload's host is the best available).
-    let storedPot: string | undefined;
-    if (pot !== undefined) {
-      const parsed = parseEndpoint(pot);
-      storedPot =
-        parsed !== null && !endpoint.host.includes(':')
-          ? `${endpoint.host}:${parsed.port}`
-          : pot;
-    }
+    // The welcome's `pot` is the answering server's own
+    // advertisement — authoritative over the QR payload's copy and
+    // the only channel a typed-code pairing learns it through.
+    const storedPot = rebasePot(welcome.pot ?? pot, endpoint.host);
     const stored: SyncPeer = {
       fp: session.peerFp,
       name: welcome.name,
@@ -1018,7 +1035,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       if (!loaded.ok) {
         return loaded;
       }
-      const peer = peers.get(fp);
+      let peer = peers.get(fp);
       if (peer === undefined) {
         return err(appError('not-found', 'sync: unknown peer fingerprint'));
       }
@@ -1085,6 +1102,22 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             return err(
               appError('auth-required', 'sync: device re-bound remotely'),
             );
+          }
+          // The welcome's pot is connection-authoritative: a desktop
+          // that rebound its ephemeral minter port advertises the new
+          // one here, healing a stale record without a re-pair.
+          const welcomePot = rebasePot(
+            opened.value.welcome.pot,
+            opened.value.endpoint.host,
+          );
+          if (welcomePot !== undefined && welcomePot !== peer.pot) {
+            const refreshed: SyncPeer = { ...peer, pot: welcomePot };
+            peers.set(fp, refreshed);
+            const persisted = await deps.keys.peerPut(refreshed, signal);
+            if (!persisted.ok) {
+              return err(persisted.error);
+            }
+            peer = refreshed;
           }
         }
       }

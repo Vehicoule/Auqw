@@ -1159,10 +1159,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       ) {
         pendingSync.delete(session.registeredId);
       }
+      const pairPot = potEndpoint();
       sendSealed(session, {
         t: 'welcome',
         device: outcome.record,
         name: deviceName,
+        // The minter advertisement rides the welcome too — a guest
+        // that paired by typed code (no QR payload) learns it here.
+        ...(pairPot !== null ? { pot: pairPot } : {}),
       });
       await enterOpen(session);
       return;
@@ -1197,10 +1201,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         reject('unavailable');
         return;
       }
+      const resumePot = potEndpoint();
       sendSealed(session, {
         t: 'welcome',
         device: record,
         name: deviceName,
+        // Refreshed every resume: a rebound ephemeral minter port
+        // heals the stored peer record on the next sync connect.
+        ...(resumePot !== null ? { pot: resumePot } : {}),
       });
       await enterOpen(session);
       return;
