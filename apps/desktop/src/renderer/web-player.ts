@@ -42,6 +42,11 @@ export type AudioLike = {
   readonly duration: number;
   readonly paused: boolean;
   readonly ended: boolean;
+  /**
+   * Output gain 0–1 — the stage's volume row writes this. The port
+   * never touches it (mixing stays with the element and the OS).
+   */
+  volume: number;
   play(): Promise<void>;
   pause(): void;
   addEventListener(type: string, listener: () => void): void;

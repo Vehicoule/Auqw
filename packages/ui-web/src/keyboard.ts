@@ -112,11 +112,20 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 export type GlobalKeyAction = 'focus-search' | null;
 
-/** '/' opens search from anywhere outside an editable element. */
+/**
+ * '/' opens search from anywhere outside an editable element; so does
+ * the Ctrl/Meta-K chord — the toolbar field's advertised shortcut.
+ * The chord is honored even inside editables (it steals nothing a
+ * text field owns).
+ */
 export function globalKeyAction(
   key: string,
   target: EventTarget | null,
+  ctrl = false,
 ): GlobalKeyAction {
+  if ((key === 'k' || key === 'K') && ctrl) {
+    return 'focus-search';
+  }
   if (key === '/' && !isEditableTarget(target)) {
     return 'focus-search';
   }

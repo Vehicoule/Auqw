@@ -217,7 +217,9 @@
 .ui-web:not([data-reduced-motion='true']) .uw-icon-btn,
 .ui-web:not([data-reduced-motion='true']) .uw-pressable,
 .ui-web:not([data-reduced-motion='true']) .uw-back,
-.ui-web:not([data-reduced-motion='true']) .uw-sidebar__item,
+.ui-web:not([data-reduced-motion='true']) .uw-navtab,
+.ui-web:not([data-reduced-motion='true']) .uw-tsrch__icon,
+.ui-web:not([data-reduced-motion='true']) .uw-tsrch__clear,
 .ui-web:not([data-reduced-motion='true']) .uw-sheet-panel__close,
 .ui-web:not([data-reduced-motion='true']) .uw-search__cancel,
 .ui-web:not([data-reduced-motion='true']) .uw-search__clear,
@@ -455,8 +457,8 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
-  min-height: var(--size-track-row);
-  padding: 0 var(--spacing-xs);
+  min-height: 40px;
+  padding: 0 var(--spacing-sm);
   border-radius: var(--radius-control);
   position: relative;
 }
@@ -477,8 +479,8 @@
 }
 .uw-track-row__art {
   position: relative;
-  width: 40px;
-  height: 40px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
 }
 .uw-track-row__eq {
@@ -490,12 +492,31 @@
   background: var(--scrim);
   border-radius: var(--radius-thumb);
 }
+/* Single-line anatomy: title truncates first, then the muted
+   '· artist · version' em — both share the row per the preview. */
 .uw-track-row__text {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xxs);
+  align-items: baseline;
+  gap: 6px;
+}
+.uw-track-row__em {
+  flex: 1;
+  min-width: 0;
+  font-style: normal;
+  font-family: var(--font-body-family), var(--uw-font-stack);
+  font-size: calc(var(--font-body) * var(--uw-scale));
+  line-height: calc(var(--font-body-line) * var(--uw-scale));
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.uw-track-row[data-state='unavailable'] .uw-track-row__em,
+.uw-track-row[data-state='unavailable'] .uw-track-row__clock {
+  color: var(--text-secondary);
+  opacity: 0.6;
 }
 .uw-track-row__tail {
   display: flex;
@@ -1382,11 +1403,27 @@
   flex-shrink: 1;
   min-height: 0;
 }
+/* Meta + action buttons share one row (title/artist column left,
+   download · playlist icons pinned right) — same anatomy in the
+   sheet and the persistent column. */
 .uw-stage__meta {
   margin-top: var(--spacing-lg);
   display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+.uw-stage__meta-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
   gap: var(--spacing-xxs);
+}
+.uw-stage__meta-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xxs);
+  flex-shrink: 0;
 }
 .uw-stage__meta--lyrics {
   margin-top: var(--spacing-md);
@@ -1534,6 +1571,301 @@
   background: var(--accent-soft);
 }
 
+/* ---- omarchy shell: stage column + world -------------------------- */
+
+.uw-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--canvas);
+}
+
+/* The stage column runs to the top edge — its own top strip doubles
+   as a drag grip, so no titlebar band sits above it. */
+.uw-stage-col {
+  width: 340px;
+  flex: 0 0 340px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--stage);
+  border-right: var(--stroke-hairline) solid var(--hairline);
+  padding: 0 var(--spacing-xl) var(--spacing-lg);
+}
+.uw-stage-top {
+  position: relative;
+  flex: 0 0 var(--uw-titlebar-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 calc(var(--spacing-xl) * -1);
+  -webkit-app-region: drag;
+}
+.uw-stage-top .uw-stage-pill,
+.uw-stage-top .uw-stage-top__side {
+  -webkit-app-region: no-drag;
+}
+.uw-stage-pill {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  height: 28px;
+  padding: 0 var(--spacing-md);
+  border-radius: var(--radius-pill);
+  background: var(--fg08);
+}
+.uw-stage-pill__caret {
+  width: 7px;
+  height: 7px;
+  transform: rotate(45deg);
+  border-right: var(--stroke-hairline) solid var(--text-secondary);
+  border-bottom: var(--stroke-hairline) solid var(--text-secondary);
+}
+.uw-stage-top__side {
+  position: absolute;
+  right: var(--spacing-sm);
+}
+.uw-stage-col .uw-segment {
+  margin-top: auto;
+}
+
+/* The transport's stage variant: prev/next sit loose, play is the
+   solid bright block the preview draws. */
+.uw-transport--stage .uw-transport__play {
+  width: 48px;
+  min-width: 48px;
+  height: 48px;
+  border-radius: var(--radius-control);
+  background: var(--text-bright);
+}
+.uw-transport--stage .uw-transport__play:hover:not(:disabled) {
+  transform: none;
+  box-shadow: inset 0 0 0 999px var(--fg18);
+}
+.uw-transport--stage .uw-transport__main,
+.uw-transport--stage .uw-transport__side {
+  width: 32px;
+  height: 32px;
+}
+
+.uw-vol {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+}
+.uw-vol__input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+}
+.uw-vol__input:focus {
+  outline: none;
+}
+.uw-vol__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-pill);
+}
+.uw-vol__input::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--accent) var(--uw-fill),
+    var(--fg18) var(--uw-fill),
+    var(--fg18) 100%
+  );
+}
+.uw-vol__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--text-bright);
+}
+.uw-vol__input::-moz-range-track {
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--fg18);
+}
+.uw-vol__input::-moz-range-progress {
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+.uw-vol__input::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--text-bright);
+}
+
+/* The world column: draggable toolbar + content region. */
+.uw-world {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--canvas);
+}
+.uw-toolbar {
+  position: relative;
+  flex: 0 0 var(--uw-titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing-lg) 0 var(--spacing-xl);
+  -webkit-app-region: drag;
+}
+.uw-toolbar > * {
+  -webkit-app-region: no-drag;
+}
+.uw-toolbar > .uw-wco {
+  -webkit-app-region: drag;
+}
+
+/* Toolbar search: a 32px icon that grows into the toolbar's left
+   field on focus — open it claims the row and the tabs step aside. */
+.uw-tsrch {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xxs);
+  height: 32px;
+  min-width: 32px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.uw-tsrch:hover {
+  background: var(--fg08);
+}
+.uw-tsrch__icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: var(--radius-control);
+}
+.uw-tsrch__input {
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--uw-font-stack);
+  font-size: calc(var(--font-body) * var(--uw-scale));
+  min-width: 0;
+  width: 0;
+  flex: 0 1 auto;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+}
+.uw-tsrch__input:focus {
+  outline: none;
+}
+.uw-tsrch--open {
+  flex: 1;
+  min-width: 0;
+  margin: 0 var(--spacing-xs);
+  padding-left: var(--spacing-xs);
+  background: var(--fg08);
+}
+.uw-tsrch--open .uw-tsrch__input {
+  flex: 1;
+  width: auto;
+  opacity: 1;
+  pointer-events: auto;
+}
+.uw-tsrch__cancel {
+  padding: 0 var(--spacing-sm);
+  flex: 0 0 auto;
+}
+.uw-tsrch__clear {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: var(--radius-control);
+}
+.uw-tsrch__clear:hover:not(:disabled) {
+  background: var(--fg18);
+}
+.uw-tsrch__kbd {
+  flex: 0 0 auto;
+  padding: 1px var(--spacing-xs);
+  margin-right: var(--spacing-xxs);
+  border: var(--stroke-hairline) solid var(--hairline);
+  border-radius: var(--radius-control);
+  font-family: var(--uw-font-stack);
+  font-size: var(--font-metadata);
+  color: var(--text-secondary);
+}
+
+/* Centered nav tabs — absolutely centered so search/right controls
+   never nudge them off the window's middle. */
+.uw-navtabs {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xxs);
+  padding: 3px;
+  border-radius: var(--radius-control);
+  background: var(--fg08);
+}
+.uw-navtab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px var(--spacing-md);
+  border-radius: var(--radius-control);
+}
+.uw-navtab:hover:not(:disabled):not(.uw-navtab--on) {
+  background: var(--fg18);
+}
+.uw-navtab--on {
+  background: var(--raised);
+}
+
+.uw-toolbar__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+/* Caption-button reservation: the frameless window's overlay buttons
+   draw over this span — the hairline marks where app chrome ends. */
+.uw-wco {
+  align-self: stretch;
+  width: 128px;
+  border-left: var(--stroke-hairline) solid var(--hairline);
+}
+
+.uw-world-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Kept for other embedders: the pre-shell chrome chrome used by
+   embedders before the omarchy layout landed. */
 .uw-chrome {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
@@ -1541,51 +1873,12 @@
   min-height: 0;
   background: var(--canvas);
 }
-.uw-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xxs);
-  padding: var(--spacing-md) var(--spacing-sm);
-  background: var(--deep);
-  border-right: var(--stroke-hairline) solid var(--hairline);
-  /* frameless window: the sidebar dead space doubles as a drag grip */
-  -webkit-app-region: drag;
-}
-.uw-sidebar__item,
-.uw-sidebar__item * {
-  -webkit-app-region: no-drag;
-}
-.uw-sidebar__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm);
-  margin-bottom: var(--spacing-md);
-}
-.uw-sidebar__item {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  width: 100%;
-  min-height: 36px;
-  padding: 0 var(--spacing-md);
-  border-radius: var(--radius-control);
-  text-align: left;
-}
-.uw-sidebar__item--on {
-  background: var(--accent-soft);
-}
-.uw-sidebar__item:hover:not(:disabled):not(.uw-sidebar__item--on) {
-  background: var(--fg08);
-}
 .uw-chrome__main {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
-/* Frameless titlebar strip — keeps the Electron window-control
-   overlay off screen content and gives the window a drag grip. */
 .uw-chrome__main::before {
   content: '';
   flex: 0 0 var(--uw-titlebar-h);

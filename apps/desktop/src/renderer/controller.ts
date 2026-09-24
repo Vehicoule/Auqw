@@ -41,7 +41,7 @@ import { createSqliteDriver } from './sqlite-driver.ts';
 import { createClock, createIds, createLog } from './runtime.ts';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
-import type { MediaSessionLike } from './web-player.ts';
+import type { AudioLike, MediaSessionLike } from './web-player.ts';
 
 /**
  * The provider-slot → routing-capability map mirrored from the app's
@@ -206,6 +206,12 @@ export type SessionController = {
   readonly storage: StoragePort;
   readonly providers: readonly PluginProvider[];
   readonly player: PlayerPort;
+  /**
+   * The live playback element when the real web player is in use
+   * (null under an injected player seam) — the stage's volume row
+   * writes `.volume` directly; the port owns everything else.
+   */
+  readonly audio: AudioLike | null;
   /** The download ledger — `init`d post-restore inside the controller. */
   readonly downloads: DownloadManager;
   /**
@@ -302,17 +308,22 @@ export async function createSessionController(
   const storage =
     options?.storage ??
     new SqliteStorage(createSqliteDriver(api.storage), defaults);
-  const player =
-    options?.player ??
-    createWebPlayerPort({
+  let audioEl: AudioLike | null = null;
+  let player: PlayerPort;
+  if (options?.player !== undefined) {
+    player = options.player;
+  } else {
+    audioEl = new Audio();
+    player = createWebPlayerPort({
       stream: api.stream,
-      audio: new Audio(),
+      audio: audioEl,
       mediaSession:
         'mediaSession' in navigator
           ? (navigator.mediaSession as MediaSessionLike)
           : null,
       mse: browserMse(),
     });
+  }
 
   const clock = options?.clock ?? createClock();
   const ids = options?.ids ?? createIds();
@@ -802,6 +813,7 @@ export async function createSessionController(
     storage,
     providers,
     player,
+    audio: audioEl,
     downloads,
     local: () => localSource,
     connectivity,

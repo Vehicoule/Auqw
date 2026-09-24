@@ -36,7 +36,6 @@ import {
   AppStack,
   CollectionScreen,
   CorrectionsScreen,
-  DesktopChrome,
   EntityScreen,
   ErrorState,
   HomeScreen,
@@ -52,10 +51,11 @@ import {
   SettingsScreen,
   SheetScreen,
   StackItem,
-  StageSheet,
+  StageColumn,
   Text,
   ThemeProvider,
   TransferScreen,
+  WorldChrome,
   entityIdForRef,
   formatClock,
   toCollectionModel,
@@ -104,8 +104,11 @@ const NAV_ITEMS: readonly NavItemModel[] = [
   { key: 'home', label: 'home' },
   { key: 'explore', label: 'explore' },
   { key: 'library', label: 'library' },
-  { key: 'settings', label: 'settings' },
 ];
+
+// The world's centered tabs — settings stays reachable through the
+// toolbar menu instead of a fourth tab (the contract's nav is
+// home|explore|library only).
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
 
@@ -435,13 +438,18 @@ function Main({
 }) {
   const { session } = controller;
   const [tab, setTab] = useState('home');
-  const [expanded, setExpanded] = useState(false);
+  const [stageCollapsed, setStageCollapsed] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
-  // Bumped when '/' routes to explore — remounts SearchScreen so its
-  // autoFocus refocuses the box even when the tab was already active.
+  // Bumped when '/' or Ctrl-K routes to the toolbar search — the
+  // field focuses on the signal even when it was already open.
   const [searchFocusTick, setSearchFocusTick] = useState(0);
+  // Playback volume — the stage column writes it straight to the
+  // element; nothing else needs to observe it.
+  const [volume, setVolume] = useState(() => controller.audio?.volume ?? 1);
   // Recent searches: session-scoped, newest first — persisting them
   // would be a storage-schema decision, so they die with the app.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
@@ -1172,7 +1180,11 @@ function Main({
   // actually showing — and refetch whenever the track under it
   // changes. Leaving lyrics mode keeps the last sheet cached.
   useEffect(() => {
-    if (!expanded || stageMode !== 'lyrics' || currentRecordingId === null) {
+    if (
+      stageCollapsed ||
+      stageMode !== 'lyrics' ||
+      currentRecordingId === null
+    ) {
       return;
     }
     if (lyricsFetch?.recordingId === currentRecordingId) {
@@ -1180,7 +1192,7 @@ function Main({
     }
     fetchLyrics(currentRecordingId);
   }, [
-    expanded,
+    stageCollapsed,
     stageMode,
     currentRecordingId,
     lyricsFetch,
@@ -1879,23 +1891,70 @@ function Main({
     [session, pushOverlay],
   );
 
+  const onCancelSearch = useCallback(() => {
+    setQuery('');
+    search?.cancel();
+  }, [search]);
+
+  const onVolumeChange = useCallback(
+    (value: number) => {
+      const audio = controller.audio;
+      if (audio === null) {
+        return;
+      }
+      audio.volume = Math.min(1, Math.max(0, value));
+      setVolume(audio.volume);
+    },
+    [controller],
+  );
+
+  const onMenuAction = useCallback(
+    (key: string) => {
+      setMenuOpen(false);
+      switch (key) {
+        case 'settings':
+          setTab('settings');
+          clearOverlays();
+          break;
+        case 'theme':
+          setThemePickerOpen(true);
+          break;
+        case 'queue':
+          setStageCollapsed(false);
+          setStageMode('queue');
+          break;
+        case 'corrections':
+          pushOverlay({ type: 'corrections' });
+          break;
+        case 'transfer':
+          pushOverlay({ type: 'transfer' });
+          break;
+        default:
+          break;
+      }
+    },
+    [pushOverlay, clearOverlays],
+  );
+
+  // The toolbar search and the explore tab share one body: while the
+  // field is open (from '/' / Ctrl-K / the icon) the world shows
+  // results regardless of the active tab — the GTK pattern.
+  const showSearch = searchOpen || tab === 'explore';
+
   const renderTabScreen = (key: string) => {
     switch (key) {
       case 'explore':
         return (
           <SearchScreen
-            key={searchFocusTick}
             state={searchModel}
             query={query}
+            hideField
             onQueryChange={setQuery}
             onSubmit={() => {
               recordRecentSearch(query);
               runSearch(query);
             }}
-            onCancel={() => {
-              setQuery('');
-              search?.cancel();
-            }}
+            onCancel={onCancelSearch}
             onRetry={() => runSearch(searchModel.query)}
             onResultPress={onResultPress}
             onContext={(row) => {
@@ -1908,8 +1967,8 @@ function Main({
             onRecentPress={(recent) => {
               setQuery(recent);
               recordRecentSearch(recent);
+              setSearchOpen(true);
             }}
-            autoFocus
           />
         );
       case 'library':
@@ -2175,61 +2234,100 @@ function Main({
       />
       <AppStack>
         <StackItem stackKey="root">
-          <DesktopChrome
-            items={NAV_ITEMS}
-            activeKey={tab}
-            onSelect={(key) => {
-              setTab(key);
-              clearOverlays();
-            }}
-            onFocusSearch={() => {
-              setTab('explore');
-              setSearchFocusTick((n) => n + 1);
-            }}
-            miniPlayer={
-              player !== null && !expanded ? (
-                <MiniPlayer
-                  player={player}
-                  onPress={() => setExpanded(true)}
-                  onPlayPause={onPlayPause}
-                  onNext={() => advance('next')}
-                  onPrevious={() => advance('previous')}
-                  onToggleLike={onToggleLike}
-                  onDismiss={() => void session.stop()}
-                />
-              ) : undefined
-            }
-          >
-            {renderTabScreen(tab)}
-          </DesktopChrome>
-          {player !== null ? (
-            <StageSheet
-              player={player}
-              expanded={expanded}
-              onExpandChange={setExpanded}
-              mode={stageMode}
-              onModeChange={setStageMode}
-              queue={queueModel}
-              queueReordering={reordering}
-              lyrics={lyricsModel}
-              radio={radioModel}
-              onPlayPause={onPlayPause}
-              onNext={() => advance('next')}
-              onPrevious={() => advance('previous')}
-              onToggleLike={onToggleLike}
-              onSeek={(ms) => void session.seekTo(ms)}
-              onRetryLyrics={onRetryLyrics}
-              onStartRadio={
-                radioSeedable(radioSeedRef) ? onStartRadio : undefined
+          <div className="uw-shell">
+            {!stageCollapsed && (
+              <StageColumn
+                player={player}
+                mode={stageMode}
+                onModeChange={setStageMode}
+                queue={queueModel}
+                queueReordering={reordering}
+                lyrics={lyricsModel}
+                radio={radioModel}
+                download={
+                  queueModel.items.find((item) => item.current)?.row
+                    .download ?? null
+                }
+                onPlayPause={onPlayPause}
+                onNext={() => advance('next')}
+                onPrevious={() => advance('previous')}
+                onToggleLike={onToggleLike}
+                onSeek={(ms) => void session.seekTo(ms)}
+                onRetryLyrics={onRetryLyrics}
+                onStartRadio={
+                  radioSeedable(radioSeedRef) ? onStartRadio : undefined
+                }
+                onStopRadio={onStopRadio}
+                onPressQueueItem={playQueueOccurrence}
+                onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+                onToggleQueueReorder={() => setReordering((v) => !v)}
+                onMoveQueueItem={onMoveQueueItem}
+                onMoveQueueItemTo={onMoveQueueItemTo}
+                onAddToPlaylist={
+                  currentRecordingId === null
+                    ? undefined
+                    : () =>
+                        setPickerFor({
+                          kind: 'recording',
+                          recordingId: currentRecordingId,
+                        })
+                }
+                onCollapse={() => setStageCollapsed(true)}
+                volume={volume}
+                onVolumeChange={
+                  controller.audio === null ? undefined : onVolumeChange
+                }
+              />
+            )}
+            <WorldChrome
+              items={NAV_ITEMS}
+              activeKey={tab}
+              onSelect={(key) => {
+                setTab(key);
+                clearOverlays();
+                if (key === 'explore') {
+                  setSearchOpen(true);
+                }
+              }}
+              search={{
+                open: searchOpen,
+                query,
+                loading: searchModel.phase === 'loading',
+                onOpenChange: setSearchOpen,
+                onQueryChange: setQuery,
+                onSubmit: () => {
+                  recordRecentSearch(query);
+                  runSearch(query);
+                },
+                onCancel: onCancelSearch,
+              }}
+              focusSignal={searchFocusTick}
+              onMenu={() => setMenuOpen(true)}
+              stageCollapsed={stageCollapsed}
+              onRestoreStage={() => setStageCollapsed(false)}
+              onFocusSearch={() => {
+                setSearchOpen(true);
+                setSearchFocusTick((n) => n + 1);
+              }}
+              miniPlayer={
+                player !== null && stageCollapsed ? (
+                  <MiniPlayer
+                    player={player}
+                    onPress={() => setStageCollapsed(false)}
+                    onPlayPause={onPlayPause}
+                    onNext={() => advance('next')}
+                    onPrevious={() => advance('previous')}
+                    onToggleLike={onToggleLike}
+                    onDismiss={() => void session.stop()}
+                  />
+                ) : undefined
               }
-              onStopRadio={onStopRadio}
-              onPressQueueItem={playQueueOccurrence}
-              onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
-              onToggleQueueReorder={() => setReordering((v) => !v)}
-              onMoveQueueItem={onMoveQueueItem}
-              onMoveQueueItemTo={onMoveQueueItemTo}
-            />
-          ) : null}
+            >
+              {showSearch
+                ? renderTabScreen('explore')
+                : renderTabScreen(tab)}
+            </WorldChrome>
+          </div>
           {online === false && (
             <div
               style={{
@@ -2398,6 +2496,33 @@ function Main({
                 setThemePickerOpen(false);
               }}
               onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {menuOpen && (
+          <SheetScreen
+            stackKey="sheet-menu"
+            onDismissed={() => setMenuOpen(false)}
+          >
+            <RowActionsSheet
+              title="menu"
+              actions={[
+                { key: 'settings', label: 'settings', icon: 'settings' },
+                { key: 'theme', label: 'theme', icon: 'monitor' },
+                { key: 'queue', label: 'queue', icon: 'queue' },
+                {
+                  key: 'corrections',
+                  label: 'match reviews',
+                  icon: 'check',
+                },
+                {
+                  key: 'transfer',
+                  label: 'import / export',
+                  icon: 'download',
+                },
+              ]}
+              onAction={onMenuAction}
+              onDismiss={() => setMenuOpen(false)}
             />
           </SheetScreen>
         )}

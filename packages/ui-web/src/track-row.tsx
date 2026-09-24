@@ -98,10 +98,10 @@ export function TrackRow({
         onFocus={onFocusRow}
       >
         <span className="uw-track-row__art">
-          <Artwork url={row.artworkUrl} size={40} dimmed={unavailable} />
+          <Artwork url={row.artworkUrl} size={28} dimmed={unavailable} />
           {row.playing && (
             <span className="uw-track-row__eq">
-              <EqBars size={11} />
+              <EqBars size={10} />
             </span>
           )}
         </span>
@@ -110,14 +110,12 @@ export function TrackRow({
             variant="body"
             color={row.playing ? 'accent' : unavailable ? 'secondary' : 'primary'}
             numberOfLines={1}
-            className={row.playing ? 'uw-track-row__title--playing' : undefined}
+            className={row.playing ? 'uw-text--bold' : undefined}
           >
             {row.title}
           </Text>
           {sub !== '' && (
-            <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {sub}
-            </Text>
+            <em className="uw-track-row__em">· {sub}</em>
           )}
         </span>
       </Pressable>
@@ -157,34 +155,36 @@ export function TrackRow({
         )}
         {row.liked && onToggleLike === undefined && (
           <span className="uw-track-row__chip" title="liked">
-            <Icon name="heart-filled" size={14} color="var(--liked)" />
+            <Icon name="heart-filled" size={13} color="var(--liked)" />
           </span>
+        )}
+        {onToggleLike !== undefined && (
+          <IconButton
+            icon={row.liked ? 'heart-filled' : 'heart'}
+            size={26}
+            iconSize={13}
+            color={row.liked ? 'var(--liked)' : 'var(--text-secondary)'}
+            ariaLabel={row.liked ? 'unlike' : 'like'}
+            onPress={onToggleLike}
+          />
         )}
         {onContext !== undefined && (
           <IconButton
-            icon="menu"
-            size={30}
-            iconSize={14}
+            icon="list-plus"
+            size={26}
+            iconSize={13}
+            color="var(--text-secondary)"
             ariaLabel="row actions"
             onPress={onContext}
             className="uw-track-row__menu"
           />
         )}
-        {onToggleLike !== undefined && (
-          <IconButton
-            icon={row.liked ? 'heart-filled' : 'heart'}
-            size={30}
-            iconSize={14}
-            color={row.liked ? 'var(--liked)' : undefined}
-            ariaLabel={row.liked ? 'unlike' : 'like'}
-            onPress={onToggleLike}
-          />
-        )}
         {onRemove !== undefined && (
           <IconButton
             icon="close"
-            size={30}
-            iconSize={14}
+            size={26}
+            iconSize={13}
+            color="var(--text-secondary)"
             ariaLabel="remove from queue"
             onPress={onRemove}
           />

@@ -50,11 +50,18 @@ export {
 } from './states.tsx';
 export type { StateViewProps } from './states.tsx';
 
-export { DesktopChrome, DesktopHeader, DesktopSidebar } from './chrome.tsx';
+export {
+    DesktopChrome,
+    DesktopHeader,
+    DesktopSidebar,
+    WorldChrome,
+} from './chrome.tsx';
 export type {
     DesktopChromeProps,
     DesktopHeaderProps,
     DesktopSidebarProps,
+    WorldChromeProps,
+    WorldSearchProps,
 } from './chrome.tsx';
 
 export {
@@ -78,13 +85,18 @@ export type { MiniPlayerProps } from './mini-player.tsx';
 export {
     ModeSegment,
     NowPlayingScreen,
+    StageColumn,
+    StageModes,
     StageSheet,
     TransportControls,
 } from './now-playing-screen.tsx';
 export type {
     NowPlayingScreenProps,
+    StageColumnProps,
+    StageModesProps,
     StageSheetProps,
     TransportProps,
+    TransportVariant,
 } from './now-playing-screen.tsx';
 
 export {

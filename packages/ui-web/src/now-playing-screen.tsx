@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import {
   Artwork,
   Icon,
@@ -24,8 +25,10 @@ import type {
 
 export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
+export type TransportVariant = 'm3e' | 'ios' | 'stage';
+
 export type TransportProps = {
-  readonly variant?: 'm3e' | 'ios' | undefined;
+  readonly variant?: TransportVariant | undefined;
   readonly status: PlayerModel['status'];
   readonly liked: boolean;
   readonly canPrevious: boolean;
@@ -34,13 +37,18 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /**
+   * Repeat-mode cycle — the 'stage' layout always renders the control;
+   * with no handler it stays honestly disabled (no repeat backend
+   * exists yet).
+   */
+  readonly onRepeat?: (() => void) | undefined;
+  readonly repeatActive?: boolean | undefined;
   /** Owned-bytes state of the current track; null hides the button. */
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
 };
 
-// The desktop transport keeps the m3e layout (raised main pill,
-// accent play slab) — the ios glass variant exists for parity.
 export function TransportControls({
   variant = 'm3e',
   status,
@@ -51,12 +59,15 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
+  onRepeat,
+  repeatActive = false,
   download = null,
   onDownload,
 }: TransportProps) {
   const busy = status === 'preparing' || status === 'buffering';
   const playing = status === 'playing';
-  const playColor = variant === 'm3e' ? 'var(--canvas)' : 'var(--text-bright)';
+  const playColor =
+    variant === 'ios' ? 'var(--text-bright)' : 'var(--canvas)';
   return (
     <div className={`uw-transport uw-transport--${variant}`} role="group" aria-label="transport">
       <IconButton
@@ -101,7 +112,21 @@ export function TransportControls({
         onPress={onNext}
         className="uw-transport__main"
       />
-      {download !== null && (
+      {variant === 'stage' && (
+        <IconButton
+          icon="repeat"
+          size={32}
+          iconSize={14}
+          color={repeatActive ? 'var(--accent)' : 'var(--text-secondary)'}
+          ariaLabel={
+            onRepeat === undefined ? 'repeat — not wired yet' : 'repeat'
+          }
+          active={repeatActive}
+          onPress={onRepeat}
+          className="uw-transport__side"
+        />
+      )}
+      {variant !== 'stage' && download !== null && (
         <IconButton
           icon={
             download === 'stored'
@@ -181,6 +206,53 @@ export function ModeSegment({
   );
 }
 
+function DownloadButton({
+  download,
+  onDownload,
+  size = 28,
+  iconSize = 14,
+}: {
+  readonly download: DownloadChip | null;
+  readonly onDownload?: (() => void) | undefined;
+  readonly size?: number | undefined;
+  readonly iconSize?: number | undefined;
+}) {
+  if (download === null) {
+    return null;
+  }
+  return (
+    <IconButton
+      icon={
+        download === 'stored'
+          ? 'check'
+          : download === 'failed'
+            ? 'warn'
+            : 'download'
+      }
+      size={size}
+      iconSize={iconSize}
+      color={
+        download === 'failed'
+          ? 'var(--warn)'
+          : download === 'stored'
+            ? 'var(--accent)'
+            : 'var(--text-secondary)'
+      }
+      ariaLabel={
+        download === 'stored'
+          ? 'downloaded — remove'
+          : download === 'failed'
+            ? 'download failed — retry'
+            : download === 'queued' || download === 'downloading'
+              ? 'downloading — cancel'
+              : 'download'
+      }
+      active={download === 'stored'}
+      onPress={onDownload}
+    />
+  );
+}
+
 export type NowPlayingScreenProps = {
   readonly player: PlayerModel;
   readonly mode?: StageMode | undefined;
@@ -193,8 +265,11 @@ export type NowPlayingScreenProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  readonly onRepeat?: (() => void) | undefined;
+  readonly repeatActive?: boolean | undefined;
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
+  readonly onAddToPlaylist?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
@@ -211,7 +286,23 @@ export type NowPlayingScreenProps = {
     | undefined;
 };
 
-export function NowPlayingScreen({
+export type StageModesProps = NowPlayingScreenProps & {
+  /** The resolved pane — controlled or the caller's internal state. */
+  readonly mode: StageMode;
+  readonly transportVariant?: TransportVariant | undefined;
+  /**
+   * Extra control rows appended under the transport in player mode —
+   * the column's volume row lives here.
+   */
+  readonly afterTransport?: ReactNode | undefined;
+};
+
+/**
+ * The three stage-mode bodies, unrooted — shared by the overlay
+ * (NowPlayingScreen/StageSheet wraps it in `.uw-stage`) and the
+ * persistent StageColumn.
+ */
+export function StageModes({
   player,
   mode,
   queue,
@@ -223,48 +314,68 @@ export function NowPlayingScreen({
   onNext,
   onPrevious,
   onToggleLike,
+  onRepeat,
+  repeatActive = false,
   download = null,
   onDownload,
+  onAddToPlaylist,
   onSeek,
   onRetryLyrics,
   onStartRadio,
   onStopRadio,
-  onModeChange,
   onPressQueueItem,
   onRemoveQueueItem,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
-}: NowPlayingScreenProps) {
-  const [internalMode, setInternalMode] = useState<StageMode>('player');
-  const activeMode = mode ?? internalMode;
+  transportVariant = 'm3e',
+  afterTransport,
+}: StageModesProps) {
   return (
-    <div className="uw-stage" data-mode={activeMode}>
-      {activeMode === 'player' && (
+    <>
+      {mode === 'player' && (
         <>
           <div className="uw-stage__art">
             <Artwork url={player.artworkUrl} fill />
           </div>
           <div className="uw-stage__meta">
-            <Text variant="title" color="bright" numberOfLines={1}>
-              {player.title}
-            </Text>
-            <Text variant="body" color="primary" numberOfLines={1}>
-              {player.artist ?? '—'}
-            </Text>
-            {player.albumLabel !== null && (
-              <Text
-                variant="metadata"
-                color="secondary"
-                numberOfLines={1}
-              >
-                {player.albumLabel}
+            <div className="uw-stage__meta-text">
+              <Text variant="title" color="bright" numberOfLines={1}>
+                {player.title}
               </Text>
-            )}
-            {player.errorMessage !== null && (
-              <Text variant="metadata" color="warn" numberOfLines={2}>
-                {player.errorMessage}
+              <Text variant="body" color="primary" numberOfLines={1}>
+                {player.artist ?? '—'}
               </Text>
+              {player.albumLabel !== null && (
+                <Text
+                  variant="metadata"
+                  color="secondary"
+                  numberOfLines={1}
+                >
+                  {player.albumLabel}
+                </Text>
+              )}
+              {player.errorMessage !== null && (
+                <Text variant="metadata" color="warn" numberOfLines={2}>
+                  {player.errorMessage}
+                </Text>
+              )}
+            </div>
+            {(download !== null || onAddToPlaylist !== undefined) && (
+              <div className="uw-stage__meta-actions">
+                <DownloadButton
+                  download={download}
+                  onDownload={onDownload}
+                />
+                <IconButton
+                  icon="list-plus"
+                  size={28}
+                  iconSize={13}
+                  color="var(--text-secondary)"
+                  ariaLabel="add to playlist"
+                  onPress={onAddToPlaylist}
+                />
+              </div>
             )}
           </div>
           <WaveformSeek
@@ -273,7 +384,7 @@ export function NowPlayingScreen({
             onSeek={onSeek}
           />
           <TransportControls
-            variant="m3e"
+            variant={transportVariant}
             status={player.status}
             liked={player.liked}
             canPrevious={player.canPrevious}
@@ -282,9 +393,12 @@ export function NowPlayingScreen({
             onPrevious={onPrevious}
             onNext={onNext}
             onToggleLike={onToggleLike}
+            onRepeat={onRepeat}
+            repeatActive={repeatActive}
             download={download}
             onDownload={onDownload}
           />
+          {afterTransport}
           {/*
            * The live radio element: a seed affordance when no tail is
            * armed, the tail's honest status when one is — 'failed'
@@ -336,16 +450,27 @@ export function NowPlayingScreen({
           )}
         </>
       )}
-      {activeMode === 'lyrics' && (
+      {mode === 'lyrics' && (
         <>
           <div className="uw-stage__meta uw-stage__meta--lyrics">
-            <Text variant="body" color="bright" numberOfLines={1}>
-              {player.title}
-            </Text>
-            <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {player.artist ?? '—'}
-              {lyrics?.syncLabel != null ? ` · ${lyrics.syncLabel}` : ''}
-            </Text>
+            <div className="uw-stage__meta-text">
+              <Text variant="body" color="bright" numberOfLines={1}>
+                {player.title}
+              </Text>
+              <Text variant="metadata" color="secondary" numberOfLines={1}>
+                {player.artist ?? '—'}
+                {lyrics?.syncLabel != null ? ` · ${lyrics.syncLabel}` : ''}
+              </Text>
+            </div>
+            <div className="uw-stage__meta-actions">
+              <IconButton
+                icon="pin"
+                size={28}
+                iconSize={13}
+                color="var(--text-secondary)"
+                ariaLabel="pin lyrics — not wired yet"
+              />
+            </div>
           </div>
           {/*
            * Honest lyrics: only `state === 'synced'` highlights the
@@ -399,7 +524,7 @@ export function NowPlayingScreen({
           )}
         </>
       )}
-      {activeMode === 'queue' && (
+      {mode === 'queue' && (
         <div className="uw-stage__queue">
           {queue === undefined ? (
             <EmptyState title="queue is empty" icon="queue" />
@@ -437,15 +562,174 @@ export function NowPlayingScreen({
           )}
         </div>
       )}
-      <ModeSegment
-        mode={activeMode}
-        onSelect={(m) => {
-          setInternalMode(m);
-          if (onModeChange !== undefined) {
-            onModeChange(m);
+    </>
+  );
+}
+
+function useStageMode(
+  mode: StageMode | undefined,
+  onModeChange: ((mode: StageMode) => void) | undefined,
+): readonly [StageMode, (next: StageMode) => void] {
+  const [internalMode, setInternalMode] = useState<StageMode>('player');
+  const activeMode = mode ?? internalMode;
+  const select = useCallback(
+    (next: StageMode) => {
+      setInternalMode(next);
+      onModeChange?.(next);
+    },
+    [onModeChange],
+  );
+  return [activeMode, select];
+}
+
+export function NowPlayingScreen(props: NowPlayingScreenProps) {
+  const [activeMode, selectMode] = useStageMode(props.mode, props.onModeChange);
+  return (
+    <div className="uw-stage" data-mode={activeMode}>
+      <StageModes {...props} mode={activeMode} transportVariant="m3e" />
+      <ModeSegment mode={activeMode} onSelect={selectMode} />
+    </div>
+  );
+}
+
+export type StageColumnProps = Omit<NowPlayingScreenProps, 'player'> & {
+  /**
+   * The playing track — null is an honest idle stage ("nothing
+   * playing"), not a missing player.
+   */
+  readonly player: PlayerModel | null;
+  /**
+   * The output-device readout — the contract's audio-output affordance
+   * has no backend surface on this build, so the pill is a read-only
+   * label with a caret, not a picker trigger.
+   */
+  readonly outputLabel?: string | undefined;
+  /** Collapse the column — the world takes the full window then. */
+  readonly onCollapse?: (() => void) | undefined;
+  /** Playback volume 0–1; without a setter the row renders disabled. */
+  readonly volume?: number | undefined;
+  readonly onVolumeChange?: ((volume: number) => void) | undefined;
+};
+
+/**
+ * The desktop stage as a persistent column — the same mode bodies the
+ * StageSheet hosts, framed by the stage-top strip (output readout +
+ * collapse) and the pinned mode segment.
+ */
+export function StageColumn({
+  outputLabel = 'default output',
+  onCollapse,
+  volume,
+  onVolumeChange,
+  player,
+  queue,
+  queueReordering = false,
+  queueScrollEnabled = true,
+  onPressQueueItem,
+  onRemoveQueueItem,
+  onToggleQueueReorder,
+  onMoveQueueItem,
+  onMoveQueueItemTo,
+  ...rest
+}: StageColumnProps) {
+  const [activeMode, selectMode] = useStageMode(rest.mode, rest.onModeChange);
+  return (
+    <div className="uw-stage-col" data-mode={activeMode}>
+      <div className="uw-stage-top">
+        <div
+          className="uw-stage-pill"
+          title={`audio output · ${outputLabel}`}
+        >
+          <Icon name="monitor" size={12} color="var(--text-secondary)" />
+          <Text variant="metadata" color="secondary">
+            {outputLabel}
+          </Text>
+          <span className="uw-stage-pill__caret" aria-hidden="true" />
+        </div>
+        <IconButton
+          icon="sidebar"
+          size={28}
+          iconSize={13}
+          color="var(--text-secondary)"
+          ariaLabel="hide stage"
+          onPress={onCollapse}
+          className="uw-stage-top__side"
+        />
+      </div>
+      {player === null ? (
+        <>
+          {activeMode === 'player' && (
+            <EmptyState title="nothing playing" icon="note" />
+          )}
+          {activeMode === 'lyrics' && (
+            <EmptyState title="no lyrics" icon="lyrics" />
+          )}
+          {activeMode === 'queue' && (
+            <div className="uw-stage__queue">
+              {queue === undefined ? (
+                <EmptyState title="queue is empty" icon="queue" />
+              ) : (
+                <QueueList
+                  queue={queue}
+                  reordering={queueReordering}
+                  scrollEnabled={queueScrollEnabled}
+                  onPressItem={onPressQueueItem}
+                  onRemoveItem={onRemoveQueueItem}
+                  onMoveItem={onMoveQueueItem}
+                  onMoveItemTo={onMoveQueueItemTo}
+                />
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <StageModes
+          {...rest}
+          player={player}
+          queue={queue}
+          queueReordering={queueReordering}
+          queueScrollEnabled={queueScrollEnabled}
+          onPressQueueItem={onPressQueueItem}
+          onRemoveQueueItem={onRemoveQueueItem}
+          onToggleQueueReorder={onToggleQueueReorder}
+          onMoveQueueItem={onMoveQueueItem}
+          onMoveQueueItemTo={onMoveQueueItemTo}
+          mode={activeMode}
+          transportVariant="stage"
+          afterTransport={
+            <div className="uw-vol" role="group" aria-label="volume">
+              <Icon
+                name="volume"
+                size={14}
+                color="var(--text-secondary)"
+              />
+              <input
+                type="range"
+                className={`uw-vol__input${onVolumeChange === undefined ? ' uw-off' : ''}`}
+                aria-label="volume"
+                aria-valuetext={`${Math.round((volume ?? 1) * 100)}%`}
+                min={0}
+                max={1}
+                step="any"
+                value={volume ?? 1}
+                disabled={onVolumeChange === undefined}
+                onChange={
+                  onVolumeChange === undefined
+                    ? undefined
+                    : (event) =>
+                        onVolumeChange(Number(event.currentTarget.value))
+                }
+                style={
+                  {
+                    '--uw-fill': `${(volume ?? 1) * 100}%`,
+                  } as CSSProperties
+                }
+              />
+            </div>
           }
-        }}
-      />
+        />
+      )}
+      <ModeSegment mode={activeMode} onSelect={selectMode} />
     </div>
   );
 }

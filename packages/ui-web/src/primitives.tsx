@@ -281,7 +281,10 @@ export type IconName =
   | 'radio'
   | 'check'
   | 'menu'
-  | 'monitor';
+  | 'monitor'
+  | 'sidebar'
+  | 'pin'
+  | 'volume';
 
 type GlyphShape =
   | { readonly kind: 'path'; readonly d: string }
@@ -444,6 +447,23 @@ const GLYPHS: Record<IconName, Glyph> = {
   monitor: {
     filled: false,
     shapes: [rr(3, 5, 18, 12, 1.5), p('M9 21h6m-3-4v4')],
+  },
+  // Pane layout — the stage-collapse affordance in the shell's
+  // stage-top strip (a pane with a dedicated left column).
+  sidebar: {
+    filled: false,
+    shapes: [rr(4, 5, 16, 14, 2), p('M14 5v14')],
+  },
+  pin: {
+    filled: false,
+    shapes: [
+      p('M12 3a6 6 0 0 1 6 6c0 4-6 12-6 12S6 13 6 9a6 6 0 0 1 6-6z'),
+      c(12, 9, 2),
+    ],
+  },
+  volume: {
+    filled: false,
+    shapes: [p('M4 9v6h4l5 4V5L8 9H4z'), p('M16 9a4 4 0 0 1 0 6')],
   },
 };
 

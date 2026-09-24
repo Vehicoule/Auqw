@@ -31,6 +31,12 @@ export type SearchScreenProps = {
   readonly onRecentPress?: ((query: string) => void) | undefined;
   /** Focus the input on mount — the '/' global shortcut lands here. */
   readonly autoFocus?: boolean | undefined;
+  /**
+   * Hide the in-screen field — the world toolbar owns search input
+   * on the desktop shell; the screen then renders results/recents/
+   * states only.
+   */
+  readonly hideField?: boolean | undefined;
 };
 
 export function SearchScreen({
@@ -47,6 +53,7 @@ export function SearchScreen({
   recents = [],
   onRecentPress,
   autoFocus = false,
+  hideField = false,
 }: SearchScreenProps) {
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
@@ -77,6 +84,7 @@ export function SearchScreen({
       className="uw-screen uw-search"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
+      {!hideField && (
       <div className="uw-search__field">
         <Icon name="search" size={14} color="var(--text-secondary)" />
         <input
@@ -127,6 +135,7 @@ export function SearchScreen({
           </Pressable>
         )}
       </div>
+      )}
       {state.phase === 'ready' && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">

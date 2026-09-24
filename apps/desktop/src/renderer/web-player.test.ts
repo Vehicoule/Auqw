@@ -15,6 +15,7 @@ function fakeAudio(): FakeAudio {
     duration: 60,
     paused: true,
     ended: false,
+    volume: 1,
     play(): Promise<void> {
       audio.paused = false;
       audio.fire('playing');
