@@ -209,6 +209,37 @@ export async function run(): Promise<void> {
   assertEqual(dropBuilds, 2, 'failed session was reused');
   await dropper.close();
 
+  // An empty mint evicts the session too — otherwise every later
+  // request replays the same bad minter until its TTL ends.
+  let emptyBuilds = 0;
+  const emptyMint = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: async (): Promise<PotSession> => {
+      emptyBuilds += 1;
+      return {
+        mint: async () => (emptyBuilds === 1 ? '' : 'tok-fresh'),
+        expiresAtMs: now.ms + 60_000,
+      };
+    },
+  });
+  const eport = await emptyMint.bind();
+  assert(eport !== null);
+  const ebase = `http://127.0.0.1:${eport}`;
+  assertEqual(
+    (await post(ebase, JSON.stringify({ content_binding: 'x' }))).status,
+    503,
+  );
+  const evicted = await post(
+    ebase,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  assertEqual(evicted.status, 200);
+  assert(isRecord(evicted.body));
+  assertEqual(evicted.body['poToken'], 'tok-fresh');
+  assertEqual(emptyBuilds, 2, 'empty-mint session was reused');
+  await emptyMint.close();
+
   /* ------- protocol-leg fixtures (real BotGuard flow, fake wire) ------ */
 
   const interpreterJs = `
@@ -374,6 +405,40 @@ export async function run(): Promise<void> {
   // binding length 11 -> bytes [11, 42] -> btoa -> "Cyo="
   assertEqual(itRes.body['poToken'], 'Cyo=');
   await itSvc.close();
+
+  // A 30-second TTL still gets a reuse window — the refresh margin
+  // shrinks with the TTL instead of leaving nothing to cache, so the
+  // second mint reuses the same session (no homepage refetch).
+  const shortWire = fakeWire(
+    '//www.google.com/js/th/fake.js',
+    '[null, 30, 0, "RkFMTEJBQ0s"]',
+  );
+  const shortSvc = createPotService({
+    fetchImpl: shortWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const shortPort = await shortSvc.bind();
+  assert(shortPort !== null);
+  const shortBase = `http://127.0.0.1:${shortPort}`;
+  assertEqual(
+    (
+      await post(shortBase, JSON.stringify({ content_binding: 'a' }))
+    ).status,
+    200,
+  );
+  assertEqual(
+    (
+      await post(shortBase, JSON.stringify({ content_binding: 'b' }))
+    ).status,
+    200,
+  );
+  assertEqual(
+    shortWire.urls.filter((u) => u === 'https://www.youtube.com').length,
+    1,
+    'short-TTL session was rebuilt instead of reused',
+  );
+  await shortSvc.close();
 
   // A poisoned homepage pointing the interpreter off-Google fails
   // closed — the hostile leg is never fetched.

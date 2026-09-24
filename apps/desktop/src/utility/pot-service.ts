@@ -109,6 +109,12 @@ export type FetchLike = (
 export type PotSession = {
   mint(contentBinding: string): Promise<string>;
   readonly expiresAtMs: number;
+  /**
+   * Reuse horizon — a fresh session serves until this timestamp,
+   * then a new build replaces it. Short-lived sessions shrink the
+   * refresh margin rather than leaving no cacheable window.
+   */
+  readonly freshUntilMs?: number;
   /** Releases resources held by the session (in-VM timers). */
   readonly dispose?: () => void;
 };
@@ -759,6 +765,9 @@ async function mintSession(
       ? Math.min(estimatedTtlSecs * 1_000, MAX_SESSION_TTL_MS)
       : DEFAULT_SESSION_TTL_MS;
   const expiresAtMs = nowMs() + ttlMs;
+  // Margin is proportional to the TTL — a fixed 60s margin would
+  // leave sessions of a minute or less with no cacheable window.
+  const freshUntilMs = expiresAtMs - Math.min(SESSION_MARGIN_MS, ttlMs / 4);
   if (typeof integrityToken === 'string' && integrityToken.length > 0) {
     // The snapshot's getMinter is a vm-realm function, and the
     // mintCallback it returns is too — `instanceof Function` inside
@@ -798,6 +807,7 @@ async function mintSession(
       mint: (contentBinding) =>
         minter.mintAsWebsafeString(contentBinding),
       expiresAtMs,
+      freshUntilMs,
       dispose: () => sandbox.dispose(),
     };
   }
@@ -810,6 +820,7 @@ async function mintSession(
     return {
       mint: async () => token,
       expiresAtMs,
+      freshUntilMs,
       dispose: () => sandbox.dispose(),
     };
   }
@@ -852,7 +863,8 @@ export function createPotService(opts: PotServiceDeps): PotService {
   function ensureSession(): Promise<PotSession> {
     if (
       session !== null &&
-      nowMs() < session.expiresAtMs - SESSION_MARGIN_MS
+      nowMs() <
+        (session.freshUntilMs ?? session.expiresAtMs - SESSION_MARGIN_MS)
     ) {
       return Promise.resolve(session);
     }
@@ -889,10 +901,12 @@ export function createPotService(opts: PotServiceDeps): PotService {
         return built;
       } catch (thrown) {
         lastFailureAt = nowMs();
+        // Only our own error messages reach the log — a raw upstream
+        // exception can carry request details or token material.
         log(
-          `pot: session build failed (${
-            thrown instanceof Error ? thrown.message : 'unknown'
-          })`,
+          thrown instanceof HttpError
+            ? `pot: session build failed (${thrown.message})`
+            : 'pot: session build failed',
         );
         throw thrown instanceof HttpError
           ? thrown
@@ -908,6 +922,13 @@ export function createPotService(opts: PotServiceDeps): PotService {
     return sessionPending;
   }
 
+  const dropSession = (dead: PotSession): void => {
+    if (session === dead) {
+      session = null;
+      dead.dispose?.();
+    }
+  };
+
   async function mint(contentBinding: string): Promise<MintResult> {
     const active = await ensureSession();
     let poToken: string;
@@ -917,15 +938,15 @@ export function createPotService(opts: PotServiceDeps): PotService {
       // A dead mint usually means the integrity session went stale —
       // drop it so the next request rebuilds rather than retrying a
       // corpse. The thrown value stays taxonomy-shaped.
-      if (session === active) {
-        session = null;
-        active.dispose?.();
-      }
+      dropSession(active);
       throw thrown instanceof HttpError
         ? thrown
         : new HttpError(503, 'unavailable', 'pot: mint failed');
     }
     if (typeof poToken !== 'string' || poToken.length === 0) {
+      // An empty mint is as dead as a thrown one — evict it, or every
+      // later request replays the same bad session until expiry.
+      dropSession(active);
       throw new HttpError(503, 'unavailable', 'pot: empty mint');
     }
     return { poToken, expiresAtMs: active.expiresAtMs };
