@@ -44,17 +44,21 @@ export function TrackRow({
   const unavailable = row.state !== 'available';
   // The mobile anatomy folds the trailing `artist · len` into the
   // small line — there is no separate duration column (preview
-  // `.mrows .r .t small`).
+  // `.mrows .r .t small`). A state note replaces the line outright
+  // on unavailable rows (`unavailable`); a provenance note like
+  // `local` leads it instead of swallowing artist + len.
   const sub =
-    row.note ??
-    [
-      badge,
-      row.artist,
-      row.versionLabel,
-      row.durationMs === null ? null : formatClock(row.durationMs),
-    ]
-      .filter((part): part is string => part !== null && part !== '')
-      .join(' · ');
+    unavailable && row.note !== null
+      ? row.note
+      : [
+          row.note,
+          badge,
+          row.artist,
+          row.versionLabel,
+          row.durationMs === null ? null : formatClock(row.durationMs),
+        ]
+          .filter((part): part is string => part !== null && part !== '')
+          .join(' · ');
   return (
     <View
       style={{

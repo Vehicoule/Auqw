@@ -3879,8 +3879,10 @@ export class Session {
     }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
-      // fails honestly. The enqueue is best-effort — a review-write
-      // failure must not mask the match outcome.
+      // fails honestly. The gate is emitted only once a review
+      // actually exists — reporting it on a failed write would route
+      // resolve surfaces to an empty queue, so the storage error is
+      // what the attempt returns instead.
       const enqueued = await this.#enqueueStorage(() =>
         this.#corrections.enqueueReview(
           recording.id,
@@ -3893,6 +3895,8 @@ export class Session {
       );
       if (!enqueued.ok) {
         this.#logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
+        await this.#failAttempt(attempt, enqueued.error);
+        return err(enqueued.error);
       }
       const error = appError('unavailable', MATCH_GATE_MESSAGE);
       await this.#failAttempt(attempt, error);

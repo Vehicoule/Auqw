@@ -1111,18 +1111,36 @@ function Main({
     if (recording === undefined) {
       return null;
     }
-    const mapped = effectiveMapping(
-      recording,
-      state.settings.playbackProvider,
-    );
-    if (mapped !== null) {
-      return mapped.ref;
+    // Mirror Session.#pickRef so the marked row is the ref the player
+    // actually resolved: offline resolves owned bytes (no catalog row
+    // matches); an active-provider pin wins verbatim; owned bytes
+    // beat auto-picks; then the mapping verdict; then any unvetoed
+    // provider ref.
+    if (online === false) {
+      return null;
     }
+    const provider = state.settings.playbackProvider;
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
     );
-    return current?.selectedRef ?? recording.sourceRefs[0] ?? null;
-  }, [state]);
+    if (current?.selectedRef?.provider === provider) {
+      return current.selectedRef;
+    }
+    if (isOwned(recording.id)) {
+      return null;
+    }
+    const mapped = effectiveMapping(recording, provider);
+    if (mapped !== null) {
+      return mapped.ref;
+    }
+    return (
+      recording.sourceRefs.find(
+        (s) =>
+          s.provider === provider &&
+          !isRefRejected(recording.mappings, s),
+      ) ?? null
+    );
+  }, [state, online, isOwned]);
 
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
@@ -1217,7 +1235,15 @@ function Main({
     return rows;
     // localTick re-reads local.uriFor after a folder mutation — a
     // removed folder's recordings persist but must stop matching.
-  }, [searchState, state.recordings, state.likes, controller, localTick]);
+    // state.playback is read for the per-row playing mark.
+  }, [
+    searchState,
+    state.recordings,
+    state.likes,
+    state.playback,
+    controller,
+    localTick,
+  ]);
   const searchModel = useMemo(() => {
     const base = toSearchModel(searchState, playingRef);
     if (localResults.length === 0 || base.phase === 'idle') {
