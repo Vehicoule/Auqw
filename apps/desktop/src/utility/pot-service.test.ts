@@ -262,6 +262,7 @@ export async function run(): Promise<void> {
   function fakeWire(
     interpreterUrl: string,
     generateIt: string,
+    script: string = interpreterJs,
   ): {
     impl: FetchLike;
     urls: string[];
@@ -283,7 +284,10 @@ export async function run(): Promise<void> {
         return { ok: true, status: 200, text: async () => generateIt };
       }
       if (url === `https://www.google.com/js/th/fake.js`) {
-        return { ok: true, status: 200, text: async () => interpreterJs };
+        return { ok: true, status: 200, text: async () => script };
+      }
+      if (url === 'https://www.youtube.com/json') {
+        return { ok: true, status: 200, text: async () => '{"a":1}' };
       }
       return { ok: false, status: 404, text: async () => '' };
     };
@@ -386,6 +390,62 @@ export async function run(): Promise<void> {
     'interpreter fetched from an unlisted host',
   );
   await evilSvc.close();
+
+  // The bounded response keeps the full Response contract — an
+  // interpreter reading .json() works, and its follow-up marker
+  // fetch proves the parse succeeded (only fires on resolve).
+  const contractJs = `
+    globalThis.TR = {
+      a: async function (program, setupCb) {
+        const asyncSnapshot = function (cb, argsArr) {
+          fetch('https://www.youtube.com/json').then(function (r) {
+            return r.json();
+          }).then(function () {
+            fetch('https://www.youtube.com/json-ok').then(
+              function () {},
+              function () {},
+            );
+          }, function () {});
+          cb(['snap', 1]);
+        };
+        setupCb(
+          asyncSnapshot,
+          function () {},
+          function () {},
+          function () {},
+        );
+        return [asyncSnapshot];
+      },
+    };
+  `;
+  const contractWire = fakeWire(
+    '//www.google.com/js/th/fake.js',
+    '[null, 3600, 0, "RkFMTEJBQ0s"]',
+    contractJs,
+  );
+  const contractSvc = createPotService({
+    fetchImpl: contractWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const contractPort = await contractSvc.bind();
+  assert(contractPort !== null);
+  assertEqual(
+    (
+      await post(
+        `http://127.0.0.1:${contractPort}`,
+        JSON.stringify({ content_binding: 'x' }),
+      )
+    ).status,
+    200,
+  );
+  // The json() -> marker chain settles in microtasks after the mint.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert(
+    contractWire.urls.some((u) => u.endsWith('/json-ok')),
+    'sandboxed response lost the Response contract (json() failed)',
+  );
+  await contractSvc.close();
 
   // Homepage without a ytAtN challenge -> typed 503.
   const bareSvc = createPotService({

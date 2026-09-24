@@ -224,6 +224,54 @@ function botGuardSandbox(
   // allowlist the interpreter URL itself passed — https only,
   // no redirect following (a 30x could still escape the list), and
   // bounded per session in both call count and response size.
+  // Only the body-reading methods are shadowed under the size cap —
+  // every other Response property passes through so the interpreter's
+  // .json()/.arrayBuffer()/.clone() usage keeps working.
+  type FullResponse = FetchResponse & {
+    text: () => Promise<string>;
+    json?: () => Promise<unknown>;
+    arrayBuffer?: () => Promise<ArrayBuffer>;
+    blob?: () => Promise<Blob>;
+    clone?: () => FetchResponse;
+  };
+  const boundedResponse = (resp: FetchResponse): FetchResponse => {
+    const full = resp as FullResponse;
+    // Bind the originals BEFORE shadowing — the shadows re-enter them.
+    const readText = resp.text.bind(resp);
+    const readBuffer =
+      typeof full.arrayBuffer === 'function'
+        ? full.arrayBuffer.bind(resp)
+        : undefined;
+    const cappedText = async (): Promise<string> => {
+      const text = await readText();
+      if (text.length > SANDBOX_FETCH_MAX_CHARS) {
+        throw new TypeError('pot: sandboxed fetch response oversized');
+      }
+      return text;
+    };
+    const cappedBuffer = async (): Promise<ArrayBuffer> => {
+      if (readBuffer === undefined) {
+        return new TextEncoder().encode(await cappedText())
+          .buffer as ArrayBuffer;
+      }
+      const buf = await readBuffer();
+      if (buf.byteLength > SANDBOX_FETCH_MAX_CHARS) {
+        throw new TypeError('pot: sandboxed fetch response oversized');
+      }
+      return buf;
+    };
+    full.text = cappedText;
+    full.json = async () => JSON.parse(await cappedText());
+    full.arrayBuffer = cappedBuffer;
+    if (typeof full.blob === 'function') {
+      full.blob = async () => new Blob([await cappedBuffer()]);
+    }
+    if (typeof full.clone === 'function') {
+      const cloneUpstream = full.clone.bind(resp);
+      full.clone = () => boundedResponse(cloneUpstream());
+    }
+    return full;
+  };
   let sandboxFetches = 0;
   const sandboxFetch = (
     input: unknown,
@@ -257,17 +305,7 @@ function botGuardSandbox(
       // Same deadline discipline as the host legs — an in-context
       // fetch must not outlive the mint it's serving.
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    }).then((resp) => ({
-      ok: resp.ok,
-      status: resp.status,
-      text: async () => {
-        const text = await resp.text();
-        if (text.length > SANDBOX_FETCH_MAX_CHARS) {
-          throw new TypeError('pot: sandboxed fetch response oversized');
-        }
-        return text;
-      },
-    }));
+    }).then(boundedResponse);
   };
   const sandbox: Record<string, unknown> = {
     navigator: {
