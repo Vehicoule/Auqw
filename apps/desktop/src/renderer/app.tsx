@@ -1387,6 +1387,17 @@ function Main({
     [],
   );
 
+  // The fallback file dialog emits no `change` on dismiss — `cancel`
+  // (not in this React's typings) is the only recovery hook; without it
+  // a cancelled pick latches the button on 'working…' forever.
+  useEffect(() => {
+    const input = importInput.current;
+    const onCancel = () =>
+      setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+    input?.addEventListener('cancel', onCancel);
+    return () => input?.removeEventListener('cancel', onCancel);
+  }, []);
+
   const onPickImportFile = useCallback(() => {
     setTransfer((prev) => ({
       ...prev,
@@ -1394,9 +1405,9 @@ function Main({
       importDetail: null,
       preview: null,
     }));
-    // showOpenFilePicker resolves a cancel as AbortError — the hidden
-    // input path (fallback) can't observe cancel, but it stays for
-    // webviews where the picker API is absent.
+    // showOpenFilePicker resolves a cancel as AbortError; the hidden
+    // input fallback (webviews without the picker API) observes it via
+    // its `cancel` event — both paths reset to idle.
     const picker = (
       window as unknown as {
         showOpenFilePicker?: (options: {
@@ -2139,7 +2150,6 @@ function Main({
       {/* The sandboxed file input that powers library import — the
           browser picker is the only fs path a renderer gets. */}
       <input
-        ref={importInput}
         type="file"
         accept="application/json,.json"
         style={{ display: 'none' }}
@@ -2149,6 +2159,7 @@ function Main({
           event.target.value = '';
           onImportFileChosen(file);
         }}
+        ref={importInput}
       />
       <AppStack>
         <StackItem stackKey="root">
