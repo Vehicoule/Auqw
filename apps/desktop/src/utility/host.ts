@@ -86,6 +86,11 @@ export type HostEnv = {
   /** Host state directory — stream stores live under it. */
   AUQW_USER_DATA?: string | undefined;
   AUQW_STREAM_DIR?: string | undefined;
+  /**
+   * POT provider override — wins over the bundled pot-service's
+   * loopback URL when set (points the host at an external bgutil).
+   */
+  AUQW_POT_PROVIDER_URL?: string | undefined;
 };
 
 type RequireLike = (path: string) => NodeBindingsModule;
@@ -193,6 +198,12 @@ export function createHostRuntime(opts: {
   repoRoot?: string | undefined;
   require?: RequireLike | undefined;
   fs?: FsLike | undefined;
+  /**
+   * Bundled POT service's loopback URL — read at PluginHost
+   * construction (lazy bindings make this a thunk, not a value).
+   * `AUQW_POT_PROVIDER_URL` wins over it when set.
+   */
+  potProviderUrl?: () => string | null;
 }): {
   host(): PluginHostLike;
   pluginsReady(): Promise<readonly string[]>;
@@ -225,6 +236,8 @@ export function createHostRuntime(opts: {
     try {
       const mod = requireFn(stageArtifact(found));
       const userData = opts.env.AUQW_USER_DATA ?? process.cwd();
+      const potUrl =
+        opts.env.AUQW_POT_PROVIDER_URL ?? opts.potProviderUrl?.() ?? undefined;
       host = new mod.PluginHost({
         fuelPerEntry: FUEL_PER_ENTRY,
         fuelTotal: FUEL_TOTAL,
@@ -234,6 +247,9 @@ export function createHostRuntime(opts: {
         // codec matrix requires it. Without the hint the guest prefers
         // mp4 on ties — wrong container for this surface.
         prefer: ['audio/webm', 'audio/mp4'],
+        ...(potUrl !== undefined && potUrl !== ''
+          ? { potProviderUrl: potUrl }
+          : {}),
       });
       bindingsError = undefined;
       return host;

@@ -162,6 +162,14 @@ export type SyncServiceDeps = {
   readonly advertise?: SyncAdvertise | null;
   /** Forced endpoint host for payloads; otherwise first LAN IPv4. */
   readonly endpointHost?: string;
+  /**
+   * Bound port of the bundled POT service — the pairing payload
+   * carries it as `pot` (`host:port` on the primary endpoint host)
+   * so a paired phone can mint tokens against this desktop. Null or
+   * absent → no `pot` field (e.g. AUQW_POT_PROVIDER_URL override,
+   * or the service failed to bind).
+   */
+  readonly potPort?: () => number | null;
   readonly nowMs?: () => number;
   /* Tuning knobs — production defaults; tests shrink them. */
   readonly handshakeCap?: number;
@@ -913,13 +921,17 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * stays the canonical primary for status display, the pairing
    * payload carries the full list.
    */
+  function endpointHosts(): string[] {
+    return deps.endpointHost !== undefined
+      ? [deps.endpointHost]
+      : lanIpv4s();
+  }
+
   function endpoints(): string[] {
     if (boundPort === null) {
       return [];
     }
-    const hosts =
-      deps.endpointHost !== undefined ? [deps.endpointHost] : lanIpv4s();
-    return hosts.map((ip) => {
+    return endpointHosts().map((ip) => {
       const formatted = ip.includes(':') ? `[${ip}]` : ip;
       return `${formatted}:${boundPort}`;
     });
@@ -927,6 +939,21 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   function endpoint(): string | null {
     return endpoints()[0] ?? null;
+  }
+
+  /**
+   * `host:port` for the bundled POT service on the primary endpoint
+   * host — the same `endpoints()[0]` the phone dials for sync. The
+   * service binds IPv4 wildcard only, so an IPv6 `endpointHost`
+   * advertises nothing rather than a dead socket.
+   */
+  function potEndpoint(): string | null {
+    const port = deps.potPort?.() ?? null;
+    if (port === null) {
+      return null;
+    }
+    const host = endpointHosts().find((h) => !h.includes(':'));
+    return host === undefined ? null : `${host}:${port}`;
   }
 
   // Propagates custody failures — a dead registry is NOT an empty
@@ -1585,6 +1612,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       const { code, expiresAt } = pairing.mint();
       badAttempts.clear(); // a fresh code means a fresh budget
       totalBadAttempts = 0;
+      const pot = potEndpoint();
       const payload = JSON.stringify({
         v: 1,
         endpoint: ep,
@@ -1593,6 +1621,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         endpoints: endpoints(),
         code,
         fp: fingerprint,
+        ...(pot !== null ? { pot } : {}),
       });
       return checked(isSyncPairingResult, 'sync:pairing')({
         payload,

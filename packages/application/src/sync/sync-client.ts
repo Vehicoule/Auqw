@@ -884,6 +884,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     endpoints: readonly string[],
     code: string,
     pinnedFp: string | undefined,
+    pot: string | undefined,
     signal?: CancellationSignal,
   ): Promise<Result<SyncPeer>> {
     const opened = await openSession({
@@ -903,6 +904,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       pairedAt: welcome.device.pairedAt,
       lastSeenAt: deps.clock.nowMs(),
       peerCursor: {},
+      ...(pot !== undefined ? { pot } : {}),
     };
     const prior = sessions.get(stored.fp);
     if (prior !== undefined && prior !== session) {
@@ -966,14 +968,20 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           decoded.endpoints !== undefined && decoded.endpoints.length > 0
             ? decoded.endpoints
             : [decoded.endpoint];
-        return pairOp(endpoints, decoded.code, decoded.fp, signal);
+        return pairOp(
+          endpoints,
+          decoded.code,
+          decoded.fp,
+          decoded.pot,
+          signal,
+        );
       }
       if (!PAIR_CODE_PATTERN.test(opts.code)) {
         return err(
           appError('invalid-message', 'sync: pairing code must be 6 digits'),
         );
       }
-      return pairOp(opts.endpoints, opts.code, undefined, signal);
+      return pairOp(opts.endpoints, opts.code, undefined, undefined, signal);
     },
 
     async syncNow(fp, signal) {

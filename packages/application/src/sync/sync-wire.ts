@@ -125,6 +125,12 @@ export type SyncPairingPayload = {
   readonly code: string;
   /** sha256(server SPKI DER) hex — the dial-time identity pin. */
   readonly fp: string;
+  /**
+   * Bundled POT service's `host:port` on the same endpoint host —
+   * present only when the desktop bound its minter. Persisted on
+   * the peer record so the host's PluginHost gets a provider URL.
+   */
+  readonly pot?: string;
 };
 
 export type SyncEndpoint = {
@@ -270,7 +276,11 @@ export function isPairingPayload(
 ): value is SyncPairingPayload {
   return (
     isRecord(value) &&
-    hasKeys(value, ['v', 'endpoint', 'code', 'fp'], ['endpoints']) &&
+    hasKeys(
+      value,
+      ['v', 'endpoint', 'code', 'fp'],
+      ['endpoints', 'pot'],
+    ) &&
     value['v'] === WIRE_VERSION &&
     isString(value['endpoint'], 320) &&
     PAIR_CODE_PATTERN.test(String(value['code'])) &&
@@ -280,7 +290,9 @@ export function isPairingPayload(
         value['endpoints'].length <= 16 &&
         (value['endpoints'] as unknown[]).every(
           (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        )))
+        ))) &&
+    (value['pot'] === undefined ||
+      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
   );
 }
 
