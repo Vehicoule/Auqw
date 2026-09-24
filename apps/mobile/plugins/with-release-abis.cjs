@@ -82,11 +82,11 @@ module.exports = function withReleaseAbis(config) {
         'proguard-rules.pro',
       );
       const rules = fs.readFileSync(rulesPath, 'utf8');
-      const marker = '-dontwarn java.awt.**';
+      const marker = '-keep class com.sun.jna.**';
       if (!rules.includes(marker)) {
         fs.writeFileSync(
           rulesPath,
-          `${rules}\n# JNA ships desktop AWT references that can't resolve under R8 — the\n# host paths using them never run on Android anyway.\n-dontwarn java.awt.**\n-dontwarn com.sun.jna.**\n`,
+          `${rules}\n# JNA ships desktop AWT references that can't resolve under R8 — the\n# host paths using them never run on Android anyway — and reaches its\n# own members reflectively: dontwarn alone lets R8 strip Pointer.peer\n# and the release APK dies on boot (UnsatisfiedLinkError).\n-dontwarn java.awt.**\n-dontwarn com.sun.jna.**\n-keep class com.sun.jna.** { *; }\n-keepclassmembers class * extends com.sun.jna.** { *; }\n`,
         );
       }
       return config;
