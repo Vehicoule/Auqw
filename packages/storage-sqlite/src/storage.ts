@@ -45,23 +45,36 @@ import type {
   SqlRow,
   SqlValue,
 } from './driver.ts';
+import { enqueueDriverTransaction } from './transaction-queue.ts';
 import {
   CURRENT_SCHEMA_VERSION,
-  KNOWN_TABLES,
+  KNOWN_SCHEMA_OBJECTS,
   MIGRATIONS,
 } from './migrations.ts';
 
 const ATTEMPT_CAP = 500;
 
-/**
- * Transaction tails keyed by driver: one driver is one connection, so
- * transactions serialize per driver even when several SqliteStorage
- * instances share it.
- */
-const TRANSACTION_TAILS = new WeakMap<
-  SqliteDriver,
-  { tail: Promise<void> }
->();
+// Names SQLite collides within — tables, views, and indexes share
+// one namespace; triggers are separate. The version-zero probe
+// rejects a foreign file only when it holds an object that would
+// actually block a migration's CREATE.
+const FOREIGN_OBJECT_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'object',
+).map((o) => o.name);
+const FOREIGN_TRIGGER_NAMES = KNOWN_SCHEMA_OBJECTS.filter(
+  (o) => o.kind === 'trigger',
+).map((o) => o.name);
+const FOREIGN_PROBE_SQL =
+  `SELECT name FROM sqlite_master WHERE ` +
+  `(type IN ('table','index','view') AND name COLLATE NOCASE IN (${FOREIGN_OBJECT_NAMES.map(() => '?').join(',')}))` +
+  (FOREIGN_TRIGGER_NAMES.length > 0
+    ? ` OR (type = 'trigger' AND name COLLATE NOCASE IN (${FOREIGN_TRIGGER_NAMES.map(() => '?').join(',')}))`
+    : '') +
+  ` LIMIT 1`;
+const FOREIGN_PROBE_PARAMS = [
+  ...FOREIGN_OBJECT_NAMES,
+  ...FOREIGN_TRIGGER_NAMES,
+];
 
 /**
  * Initialize sections keyed by driver: probe, backup, and migrate are
@@ -158,25 +171,20 @@ export class SqliteStorage implements StoragePort {
 
   /**
    * One connection cannot run overlapping BEGIN/COMMIT sequences.
-   * The tail is keyed on the driver, not this instance: several
-   * SqliteStorage objects over one driver share its connection and
-   * must queue on the same tail.
+   * The tail is keyed on the driver, not this instance — it lives in
+   * transaction-queue.ts so the sync-log store shares the same queue
+   * when both sit on one database file.
    */
   #transaction<T>(
     work: (connection: SqliteConnection) => Promise<T>,
     signal: CancellationSignal,
   ): Promise<T> {
-    let slot = TRANSACTION_TAILS.get(this.#driver);
-    if (slot === undefined) {
-      slot = { tail: Promise.resolve() };
-      TRANSACTION_TAILS.set(this.#driver, slot);
-    }
-    const result = slot.tail.then(() => {
-      this.#check(signal);
-      return this.#driver.transaction(work, signal);
-    });
-    slot.tail = result.then(() => undefined, () => undefined);
-    return result;
+    return enqueueDriverTransaction(
+      this.#driver,
+      work,
+      signal,
+      (s) => this.#check(s),
+    );
   }
 
   #mapError(thrown: unknown, signal: CancellationSignal): AppError {
@@ -235,11 +243,12 @@ export class SqliteStorage implements StoragePort {
           // migrations cannot get here: each migration is one
           // transaction and rolls back whole.
           const foreign = await conn.query<SqlRow>(
-            `SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name IN (${KNOWN_TABLES.map(() => '?').join(',')})
-             LIMIT 1`,
-            [...KNOWN_TABLES],
+            // NOCASE: sqlite_master stores the creation-time spelling
+            // but SQLite treats identifiers case-insensitively — a
+            // foreign `Downloads` collides with `downloads` all the
+            // same, and must reject as foreign, not die in-migration.
+            FOREIGN_PROBE_SQL,
+            FOREIGN_PROBE_PARAMS,
             signal,
           );
           if (foreign.length > 0) {

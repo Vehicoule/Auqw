@@ -10,8 +10,8 @@ import { QueueList } from './queue-list';
 import type {
   PlayerModel,
   QueueModel,
-} from './view-models.ts';
-import { formatClock } from './view-models.ts';
+} from '@auqw/ui-shared';
+import { formatClock } from '@auqw/ui-shared';
 
 export type QueueScreenProps = {
   readonly queue: QueueModel;

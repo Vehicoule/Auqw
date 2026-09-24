@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -26,6 +26,13 @@ export const KNOWN_TABLES: readonly string[] = Object.freeze([
   'match_reviews',
   'lyrics_cache',
   'artwork_cache',
+  'downloads',
+  'local_sources',
+  'local_files',
+  'sync_log',
+  'sync_divergence',
+  'sync_watermarks',
+  'sync_meta',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -267,10 +274,100 @@ const MIGRATION_4: readonly string[] = [
   `ALTER TABLE local_files ADD COLUMN modified_ms INTEGER CHECK (modified_ms >= 0 OR modified_ms IS NULL)`,
 ];
 
+/**
+ * v4 -> v5: the SyncEngine's durable log (docs/specs/sync.md). Rows
+ * carry canonical append order implicitly via rowid — `seq` is the
+ * per-device watermark the engine stamps on each entry, NOT the table
+ * order. `sync_divergence.seq` mirrors it so the retention floor can
+ * drop rows below `dropDivergenceBefore` in one DELETE.
+ * (device_id, seq) and (history_id) uniqueness make a crash-replayed
+ * append idempotent via INSERT OR IGNORE.
+ */
+const MIGRATION_5: readonly string[] = [
+  `CREATE TABLE sync_log (
+  device_id TEXT NOT NULL,
+  seq INTEGER NOT NULL CHECK (seq >= 0),
+  entry_json TEXT NOT NULL,
+  UNIQUE (device_id, seq)
+)`,
+  `CREATE TABLE sync_divergence (
+  history_id TEXT NOT NULL UNIQUE,
+  seq INTEGER NOT NULL CHECK (seq >= 0),
+  row_json TEXT NOT NULL
+)`,
+  `CREATE INDEX sync_divergence_seq_idx ON sync_divergence(seq)`,
+  `CREATE TABLE sync_watermarks (
+  device_id TEXT PRIMARY KEY,
+  mark INTEGER NOT NULL CHECK (mark >= 0)
+)`,
+  `CREATE TABLE sync_meta (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
   Object.freeze([...MIGRATION_2]),
   Object.freeze([...MIGRATION_3]),
   Object.freeze([...MIGRATION_4]),
+  Object.freeze([...MIGRATION_5]),
 ]);
+
+const CREATED_OBJECT_NAME =
+  /CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+const RENAMED_OBJECT_NAME =
+  /RENAME\s+TO\s+["'`\[]?([A-Za-z_][A-Za-z0-9_]*)/i;
+
+/**
+ * Namespaces SQLite collides names within: tables, views, and
+ * indexes share one ('object'); triggers live in their own and may
+ * reuse an object name without colliding.
+ */
+export type SchemaObjectKind = 'object' | 'trigger';
+
+/**
+ * Every schema-object name the migrations create or rename to —
+ * final tables, throwaways like `likes_new`, and named indexes —
+ * tagged with its collision namespace. Derived from the SQL itself
+ * so a new migration cannot forget to declare its objects. The
+ * version-zero foreign-file probe rejects only same-namespace
+ * collisions: a foreign `downloads_state_idx` index collides with
+ * our `CREATE INDEX`, a foreign `downloads` trigger does not.
+ */
+export const KNOWN_SCHEMA_OBJECTS: readonly {
+  readonly kind: SchemaObjectKind;
+  readonly name: string;
+}[] = Object.freeze(
+  Array.from(
+    new Map(
+      MIGRATIONS.flat()
+        .flatMap((sql) => {
+          const created = CREATED_OBJECT_NAME.exec(sql);
+          const renamed = RENAMED_OBJECT_NAME.exec(sql);
+          return [
+            created !== null
+              ? {
+                  kind: ((created[1] ?? '').toUpperCase() === 'TRIGGER'
+                    ? 'trigger'
+                    : 'object') as SchemaObjectKind,
+                  name: created[2] as string,
+                }
+              : undefined,
+            renamed !== null
+              ? ({ kind: 'object', name: renamed[1] } as const)
+              : undefined,
+          ];
+        })
+        .filter(
+          (entry): entry is { kind: SchemaObjectKind; name: string } =>
+            entry !== undefined,
+        )
+        .concat(
+          KNOWN_TABLES.map((name) => ({ kind: 'object' as const, name })),
+        )
+        .map((entry) => [`${entry.kind}:${entry.name}`, entry] as const),
+    ).values(),
+  ),
+);

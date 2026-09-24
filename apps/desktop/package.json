@@ -1,0 +1,36 @@
+{
+  "name": "auqw-desktop",
+  "version": "0.0.1-alpha.1",
+  "private": true,
+  "description": "auqw desktop shell — plugin-resolved audio client",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "desktopName": "auqw",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "pnpm build && electron .",
+    "dist": "pnpm run build && node ../../tooling/sync-plugins.mjs apps/desktop/plugins && cargo build --release -p auqw-node-bindings && electron-builder --linux",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/desktop.test.ts"
+  },
+  "devDependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/storage-sqlite": "workspace:*",
+    "@types/node": "26.6.1",
+    "@types/react": "~19.2.2",
+    "@types/react-dom": "~19.2.3",
+    "bonjour-service": "1.4.4",
+    "electron": "44.3.0",
+    "electron-builder": "26.16.1",
+    "esbuild": "0.28.2",
+    "music-metadata": "11.15.0",
+    "typescript": "~6.0.3"
+  },
+  "dependencies": {
+    "@auqw/design-tokens": "workspace:*",
+    "@auqw/ui-web": "workspace:*",
+    "bgutils-js": "4.0.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  }
+}

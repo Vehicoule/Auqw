@@ -65,6 +65,10 @@ export interface TagReaderPort {
   /**
    * List candidate media files inside the granted tree.
    * `permission-denied` when the grant is gone (row stays, honest).
+   * The listing is authoritative — the engine diffs it against the
+   * index, so an adapter must fail typed on any unreadable entry
+   * rather than return a partial scan that reads as deletion. Only
+   * entries that vanished mid-scan may be omitted.
    */
   enumerate(
     treeUri: string,

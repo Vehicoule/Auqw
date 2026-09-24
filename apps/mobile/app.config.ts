@@ -3,7 +3,7 @@ import type { ExpoConfig } from 'expo/config';
 const config: ExpoConfig = {
   name: 'Auqw',
   slug: 'auqw',
-  version: '0.1.0',
+  version: '0.0.1-alpha.1',
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'automatic',
@@ -35,6 +35,13 @@ const config: ExpoConfig = {
       },
     ],
     'expo-sqlite',
+    // CI-secret alpha keystore → release builds sign with one stable
+    // identity across CI runs (upgrade-install between alphas works);
+    // no env → stock debug signing for local builds.
+    './plugins/with-alpha-signing.cjs',
+    // release APK splits per ABI (arm64-v8a + x86_64) + R8/shrink —
+    // the 153 MB alpha.2 was half dead-arch libs and unminified dex.
+    './plugins/with-release-abis.cjs',
     [
       'expo-navigation-bar',
       {

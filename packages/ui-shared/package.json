@@ -1,0 +1,23 @@
+{
+  "name": "@auqw/ui-shared",
+  "private": true,
+  "version": "0.0.1-alpha.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./fixtures": "./src/fixtures.ts",
+    "./view-models": "./src/view-models.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/ui-shared.test.ts"
+  },
+  "dependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/design-tokens": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.1",
+    "typescript": "~6.0.3"
+  }
+}

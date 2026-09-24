@@ -147,8 +147,15 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     return deferred.promise;
   }
 
-  /** Settles the oldest pending download; false when none pending. */
+  /** Settles the oldest still-open download; false when none pending. */
   settleDownload(result: Result<{ bytes: number }>): boolean {
+    // Cancelled downloads resolved through their signal listener are
+    // already settled — a real aborted request is simply gone.
+    let head = this.#deferreds[0];
+    while (head !== undefined && head.settled) {
+      this.#deferreds.shift();
+      head = this.#deferreds[0];
+    }
     const deferred = this.#deferreds.shift();
     if (deferred === undefined) {
       return false;
@@ -401,6 +408,55 @@ async function coalescedConcurrentGets(): Promise<void> {
   const [r3, r4] = await Promise.all([p3, p4]);
   assert(r3.ok, 'leader get must succeed');
   assert(!r4.ok && r4.error.kind === 'cancelled');
+
+  // The leader's own cancel must not kill shared work either — an
+  // unmounted first subscriber leaves the download for the rest.
+  const s5 = new CancellationSource();
+  const s6 = new CancellationSource();
+  const p5 = r.cache.get(C, ctx(s5));
+  const p6 = r.cache.get(C, ctx(s6));
+  await pump();
+  assertEqual(r.fetch.calls.length, 3);
+  s5.cancel();
+  assert(
+    r.fetch.settleDownload(ok({ bytes: 3 * MB })),
+    'download must survive the leader cancelling',
+  );
+  const [r5, r6] = await Promise.all([p5, p6]);
+  assert(!r5.ok && r5.error.kind === 'cancelled', 'leader sees cancelled');
+  assert(r6.ok, 'waiter keeps the shared download');
+  assertEqual(r6.value.filePath, destOf(C));
+
+  // But once every waiter is gone, the work itself is cancelled —
+  // downloads nobody still needs never land.
+  const s7 = new CancellationSource();
+  const s8 = new CancellationSource();
+  const p7 = r.cache.get(D, ctx(s7));
+  const p8 = r.cache.get(D, ctx(s8));
+  await pump();
+  assertEqual(r.fetch.calls.length, 4);
+  s7.cancel();
+  s8.cancel();
+  // A get landing synchronously after the last waiter left — while
+  // the cancelled record still sits in the map — must start fresh
+  // work; joining the dead record could only answer cancelled.
+  const p9 = r.cache.get(D, ctx());
+  const [r7, r8] = await Promise.all([p7, p8]);
+  assert(!r7.ok && !r8.ok, 'empty waiter set cancels the work');
+  assertEqual(
+    (await storedUrls(r.storage)).filter((u) => u === D).length,
+    0,
+    'abandoned download caches nothing',
+  );
+  await pump();
+  assertEqual(
+    r.fetch.calls.length,
+    5,
+    'late get must restart, not join cancelled work',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 1 * MB })));
+  const r9 = await p9;
+  assert(r9.ok && r9.value.filePath === destOf(D));
 }
 
 async function cancellation(): Promise<void> {

@@ -3,11 +3,15 @@ import TabView from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
-import type { NavItemModel } from './view-models.ts';
+import type { NavItemModel } from '@auqw/ui-shared';
 import iconHome from '../assets/tab-icons/home.png';
 import iconExplore from '../assets/tab-icons/explore.png';
 import iconLibrary from '../assets/tab-icons/library.png';
 import iconSettings from '../assets/tab-icons/settings.png';
+import iconHomeOutline from '../assets/tab-icons/home_outline.png';
+import iconExploreOutline from '../assets/tab-icons/explore_outline.png';
+import iconLibraryOutline from '../assets/tab-icons/library_outline.png';
+import iconSettingsOutline from '../assets/tab-icons/settings_outline.png';
 
 const SF_SYMBOLS: Record<string, AppleIcon['sfSymbol']> = {
   home: 'house',
@@ -23,6 +27,14 @@ const PNG_ICONS: Record<string, ImageSourcePropType> = {
   settings: iconSettings,
 };
 
+// M3: inactive tabs read the outlined glyph, active switches to filled.
+const PNG_ICONS_OUTLINE: Record<string, ImageSourcePropType> = {
+  home: iconHomeOutline,
+  explore: iconExploreOutline,
+  library: iconLibraryOutline,
+  settings: iconSettingsOutline,
+};
+
 // Space reserved at a scene's bottom edge while the Android docked
 // accessory overlays it (mini player height + its margins).
 const ACCESSORY_RESERVE = 78;
@@ -31,15 +43,23 @@ type Route = {
   key: string;
   title: string;
   focusedIcon: ImageSourcePropType | AppleIcon;
+  unfocusedIcon?: ImageSourcePropType;
 };
 
 function routeFor(item: NavItemModel): Route {
   const symbol = SF_SYMBOLS[item.key] ?? 'questionmark';
+  if (Platform.OS === 'ios') {
+    return {
+      key: item.key,
+      title: item.label,
+      focusedIcon: { sfSymbol: symbol },
+    };
+  }
   return {
     key: item.key,
     title: item.label,
-    focusedIcon:
-      Platform.OS === 'ios' ? { sfSymbol: symbol } : PNG_ICONS[item.key] ?? iconHome,
+    focusedIcon: PNG_ICONS[item.key] ?? iconHome,
+    unfocusedIcon: PNG_ICONS_OUTLINE[item.key] ?? iconHomeOutline,
   };
 }
 
@@ -80,7 +100,8 @@ export function PlatformTabs({
       }}
       tabBarActiveTintColor={theme.colors.accent}
       tabBarInactiveTintColor={theme.colors.textSecondary}
-      tabBarStyle={{ backgroundColor: theme.colors.canvas }}
+      tabBarStyle={{ backgroundColor: theme.colors.raised }}
+      tabLabelStyle={{ fontFamily: theme.fontFamilies.medium }}
       activeIndicatorColor={theme.colors.accentSoft}
       labeled
       hapticFeedbackEnabled

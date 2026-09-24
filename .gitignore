@@ -27,3 +27,15 @@ apps/mobile/assets/plugins/
 
 # Local env
 .envrc
+
+# Electron bundles (rebuild via `pnpm --filter auqw-desktop build`)
+apps/desktop/dist/
+
+# electron-builder package output (rebuild via `pnpm --filter auqw-desktop dist`)
+apps/desktop/dist-packages/
+
+# Provider artifacts synced for packaging (rebuild via tooling/sync-plugins.mjs)
+apps/desktop/plugins/
+
+# sync-plugins staging dirs — cleaned on exit; only SIGKILL leaves residue
+**/.sync-stage-*/

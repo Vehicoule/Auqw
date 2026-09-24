@@ -608,16 +608,23 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 public protocol PluginHostProtocol: AnyObject, Sendable {
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */
     func cancel(requestId: String) 
     
@@ -643,9 +650,21 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */
     func setAuthToken(token: String?) 
+    
+    /**
+     * Set or clear the bgutil-compatible PO-token provider URL
+     * (`POST {url}/get_pot`) on the running host — resolves read the
+     * slot at invocation spawn, so a provider learned after
+     * construction (mid-session pairing) applies without recreating
+     * the host. Never logged.
+     */
+    func setPotProvider(url: String?) 
     
     /**
      * Start any declared capability with a JSON object payload. The
@@ -748,8 +767,9 @@ public protocol PluginHostProtocol: AnyObject, Sendable {
     
 }
 /**
- * The plugin host object: owns a tokio runtime, an HTTP client, the
- * loaded plugin set, and per-request cancellation tokens.
+ * The plugin host object exposed to Kotlin/Swift: delegates to the
+ * shared surface and mints `req-N` request ids here — the surface's
+ * caller-supplied-id contract leaves id minting to each binding.
  */
 open class PluginHost: PluginHostProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -820,10 +840,16 @@ public convenience init(config: HostConfig)throws  {
 
     
     /**
-     * Cancel an in-flight request; unknown ids are a no-op. A
-     * `cancelPrepare` landing after `prepared` also abandons the
-     * produced session — but only while it is still unattached: a
-     * playing consumer is never cancelled out from under playback.
+     * Cancel an in-flight request. Unknown ids are a no-op except
+     * that a plausible issued-id is tombstoned briefly so a cancel
+     * that outran the bookkeeping still abandons the session it was
+     * about to receive. A `cancelPrepare` landing after `prepared`
+     * also abandons the produced session — but only while it is still
+     * unattached: a playing consumer is never cancelled out from
+     * under playback. And only once the `prepared` outcome is on the
+     * wire — a slot still mid-delivery is consumed but its handle
+     * left live, or the listener would get a `Prepared` naming a
+     * released session.
      */
 open func cancel(requestId: String)  {try! rustCall() {
         uniffiCallStatus in
@@ -874,13 +900,32 @@ open func runSpin(wasm: Data, manifestJson: String)throws  -> SpinReport  {
      * into every session-trust payload (`Authorization: Bearer` on
      * InnerTube calls). Prepared sessions read the same slot at
      * re-mint, so a refreshed token applies to in-flight playback
-     * recovery. Never logged.
+     * recovery. Never logged. An off-contract value (empty or over
+     * the contract `maxLength`) clears the slot — the guest resolves
+     * anonymous rather than receiving a payload that fails
+     * validation.
      */
 open func setAuthToken(token: String?)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(
             self.uniffiCloneHandle(),
         FfiConverterOptionString.lower(token),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Set or clear the bgutil-compatible PO-token provider URL
+     * (`POST {url}/get_pot`) on the running host — resolves read the
+     * slot at invocation spawn, so a provider learned after
+     * construction (mid-session pairing) applies without recreating
+     * the host. Never logged.
+     */
+open func setPotProvider(url: String?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_pot_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(url),uniffiCallStatus
     )
 }
 }
@@ -1352,7 +1397,9 @@ public struct HostConfig: Equatable, Hashable {
     /**
      * Initial OAuth access token for session-trust `Authorization:
      * Bearer` on InnerTube calls. `None` starts anonymous; update it
-     * later with [`PluginHost::set_auth_token`]. Never logged.
+     * later with [`PluginHost::set_auth_token`]. Never logged. Values
+     * outside the contract (`minLength: 1`, `maxLength: 8192`) are
+     * treated as unset.
      */
     public var authToken: String?
 
@@ -1387,7 +1434,9 @@ public struct HostConfig: Equatable, Hashable {
         /**
          * Initial OAuth access token for session-trust `Authorization:
          * Bearer` on InnerTube calls. `None` starts anonymous; update it
-         * later with [`PluginHost::set_auth_token`]. Never logged.
+         * later with [`PluginHost::set_auth_token`]. Never logged. Values
+         * outside the contract (`minLength: 1`, `maxLength: 8192`) are
+         * treated as unset.
          */authToken: String?) {
         self.fuelPerEntry = fuelPerEntry
         self.fuelTotal = fuelTotal
@@ -2005,6 +2054,17 @@ enum HostError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
          * Detail.
          */detail: String
     )
+    /**
+     * The caller-minted request id is still owned by a live
+     * invocation or an unreleased prepared session — ids must be
+     * unique while live. Kept last so the original discriminants
+     * (Load, Unknown, Runtime) don't shift for stale decoders.
+     */
+    case RequestInFlight(
+        /**
+         * The colliding request id.
+         */id: String
+    )
 
     
 
@@ -2043,6 +2103,9 @@ public struct FfiConverterTypeHostError: FfiConverterRustBuffer {
         case 3: return .Runtime(
             detail: try FfiConverterString.read(from: &buf)
             )
+        case 4: return .RequestInFlight(
+            id: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2068,6 +2131,11 @@ public struct FfiConverterTypeHostError: FfiConverterRustBuffer {
         case let .Runtime(detail):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(detail, into: &buf)
+            
+        
+        case let .RequestInFlight(id):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(id, into: &buf)
             
         }
     }
@@ -3133,7 +3201,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 26661) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel() != 11660) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin() != 41359) {
@@ -3142,7 +3210,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_run_spin() != 34269) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() != 14712) {
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() != 44159) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_pot_provider() != 15487) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() != 7187) {

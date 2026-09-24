@@ -63,6 +63,8 @@ private const val EVENT_PLAYBACK_STATUS = "onPlaybackStatus"
 private const val EVENT_PHASE_MARK = "onPhaseMark"
 private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
 private const val EVENT_CONNECTIVITY = "onConnectivityChanged"
+private const val EVENT_SYNC_DATA = "onSyncSocketData"
+private const val EVENT_SYNC_CLOSED = "onSyncSocketClosed"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
@@ -247,6 +249,27 @@ class AuqwExpoModule : Module() {
   /** Lazily created on the first connectivity observer. */
   private var connectivityMonitor: AuqwConnectivityMonitor? = null
 
+  /** Lazily created on the first sync socket connect — zero thread
+   * cost for a build that never pairs. */
+  private var syncSockets: AuqwSyncSockets? = null
+
+  private fun syncSocketsInstance(): AuqwSyncSockets =
+    syncSockets
+      ?: AuqwSyncSockets(
+        emitData = { socketId, dataB64 ->
+          sendEvent(
+            EVENT_SYNC_DATA,
+            mapOf("socketId" to socketId, "data" to dataB64)
+          )
+        },
+        emitClosed = { socketId, reason ->
+          sendEvent(
+            EVENT_SYNC_CLOSED,
+            mapOf("socketId" to socketId, "reason" to reason)
+          )
+        },
+      ).also { syncSockets = it }
+
   private fun connectivityMonitorInstance(ctx: Context): AuqwConnectivityMonitor =
     connectivityMonitor
       ?: AuqwConnectivityMonitor(ctx) { online, metered ->
@@ -380,7 +403,9 @@ class AuqwExpoModule : Module() {
       EVENT_PLAYBACK_STATUS,
       EVENT_PHASE_MARK,
       EVENT_QUEUE_TRANSITION,
-      EVENT_CONNECTIVITY
+      EVENT_CONNECTIVITY,
+      EVENT_SYNC_DATA,
+      EVENT_SYNC_CLOSED
     )
 
     OnCreate {
@@ -395,6 +420,8 @@ class AuqwExpoModule : Module() {
       try {
         connectivityMonitor?.stop()
         connectivityMonitor = null
+        syncSockets?.destroyAll()
+        syncSockets = null
         boundService?.remoteDispatcher = null
         appContext.reactContext?.unbindService(serviceConnection)
       } catch (e: Exception) {
@@ -422,12 +449,46 @@ class AuqwExpoModule : Module() {
      * Idempotent; unwatch stops the callback.
      */
     Function("connectivityWatch") { ->
-      val ctx = appContext.reactContext ?: return@Function
-      connectivityMonitorInstance(ctx).start()
+      appContext.reactContext?.let { connectivityMonitorInstance(it).start() }
     }
 
     Function("connectivityUnwatch") { ->
       connectivityMonitor?.stop()
+    }
+
+    /**
+     * LAN-sync client sockets (docs/specs/sync.md): the JS pump owns
+     * framing; these calls move opaque bytes, bridged as base64.
+     * `syncConnect` resolves with the peer's address string.
+     */
+    AsyncFunction("syncConnect") { socketId: String, host: String, port: Double, timeoutMs: Double ->
+      mapOf(
+        "remoteAddress" to
+          syncSocketsInstance().connect(socketId, host, port.toInt(), timeoutMs.toInt())
+      )
+    }
+
+    AsyncFunction("syncSend") { socketId: String, data: String ->
+      syncSocketsInstance().send(socketId, data)
+      null
+    }
+
+    AsyncFunction("syncClose") { socketId: String ->
+      syncSocketsInstance().close(socketId)
+      null
+    }
+
+    AsyncFunction("syncDestroy") { socketId: String ->
+      syncSocketsInstance().destroy(socketId)
+      null
+    }
+
+    /** SecureRandom → base64 — the JS crypto suite's CSPRNG source.
+     * Sync (not AsyncFunction): the noble crypto's keygen/ephemeral
+     * calls take bytes synchronously; SecureRandom is fast enough
+     * for the JS thread. */
+    Function("syncRandomBytes") { length: Double ->
+      syncSocketsInstance().randomBytes(length.toInt())
     }
 
     AsyncFunction("createHost") { config: HostConfigInput ->
@@ -485,6 +546,17 @@ class AuqwExpoModule : Module() {
     Function("setAuthToken") { token: String? ->
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       h.setAuthToken(token)
+    }
+
+    /**
+     * Live PO-token provider update — resolves read the host's slot
+     * at invocation spawn, so a pairing or unpairing landing after
+     * createHost applies without a host recreate. null restores the
+     * anonymous resolve ladder.
+     */
+    Function("setPotProvider") { url: String? ->
+      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      h.setPotProvider(url)
     }
 
     AsyncFunction("loadPlugin") { wasmBase64: String, manifestJson: String ->
@@ -1418,9 +1490,10 @@ class AuqwExpoModule : Module() {
       val localUri = Uri.parse(
         if (sourceRef.contains("://")) sourceRef else "file://$sourceRef"
       )
+      val ctx = appContext.reactContext ?: return
       attachOnPlayerThread(
         p, localAttach, 0.0, localUri,
-        DefaultDataSource.Factory(p.applicationContext),
+        DefaultDataSource.Factory(ctx),
         OccurrenceBind.FIXED, target.occurrenceId
       )
       if (attached === localAttach) {
@@ -1873,5 +1946,6 @@ class AuqwExpoModule : Module() {
     is HostException.Load -> CodedException("ERR_LOAD", e.message, e)
     is HostException.UnknownPlugin -> CodedException("ERR_UNKNOWN_PLUGIN", e.message, e)
     is HostException.Runtime -> CodedException("ERR_RUNTIME", e.message, e)
+    is HostException.RequestInFlight -> CodedException("ERR_REQUEST_IN_FLIGHT", e.message, e)
   }
 }

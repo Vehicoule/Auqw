@@ -23,10 +23,13 @@ import {
   JetBrainsMono_700Bold,
 } from '@expo-google-fonts/jetbrains-mono';
 import * as AuqwExpo from 'auqw-expo';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
+  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
   CancellationSource,
   SearchSession,
   effectiveMapping,
+  isMatchGate,
   isRefRejected,
   previewImport,
 } from '@auqw/application';
@@ -44,11 +47,13 @@ import type {
   SearchState,
   SessionState,
   SourceRef,
+  SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
   AppStack,
+  ArtworkResolverProvider,
   CollectionScreen,
   CorrectionsScreen,
   EmptyState,
@@ -61,6 +66,7 @@ import {
   MiniPlayer,
   PlatformTabs,
   PlaylistScreen,
+  Pressable,
   ProviderPickerSheet,
   PushScreen,
   RowActionsSheet,
@@ -69,6 +75,7 @@ import {
   SheetScreen,
   StackItem,
   StageSheet,
+  SyncScreen,
   Text,
   ThemeProvider,
   TransferScreen,
@@ -87,10 +94,12 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  toSyncModel,
   toTrackRowModel,
   useTheme,
 } from '@auqw/ui-native';
 import type {
+  ArtworkResolver,
   CollectionRowModel,
   CorrectionsFilter,
   DownloadChip,
@@ -106,14 +115,17 @@ import type {
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
+import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
+import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
 import { devRoute } from './src/dev-routes.ts';
 import { appFilePath, runSeamLink } from './seam-dev.ts';
 
-// PO-token service (bgutil /get_pot contract). Off unless configured —
-// set EXPO_PUBLIC_POT_PROVIDER_URL at bundle time (from the Android
+// PO-token service (bgutil /get_pot contract). Source order: the
+// paired desktop's discovered endpoint (persisted SyncPeer.pot) >
+// EXPO_PUBLIC_POT_PROVIDER_URL dev override (from the Android
 // emulator, http://10.0.2.2:4416 reaches a provider on the host
-// machine). Unset: resolves stay on the anonymous ladder.
+// machine) > none — unset peers resolve on the anonymous ladder.
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
 const SEARCH_LIMIT = 25;
@@ -126,6 +138,50 @@ const NAV_ITEMS: readonly NavItemModel[] = [
   { key: 'settings', label: 'settings' },
 ];
 
+/**
+ * The sync screen's QR scanner — expo-camera lives in the app (not
+ * ui-native), so the camera mounts here and the screen receives it
+ * through its renderScanner seam. Permission is requested lazily on
+ * first open; denied/restricted renders an honest prompt, never a
+ * dead black frame.
+ */
+function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
+  const theme = useTheme();
+  const [permission, requestPermission] = useCameraPermissions();
+  const consumed = useRef(false);
+  useEffect(() => {
+    if (permission !== null && !permission.granted && permission.canAskAgain) {
+      void requestPermission();
+    }
+  }, [permission, requestPermission]);
+  if (permission === null || !permission.granted) {
+    return (
+      <Pressable
+        onPress={() => void requestPermission()}
+        accessibilityLabel="grant camera access"
+        accessibilityRole="button"
+        style={{ padding: 14 }}
+      >
+        <Text variant="metadata" color="secondary">
+          camera access is needed to scan the pairing QR
+        </Text>
+      </Pressable>
+    );
+  }
+  return (
+    <CameraView
+      style={{ flex: 1 }}
+      barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+      onBarcodeScanned={(result) => {
+        if (!consumed.current && typeof result.data === 'string') {
+          consumed.current = true;
+          onScan(result.data);
+        }
+      }}
+    />
+  );
+}
+
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
 
 const THEME_OPTIONS: readonly ProviderPickerOption[] = [
@@ -133,6 +189,18 @@ const THEME_OPTIONS: readonly ProviderPickerOption[] = [
   { key: 'dark', label: 'dark', detail: 'tokyo night' },
   { key: 'light', label: 'light', detail: 'daylight' },
   { key: 'oled', label: 'oled', detail: 'true black' },
+];
+
+// On-disk artwork LRU sizes, MiB — inside the domain's 16 MiB–1 GiB
+// artworkCacheBytes bounds; 200 is the spec default (data.md).
+const ARTWORK_CACHE_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: '16', label: '16 mb', detail: 'minimum' },
+  { key: '64', label: '64 mb' },
+  { key: '128', label: '128 mb' },
+  { key: '200', label: '200 mb', detail: 'default' },
+  { key: '256', label: '256 mb' },
+  { key: '512', label: '512 mb' },
+  { key: '1024', label: '1024 mb', detail: 'maximum' },
 ];
 
 type Boot =
@@ -156,8 +224,13 @@ export function App() {
     setBoot({ type: 'loading' });
     void (async () => {
       try {
+        // potProviderUrl is a one-shot createHost input — the
+        // persisted peer endpoint must be read before the controller
+        // exists, and a corrupt/missing record degrades to the env
+        // override, then the bare ladder.
         const created = await createSessionController(AuqwExpo, {
-          potProviderUrl: POT_PROVIDER_URL,
+          potProviderUrl:
+            (await discoveredPotProviderUrl()) ?? POT_PROVIDER_URL,
           // Android plays through the native Media3 seam (background
           // queue projection + lock-screen controls); iOS keeps the
           // provisional expo-audio path until the seam's iOS player
@@ -273,16 +346,32 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     () => controller.session.subscribe(setState),
     [controller],
   );
+  // Every Artwork in the tree resolves remote urls through the
+  // bounded on-disk cache; a failed lookup resolves to null and the
+  // component renders the remote url instead.
+  const resolveArtwork = useCallback<ArtworkResolver>(
+    (url, signal) =>
+      controller.artworkCache
+        .get(url, {
+          requestId: createIds().next('artwork'),
+          deadlineMs: createClock().nowMs() + 30_000,
+          signal,
+        })
+        .then((result) => (result.ok ? result.value.filePath : null)),
+    [controller],
+  );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
   // OS font scale feeds textScale — accessibility sizing isn't opt-in.
   const { fontScale } = useWindowDimensions();
   return (
     <ThemeProvider theme={theme} textScale={fontScale}>
-      {state.type === 'ready' ? (
-        <Main controller={controller} state={state} />
-      ) : (
-        <SessionGate state={state} controller={controller} />
-      )}
+      <ArtworkResolverProvider resolve={resolveArtwork}>
+        {state.type === 'ready' ? (
+          <Main controller={controller} state={state} />
+        ) : (
+          <SessionGate state={state} controller={controller} />
+        )}
+      </ArtworkResolverProvider>
     </ThemeProvider>
   );
 }
@@ -317,7 +406,10 @@ function SessionGate({
   );
 }
 
-function toSearchModel(state: SearchState): SearchStateModel {
+function toSearchModel(
+  state: SearchState,
+  playingRef: SourceRef | null = null,
+): SearchStateModel {
   switch (state.type) {
     case 'idle':
       return {
@@ -350,7 +442,9 @@ function toSearchModel(state: SearchState): SearchStateModel {
       return {
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         query: state.query,
-        results: state.page.items.map(toSearchRowModel),
+        results: state.page.items.map((meta, index) =>
+          toSearchRowModel(meta, index, playingRef),
+        ),
         providerId: null,
         message: state.refreshError?.message ?? null,
         retryable: false,
@@ -388,7 +482,8 @@ type Overlay =
   | { readonly type: 'playlist'; readonly playlistId: string }
   | { readonly type: 'entity'; readonly ref: EntityRef }
   | { readonly type: 'corrections' }
-  | { readonly type: 'transfer' };
+  | { readonly type: 'transfer' }
+  | { readonly type: 'sync' };
 
 /** A pushed route on the native screen stack. */
 type OverlayEntry = { readonly key: string; readonly overlay: Overlay };
@@ -506,6 +601,8 @@ function Main({
   // would be a storage-schema decision, so they die with the app.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
+    useState(false);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Library-world overlay stack: pushed routes — collection list,
@@ -716,6 +813,38 @@ function Main({
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
+
+  // Slice-4 sync surface — null on iOS or when bring-up failed. The
+  // client's own subscription feeds status; a failed bring-up leaves
+  // the settings row disabled with 'unavailable', never a dead link.
+  const syncSurface = controller.sync();
+  const [syncStatus, setSyncStatus] = useState<SyncClientStatus | null>(
+    () => syncSurface?.client.status() ?? null,
+  );
+  const [pairing, setPairing] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
+  useEffect(() => {
+    if (syncSurface === null) {
+      return;
+    }
+    const applyStatus = (status: SyncClientStatus) => {
+      setSyncStatus(status);
+      // Live provider update: createHost's potProviderUrl is
+      // boot-time, but peers keep changing — a mid-session pair
+      // brings the desktop's endpoint, an unpair or a
+      // welcome-carried refresh clears/replaces it. Same source
+      // order as boot: discovered peer > env override > none.
+      controller.setPotProvider(
+        potProviderUrlFromPeers(status.peers.map((view) => view.peer)) ??
+          POT_PROVIDER_URL ??
+          null,
+      );
+    };
+    applyStatus(syncSurface.client.status());
+    return syncSurface.client.subscribe(applyStatus);
+    // The surface is stable for the controller's life — subscribe once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
 
   const catalogProvider =
     controller.providers.find(
@@ -988,6 +1117,25 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state, downloads, downloadChipFor, online, controller, localTick],
   );
+  // The ref the player actually resolved for the live attempt —
+  // published on the playback snapshot, so a pin, a verdict, or
+  // owned bytes each mark exactly the row they resolved to (local
+  // picks match no catalog row). A failed gate is not 'playing'.
+  const playingRef = useMemo((): SourceRef | null => {
+    const playback = state.playback;
+    // Only an engaged attempt marks — paused keeps its loaded ref but
+    // is not 'playing' (the queue surface drops its mark on the same
+    // moment); a failed gate never marked at all.
+    if (
+      playback.type === 'idle' ||
+      playback.type === 'paused' ||
+      playback.type === 'failed'
+    ) {
+      return null;
+    }
+    return playback.ref ?? null;
+  }, [state.playback]);
+
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
       toEntityModel({
@@ -996,8 +1144,9 @@ function Main({
         likes: state.likes,
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
+        playingRef,
       }),
-    [state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs, playingRef],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1066,6 +1215,11 @@ function Main({
             key: `local:${rec.id}`,
             liked: liked.has(rec.id),
             note: 'local',
+            playing:
+              state.playback.type !== 'idle' &&
+              state.playback.type !== 'paused' &&
+              state.playback.type !== 'failed' &&
+              state.playback.recordingId === rec.id,
           }),
         );
         if (rows.length >= 25) {
@@ -1076,9 +1230,17 @@ function Main({
     return rows;
     // localTick re-reads local.uriFor after a folder mutation — a
     // removed folder's recordings persist but must stop matching.
-  }, [searchState, state.recordings, state.likes, controller, localTick]);
+    // state.playback is read for the per-row playing mark.
+  }, [
+    searchState,
+    state.recordings,
+    state.likes,
+    state.playback,
+    controller,
+    localTick,
+  ]);
   const searchModel = useMemo(() => {
-    const base = toSearchModel(searchState);
+    const base = toSearchModel(searchState, playingRef);
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
     }
@@ -1090,7 +1252,7 @@ function Main({
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults]);
+  }, [searchState, localResults, playingRef]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
@@ -1123,6 +1285,17 @@ function Main({
     }),
     [state, controller, attempts, pendingReviews],
   );
+  const syncModel = useMemo(
+    () =>
+      toSyncModel({
+        available: syncSurface !== null,
+        status: syncStatus,
+      }),
+    // syncSurface is stable per controller — syncStatus carries the
+    // updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [syncStatus, controller],
+  );
   const settingsModel = useMemo(
     () =>
       toSettingsModel(state.settings, diagnostics, {
@@ -1136,8 +1309,79 @@ function Main({
           ?.list()
           .map((s) => ({ sourceId: s.sourceId, label: s.label })),
         downloadCount: downloads.length,
+        syncSupported: syncSurface !== null,
+        syncLabel: syncModel.statusLabel,
       }),
-    [state, diagnostics, storageText, localTick, controller, downloads],
+    [state, diagnostics, storageText, localTick, controller, downloads, syncModel],
+  );
+
+  // ---- library world: overlay routes ------------------------------
+
+  const pushOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack((stack) => [
+      ...stack,
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
+  }, []);
+
+  const resetOverlay = useCallback((next: Overlay) => {
+    overlayCounter.current += 1;
+    setOverlayStack([
+      { key: `ov-${overlayCounter.current}`, overlay: next },
+    ]);
+  }, []);
+
+  /** Pop the top route — every screen's own back affordance. */
+  const closeOverlay = useCallback(() => {
+    setOverlayStack((stack) => stack.slice(0, -1));
+  }, []);
+
+  /** Native gesture/back dismissal removes a screen and all above it. */
+  const dismissOverlay = useCallback((key: string) => {
+    setOverlayStack((stack) => {
+      const index = stack.findIndex((entry) => entry.key === key);
+      return index === -1 ? stack : stack.slice(0, index);
+    });
+  }, []);
+
+  const clearOverlays = useCallback(() => {
+    setOverlayStack([]);
+    setEntityFetches({});
+  }, []);
+
+  // ---- play actions ------------------------------------------------
+
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
+  // The ambiguous-match gate parks candidates in a review the user
+  // must resolve — retrying the press only fails the same way, so a
+  // play that hits the gate opens the review surface instead of
+  // dying quietly on a dead queue item.
+  const reportPlay = useCallback(
+    (action: string, result: Result<unknown>) => {
+      reportResult(action, result);
+      if (!result.ok && isMatchGate(result.error)) {
+        // Land the user on the fresh pending row: a stale 'resolved'
+        // filter or an already-open screen would hide it, so the
+        // route always selects pending and reloads.
+        setReviewFilter('pending');
+        loadReviews();
+        if (overlay?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
+        }
+      }
+    },
+    [pushOverlay, overlay, loadReviews],
   );
 
   const playRecording = useCallback(
@@ -1146,11 +1390,13 @@ function Main({
         return;
       }
       const enqueued = await session.enqueueRecording(recordingId);
-      if (enqueued.ok) {
-        await session.playOccurrence(enqueued.value);
+      if (!enqueued.ok) {
+        reportResult('enqueue track', enqueued);
+        return;
       }
+      reportPlay('play', await session.playOccurrence(enqueued.value));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1163,9 +1409,9 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
-      void session.playOccurrence(occurrenceId);
+      void session.playOccurrence(occurrenceId).then((r) => reportPlay('play', r));
     },
-    [session, state.queue, canPlay],
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Mirrors QueueEngine.next()/previous() targeting: next → index+1
@@ -1189,9 +1435,11 @@ function Main({
           return;
         }
       }
-      void (method === 'next' ? session.next() : session.previous());
+      void (method === 'next' ? session.next() : session.previous()).then(
+        (r) => reportPlay(method, r),
+      );
     },
-    [online, state.queue, isOwned, session],
+    [online, state.queue, isOwned, session, reportPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
@@ -1226,10 +1474,10 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void session.addAndPlay(meta);
+        void session.addAndPlay(meta).then((r) => reportPlay('play result', r));
       }
     },
-    [session, canPlayMeta, playRecording, query, recordRecentSearch],
+    [session, canPlayMeta, playRecording, query, recordRecentSearch, reportPlay],
   );
 
   const onSettingsSelect = useCallback(
@@ -1251,6 +1499,10 @@ function Main({
         importText.current = null;
         setTransfer(IDLE_TRANSFER);
         pushOverlay({ type: 'transfer' });
+        return;
+      }
+      if (key === 'sync') {
+        pushOverlay({ type: 'sync' });
         return;
       }
       if (key === 'addLocalFolder') {
@@ -1305,6 +1557,10 @@ function Main({
           });
         return;
       }
+      if (key === 'artworkCacheBytes') {
+        setArtworkCachePickerOpen(true);
+        return;
+      }
       // storefront, quality, downloadStorage rows are display-only.
     },
     [session, state.settings, controller, refreshLocal, refreshUsage],
@@ -1338,6 +1594,73 @@ function Main({
     [session, state.settings, controller],
   );
 
+  // ---- slice-4 LAN sync ------------------------------------------------
+  // Both pair paths and every peer op guard on the live client — the
+  // surface can be null (iOS / failed bring-up) behind an enabled row.
+  const runPair = useCallback(
+    (
+      request:
+        | { readonly payload: string }
+        | { readonly code: string; readonly endpoints: readonly string[] },
+    ) => {
+      const client = syncSurface?.client;
+      if (client === undefined || pairing) {
+        return;
+      }
+      setPairing(true);
+      setPairError(null);
+      void client
+        .pair(request, new CancellationSource().signal)
+        .then((result) => {
+          setPairing(false);
+          setPairError(result.ok ? null : result.error.message);
+        });
+    },
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller, pairing],
+  );
+  const onPairCode = useCallback(
+    (input: { code: string; host: string; port: number | null }) => {
+      if (input.port === null) {
+        return;
+      }
+      runPair({
+        code: input.code,
+        endpoints: [`${input.host}:${input.port}`],
+      });
+    },
+    [runPair],
+  );
+  const onPairPayload = useCallback(
+    (payload: string) => {
+      runPair({ payload });
+    },
+    [runPair],
+  );
+  const onSyncNow = useCallback(
+    (fp: string) => {
+      const client = syncSurface?.client;
+      if (client === undefined) {
+        return;
+      }
+      void client.syncNow(fp, new CancellationSource().signal);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller],
+  );
+  const onUnpair = useCallback(
+    (fp: string) => {
+      const client = syncSurface?.client;
+      if (client === undefined) {
+        return;
+      }
+      void client.unpair(fp, new CancellationSource().signal);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controller],
+  );
+
   const playback = state.playback;
   const playing = playback.type === 'playing';
   const currentRecordingId =
@@ -1353,8 +1676,10 @@ function Main({
       return;
     }
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    void (playing ? session.pause() : session.resume());
-  }, [session, playing, currentRecordingId, canPlay]);
+    void (playing ? session.pause() : session.resume()).then((r) =>
+      reportPlay(playing ? 'pause' : 'resume', r),
+    );
+  }, [session, playing, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -1497,17 +1822,6 @@ function Main({
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
 
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.
@@ -1733,40 +2047,7 @@ function Main({
     [providerSlot, session, state.settings],
   );
 
-  // ---- library world: overlay routes + entity fetch --------------
-
-  const pushOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack((stack) => [
-      ...stack,
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  const resetOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack([
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  /** Pop the top route — every screen's own back affordance. */
-  const closeOverlay = useCallback(() => {
-    setOverlayStack((stack) => stack.slice(0, -1));
-  }, []);
-
-  /** Native gesture/back dismissal removes a screen and all above it. */
-  const dismissOverlay = useCallback((key: string) => {
-    setOverlayStack((stack) => {
-      const index = stack.findIndex((entry) => entry.key === key);
-      return index === -1 ? stack : stack.slice(0, index);
-    });
-  }, []);
-
-  const clearOverlays = useCallback(() => {
-    setOverlayStack([]);
-    setEntityFetches({});
-  }, []);
+  // ---- library world: entity fetch ----------------------------------
 
   const loadEntityPage = useCallback(
     (ref: EntityRef) => {
@@ -1943,14 +2224,16 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((row) => ({
-          recordingId: row.recordingId,
-          selectedRef: null,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((row) => ({
+            recordingId: row.recordingId,
+            selectedRef: null,
+          })),
+        )
+        .then((r) => reportPlay('play collection', r));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const playPlaylist = useCallback(
@@ -1964,18 +2247,20 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((entry) => ({
-          recordingId: entry.recordingId,
-          // A provider pin beats owned bytes in #pickRef — drop it
-          // when bytes exist so downloads actually get played.
-          selectedRef: isOwned(entry.recordingId)
-            ? null
-            : entry.selectedRef,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((entry) => ({
+            recordingId: entry.recordingId,
+            // A provider pin beats owned bytes in #pickRef — drop it
+            // when bytes exist so downloads actually get played.
+            selectedRef: isOwned(entry.recordingId)
+              ? null
+              : entry.selectedRef,
+          })),
+        )
+        .then((r) => reportPlay('play playlist', r));
     },
-    [session, isOwned, canPlay],
+    [session, isOwned, canPlay, reportPlay],
   );
 
   const playlistDownloadFor = useCallback(
@@ -2183,8 +2468,22 @@ function Main({
   // review?list|confirm=&candidate=|reject=|undo=, transfer?export|
   // import=<path>|apply-import, download?i=N|downloads, local-add|
   // local-rescan|local-list, airplane. Never ships in release bundles.
-  const journeyDeps = useRef({ session, search, state, controller, downloadRefFor });
-  journeyDeps.current = { session, search, state, controller, downloadRefFor };
+  const journeyDeps = useRef({
+    session,
+    search,
+    state,
+    controller,
+    downloadRefFor,
+    reportPlay,
+  });
+  journeyDeps.current = {
+    session,
+    search,
+    state,
+    controller,
+    downloadRefFor,
+    reportPlay,
+  };
   useEffect(() => {
     if (!__DEV__) {
       return undefined;
@@ -2216,6 +2515,7 @@ function Main({
         state: st,
         controller: ctl,
         downloadRefFor: refFor,
+        reportPlay,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
@@ -2285,21 +2585,21 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s.addAndPlay(meta).then((r) => reportResult('play result', r));
+            void s.addAndPlay(meta).then((r) => reportPlay('play result', r));
           }
           break;
         }
         case 'next':
-          void s.next().then((r) => reportResult('next', r));
+          void s.next().then((r) => reportPlay('next', r));
           break;
         case 'previous':
-          void s.previous().then((r) => reportResult('previous', r));
+          void s.previous().then((r) => reportPlay('previous', r));
           break;
         case 'pause':
           void s.pause().then((r) => reportResult('pause', r));
           break;
         case 'resume':
-          void s.resume().then((r) => reportResult('resume', r));
+          void s.resume().then((r) => reportPlay('resume', r));
           break;
         case 'like-current':
           if (st.type === 'ready' && st.playback.type !== 'idle') {
@@ -2704,7 +3004,9 @@ function Main({
             model={homeModel}
             topInset={topInset}
             onPressCard={(card) => void playRecording(card.key)}
-            onResume={() => void session.resume()}
+            onResume={() =>
+              void session.resume().then((r) => reportPlay('resume', r))
+            }
           />
         );
     }
@@ -2759,14 +3061,16 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
-              void session.playRecordings([
-                {
-                  recordingId: entry.recordingId,
-                  selectedRef: isOwned(entry.recordingId)
-                    ? null
-                    : entry.selectedRef,
-                },
-              ]);
+              void session
+                .playRecordings([
+                  {
+                    recordingId: entry.recordingId,
+                    selectedRef: isOwned(entry.recordingId)
+                      ? null
+                      : entry.selectedRef,
+                  },
+                ])
+                .then((r) => reportPlay('play playlist entry', r));
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
@@ -2822,7 +3126,9 @@ function Main({
                 .filter(
                   (m): m is TrackMetadata => m !== undefined,
                 );
-              void session.playMetadata(metas);
+              void session
+                .playMetadata(metas)
+                .then((r) => reportPlay('play all', r));
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
@@ -2830,7 +3136,9 @@ function Main({
                 .filter(
                   (m): m is TrackMetadata => m !== undefined,
                 );
-              void session.playMetadata(metas, { shuffle: true });
+              void session
+                .playMetadata(metas, { shuffle: true })
+                .then((r) => reportPlay('shuffle all', r));
             }}
             onToggleLike={
               entityId === null
@@ -2841,7 +3149,9 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                void session.addAndPlay(meta);
+                void session
+                  .addAndPlay(meta)
+                  .then((r) => reportPlay('play result', r));
               }
             }}
             onContext={(row) => {
@@ -2884,6 +3194,25 @@ function Main({
             onPickImportFile={onPickImportFile}
             onApplyImport={onApplyImport}
             onResetImport={onResetImport}
+          />
+        );
+      case 'sync':
+        return (
+          <SyncScreen
+            model={syncModel}
+            topInset={topInset}
+            onBack={closeOverlay}
+            onPairCode={onPairCode}
+            onPairPayload={onPairPayload}
+            onSyncNow={onSyncNow}
+            onUnpair={onUnpair}
+            pairing={pairing}
+            pairError={pairError}
+            renderScanner={
+              Platform.OS === 'android'
+                ? (onScan) => <SyncScanner onScan={onScan} />
+                : undefined
+            }
           />
         );
       default:
@@ -3142,6 +3471,48 @@ function Main({
                 setThemePickerOpen(false);
               }}
               onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {artworkCachePickerOpen && (
+          <SheetScreen
+            stackKey="sheet-artwork-cache"
+            onDismissed={() => setArtworkCachePickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="artwork cache"
+              options={ARTWORK_CACHE_OPTIONS}
+              selectedKey={`${Math.round(
+                (state.settings.artworkCacheBytes ??
+                  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
+                  (1024 * 1024),
+              )}`}
+              onPick={(key) => {
+                setArtworkCachePickerOpen(false);
+                const mib = Number(key);
+                if (!Number.isSafeInteger(mib)) {
+                  return;
+                }
+                const artworkCacheBytes = mib * 1024 * 1024;
+                const shrinking =
+                  artworkCacheBytes <
+                  (state.settings.artworkCacheBytes ??
+                    ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
+                void session
+                  .updateSettings({ ...state.settings, artworkCacheBytes })
+                  .then((updated) => {
+                    // A shrunken cap takes effect only once rows over
+                    // it are evicted — sweep after the commit lands.
+                    if (updated.ok && shrinking) {
+                      void controller.artworkCache.sweep({
+                        requestId: createIds().next('artwork-sweep'),
+                        deadlineMs: createClock().nowMs() + 60_000,
+                        signal: new CancellationSource().signal,
+                      });
+                    }
+                  });
+              }}
+              onDismiss={() => setArtworkCachePickerOpen(false)}
             />
           </SheetScreen>
         )}

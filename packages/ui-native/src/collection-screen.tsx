@@ -3,7 +3,7 @@ import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { CollectionModel, CollectionRowModel } from './view-models.ts';
+import type { CollectionModel, CollectionRowModel } from '@auqw/ui-shared';
 
 export type CollectionScreenProps = {
   readonly model: CollectionModel;

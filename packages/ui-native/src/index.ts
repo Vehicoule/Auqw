@@ -1,7 +1,17 @@
 export { ThemeProvider, useTheme } from './theme.tsx';
 export type { Theme, ThemeProviderProps } from './theme.tsx';
 
-export * from './view-models.ts';
+export {
+    ArtworkResolverProvider,
+    useArtworkResolver,
+    useResolvedArtworkUri,
+} from './artwork.tsx';
+export type {
+    ArtworkResolver,
+    ArtworkResolverProviderProps,
+} from './artwork.tsx';
+
+export * from '@auqw/ui-shared';
 
 export {
     Artwork,
@@ -115,9 +125,12 @@ export type { CorrectionsScreenProps } from './corrections-screen.tsx';
 export { TransferScreen } from './transfer-screen.tsx';
 export type { TransferScreenProps } from './transfer-screen.tsx';
 
+export { SyncScreen } from './sync-screen.tsx';
+export type { SyncScreenProps } from './sync-screen.tsx';
+
 export { HomeScreen } from './home-screen.tsx';
 export type { HomeScreenProps } from './home-screen.tsx';
 
 export { GalleryScreen } from './gallery.tsx';
 
-export * as fixtures from './fixtures.ts';
+export * as fixtures from '@auqw/ui-shared/fixtures';

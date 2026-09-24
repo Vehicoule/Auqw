@@ -2,8 +2,8 @@ import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
-import { formatClock } from './view-models.ts';
-import type { HomeModel, RailCardModel, ResumeModel } from './view-models.ts';
+import { formatClock } from '@auqw/ui-shared';
+import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
 export type HomeScreenProps = {
   readonly model: HomeModel;

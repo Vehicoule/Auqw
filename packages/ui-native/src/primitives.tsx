@@ -29,6 +29,7 @@ import Animated, {
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
+import { useResolvedArtworkUri } from './artwork.tsx';
 import { morphPlayPause, quadPath } from './motion.ts';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -307,6 +308,7 @@ export function Artwork({
   style,
 }: ArtworkProps) {
   const theme = useTheme();
+  const { uri, pending, markRemote } = useResolvedArtworkUri(url);
   const r = cornerRadius ?? theme.radius.thumb;
   return (
     <View
@@ -339,7 +341,7 @@ export function Artwork({
         >
           <Spinner size={fill ? 24 : Math.max(10, size * 0.3)} />
         </View>
-      ) : url === null ? (
+      ) : url === null || pending ? (
         monogram !== null && monogram !== undefined && monogram !== '' ? (
           <RNText
             // Monogram size is pure geometry — never font-scale it.
@@ -363,13 +365,14 @@ export function Artwork({
         )
       ) : (
         <Image
-          source={{ uri: url }}
+          source={{ uri: uri ?? undefined }}
           style={
             fill
               ? { width: '100%', height: '100%' }
               : { width: size, height: size }
           }
           resizeMode="cover"
+          onError={markRemote}
           accessibilityIgnoresInvertColors
         />
       )}

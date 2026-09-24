@@ -50,6 +50,19 @@ import type {
   StorageBatch,
   StoragePort,
 } from '../ports/storage.ts';
+import type {
+  ChangeEntry,
+  DivergenceEntry,
+  SyncLogSnapshot,
+  SyncLogStore,
+  SyncLogWrite,
+} from '../sync/sync-engine.ts';
+import {
+  isChangeEntry,
+  isDivergenceEntry,
+  isSyncCursor,
+} from '../sync/sync-engine.ts';
+
 import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
 
@@ -1252,5 +1265,169 @@ export class FakeConnectivity implements ConnectivityPort {
     for (const listener of this.listeners) {
       listener({ ...state });
     }
+  }
+}
+
+/**
+ * In-memory SyncLogStore: clone-on-read/write like FakeStorage so a
+ * test can't mutate the durable log behind the engine's back.
+ */
+export class FakeSyncLogStore implements SyncLogStore {
+  #entries: ChangeEntry[] = [];
+  #divergence: DivergenceEntry[] = [];
+  #watermarks: Record<string, number> = {};
+  /** Cumulative prune frontier — the largest seq ever capped away. */
+  #divergenceFloor = 0;
+  #failNextAppend: AppError | null = null;
+  #deferNextAppend = false;
+  #appendDeferreds: Deferred<Result<void>>[] = [];
+  readonly writes: { write: SyncLogWrite; context: OperationContext }[] = [];
+  readonly loads: OperationContext[] = [];
+
+  constructor(initial?: SyncLogSnapshot) {
+    if (initial !== undefined) {
+      this.#entries = [...initial.entries];
+      this.#divergence = [...initial.divergence];
+      this.#watermarks = { ...initial.watermarks };
+      this.#divergenceFloor = initial.divergenceFloor ?? 0;
+    }
+  }
+
+  #clone<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+
+  /** The next append resolves with this error instead of writing. */
+  failNextAppend(error: AppError): void {
+    this.#failNextAppend = error;
+  }
+
+  /** The next append stays pending until settleAppend. */
+  holdNextAppend(): void {
+    this.#deferNextAppend = true;
+  }
+
+  /** Settles the oldest held append; false when none pending. */
+  settleAppend(result: Result<void>): boolean {
+    const deferred = this.#appendDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
+  }
+
+  get pendingAppends(): number {
+    return this.#appendDeferreds.length;
+  }
+
+  get entries(): readonly ChangeEntry[] {
+    return this.#clone(this.#entries);
+  }
+
+  get divergenceRows(): readonly DivergenceEntry[] {
+    return this.#clone(this.#divergence);
+  }
+
+  get storedWatermarks(): Readonly<Record<string, number>> {
+    return this.#clone(this.#watermarks);
+  }
+
+  get storedDivergenceFloor(): number {
+    return this.#divergenceFloor;
+  }
+
+  load(context: OperationContext): Promise<Result<SyncLogSnapshot>> {
+    this.loads.push(context);
+    if (context.signal.cancelled) {
+      return Promise.resolve({
+        ok: false,
+        error: appError('cancelled', 'cancelled'),
+      });
+    }
+    return Promise.resolve(
+      ok(
+        this.#clone({
+          entries: this.#entries,
+          divergence: this.#divergence,
+          watermarks: this.#watermarks,
+          divergenceFloor: this.#divergenceFloor,
+        }),
+      ),
+    );
+  }
+
+  append(
+    write: SyncLogWrite,
+    context: OperationContext,
+  ): Promise<Result<void>> {
+    if (context.signal.cancelled) {
+      return Promise.resolve({
+        ok: false,
+        error: appError('cancelled', 'cancelled'),
+      });
+    }
+    if (this.#failNextAppend !== null) {
+      const error = this.#failNextAppend;
+      this.#failNextAppend = null;
+      return Promise.resolve({ ok: false, error });
+    }
+    if (this.#deferNextAppend) {
+      this.#deferNextAppend = false;
+      const deferred = new Deferred<Result<void>>();
+      this.#appendDeferreds.push(deferred);
+      return deferred.promise.then((settled) => {
+        if (!settled.ok) {
+          return settled;
+        }
+        return this.#applyWrite(write, context);
+      });
+    }
+    return Promise.resolve(this.#applyWrite(write, context));
+  }
+
+  #applyWrite(
+    write: SyncLogWrite,
+    context: OperationContext,
+  ): Result<void> {
+    if (
+      (write.entries !== undefined &&
+        !write.entries.every(isChangeEntry)) ||
+      (write.divergence !== undefined &&
+        !write.divergence.every(isDivergenceEntry)) ||
+      (write.watermarks !== undefined &&
+        !isSyncCursor(write.watermarks)) ||
+      (write.dropDivergenceBefore !== undefined &&
+        !isSafeNonNegative(write.dropDivergenceBefore))
+    ) {
+      return err(
+        appError('invalid-response', 'append batch failed validation'),
+      );
+    }
+    this.writes.push({ write: this.#clone(write), context });
+    if (write.entries !== undefined) {
+      this.#entries.push(...this.#clone(write.entries));
+    }
+    if (write.divergence !== undefined) {
+      this.#divergence.push(...this.#clone(write.divergence));
+    }
+    if (write.watermarks !== undefined) {
+      for (const [device, mark] of Object.entries(write.watermarks)) {
+        const current = this.#watermarks[device];
+        if (current === undefined || mark > current) {
+          this.#watermarks[device] = mark;
+        }
+      }
+    }
+    if (write.dropDivergenceBefore !== undefined) {
+      const floor = write.dropDivergenceBefore;
+      this.#divergence = this.#divergence.filter(
+        (row) => row.seq >= floor,
+      );
+      if (floor > this.#divergenceFloor) {
+        this.#divergenceFloor = floor;
+      }
+    }
+    return ok(undefined);
   }
 }

@@ -11,7 +11,7 @@ import {
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
-import type { PlaylistEntryModel, PlaylistModel } from './view-models.ts';
+import type { PlaylistEntryModel, PlaylistModel } from '@auqw/ui-shared';
 
 export type PlaylistScreenProps = {
   /**

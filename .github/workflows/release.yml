@@ -1,0 +1,254 @@
+name: release
+
+# A `v*` tag is the release. The tag carries the full semver
+# (v0.0.1-alpha.1, v0.0.1) — tooling/stamp-version.mjs writes it into
+# the release-facing manifests before any build runs, so artifacts
+# always identify their own tag and the repo manifests just track the
+# in-development line.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      # providers.lock.json resolves `release:../auqw-plugins/...` —
+      # the plugins repo must sit as a sibling of the Auqw checkout.
+      - uses: actions/checkout@v7
+        with:
+          path: auqw
+      - uses: actions/checkout@v7
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          # Same-org public repos read fine under GITHUB_TOKEN; a
+          # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      # Pinned rustup over a toolchain action — one less node-runtime
+      # dep, identical result.
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: auqw
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: auqw/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: auqw/pnpm-lock.yaml
+      # electron-builder downloads the Electron dist + packaging tools
+      # on every build — both dirs cache cleanly.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ hashFiles('auqw/pnpm-lock.yaml') }}
+          restore-keys: electron-
+      # The flathub runtime/SDK/BaseApp install is GBs each run — the
+      # flatpak user repo + builder cache survive in these two dirs. The
+      # key rotates weekly: restore-keys pulls last week's snapshot, the
+      # post-install `flatpak update` refreshes refs, and the new key
+      # persists the refreshed snapshot — a fixed key would restore the
+      # first saved state forever.
+      - id: flatpak-period
+        run: echo "period=$(date +%Y-%U)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.flatpak-builder
+          key: flatpak-24.08-${{ runner.os }}-${{ steps.flatpak-period.outputs.period }}
+          restore-keys: flatpak-24.08-${{ runner.os }}-
+      - name: flatpak toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform/x86_64/24.08 \
+            org.freedesktop.Sdk/x86_64/24.08 \
+            org.electronjs.Electron2.BaseApp/x86_64/24.08
+          # The cache key is fixed — without an explicit update, warm
+          # restores would pin stale runtime refs forever.
+          flatpak update --user -y
+      - name: build desktop packages
+        working-directory: auqw
+        run: |
+          pnpm install --frozen-lockfile
+          node tooling/stamp-version.mjs "$VERSION"
+          node tooling/stamp-version.mjs --check "${VERSION#v}"
+          node tooling/sync-plugins.mjs apps/desktop/plugins
+          pnpm --dir apps/desktop run dist
+      - name: checksums
+        working-directory: auqw/apps/desktop/dist-packages
+        run: sha256sum auqw-* > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-packages
+          # auqw-* globs only the shipped files — dist-packages also
+          # holds electron-builder's linux-unpacked/ staging dir, which
+          # is not a release asset (and `gh release` fails on dirs).
+          path: |
+            auqw/apps/desktop/dist-packages/auqw-*
+            auqw/apps/desktop/dist-packages/SHA256SUMS.txt
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: auqw
+      - uses: actions/checkout@v7
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      - run: |
+          rustup toolchain install 1.98.0 --profile minimal \
+            --target aarch64-linux-android --target x86_64-linux-android
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: auqw
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: auqw/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: auqw/pnpm-lock.yaml
+      # Prebuilt cargo-ndk — `cargo install` compiles it from source.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # Caches gradle deps + wrapper downloads between runs.
+      - uses: gradle/actions/setup-gradle@v6
+      # Alpha signing key lives in repo secrets — decoded to a runner
+      # temp file, never committed. A release must never silently ship
+      # debug-signed: missing secrets fail the job (the plugin's no-env
+      # debug fallback is for local builds only). Only the keystore
+      # *path* enters shared env — passwords stay step-scoped so later
+      # build scripts can't read them.
+      - name: alpha signing key
+        env:
+          AUQW_ALPHA_KEYSTORE_B64: ${{ secrets.AUQW_ALPHA_KEYSTORE_B64 }}
+          AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
+          AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
+        run: |
+          if [ -z "$AUQW_ALPHA_KEYSTORE_B64" ] || \
+             [ -z "$AUQW_ALPHA_STORE_PASSWORD" ] || \
+             [ -z "$AUQW_ALPHA_KEY_PASSWORD" ]; then
+            echo '::error::AUQW_ALPHA_* secrets missing — refusing to publish a debug-signed release APK' >&2
+            exit 1
+          fi
+          echo "$AUQW_ALPHA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/alpha.keystore"
+          echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore" >> "$GITHUB_ENV"
+      - name: android inputs (bindings + plugins)
+        working-directory: auqw
+        run: |
+          # ubuntu-latest ships several NDKs under the SDK — the
+          # bindings script defaults to a macOS path, so point it at
+          # the highest installed here.
+          export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
+          ./tooling/build-android-bindings.sh
+          pnpm install --frozen-lockfile
+          node tooling/stamp-version.mjs "$VERSION"
+          node tooling/stamp-version.mjs --check "${VERSION#v}"
+          node tooling/sync-plugins.mjs
+          pnpm --dir apps/mobile exec expo prebuild --platform android
+      - name: build release APK
+        working-directory: auqw/apps/mobile
+        # Passwords only here — step-scoped so the bindings/plugin steps
+        # above never see them. assembleRelease embeds the JS bundle —
+        # the APK is standalone (a debug APK is a dev client that needs
+        # Metro on the device).
+        env:
+          AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
+          AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
+        run: |
+          cd android && ./gradlew assembleRelease
+          cd .. && for apk in android/app/build/outputs/apk/release/app-*-release.apk; do
+            name=$(basename "$apk")
+            abi=${name#app-}; abi=${abi%-release.apk}
+            mv "$apk" "auqw-${VERSION#v}-android-${abi}.apk"
+          done
+          ls -la auqw-*-android-*.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-packages
+          path: auqw/apps/mobile/auqw-*-android-*.apk
+
+  release:
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job — gh resolves the repo from GH_REPO,
+          # not the (absent) working tree.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
+          # bare v*.*.* publishes stable.
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          # Verify the desktop bundle before any of it goes public — the
+          # checksum file is itself a release asset.
+          (cd artifacts/desktop-packages && sha256sum -c SHA256SUMS.txt)
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              "${flags[@]}" \
+              artifacts/desktop-packages/* \
+              artifacts/android-packages/*
+            exit 0
+          fi
+          # Rerun on a published release. Never delete the release: a
+          # failed attempt must leave existing downloads serving. Assets
+          # refresh in place (bounded retries shrink the per-asset
+          # clobber window); obsolete names prune only after uploads
+          # succeed; notes regenerate since the tag may have moved.
+          for attempt in 1 2 3; do
+            if gh release upload "$VERSION" --clobber \
+              artifacts/desktop-packages/* \
+              artifacts/android-packages/*; then break; fi
+            [ "$attempt" -lt 3 ] || exit 1
+          done
+          mapfile -t names < <(basename -a artifacts/desktop-packages/* artifacts/android-packages/*)
+          gh release view "$VERSION" --json assets -q '.assets[].name' \
+            | while read -r old; do
+                case " ${names[*]} " in
+                  *" $old "*) ;;
+                  *) gh release delete-asset "$VERSION" "$old" --yes ;;
+                esac
+              done
+          notes=$(gh api "repos/$GH_REPO/releases/generate-notes" \
+            -f tag_name="$VERSION" -q .body)
+          gh release edit "$VERSION" --notes "$notes"
+          # A leftover draft publishes only now — after every asset and
+          # note update succeeded — so a failed retry never ships a
+          # half-populated release.
+          draft=$(gh release view "$VERSION" --json isDraft -q .isDraft)
+          if [ "$draft" = "true" ]; then
+            gh release edit "$VERSION" --draft=false
+          fi

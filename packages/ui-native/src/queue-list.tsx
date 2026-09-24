@@ -3,7 +3,7 @@ import { useTheme } from './theme.tsx';
 import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { QueueItemModel, QueueModel } from './view-models.ts';
+import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 
 // Shared fallback (web/desktop + any platform without gesture-handler):
 // reorder uses paired chevron controls; the native variant swaps this

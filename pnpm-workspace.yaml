@@ -26,3 +26,6 @@ minimumReleaseAgeExclude:
   - expo@57.0.24
   - is-core-module@2.17.0
   - node-releases@2.0.56
+allowBuilds:
+  electron-winstaller: true
+  esbuild: true

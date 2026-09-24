@@ -3,7 +3,7 @@ import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
-import type { ImportPreviewModel, TransferModel } from './view-models.ts';
+import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
 
 export type TransferScreenProps = {
   readonly model: TransferModel;

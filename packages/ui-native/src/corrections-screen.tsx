@@ -7,7 +7,7 @@ import type {
   CorrectionsFilter,
   CorrectionsModel,
   ReviewRowModel,
-} from './view-models.ts';
+} from '@auqw/ui-shared';
 
 const FILTERS: readonly { value: CorrectionsFilter; label: string }[] = [
   { value: 'pending', label: 'pending' },

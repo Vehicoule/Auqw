@@ -8,7 +8,7 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import type { SearchStateModel, TrackRowModel } from './view-models.ts';
+import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
 
 export type SearchScreenProps = {
   readonly state: SearchStateModel;

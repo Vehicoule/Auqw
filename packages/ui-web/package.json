@@ -1,0 +1,32 @@
+{
+  "name": "@auqw/ui-web",
+  "private": true,
+  "version": "0.0.1-alpha.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/ui-web.test.ts"
+  },
+  "dependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/design-tokens": "workspace:*",
+    "@auqw/ui-shared": "workspace:*",
+    "uqr": "0.1.2"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-dom": "*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.1",
+    "@types/react": "~19.2.2",
+    "@types/react-dom": "~19.2.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "typescript": "~6.0.3"
+  }
+}

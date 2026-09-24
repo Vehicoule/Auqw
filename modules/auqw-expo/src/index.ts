@@ -262,11 +262,20 @@ type AuqwExpoEvents = {
   onPhaseMark: (event: PhaseMarkEvent) => void;
   onQueueTransition: (event: QueueTransitionEvent) => void;
   onConnectivityChanged: (event: ConnectivityChangedEvent) => void;
+  onSyncSocketData: (event: SyncSocketDataEvent) => void;
+  onSyncSocketClosed: (event: SyncSocketClosedEvent) => void;
 };
 
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   createHost(config: HostConfig): Promise<void>;
   setAuthToken(token: string | null): void;
+  /**
+   * Live PO-token provider update — resolves read the host's slot
+   * at invocation spawn, so a pairing or unpairing landing after
+   * createHost applies without a host recreate. null restores the
+   * anonymous resolve ladder.
+   */
+  setPotProvider(url: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   startResolve(pluginId: string, sourceRef: string): Promise<string>;
   startRequest(pluginId: string, capability: string, payloadJson: string): Promise<string>;
@@ -301,6 +310,17 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   connectivitySnapshot(): Promise<ConnectivityChangedEvent>;
   connectivityWatch(): void;
   connectivityUnwatch(): void;
+  syncConnect(
+    socketId: string,
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ): Promise<{ remoteAddress: string | null }>;
+  syncSend(socketId: string, data: string): Promise<void>;
+  syncClose(socketId: string): Promise<void>;
+  syncDestroy(socketId: string): Promise<void>;
+  /** Synchronous — the JS crypto suite takes CSPRNG bytes inline. */
+  syncRandomBytes(length: number): string;
 }
 
 const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
@@ -337,6 +357,17 @@ export function createHost(config: HostConfig): Promise<void> {
  */
 export function setAuthToken(token: string | null): void {
   native.setAuthToken(token);
+}
+
+/**
+ * Set or clear the bgutil-compatible PO-token provider URL on the
+ * running host (`POST {url}/get_pot`). Resolves read the slot at
+ * invocation spawn — a mid-session pairing or a welcome-carried
+ * endpoint refresh reaches the host without a recreate, and `null`
+ * restores the anonymous ladder. Never logged.
+ */
+export function setPotProvider(url: string | null): void {
+  native.setPotProvider(url);
 }
 
 export function loadPlugin(wasmBase64: string, manifestJson: string): Promise<string> {
@@ -600,6 +631,92 @@ export function hasTagReader(): boolean {
     typeof (native as { tagPickFolder?: unknown }).tagPickFolder ===
       'function' &&
     typeof (native as { tagEnumerate?: unknown }).tagEnumerate ===
+      'function'
+  );
+}
+
+// ---- Sync-socket wrappers (LAN sync client, docs/specs/sync.md) ----
+
+/** Frame bytes cross the bridge as base64 — never raw binary JSON. */
+export type SyncSocketDataEvent = {
+  socketId: string;
+  data: string;
+};
+
+/** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
+export type SyncSocketClosedEvent = {
+  socketId: string;
+  reason: string;
+};
+
+export function syncConnect(
+  socketId: string,
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<{ remoteAddress: string | null }> {
+  return seam.syncConnect === undefined
+    ? seamUnavailable('syncConnect')
+    : seam.syncConnect(socketId, host, port, timeoutMs);
+}
+
+export function syncSend(
+  socketId: string,
+  data: string,
+): Promise<void> {
+  return seam.syncSend === undefined
+    ? seamUnavailable('syncSend')
+    : seam.syncSend(socketId, data);
+}
+
+/** Graceful half-close — queued writes flush, then FIN. */
+export function syncClose(socketId: string): Promise<void> {
+  return seam.syncClose === undefined
+    ? seamUnavailable('syncClose')
+    : seam.syncClose(socketId);
+}
+
+/** Immediate teardown — pending writes may drop. */
+export function syncDestroy(socketId: string): Promise<void> {
+  return seam.syncDestroy === undefined
+    ? seamUnavailable('syncDestroy')
+    : seam.syncDestroy(socketId);
+}
+
+/** SecureRandom bytes as base64 — the sync crypto's CSPRNG source.
+ * Synchronous like the noble calls that consume it. */
+export function syncRandomBytes(length: number): string {
+  if (seam.syncRandomBytes === undefined) {
+    throw new CodedError(
+      'unavailable',
+      "auqw-expo 'syncRandomBytes' is unavailable on this platform",
+    );
+  }
+  return seam.syncRandomBytes(length);
+}
+
+export function addSyncSocketDataListener(
+  listener: (event: SyncSocketDataEvent) => void,
+): EventSubscription {
+  return native.addListener('onSyncSocketData', listener);
+}
+
+export function addSyncSocketClosedListener(
+  listener: (event: SyncSocketClosedEvent) => void,
+): EventSubscription {
+  return native.addListener('onSyncSocketClosed', listener);
+}
+
+/**
+ * Whether the platform's module carries the LAN-sync socket surface —
+ * Android-only today; on iOS the seam rejects 'unavailable' and the
+ * UI should report sync as off rather than offering a dead dial.
+ */
+export function hasSyncSocket(): boolean {
+  return (
+    typeof (native as { syncConnect?: unknown }).syncConnect ===
+      'function' &&
+    typeof (native as { syncRandomBytes?: unknown }).syncRandomBytes ===
       'function'
   );
 }

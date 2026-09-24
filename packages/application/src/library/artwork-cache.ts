@@ -1,3 +1,4 @@
+import { CancellationSource } from '../cancellation.ts';
 import type {
   CancellationSignal,
   OperationContext,
@@ -130,6 +131,14 @@ type Probe =
 
 type Inflight = {
   promise: Promise<Result<ArtworkLookup>>;
+  /**
+   * Callers still waiting on the shared download. The work runs on
+   * its own signal — one waiter cancelling (an unmounted image)
+   * must not abort a download the others still need; the work only
+   * cancels once the last waiter is gone.
+   */
+  waiters: number;
+  work: CancellationSource;
 };
 
 type Eviction = {
@@ -509,15 +518,33 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     });
   }
 
-  async function waitFor(
+  function waitFor(
     record: Inflight,
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
-    const result = await record.promise;
-    if (context.signal.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
-    }
-    return result;
+    record.waiters += 1;
+    return new Promise<Result<ArtworkLookup>>((resolve) => {
+      let unsubscribe: () => void = () => {};
+      let done = false;
+      const finish = (result: Result<ArtworkLookup>): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        unsubscribe();
+        record.waiters -= 1;
+        if (record.waiters === 0) {
+          record.work.cancel();
+        }
+        resolve(result);
+      };
+      unsubscribe = context.signal.subscribe(() => {
+        finish(err(appError('cancelled', 'cancelled')));
+      });
+      if (!context.signal.cancelled) {
+        void record.promise.then(finish);
+      }
+    });
   }
 
   function get(
@@ -534,9 +561,13 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         err(appError('cancelled', 'cancelled')),
       );
     }
-    // Concurrent gets for the same url coalesce onto one download.
+    // Concurrent gets for the same url coalesce onto one download —
+    // except a record whose work is already cancelled but not yet
+    // unwound: joining it could only ever answer cancelled, so a
+    // fresh record takes over (the abandoned one deletes itself by
+    // identity check and cannot clobber the replacement).
     const pending = inflight.get(url);
-    if (pending !== undefined) {
+    if (pending !== undefined && !pending.work.signal.cancelled) {
       return waitFor(pending, context);
     }
     // Placeholder replaced before the record is published to the map.
@@ -544,10 +575,14 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       promise: Promise.resolve(
         err(appError('internal', 'inflight record unset')),
       ),
+      waiters: 0,
+      work: new CancellationSource(),
     };
     record.promise = (async (): Promise<Result<ArtworkLookup>> => {
       try {
-        return await runGet(url, context);
+        // The download answers to `work`, not any caller's signal —
+        // it outlives a waiter until every waiter is gone.
+        return await runGet(url, { ...context, signal: record.work.signal });
       } catch (thrown) {
         return err(fromUnknown(thrown));
       } finally {

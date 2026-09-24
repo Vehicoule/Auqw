@@ -11,7 +11,7 @@ import type {
   CollectionKey,
   LibraryCardModel,
   LibraryModel,
-} from './view-models.ts';
+} from '@auqw/ui-shared';
 
 export type LibraryScreenProps = {
   readonly model: LibraryModel;

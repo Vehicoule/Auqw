@@ -176,6 +176,13 @@ export type AuqwExpoLike = AuqwExpoHostLike &
   AuqwExpoPlayerLike & {
     createHost(config: AuqwExpoHostConfig): Promise<void>;
     setAuthToken(token: string | null): void;
+    /**
+     * Live PO-token provider update — resolves read the host's slot
+     * at invocation spawn, so a pairing or unpairing that lands after
+     * `createHost` applies without recreating the host. `null`
+     * restores the anonymous resolve ladder.
+     */
+    setPotProvider(url: string | null): void;
     loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
   };
 
@@ -186,6 +193,8 @@ export type AuqwExpoLike = AuqwExpoHostLike &
 export type AuqwExpoHostModuleLike = AuqwExpoHostLike & {
   createHost(config: AuqwExpoHostConfig): Promise<void>;
   setAuthToken(token: string | null): void;
+  /** Live PO-token provider update — see `AuqwExpoLike.setPotProvider`. */
+  setPotProvider(url: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
 };
 
@@ -273,6 +282,46 @@ export type AuqwConnectivityNative = {
   connectivityUnwatch(): void;
   addConnectivityChangedListener(
     listener: (event: AuqwConnectivityEvent) => void,
+  ): AuqwExpoSubscription;
+};
+
+// ---------------------------------------------------------------------------
+// Sync socket — mirrors the auqw-expo `sync*` surface (slice 4).
+// ---------------------------------------------------------------------------
+
+/** `data` is base64 — binary frames never cross the bridge as JSON. */
+export type AuqwSyncSocketDataEvent = {
+  socketId: string;
+  data: string;
+};
+
+/** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
+export type AuqwSyncSocketClosedEvent = {
+  socketId: string;
+  reason: string;
+};
+
+export type AuqwSyncNative = {
+  syncConnect(
+    socketId: string,
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ): Promise<{ remoteAddress: string | null }>;
+  /** `data` is base64. Rejects when the socket is gone or write fails. */
+  syncSend(socketId: string, data: string): Promise<void>;
+  /** Graceful half-close: queued writes flush, then FIN. */
+  syncClose(socketId: string): Promise<void>;
+  /** Immediate teardown — pending writes may drop. */
+  syncDestroy(socketId: string): Promise<void>;
+  /** SecureRandom bytes, base64 — the sync crypto's CSPRNG source.
+   * Synchronous like the noble calls that consume it. */
+  syncRandomBytes(length: number): string;
+  addSyncSocketDataListener(
+    listener: (event: AuqwSyncSocketDataEvent) => void,
+  ): AuqwExpoSubscription;
+  addSyncSocketClosedListener(
+    listener: (event: AuqwSyncSocketClosedEvent) => void,
   ): AuqwExpoSubscription;
 };
 

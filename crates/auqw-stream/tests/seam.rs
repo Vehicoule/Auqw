@@ -1446,6 +1446,17 @@ async fn detached_session_evicted_by_detached_age() {
     // Once the detached window itself reaches the TTL the reaper ends
     // it and drops the handle — a stale handle answers not-found.
     wait_until(|| !reg.is_live(&h)).await;
+    // `is_live` flips when the terminal bit lands, a beat before the
+    // entry actually leaves the map — an attach in that gap still sees
+    // the typed `evicted`. Polling attach is safe only now: a terminal
+    // session errors before the shared-state writes, so the probe
+    // can't re-attach or reset the detached clock it would race.
+    wait_until(|| {
+        reg.attach(&h, 0)
+            .err()
+            .is_some_and(|e| e.kind() == "not-found")
+    })
+    .await;
     let e = err_of(reg.attach(&h, 0));
     assert_eq!(e.kind(), "not-found", "{e}");
 }

@@ -3,7 +3,7 @@ import { BlurView } from 'expo-blur';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
-import type { NavItemModel, PlatformVariant } from './view-models.ts';
+import type { NavItemModel, PlatformVariant } from '@auqw/ui-shared';
 
 const NAV_ICONS: Record<string, IconName> = {
   home: 'home',
@@ -35,6 +35,7 @@ export function AndroidNavbar({
       <View
         accessibilityRole="tablist"
         style={{
+          // The preview's native bar sits on the deep surface.
           backgroundColor: theme.colors.deep,
           flexDirection: 'row',
           paddingTop: theme.spacing.sm,
