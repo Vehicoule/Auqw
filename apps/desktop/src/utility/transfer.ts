@@ -525,6 +525,19 @@ export function createTransferService(
     if (!isBareName(args.name)) {
       throw shellError('invalid-request', 'not a managed file name');
     }
+    // A live sink's `.part` is `name + '.part'` — unlinking either
+    // file out from under an open (or pending) sink deletes the bytes
+    // it is mid-write on and strands its finalize. In-flight transfers
+    // end through `transfer:abort`, not here.
+    if (
+      reserved.has(args.name) ||
+      [...sinks.values()].some((sink) => sink.destPath === args.name)
+    ) {
+      throw shellError(
+        'unavailable',
+        'destination has an in-flight transfer',
+      );
+    }
     try {
       await rm(join(dir(), args.name), { force: true });
       await rm(join(dir(), `${args.name}${PART_SUFFIX}`), { force: true });

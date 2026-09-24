@@ -641,8 +641,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           };
         }
         if (!pairing.consume(msg.code)) {
-          // Defensive: inside the lock a peek-ok always consumes —
-          // this can only mean state was cleared out-of-band.
+          // Mint/expire run off-lock, so a peek-ok can still lose —
+          // the durable record must not stand: a 'no-pairing' reply
+          // with the record kept would grant the phone sync access
+          // through the resume path despite the failed pair.
+          await deps.keys.deviceDelete(record.id).catch(() => undefined);
           return { ok: false, reason: 'no-pairing' };
         }
         badAttempts.delete(session.remoteIp);

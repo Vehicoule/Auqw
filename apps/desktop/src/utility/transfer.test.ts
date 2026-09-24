@@ -306,6 +306,32 @@ export async function run(): Promise<void> {
       'removed file reports gone',
     );
 
+    // Remove refuses a name held by a live sink — unlinking its
+    // `.part` mid-write strands the finalize. Abort is the end for
+    // in-flight transfers, not remove.
+    const liveBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'live.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(liveBegin.ok, 'live begin resolves');
+    const liveSink = (liveBegin.result as { sinkId: string }).sinkId;
+    await call(CHANNELS.transferWrite, {
+      sinkId: liveSink,
+      data: payload.subarray(0, 4).toString('base64'),
+    });
+    const removeLive = await call(CHANNELS.transferRemove, {
+      name: 'live.mp4',
+    });
+    assert(
+      !removeLive.ok && removeLive.error?.kind === 'unavailable',
+      'remove refuses a live destination',
+    );
+    await call(CHANNELS.transferAbort, { sinkId: liveSink, keep: false });
+    const removeAfter = await call(CHANNELS.transferRemove, {
+      name: 'live.mp4',
+    });
+    assert(removeAfter.ok, 'remove resolves once the sink is gone');
+
     // keep: true retains the partial for a later resume.
     const keepable = await call(CHANNELS.transferBegin, {
       destPath: 'keep.mp4',

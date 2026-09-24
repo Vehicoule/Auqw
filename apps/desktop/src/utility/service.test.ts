@@ -49,6 +49,15 @@ export async function run(): Promise<void> {
   assertEqual(client.onMessage({ id: 999, ok: true, result: 1 }), true);
   assertEqual(client.onMessage({ id: 999, ok: false, error: { kind: 'internal', message: 'm', retryable: true } }), true);
 
+  // Malformed response-shaped messages are consumed too — a bounced
+  // 'malformed request' reply shares the id space and can collide
+  // with an in-flight request in the other direction.
+  assertEqual(client.onMessage({ id: 999, ok: 'yes' }), true);
+  assertEqual(client.onMessage({ id: 999, ok: false, stray: 1 }), true);
+  assertEqual(client.onMessage({ id: 999 }), true);
+  // A genuine request still reaches the dispatcher.
+  assertEqual(client.onMessage({ id: 999, channel: 'sync:keys' }), false);
+
   // Typed failures reject; unknown ids are dropped.
   const failing = client.request('sync:keys', { op: 'x' });
   const failingId = (posted[posted.length - 1] as { id?: number }).id;

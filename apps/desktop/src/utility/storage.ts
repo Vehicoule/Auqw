@@ -53,13 +53,26 @@ function rethrowStorage(message: string, thrown: unknown): never {
 }
 
 function toSqlRow(row: Record<string, unknown>): Record<string, unknown> {
-  for (const value of Object.values(row)) {
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+    if (typeof value === 'bigint') {
+      // Outside the safe range a Number would round-trip a different
+      // key — refuse rather than send an imprecise value.
+      if (
+        value < BigInt(-Number.MAX_SAFE_INTEGER) ||
+        value > BigInt(Number.MAX_SAFE_INTEGER)
+      ) {
+        throw ioError('unsupported sqlite column type');
+      }
+      row[key] = Number(value);
+      continue;
+    }
     if (
       value !== null &&
       typeof value !== 'string' &&
       typeof value !== 'number'
     ) {
-      // bigint/blob have no SqlValue representation on the wire.
+      // blob has no SqlValue representation on the wire.
       throw ioError('unsupported sqlite column type');
     }
   }
@@ -71,7 +84,8 @@ function toRowId(value: number | bigint | undefined): number | null {
     return null;
   }
   if (typeof value === 'bigint') {
-    return value <= BigInt(Number.MAX_SAFE_INTEGER)
+    return value >= BigInt(-Number.MAX_SAFE_INTEGER) &&
+      value <= BigInt(Number.MAX_SAFE_INTEGER)
       ? Number(value)
       : null;
   }
@@ -80,6 +94,35 @@ function toRowId(value: number | bigint | undefined): number | null {
 
 function toCount(value: number | bigint): number {
   return typeof value === 'bigint' ? Number(value) : value;
+}
+
+/**
+ * Which statements the renderer may run inside its tx. Arbitrary SQL
+ * is the channel's contract, but three forms escape the database
+ * boundary the sandbox is built on: `ATTACH`/`DETACH` reach any
+ * sqlite file the utility process can read, `VACUUM` rewrites the
+ * file out from under the tx, and most `PRAGMA` forms flip
+ * connection-global or schema-level state (`writable_schema`,
+ * `journal_mode`/`foreign_keys = OFF`) the tx model can't isolate.
+ * The one pragma the renderer's own driver legitimately issues is
+ * `PRAGMA foreign_keys = ON`; anything else is refused.
+ */
+const PRAGMA_FOREIGN_KEYS_ON = /^pragma\s+foreign_keys\s*=\s*on\s*;?$/i;
+const STATEMENT_HEAD = /^(?:\s|--[^\n]*\n|\/\*[^]*?\*\/\s*)*([a-z]+)/i;
+const BLOCKED_HEADS = new Set(['attach', 'detach', 'vacuum', 'pragma']);
+
+function checkStatement(sql: string): void {
+  const keyword = (STATEMENT_HEAD.exec(sql)?.[1] ?? '').toLowerCase();
+  if (!BLOCKED_HEADS.has(keyword)) {
+    return;
+  }
+  if (keyword === 'pragma' && PRAGMA_FOREIGN_KEYS_ON.test(sql)) {
+    return;
+  }
+  throw shellError(
+    'invalid-request',
+    `statement keyword ${keyword} is not admitted`,
+  );
 }
 
 /**
@@ -238,8 +281,13 @@ export function createStorageService(
     if (tx.cancelled) {
       throw shellError('cancelled', 'transaction cancelled');
     }
+    checkStatement(args.sql);
     try {
-      const info = database().prepare(args.sql).run(...args.params);
+      // bigint reads keep rowids exact — a truncated f64 rowid bound
+      // as a key later would address a different row.
+      const stmt = database().prepare(args.sql);
+      stmt.setReadBigInts(true);
+      const info = stmt.run(...args.params);
       return {
         changes: toCount(info.changes),
         lastInsertRowId: toRowId(info.lastInsertRowid),
@@ -254,9 +302,12 @@ export function createStorageService(
     if (tx.cancelled) {
       throw shellError('cancelled', 'transaction cancelled');
     }
+    checkStatement(args.sql);
     try {
-      const rows = database().prepare(args.sql).all(...args.params);
-      return { rows: rows.map(toSqlRow) };
+      const stmt = database().prepare(args.sql);
+      stmt.setReadBigInts(true);
+      const rows = stmt.all(...args.params);
+      return { rows: rows.map((row) => toSqlRow(row as Record<string, unknown>)) };
     } catch (thrown) {
       rethrowStorage('storage query failed', thrown);
     }

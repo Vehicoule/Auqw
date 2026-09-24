@@ -59,15 +59,14 @@ export function createStreamPump(deps: {
     }
   }
 
-  function sendError(thrown: unknown, code: string): void {
+  function sendError(code: string): void {
     const message: PumpError = {
       kind: 'error',
       epoch,
       code,
-      message:
-        thrown instanceof Error && thrown.message.length <= 400
-          ? thrown.message
-          : 'pump failed',
+      // The code carries the taxonomy; raw throw text (paths, native
+      // messages) never crosses the pump boundary.
+      message: 'pump failed',
     };
     send(message);
     close();
@@ -112,7 +111,7 @@ export function createStreamPump(deps: {
             epoch,
             bytes: new Uint8Array(chunk),
           });
-        } catch (thrown) {
+        } catch {
           inFlight -= 1;
           if (readEpoch !== epoch) {
             // Stale-epoch read failed after a seek — keep pumping at
@@ -120,7 +119,7 @@ export function createStreamPump(deps: {
             // post-seek grant's credit with nothing left to spend it.
             continue;
           }
-          sendError(thrown, 'io-error');
+          sendError('io-error');
           return;
         }
       }
@@ -153,8 +152,8 @@ export function createStreamPump(deps: {
     opened = true;
     const ready: PumpReady = { kind: 'ready', remaining, epoch };
     send(ready);
-  } catch (thrown) {
-    sendError(thrown, 'unavailable');
+  } catch {
+    sendError('unavailable');
     return;
   }
 

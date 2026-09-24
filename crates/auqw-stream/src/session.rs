@@ -686,6 +686,30 @@ impl SessionInner {
         }
     }
 
+    /// True when a never-attached session has outlived its welcome —
+    /// the caller drops the lock, terminates `Expired`, and errs.
+    /// Expiry and the prepare TTL gate the *first* attach — a stale
+    /// speculative prepare ends `Expired`. A re-attach on an
+    /// already-attached session (DataSource reopen after `close`) is
+    /// not a fresh intent: the session is live and the pump's re-mint
+    /// path owns staleness from here on. The gate keys on the attach
+    /// mark, not `attached` — a session that played, detached, and
+    /// reopens must not die to the prepare TTL on its own creation
+    /// clock.
+    fn stale_prepare(&self, sh: &Shared) -> Result<bool, StreamError> {
+        if sh.marks.attach_ms.is_some() {
+            return Ok(false);
+        }
+        let core = lock(&self.core)?;
+        if let Some(exp) = core.source.expires_at_ms {
+            let margin = u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
+            if now_ms().saturating_add(margin) >= exp {
+                return Ok(true);
+            }
+        }
+        Ok(self.created.elapsed() >= self.config.prepare_ttl)
+    }
+
     /// `attach` marks the consumer live: exempt from supersede, the
     /// fill bound switches from `head_bytes` to the read-ahead window,
     /// and expiry/TTL are enforced — a stale prepare ends `Expired`.
@@ -695,32 +719,10 @@ impl SessionInner {
             if let Some(e) = &sh.terminal {
                 return Err(e.clone());
             }
-            let core = lock(&self.core)?;
-            // Expiry and the prepare TTL gate the *first* attach — a
-            // stale speculative prepare ends `Expired`. A re-attach on
-            // an already-attached session (DataSource reopen after
-            // `close`) is not a fresh intent: the session is live and
-            // the pump's re-mint path owns staleness from here on. The
-            // gate keys on the attach mark, not `attached` — a session
-            // that played, detached, and reopens must not die to the
-            // prepare TTL on its own creation clock.
-            if sh.marks.attach_ms.is_none() {
-                if let Some(exp) = core.source.expires_at_ms {
-                    let margin =
-                        u64::try_from(self.config.expiry_margin.as_millis()).unwrap_or(u64::MAX);
-                    if now_ms().saturating_add(margin) >= exp {
-                        drop(core);
-                        drop(sh);
-                        self.terminate(StreamError::Expired);
-                        return Err(StreamError::Expired);
-                    }
-                }
-                if self.created.elapsed() >= self.config.prepare_ttl {
-                    drop(core);
-                    drop(sh);
-                    self.terminate(StreamError::Expired);
-                    return Err(StreamError::Expired);
-                }
+            if self.stale_prepare(&sh)? {
+                drop(sh);
+                self.terminate(StreamError::Expired);
+                return Err(StreamError::Expired);
             }
             sh.attached = true;
             sh.detached_since = None;
@@ -736,6 +738,27 @@ impl SessionInner {
         self.pump_notify.notify_one();
         self.effective_total()
             .map(|t| t.map(|t| t.saturating_sub(position)))
+    }
+
+    /// HEAD-probe attach: the same liveness verdict as `attach` —
+    /// terminal error, stale-prepare expiry — but no consumer mark.
+    /// `read_pos`, the attach mark, and the transient latch belong to
+    /// whoever is actually reading: a probe that re-anchored them
+    /// would reset a playing session's fill window (the refetch is
+    /// wasted) or unlatch a parked pump, and a probe spending
+    /// `attached` would flip speculative fill into the read-ahead
+    /// window for a request that spends no body bytes.
+    pub(crate) fn attach_probe(&self) -> Result<(), StreamError> {
+        let sh = lock(&self.shared)?;
+        if let Some(e) = &sh.terminal {
+            return Err(e.clone());
+        }
+        if self.stale_prepare(&sh)? {
+            drop(sh);
+            self.terminate(StreamError::Expired);
+            return Err(StreamError::Expired);
+        }
+        Ok(())
     }
 
     /// `close` detaches the consumer; the session stays live for

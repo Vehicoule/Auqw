@@ -176,7 +176,9 @@ function manifestFields(
   }
   const record = raw as Record<string, unknown>;
   const providerId =
-    typeof record['id'] === 'string' && record['id'].length <= 128
+    typeof record['id'] === 'string' &&
+    record['id'].length > 0 &&
+    record['id'].length <= 128
       ? record['id']
       : stem;
   const capabilities = Array.isArray(record['capabilities'])
@@ -216,10 +218,12 @@ export function createHostRuntime(opts: {
     );
     const found = candidates.find((c) => fs.exists(c));
     if (found === undefined) {
-      bindingsError = `none of ${candidates.join(', ')}`;
+      // Absolute candidate paths stay utility-side — the status field
+      // and the thrown message both cross to the renderer.
+      bindingsError = 'no candidate artifact found';
       throw shellError(
         'unavailable',
-        `node bindings artifact not found: ${bindingsError}`,
+        'node bindings artifact not found',
       );
     }
     try {
@@ -237,13 +241,10 @@ export function createHostRuntime(opts: {
       });
       bindingsError = undefined;
       return host;
-    } catch (thrown) {
-      bindingsError =
-        thrown instanceof Error ? thrown.message : String(thrown);
-      throw shellError(
-        'unavailable',
-        `node bindings load failed: ${bindingsError}`,
-      );
+    } catch {
+      // Raw dlopen text carries paths — the renderer gets the slug.
+      bindingsError = 'bindings artifact failed to load';
+      throw shellError('unavailable', 'node bindings load failed');
     }
   }
 

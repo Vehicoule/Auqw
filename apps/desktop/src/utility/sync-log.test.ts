@@ -206,6 +206,40 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A final line without its terminator is torn too ——
+  // The writer commits `line + '\n'` before fsync; a complete-looking
+  // last line that lacks the newline lost the fsync boundary and is
+  // uncommitted — repair drops it rather than admitting the write.
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    const good = await opened.value.store.append(
+      { entries: [entry(1)] },
+      ctx(),
+    );
+    assert(good.ok);
+    // The torn write: a whole, parseable line with no trailing '\n'.
+    await appendFile(path, '{"watermarks":{"dsk-x":9}}', 'utf8');
+    const repaired = await openSyncLogStore(path);
+    assert(repaired.ok);
+    if (!repaired.ok) {
+      return;
+    }
+    assertEqual(repaired.value.repaired, true);
+    assertEqual(repaired.value.deviceId, opened.value.deviceId);
+    const loaded = await repaired.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      assertEqual(loaded.value.entries.length, 1);
+      assertDeepEqual(loaded.value.watermarks, {});
+    }
+  }
+
   // —— A foreign file moves aside; a fresh log mints a fresh id ——
   {
     const dir = await freshDir();

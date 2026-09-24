@@ -490,6 +490,15 @@ fn attach_counted(shared: &Shared, handle: &str, position: u64) -> Result<(), St
     Ok(())
 }
 
+/// Probe attach under the same conn count — HEAD's open/close
+/// pairing — without the consumer anchor `attach` carries.
+fn attach_probe_counted(shared: &Shared, handle: &str) -> Result<(), StreamError> {
+    let mut counts = lock(&shared.attaches)?;
+    shared.registry.attach_probe(handle)?;
+    *counts.entry(handle.to_string()).or_insert(0) += 1;
+    Ok(())
+}
+
 /// Detaches the session a request attached when the connection ends
 /// — the DataSource-close semantic, applied once the LAST conn
 /// holding the handle ends. Without it a served conn pins the
@@ -693,7 +702,10 @@ fn respond(out: &mut TcpStream, shared: &Shared, req: &Request) -> Result<(), St
                 }
             },
         };
-        if let Err(e) = attach_counted(shared, &handle, start) {
+        // Probe attach: a HEAD must not re-anchor the session — a
+        // full attach here would reset `read_pos` (and the transient
+        // latch) on a session a GET is still playing.
+        if let Err(e) = attach_probe_counted(shared, &handle) {
             write_status(out, status_for(&e), &[]);
             return Ok(());
         }

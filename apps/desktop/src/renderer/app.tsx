@@ -1377,6 +1377,19 @@ function Main({
     [],
   );
 
+  // Dialog-cancel leaves `importPhase` at 'reading' without this — the
+  // transfer screen's disabled state never clears. React has no typed
+  // prop for the input's cancel event; bind it natively on the ref.
+  useEffect(() => {
+    const input = importInput.current;
+    if (input === null) {
+      return;
+    }
+    const onCancel = () => onImportFileChosen(null);
+    input.addEventListener('cancel', onCancel);
+    return () => input.removeEventListener('cancel', onCancel);
+  }, [onImportFileChosen]);
+
   const onApplyImport = useCallback(() => {
     const text = importText.current;
     if (text === null) {

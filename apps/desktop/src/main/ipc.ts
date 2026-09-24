@@ -17,6 +17,7 @@ import type {
   StreamReadArgs,
   SyncDeltasArgs,
   SyncImportDeltaArgs,
+  SyncLocalChangesArgs,
   SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
@@ -45,6 +46,7 @@ import {
   isStreamReadArgs,
   isSyncDeltasArgs,
   isSyncImportDeltaArgs,
+  isSyncLocalChangesArgs,
   isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
@@ -417,6 +419,12 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.syncImportDelta,
     channel(isSyncImportDeltaArgs, (args: SyncImportDeltaArgs, deps) =>
       deps.utility.request(CHANNELS.syncImportDelta, args),
+    ),
+  ],
+  [
+    CHANNELS.syncLocalChanges,
+    channel(isSyncLocalChangesArgs, (args: SyncLocalChangesArgs, deps) =>
+      deps.utility.request(CHANNELS.syncLocalChanges, args),
     ),
   ],
   [

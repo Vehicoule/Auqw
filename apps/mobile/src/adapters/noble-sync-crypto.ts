@@ -307,11 +307,13 @@ export function createNobleSyncCrypto(opts: {
               keys.subarray(0, 32),
               keys.subarray(32, 64),
             );
-          } catch (thrown) {
+          } catch {
+            // Raw crypto text stays out of the message — the kind
+            // carries the failure class across the seam.
             return err(
               cryptoError(
                 'invalid-response',
-                `sync: handshake derivation failed (${thrown instanceof Error ? thrown.message : 'crypto error'})`,
+                'sync: handshake derivation failed',
               ),
             );
           }

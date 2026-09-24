@@ -221,6 +221,55 @@ export async function run(): Promise<void> {
     const dropAbsent = await call(CHANNELS.storageDropBackup, { tag: 'v1' });
     assert(dropAbsent.ok, 'dropBackup on a missing image still resolves');
 
+    // the statement gate: ATTACH/DETACH/VACUUM and non-allowlisted
+    // PRAGMA escape the db boundary — refused before prepare
+    const gated = await begin();
+    for (const sql of [
+      "ATTACH DATABASE '/tmp/evil.db' AS evil",
+      '  DeTach DATABASE main',
+      'VACUUM',
+      'VACUUM INTO "/tmp/vac.db"',
+      'PRAGMA foreign_keys = OFF',
+      'PRAGMA writable_schema = ON',
+      'PRAGMA journal_mode = DELETE',
+      '-- peek\nATTACH DATABASE x AS y',
+      '/* c */ pragma foreign_keys = off',
+    ]) {
+      const res = await execute(gated, sql);
+      assert(
+        !res.ok && res.error.kind === 'invalid-request',
+        `gate refuses: ${sql}`,
+      );
+      const qres = await query(gated, sql);
+      assert(
+        !qres.ok && qres.error.kind === 'invalid-request',
+        `gate refuses query: ${sql}`,
+      );
+    }
+    // the one pragma the renderer's own driver issues stays legal
+    const pragmaOk = await execute(gated, 'PRAGMA foreign_keys = ON');
+    assert(pragmaOk.ok, 'pragma foreign_keys = ON passes the gate');
+    // ordinary statements still flow
+    const stillOk = await execute(
+      gated,
+      'INSERT INTO items (name) VALUES (?)',
+      ['post-gate'],
+    );
+    assert(stillOk.ok, 'ordinary statements pass the gate');
+    // a rowid outside the safe range folds to null — never an
+    // imprecise Number that round-trips a different key
+    const hugeRow = await execute(
+      gated,
+      'INSERT INTO items (id, name) VALUES (-9223372036854775807, ?)',
+      ['huge'],
+    );
+    assert(hugeRow.ok);
+    assertDeepEqual(hugeRow.result, {
+      changes: 1,
+      lastInsertRowId: null,
+    });
+    await call(CHANNELS.storageRollback, { txId: gated });
+
     // a tx abandoned on close rolls back — nothing it wrote survives
     const abandoned = await begin();
     await execute(abandoned, 'CREATE TABLE lost (id INTEGER)');

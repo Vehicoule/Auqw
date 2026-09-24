@@ -1481,6 +1481,13 @@ function Main({
         .then((result) => {
           setPairing(false);
           setPairError(result.ok ? null : result.error.message);
+        })
+        // A thrown pair (adapter crash) must still clear the latch —
+        // otherwise `pairing` stays true and every later attempt is
+        // dropped on the guard above.
+        .catch(() => {
+          setPairing(false);
+          setPairError('pairing failed');
         });
     },
     // syncSurface is stable per controller.

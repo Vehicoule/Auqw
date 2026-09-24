@@ -299,6 +299,24 @@ export async function run(): Promise<void> {
       assertEqual(refused.ok, false);
       assertEqual(refused.error?.kind, 'invalid-request');
 
+      // Prototype members never pass the whitelist — 'constructor'
+      // resolves through Object.prototype on a plain index but isn't
+      // an own-property service.
+      for (const name of ['constructor', 'hasOwnProperty', 'toString']) {
+        c.emit('message', { id: 54, channel: name, args: {} });
+        await sleep(5);
+        const protoRefused = c.posted[c.posted.length - 1] as {
+          ok?: boolean;
+          error?: { kind?: string };
+        };
+        assertEqual(protoRefused.ok, false);
+        assertEqual(
+          protoRefused.error?.kind,
+          'invalid-request',
+          `prototype member ${name} refused`,
+        );
+      }
+
       // Handler throws map onto typed envelopes — never raw.
       c.emit('message', { id: 52, channel: 'svc:boom', args: {} });
       await sleep(5);

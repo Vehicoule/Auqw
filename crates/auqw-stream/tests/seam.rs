@@ -251,6 +251,48 @@ async fn attach_returns_remaining_length() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_attach_keeps_the_anchor() {
+    let d = TestDir::new("probeanchor");
+    let mut pages = HashMap::new();
+    pages.insert(0u64, VecDeque::from([Step::Reply(chunk(0, 128, 1024, 1))]));
+    pages.insert(
+        128u64,
+        VecDeque::from([Step::Reply(chunk(128, 128, 1024, 1))]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    wait_until(|| head_ready(&reg, &h)).await;
+    // A playing session anchored at 300: fill chases the read-ahead
+    // window — its fetch is parked (unscripted) but issued.
+    reg.attach(&h, 300)
+        .unwrap_or_else(|e| panic!("attach: {e}"));
+    wait_until(|| fetch.issued(300)).await;
+    // A HEAD probe answers liveness without re-anchoring: with a full
+    // attach at the probe's start the fill bound would reset to 0 and
+    // re-issue the gap at 256 — the probe must leave it untouched.
+    reg.attach_probe(&h)
+        .unwrap_or_else(|e| panic!("probe: {e}"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !fetch.issued(256),
+        "probe re-anchored the session's fill window",
+    );
+    assert!(
+        reg.attach_probe("no-such-handle").is_err(),
+        "probe on an unknown handle must fail",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_serves_prepared_head_bytes() {
     let d = TestDir::new("headread");
     let mut pages = HashMap::new();

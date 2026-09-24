@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assert, assertEqual } from '@auqw/application/testing';
@@ -49,6 +49,13 @@ export async function run(): Promise<void> {
     assertEqual(await store.get('session.token'), 's3cret');
     await store.set('session.token', 'rotated');
     assertEqual(await store.get('session.token'), 'rotated');
+    // The write publishes atomically — no staging residue survives.
+    assertEqual(
+      readdirSync(join(dir, 'secure')).filter((f) => f.endsWith('.tmp'))
+        .length,
+      0,
+      'no staging files left behind',
+    );
     await store.delete('session.token');
     assertEqual(await store.get('session.token'), null);
     // Deleting a missing key is not an error.
