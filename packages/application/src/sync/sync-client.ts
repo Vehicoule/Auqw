@@ -1105,13 +1105,21 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           }
           // The welcome's pot is connection-authoritative: a desktop
           // that rebound its ephemeral minter port advertises the new
-          // one here, healing a stale record without a re-pair.
+          // one here, healing a stale record without a re-pair. A
+          // missing advertisement clears the stored endpoint — a pot
+          // can only ever have come from a minter-capable desktop, so
+          // absence means the minter is gone (failed bind or
+          // external-provider override), not that the server is old.
           const welcomePot = rebasePot(
             opened.value.welcome.pot,
             opened.value.endpoint.host,
           );
-          if (welcomePot !== undefined && welcomePot !== peer.pot) {
-            const refreshed: SyncPeer = { ...peer, pot: welcomePot };
+          if (welcomePot !== peer.pot) {
+            const { pot: _stale, ...rest } = peer;
+            const refreshed: SyncPeer =
+              welcomePot === undefined
+                ? rest
+                : { ...rest, pot: welcomePot };
             peers.set(fp, refreshed);
             const persisted = await deps.keys.peerPut(refreshed, signal);
             if (!persisted.ok) {
