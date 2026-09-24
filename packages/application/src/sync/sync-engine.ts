@@ -179,11 +179,94 @@ export function mappingRecordId(
   ]);
 }
 
+/**
+ * Set key identifying one synced record — matches the materialized
+ * view's (kind, recordId) pair space. Callers building the
+ * key→fields map for `Session.emitUnsynced` key records with this.
+ */
+export function syncedRecordKey(
+  kind: SyncRecordKind,
+  recordId: string,
+): string {
+  return `${kind}\u001f${recordId}`;
+}
+
+/**
+ * `materialize()` ordering: each parent record sorts ADJACENT to the
+ * records its row needs to materialize, not merely before all
+ * dependents (Review #46 round-9). A recording's row is only valid
+ * with a source ref, so kinds that share a parent id interleave
+ * under that id — a byte-paged rebuild then holds at most one
+ * family's records pending at a page boundary instead of every
+ * recording waiting on the ref region (and evicting under the
+ * pending bound past ~2048). Tier-1 kinds (likes, playlist entries,
+ * play events, reviews, settings) reference parents only through
+ * their fields, so they sort after every complete family.
+ */
+const MATERIALIZE_GROUPED_KINDS: ReadonlySet<SyncRecordKind> = new Set([
+  'recording',
+  'recordingSourceRef',
+  'recordingMapping',
+  'playCount',
+  'entity',
+  'entitySourceRef',
+  'playlist',
+]);
+
+/**
+ * The parent id a grouped record belongs to: its own id for parent
+ * kinds, the first decoded component for composite ids (a source ref
+ * or mapping id embeds the recording id; an entity source ref embeds
+ * the entity id). playCount ids ARE the recording id already.
+ */
+function materializeGroup(kind: SyncRecordKind, recordId: string): string {
+  if (
+    kind === 'recordingSourceRef' ||
+    kind === 'recordingMapping' ||
+    kind === 'entitySourceRef'
+  ) {
+    return decodeRecordId(recordId)?.[0] ?? recordId;
+  }
+  return recordId;
+}
+
 export function entitySourceRefRecordId(
   entityId: string,
   provider: string,
 ): string {
   return encodeRecordId([entityId, provider]);
+}
+
+/**
+ * Inverse of `encodeRecordId`: parses the `len:component` stream back
+ * into its exact parts. Returns null on any malformed shape — a bad
+ * length prefix, a truncated component, or a dangling separator —
+ * since only a well-formed id can decode to identity parts.
+ */
+export function decodeRecordId(recordId: string): readonly string[] | null {
+  const parts: string[] = [];
+  let pos = 0;
+  while (pos < recordId.length) {
+    const colon = recordId.indexOf(':', pos);
+    if (colon < 0) {
+      return null;
+    }
+    const rawLen = recordId.slice(pos, colon);
+    if (rawLen.length === 0 || !/^\d+$/.test(rawLen)) {
+      return null;
+    }
+    const len = Number.parseInt(rawLen, 10);
+    if (!Number.isSafeInteger(len) || len < 0) {
+      return null;
+    }
+    const start = colon + 1;
+    if (start + len > recordId.length) {
+      return null;
+    }
+    parts.push(recordId.slice(start, start + len));
+    pos = start + len;
+  }
+  return parts;
 }
 
 // ---- wire types -----------------------------------------------------------
@@ -319,6 +402,14 @@ export type MergeOutcome =
     readonly type: 'applied';
     readonly entry: ChangeEntry;
     readonly displaced: readonly ChangeEntry[];
+    /**
+     * Post-merge materialized fields for the entry's record (every
+     * surviving field, not just this entry's). The projector must
+     * trust this over inferring record state from entries alone —
+     * a delayed tombstone that lost to newer fields leaves fields
+     * alive here. Empty `fields` means the record is fully deleted.
+     */
+    readonly record?: MaterializedRecord;
   }
   | {
     readonly type: 'superseded';
@@ -456,7 +547,11 @@ export interface SyncEngine {
     historyId: string,
     signal?: CancellationSignal,
   ): Promise<Result<LocalChangeResult>>;
-  /** The merged record view: every record with at least one live field. */
+  /**
+   * The merged record view: every record the merge ever touched —
+   * empty `fields` means a winning tombstone ("synced then deleted"),
+   * distinct from a record absent here, which was never synced.
+   */
   materialize(): readonly MaterializedRecord[];
   /** This device's per-source-device watermark map. */
   cursor(): SyncCursor;
@@ -679,6 +774,11 @@ export const SYNC_FIELD_RULES: Readonly<
     lastMs: rule(isSafeNonNegative, 'max'),
   },
   matchReview: {
+    // Identity fields ride too — a review CREATED on another device
+    // must materialize locally, and a receiver can't build the row
+    // from mutable state alone (Review #46).
+    recordingId: rule(str(64)),
+    createdMs: rule(isSafeNonNegative),
     status: rule(isReviewStatus),
     resolution: rule(isResolutionValue),
     resolvedMs: rule(isOptSafeNonNegative),
@@ -749,6 +849,24 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
     isRecord(value) &&
     Object.keys(value).length <= MAX_CURSOR_DEVICES &&
     Object.values(value).every(isSafeNonNegative)
+  );
+}
+
+/**
+ * Wire-level shape check for the materialized pull — field VALUES go
+ * unvalidated here because the projector only reads them through
+ * per-field typed accessors and the field whitelist.
+ */
+export function isMaterializedRecord(
+  value: unknown,
+): value is MaterializedRecord {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['kind', 'recordId', 'fields']) &&
+    isSyncRecordKind(value['kind']) &&
+    isString(value['recordId'], MAX_RECORD_ID) &&
+    isRecord(value['fields']) &&
+    Object.keys(value['fields']).every((k) => k.length <= MAX_FIELD)
   );
 }
 
@@ -1646,9 +1764,40 @@ export async function createSyncEngine(
     return ok(input);
   }
 
+  /**
+   * 'sum' callers assert the desired AGGREGATE — the merged value the
+   * field should show — because the domain row is exactly that. The
+   * stamped entry must carry only THIS device's component (the merge
+   * sums per-device winners), so translate: component = target minus
+   * what peer components already contribute. Clamped at 0 — a target
+   * below the remote share can't be expressed and the remote share
+   * honestly survives.
+   */
+  function sumComponentFor(
+    input: Extract<LocalWrite, { field: string }>,
+  ): unknown {
+    const rule = syncFieldRule(input.kind, input.field);
+    if (rule?.merge !== 'sum' || typeof input.value !== 'number') {
+      return input.value;
+    }
+    const record = records.get(`${input.kind}${KEY_SEP}${input.recordId}`);
+    const cell = record?.fields.get(input.field);
+    const remoteShare = sumValue(
+      (cell?.live ?? []).filter((e) => e.deviceId !== deviceId),
+    );
+    return Math.max(0, input.value - remoteShare);
+  }
+
   async function writeChanges(
     inputs: readonly LocalWrite[],
     signal: CancellationSignal | undefined,
+    /**
+     * `restoreLoser` only: the stored loser value is already a 'sum'
+     * component — translating it through `sumComponentFor` again
+     * would subtract the remote share twice and clamp the restore
+     * to zero. Domain-originated writes stay aggregate-asserted.
+     */
+    preNormalized = false,
   ): Promise<Result<readonly LocalChangeResult[]>> {
     if (!Array.isArray(inputs) || inputs.length === 0) {
       return err(appError('invalid-response', 'empty local write'));
@@ -1700,7 +1849,11 @@ export async function createSyncEngine(
                 // Own the value: the caller keeps its mutable object,
                 // the engine freezes its clone — same ownership rule
                 // as accepted wire entries.
-                value: JSON.parse(JSON.stringify(input.value)) as unknown,
+                value: JSON.parse(
+                  JSON.stringify(
+                    preNormalized ? input.value : sumComponentFor(input),
+                  ),
+                ) as unknown,
                 tombstone: false,
                 hlc: stamp,
                 deviceId,
@@ -1986,16 +2139,37 @@ export async function createSyncEngine(
         return err(fromUnknown(thrown));
       }
       await appendDivergence(divs, sig, deadlineMs);
+      // Attach the post-merge materialized truth per applied record —
+      // projecting from entries alone can't see fields that merged in
+      // earlier deltas (a delayed tombstone that lost to newer fields
+      // must not delete a row the engine still materializes).
+      const stamped = outcomes.map((outcome) =>
+        outcome.type === 'applied'
+          ? { ...outcome, record: recordSnapshot(outcome.entry) }
+          : outcome,
+      );
       const result: ApplyResult = {
         senderDeviceId: doc.senderDeviceId,
         entries: fresh,
-        outcomes,
+        outcomes: stamped,
         divergence: divs,
         cursor: cursorSnapshot(),
       };
       return ok(result);
     });
     return cancellable(work, sig);
+  }
+
+  /** The record's surviving field set as the merge currently sees it. */
+  function recordSnapshot(entry: ChangeEntry): MaterializedRecord {
+    const record = records.get(`${entry.kind}${KEY_SEP}${entry.recordId}`);
+    const fields: Record<string, unknown> = {};
+    if (record !== undefined) {
+      for (const [field, cell] of record.fields) {
+        fields[field] = cell.value;
+      }
+    }
+    return { kind: entry.kind, recordId: entry.recordId, fields };
   }
 
   function divergenceHistory(
@@ -2031,7 +2205,18 @@ export async function createSyncEngine(
         field: row.field,
         value: row.loser.value,
       };
-    return localChange(input, signal);
+    // The loser value is already the field's component form for
+    // 'sum' rules — restoring must stamp it verbatim, not translate
+    // a second aggregate (Review #46 round-8).
+    const batch = await writeChanges([input], signal, true);
+    if (!batch.ok) {
+      return err(batch.error);
+    }
+    const first = batch.value[0];
+    if (first === undefined) {
+      return err(appError('internal', 'local write produced no entry'));
+    }
+    return ok(first);
   }
 
   function materialize(): readonly MaterializedRecord[] {
@@ -2041,15 +2226,31 @@ export async function createSyncEngine(
       for (const [field, cell] of record.fields) {
         fields[field] = cell.value;
       }
-      if (Object.keys(fields).length > 0) {
-        out.push({
-          kind: record.kind,
-          recordId: record.recordId,
-          fields,
-        });
-      }
+      // Empty fields is included on purpose: a record only ends up
+      // fieldless after a WINNING tombstone, so it means "synced then
+      // deleted" — distinct from a record absent here, which was never
+      // synced at all. Rebuild consumers need the tombstone to drop
+      // the row; absence must keep it.
+      out.push({
+        kind: record.kind,
+        recordId: record.recordId,
+        fields,
+      });
     }
     out.sort((a, b) => {
+      // (tier, group, kind, recordId): grouped families sort by their
+      // shared parent id so a page carries a recording WITH its refs;
+      // tier-1 dependents sort last, whole, after every parent exists.
+      const ta = MATERIALIZE_GROUPED_KINDS.has(a.kind) ? 0 : 1;
+      const tb = MATERIALIZE_GROUPED_KINDS.has(b.kind) ? 0 : 1;
+      if (ta !== tb) {
+        return ta - tb;
+      }
+      const ga = materializeGroup(a.kind, a.recordId);
+      const gb = materializeGroup(b.kind, b.recordId);
+      if (ga !== gb) {
+        return ga < gb ? -1 : 1;
+      }
       if (a.kind !== b.kind) {
         return a.kind < b.kind ? -1 : 1;
       }

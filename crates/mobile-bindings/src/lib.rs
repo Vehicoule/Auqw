@@ -385,6 +385,15 @@ impl PluginHost {
         self.inner.set_auth_token(token);
     }
 
+    /// Set or clear the bgutil-compatible PO-token provider URL
+    /// (`POST {url}/get_pot`) on the running host — resolves read the
+    /// slot at invocation spawn, so a provider learned after
+    /// construction (mid-session pairing) applies without recreating
+    /// the host. Never logged.
+    pub fn set_pot_provider(&self, url: Option<String>) {
+        self.inner.set_pot_provider(url);
+    }
+
     /// Validate and register a plugin artifact. Returns the manifest id.
     ///
     /// # Errors

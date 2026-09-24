@@ -4,19 +4,30 @@ import {
   dialog,
   ipcMain,
   MessageChannelMain,
+  nativeTheme,
   net,
   safeStorage,
   screen,
   utilityProcess,
 } from 'electron';
-import type { BrowserWindowConstructorOptions, WebContents } from 'electron';
+import type {
+  BrowserWindowConstructorOptions,
+  TitleBarOverlay,
+  WebContents,
+} from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { schemes } from '@auqw/design-tokens';
+import type { SchemeName } from '@auqw/design-tokens';
+import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
+import { shellError } from '../shared/errors.ts';
+import { isSyncAppliedEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
+import { createAppliedPushService } from './sync-events.ts';
 import { createSyncKeysHandler } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -73,6 +84,7 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_SYNC_DISABLED',
     'AUQW_SYNC_NAME',
     'AUQW_SYNC_NO_MDNS',
+    'AUQW_POT_PROVIDER_URL',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -126,6 +138,7 @@ async function main(): Promise<void> {
   const netService = createNetService({
     readOnline: () => net.isOnline(),
   });
+  const appliedPush = createAppliedPushService();
   const supervisor = createSupervisor({
     fork: () =>
       utilityProcess.fork(UTILITY, [], {
@@ -142,6 +155,18 @@ async function main(): Promise<void> {
         secure,
         dir: join(userDataPath, 'secure'),
       }),
+      // Utility→main→renderer push: the sync service posts after every
+      // applyDelta; subscribed renderers pull sync:drainApplied on it.
+      'sync:applied': async (args) => {
+        if (!isSyncAppliedEvent(args)) {
+          throw shellError(
+            'invalid-request',
+            'sync:applied expects {pending}',
+          );
+        }
+        appliedPush.notify(args);
+        return undefined;
+      },
     },
   });
 
@@ -177,11 +202,27 @@ async function main(): Promise<void> {
       return result.canceled ? [] : result.filePaths;
     },
     net: netService,
+    syncApplied: appliedPush,
     secure,
     utility: supervisor,
     // Brokers the stream pump channel — the utility child gets one end
     // with the attach message, the renderer the other via postMessage.
     messageChannel: () => new MessageChannelMain(),
+  });
+
+  // The renderer reports its resolved ui-web scheme (which may differ
+  // from the OS theme when the user picked an explicit one) so the
+  // window-control overlay can re-tint itself to match the canvas.
+  ipcMain.on(CHANNELS.chromeScheme, (event, scheme) => {
+    if (!isSchemeName(scheme)) {
+      return;
+    }
+    const sender = BrowserWindow.fromWebContents(event.sender);
+    try {
+      sender?.setTitleBarOverlay(titleBarOverlay(scheme));
+    } catch {
+      // platform without a working window-control overlay — ignore
+    }
   });
 
   const { state } = await loadWindowState(statePath);
@@ -217,8 +258,18 @@ async function main(): Promise<void> {
   });
   app.on('will-quit', () => {
     netService.stop();
+    appliedPush.stop();
     supervisor.shutdown();
   });
+}
+
+function titleBarOverlay(scheme: SchemeName): TitleBarOverlay {
+  const tokens = schemes[scheme];
+  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 56 };
+}
+
+function isSchemeName(value: unknown): value is SchemeName {
+  return value === 'dark' || value === 'light' || value === 'oled';
 }
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
@@ -228,11 +279,9 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
     height: state.height,
     title: 'auqw',
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#1a1b20',
-      symbolColor: '#e8e8ea',
-      height: 56,
-    },
+    titleBarOverlay: titleBarOverlay(
+      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    ),
     webPreferences: {
       preload: PRELOAD,
       sandbox: true,

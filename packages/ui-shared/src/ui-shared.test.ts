@@ -107,7 +107,7 @@ const syncPanel = toSyncPanel(
       lastSeenAt: NOW - 5_000,
     },
   ],
-  { payload: '{"v":1,"code":"123456"}', code: '123456', expiresAt: NOW + 4 * 60_000 },
+  { payload: '{"v":1,"code":"123456"}', code: '123456', endpoint: '192.168.1.20:48715', expiresAt: NOW + 4 * 60_000 },
   NOW,
 );
 const syncStatus = syncPanel.status;
@@ -132,7 +132,7 @@ assertEqual(noSync.pairing, null);
 const expiredPairing = toSyncPanel(
   null,
   [],
-  { payload: 'x', code: '000000', expiresAt: NOW - 1 },
+  { payload: 'x', code: '000000', endpoint: '10.0.0.2:48715', expiresAt: NOW - 1 },
   NOW,
 );
 assertEqual(expiredPairing.pairing?.expiresLabel, 'expired');

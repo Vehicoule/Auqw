@@ -344,7 +344,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
         }
     }
 }
-// Initial value and increment amount for handles.
+// Initial value and increment amount for handles. 
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -354,7 +354,7 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start
+    // Start 
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -747,6 +747,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_pot_provider(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_resolve(
@@ -776,55 +778,57 @@ internal object IntegrityCheckingUniffiLib {
     external fun ffi_auqw_mobile_bindings_uniffi_contract_version(
     ): Int
 
-
+        
 }
 
 internal object UniffiLib {
-
+    
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
-
+    
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "auqw_mobile_bindings"))
         uniffiCallbackInterfacePrepareListener.register(this)
         uniffiCallbackInterfaceRequestListener.register(this)
         uniffiCallbackInterfaceResolveListener.register(this)
-
+        
     }
-    external fun uniffi_auqw_mobile_bindings_fn_clone_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_clone_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_auqw_mobile_bindings_fn_free_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_free_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_auqw_mobile_bindings_fn_constructor_pluginhost_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_constructor_pluginhost_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_cancel(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_cancel(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_load_plugin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_load_plugin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_run_spin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_run_spin(`ptr`: Long,`wasm`: RustBuffer.ByValue,`manifestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(`ptr`: Long,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(`ptr`: Long,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`capability`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(`ptr`: Long,`url`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`contentLength`: RustBuffer.ByValue,`remintable`: Byte,uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_pot_provider(`ptr`: Long,`url`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`capability`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(`ptr`: Long,`url`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`contentLength`: RustBuffer.ByValue,`remintable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`sourceRef`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_requestlistener(`vtable`: UniffiVTableCallbackInterfaceRequestListener,
     ): Unit
@@ -832,13 +836,13 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_init_callback_vtable_preparelistener(`vtable`: UniffiVTableCallbackInterfacePrepareListener,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_auqw_mobile_bindings_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_auqw_mobile_bindings_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_auqw_mobile_bindings_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -846,7 +850,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_u8(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_auqw_mobile_bindings_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -854,7 +858,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_i8(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun ffi_auqw_mobile_bindings_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -862,7 +866,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_u16(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_auqw_mobile_bindings_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -870,7 +874,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_i16(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
     external fun ffi_auqw_mobile_bindings_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -878,7 +882,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_u32(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_auqw_mobile_bindings_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -886,7 +890,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_i32(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun ffi_auqw_mobile_bindings_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -894,7 +898,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_u64(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun ffi_auqw_mobile_bindings_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -902,7 +906,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_i64(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun ffi_auqw_mobile_bindings_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -910,7 +914,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_f32(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Float
     external fun ffi_auqw_mobile_bindings_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -918,7 +922,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_f64(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
     external fun ffi_auqw_mobile_bindings_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -926,7 +930,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_auqw_mobile_bindings_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -934,10 +938,10 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_auqw_mobile_bindings_rust_future_free_void(`handle`: Long,
     ): Unit
-    external fun ffi_auqw_mobile_bindings_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_auqw_mobile_bindings_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
 
-
+        
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -961,6 +965,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_auth_token() and 0xFFFF) != 44159) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_set_pot_provider() and 0xFFFF) != 15487) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_start_request() and 0xFFFF) != 7187) {
@@ -1077,7 +1084,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/**
+/** 
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
  *
  * This is the first argument for interface constructors that input a raw handle. It exists is that
@@ -1088,7 +1095,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * */
 object UniffiWithHandle
 
-/**
+/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1464,7 +1471,7 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
  * caller-supplied-id contract leaves id minting to each binding.
  */
 public interface PluginHostInterface {
-
+    
     /**
      * Cancel an in-flight request. Unknown ids are a no-op except
      * that a plausible issued-id is tombstoned briefly so a cancel
@@ -1478,7 +1485,7 @@ public interface PluginHostInterface {
      * released session.
      */
     fun `cancel`(`requestId`: kotlin.String)
-
+    
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -1486,7 +1493,7 @@ public interface PluginHostInterface {
      * [`HostError::Load`] on any contract or policy violation.
      */
     fun `loadPlugin`(`wasm`: kotlin.ByteArray, `manifestJson`: kotlin.String): kotlin.String
-
+    
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -1495,7 +1502,7 @@ public interface PluginHostInterface {
      * [`HostError::Load`] if the artifact fails validation.
      */
     fun `runSpin`(`wasm`: kotlin.ByteArray, `manifestJson`: kotlin.String): SpinReport
-
+    
     /**
      * Set or clear the OAuth access token merged as `access_token`
      * into every session-trust payload (`Authorization: Bearer` on
@@ -1507,7 +1514,16 @@ public interface PluginHostInterface {
      * validation.
      */
     fun `setAuthToken`(`token`: kotlin.String?)
-
+    
+    /**
+     * Set or clear the bgutil-compatible PO-token provider URL
+     * (`POST {url}/get_pot`) on the running host — resolves read the
+     * slot at invocation spawn, so a provider learned after
+     * construction (mid-session pairing) applies without recreating
+     * the host. Never logged.
+     */
+    fun `setPotProvider`(`url`: kotlin.String?)
+    
     /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
@@ -1517,7 +1533,7 @@ public interface PluginHostInterface {
      * [`HostError::UnknownPlugin`] for an unloaded `plugin_id`.
      */
     fun `startRequest`(`pluginId`: kotlin.String, `capability`: kotlin.String, `payloadJson`: kotlin.String, `listener`: RequestListener): kotlin.String
-
+    
     /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
@@ -1526,7 +1542,7 @@ public interface PluginHostInterface {
      * [`HostError::UnknownPlugin`] if `plugin_id` was never loaded.
      */
     fun `startResolve`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: ResolveListener): kotlin.String
-
+    
     /**
      * Dev-gate entry: register a session for a bare URL, skipping the
      * guest `playback.resolve` (same convention as the Kotlin
@@ -1544,7 +1560,7 @@ public interface PluginHostInterface {
      * [`StreamError::Failed`] with the prepare's kind otherwise.
      */
     fun `devPrepareUrl`(`url`: kotlin.String, `mime`: kotlin.String, `contentLength`: kotlin.ULong?, `remintable`: kotlin.Boolean): PreparedStream
-
+    
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -1555,7 +1571,7 @@ public interface PluginHostInterface {
      * [`HostError::Runtime`] when the seam is not configured.
      */
     fun `startPrepare`(`pluginId`: kotlin.String, `sourceRef`: kotlin.String, `listener`: PrepareListener): kotlin.String
-
+    
     /**
      * DataSource close: detaches the consumer; the session stays live
      * for re-attach.
@@ -1565,7 +1581,7 @@ public interface PluginHostInterface {
      * [`StreamError::Failed`] for an unknown handle.
      */
     fun `streamClose`(`handle`: kotlin.String)
-
+    
     /**
      * Attach a consumer at `position` (DataSource open). Returns
      * `content_length - position` when the stream total is known.
@@ -1575,7 +1591,7 @@ public interface PluginHostInterface {
      * [`StreamError::Failed`] with the session's kind otherwise.
      */
     fun `streamOpen`(`handle`: kotlin.String, `position`: kotlin.ULong): kotlin.ULong?
-
+    
     /**
      * The session's lifecycle marks — available even after terminal
      * states.
@@ -1585,7 +1601,7 @@ public interface PluginHostInterface {
      * [`StreamError::Failed`] for an unknown handle.
      */
     fun `streamPhaseMarks`(`handle`: kotlin.String): StreamPhaseMarks
-
+    
     /**
      * Blocking read — **foreign (JNI/DataSource) threads only**;
      * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
@@ -1597,7 +1613,7 @@ public interface PluginHostInterface {
      * [`StreamError::Failed`] with the session's kind otherwise.
      */
     fun `streamRead`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong): kotlin.ByteArray
-
+    
     /**
      * Terminal release: parked readers unwind `released`, in-flight
      * work aborts, the partial file is evicted. Idempotent.
@@ -1606,7 +1622,7 @@ public interface PluginHostInterface {
      * [`StreamError::Unavailable`] when the seam is not configured.
      */
     fun `streamRelease`(`handle`: kotlin.String)
-
+    
     companion object
 }
 
@@ -1646,11 +1662,11 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * [`HostError::Runtime`] if the runtime or TLS backend cannot start.
      */
     constructor(`config`: HostConfig) :
-        this(UniffiWithHandle,
+        this(UniffiWithHandle, 
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_constructor_pluginhost_new(
-
-
+    
+        
         FfiConverterTypeHostConfig.lower(`config`),_status)
 }
     )
@@ -1731,7 +1747,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
         }
     }
 
-
+    
     /**
      * Cancel an in-flight request. Unknown ids are a no-op except
      * that a plausible issued-id is tombstoned briefly so a cancel
@@ -1744,19 +1760,19 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * left live, or the listener would get a `Prepared` naming a
      * released session.
      */override fun `cancel`(`requestId`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_cancel(
         it,
-
+        
         FfiConverterString.lower(`requestId`),_status)
 }
     }
+    
+    
 
-
-
-
+    
     /**
      * Validate and register a plugin artifact. Returns the manifest id.
      *
@@ -1769,16 +1785,16 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_load_plugin(
         it,
-
+        
         FfiConverterByteArray.lower(`wasm`),
         FfiConverterString.lower(`manifestJson`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     /**
      * Run the spin conformance guest to measure the fuel trap latency
      * on-device. Blocks the calling thread on the runtime.
@@ -1792,16 +1808,16 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_run_spin(
         it,
-
+        
         FfiConverterByteArray.lower(`wasm`),
         FfiConverterString.lower(`manifestJson`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     /**
      * Set or clear the OAuth access token merged as `access_token`
      * into every session-trust payload (`Authorization: Bearer` on
@@ -1812,19 +1828,39 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * anonymous rather than receiving a payload that fails
      * validation.
      */override fun `setAuthToken`(`token`: kotlin.String?)
-        =
+        = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_auth_token(
         it,
-
+        
         FfiConverterOptionalString.lower(`token`),_status)
 }
     }
+    
+    
 
+    
+    /**
+     * Set or clear the bgutil-compatible PO-token provider URL
+     * (`POST {url}/get_pot`) on the running host — resolves read the
+     * slot at invocation spawn, so a provider learned after
+     * construction (mid-session pairing) applies without recreating
+     * the host. Never logged.
+     */override fun `setPotProvider`(`url`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_set_pot_provider(
+        it,
+        
+        FfiConverterOptionalString.lower(`url`),_status)
+}
+    }
+    
+    
 
-
-
+    
     /**
      * Start any declared capability with a JSON object payload. The
      * outcome carries the raw `done.result` JSON.
@@ -1839,7 +1875,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_request(
         it,
-
+        
         FfiConverterString.lower(`pluginId`),
         FfiConverterString.lower(`capability`),
         FfiConverterString.lower(`payloadJson`),
@@ -1848,9 +1884,9 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
 
-
-
+    
     /**
      * Start a `playback.resolve` invocation on the runtime. The
      * returned request id is passed back through the listener.
@@ -1864,7 +1900,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_resolve(
         it,
-
+        
         FfiConverterString.lower(`pluginId`),
         FfiConverterString.lower(`sourceRef`),
         FfiConverterTypeResolveListener.lower(`listener`),_status)
@@ -1872,9 +1908,9 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
 
-
-
+    
     /**
      * Dev-gate entry: register a session for a bare URL, skipping the
      * guest `playback.resolve` (same convention as the Kotlin
@@ -1897,7 +1933,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_dev_prepare_url(
         it,
-
+        
         FfiConverterString.lower(`url`),
         FfiConverterString.lower(`mime`),
         FfiConverterOptionalULong.lower(`contentLength`),
@@ -1906,9 +1942,9 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
 
-
-
+    
     /**
      * Resolve `source_ref` and register the result as a prepared
      * stream session (bounded speculative head fill). The outcome —
@@ -1924,7 +1960,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(HostException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_start_prepare(
         it,
-
+        
         FfiConverterString.lower(`pluginId`),
         FfiConverterString.lower(`sourceRef`),
         FfiConverterTypePrepareListener.lower(`listener`),_status)
@@ -1932,9 +1968,9 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
 
-
-
+    
     /**
      * DataSource close: detaches the consumer; the session stays live
      * for re-attach.
@@ -1944,19 +1980,19 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * [`StreamError::Failed`] for an unknown handle.
      */
     @Throws(StreamException::class)override fun `streamClose`(`handle`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(
         it,
-
+        
         FfiConverterString.lower(`handle`),_status)
 }
     }
+    
+    
 
-
-
-
+    
     /**
      * Attach a consumer at `position` (DataSource open). Returns
      * `content_length - position` when the stream total is known.
@@ -1971,16 +2007,16 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(
         it,
-
+        
         FfiConverterString.lower(`handle`),
         FfiConverterULong.lower(`position`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     /**
      * The session's lifecycle marks — available even after terminal
      * states.
@@ -1995,15 +2031,15 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(
         it,
-
+        
         FfiConverterString.lower(`handle`),_status)
 }
     }
     )
     }
+    
 
-
-
+    
     /**
      * Blocking read — **foreign (JNI/DataSource) threads only**;
      * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
@@ -2020,7 +2056,7 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(
         it,
-
+        
         FfiConverterString.lower(`handle`),
         FfiConverterULong.lower(`position`),
         FfiConverterULong.lower(`maxLen`),_status)
@@ -2028,9 +2064,9 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
     }
     )
     }
+    
 
-
-
+    
     /**
      * Terminal release: parked readers unwind `released`, in-flight
      * work aborts, the partial file is evicted. Idempotent.
@@ -2039,30 +2075,30 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
      * [`StreamError::Unavailable`] when the seam is not configured.
      */
     @Throws(StreamException::class)override fun `streamRelease`(`handle`: kotlin.String)
-        =
+        = 
     callWithHandle {
     uniffiRustCallWithError(StreamException) { _status ->
     UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_release(
         it,
-
+        
         FfiConverterString.lower(`handle`),_status)
 }
     }
+    
+    
+
+    
+
+    
 
 
-
-
-
-
-
-
-
-
+    
+    
     /**
      * @suppress
      */
     companion object
-
+    
 }
 
 
@@ -2099,48 +2135,48 @@ data class AttemptSummary (
      * Host-generated request id.
      */
     var `requestId`: kotlin.String
-    ,
+    , 
     /**
      * `handle` steps executed.
      */
     var `steps`: kotlin.UInt
-    ,
+    , 
     /**
      * HTTP requests performed for the guest.
      */
     var `httpCalls`: kotlin.UInt
-    ,
+    , 
     /**
      * HTTP bytes moved, in and out.
      */
     var `bytes`: kotlin.ULong
-    ,
+    , 
     /**
      * Fuel consumed across all guest entries.
      */
     var `fuelUsed`: kotlin.ULong
-    ,
+    , 
     /**
      * Wall-clock elapsed.
      */
     var `elapsedMs`: kotlin.ULong
-    ,
+    , 
     /**
      * Sanitized HTTP trace entries.
      */
     var `httpTrace`: List<HttpTraceSummary>
-    ,
+    , 
     /**
      * Guest log entries.
      */
     var `guestLog`: List<GuestLogSummary>
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2194,18 +2230,18 @@ data class GuestLogSummary (
      * `debug` | `info` | `warn` | `error`.
      */
     var `level`: kotlin.String
-    ,
+    , 
     /**
      * Redacted message text.
      */
     var `message`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2242,24 +2278,24 @@ data class HostConfig (
      * Fuel granted to each guest entry.
      */
     var `fuelPerEntry`: kotlin.ULong
-    ,
+    , 
     /**
      * Total fuel across one invocation.
      */
     var `fuelTotal`: kotlin.ULong
-    ,
+    , 
     /**
      * Base URL of a bgutil-compatible PO-token service
      * (`POST {provider}/get_pot`). `None` leaves resolves anonymous.
      */
     var `potProviderUrl`: kotlin.String?
-    ,
+    , 
     /**
      * Path of the on-disk KV store the native shell supplies;
      * `None` keeps plugin state volatile.
      */
     var `statePath`: kotlin.String?
-    ,
+    , 
     /**
      * Directory for the sparse stream cache; `None` disables the
      * streaming seam — every `stream_*` call then fails
@@ -2267,14 +2303,14 @@ data class HostConfig (
      * synchronously.
      */
     var `streamPath`: kotlin.String?
-    ,
+    , 
     /**
      * Container preference order sent on `playback.resolve` — the
      * surface's `prefer` hint (webm-first on Android+desktop, mp4-only
      * on iOS). `None` leaves the guest's own default order.
      */
     var `prefer`: List<kotlin.String>?
-    ,
+    , 
     /**
      * Initial OAuth access token for session-trust `Authorization:
      * Bearer` on InnerTube calls. `None` starts anonymous; update it
@@ -2283,13 +2319,13 @@ data class HostConfig (
      * treated as unset.
      */
     var `authToken`: kotlin.String?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2342,33 +2378,33 @@ data class HttpTraceSummary (
      * HTTP method.
      */
     var `method`: kotlin.String
-    ,
+    , 
     /**
      * URL without query or fragment.
      */
     var `url`: kotlin.String
-    ,
+    , 
     /**
      * Response status when one was received.
      */
     var `status`: kotlin.UShort?
-    ,
+    , 
     /**
      * Body bytes received.
      */
     var `bytes`: kotlin.ULong
-    ,
+    , 
     /**
      * Round-trip milliseconds.
      */
     var `elapsedMs`: kotlin.ULong
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2414,38 +2450,38 @@ data class PreparedStream (
      * Opaque session handle for `stream_open`/`stream_read`/...
      */
     var `handle`: kotlin.String
-    ,
+    , 
     /**
      * MIME type; pinned across re-mints.
      */
     var `mime`: kotlin.String
-    ,
+    , 
     /**
      * Format itag when reported.
      */
     var `itag`: kotlin.UInt?
-    ,
+    , 
     /**
      * Bitrate hint in kbps.
      */
     var `bitrateKbps`: kotlin.UInt?
-    ,
+    , 
     /**
      * Reported length in bytes, when known.
      */
     var `contentLength`: kotlin.ULong?
-    ,
+    , 
     /**
      * URL expiry, epoch ms.
      */
     var `expiresAtMs`: kotlin.ULong?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2493,43 +2529,43 @@ data class ResolvedResource (
      * Direct stream URL (signed; redact everywhere).
      */
     var `url`: kotlin.String
-    ,
+    , 
     /**
      * MIME type, e.g. `audio/mp4`.
      */
     var `mime`: kotlin.String
-    ,
+    , 
     /**
      * Bitrate in kbps when the guest reported one.
      */
     var `bitrateKbps`: kotlin.UInt?
-    ,
+    , 
     /**
      * `expire=` converted to epoch milliseconds.
      */
     var `expiresAtMs`: kotlin.ULong?
-    ,
+    , 
     /**
      * Ladder rung that produced the URL.
      */
     var `client`: kotlin.String
-    ,
+    , 
     /**
      * Reported `contentLength` of the picked format in bytes.
      */
     var `contentLength`: kotlin.ULong?
-    ,
+    , 
     /**
      * Provider format itag when the guest reported one.
      */
     var `itag`: kotlin.UInt?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2580,23 +2616,23 @@ data class SpinReport (
      * Wall-clock time until the trap.
      */
     var `elapsedMs`: kotlin.ULong
-    ,
+    , 
     /**
      * Fuel consumed before the trap.
      */
     var `fuelUsed`: kotlin.ULong
-    ,
+    , 
     /**
      * Terminal error kind (`budget-exceeded` expected).
      */
     var `kind`: kotlin.String
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2636,38 +2672,38 @@ data class StreamPhaseMarks (
      * Epoch ms when `prepare` registered the session.
      */
     var `prepareStartedMs`: kotlin.ULong
-    ,
+    , 
     /**
      * Duration of the minting `playback.resolve`, when known.
      */
     var `resolveMs`: kotlin.ULong?
-    ,
+    , 
     /**
      * Duration of the most recent re-mint, when one ran.
      */
     var `mintMs`: kotlin.ULong?
-    ,
+    , 
     /**
      * Epoch ms when the first byte landed.
      */
     var `firstByteMs`: kotlin.ULong?
-    ,
+    , 
     /**
      * Epoch ms when the head-fill bound was covered.
      */
     var `headReadyMs`: kotlin.ULong?
-    ,
+    , 
     /**
      * Epoch ms of the first attach.
      */
     var `attachMs`: kotlin.ULong?
-
+    
 ){
+    
 
+    
 
-
-
-
+    
     companion object
 }
 
@@ -2716,12 +2752,12 @@ public object FfiConverterTypeStreamPhaseMarks: FfiConverterRustBuffer<StreamPha
  * property named `message` collides with `Throwable.message`.
  */
 sealed class HostException: kotlin.Exception() {
-
+    
     /**
      * Artifact or manifest rejected at load.
      */
     class Load(
-
+        
         /**
          * Rejection detail.
          */
@@ -2730,12 +2766,12 @@ sealed class HostException: kotlin.Exception() {
         override val message
             get() = "detail=${ `detail` }"
     }
-
+    
     /**
      * `start_resolve`/`cancel` referenced an id that is not loaded.
      */
     class UnknownPlugin(
-
+        
         /**
          * The missing plugin id.
          */
@@ -2744,12 +2780,12 @@ sealed class HostException: kotlin.Exception() {
         override val message
             get() = "id=${ `id` }"
     }
-
+    
     /**
      * Internal runtime failure.
      */
     class Runtime(
-
+        
         /**
          * Detail.
          */
@@ -2758,7 +2794,7 @@ sealed class HostException: kotlin.Exception() {
         override val message
             get() = "detail=${ `detail` }"
     }
-
+    
     /**
      * The caller-minted request id is still owned by a live
      * invocation or an unreleased prepared session — ids must be
@@ -2766,7 +2802,7 @@ sealed class HostException: kotlin.Exception() {
      * (Load, Unknown, Runtime) don't shift for stale decoders.
      */
     class RequestInFlight(
-
+        
         /**
          * The colliding request id.
          */
@@ -2775,16 +2811,16 @@ sealed class HostException: kotlin.Exception() {
         override val message
             get() = "id=${ `id` }"
     }
+    
 
-
-
+    
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<HostException> {
         override fun lift(error_buf: RustBuffer.ByValue): HostException = FfiConverterTypeHostError.lift(error_buf)
     }
 
-
+    
 }
 
 /**
@@ -2792,7 +2828,7 @@ sealed class HostException: kotlin.Exception() {
  */
 public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> {
     override fun read(buf: ByteBuffer): HostException {
-
+        
 
         return when(buf.getInt()) {
             1 -> HostException.Load(
@@ -2869,7 +2905,7 @@ public object FfiConverterTypeHostError : FfiConverterRustBuffer<HostException> 
  * Terminal outcome of one `start_prepare` invocation.
  */
 sealed class PrepareOutcome {
-
+    
     /**
      * The resolve produced a source and the seam registered it.
      */
@@ -2877,24 +2913,24 @@ sealed class PrepareOutcome {
         /**
          * The prepared session handle + metadata.
          */
-        val `stream`: uniffi.auqw_mobile_bindings.PreparedStream,
+        val `stream`: uniffi.auqw_mobile_bindings.PreparedStream, 
         /**
          * Handles this prepare superseded or pruned — the caller's
          * handle routing must drop these so a dead session's entry
          * can never serve a later attach.
          */
-        val `superseded`: List<kotlin.String>,
+        val `superseded`: List<kotlin.String>, 
         /**
          * Invocation accounting for the resolve.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : PrepareOutcome()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     /**
      * The resolve or the seam registration failed.
      */
@@ -2902,27 +2938,27 @@ sealed class PrepareOutcome {
         /**
          * Taxonomy kind (`no-result`, `cancelled`, ...).
          */
-        val `kind`: kotlin.String,
+        val `kind`: kotlin.String, 
         /**
          * Human-readable detail (never contains the URL).
          */
-        val `message`: kotlin.String,
+        val `message`: kotlin.String, 
         /**
          * Invocation accounting for the resolve.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : PrepareOutcome()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -2998,7 +3034,7 @@ public object FfiConverterTypePrepareOutcome : FfiConverterRustBuffer<PrepareOut
  * raw JSON — the typed [`ResolveOutcome`] remains for resolve callers.
  */
 sealed class RequestOutcome {
-
+    
     /**
      * The invocation produced a `done` result.
      */
@@ -3006,18 +3042,18 @@ sealed class RequestOutcome {
         /**
          * `done.result` serialized to JSON.
          */
-        val `resultJson`: kotlin.String,
+        val `resultJson`: kotlin.String, 
         /**
          * Invocation accounting.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : RequestOutcome()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     /**
      * The invocation failed; `kind` is the ABI error taxonomy.
      */
@@ -3025,27 +3061,27 @@ sealed class RequestOutcome {
         /**
          * Taxonomy kind.
          */
-        val `kind`: kotlin.String,
+        val `kind`: kotlin.String, 
         /**
          * Human-readable detail (never contains signed URLs).
          */
-        val `message`: kotlin.String,
+        val `message`: kotlin.String, 
         /**
          * Invocation accounting.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : RequestOutcome()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -3117,7 +3153,7 @@ public object FfiConverterTypeRequestOutcome : FfiConverterRustBuffer<RequestOut
  * Terminal outcome of one `start_resolve` invocation.
  */
 sealed class ResolveOutcome {
-
+    
     /**
      * A plain audio URL was produced.
      */
@@ -3125,18 +3161,18 @@ sealed class ResolveOutcome {
         /**
          * The stream.
          */
-        val `resource`: uniffi.auqw_mobile_bindings.ResolvedResource,
+        val `resource`: uniffi.auqw_mobile_bindings.ResolvedResource, 
         /**
          * Invocation accounting.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : ResolveOutcome()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
     /**
      * The invocation failed; `kind` is the ABI error taxonomy.
      */
@@ -3144,27 +3180,27 @@ sealed class ResolveOutcome {
         /**
          * Taxonomy kind (`no-result`, `cancelled`, ...).
          */
-        val `kind`: kotlin.String,
+        val `kind`: kotlin.String, 
         /**
          * Human-readable detail (never contains the URL).
          */
-        val `message`: kotlin.String,
+        val `message`: kotlin.String, 
         /**
          * Invocation accounting.
          */
         val `attempt`: uniffi.auqw_mobile_bindings.AttemptSummary) : ResolveOutcome()
-
+        
     {
-
+        
 
         companion object
     }
+    
 
+    
 
-
-
-
-
+    
+    
 
 
     companion object
@@ -3240,7 +3276,7 @@ public object FfiConverterTypeResolveOutcome : FfiConverterRustBuffer<ResolveOut
  * Field names avoid `message` for the same reason as [`HostError`].
  */
 sealed class StreamException: kotlin.Exception() {
-
+    
     /**
      * `HostConfig.stream_path` was unset — the seam is not running.
      */
@@ -3249,17 +3285,17 @@ sealed class StreamException: kotlin.Exception() {
         override val message
             get() = ""
     }
-
+    
     /**
      * The session operation failed; `kind` is the ABI taxonomy.
      */
     class Failed(
-
+        
         /**
          * Kebab-case error kind.
          */
-        val `kind`: kotlin.String,
-
+        val `kind`: kotlin.String, 
+        
         /**
          * Failure detail (never contains the signed URL).
          */
@@ -3268,16 +3304,16 @@ sealed class StreamException: kotlin.Exception() {
         override val message
             get() = "kind=${ `kind` }, detail=${ `detail` }"
     }
+    
 
-
-
+    
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<StreamException> {
         override fun lift(error_buf: RustBuffer.ByValue): StreamException = FfiConverterTypeStreamError.lift(error_buf)
     }
 
-
+    
 }
 
 /**
@@ -3285,7 +3321,7 @@ sealed class StreamException: kotlin.Exception() {
  */
 public object FfiConverterTypeStreamError : FfiConverterRustBuffer<StreamException> {
     override fun read(buf: ByteBuffer): StreamException {
-
+        
 
         return when(buf.getInt()) {
             1 -> StreamException.Unavailable()
@@ -3337,12 +3373,12 @@ public object FfiConverterTypeStreamError : FfiConverterRustBuffer<StreamExcepti
  * Receives the terminal outcome of [`PluginHost::start_prepare`].
  */
 public interface PrepareListener {
-
+    
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
     fun `onOutcome`(`requestId`: kotlin.String, `outcome`: PrepareOutcome)
-
+    
     companion object
 }
 
@@ -3405,12 +3441,12 @@ public object FfiConverterTypePrepareListener: FfiConverterCallbackInterface<Pre
  * [`PluginHost::start_request`].
  */
 public interface RequestListener {
-
+    
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
     fun `onOutcome`(`requestId`: kotlin.String, `outcome`: RequestOutcome)
-
+    
     companion object
 }
 
@@ -3473,12 +3509,12 @@ public object FfiConverterTypeRequestListener: FfiConverterCallbackInterface<Req
  * [`PluginHost::start_resolve`].
  */
 public interface ResolveListener {
-
+    
     /**
      * Called exactly once per request, on a runtime worker thread.
      */
     fun `onOutcome`(`requestId`: kotlin.String, `outcome`: ResolveOutcome)
-
+    
     companion object
 }
 

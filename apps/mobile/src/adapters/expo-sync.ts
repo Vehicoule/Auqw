@@ -1,4 +1,5 @@
 import type {
+  ApplyResult,
   ClockPort,
   IdPort,
   LogPort,
@@ -22,7 +23,6 @@ import {
   createNobleSyncCrypto,
 } from './noble-sync-crypto.ts';
 import { createExpoSyncSockets } from './expo-sync-socket.ts';
-import { createSecureSyncKeys } from './secure-sync-keys.ts';
 import { nativeError, type AuqwSyncNative } from './auqw-expo-surface.ts';
 
 /**
@@ -47,6 +47,14 @@ export type ExpoSyncDeps = {
   readonly log: LogPort;
   /** Optional custody override — tests inject memory stores. */
   readonly keys?: SyncClientKeys;
+  /**
+   * Fires after every successful `applyDelta` — the domain-projection
+   * seam. The engine hands the `ApplyResult` (merged entries +
+   * outcomes) to the Session; applied here so EVERY inbound path
+   * (syncNow pages plus any later caller of `surface.engine
+   * .applyDelta`) notifies, not just the round driver.
+   */
+  readonly onApplied?: (applied: ApplyResult) => void;
 };
 
 export type ExpoSyncSurface = {
@@ -72,7 +80,11 @@ export async function createExpoSync(
   // custody, engine, codec — so a sync failure surfaces as a typed
   // error (honest 'unavailable'), never as a boot-killing rejection.
   try {
-    const keys = deps.keys ?? createSecureSyncKeys();
+    // expo-secure-store resolves through Metro, not plain node —
+    // pull it lazily so injected custody never pays the native import.
+    const keys =
+      deps.keys ??
+      (await import('./secure-sync-keys.ts')).createSecureSyncKeys();
     const random = nativeRandom(deps.host);
     const custody = await ensureSyncIdentity({
       keys,
@@ -93,6 +105,22 @@ export async function createExpoSync(
     if (!engine.ok) {
       return err(engine.error);
     }
+    // Domain projection seam: wrap applyDelta once so every merge
+    // notifies — the round driver's pages AND any direct apply path
+    // through the surface land the same projection.
+    const wrappedEngine: SyncEngine =
+      deps.onApplied === undefined
+        ? engine.value
+        : {
+            ...engine.value,
+            applyDelta: async (doc, signal) => {
+              const applied = await engine.value.applyDelta(doc, signal);
+              if (applied.ok) {
+                deps.onApplied?.(applied.value);
+              }
+              return applied;
+            },
+          };
     const crypto = createNobleSyncCrypto({
       identity: custody.value.identity,
       randomBytes: random,
@@ -101,7 +129,7 @@ export async function createExpoSync(
       sockets: createExpoSyncSockets(deps.host),
       crypto,
       keys,
-      engine: engine.value,
+      engine: wrappedEngine,
       ids: deps.ids,
       clock: deps.clock,
       log: deps.log,
@@ -115,7 +143,7 @@ export async function createExpoSync(
       await client.close();
       return err(hydrated.error);
     }
-    return ok({ client, engine: engine.value, deviceId });
+    return ok({ client, engine: wrappedEngine, deviceId });
   } catch (thrown) {
     // Native exception text can carry paths, URLs, or stack detail and
     // the log sink performs no redaction — neither the typed error nor

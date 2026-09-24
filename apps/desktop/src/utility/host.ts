@@ -64,6 +64,13 @@ export type PluginHostLike = {
   streamClose(handle: string): void;
   streamRelease(handle: string): void;
   streamPhaseMarks(handle: string): unknown;
+  /**
+   * napi `set_pot_provider(&self, url: Option<String>)` — updates
+   * the provider slot resolves read at invocation spawn, so a
+   * minter bind retry landing after construction still reaches the
+   * running host. `null` restores anonymous resolves.
+   */
+  setPotProvider(url: string | null): void;
 };
 
 /** Fuel budgets match the mobile host's values (200M/entry, 2G total). */
@@ -86,6 +93,11 @@ export type HostEnv = {
   /** Host state directory — stream stores live under it. */
   AUQW_USER_DATA?: string | undefined;
   AUQW_STREAM_DIR?: string | undefined;
+  /**
+   * POT provider override — wins over the bundled pot-service's
+   * loopback URL when set (points the host at an external bgutil).
+   */
+  AUQW_POT_PROVIDER_URL?: string | undefined;
 };
 
 type RequireLike = (path: string) => NodeBindingsModule;
@@ -193,8 +205,20 @@ export function createHostRuntime(opts: {
   repoRoot?: string | undefined;
   require?: RequireLike | undefined;
   fs?: FsLike | undefined;
+  /**
+   * Bundled POT service's loopback URL — read at PluginHost
+   * construction (lazy bindings make this a thunk, not a value).
+   * `AUQW_POT_PROVIDER_URL` wins over it when set.
+   */
+  potProviderUrl?: () => string | null;
 }): {
   host(): PluginHostLike;
+  /**
+   * The already-constructed host or null — never builds one. For
+   * late-arriving updates (`setPotProvider` after a minter bind
+   * retry) that must not force bindings to load.
+   */
+  hostIfLoaded(): PluginHostLike | null;
   pluginsReady(): Promise<readonly string[]>;
   status(): Promise<HostPluginsResult>;
 } {
@@ -225,6 +249,14 @@ export function createHostRuntime(opts: {
     try {
       const mod = requireFn(stageArtifact(found));
       const userData = opts.env.AUQW_USER_DATA ?? process.cwd();
+      // An empty override reads as unset — otherwise it would both
+      // skip the bundled service's loopback URL AND fail the host's
+      // own URL validation, leaving playback with no provider.
+      const envPotUrl = opts.env.AUQW_POT_PROVIDER_URL;
+      const potUrl =
+        (envPotUrl !== undefined && envPotUrl.trim() !== ''
+          ? envPotUrl
+          : opts.potProviderUrl?.()) ?? undefined;
       host = new mod.PluginHost({
         fuelPerEntry: FUEL_PER_ENTRY,
         fuelTotal: FUEL_TOTAL,
@@ -234,6 +266,9 @@ export function createHostRuntime(opts: {
         // codec matrix requires it. Without the hint the guest prefers
         // mp4 on ties — wrong container for this surface.
         prefer: ['audio/webm', 'audio/mp4'],
+        ...(potUrl !== undefined && potUrl !== ''
+          ? { potProviderUrl: potUrl }
+          : {}),
       });
       bindingsError = undefined;
       return host;
@@ -326,6 +361,9 @@ export function createHostRuntime(opts: {
   return {
     host(): PluginHostLike {
       return ensureHost();
+    },
+    hostIfLoaded(): PluginHostLike | null {
+      return host;
     },
     pluginsReady(): Promise<readonly string[]> {
       return ready().then((loaded) => loaded.map((p) => p.pluginId));

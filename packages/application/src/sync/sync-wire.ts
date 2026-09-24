@@ -83,6 +83,13 @@ export type WelcomeMsg = {
   readonly device: SyncDeviceRecord;
   /** The server's display name. */
   readonly name: string;
+  /**
+   * The server's bundled POT provider (`host:port`), sent on the
+   * connection that actually answered — the authoritative
+   * advertisement, refreshed every welcome so a rebound minter
+   * port heals the stored peer record.
+   */
+  readonly pot?: string;
 };
 
 export type RejectMsg = { readonly t: 'reject'; readonly reason: string };
@@ -125,6 +132,12 @@ export type SyncPairingPayload = {
   readonly code: string;
   /** sha256(server SPKI DER) hex — the dial-time identity pin. */
   readonly fp: string;
+  /**
+   * Bundled POT service's `host:port` on the same endpoint host —
+   * present only when the desktop bound its minter. Persisted on
+   * the peer record so the host's PluginHost gets a provider URL.
+   */
+  readonly pot?: string;
 };
 
 export type SyncEndpoint = {
@@ -183,10 +196,12 @@ export function isSyncDeviceRecord(
 export function isWelcomeMsg(value: unknown): value is WelcomeMsg {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ['t', 'device', 'name']) &&
+    hasKeys(value, ['t', 'device', 'name'], ['pot']) &&
     value['t'] === 'welcome' &&
     isSyncDeviceRecord(value['device']) &&
-    isString(value['name'], DEVICE_NAME_MAX)
+    isString(value['name'], DEVICE_NAME_MAX) &&
+    (value['pot'] === undefined ||
+      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
   );
 }
 
@@ -270,7 +285,11 @@ export function isPairingPayload(
 ): value is SyncPairingPayload {
   return (
     isRecord(value) &&
-    hasKeys(value, ['v', 'endpoint', 'code', 'fp'], ['endpoints']) &&
+    hasKeys(
+      value,
+      ['v', 'endpoint', 'code', 'fp'],
+      ['endpoints', 'pot'],
+    ) &&
     value['v'] === WIRE_VERSION &&
     isString(value['endpoint'], 320) &&
     PAIR_CODE_PATTERN.test(String(value['code'])) &&
@@ -280,7 +299,9 @@ export function isPairingPayload(
         value['endpoints'].length <= 16 &&
         (value['endpoints'] as unknown[]).every(
           (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        )))
+        ))) &&
+    (value['pot'] === undefined ||
+      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
   );
 }
 
@@ -318,6 +339,19 @@ export function utf8Encode(input: string): Uint8Array {
     }
   }
   return new Uint8Array(out);
+}
+
+/** UTF-8 byte count without encoding — for size budgets. */
+export function utf8ByteLength(input: string): number {
+  let bytes = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const cp = input.codePointAt(i) ?? 0;
+    if (cp > 0xffff) {
+      i += 1;
+    }
+    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+  }
+  return bytes;
 }
 
 /** Replacement-char decode — malformed bytes never throw. */

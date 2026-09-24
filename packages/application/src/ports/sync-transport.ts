@@ -116,6 +116,12 @@ export type SyncPeer = {
   readonly lastSeenAt: number;
   readonly peerCursor: SyncCursor;
   readonly lastSyncAt?: number;
+  /**
+   * The peer's bundled POT service as `host:port`, learned from the
+   * pairing payload — shares `endpoints`' freshness horizon (a
+   * desktop restart rebinds both; the next pair refreshes).
+   */
+  readonly pot?: string;
 };
 
 /**

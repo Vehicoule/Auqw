@@ -72,6 +72,7 @@ import {
   toSearchRowModel,
   toSettingsModel,
   toSyncPanel,
+  useTheme,
 } from '@auqw/ui-web';
 import type {
   CollectionRowModel,
@@ -91,6 +92,7 @@ import type {
   SyncStatusResult,
 } from '../shared/contract.ts';
 import { isSyncDeltaDoc } from '../shared/contract.ts';
+import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
@@ -214,6 +216,7 @@ function Shell({ controller }: { readonly controller: SessionController }) {
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
   return (
     <ThemeProvider theme={theme}>
+      <ChromeSchemeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -221,6 +224,16 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       )}
     </ThemeProvider>
   );
+}
+
+/** Pushes the resolved scheme to main so the titlebar overlay
+    matches the canvas even when the user picked an explicit scheme. */
+function ChromeSchemeReporter(): null {
+  const { scheme } = useTheme();
+  useEffect(() => {
+    window.auqw.chrome.setScheme(scheme);
+  }, [scheme]);
+  return null;
 }
 
 function SessionGate({
@@ -286,7 +299,9 @@ function toSearchModel(state: SearchState): SearchStateModel {
       return {
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         query: state.query,
-        results: state.page.items.map(toSearchRowModel),
+        results: state.page.items.map((meta, index) =>
+          toSearchRowModel(meta, index),
+        ),
         providerId: null,
         message: state.refreshError?.message ?? null,
         retryable: false,
@@ -499,6 +514,7 @@ function Main({
     readonly SyncDeviceInfo[]
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
+  const [pairingError, setPairingError] = useState<string | null>(null);
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
   // sync polls.
@@ -840,15 +856,35 @@ function Main({
   );
   const syncModel = useMemo(
     () =>
-      toSyncPanel(syncStatus, syncDevices, pairing, Date.now()),
-    [syncStatus, syncDevices, pairing, pairingTick],
+      toSyncPanel(
+        syncStatus,
+        syncDevices,
+        pairing,
+        Date.now(),
+        pairingError,
+      ),
+    [syncStatus, syncDevices, pairing, pairingTick, pairingError],
   );
 
   const onPairDevice = useCallback(() => {
     void window.auqw.sync
       .pairing()
-      .then((offer) => setPairing(offer))
-      .catch(() => setPairing(null));
+      .then((offer) => {
+        setPairing(offer);
+        setPairingError(null);
+      })
+      // A mint failure (listener down, no LAN address) must surface —
+      // a silent reject leaves the row looking dead-clicked.
+      .catch((thrown: unknown) => {
+        setPairing(null);
+        setPairingError(
+          isShellError(thrown)
+            ? thrown.message
+            : thrown instanceof Error
+              ? thrown.message
+              : 'could not mint a pairing offer',
+        );
+      });
   }, []);
   const onUnpairDevice = useCallback(
     (deviceId: string) => {
@@ -1322,18 +1358,6 @@ function Main({
     });
   }, [session]);
 
-  const onPickImportFile = useCallback(() => {
-    setTransfer((prev) => ({
-      ...prev,
-      importPhase: 'reading',
-      importDetail: null,
-      preview: null,
-    }));
-    // The hidden file input carries the picker; its change event
-    // continues the flow below.
-    importInput.current?.click();
-  }, []);
-
   const onImportFileChosen = useCallback(
     (file: globalThis.File | null) => {
       if (file === null) {
@@ -1376,6 +1400,67 @@ function Main({
     },
     [],
   );
+
+  // The fallback file dialog emits no `change` on dismiss — `cancel`
+  // (not in this React's typings) is the only recovery hook; without it
+  // a cancelled pick latches the button on 'working…' forever.
+  useEffect(() => {
+    const input = importInput.current;
+    const onCancel = () =>
+      setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+    input?.addEventListener('cancel', onCancel);
+    return () => input?.removeEventListener('cancel', onCancel);
+  }, []);
+
+  const onPickImportFile = useCallback(() => {
+    setTransfer((prev) => ({
+      ...prev,
+      importPhase: 'reading',
+      importDetail: null,
+      preview: null,
+    }));
+    // showOpenFilePicker resolves a cancel as AbortError; the hidden
+    // input fallback (webviews without the picker API) observes it via
+    // its `cancel` event — both paths reset to idle.
+    const picker = (
+      window as unknown as {
+        showOpenFilePicker?: (options: {
+          multiple?: boolean;
+          types?: readonly {
+            description?: string;
+            accept: Record<string, readonly string[]>;
+          }[];
+        }) => Promise<readonly { getFile(): Promise<globalThis.File> }[]>;
+      }
+    ).showOpenFilePicker;
+    if (picker === undefined) {
+      importInput.current?.click();
+      return;
+    }
+    void picker
+      .call(window, {
+        types: [
+          {
+            description: 'auqw library export',
+            accept: { 'application/json': ['.json'] },
+          },
+        ],
+        multiple: false,
+      })
+      .then(async (handles) => {
+        const handle = handles[0];
+        return handle === undefined ? null : handle.getFile();
+      })
+      .then((file) => onImportFileChosen(file))
+      .catch((thrown: unknown) => {
+        if (thrown instanceof DOMException && thrown.name === 'AbortError') {
+          setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+          return;
+        }
+        // Picker rejected for a real reason — fall back to the input.
+        importInput.current?.click();
+      });
+  }, [onImportFileChosen]);
 
   const onApplyImport = useCallback(() => {
     const text = importText.current;
@@ -2079,7 +2164,6 @@ function Main({
       {/* The sandboxed file input that powers library import — the
           browser picker is the only fs path a renderer gets. */}
       <input
-        ref={importInput}
         type="file"
         accept="application/json,.json"
         style={{ display: 'none' }}
@@ -2089,6 +2173,7 @@ function Main({
           event.target.value = '';
           onImportFileChosen(file);
         }}
+        ref={importInput}
       />
       <AppStack>
         <StackItem stackKey="root">

@@ -1,6 +1,6 @@
 {
   "name": "auqw-expo",
-  "version": "0.1.0",
+  "version": "0.0.1-alpha.1",
   "private": true,
   "description": "Expo module wrapping the UniFFI plugin host plus the Media3 streaming-seam player (Android + iOS, Slice 1.5; supersedes plugin-host-expo)",
   "main": "src/index.ts",

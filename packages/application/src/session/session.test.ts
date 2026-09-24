@@ -23,7 +23,24 @@ import { CancellationSource } from '../cancellation.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { ProviderPort } from '../ports/provider.ts';
 import { Session } from './session.ts';
-import type { ReadySession, SessionState } from './session.ts';
+import type {
+  ReadySession,
+  SessionState,
+  SyncEmitPort,
+} from './session.ts';
+import type {
+  ChangeEntry,
+  LocalWrite,
+  MergeOutcome,
+  SyncRecordKind,
+} from '../sync/sync-engine.ts';
+import {
+  likeRecordId,
+  SETTINGS_RECORD_ID,
+  sourceRefRecordId,
+  TOMBSTONE_FIELD,
+} from '../sync/sync-engine.ts';
+import { utf8ByteLength } from '../sync/sync-wire.ts';
 import {
   FakeClock,
   FakeLog,
@@ -154,6 +171,7 @@ function rig(
   extraProviders: ProviderPort[] = [],
   localPlayback?: Map<string, string>,
   online?: () => boolean,
+  sync?: SyncEmitPort,
 ): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
@@ -174,6 +192,7 @@ function rig(
     defaults: SETTINGS,
     localPlaybackFor: (recordingId) => localPlayback?.get(recordingId) ?? null,
     isOnline: online ?? (() => true),
+    ...(sync !== undefined ? { sync } : {}),
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -3528,6 +3547,394 @@ async function enqueueCommitFailureHonest(): Promise<void> {
   );
 }
 
+// ---- sync projection seam -------------------------------------------------
+
+let syncSeq = 0;
+
+function syncEntry(
+  kind: SyncRecordKind,
+  recordId: string,
+  field: string,
+  value: unknown,
+  opts: { l?: number; device?: string } = {},
+): ChangeEntry {
+  syncSeq += 1;
+  return {
+    kind,
+    recordId,
+    field,
+    value,
+    tombstone: false,
+    hlc: { l: opts.l ?? 100, c: syncSeq },
+    deviceId: opts.device ?? 'device-remote',
+    seq: syncSeq,
+  };
+}
+
+function syncTombstone(
+  kind: SyncRecordKind,
+  recordId: string,
+  opts: { l?: number; device?: string } = {},
+): ChangeEntry {
+  return {
+    ...syncEntry(kind, recordId, TOMBSTONE_FIELD, null, opts),
+    tombstone: true,
+  };
+}
+
+function appliedOutcome(
+  entry: ChangeEntry,
+  displaced: readonly ChangeEntry[] = [],
+): MergeOutcome {
+  return { type: 'applied', entry, displaced };
+}
+
+async function syncEmitAfterCommit(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: {
+    writes: readonly LocalWrite[];
+    commitsSeen: number;
+  }[] = [];
+  let r: Rig | undefined;
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push({
+        writes,
+        commitsSeen: r?.storage.commits.length ?? -1,
+      });
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  r = rig(base, [], undefined, undefined, port);
+  await restoreOk(r);
+  const before = r.storage.commits.length;
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  const writes = captured
+    .flatMap((c) => c.writes)
+    .filter((w) => w.kind === 'like');
+  assert(writes.length > 0, 'like write emitted');
+  assertEqual(
+    writes[0]?.recordId,
+    likeRecordId('track', 'r1'),
+    'like write keyed by likeRecordId',
+  );
+  // Emission rides the post-commit hook: the domain commit is already
+  // durable when the port sees the writes.
+  assert(
+    captured.every((c) => c.commitsSeen > before),
+    'emit observed strictly after the domain commit',
+  );
+}
+
+async function syncEmitFailureKeepsDomainWrite(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const failing: SyncEmitPort = {
+    localChanges: () =>
+      Promise.resolve(err(appError('unavailable', 'emit offline'))),
+  };
+  const r = rig(base, [], undefined, undefined, failing);
+  await restoreOk(r);
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  // The emit failed but the domain write landed — the change log is
+  // async catch-up, never a rollback.
+  assert(
+    readyOf(r).likes.some(
+      (l) => l.entityKind === 'track' && l.targetId === 'r1',
+    ),
+    'like landed despite emit failure',
+  );
+  assert(
+    readyOf(r).persistenceError !== undefined,
+    'emit failure surfaces as persistenceError',
+  );
+  assert(
+    r.log.entries.some(
+      (e) => e.level === 'warn' && e.message.includes('sync emission'),
+    ),
+    'emit failure logs a typed warning',
+  );
+}
+
+async function applySyncedEntriesRemoteInsert(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const sr = ref('itunes', 't-remote');
+  const outcomes: MergeOutcome[] = [
+    appliedOutcome(syncEntry('recording', 'r-remote', 'title', 'Remote')),
+    appliedOutcome(
+      syncEntry(
+        'recordingSourceRef',
+        sourceRefRecordId('r-remote', sr),
+        'ref',
+        sr,
+      ),
+    ),
+  ];
+  const result = await r.session.applySyncedEntries(outcomes);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  const landed = readyOf(r).recordings.find((rec) => rec.id === 'r-remote');
+  assert(landed !== undefined, 'remote recording mirrors into state');
+  assertEqual(landed?.title, 'Remote');
+  // Partial field set materializes with domain defaults.
+  assertEqual(landed?.album, null);
+  assertEqual(landed?.provenance, 'provider');
+  const stored = await r.storage.load({
+    requestId: 'verify',
+    deadlineMs: Number.MAX_SAFE_INTEGER,
+    signal: new CancellationSource().signal,
+  });
+  assert(
+    stored.ok &&
+      stored.value.recordings.some((rec) => rec.id === 'r-remote'),
+    'remote recording commits to storage',
+  );
+}
+
+async function applySyncedEntriesTombstoneRemoves(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+      playCounts: [{ recordingId: 'r1', count: 4, lastMs: 10 }],
+    }),
+  );
+  await restoreOk(r);
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncTombstone('recording', 'r1')),
+  ]);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  assertEqual(
+    readyOf(r).recordings.length,
+    0,
+    'tombstone removes the recording',
+  );
+  assertEqual(
+    readyOf(r).likes.length,
+    0,
+    'dependent like drops with the recording',
+  );
+  assertEqual(
+    readyOf(r).playCounts.length,
+    0,
+    'dependent play count drops with the recording',
+  );
+}
+
+async function applySyncedEntriesSupersededKeepsRow(): Promise<void> {
+  const r = rig(
+    persisted({ recordings: [recording('r1', [ref('itunes', 'i1')])] }),
+  );
+  await restoreOk(r);
+  const loser = syncEntry('recording', 'r1', 'title', 'Remote Rename', {
+    l: 90,
+  });
+  const winner = syncEntry('recording', 'r1', 'title', 'Winner', { l: 95 });
+  const outcome: MergeOutcome = {
+    type: 'superseded',
+    entry: loser,
+    winner,
+  };
+  const result = await r.session.applySyncedEntries([outcome]);
+  assert(result.ok, 'applySyncedEntries failed');
+  await pump();
+  assertEqual(
+    readyOf(r).recordings[0]?.title,
+    'Song r1',
+    'superseded entry never overwrites the domain row',
+  );
+  assert(
+    r.log.entries.some(
+      (e) =>
+        e.level === 'warn' && e.message.includes('non-applied outcomes'),
+    ),
+    'dropped outcome logs divergence',
+  );
+}
+
+async function applySyncedEntriesRequiresReady(): Promise<void> {
+  const r = rig(persisted({}));
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('recording', 'r1', 'title', 'T')),
+  ]);
+  assert(!result.ok, 'apply before restore must fail typed');
+}
+
+// A load failure must retain the consumed outcomes for the next
+// drain — the transport already dequeued them (Devin Review #46).
+async function applySyncedEntriesLoadFailRetains(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  r.storage.holdNextLoad();
+  const first = r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'Remote')),
+  ]);
+  await pump();
+  // The deferred queue keeps resolved entries — drain until the
+  // held load is actually settled.
+  let settled = false;
+  while (
+    r.storage.settleLoad(err(appError('unavailable', 'disk wedged')))
+  ) {
+    settled = true;
+  }
+  assert(settled, 'held load settles');
+  const failed = await first;
+  assert(!failed.ok, 'load failure fails typed');
+  assert(
+    readyOf(r).persistenceError !== undefined,
+    'failure surfaces honestly',
+  );
+  // Next drain replays nothing — the retained union folds alone.
+  const retry = await r.session.applySyncedEntries([]);
+  assert(retry.ok, 'retained outcomes refold');
+  await pump();
+  const list = readyOf(r).playlists.find((p) => p.playlistId === 'pl-1');
+  assert(list !== undefined, 'retained outcome materializes');
+  assertEqual(list?.name, 'Remote');
+  // The successful refold clears the surface the failure raised —
+  // a sticky error would misreport a resolved state (Review #46).
+  assertEqual(readyOf(r).persistenceError, undefined);
+}
+
+// A drain page may carry more outcomes than the retained-pending
+// bound (Review #46): the cap applies to the post-failure backlog,
+// never to fresh page data.
+async function applySyncedEntriesLargeDrain(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const outcomes: MergeOutcome[] = [];
+  for (let i = 0; i < 3_000; i += 1) {
+    outcomes.push(
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'name', `P${i}`)),
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'createdMs', 7)),
+      appliedOutcome(syncEntry('playlist', `pl-${i}`, 'updatedMs', 7)),
+    );
+  }
+  const applied = await r.session.applySyncedEntries(outcomes);
+  assert(applied.ok, 'large drain failed');
+  await pump();
+  assertEqual(
+    readyOf(r).playlists.length,
+    3_000,
+    'every outcome in the page projected',
+  );
+}
+
+// Remote settings naming providers this build lacks must never
+// strand playback (Review #46): required slots keep the current
+// valid value, optional slots null out, unrelated fields merge.
+async function applySyncedEntriesSettingsReconcile(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const applied = await r.session.applySyncedEntries([
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'playbackProvider', 'ghost'),
+    ),
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'lyricsProvider', 'ghost'),
+    ),
+    appliedOutcome(
+      syncEntry('settings', SETTINGS_RECORD_ID, 'theme', 'dark'),
+    ),
+  ]);
+  assert(applied.ok, 'settings apply failed');
+  await pump();
+  const settings = readyOf(r).settings;
+  assertEqual(settings.playbackProvider, 'youtube-music');
+  assertEqual(settings.lyricsProvider, null);
+  assertEqual(settings.theme, 'dark');
+}
+
+// Remote deletes that cascade into downloads/localFiles report
+// rehydrateMedia so the controllers rebuild their live media owners;
+// a plain apply reports false (Review #46).
+async function applySyncedEntriesReportsRehydrate(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      localSources: [
+        {
+          sourceId: 'src-1',
+          treeUri: 'tree://music',
+          label: 'Music',
+          addedMs: 1,
+          lastScanMs: null,
+        },
+      ],
+      localFiles: [
+        {
+          fileId: 'f1',
+          sourceId: 'src-1',
+          docId: 'doc-1',
+          size: 1024,
+          fingerprint: 'fp-1',
+          modifiedMs: null,
+          title: 'T',
+          artist: 'A',
+          album: null,
+          durationMs: 1000,
+          genre: null,
+          recordingId: 'r1',
+        },
+      ],
+    }),
+  );
+  await restoreOk(r);
+  const applied = await r.session.applySyncedEntries([
+    appliedOutcome(syncTombstone('recording', 'r1')),
+  ]);
+  assert(applied.ok, 'cascade apply failed');
+  assertEqual(applied.value.rehydrateMedia, true);
+  const plain = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'P')),
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'createdMs', 7)),
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'updatedMs', 7)),
+  ]);
+  assert(plain.ok, 'plain apply failed');
+  assertEqual(plain.value.rehydrateMedia, false);
+}
+
+// applySyncedEntries is serialized through the storage segment —
+// two overlapping calls resolve, no interleaved batch.
+async function applySyncedEntriesOverlapping(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  const [a, b] = await Promise.all([
+    r.session.applySyncedEntries([
+      appliedOutcome(syncEntry('playlist', 'pl-a', 'name', 'A')),
+    ]),
+    r.session.applySyncedEntries([
+      appliedOutcome(syncEntry('playlist', 'pl-b', 'name', 'B')),
+    ]),
+  ]);
+  assert(a.ok && b.ok, 'overlapping applies both resolve');
+  await pump();
+  const names = readyOf(r).playlists.map((p) => p.name);
+  assert(names.includes('A') && names.includes('B'), 'both land');
+}
+
+// Post-dispose the method returns a typed failure — the mobile
+// detach path must never throw (Devin Review #46).
+async function applySyncedEntriesAfterDispose(): Promise<void> {
+  const r = rig(persisted({}));
+  await restoreOk(r);
+  await r.session.dispose();
+  const result = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('playlist', 'pl-1', 'name', 'X')),
+  ]);
+  assert(!result.ok, 'apply after dispose fails typed, not thrown');
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pauseDuringPreparing', pauseDuringPreparing],
   ['seekDuringPreparing', seekDuringPreparing],
@@ -3590,7 +3997,259 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['offlineProjectionNulls', offlineProjectionNulls],
   ['offlinePinnedOwnedStillPlays', offlinePinnedOwnedStillPlays],
   ['connectivityEdgeReprojects', connectivityEdgeReprojects],
+  ['syncEmitAfterCommit', syncEmitAfterCommit],
+  ['syncEmitFailureKeepsDomainWrite', syncEmitFailureKeepsDomainWrite],
+  ['applySyncedEntriesRemoteInsert', applySyncedEntriesRemoteInsert],
+  ['applySyncedEntriesTombstoneRemoves', applySyncedEntriesTombstoneRemoves],
+  [
+    'applySyncedEntriesSupersededKeepsRow',
+    applySyncedEntriesSupersededKeepsRow,
+  ],
+  ['applySyncedEntriesRequiresReady', applySyncedEntriesRequiresReady],
+  [
+    'applySyncedEntriesLoadFailRetains',
+    applySyncedEntriesLoadFailRetains,
+  ],
+  [
+    'applySyncedEntriesOverlapping',
+    applySyncedEntriesOverlapping,
+  ],
+  [
+    'applySyncedEntriesAfterDispose',
+    applySyncedEntriesAfterDispose,
+  ],
+  [
+    'applySyncedEntriesLargeDrain',
+    applySyncedEntriesLargeDrain,
+  ],
+  [
+    'applySyncedEntriesSettingsReconcile',
+    applySyncedEntriesSettingsReconcile,
+  ],
+  [
+    'applySyncedEntriesReportsRehydrate',
+    applySyncedEntriesReportsRehydrate,
+  ],
+  [
+    'applyMaterializedEntriesRestores',
+    applyMaterializedEntriesRestores,
+  ],
+  [
+    'applyMaterializedPendingAcrossCalls',
+    applyMaterializedPendingAcrossCalls,
+  ],
+  ['emitUnsyncedRecoversCommitted', emitUnsyncedRecoversCommitted],
+  ['disposeFinishesEmitTail', disposeFinishesEmitTail],
+  ['syncEmitChunkByteBound', syncEmitChunkByteBound],
 ] as const;
+
+// The materialized rebuild: the durable log's surviving records
+// restore rows the outcome drain missed, and never delete rows the
+// engine still materializes (Devin Review #46 round-3).
+async function applyMaterializedEntriesRestores(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+      likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+    }),
+  );
+  await restoreOk(r);
+  const sr = ref('itunes', 't-mat');
+  const result = await r.session.applyMaterializedEntries([
+    {
+      kind: 'recording',
+      recordId: 'r-mat',
+      fields: { title: 'Mat Song', artist: 'M' },
+    },
+    {
+      kind: 'recordingSourceRef',
+      recordId: sourceRefRecordId('r-mat', sr),
+      fields: { ref: sr },
+    },
+  ]);
+  assert(result.ok, 'applyMaterializedEntries failed');
+  await pump();
+  const landed = readyOf(r).recordings.find(
+    (rec) => rec.id === 'r-mat',
+  );
+  assert(landed !== undefined, 'materialized record mirrors in');
+  assertEqual(landed?.title, 'Mat Song');
+  // Rows absent from the materialized set are untouched — they were
+  // never synced, not deleted.
+  assert(
+    readyOf(r).likes.some((l) => l.targetId === 'r1'),
+    'unsynced like survives the rebuild',
+  );
+}
+
+// A committed write stranded in the memory-only emit queue (killed
+// mid-drain, dead port) re-emits at boot via the existence diff —
+// upserts only (Devin Review #46 round-6).
+async function emitUnsyncedRecoversCommitted(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: (readonly LocalWrite[])[] = [];
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(base, [], undefined, undefined, port);
+  await restoreOk(r);
+  const before = captured.flat().length;
+
+  await r.session.emitUnsynced(new Map());
+  await pump();
+  const recovered = captured.flat().slice(before);
+  assert(
+    recovered.some(
+      (w) => w.kind === 'recording' && w.recordId === 'r1',
+    ),
+    'unsynced recording re-emits its field writes',
+  );
+
+  // Once every emitted record reports its delivered field values,
+  // the diff closes — a second call emits nothing (no double-stamps
+  // on 'sum' fields).
+  const synced = new Map<string, Record<string, unknown>>();
+  for (const w of recovered) {
+    if ('tombstone' in w) {
+      continue;
+    }
+    const key = `${w.kind}\u001f${w.recordId}`;
+    const fields = synced.get(key) ?? {};
+    fields[w.field] = w.value;
+    synced.set(key, fields);
+  }
+  const seen = captured.flat().length;
+  await r.session.emitUnsynced(synced);
+  await pump();
+  assertEqual(
+    captured.flat().length,
+    seen,
+    'fully synced domain emits nothing on re-diff',
+  );
+}
+
+// Graceful dispose finishes the emit tail: a chunk retained by a
+// failed in-flight send gets one final drain with an uncancelled
+// source instead of dying with the queue (Devin Review #46 round-6).
+async function disposeFinishesEmitTail(): Promise<void> {
+  const base = persisted({
+    recordings: [recording('r1', [ref('itunes', 'i1')])],
+  });
+  const captured: (readonly LocalWrite[])[] = [];
+  let calls = 0;
+  const flaky: SyncEmitPort = {
+    localChanges: (writes) => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve(err(appError('cancelled', 'mid-send')));
+      }
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(base, [], undefined, undefined, flaky);
+  await restoreOk(r);
+  const liked = await r.session.toggleLike('r1');
+  assert(liked.ok, 'toggleLike failed');
+  await pump();
+  assertEqual(captured.length, 0, 'first send failed — chunk retained');
+
+  await r.session.dispose();
+  assert(
+    captured.flat().some(
+      (w) =>
+        w.kind === 'like' &&
+        w.recordId === likeRecordId('track', 'r1'),
+    ),
+    'dispose drains the retained chunk before dying',
+  );
+}
+
+// Review #46 round-9: emit chunks bound by encoded BYTES, not only
+// write count — a count-only bound could push ~16 MiB through one
+// send, overflowing the channel cap into a fake transport failure
+// after the engine already appended the batch.
+async function syncEmitChunkByteBound(): Promise<void> {
+  const recs = Array.from({ length: 2_600 }, (_, i) =>
+    recording(`r-${i}`, [ref('itunes', `s-${i}`)]),
+  );
+  const captured: (readonly LocalWrite[])[] = [];
+  const port: SyncEmitPort = {
+    localChanges: (writes) => {
+      captured.push(writes);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const r = rig(
+    persisted({ recordings: recs }),
+    [],
+    undefined,
+    undefined,
+    port,
+  );
+  await restoreOk(r);
+  await r.session.emitUnsynced(new Map());
+  await pump();
+  assert(captured.length >= 2, 'oversized backlog splits by bytes');
+  for (const chunk of captured) {
+    const bytes = chunk.reduce(
+      (t, w) => t + utf8ByteLength(JSON.stringify(w)) + 1,
+      2,
+    );
+    assert(bytes <= 800 * 1024, 'each send stays under the bound');
+  }
+  assert(captured.flat().length > 0, 'writes actually emitted');
+}
+
+// Staged rebuild (Review #46 round-5): a dependent that materializes
+// ahead of its parent rides the session's retained pending — the next
+// call re-folds it and lands it once the parent arrives, instead of
+// dropping it or holding the whole view in memory at once.
+async function applyMaterializedPendingAcrossCalls(): Promise<void> {
+  const r = rig(persisted({ recordings: [], likes: [] }));
+  await restoreOk(r);
+  const first = await r.session.applyMaterializedEntries([
+    {
+      kind: 'like',
+      recordId: likeRecordId('track', 'r-mat'),
+      fields: {
+        like: { entityKind: 'track', targetId: 'r-mat', likedAtMs: 9 },
+      },
+    },
+  ]);
+  assert(first.ok, 'first materialized call failed');
+  await pump();
+  assert(
+    !readyOf(r).likes.some((l) => l.targetId === 'r-mat'),
+    'dependent before parent lands nothing',
+  );
+  const sr = ref('itunes', 't-mat2');
+  const second = await r.session.applyMaterializedEntries([
+    {
+      kind: 'recording',
+      recordId: 'r-mat',
+      fields: { title: 'Mat Song', artist: 'M' },
+    },
+    {
+      kind: 'recordingSourceRef',
+      recordId: sourceRefRecordId('r-mat', sr),
+      fields: { ref: sr },
+    },
+  ]);
+  assert(second.ok, 'second materialized call failed');
+  await pump();
+  const like = readyOf(r).likes.find((l) => l.targetId === 'r-mat');
+  assertEqual(
+    like?.likedAtMs,
+    9,
+    'retained dependent lands once the parent arrives',
+  );
+}
 
 // Offline + unowned: the attempt must fail 'unavailable' BEFORE any
 // candidates/resolve/prepare call — zero resolution calls is the
@@ -3902,7 +4561,7 @@ async function localPlaybackPinnedForeign(): Promise<void> {
 }
 
 export async function run(): Promise<void> {
-  for (const [name, fn] of TESTS) {
+  for (const [, fn] of TESTS) {
     await fn();
   }
 }

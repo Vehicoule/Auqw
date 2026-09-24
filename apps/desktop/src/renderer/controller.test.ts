@@ -139,6 +139,9 @@ function fakeApi(): Rig {
             userDataPath: '/tmp/auqw-test',
           }),
       },
+      chrome: {
+        setScheme: () => {},
+      },
       dialog: {
         pickFolder: () => Promise.resolve(null),
         pickFiles: () => Promise.resolve([]),
@@ -177,6 +180,13 @@ function fakeApi(): Rig {
         trigger: () => Promise.reject(new Error('seam: inject sync')),
         localChanges: () =>
           Promise.reject(new Error('seam: inject sync')),
+        drainApplied: () =>
+          Promise.reject(new Error('seam: inject sync')),
+        ackApplied: () =>
+          Promise.reject(new Error('seam: inject sync')),
+        materialized: () =>
+          Promise.reject(new Error('seam: inject sync')),
+        onApplied: () => () => {},
       },
       utility: {
         ping: () => Promise.reject(new Error('unused')),

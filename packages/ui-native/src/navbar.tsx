@@ -35,6 +35,7 @@ export function AndroidNavbar({
       <View
         accessibilityRole="tablist"
         style={{
+          // The preview's native bar sits on the deep surface.
           backgroundColor: theme.colors.deep,
           flexDirection: 'row',
           paddingTop: theme.spacing.sm,

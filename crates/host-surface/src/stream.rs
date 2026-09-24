@@ -171,7 +171,10 @@ struct PluginRemint {
     budgets: Budgets,
     http: Arc<ReqwestClient>,
     kv: Arc<dyn KeyValueStore>,
-    pot_provider: Option<String>,
+    /// The host's live provider slot — read at re-mint so a provider
+    /// learned after prepare (mid-session pairing, minter retry)
+    /// reaches recovery rather than replaying the prepare-time value.
+    pot_provider: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl Remint for PluginRemint {
@@ -194,9 +197,10 @@ impl Remint for PluginRemint {
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
-        let pot_provider = self.pot_provider.clone();
+        let pot_provider = Arc::clone(&self.pot_provider);
         Box::pin(async move {
             let clock = SystemClock;
+            let pot_url = pot_provider.read().ok().and_then(|slot| slot.clone());
             let invocation = invoke(
                 &plugin,
                 "playback.resolve",
@@ -207,7 +211,7 @@ impl Remint for PluginRemint {
                     http: &*http,
                     kv,
                     clock: &clock,
-                    pot_provider: pot_provider.as_deref(),
+                    pot_provider: pot_url.as_deref(),
                 },
             )
             .await;
@@ -352,7 +356,7 @@ impl PluginHost {
             budgets: self.budgets.clone(),
             http: Arc::clone(&self.http),
             kv: Arc::clone(&self.kv),
-            pot_provider: self.pot_provider_url.clone(),
+            pot_provider: Arc::clone(&self.pot_provider_url),
         };
         let provider = plugin_id.clone();
         let prepared_handles = Arc::clone(&self.prepared_handles);

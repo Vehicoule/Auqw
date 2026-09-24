@@ -48,6 +48,7 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
     streamPhaseMarks() {
       return { mintMs: 12, attachMs: 30 };
     },
+    setPotProvider() {},
     ...overrides,
   };
 }

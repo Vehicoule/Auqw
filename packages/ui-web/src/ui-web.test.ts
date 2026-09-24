@@ -339,6 +339,7 @@ function render(node: ReactNode): string {
       pairing: {
         code: '123456',
         payload: '{"v":1}',
+        endpointLabel: '192.168.1.20:48715',
         expiresLabel: 'expires in 4m',
       },
       onCopyPayload: () => {},
@@ -346,7 +347,8 @@ function render(node: ReactNode): string {
     }),
   );
   assertIncludes('pairing code renders', markup, '123456');
-  assertIncludes('pairing payload renders', markup, '{&quot;v&quot;:1}');
+  assertIncludes('pairing endpoint renders', markup, '192.168.1.20:48715');
+  check('pairing QR renders as svg', markup.includes('<svg'));
   assertIncludes('pairing expiry renders', markup, 'expires in 4m');
   assertIncludes('pairing copy affordance', markup, 'copy payload');
 }

@@ -1,4 +1,14 @@
 import { randomInt } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
+import {
+  appendFile,
+  open,
+  readFile,
+  rename,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { createServer, type Server } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import {
@@ -16,14 +26,18 @@ import {
 import {
   MAX_SYNC_CURSOR_CHARS,
   MAX_SYNC_DOC_BYTES,
+  isJsonValue,
   isSyncDeltasArgs,
   isSyncDeltasResult,
   isSyncDeltaDoc,
   isSyncDevicesResult,
+  isSyncDrainAppliedResult,
   isSyncImportDeltaArgs,
   isSyncImportDeltaResult,
   isSyncLocalChangesArgs,
   isSyncLocalChangesResult,
+  isSyncMaterializedArgs,
+  isSyncMaterializedResult,
   isSyncPairingResult,
   isSyncStatusResult,
   isSyncTriggerResult,
@@ -123,6 +137,23 @@ export type SyncServiceDeps = {
     writes: readonly unknown[],
     signal?: CancellationSignal,
   ) => Promise<Result<unknown>>;
+  /**
+   * Push seam toward the renderer: after every successful applyDelta
+   * the applied merge outcomes queue into a bounded outbox, and this
+   * is invoked with the current queue depth so main can broadcast
+   * `sync:applied`. Errors are swallowed — the pull drain still
+   * reaches the same queue.
+   */
+  readonly notifyApplied?: (pending: number) => unknown;
+  /**
+   * Durability seam for the applied outbox: when set, outcomes that
+   * overflow the in-memory cap append to a JSONL spill file here
+   * (same durability horizon as the sync log) and the drain serves
+   * them before the memory queue — nothing is lost while the
+   * renderer is booting or dead. Absent: overflow drops oldest and
+   * sets `dropped`, honest but lossy.
+   */
+  readonly appliedSpillPath?: string;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
@@ -131,6 +162,14 @@ export type SyncServiceDeps = {
   readonly advertise?: SyncAdvertise | null;
   /** Forced endpoint host for payloads; otherwise first LAN IPv4. */
   readonly endpointHost?: string;
+  /**
+   * Bound port of the bundled POT service — the pairing payload
+   * carries it as `pot` (`host:port` on the primary endpoint host)
+   * so a paired phone can mint tokens against this desktop. Null or
+   * absent → no `pot` field (e.g. AUQW_POT_PROVIDER_URL override,
+   * or the service failed to bind).
+   */
+  readonly potPort?: () => number | null;
   readonly nowMs?: () => number;
   /* Tuning knobs — production defaults; tests shrink them. */
   readonly handshakeCap?: number;
@@ -436,18 +475,463 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     resolveReady = resolve;
   });
 
+  /* ------------- applied-outcome outbox (renderer drain) ---------- */
+  /**
+   * Every successful applyDelta's 'applied' merge outcomes queue
+   * here until the renderer pulls `sync:drainApplied`. Durable mode
+   * (`appliedSpillPath` set — always in production): outcomes append
+   * to the JSONL spill BEFORE the applyDelta ack goes out (the
+   * caller awaits `recordApplied`), so an acknowledged delta can
+   * never lose its projection work — same durability horizon as the
+   * sync log itself. Drain PEEKS (read only); `sync:ackApplied`
+   * consumes the served lines after the renderer confirms its domain
+   * commit — crash windows collapse to at-least-once redelivery,
+   * which the projector's materialized snapshots make idempotent.
+   * Volatile mode (no path — tests) keeps an in-memory FIFO consumed
+   * at drain, bounded drop-oldest.
+   */
+  const APPLIED_OUTBOX_MAX = 4_096;
+  const appliedOutbox: unknown[] = [];
+  let appliedDropped = false;
+  /** Serializes spill appends against drain reads and ack rewrites. */
+  let spillTail: Promise<unknown> = Promise.resolve();
+  /** Bytes served by the most recent drain, awaiting ack. */
+  let awaitingAckBytes = 0;
+
+  /**
+   * Incremental line walk over the spill starting at `startOff` —
+   * memory bounded by the page budget, not the backlog: served lines
+   * stop at the budget but the walk keeps counting for `remaining`.
+   * `servedBytes` is the exact byte length the ack advances the
+   * durable offset by (line + its newline).
+   */
+  async function spillScan(
+    path: string,
+    startOff: number,
+    budgetBytes: number,
+  ): Promise<{
+    readonly served: readonly string[];
+    readonly servedBytes: number;
+    readonly totalLines: number;
+    readonly skippedLines: number;
+  }> {
+    const served: string[] = [];
+    let servedBytes = 0;
+    let totalLines = 0;
+    let skippedLines = 0;
+    let fits = true;
+    const take = (line: string): void => {
+      totalLines += 1;
+      const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+      if (fits && servedBytes + lineBytes <= budgetBytes) {
+        served.push(line);
+        servedBytes += lineBytes;
+        return;
+      }
+      if (served.length === 0 && servedBytes === 0) {
+        // Poison line: bigger than the whole page, so NO offset ever
+        // fits it — leaving it would wedge the drain forever
+        // (Review #46 round-9). Consume its bytes so the ack
+        // advances past it; the dropped flag surfaces the loss and
+        // the materialized reconcile rebuilds the row anyway.
+        servedBytes += lineBytes;
+        skippedLines += 1;
+        return;
+      }
+      fits = false;
+    };
+    const stream = createReadStream(path, { start: startOff });
+    stream.setEncoding('utf8');
+    let carry = '';
+    try {
+      for await (const chunk of stream) {
+        let buf = carry + (chunk as string);
+        carry = '';
+        for (;;) {
+          const nl = buf.indexOf('\n');
+          if (nl < 0) {
+            break;
+          }
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.length > 0) {
+            take(line);
+          }
+        }
+        carry = buf;
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { served: [], servedBytes: 0, totalLines: 0, skippedLines: 0 };
+      }
+      throw e;
+    }
+    if (carry.length > 0) {
+      take(carry);
+    }
+    return { served, servedBytes, totalLines, skippedLines };
+  }
+
+  /** The ack sidecar: the byte offset the served prefix ends at. */
+  function spillOffsetPath(path: string): string {
+    return `${path}.off`;
+  }
+
+  /**
+   * Durable ack position for the spill, in bytes. A sidecar past EOF
+   * is stale — a crash between a compact's rename and its offset
+   * reset — so rescan from 0: the compacted file already starts at
+   * the old offset and re-serving is correct, not a duplicate.
+   */
+  async function readSpillOffset(
+    offPath: string,
+    path: string,
+  ): Promise<number> {
+    const raw = await readFile(offPath, 'utf8').catch(() => '');
+    const off = Number.parseInt(raw.trim(), 10);
+    if (!Number.isSafeInteger(off) || off < 0) {
+      return 0;
+    }
+    const size = await stat(path)
+      .then((s) => s.size)
+      .catch(() => 0);
+    return off > size ? 0 : off;
+  }
+
+  /**
+   * Drop the consumed prefix by streaming the rest into a fresh file
+   * — bounded IO per ack: only runs once the dead prefix dominates
+   * the file, so each byte is rewritten O(1) times across the
+   * backlog's life instead of the whole remainder per page.
+   */
+  /**
+   * fsync a file's current contents — used before the renames that
+   * commit a compaction, so a power-loss can't resurrect a torn
+   * generation boundary.
+   */
+  async function fsyncFile(path: string): Promise<void> {
+    const fh = await open(path, 'r+');
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  }
+
+  async function compactSpill(
+    path: string,
+    offPath: string,
+    startOff: number,
+  ): Promise<void> {
+    // Commit the zeroed sidecar BEFORE the compacted file: the only
+    // bad generation state would be `off > 0` beside the NEW layout
+    // (the offset was measured against the old one and would skip
+    // unserved rows — Review #46 round-8). Resetting first means a
+    // crash mid-compact leaves `off = 0` + the OLD file → rescan
+    // and re-serve a prefix (at-least-once, which the projection
+    // tolerates), never a stale offset on the new file.
+    const offTmp = `${offPath}.tmp`;
+    await writeFile(offTmp, '0');
+    await fsyncFile(offTmp);
+    await rename(offTmp, offPath);
+    const tmp = `${path}.tmp`;
+    await pipeline(
+      createReadStream(path, { start: startOff }),
+      createWriteStream(tmp),
+    );
+    await fsyncFile(tmp);
+    await rename(tmp, path);
+  }
+
+  function notifyApplied(pending: number): void {
+    try {
+      void Promise.resolve(deps.notifyApplied?.(pending)).catch(
+        () => undefined,
+      );
+    } catch {
+      // The push path is a hint — the pull drain never depends on it.
+    }
+  }
+
+  function recordApplied(result: unknown): Promise<void> {
+    if (!isRecord(result) || !Array.isArray(result['outcomes'])) {
+      return Promise.resolve();
+    }
+    const collected: unknown[] = [];
+    for (const outcome of result['outcomes']) {
+      if (
+        !isRecord(outcome) ||
+        outcome['type'] !== 'applied' ||
+        !isJsonValue(outcome)
+      ) {
+        continue;
+      }
+      collected.push(outcome);
+    }
+    if (collected.length === 0) {
+      return Promise.resolve();
+    }
+    const path = deps.appliedSpillPath;
+    if (path !== undefined) {
+      const lines = `${collected.map((o) => JSON.stringify(o)).join('\n')}\n`;
+      const append = spillTail.then(() => appendFile(path, lines));
+      spillTail = append.then(
+        () => undefined,
+        () => {
+          appliedDropped = true;
+        },
+      );
+      notifyApplied(collected.length);
+      return append.catch(() => {
+        appliedDropped = true;
+      });
+    }
+    for (const outcome of collected) {
+      appliedOutbox.push(outcome);
+      if (appliedOutbox.length > APPLIED_OUTBOX_MAX) {
+        appliedOutbox.shift();
+        appliedDropped = true;
+      }
+    }
+    notifyApplied(collected.length);
+    return Promise.resolve();
+  }
+
+  /**
+   * One byte-bounded pull: pack outcomes until the encoded payload
+   * would approach `MAX_SYNC_DOC_BYTES`, leaving headroom for the
+   * envelope keys. Spill lines serve before the memory queue (FIFO
+   * across both). The read is a PEEK — served file lines stay on
+   * disk until `ackApplied` confirms the renderer's domain commit,
+   * so a crash between serve and commit replays rather than loses
+   * (the projector's snapshots keep replay idempotent). Corrupt or
+   * oversized file lines count as served so the ack can drop them —
+   * a poison head must not block the queue forever.
+   */
+  async function drainAppliedChunk(): Promise<{
+    readonly outcomes: readonly unknown[];
+    readonly dropped: boolean;
+    readonly remaining: number;
+  }> {
+    const budget = MAX_SYNC_DOC_BYTES - 16_384;
+    const chunk: unknown[] = [];
+    let bytes = 2; // '[]'
+    const sizeOf = (next: unknown): number => {
+      try {
+        // The contract validates the RESULT in UTF-8 bytes — string
+        // length undercounts multi-byte metadata, and an over-budget
+        // chunk is rejected AFTER these entries were dequeued.
+        return Buffer.byteLength(JSON.stringify(next), 'utf8') + 1;
+      } catch {
+        return -1;
+      }
+    };
+
+    const path = deps.appliedSpillPath;
+    let spilledBacklog = 0;
+    let servedFileBytes = 0;
+    if (path !== undefined) {
+      // Peek inside `spillTail` so a concurrent append or ack rewrite
+      // can't interleave with the read — and scan incrementally so a
+      // huge backlog can't exhaust utility memory (Review #46).
+      const drainFile = spillTail.then(async () => {
+        const offPath = spillOffsetPath(path);
+        const off = await readSpillOffset(offPath, path);
+        const scan = await spillScan(path, off, budget - bytes);
+        servedFileBytes = scan.servedBytes;
+        // A page that served ONLY poison skips holds nothing the
+        // renderer could commit — the durable offset advances now,
+        // inside the serialized tail, or the same line re-scans on
+        // every later drain (the ack path waits on served bytes;
+        // Review #46 round-9).
+        if (scan.skippedLines > 0 && scan.served.length === 0) {
+          servedFileBytes = 0;
+          await advanceSpillOffset(path, offPath, off + scan.servedBytes);
+        }
+        for (const line of scan.served) {
+          try {
+            const parsed: unknown = JSON.parse(line);
+            if (isJsonValue(parsed)) {
+              bytes += Buffer.byteLength(line, 'utf8') + 1;
+              chunk.push(parsed);
+            } else {
+              appliedDropped = true;
+            }
+          } catch {
+            // Torn tail line (killed mid-append) — count it served so
+            // the ack drops it rather than poison-blocking the queue.
+            appliedDropped = true;
+          }
+        }
+        // Poison-skipped lines were consumed without being served —
+        // they are neither backlog nor deliverable; the dropped flag
+        // reports the loss honestly (materialized reconcile covers).
+        if (scan.skippedLines > 0) {
+          appliedDropped = true;
+        }
+        spilledBacklog =
+          scan.totalLines - scan.served.length - scan.skippedLines;
+      });
+      spillTail = drainFile.then(
+        () => undefined,
+        () => undefined,
+      );
+      await drainFile;
+    }
+    awaitingAckBytes = servedFileBytes;
+
+    while (appliedOutbox.length > 0) {
+      const next = appliedOutbox[0];
+      const size = sizeOf(next);
+      if (size < 0) {
+        appliedOutbox.shift();
+        appliedDropped = true;
+        continue;
+      }
+      if (bytes + size > budget) {
+        if (chunk.length === 0) {
+          appliedOutbox.shift();
+          appliedDropped = true;
+          continue;
+        }
+        break;
+      }
+      appliedOutbox.shift();
+      bytes += size;
+      chunk.push(next);
+    }
+    const dropped = appliedDropped;
+    appliedDropped = false;
+    return {
+      outcomes: chunk,
+      dropped,
+      remaining: spilledBacklog + appliedOutbox.length,
+    };
+  }
+
+  /**
+   * Advance the durable offset: persist the new position first, then
+   * compact the dead prefix once it dominates the file — linear
+   * recovery, never quadratic. Shared by the renderer ack and the
+   * drain's poison-skip self-advance.
+   */
+  async function advanceSpillOffset(
+    path: string,
+    offPath: string,
+    newOff: number,
+  ): Promise<void> {
+    await writeFile(offPath, String(newOff));
+    const size = await stat(path)
+      .then((s) => s.size)
+      .catch(() => 0);
+    if (newOff >= Math.max(1_048_576, size / 2)) {
+      await compactSpill(path, offPath, newOff);
+    }
+  }
+
+  /**
+   * Consume the file bytes the most recent drain served — called by
+   * the renderer only after its domain commit landed, so served
+   * outcomes leave durable storage exactly once they're reflected
+   * downstream. The ack persists a byte-offset sidecar (tiny write)
+   * instead of rewriting the whole remainder; the dead prefix is
+   * compacted only once it dominates the file, so recovery stays
+   * linear rather than quadratic (Review #46). A failed ack must
+   * REJECT, not swallow: the served prefix stays on disk either way,
+   * but the renderer's drain loop stops here instead of re-fetching
+   * the same page forever.
+   */
+  async function ackApplied(): Promise<void> {
+    const path = deps.appliedSpillPath;
+    const dropBytes = awaitingAckBytes;
+    awaitingAckBytes = 0;
+    if (path === undefined || dropBytes === 0) {
+      return;
+    }
+    const offPath = spillOffsetPath(path);
+    const rewrite = spillTail.then(async () => {
+      const off = await readSpillOffset(offPath, path);
+      await advanceSpillOffset(path, offPath, off + dropBytes);
+    });
+    spillTail = rewrite.then(
+      () => undefined,
+      () => undefined,
+    );
+    await rewrite.catch(() => {
+      throw shellError(
+        'io-error',
+        'sync applied ack could not persist; drain stopped',
+      );
+    });
+  }
+
+  /**
+   * The engine's materialized record view, byte-paged — the durable
+   * recovery path for any outcome stream the outbox lost (drained
+   * before ack, evicted, pre-durability version). Records aren't
+   * consumed, so no ack exists.
+   *
+   * One reconcile pass pages a SINGLE snapshot: a fresh `materialize()`
+   * per offset would let a concurrent merge shift every later offset —
+   * pages would duplicate or omit records mid-pass (Review #46). The
+   * snapshot is taken lazily at the pass's first pull, reused for the
+   * rest, and dropped when the pass completes or a new pass restarts
+   * at offset 0. Merges landing mid-pass aren't lost — their outcomes
+   * still flow through the normal applied drain.
+   */
+  let materializedSnapshot: readonly unknown[] | null = null;
+  function materializedChunk(offset: number): {
+    readonly records: readonly unknown[];
+    readonly nextOffset: number | null;
+  } {
+    const start = Math.max(0, Math.floor(offset));
+    if (start === 0 || materializedSnapshot === null) {
+      materializedSnapshot = engine?.materialize?.() ?? [];
+    }
+    const all = materializedSnapshot;
+    const budget = MAX_SYNC_DOC_BYTES - 16_384;
+    const page: unknown[] = [];
+    let bytes = 2;
+    let i = start;
+    for (; i < all.length; i += 1) {
+      const rec = all[i];
+      const size = Buffer.byteLength(JSON.stringify(rec), 'utf8') + 1;
+      if (bytes + size > budget) {
+        if (page.length === 0) {
+          // A lone oversized record can never fit — skip it rather
+          // than wedge the pull.
+          continue;
+        }
+        break;
+      }
+      bytes += size;
+      page.push(rec);
+    }
+    const nextOffset = i < all.length ? i : null;
+    if (nextOffset === null) {
+      // Pass complete — the next offset-0 pull re-snapshots so a later
+      // reconcile sees merges that landed after this pass started.
+      materializedSnapshot = null;
+    }
+    return { records: page, nextOffset };
+  }
+
   /**
    * Every `ip:port` a phone could try, best first — `endpoint()`
    * stays the canonical primary for status display, the pairing
    * payload carries the full list.
    */
+  function endpointHosts(): string[] {
+    return deps.endpointHost !== undefined
+      ? [deps.endpointHost]
+      : lanIpv4s();
+  }
+
   function endpoints(): string[] {
     if (boundPort === null) {
       return [];
     }
-    const hosts =
-      deps.endpointHost !== undefined ? [deps.endpointHost] : lanIpv4s();
-    return hosts.map((ip) => {
+    return endpointHosts().map((ip) => {
       const formatted = ip.includes(':') ? `[${ip}]` : ip;
       return `${formatted}:${boundPort}`;
     });
@@ -455,6 +939,21 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   function endpoint(): string | null {
     return endpoints()[0] ?? null;
+  }
+
+  /**
+   * `host:port` for the bundled POT service on the primary endpoint
+   * host — the same `endpoints()[0]` the phone dials for sync. The
+   * service binds IPv4 wildcard only, so an IPv6 `endpointHost`
+   * advertises nothing rather than a dead socket.
+   */
+  function potEndpoint(): string | null {
+    const port = deps.potPort?.() ?? null;
+    if (port === null) {
+      return null;
+    }
+    const host = endpointHosts().find((h) => !h.includes(':'));
+    return host === undefined ? null : `${host}:${port}`;
   }
 
   // Propagates custody failures — a dead registry is NOT an empty
@@ -660,10 +1159,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       ) {
         pendingSync.delete(session.registeredId);
       }
+      const pairPot = potEndpoint();
       sendSealed(session, {
         t: 'welcome',
         device: outcome.record,
         name: deviceName,
+        // The minter advertisement rides the welcome too — a guest
+        // that paired by typed code (no QR payload) learns it here.
+        ...(pairPot !== null ? { pot: pairPot } : {}),
       });
       await enterOpen(session);
       return;
@@ -698,10 +1201,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         reject('unavailable');
         return;
       }
+      const resumePot = potEndpoint();
       sendSealed(session, {
         t: 'welcome',
         device: record,
         name: deviceName,
+        // Refreshed every resume: a rebound ephemeral minter port
+        // heals the stored peer record on the next sync connect.
+        ...(resumePot !== null ? { pot: resumePot } : {}),
       });
       await enterOpen(session);
       return;
@@ -837,6 +1344,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
               });
               return;
             }
+            // Write-through: the durable outbox append must land
+            // before the export answers — an acknowledged delta's
+            // outcomes can't die with renderer memory.
+            await recordApplied(applied.value);
           }
           const exported = await engine.exportDelta(
             msg.since,
@@ -1109,6 +1620,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       const { code, expiresAt } = pairing.mint();
       badAttempts.clear(); // a fresh code means a fresh budget
       totalBadAttempts = 0;
+      const pot = potEndpoint();
       const payload = JSON.stringify({
         v: 1,
         endpoint: ep,
@@ -1117,10 +1629,12 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         endpoints: endpoints(),
         code,
         fp: fingerprint,
+        ...(pot !== null ? { pot } : {}),
       });
       return checked(isSyncPairingResult, 'sync:pairing')({
         payload,
         code,
+        endpoint: ep,
         expiresAt,
       });
     },
@@ -1187,6 +1701,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!applied.ok) {
         throw engineError(applied.error);
       }
+      await recordApplied(applied.value);
       return checked(isSyncImportDeltaResult, 'sync:importDelta')({
         result: applied.value,
       });
@@ -1256,9 +1771,36 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!result.ok) {
         throw engineError(result.error);
       }
+      // Small ack only — the caller discards per-write results, and
+      // echoing the appended batch would overflow the result cap
+      // after the writes already landed (Review #46 round-9).
       return checked(isSyncLocalChangesResult, 'sync:localChanges')({
-        result: result.value,
+        accepted: Array.isArray(result.value)
+          ? result.value.length
+          : args.writes.length,
       });
+    },
+
+    'sync:drainApplied': async () =>
+      checked(isSyncDrainAppliedResult, 'sync:drainApplied')(
+        await drainAppliedChunk(),
+      ),
+
+    'sync:ackApplied': async () => {
+      await ackApplied();
+      return undefined;
+    },
+
+    'sync:materialized': async (args) => {
+      if (!isSyncMaterializedArgs(args)) {
+        throw shellError(
+          'invalid-request',
+          'sync:materialized expects {offset}',
+        );
+      }
+      return checked(isSyncMaterializedResult, 'sync:materialized')(
+        materializedChunk(args.offset),
+      );
     },
   };
 
@@ -1309,6 +1851,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       for (const session of [...sessions]) {
         killSession(session);
       }
+      // Sessions are dead — no handler can queue new spill work, so
+      // settle the tail before tearing down: a mid-flight drain's
+      // offset write or compaction must not survive close()
+      // (Review #46 round-10).
+      await spillTail.then(
+        () => undefined,
+        () => undefined,
+      );
       pairing.expire();
       if (advertiser !== null) {
         try {

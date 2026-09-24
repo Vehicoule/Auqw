@@ -6,15 +6,22 @@ is a proposal, not a settled choice; each carries its reopen condition.
 Once ratified, the picked path moves into the decision log and this doc
 keeps only the how-to.
 
-Current state: `app.config.ts` pins `com.vehicoule.auqw` / `version: 0.1.0`;
-no `eas.json`, no checked-in `android/` (CNG — `expo prebuild` regenerates
-it, gitignored). A debug APK already builds locally per `README.md`
-(`build-android-bindings.sh` → `pnpm install` → `pnpm sync-plugins` →
-`expo prebuild` → `./android/gradlew assembleDebug`). This doc is the
-path from there to a signed installable artifact. iOS is post-release —
-the provisional `expo-audio` path stays until the native seam lands, and
-App Store signing needs an Apple Developer account anyway; not covered
-here.
+Current state: `app.config.ts` pins `com.vehicoule.auqw`; the release
+workflow stamps the version from the git tag. No `eas.json`, no
+checked-in `android/` (CNG — `expo prebuild` regenerates it,
+gitignored). **Alpha already signs**: `plugins/with-alpha-signing.cjs`
+injects `signingConfigs.alpha` when `AUQW_ALPHA_KEYSTORE_FILE` is set —
+the release workflow decodes the keystore from the
+`AUQW_ALPHA_KEYSTORE_B64` repo secret (credentials never enter the
+repo, passwords stay step-scoped; missing secrets *fail the release
+job* rather than ship a debug-signed APK — only local builds without
+env fall back to debug signing) and repoints the release buildType —
+shipping `assembleRelease` APKs under one consistent alpha identity.
+What stays Open below is only the post-alpha signing story (real
+upload key, distribution channel). iOS is post-release —
+the provisional `expo-audio` path stays until the native seam lands,
+and App Store signing needs an Apple Developer account anyway; not
+covered here.
 
 ## Build inputs (unchanged by signing choice)
 
@@ -75,10 +82,14 @@ Needs an Expo account + `eas init` (mints `extra.eas.projectId` in
 
 ## Path B — fully local (no EAS account)
 
-`./gradlew assembleRelease` on the prebuilt project is unsigned by
-default — Gradle's release signing config must come from somewhere.
+`./gradlew assembleRelease` on the prebuilt project needs a signing
+config from somewhere — AGP's default release buildType carries none.
 Because `android/` is regenerated, signing config lives in a **config
-plugin**, not a hand-edit:
+plugin**, not a hand-edit. The alpha channel already implements the
+env-fed variant of this recipe (`with-alpha-signing.cjs` reading a
+CI-secret keystore); the `keystore.properties` design below is the same
+plugin shape pointed at a developer-local key file — either way the
+real upload key never enters the repo.
 
 1. One-time, outside the repo:
 
@@ -126,9 +137,10 @@ plugin**, not a hand-edit:
    the standard AGP recipe — also works; either way secrets stay out of
    git.)
 
-4. `./android/gradlew -p android assembleRelease` →
-   `android/app/build/outputs/apk/release/app-release.apk` (signed,
-   installable); `bundleRelease` → `app-release.aab` for Play.
+4. `./android/gradlew -p android assembleRelease` → per-ABI outputs
+   `android/app/build/outputs/apk/release/app-{arm64-v8a,x86_64}-release.apk`
+   (signed, installable — no universal APK is produced);
+   `bundleRelease` → `app-release.aab` for Play (bundles stay universal).
 
 ## Signing strategy — what to ratify
 

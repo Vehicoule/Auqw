@@ -9,12 +9,14 @@ import {
   LocalFileSource,
   previewImport,
   Session,
+  syncedRecordKey,
 } from '@auqw/application';
 import type {
   ArtworkCache,
   CancellationSignal,
   ConnectivityPort,
   ImportPreview,
+  LocalWrite,
   PlayerPort,
   ProviderPort,
   QueueSnapshot,
@@ -48,6 +50,7 @@ import {
   type ExpoSyncSurface,
 } from '../adapters/expo-sync.ts';
 import { createClock, createIds, createLog } from '../adapters/runtime.ts';
+import { createSyncEmit } from './sync-emit.ts';
 
 // Metro asset requires must be static literals. All pairs are
 // produced by tooling/sync-plugins.mjs per providers.lock.json.
@@ -109,6 +112,13 @@ export type SessionController = {
    * honest 'sync unavailable' state, never a dead control.
    */
   readonly sync: () => ExpoSyncSurface | null;
+  /**
+   * Live PO-token provider update on the running plugin host —
+   * resolves read the slot at invocation spawn, so a pairing or
+   * unpairing landing after construction applies without a host
+   * recreate. `null` restores the anonymous resolve ladder.
+   */
+  setPotProvider(url: string | null): void;
   /**
    * Post-restore bring-up: loads persisted state once more, builds
    * the local source over it, and inits the download ledger. Call
@@ -243,6 +253,16 @@ export async function createSessionController(
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
+  // Pre-surface emission buffer: domain edits made before the engine
+  // exists (or while its bring-up is still in flight) queue here and
+  // flush through one localChangeBatch once the surface lands — a
+  // drop-oldest bound keeps a never-syncable platform (iOS, web
+  // build) from growing memory forever.
+  // Serializes every localChangeBatch call — emission order IS the
+  // log order, so a racing flush can't reorder writes on one record.
+  const emitWrites = createSyncEmit({
+    surface: () => syncSurface?.engine ?? null,
+  });
   const providerMap = new Map(providers.map((p) => [p.id, p]));
   const player = (options.player ?? ((map) => {
     return createExpoAudioPlayer({
@@ -296,6 +316,16 @@ export async function createSessionController(
           isOnline: () => lastOnline,
         }
       : {}),
+    // Commit-then-log over the in-process engine: every syncable
+    // domain write emits mapped LocalWrites here post-commit. While
+    // the surface is absent the writes buffer (drop-oldest) so
+    // pre-bring-up edits still reach the log once it lands — the
+    // surface assignment itself triggers the flush, no edit needed;
+    // a failed flush re-pends the buffer.
+    sync: {
+      localChanges: (writes: readonly LocalWrite[], signal) =>
+        emitWrites(writes, signal),
+    },
   });
   type ReadyState = Extract<
     ReturnType<Session['snapshot']>,
@@ -431,6 +461,7 @@ export async function createSessionController(
     local: () => localSource,
     connectivity,
     sync: () => syncSurface,
+    setPotProvider: (url) => host.setPotProvider(url),
     async start(signal) {
       const loaded = await storage.load({
         requestId: ids.next('local-boot'),
@@ -586,9 +617,105 @@ export async function createSessionController(
           ids,
           clock,
           log,
+          // Every inbound merge — syncNow pages and any other
+          // applyDelta path — projects onto the domain here. A
+          // failed projection stays in the session's pending, so
+          // refold with bounded retries rather than wait for an
+          // inbound delta that may never come.
+          onApplied: (applied) => {
+            void (async () => {
+              let result = await session.applySyncedEntries(
+                applied.outcomes,
+              );
+              for (
+                let attempt = 0;
+                !result.ok && attempt < 3 && !signal.cancelled;
+                attempt += 1
+              ) {
+                await new Promise<void>((resolve) =>
+                  setTimeout(resolve, 400 * (attempt + 1)),
+                );
+                if (signal.cancelled) {
+                  return;
+                }
+                result = await session.applySyncedEntries([]);
+              }
+              if (!result.ok) {
+                void log.write({
+                  level: 'warn',
+                  message: `sync apply failed: ${result.error.kind}`,
+                  atMs: clock.nowMs(),
+                });
+                return;
+              }
+              if (result.value.rehydrateMedia) {
+                void rehydrateMedia(signal);
+              }
+            })().catch(() => undefined);
+          },
         });
         if (built.ok) {
           syncSurface = built.value;
+          // Reconcile from the engine's materialized view ONCE at
+          // bring-up — pending outcomes are in-memory only, so a kill
+          // mid-apply loses them; the durable sync log keeps the
+          // truth and this rebuild restores anything lost (Review
+          // #46). Idempotent — outcomes that already projected just
+          // re-fold to the same rows.
+          void (async () => {
+            const materialized = syncSurface.engine.materialize();
+            let applied = await session.applyMaterializedEntries(
+              materialized,
+            );
+            // A failed apply keeps the whole union in the session's
+            // retained pending — refold with bounded retries rather
+            // than drop the recovery page until restart (Review #46).
+            for (
+              let attempt = 0;
+              !applied.ok && attempt < 3 && !signal.cancelled;
+              attempt += 1
+            ) {
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, 400 * (attempt + 1)),
+              );
+              if (signal.cancelled) {
+                return;
+              }
+              applied = await session.applyMaterializedEntries([]);
+            }
+            if (!applied.ok) {
+              void log.write({
+                level: 'warn',
+                message: `sync reconcile failed: ${applied.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+              return;
+            }
+            if (applied.value.rehydrateMedia) {
+              void rehydrateMedia(signal);
+            }
+            // The session's emit queue is memory-only — committed
+            // writes a past kill stranded re-emit against the
+            // materialized (kind, recordId)→fields map the same
+            // view just walked: absent records AND stale field
+            // values, upserts only (Review #46).
+            const synced = new Map<string, Record<string, unknown>>();
+            for (const rec of materialized) {
+              synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
+            }
+            await session.emitUnsynced(synced).catch(() => undefined);
+          })().catch(() => undefined);
+          // Flush buffered pre-surface writes NOW — the next edit
+          // may never come, and the buffer only rides emit calls.
+          void emitWrites([]).then((flushed) => {
+            if (!flushed.ok) {
+              void log.write({
+                level: 'warn',
+                message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+            }
+          });
         } else {
           void log.write({
             level: 'warn',
@@ -647,7 +774,14 @@ export async function createSessionController(
       }
     },
     async dispose() {
-      // Sync goes down first — bye frames flush while the sockets
+      // Session FIRST: its graceful emit drain must run while the
+      // sync surface is still live — after close() the emit port
+      // would buffer the retained writes into a pre-surface queue
+      // the dead controller discards, losing committed tombstones
+      // (Review #46). dispose() also bars new session work, so the
+      // client can't be re-entered once it goes down.
+      await session.dispose();
+      // Sync goes down next — bye frames flush while the sockets
       // still answer; a live session must never outlive its client.
       if (syncSurface !== null) {
         await syncSurface.client.close();
@@ -666,7 +800,6 @@ export async function createSessionController(
       } catch {
         // Method absent on this platform.
       }
-      await session.dispose();
       for (const provider of providers) {
         provider.dispose();
       }
