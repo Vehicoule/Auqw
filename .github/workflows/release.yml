@@ -72,7 +72,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-packages
-          path: auqw/apps/desktop/dist-packages/*
+          # auqw-* globs only the shipped files — dist-packages also
+          # holds electron-builder's linux-unpacked/ staging dir, which
+          # is not a release asset (and `gh release` fails on dirs).
+          path: |
+            auqw/apps/desktop/dist-packages/auqw-*
+            auqw/apps/desktop/dist-packages/SHA256SUMS.txt
 
   android:
     runs-on: ubuntu-latest
@@ -144,6 +149,9 @@ jobs:
           # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
           # bare v*.*.* publishes stable.
           if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          # A moved tag re-runs this job — replace any same-tag release
+          # left by a prior attempt instead of dying on `already exists`.
+          gh release delete "$VERSION" --yes 2>/dev/null || true
           gh release create "$VERSION" \
             --title "$VERSION" \
             --generate-notes \
