@@ -41,6 +41,7 @@ import {
   createCorrections,
   effectiveMapping,
   isRefRejected,
+  MATCH_GATE_MESSAGE,
 } from '../library/corrections.ts';
 import type {
   Corrections,
@@ -3893,7 +3894,7 @@ export class Session {
       if (!enqueued.ok) {
         this.#logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
       }
-      const error = appError('unavailable', 'match requires confirmation');
+      const error = appError('unavailable', MATCH_GATE_MESSAGE);
       await this.#failAttempt(attempt, error);
       return err(error);
     }

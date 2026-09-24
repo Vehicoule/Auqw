@@ -1,6 +1,6 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal, OperationContext } from '../cancellation.ts';
-import type { Result } from '../errors.ts';
+import type { AppError, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
   MappingStatus,
@@ -98,6 +98,26 @@ export interface Corrections {
 
 const OP_DEADLINE_MS = 15_000;
 const MAX_CANDIDATES = 64;
+
+/**
+ * The ambiguous-match gate message — the typed error a play attempt
+ * returns when candidates are parked for user confirmation. One
+ * shared string keeps the producer and the resolve surface on the
+ * same contract.
+ */
+export const MATCH_GATE_MESSAGE = 'match requires confirmation';
+
+/**
+ * True when an error is the match-confirmation gate — the only
+ * 'unavailable' failure the review surface can resolve. Retry
+ * without a verdict just fails the same way, so callers route the
+ * press to the review instead of retrying.
+ */
+export function isMatchGate(error: AppError): boolean {
+  return (
+    error.kind === 'unavailable' && error.message === MATCH_GATE_MESSAGE
+  );
+}
 
 /** Same conflict order as MatchingEngine's per-ref collapse. */
 function statusRank(status: MappingStatus): number {
