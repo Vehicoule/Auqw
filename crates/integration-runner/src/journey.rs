@@ -35,6 +35,13 @@ pub struct Upstream {
     /// Substring matched against the outbound request URL. First
     /// matching upstream wins; an unmatched request fails the journey.
     pub url_contains: String,
+    /// Request headers the matching upstream asserts: each declared
+    /// name must arrive (case-insensitive) with a value containing
+    /// the given substring. A request that matches the URL but not
+    /// the headers is an uncanned upstream — the canned response must
+    /// never answer a probe the spec declared differently.
+    #[serde(default)]
+    pub request_headers: BTreeMap<String, String>,
     #[serde(default = "default_status")]
     pub status: u16,
     #[serde(default)]
@@ -45,6 +52,34 @@ pub struct Upstream {
 
 fn default_status() -> u16 {
     200
+}
+
+/// First violated request-header assertion, if any: `name`
+/// matches case-insensitively and the value must contain the
+/// declared substring.
+fn header_miss(
+    req: &HttpRequest,
+    want: &BTreeMap<String, String>,
+) -> Option<String> {
+    for (name, needle) in want {
+        let got = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str());
+        match got {
+            Some(v) if v.contains(needle.as_str()) => {}
+            Some(v) => {
+                return Some(format!(
+                    "header {name}: expected to contain {needle:?}, got {v:?}"
+                ));
+            }
+            None => {
+                return Some(format!("header {name}: missing"));
+            }
+        }
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -117,6 +152,7 @@ impl CannedHttp {
                 .iter()
                 .map(|u| Upstream {
                     url_contains: u.url_contains.clone(),
+                    request_headers: u.request_headers.clone(),
                     status: u.status,
                     headers: u.headers.clone(),
                     body_file: u.body_file.clone(),
@@ -145,6 +181,21 @@ impl HttpClient for CannedHttp {
         match idx {
             Some(i) => {
                 let up = &self.upstreams[i];
+                if let Some(miss) = header_miss(&req, &up.request_headers) {
+                    let url = req.url.clone();
+                    if let Ok(mut misses) = self.misses.lock() {
+                        misses.push(format!("{url} ({miss})"));
+                    }
+                    return Box::pin(async move {
+                        Err(HttpError {
+                            kind: HttpErrorKind::Transient,
+                            message: format!(
+                                "canned upstream for {url} refused request: {miss}"
+                            ),
+                            bytes_received: 0,
+                        })
+                    });
+                }
                 let response = HttpResponse {
                     status: up.status,
                     headers: up

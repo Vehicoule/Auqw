@@ -51,6 +51,11 @@ cannot silently shrink.
 - `request` is the verbatim capability payload handed to `invoke()`.
 - `upstreams`: first `url_contains` match wins; an unmatched outbound
   request fails the guest call and is reported as an uncanned upstream.
+- `request_headers` (optional): the matching upstream asserts the
+  outbound request actually sends these headers — name matched
+  case-insensitively, value must contain the declared substring. A
+  URL match that fails the header assertion is an uncanned upstream,
+  so a broken probe request can't pass against a canned answer.
 - `body_file` resolves relative to the journey file's directory —
   journeys live in `auqw-plugins/tooling/journeys/` so fixture paths
   stay inside that repo's checkouts and worktrees.
