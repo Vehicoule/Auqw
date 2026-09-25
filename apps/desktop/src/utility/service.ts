@@ -99,7 +99,14 @@ export function createServiceClient(opts: {
       if (!isUtilityResponse(raw)) {
         // Malformed, but names an outstanding call — settle it now
         // rather than leaving the caller to wait out the timeout.
-        if (typeof raw['id'] === 'number' && pending.has(raw['id'])) {
+        // Still carrying a request channel makes it ambiguous whether
+        // this is a reply at all: consume it without rejecting — a
+        // genuine reply (or the timeout) settles the call instead.
+        if (
+          typeof raw['id'] === 'number' &&
+          typeof raw['channel'] !== 'string' &&
+          pending.has(raw['id'])
+        ) {
           settle(raw['id'], (slot) =>
             slot.reject(
               shellError('invalid-response', 'malformed service reply'),

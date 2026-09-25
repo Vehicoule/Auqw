@@ -548,6 +548,15 @@ export function createTransferService(
         'destination has an in-flight transfer',
       );
     }
+    // A duplicate removal refuses outright: the entry is shared, so
+    // the first completion would clear it while the second unlink is
+    // still queued — reopening the name to `begin` mid-delete.
+    if (removals.has(args.name)) {
+      throw shellError(
+        'unavailable',
+        'destination removal is in flight',
+      );
+    }
     // Claim before the first await — a `begin` starting mid-removal
     // refuses the name rather than writing a `.part` the unlink below
     // would delete out from under it.

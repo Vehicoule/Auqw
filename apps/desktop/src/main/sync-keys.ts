@@ -1,4 +1,4 @@
-import { access, readdir, rename } from 'node:fs/promises';
+import { access, mkdir, readdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
@@ -49,6 +49,10 @@ export async function migrateSyncCustody(
     }
     throw shellError('io-error', 'legacy secure dir could not be listed');
   }
+  // The custody dir is created lazily by the store's first set — on a
+  // first-boot-after-upgrade nothing has made it yet, and a rename
+  // into a missing dir would silently skip every eligible entry.
+  await mkdir(toDir, { recursive: true });
   for (const file of files) {
     if (!file.startsWith(SYNC_KEY_PREFIX) || !file.endsWith('.b64')) {
       continue;

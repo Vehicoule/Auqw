@@ -355,6 +355,19 @@ export async function run(): Promise<void> {
       keep: false,
     });
 
+    // A second removal of the same name refuses while the first is
+    // still in flight — the shared claim must not clear early and
+    // reopen the name to begin mid-delete.
+    const dupeFirst = call(CHANNELS.transferRemove, { name: 'dupe.mp4' });
+    const dupeSecond = await call(CHANNELS.transferRemove, {
+      name: 'dupe.mp4',
+    });
+    assert(
+      !dupeSecond.ok && dupeSecond.error?.kind === 'unavailable',
+      'overlapping removal refuses',
+    );
+    await dupeFirst;
+
     // keep: true retains the partial for a later resume.
     const keepable = await call(CHANNELS.transferBegin, {
       destPath: 'keep.mp4',

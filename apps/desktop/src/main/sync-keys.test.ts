@@ -257,6 +257,20 @@ export async function run(): Promise<void> {
     // Re-running is idempotent — an upgrade that raced a first boot
     // doesn't clobber the destination.
     await migrateSyncCustody(oldDir, newDir);
+
+    // First boot after upgrade: the custody dir doesn't exist until
+    // the store's first set — the move creates it.
+    const late = device('dev-late0001');
+    await oldStore.set(
+      `auqw.sync.device.${late.id}`,
+      JSON.stringify(late),
+    );
+    const freshDir = join(root, 'custody-fresh');
+    await migrateSyncCustody(oldDir, freshDir);
+    assert(
+      existsSync(join(freshDir, `auqw.sync.device.${late.id}.b64`)),
+      'migration creates the custody dir it moves into',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
