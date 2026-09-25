@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { versionCodeOf } from './version-code.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,31 +42,11 @@ const isSemver = (value) => {
     .some((ident) => /^\d+$/.test(ident) && ident.length > 1 && ident.startsWith('0'));
 };
 
-// Play and PackageManager both refuse an install whose versionCode is
-// not strictly greater than the one already on the device, so it has to
-// rise with every release tag. It is derived from the version rather
-// than maintained beside it — a second hand-written number is exactly
-// what goes stale and silently blocks upgrades.
-//
-// Layout `MAJOR*10^6 + MINOR*10^4 + PATCH*100 + slot`, where `slot` is
-// the prerelease counter (`-alpha.5` -> 5), 0 for a prerelease without
-// one, and 99 on a bare stable tag. That keeps `0.0.1` above
-// `0.0.1-alpha.98` and `0.0.2-alpha.1` above both, at the cost of 98
-// prereleases per patch line.
-const versionCodeOf = (version) => {
-  const match = SEMVER.exec(version);
-  if (match === null) return null;
-  const [, major, minor, patch, prerelease] = match;
-  const counter =
-    prerelease === undefined ? undefined : /[.](\d+)$/.exec(prerelease)?.[1];
-  const slot =
-    prerelease === undefined
-      ? 99
-      : counter === undefined
-        ? 0
-        : Math.min(Number(counter), 98);
-  return Number(major) * 1_000_000 + Number(minor) * 10_000 + Number(patch) * 100 + slot;
-};
+// Android's versionCode derivation lives in ./version-code.mjs, which
+// range-checks every component and gives each prerelease channel a
+// disjoint ordered band (see its monotonicity tests). A version it
+// cannot order returns null and must fail the stamp rather than mint a
+// code that collides with a release already in the wild.
 
 const readAppConfig = () =>
   readFileSync(join(ROOT, 'apps/mobile/app.config.ts'), 'utf8');
@@ -107,7 +88,14 @@ if (arg === '--check') {
   // versionCode derives from that version, so a mismatch means it was
   // hand-edited — refuse rather than ship a build that cannot
   // upgrade-install over the previous one.
-  const expected = String(versionCodeOf(versions[0] ?? ''));
+  const expectedCode = versionCodeOf(versions[0] ?? '');
+  if (expectedCode === null) {
+    console.error(
+      `stamp-version: '${versions[0] ?? ''}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
+    );
+    process.exit(1);
+  }
+  const expected = String(expectedCode);
   if (found.code !== expected) {
     console.error(
       `stamp-version: app.config versionCode is ${found.code ?? 'missing'}, expected ${expected}`,
@@ -152,7 +140,14 @@ if (!FIELD.test(config) || !CODE_FIELD.test(config)) {
   );
   process.exit(1);
 }
-const code = String(versionCodeOf(version));
+const derived = versionCodeOf(version);
+if (derived === null) {
+  console.error(
+    `stamp-version: '${version}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
+  );
+  process.exit(1);
+}
+const code = String(derived);
 writeFileSync(
   configPath,
   config.replace(FIELD, `$1${version}$2`).replace(CODE_FIELD, `$1${code}$2`),

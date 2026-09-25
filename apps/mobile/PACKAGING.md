@@ -162,9 +162,9 @@ key" only makes sense under Play App Signing.*
 
 ## Versioning
 
-**Status: Decided (local path)** — `tooling/stamp-version.mjs` owns both
-numbers and stamps them from the release tag. Reopen if the
-EAS-vs-local decision flips to `appVersionSource: remote` +
+**Status: Decided** — the local path owns both numbers:
+`tooling/stamp-version.mjs` stamps them from the release tag. Reopen if
+the EAS-vs-local decision flips to `appVersionSource: remote` +
 `autoIncrement`, which hands `versionCode` back to EAS.
 
 - `version` (semver, user-facing): `app.config.ts` `version` is the

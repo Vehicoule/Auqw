@@ -58,3 +58,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # tooling/ is not a workspace package, so `pnpm -r test` never
+      # reaches it — the versionCode monotonicity tests have to be
+      # called out or a colliding derivation ships unnoticed.
+      - run: node --test tooling/

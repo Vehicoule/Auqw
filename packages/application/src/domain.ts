@@ -151,13 +151,6 @@ export type Settings = {
    * downloads wait for an unmetered connection.
    */
   downloadMetered?: boolean;
-  /**
-   * UI language. Absent or 'system' follows the platform locale; a
-   * BCP-47 tag (e.g. 'de', 'fr') pins the UI to that locale. Optional
-   * for schema compatibility: persistence of it lands with the next
-   * schema, per docs/decisions.md (language selection).
-   */
-  language?: string | null;
 };
 
 const VERSION_LABELS: ReadonlySet<string> = new Set([
@@ -512,7 +505,6 @@ export function isSettings(value: unknown): value is Settings {
       'radioProvider',
       'artworkCacheBytes',
       'downloadMetered',
-      'language',
     ]) &&
     isString(value['catalogProvider'], 64) &&
     isString(value['playbackProvider'], 64) &&
@@ -536,9 +528,7 @@ export function isSettings(value: unknown): value is Settings {
         value['artworkCacheBytes'] >= ARTWORK_CACHE_BUDGET_MIN_BYTES &&
         value['artworkCacheBytes'] <= ARTWORK_CACHE_BUDGET_MAX_BYTES)) &&
     (value['downloadMetered'] === undefined ||
-      typeof value['downloadMetered'] === 'boolean') &&
-    (value['language'] === undefined ||
-      isOptString(value['language'], 24))
+      typeof value['downloadMetered'] === 'boolean')
   );
 }
 

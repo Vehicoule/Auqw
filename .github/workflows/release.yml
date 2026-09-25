@@ -335,7 +335,18 @@ jobs:
           # stays green — a stale asset keeps serving with no signal.
           # mapfile the asset list first, then a plain loop whose
           # delete-asset failures errexit sees directly.
-          mapfile -t old_assets < <(gh release view "$VERSION" --json assets -q '.assets[].name')
+          # A failed listing must fail the step, not prune nothing: a
+          # process substitution hides the exit status, so a `gh` outage
+          # and an empty release look identical and stale assets keep
+          # serving with no signal.
+          if ! asset_list=$(gh release view "$VERSION" --json assets -q '.assets[].name'); then
+            echo "::error::could not list release assets for $VERSION — refusing to prune blind"
+            exit 1
+          fi
+          old_assets=()
+          if [ -n "$asset_list" ]; then
+            mapfile -t old_assets <<< "$asset_list"
+          fi
           for old in "${old_assets[@]}"; do
             case " ${names[*]} " in
               *" $old "*) ;;

@@ -19,9 +19,13 @@ signing and store channels stay Open in `apps/mobile/PACKAGING.md`.
   workflow runs `tooling/stamp-version.mjs <tag>` before any build,
   so every artifact embeds its own tag — never the repo's line.
 - Android's **`versionCode` derives from that same tag**, stamped by the
-  same run and never hand-maintained
-  (`MAJOR*10^6 + MINOR*10^4 + PATCH*100 + slot`, where `slot` is the
-  `-alpha.N` counter or 99 on a bare stable tag). PackageManager
+  same run and never hand-maintained — `tooling/version-code.mjs` holds
+  the layout and its monotonicity tests. Each prerelease channel gets a
+  disjoint ordered band (`alpha.N` < `beta.N` < `rc.N` < bare stable)
+  and every component is range-checked, so no channel counter or patch
+  number can mint a code an earlier release already used. A version
+  outside `x.y.z` / `x.y.z-<alpha|beta|rc>.<n>` has no known upgrade
+  order and is refused at the stamp rather than guessed. PackageManager
   refuses an upgrade whose code does not rise, so `--check` fails on a
   hand-edited value instead of shipping a build that cannot
   upgrade-install over the previous one.
