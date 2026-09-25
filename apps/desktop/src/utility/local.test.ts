@@ -1,8 +1,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import {
   assert,
   assertEqual,
@@ -89,10 +90,15 @@ export async function run(): Promise<void> {
     const probed = await call(CHANNELS.localProbe, {
       recordingId: 'rec-1',
     });
+    // The service resolves the file through realpath before minting the
+    // URI (its symlink-confinement check) and mints with pathToFileURL
+    // (percent-encoding, Windows-aware), so the expectation does the
+    // same — on macOS tmpdir() sits behind the /var symlink and a raw
+    // path string never matches the minted URI.
     assert(
       probed.ok &&
         (probed.result as { uri: string }).uri ===
-          `file://${folder}/demo.wav`,
+          pathToFileURL(await realpath(audio)).href,
       'probe resolves a file:// URI',
     );
 
@@ -111,7 +117,7 @@ export async function run(): Promise<void> {
     assert(probedDl.ok, 'download probe resolves');
     assertEqual(
       (probedDl.result as { uri: string }).uri,
-      `file://${mediaDir}/dl-1`,
+      pathToFileURL(join(mediaDir, 'dl-1')).href,
       'available downloads probe to the media dir',
     );
 
