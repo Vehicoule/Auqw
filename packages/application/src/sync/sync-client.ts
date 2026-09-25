@@ -1099,6 +1099,19 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             appError('permission-denied', 'sync: fingerprint mismatch'),
           );
         }
+        if (peers.get(fp) !== peer) {
+          // The peer vanished or was re-paired while the dial was in
+          // flight — unpair couldn't kill a session that was never
+          // registered, so it lands here instead of resurrecting
+          // custody the user just revoked.
+          killSession(
+            session,
+            appError('auth-required', 'sync: peer changed mid-connect'),
+          );
+          return err(
+            appError('auth-required', 'sync: peer changed mid-connect'),
+          );
+        }
         const prior = sessions.get(fp);
         if (prior !== undefined && prior !== session && !prior.closed) {
           // A connect that slipped the dedupe window already owns the

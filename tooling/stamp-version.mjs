@@ -51,7 +51,7 @@ const readVersions = () => ({
   config: readFileSync(
     join(ROOT, 'apps/mobile/app.config.ts'),
     'utf8',
-  ).match(/^\s*version: '([^']+)',$/m)?.[1],
+  ).match(/^\s*version: '([^']+)',\s*$/m)?.[1],
 });
 
 const arg = process.argv[2];

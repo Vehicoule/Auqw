@@ -1505,6 +1505,49 @@ export class Session {
   }
 
   /**
+   * matchReview rows sit outside the Ready mirror — tombstoning a
+   * local delete's reviews needs the persisted section, so they emit
+   * off their own load like emitUnsynced. Every other dependent in
+   * recordingDeleteWrites already went out with the sync emission.
+   */
+  async #emitMatchReviewTombstones(
+    deleted: readonly Recording[],
+  ): Promise<void> {
+    if (this.#ready === null || this.#sync === undefined) {
+      return;
+    }
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      const deadlineMs = this.#deadline();
+      const loaded = await this.#withDeadline(
+        () =>
+          this.#storage.load(
+            this.#newContext('load', deadlineMs, source.signal),
+          ),
+        deadlineMs,
+        source,
+      );
+      const matchReviews =
+        loaded.ok && isPersistedState(loaded.value)
+          ? loaded.value.matchReviews
+          : [];
+      const ids = new Set(deleted.map((rec) => rec.id));
+      this.#emitSync(
+        matchReviews
+          .filter((review) => ids.has(review.recordingId))
+          .map((review) => ({
+            kind: 'matchReview' as const,
+            recordId: review.reviewId,
+            tombstone: true as const,
+          })),
+      );
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
+  /**
    * Shared commit tail for the two sync-apply paths: provider
    * reconcile on remote settings, the storage commit, the section
    * mirror, and the publish. The caller owns pending-bookkeeping —
@@ -1784,6 +1827,7 @@ export class Session {
     if (this.#sync !== undefined) {
       const prevById = new Map(prevRows.map((rec) => [rec.id, rec]));
       const writes: LocalWrite[] = [];
+      const deleted: Recording[] = [];
       for (const rec of committed) {
         if (prevById.get(rec.id) !== rec) {
           writes.push(...recordingUpsertWrites(rec, prevById.get(rec.id)));
@@ -1797,9 +1841,13 @@ export class Session {
               playHistory: r.playHistory,
             }),
           );
+          deleted.push(rec);
         }
       }
       this.#emitSync(writes);
+      if (deleted.length > 0) {
+        this.#own(this.#emitMatchReviewTombstones(deleted));
+      }
     }
     this.#publish();
     this.#derived();

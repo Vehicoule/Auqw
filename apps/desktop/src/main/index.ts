@@ -70,6 +70,16 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'XDG_CONFIG_HOME',
     'XDG_DATA_HOME',
     'XDG_CACHE_HOME',
+    // Proxy + custom-CA family — the POT minter child forwards these
+    // for hosts whose egress needs them.
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'NO_PROXY',
+    'https_proxy',
+    'http_proxy',
+    'no_proxy',
+    'SSL_CERT_FILE',
+    'NODE_EXTRA_CA_CERTS',
   ];
   const auqwAllowlist = [
     'AUQW_NODE_BINDINGS',

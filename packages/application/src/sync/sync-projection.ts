@@ -1048,7 +1048,11 @@ export function projectAppliedEntries(
     seen.add(entryKey(outcome.entry));
     applied.push(outcome);
   }
-  applied.sort((a, b) => compareEntries(a.entry, b.entry));
+  // Folds replay canonically (hlc, then deviceId) — the merge is
+  // deterministic no matter the order a drain delivered outcomes in.
+  const ordered = [...applied].sort((a, b) =>
+    compareEntries(a.entry, b.entry),
+  );
 
   const folds = new Map<string, RecordFold>();
   const foldFor = (kind: SyncRecordKind, recordId: string): RecordFold => {
@@ -1069,7 +1073,7 @@ export function projectAppliedEntries(
     }
     return fold;
   };
-  for (const outcome of applied) {
+  for (const outcome of ordered) {
     foldOutcome(foldFor(outcome.entry.kind, outcome.entry.recordId), outcome);
   }
   // Engine-attached materialized snapshots override fold inference —
@@ -1077,9 +1081,11 @@ export function projectAppliedEntries(
   // delayed tombstone that lost to newer fields must not delete a
   // record the engine still materializes (Review #46). When several
   // outcomes carry a snapshot for the same record — a retained
-  // pending outcome replayed beside a newer one — the LAST wins:
-  // snapshots ride outcome order, so the newest apply's view is the
-  // honest merge state (Review #46 round-8).
+  // pending outcome replayed beside a newer one — the LAST in union
+  // order wins: pending outcomes precede the drain's own, so the
+  // newest apply's view is the honest merge state. Canonical order
+  // would let an older snapshot stamped on a higher-hlc entry beat
+  // the fresher one (Review #46 round-8).
   const snaps = new Map<string, MaterializedRecord>();
   for (const outcome of applied) {
     if (outcome.record !== undefined) {

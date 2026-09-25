@@ -589,13 +589,17 @@ export async function createSessionController(
   let draining = false;
   let drainAgain = false;
   let disposed = false;
+  // A dropped-outbox flag survives the drain that saw it — an apply
+  // retry-exhaustion or ack failure exits early, and the reconcile
+  // must still run once a later drain gets through.
+  let reconcileNeeded = false;
   let unsubscribeApplied: () => void = () => {};
   const APPLY_RETRY_MAX = 3;
   const APPLY_RETRY_MS = 400;
   const ACK_RETRY_MAX = 3;
   const ACK_RETRY_MS = 800;
   let ackRetries = 0;
-  const reconcileMaterialized = async (
+  const reconcilePass = async (
     emitDiff = false,
   ): Promise<void> => {
     // Staged, not accumulated: each byte-bounded page applies on its
@@ -658,6 +662,21 @@ export async function createSessionController(
       offset = page.nextOffset;
     }
   };
+  // Passes serialize through this tail — concurrent reconciles share
+  // the utility's single materialized snapshot, so an interleaved
+  // offset-0 pull would re-snapshot mid-pass and corrupt the other's
+  // paging.
+  let reconcileTail: Promise<void> = Promise.resolve();
+  const reconcileMaterialized = (emitDiff = false): Promise<void> => {
+    const run = reconcileTail.then(() =>
+      disposed ? undefined : reconcilePass(emitDiff),
+    );
+    reconcileTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
   const drainApplied = async (): Promise<void> => {
     if (draining) {
       // A second pull while one is mid-flight would re-peek the same
@@ -667,7 +686,6 @@ export async function createSessionController(
     }
     draining = true;
     try {
-      let reconcileNeeded = false;
       for (;;) {
         const batch = await api.sync.drainApplied();
         if (batch.dropped) {
@@ -744,6 +762,9 @@ export async function createSessionController(
         }
       }
       if (reconcileNeeded && !disposed) {
+        // Clear before the pass — a batch dropped mid-reconcile
+        // re-arms the flag for the drain that follows it.
+        reconcileNeeded = false;
         await reconcileMaterialized();
       }
     } finally {

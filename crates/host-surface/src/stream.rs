@@ -270,10 +270,14 @@ fn prepare_outcome(
     stream: &StreamRegistry,
     mut remint: PluginRemint,
     attempt: &Attempt,
+    request_id: &str,
     source_ref: String,
     provider: String,
 ) -> PrepareOutcome {
-    let summary = AttemptSummary::from(attempt);
+    let mut summary = AttemptSummary::from(attempt);
+    // Join by the caller-facing id — the inner `invoke-N` the engine
+    // minted for this attempt must never cross the seam.
+    summary.request_id = request_id.to_string();
     let resource = match resolve_resource_from(value) {
         Err(field) => {
             return PrepareOutcome::Failed {
@@ -397,8 +401,17 @@ impl PluginHost {
                         // Session creation does file I/O — run it on the
                         // blocking pool, not a runtime worker shared
                         // with guest wasm.
+                        let caller_request_id = request_id.clone();
                         let work = tokio::task::spawn_blocking(move || {
-                            prepare_outcome(&value, &stream, remint, &attempt, source_ref, provider)
+                            prepare_outcome(
+                                &value,
+                                &stream,
+                                remint,
+                                &attempt,
+                                &caller_request_id,
+                                source_ref,
+                                provider,
+                            )
                         });
                         match work.await {
                             Ok(o) => o,
@@ -463,8 +476,27 @@ impl PluginHost {
                             .ok()
                             .and_then(|c| c.get(&request_id).map(|r| r.token.is_cancelled()))
                             .unwrap_or(false);
-                        if was_cancelled {
-                            abandoned = Some(prepared.handle.clone());
+                        // A session that died between `prepare_timed`
+                        // and this commit (cap evict, expiry) must not
+                        // hand out a live-looking handle either — the
+                        // same abandoned path, reported 'not-found'.
+                        let dead = !registry.is_live(&prepared.handle);
+                        if was_cancelled || dead {
+                            // Any tombstone a racing `cancel` parked
+                            // for this id is spent — the failure below
+                            // is this request's outcome, so don't let
+                            // it poison a later request reusing the id.
+                            if let Ok(mut t) = cancelled_requests.lock() {
+                                t.remove(&request_id);
+                            }
+                            abandoned = Some((
+                                prepared.handle.clone(),
+                                if was_cancelled {
+                                    "cancelled"
+                                } else {
+                                    "not-found"
+                                },
+                            ));
                         } else {
                             // `track` precedes `insert`: a `Pending`
                             // slot always implies an in-flight count
@@ -486,12 +518,15 @@ impl PluginHost {
                     // that happens to reuse the id space.
                     m.remove(&request_id);
                 }
-                if let Some(handle) = abandoned {
+                if let Some((handle, kind)) = abandoned {
                     let _ = registry.cancel_if_unattached(&handle);
                     outcome = match outcome {
                         PrepareOutcome::Prepared { attempt, .. } => PrepareOutcome::Failed {
-                            kind: "cancelled".to_string(),
-                            message: "cancelled".to_string(),
+                            kind: kind.to_string(),
+                            message: match kind {
+                                "cancelled" => "cancelled".to_string(),
+                                _ => "stream session ended before delivery".to_string(),
+                            },
                             attempt,
                         },
                         other => other,
