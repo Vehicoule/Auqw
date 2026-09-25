@@ -29,11 +29,14 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ## Provider artifacts
 
 `pnpm sync-plugins` bundles the pinned provider artifacts from
-`providers.lock.json` into `apps/mobile/assets/plugins/`. Each lock
-`source` is a `local-build:` path into a sibling `auqw-plugins`
-checkout — clone it next to this repository, build the pinned artifact
-(`./tooling/build.sh <plugin-id>`), then sync. Fetching signed release
-artifacts instead of a sibling build is post–Slice 1 tooling
+`providers.lock.json` into `apps/mobile/assets/plugins/` (pass an output
+dir for the desktop set). Each lock `source` is either a `release:` path
+to a signed release in a sibling `auqw-plugins` checkout — sync verifies
+digest, manifest, provenance, and the ed25519 signature against the
+lock's pinned key before anything is copied — or a `local-build:` path
+for the dev loop (digest + manifest checks only). Clone `auqw-plugins`
+next to this repository, then sync. Fetching release artifacts over the
+network instead of from a sibling checkout is post–Slice 1 tooling
 ([../docs/specs/plugin-system.md](../docs/specs/plugin-system.md) §7).
 
 ## Layout
@@ -50,7 +53,7 @@ artifacts instead of a sibling build is post–Slice 1 tooling
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |
 | `providers.lock.json` | Pin of known plugin artifact digests |
-| `tooling` | `build-android-bindings.sh`, `sync-plugins.mjs` |
+| `tooling` | `build-android-bindings.sh`, `build-ios-bindings.sh`, `checksums.mjs`, `stamp-version.mjs`, `sync-plugins.mjs`, `version-code.mjs` |
 
 ## Smoke test
 
