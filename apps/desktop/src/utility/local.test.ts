@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -89,10 +89,14 @@ export async function run(): Promise<void> {
     const probed = await call(CHANNELS.localProbe, {
       recordingId: 'rec-1',
     });
+    // The service resolves the file through realpath before minting the
+    // URI (its confinement check), so the expectation does too — on
+    // macOS tmpdir() sits behind the /var symlink and the raw spelling
+    // never matches the resolved one.
     assert(
       probed.ok &&
         (probed.result as { uri: string }).uri ===
-          `file://${folder}/demo.wav`,
+          `file://${await realpath(audio)}`,
       'probe resolves a file:// URI',
     );
 
