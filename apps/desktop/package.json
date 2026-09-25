@@ -17,9 +17,9 @@
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
     "@types/node": "26.6.1",
-    "bonjour-service": "1.4.4",
     "@types/react": "~19.2.2",
     "@types/react-dom": "~19.2.3",
+    "bonjour-service": "1.4.4",
     "electron": "44.4.2",
     "electron-builder": "26.16.1",
     "esbuild": "0.28.2",
@@ -30,7 +30,9 @@
     "@auqw/design-tokens": "workspace:*",
     "@auqw/ui-web": "workspace:*",
     "bgutils-js": "4.0.3",
+    "jsdom": "^30.1.0",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "undici": "^8.10.2"
   }
 }
