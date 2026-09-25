@@ -5,20 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same ref makes in-flight runs moot — cancel
+# them rather than letting stale runs queue behind fresh ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Nextest runs every test binary (and the tests inside them) in
+      # parallel — `cargo test` serializes binaries, which left the
+      # two ~40s suites stacked end to end.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo nextest run
+      # Nextest does not run doctests — they are their own step.
+      - run: cargo test --doc
 
   # The desktop binding's artifact name and module loading are
   # platform-shaped — the smoke runs on all three target OSes.
@@ -28,12 +42,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: cargo build -p auqw-node-bindings
@@ -42,7 +56,7 @@ jobs:
   typescript:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
