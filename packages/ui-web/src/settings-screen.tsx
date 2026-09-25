@@ -44,10 +44,11 @@ function SettingsRow({
 }) {
   const interactive =
     row.kind === 'toggle' ? onToggleRow !== undefined : onSelectRow !== undefined;
-  // `enabled` is the toggle's checked state (kind 'toggle') and a
-  // badge on the others — disabled-ness is callback presence only,
-  // same as ui-native.
-  const off = !interactive;
+  // `enabled` is the toggle's checked state (kind 'toggle') and the
+  // disabled flag on every other kind — an off navigation/value row
+  // renders visibly inert, never a live control that dead-presses.
+  const off =
+    !interactive || (row.kind !== 'toggle' && !row.enabled);
   const label = `${row.label}${row.value === null ? '' : `, ${row.value}`}`;
   const body = (
     <>
@@ -78,7 +79,7 @@ function SettingsRow({
         aria-checked={row.enabled}
         aria-label={label}
         className={`uw-settings-row${off ? ' uw-off' : ''}`}
-        disabled={!interactive}
+        disabled={off}
         onClick={
           interactive ? () => onToggleRow?.(row.key) : undefined
         }
@@ -92,7 +93,7 @@ function SettingsRow({
       onPress={
         interactive ? () => onSelectRow?.(row.key) : undefined
       }
-      disabled={!interactive}
+      disabled={off}
       ariaLabel={label}
       className="uw-settings-row"
     >

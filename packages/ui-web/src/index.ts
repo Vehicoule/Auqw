@@ -129,6 +129,7 @@ export {
     RowActionsSheet,
     Sheet,
     SheetScaffold,
+    ValueFieldSheet,
 } from './sheets.tsx';
 export type {
     PlaylistPickerItem,

@@ -53,6 +53,11 @@ function SettingsRow({
   const theme = useTheme();
   const interactive =
     row.kind === 'toggle' ? onToggleRow !== undefined : onSelectRow !== undefined;
+  // `enabled` is the toggle's checked state (kind 'toggle') and the
+  // disabled flag on every other kind — an off navigation/value row
+  // renders visibly inert, never a live control that dead-presses.
+  const off =
+    !interactive || (row.kind !== 'toggle' && !row.enabled);
   return (
     <Pressable
       onPress={
@@ -64,7 +69,7 @@ function SettingsRow({
             ? undefined
             : () => onSelectRow(row.key)
       }
-      disabled={!interactive}
+      disabled={off}
       accessibilityLabel={`${row.label}${row.value === null ? '' : `, ${row.value}`}`}
       accessibilityRole={row.kind === 'toggle' ? 'switch' : 'button'}
       accessibilityState={row.kind === 'toggle' ? { checked: row.enabled } : undefined}

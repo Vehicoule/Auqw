@@ -79,6 +79,7 @@ import {
   Text,
   ThemeProvider,
   TransferScreen,
+  ValueFieldSheet,
   entityIdForRef,
   formatClock,
   toCollectionModel,
@@ -183,6 +184,17 @@ function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
 }
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
+
+// Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
+// bound; 128 is the spec default (providers.md).
+const QUALITY_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: '64', label: '64 kbps' },
+  { key: '96', label: '96 kbps' },
+  { key: '128', label: '128 kbps', detail: 'default' },
+  { key: '192', label: '192 kbps' },
+  { key: '256', label: '256 kbps' },
+  { key: '320', label: '320 kbps', detail: 'maximum' },
+];
 
 const THEME_OPTIONS: readonly ProviderPickerOption[] = [
   { key: 'system', label: 'system', detail: 'follow the OS' },
@@ -570,14 +582,21 @@ const IDLE_TRANSFER: TransferModel = {
 
 /**
  * Session ops resolve typed errors rather than throwing — a dropped
- * Result is a silent no-op. Keep failures observable: the `kind —
- * message` shape is taxonomy text and carries no secrets.
+ * Result is a silent no-op. Keep failures observable: the console
+ * keeps the `kind — message` taxonomy text (no secrets), and a
+ * transient toast carries it to the operator. `toastSink` is
+ * installed once by Main — reportResult is called from callbacks all
+ * over this file, so a sink avoids threading the setter through
+ * every dependency list.
  */
+let toastSink: ((text: string) => void) | null = null;
+
 function reportResult(action: string, result: Result<unknown>): void {
   if (!result.ok) {
     console.warn(
       `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
     );
+    toastSink?.(`${action} failed — ${result.error.message}`);
   }
 }
 
@@ -603,6 +622,29 @@ function Main({
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
     useState(false);
+  const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
+  const [storefrontDraft, setStorefrontDraft] = useState('');
+  const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
+  // Sheet openings are epoch-tagged — a save that resolves after the
+  // user dismissed and reopened the sheet must not close the new one.
+  const storefrontEpoch = useRef(0);
+  const qualityEpoch = useRef(0);
+  // Transient failure pill: reportResult routes its text here through
+  // the module-level sink (installed on mount), and it self-clears.
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    toastSink = setToast;
+    return () => {
+      toastSink = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (toast === null) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setToast(null), 4_000);
+    return () => clearTimeout(timer);
+  }, [toast]);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Library-world overlay stack: pushed routes — collection list,
@@ -1505,6 +1547,17 @@ function Main({
         pushOverlay({ type: 'sync' });
         return;
       }
+      if (key === 'storefront') {
+        storefrontEpoch.current += 1;
+        setStorefrontDraft(state.settings.storefront ?? '');
+        setStorefrontSheetOpen(true);
+        return;
+      }
+      if (key === 'qualityKbps') {
+        qualityEpoch.current += 1;
+        setQualityPickerOpen(true);
+        return;
+      }
       if (key === 'addLocalFolder') {
         const local = controller.local();
         if (local === null) {
@@ -1513,6 +1566,7 @@ function Main({
         void local
           .addFolder(new CancellationSource().signal)
           .then((added) => {
+            reportResult('add local folder', added);
             if (added.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1523,7 +1577,10 @@ function Main({
       if (key === 'removeAllDownloads') {
         void controller.downloads
           .removeAll(new CancellationSource().signal)
-          .then(refreshUsage);
+          .then((removed) => {
+            reportResult('remove all downloads', removed);
+            refreshUsage();
+          });
         return;
       }
       if (key.startsWith('localSourceRemove:')) {
@@ -1535,6 +1592,7 @@ function Main({
         void local
           .removeSource(sourceId, new CancellationSource().signal)
           .then((removed) => {
+            reportResult('remove local folder', removed);
             if (removed.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1550,6 +1608,7 @@ function Main({
         void local
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
+            reportResult('rescan local folders', scanned);
             if (scanned.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1561,7 +1620,7 @@ function Main({
         setArtworkCachePickerOpen(true);
         return;
       }
-      // storefront, quality, downloadStorage rows are display-only.
+      // downloadStorage is display-only.
     },
     [session, state.settings, controller, refreshLocal, refreshUsage],
   );
@@ -3310,6 +3369,28 @@ function Main({
               </Text>
             </View>
           )}
+          {toast !== null && (
+            <View
+              accessibilityLiveRegion="polite"
+              style={{
+                position: 'absolute',
+                bottom: insets.bottom + 88,
+                alignSelf: 'center',
+                maxWidth: '92%',
+                paddingHorizontal: 14,
+                paddingVertical: 6,
+                borderRadius: 999,
+                backgroundColor: theme.colors.raised,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
+                zIndex: 70,
+              }}
+            >
+              <Text variant="metadata" color="primary">
+                {toast}
+              </Text>
+            </View>
+          )}
         </StackItem>
         {overlayStack.map((entry) => {
           const content = renderOverlayEntry(entry);
@@ -3471,6 +3552,82 @@ function Main({
                 setThemePickerOpen(false);
               }}
               onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {storefrontSheetOpen && (
+          <SheetScreen
+            stackKey="sheet-storefront"
+            onDismissed={() => setStorefrontSheetOpen(false)}
+          >
+            <ValueFieldSheet
+              title="storefront"
+              initial={storefrontDraft}
+              placeholder="country code (e.g. US)"
+              submitLabel="save"
+              clearLabel="auto — defer to system locale"
+              onSubmit={(value) => {
+                const code = value.toUpperCase();
+                // The domain bound: ISO-3166 alpha-2, or null for
+                // system-locale resolution.
+                if (!/^[A-Z]{2}$/.test(code)) {
+                  setToast(
+                    'storefront must be a two-letter country code',
+                  );
+                  return;
+                }
+                // Dismiss only on commit — a failed save shows the
+                // toast, not a closed sheet over an unchanged row.
+                const opening = storefrontEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, storefront: code })
+                  .then((saved) => {
+                    reportResult('save storefront', saved);
+                    if (saved.ok && opening === storefrontEpoch.current) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
+              }}
+              onClear={() => {
+                const opening = storefrontEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, storefront: null })
+                  .then((saved) => {
+                    reportResult('clear storefront', saved);
+                    if (saved.ok && opening === storefrontEpoch.current) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
+              }}
+              onDismiss={() => setStorefrontSheetOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {qualityPickerOpen && (
+          <SheetScreen
+            stackKey="sheet-quality"
+            onDismissed={() => setQualityPickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="quality"
+              options={QUALITY_OPTIONS}
+              selectedKey={`${state.settings.qualityKbps}`}
+              onPick={(key) => {
+                const qualityKbps = Number(key);
+                if (!Number.isSafeInteger(qualityKbps)) {
+                  return;
+                }
+                const opening = qualityEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, qualityKbps })
+                  .then((saved) => {
+                    reportResult('save quality', saved);
+                    if (saved.ok && opening === qualityEpoch.current) {
+                      setQualityPickerOpen(false);
+                    }
+                  });
+              }}
+              onDismiss={() => setQualityPickerOpen(false)}
             />
           </SheetScreen>
         )}

@@ -106,6 +106,7 @@ export {
     NameField,
     ProviderPickerSheet,
     RowActionsSheet,
+    ValueFieldSheet,
 } from './sheets.tsx';
 export type {
     PlaylistPickerItem,

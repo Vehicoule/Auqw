@@ -11,6 +11,8 @@ import {
   CancellationSource,
   LOCAL_PROVIDER,
   SearchSession,
+  effectiveMapping,
+  isRefRejected,
   isSyncDelta,
   previewImport,
 } from '@auqw/application';
@@ -56,6 +58,7 @@ import {
   Text,
   ThemeProvider,
   TransferScreen,
+  ValueFieldSheet,
   entityIdForRef,
   formatClock,
   toCollectionModel,
@@ -78,6 +81,7 @@ import type {
   CollectionRowModel,
   CorrectionsFilter,
   DiagnosticsModel,
+  DownloadChip,
   LyricsModel,
   NavItemModel,
   ProviderPickerOption,
@@ -115,6 +119,29 @@ const THEME_OPTIONS: readonly ProviderPickerOption[] = [
   { key: 'light', label: 'light', detail: 'daylight' },
   { key: 'oled', label: 'oled', detail: 'true black' },
 ];
+
+// Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
+// bound; 128 is the spec default (providers.md).
+const QUALITY_OPTIONS: readonly ProviderPickerOption[] = [
+  { key: '64', label: '64 kbps' },
+  { key: '96', label: '96 kbps' },
+  { key: '128', label: '128 kbps', detail: 'default' },
+  { key: '192', label: '192 kbps' },
+  { key: '256', label: '256 kbps' },
+  { key: '320', label: '320 kbps', detail: 'maximum' },
+];
+
+function formatBytes(bytes: number, free: number): string {
+  const gb = (n: number) =>
+    n >= 1e9
+      ? `${(n / 1e9).toFixed(1)} gb`
+      : n >= 1e6
+        ? `${(n / 1e6).toFixed(0)} mb`
+        : n === 0
+          ? '0 kb'
+          : `${Math.max(1, Math.round(n / 1e3))} kb`;
+  return `${gb(bytes)} used · ${gb(free)} free`;
+}
 
 type Boot =
   | { readonly type: 'loading' }
@@ -417,14 +444,21 @@ const IDLE_TRANSFER: TransferModel = {
 
 /**
  * Session ops resolve typed errors rather than throwing — a dropped
- * Result is a silent no-op. Keep failures observable: the `kind —
- * message` shape is taxonomy text and carries no secrets.
+ * Result is a silent no-op. Keep failures observable: the console
+ * keeps the `kind — message` taxonomy text (no secrets), and a
+ * transient toast carries it to the operator. `toastSink` is
+ * installed once by Main — reportResult is called from callbacks all
+ * over this file, so a sink avoids threading the setter through
+ * every dependency list.
  */
+let toastSink: ((text: string) => void) | null = null;
+
 function reportResult(action: string, result: Result<unknown>): void {
   if (!result.ok) {
     console.warn(
       `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
     );
+    toastSink?.(`${action} failed — ${result.error.message}`);
   }
 }
 
@@ -470,6 +504,72 @@ function Main({
 
   useEffect(() => controller.subscribeOnline(setOnline), [controller]);
 
+  // Transient failure pill: reportResult routes its text here through
+  // the module-level sink (installed on mount), and it self-clears.
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    toastSink = setToast;
+    return () => {
+      toastSink = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (toast === null) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setToast(null), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  // Live download ledger — subscribed once; chips + the downloads
+  // collection + the stage action all read it.
+  const [downloads, setDownloads] = useState(
+    () => controller.downloads.list(),
+  );
+  // Bumped after a local-folder mutation so the model re-reads
+  // `local().list()` — the source is storage-backed, not evented, and
+  // scans here are user-initiated only.
+  const [localTick, setLocalTick] = useState(0);
+  const [storageText, setStorageText] = useState<string | null>(null);
+  // Transfer events can outpace the statfs probe — each read stamps a
+  // sequence, and only a success newer than the last applied success
+  // lands. A failed probe advances nothing, so it can't knock out an
+  // older success still in flight.
+  const usageSeq = useRef(0);
+  const usageApplied = useRef(0);
+  const refreshUsage = useCallback(() => {
+    usageSeq.current += 1;
+    const seq = usageSeq.current;
+    void controller.downloads
+      .usage(new CancellationSource().signal)
+      .then((u) => {
+        if (u.ok && seq > usageApplied.current) {
+          usageApplied.current = seq;
+          setStorageText(formatBytes(u.value.bytes, u.value.free));
+        }
+      });
+  }, [controller]);
+  useEffect(() => {
+    setDownloads(controller.downloads.list());
+    refreshUsage();
+    return controller.downloads.subscribe(() => {
+      setDownloads(controller.downloads.list());
+      refreshUsage();
+    });
+  }, [controller, refreshUsage]);
+
+  const refreshLocal = useCallback(() => {
+    setLocalTick((t) => t + 1);
+  }, []);
+
+  const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
+  const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
+  const [storefrontDraft, setStorefrontDraft] = useState('');
+  // Sheet openings are epoch-tagged — a save that resolves after the
+  // user dismissed and reopened the sheet must not close the new one.
+  const storefrontEpoch = useRef(0);
+  const qualityEpoch = useRef(0);
+
   // Offline honesty for remote paths: with connectivity explicitly
   // down nothing streams — every row's play affordance waits instead
   // of firing a remote attempt. Owned bytes are the exception: a row
@@ -480,6 +580,93 @@ function Main({
       online !== false ||
       controller.localPlaybackFor(recordingId) !== null,
     [online, controller],
+  );
+
+  const downloadChipFor = useCallback(
+    (recordingId: string): DownloadChip | null => {
+      const row = controller.downloads.recordFor(recordingId);
+      if (row === null) {
+        return null;
+      }
+      return row.state === 'requested'
+        ? 'queued'
+        : row.state === 'transferring'
+          ? 'downloading'
+          : row.state === 'available'
+            ? 'stored'
+            : 'failed';
+    },
+    [controller],
+  );
+
+  // A download needs a playable provider ref — recordings carrying
+  // only a `local` ref are already owned bytes; the action hides.
+  const downloadRefFor = useCallback(
+    (recordingId: string): SourceRef | null => {
+      const recording = state.recordings.find(
+        (r) => r.id === recordingId,
+      );
+      if (recording === undefined) {
+        return null;
+      }
+      // Mirrors Session.#pickRef's provider path — a download is
+      // resolved by the active playback provider, so only a mapping
+      // verdict or a non-rejected ref it owns can produce a stream.
+      const provider = state.settings.playbackProvider;
+      const mapped = effectiveMapping(recording, provider);
+      if (mapped !== null) {
+        return mapped.ref;
+      }
+      return (
+        recording.sourceRefs.find(
+          (r) =>
+            r.provider === provider &&
+            r.kind === 'track' &&
+            !isRefRejected(recording.mappings, r),
+        ) ?? null
+      );
+    },
+    [state.recordings, state.settings.playbackProvider],
+  );
+
+  // Single download affordance: absent → request; queued/downloading
+  // → cancel; failed → retry; stored → remove.
+  const onDownloadAction = useCallback(
+    (recordingId: string) => {
+      const signal = new CancellationSource().signal;
+      const existing = controller.downloads.recordFor(recordingId);
+      if (existing === null) {
+        const sourceRef = downloadRefFor(recordingId);
+        if (sourceRef === null) {
+          return;
+        }
+        void controller.downloads.request(
+          { recordingId, sourceRef },
+          signal,
+        );
+        return;
+      }
+      switch (existing.state) {
+        case 'requested':
+        case 'transferring':
+          void controller.downloads.cancel(existing.downloadId, signal);
+          return;
+        case 'failed_with_retry':
+          void controller.downloads.retry(existing.downloadId, signal);
+          return;
+        case 'available':
+          // The 'removing' transition fires before the file is gone —
+          // refresh usage again once removal settles so Settings
+          // doesn't display the freed bytes until the next event.
+          void controller.downloads
+            .remove(existing.downloadId, signal)
+            .then(refreshUsage);
+          return;
+        default:
+          return;
+      }
+    },
+    [controller, downloadRefFor, refreshUsage],
   );
 
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -687,24 +874,37 @@ function Main({
       playCounts: state.playCounts,
       entities: state.entities,
       entitySourceRefs: state.entitySourceRefs,
-      downloads: [],
+      downloads,
     });
     const playingId =
       state.playback.type === 'idle' ? null : state.playback.recordingId;
+    const chipByRecording = new Map<string, DownloadChip>(
+      downloads.map((d) => [
+        d.recordingId,
+        d.state === 'requested'
+          ? ('queued' as const)
+          : d.state === 'transferring'
+            ? ('downloading' as const)
+            : d.state === 'available'
+              ? ('stored' as const)
+              : ('failed' as const),
+      ]),
+    );
     // Honest-offline: with connectivity explicitly down, remote rows
     // degrade to 'unavailable' instead of spinning on a dead attempt.
+    // Owned bytes are the exception — rows the local probe resolves
+    // (download ledger or local files) stay playable.
     const offline = online === false;
-    const decorate = (row: TrackRowModel, recordingId: string): TrackRowModel =>
-      offline
-        ? {
-            ...row,
-            playing: recordingId === playingId ? true : row.playing,
-            state: 'unavailable',
-            note: 'offline',
-          }
-        : recordingId === playingId
-          ? { ...row, playing: true }
-          : row;
+    const decorate = (row: TrackRowModel, recordingId: string): TrackRowModel => {
+      const base: TrackRowModel = {
+        ...row,
+        download: chipByRecording.get(recordingId) ?? row.download,
+        playing: recordingId === playingId ? true : row.playing,
+      };
+      return offline && controller.localPlaybackFor(recordingId) === null
+        ? { ...base, state: 'unavailable', note: 'offline' }
+        : base;
+    };
     const mark = (row: CollectionRowModel): CollectionRowModel => ({
       ...row,
       row: decorate(row.row, row.recordingId),
@@ -722,7 +922,7 @@ function Main({
         downloads: model.collectionRows.downloads.map(mark),
       },
     };
-  }, [state, online]);
+  }, [state, online, downloads]);
   const playlistModelFor = useCallback(
     (playlistId: string) => {
       const model = toPlaylistModel({
@@ -844,16 +1044,36 @@ function Main({
     }),
     [state, controller, attempts, pendingReviews],
   );
-  const settingsModel = useMemo(
-    () =>
-      toSettingsModel(state.settings, diagnostics, {
-        // No download ledger or local folder surface on desktop yet
-        // (Phase 4) — those rows hide rather than dead-press.
-        localSupported: false,
-        downloadCount: 0,
-      }),
-    [state.settings, diagnostics],
-  );
+  const settingsModel = useMemo(() => {
+    const model = toSettingsModel(state.settings, diagnostics, {
+      storageText,
+      // The probe surface only exists once rehydrateMedia ran — gate
+      // the rows on it instead of dead-pressing behind a null local().
+      localSupported: controller.local() !== null,
+      localFolderCount: controller.local()?.list().length,
+      localSources: controller
+        .local()
+        ?.list()
+        .map((s) => ({ sourceId: s.sourceId, label: s.label })),
+      downloadCount: downloads.length,
+    });
+    // The inline sync panel below the rows already carries pairing —
+    // the 'sync' navigation row dead-ends on desktop. The artwork
+    // cache budget row does too: desktop keeps no artwork cache.
+    return {
+      ...model,
+      rows: model.rows.filter(
+        (row) => row.key !== 'sync' && row.key !== 'artworkCacheBytes',
+      ),
+    };
+  }, [
+    state.settings,
+    diagnostics,
+    storageText,
+    controller,
+    downloads,
+    localTick,
+  ]);
   const syncModel = useMemo(
     () =>
       toSyncPanel(
@@ -1070,9 +1290,77 @@ function Main({
         pushOverlay({ type: 'transfer' });
         return;
       }
-      // storefront, quality rows are display-only.
+      if (key === 'storefront') {
+        storefrontEpoch.current += 1;
+        setStorefrontDraft(state.settings.storefront ?? '');
+        setStorefrontSheetOpen(true);
+        return;
+      }
+      if (key === 'qualityKbps') {
+        qualityEpoch.current += 1;
+        setQualityPickerOpen(true);
+        return;
+      }
+      if (key === 'removeAllDownloads') {
+        void controller.downloads
+          .removeAll(new CancellationSource().signal)
+          .then((removed) => {
+            reportResult('remove all downloads', removed);
+            refreshUsage();
+          });
+        return;
+      }
+      if (key === 'addLocalFolder') {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        void local
+          .addFolder(new CancellationSource().signal)
+          .then((added) => {
+            reportResult('add local folder', added);
+            if (added.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
+      if (key.startsWith('localSourceRemove:')) {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        const sourceId = key.slice('localSourceRemove:'.length);
+        void local
+          .removeSource(sourceId, new CancellationSource().signal)
+          .then((removed) => {
+            reportResult('remove local folder', removed);
+            if (removed.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
+      if (key === 'rescanLocal' || key === 'localSources') {
+        const local = controller.local();
+        if (local === null) {
+          return;
+        }
+        void local
+          .rescan(undefined, new CancellationSource().signal)
+          .then((scanned) => {
+            reportResult('rescan local folders', scanned);
+            if (scanned.ok) {
+              session.syncLocalRecordings(local.recordings());
+              refreshLocal();
+            }
+          });
+        return;
+      }
     },
-    [],
+    [session, state.settings, controller, refreshLocal, refreshUsage],
   );
 
   const onSettingsToggle = useCallback(
@@ -1083,8 +1371,24 @@ function Main({
           prefetch: !state.settings.prefetch,
         });
       }
+      if (key === 'downloadMetered') {
+        const next = state.settings.downloadMetered !== true;
+        void session
+          .updateSettings({
+            ...state.settings,
+            downloadMetered: next,
+          })
+          .then((updated) => {
+            // Re-derive only after the setting commits — toggling ON
+            // unblocks waiting rows, toggling OFF pauses an active
+            // cellular transfer; kick() can't demote mid-flight work.
+            if (updated.ok) {
+              void controller.downloads.reevaluateEligibility();
+            }
+          });
+      }
     },
-    [session, state.settings],
+    [session, state.settings, controller],
   );
 
   const playback = state.playback;
@@ -1823,6 +2127,11 @@ function Main({
         case 'add':
           setPickerFor(target);
           break;
+        case 'download':
+          if (target.kind === 'recording') {
+            onDownloadAction(target.recordingId);
+          }
+          break;
         case 'radio': {
           // Track-seeded at this release: a metadata row seeds its own
           // ref; a library row seeds its first source ref. The action
@@ -1854,7 +2163,14 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity, state.recordings, radioSeedable],
+    [
+      actionsFor,
+      session,
+      openEntity,
+      state.recordings,
+      radioSeedable,
+      onDownloadAction,
+    ],
   );
 
   const onOpenCard = useCallback(
@@ -2219,6 +2535,19 @@ function Main({
               onNext={() => advance('next')}
               onPrevious={() => advance('previous')}
               onToggleLike={onToggleLike}
+              download={
+                currentRecordingId !== null &&
+                (controller.downloads.recordFor(currentRecordingId) !==
+                  null ||
+                  downloadRefFor(currentRecordingId) !== null)
+                  ? (downloadChipFor(currentRecordingId) ?? 'idle')
+                  : null
+              }
+              onDownload={
+                currentRecordingId !== null
+                  ? () => onDownloadAction(currentRecordingId)
+                  : undefined
+              }
               onSeek={(ms) => void session.seekTo(ms)}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={
@@ -2248,6 +2577,13 @@ function Main({
             >
               <Text variant="metadata" color="secondary">
                 offline — streams wait for connectivity
+              </Text>
+            </div>
+          )}
+          {toast !== null && (
+            <div className="uw-toast" role="status">
+              <Text variant="metadata" color="primary">
+                {toast}
               </Text>
             </div>
           )}
@@ -2305,6 +2641,32 @@ function Main({
                   label: 'add to playlist',
                   icon: 'list-plus' as const,
                 },
+                // Download affordance where a provider ref can mint a
+                // stream — OR a ledger row already exists (cancel/retry/
+                // remove don't need a resolvable ref).
+                ...(actionsFor.kind === 'recording' &&
+                (controller.downloads.recordFor(actionsFor.recordingId) !==
+                  null ||
+                  downloadRefFor(actionsFor.recordingId) !== null)
+                  ? [
+                      {
+                        key: 'download',
+                        label: (() => {
+                          const row = controller.downloads.recordFor(
+                            actionsFor.recordingId,
+                          );
+                          return row === null
+                            ? 'download'
+                            : row.state === 'available'
+                              ? 'remove download'
+                              : row.state === 'failed_with_retry'
+                                ? 'retry download'
+                                : 'cancel download';
+                        })(),
+                        icon: 'download' as const,
+                      },
+                    ]
+                  : []),
                 // Only offer the seed affordance when the seed's own
                 // provider declares radio.seed — routing is ref-scoped,
                 // so another provider's support is a dead end.
@@ -2367,6 +2729,82 @@ function Main({
               selectedKey={providerPicker.selectedKey}
               onPick={onPickProvider}
               onDismiss={() => setProviderSlot(null)}
+            />
+          </SheetScreen>
+        )}
+        {storefrontSheetOpen && (
+          <SheetScreen
+            stackKey="sheet-storefront"
+            onDismissed={() => setStorefrontSheetOpen(false)}
+          >
+            <ValueFieldSheet
+              title="storefront"
+              initial={storefrontDraft}
+              placeholder="country code (e.g. US)"
+              submitLabel="save"
+              clearLabel="auto — defer to system locale"
+              onSubmit={(value) => {
+                const code = value.toUpperCase();
+                // The domain bound: ISO-3166 alpha-2, or null for
+                // system-locale resolution.
+                if (!/^[A-Z]{2}$/.test(code)) {
+                  setToast(
+                    'storefront must be a two-letter country code',
+                  );
+                  return;
+                }
+                // Dismiss only on commit — a failed save shows the
+                // toast, not a closed sheet over an unchanged row.
+                const opening = storefrontEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, storefront: code })
+                  .then((saved) => {
+                    reportResult('save storefront', saved);
+                    if (saved.ok && opening === storefrontEpoch.current) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
+              }}
+              onClear={() => {
+                const opening = storefrontEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, storefront: null })
+                  .then((saved) => {
+                    reportResult('clear storefront', saved);
+                    if (saved.ok && opening === storefrontEpoch.current) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
+              }}
+              onDismiss={() => setStorefrontSheetOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {qualityPickerOpen && (
+          <SheetScreen
+            stackKey="sheet-quality"
+            onDismissed={() => setQualityPickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title="quality"
+              options={QUALITY_OPTIONS}
+              selectedKey={`${state.settings.qualityKbps}`}
+              onPick={(key) => {
+                const qualityKbps = Number(key);
+                if (!Number.isSafeInteger(qualityKbps)) {
+                  return;
+                }
+                const opening = qualityEpoch.current;
+                void session
+                  .updateSettings({ ...state.settings, qualityKbps })
+                  .then((saved) => {
+                    reportResult('save quality', saved);
+                    if (saved.ok && opening === qualityEpoch.current) {
+                      setQualityPickerOpen(false);
+                    }
+                  });
+              }}
+              onDismiss={() => setQualityPickerOpen(false)}
             />
           </SheetScreen>
         )}
