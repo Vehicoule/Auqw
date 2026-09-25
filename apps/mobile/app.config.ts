@@ -29,6 +29,19 @@ const config: ExpoConfig = {
   },
   plugins: [
     [
+      'expo-splash-screen',
+      {
+        image: './assets/splash-icon.png',
+        imageWidth: 320,
+        resizeMode: 'contain',
+        backgroundColor: '#eef0f7',
+        dark: {
+          image: './assets/splash-icon-dark.png',
+          backgroundColor: '#1a1b26',
+        },
+      },
+    ],
+    [
       'expo-audio',
       {
         // Playback only — no mic permission, background playback
