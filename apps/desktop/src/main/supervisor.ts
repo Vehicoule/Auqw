@@ -156,6 +156,18 @@ export function createSupervisor(
         clearTimeout(entry.timer);
         entry.timer = null;
       }
+      // Promotion honours the in-flight ceiling too. Admission was
+      // checked against `maxQueued` on the way in, so a config with a
+      // larger queue than `maxPending` would otherwise flush a whole
+      // queue into `pending` and blow past the limit it exists to
+      // enforce. Refusing is safe here: the entry was never posted, so
+      // it cannot have started work.
+      if (pending.size >= maxPending) {
+        entry.reject(
+          shellError('unavailable', 'too many in-flight utility requests'),
+        );
+        continue;
+      }
       pending.set(entry.id, entry);
       try {
         postTo({ id: entry.id, channel: entry.channel, args: entry.args });

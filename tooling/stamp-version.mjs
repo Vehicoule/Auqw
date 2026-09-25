@@ -118,6 +118,20 @@ if (!isSemver(version)) {
   process.exit(1);
 }
 
+// Derive before writing anything. `versionCodeOf` refuses a version it
+// cannot order (`-alpha.333`, an unknown channel), and stamping the
+// manifests first would leave the two package.json versions advanced
+// while app.config.ts still carried the old one — a half-stamped tree
+// that fails `--check` in a way no re-run explains.
+const derived = versionCodeOf(version);
+if (derived === null) {
+  console.error(
+    `stamp-version: '${version}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
+  );
+  process.exit(1);
+}
+const code = String(derived);
+
 for (const rel of [
   'apps/desktop/package.json',
   'apps/mobile/package.json',
@@ -140,14 +154,6 @@ if (!FIELD.test(config) || !CODE_FIELD.test(config)) {
   );
   process.exit(1);
 }
-const derived = versionCodeOf(version);
-if (derived === null) {
-  console.error(
-    `stamp-version: '${version}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
-  );
-  process.exit(1);
-}
-const code = String(derived);
 writeFileSync(
   configPath,
   config.replace(FIELD, `$1${version}$2`).replace(CODE_FIELD, `$1${code}$2`),

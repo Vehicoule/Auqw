@@ -459,4 +459,35 @@ export async function run(): Promise<void> {
     );
     sup.shutdown();
   }
+  {
+    // Promotion honours the in-flight ceiling: with a queue larger than
+    // `maxPending`, the spawn flush must refuse what cannot fit instead
+    // of blowing past the limit it exists to enforce.
+    const kids: FakeChild[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const child = new FakeChild();
+        kids.push(child);
+        return child;
+      },
+      maxQueued: 4,
+      maxPending: 1,
+      queueDeadlineMs: 60_000,
+    });
+    const first = sup.request('utility:ping', { message: 'a' });
+    const second = sup.request('utility:ping', { message: 'b' });
+    // Attach before the spawn flush rejects it — a rejection with no
+    // handler yet is an unhandled rejection at the next tick boundary.
+    const secondRefused = assertRejectsKind(second, 'unavailable');
+    const child = kids[0];
+    assert(child !== undefined);
+    child.emit('spawn');
+    await sleep(1);
+    assertEqual(child.posted.length, 1, 'only the in-flight ceiling is posted');
+    await secondRefused;
+    const post = child.posted[0] as { id?: number };
+    child.emit('message', { id: post.id, ok: true, result: 'ok' });
+    assertEqual(await first, 'ok', 'the one that fit is still answered');
+    sup.shutdown();
+  }
 }
