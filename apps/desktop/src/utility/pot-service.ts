@@ -181,6 +181,7 @@ type MintResult = {
 class AllowlistDispatcher extends Dispatcher {
   readonly #upstream: Dispatcher;
   readonly #hosts: ReadonlySet<string>;
+  #calls = 0;
 
   constructor(upstream: Dispatcher, hosts: ReadonlySet<string>) {
     super();
@@ -192,17 +193,8 @@ class AllowlistDispatcher extends Dispatcher {
     options: Dispatcher.DispatchOptions,
     handler: Dispatcher.DispatchHandler,
   ): boolean {
-    const opaque = (options as { opaque?: { url?: string } }).opaque;
-    let host: string | null = null;
-    try {
-      host = new URL(
-        opaque?.url ?? `${options.origin ?? ''}${options.path}`,
-      ).hostname.toLowerCase();
-    } catch {
-      host = null;
-    }
-    if (host === null || !this.#hosts.has(host)) {
-      const error = new TypeError('pot: sandboxed request host not allowed');
+    const reject = (reason: string): boolean => {
+      const error = new TypeError(`pot: sandboxed request ${reason}`);
       // jsdom's own blocked-URL path signals `onResponseError` the
       // same way — a dead request is its one failure shape.
       handler.onResponseError?.(
@@ -212,8 +204,62 @@ class AllowlistDispatcher extends Dispatcher {
         error,
       );
       return true;
+    };
+    const opaque = (options as { opaque?: { url?: string } }).opaque;
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(
+        opaque?.url ?? `${options.origin ?? ''}${options.path}`,
+      );
+    } catch {
+      parsed = null;
     }
-    return this.#upstream.dispatch(options, handler);
+    const method = String(options.method ?? 'GET').toUpperCase();
+    // Same grant window.fetch gets: https only, exact host, read-mostly
+    // verbs (POST stays — the interpreter legitimately ships attestation
+    // bodies to google hosts, still inside the allowlist), per-sandbox
+    // call budget.
+    if (
+      parsed === null ||
+      parsed.protocol !== 'https:' ||
+      !this.#hosts.has(parsed.hostname.toLowerCase())
+    ) {
+      return reject('host not allowed');
+    }
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+      return reject('method not allowed');
+    }
+    if (this.#calls >= SANDBOX_FETCH_MAX_CALLS) {
+      return reject('budget exhausted');
+    }
+    this.#calls += 1;
+    // Response bytes capped mid-stream — a bombed page weight must
+    // not out-read the sandbox's body budget.
+    let seen = 0;
+    const bounded: Dispatcher.DispatchHandler = {
+      onRequestStart: (c, ctx) => handler.onRequestStart?.(c, ctx),
+      onRequestUpgrade: (c, s, h, sk) =>
+        handler.onRequestUpgrade?.(c, s, h, sk),
+      onResponseStart: (c, s, h, m) =>
+        handler.onResponseStart?.(c, s, h, m),
+      onResponseData: (c, chunk) => {
+        seen += chunk.byteLength;
+        if (seen > SANDBOX_FETCH_MAX_CHARS) {
+          handler.onResponseError?.(
+            c,
+            new TypeError('pot: sandboxed response oversized'),
+          );
+          return;
+        }
+        handler.onResponseData?.(c, chunk);
+      },
+      onResponseEnd: (c, t) => handler.onResponseEnd?.(c, t),
+      onResponseError: (c, e) => handler.onResponseError?.(c, e),
+      onResponseStarted: () => handler.onResponseStarted?.(),
+      onBodySent: (chunk) => handler.onBodySent?.(chunk),
+      onRequestSent: () => handler.onRequestSent?.(),
+    };
+    return this.#upstream.dispatch(options, bounded);
   }
 
   close(callback?: () => void): Promise<void> {

@@ -1,4 +1,4 @@
-import { copyFile, readFile } from 'node:fs/promises';
+import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { build } from 'esbuild';
@@ -138,8 +138,28 @@ await copyFile(
 );
 // jsdom's synchronous-XHR worker is looked up lazily by path — it
 // must exist beside the bundles that embed jsdom (dist/utility).
-await copyFile(
+// Two packaging repairs ship with it: the repo's `"type": "module"`
+// scope would parse the worker's .js as ESM and its CJS requires
+// would throw, so dist/utility gets its own CJS marker; and its
+// `require("../../..")` chains assume jsdom's on-disk layout, so
+// they are rewritten to package-root specifiers resolvable from the
+// bundle output (dev: node_modules; packaged: the asar-unpacked
+// node_modules).
+const workerSrc = await readFile(
   join(jsdomRoot, 'lib/jsdom/living/xhr/xhr-sync-worker.js'),
+  'utf8',
+);
+await writeFile(
   'dist/utility/xhr-sync-worker.js',
+  workerSrc
+    .replace('require("../../../..")', 'require("jsdom")')
+    .replace(
+      'require("../../../generated/idl/utils")',
+      'require("jsdom/lib/generated/idl/utils")',
+    ),
+);
+await writeFile(
+  'dist/utility/package.json',
+  JSON.stringify({ type: 'commonjs' }),
 );
 console.log('desktop bundles written to dist/');
