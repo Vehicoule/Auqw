@@ -1,7 +1,7 @@
 # Auqw — for Android, Linux, macOS & Windows
 
 [![Latest release](https://img.shields.io/github/v/release/Vehicoule/Auqw?include_prereleases&label=latest%20release)](https://github.com/Vehicoule/Auqw/releases)
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Android%20%C2%B7%20Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-informational)](#download--install)
 
 Auqw is a music player for all your devices: search for a track, build
@@ -22,7 +22,7 @@ Grab the file for your platform from the
 
 Alpha builds are unsigned, so your OS may warn before running — on
 macOS run `xattr -dr com.apple.quarantine /Applications/auqw.app`, on
-Windows click "More info → Run anyway". Each download ships with a
+Windows click "More info → Run anyway". Desktop downloads ship with a
 `SHA256SUMS-<os>.txt` to verify the file.
 
 ## Development
@@ -54,10 +54,12 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 
 `pnpm sync-plugins` bundles the pinned provider artifacts from
 `providers.lock.json` into `apps/mobile/assets/plugins/`. Each lock
-`source` is a `local-build:` path into a sibling `auqw-plugins`
-checkout — clone it next to this repository, build the pinned artifact
-(`./tooling/build.sh <plugin-id>`), then sync. Fetching signed release
-artifacts instead of a sibling build is post–Slice 1 tooling.
+`source` is a `release:` path into a signed release directory inside a
+sibling `auqw-plugins` checkout — clone it next to this repository,
+then sync. The digest, manifest, provenance, and ed25519 signature are
+all verified against the lock's pinned key before anything is copied.
+(`local-build:` sources also exist for the dev loop — digest and
+manifest checks only.)
 
 ### Layout
 
