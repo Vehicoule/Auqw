@@ -531,16 +531,20 @@ function Main({
   // scans here are user-initiated only.
   const [localTick, setLocalTick] = useState(0);
   const [storageText, setStorageText] = useState<string | null>(null);
-  // Transfer events can outpace the statfs probe — sequence the reads
-  // so only the newest usage may land in the row's display.
+  // Transfer events can outpace the statfs probe — each read stamps a
+  // sequence, and only a success newer than the last applied success
+  // lands. A failed probe advances nothing, so it can't knock out an
+  // older success still in flight.
   const usageSeq = useRef(0);
+  const usageApplied = useRef(0);
   const refreshUsage = useCallback(() => {
     usageSeq.current += 1;
     const seq = usageSeq.current;
     void controller.downloads
       .usage(new CancellationSource().signal)
       .then((u) => {
-        if (u.ok && seq === usageSeq.current) {
+        if (u.ok && seq > usageApplied.current) {
+          usageApplied.current = seq;
           setStorageText(formatBytes(u.value.bytes, u.value.free));
         }
       });
@@ -561,6 +565,10 @@ function Main({
   const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
   const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
   const [storefrontDraft, setStorefrontDraft] = useState('');
+  // Sheet openings are epoch-tagged — a save that resolves after the
+  // user dismissed and reopened the sheet must not close the new one.
+  const storefrontEpoch = useRef(0);
+  const qualityEpoch = useRef(0);
 
   // Offline honesty for remote paths: with connectivity explicitly
   // down nothing streams — every row's play affordance waits instead
@@ -1283,11 +1291,13 @@ function Main({
         return;
       }
       if (key === 'storefront') {
+        storefrontEpoch.current += 1;
         setStorefrontDraft(state.settings.storefront ?? '');
         setStorefrontSheetOpen(true);
         return;
       }
       if (key === 'qualityKbps') {
+        qualityEpoch.current += 1;
         setQualityPickerOpen(true);
         return;
       }
@@ -2745,21 +2755,23 @@ function Main({
                 }
                 // Dismiss only on commit — a failed save shows the
                 // toast, not a closed sheet over an unchanged row.
+                const opening = storefrontEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, storefront: code })
                   .then((saved) => {
                     reportResult('save storefront', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
                   });
               }}
               onClear={() => {
+                const opening = storefrontEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, storefront: null })
                   .then((saved) => {
                     reportResult('clear storefront', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
                   });
@@ -2782,11 +2794,12 @@ function Main({
                 if (!Number.isSafeInteger(qualityKbps)) {
                   return;
                 }
+                const opening = qualityEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, qualityKbps })
                   .then((saved) => {
                     reportResult('save quality', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === qualityEpoch.current) {
                       setQualityPickerOpen(false);
                     }
                   });

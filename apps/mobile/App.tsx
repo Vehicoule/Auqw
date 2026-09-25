@@ -625,6 +625,10 @@ function Main({
   const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
   const [storefrontDraft, setStorefrontDraft] = useState('');
   const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
+  // Sheet openings are epoch-tagged — a save that resolves after the
+  // user dismissed and reopened the sheet must not close the new one.
+  const storefrontEpoch = useRef(0);
+  const qualityEpoch = useRef(0);
   // Transient failure pill: reportResult routes its text here through
   // the module-level sink (installed on mount), and it self-clears.
   const [toast, setToast] = useState<string | null>(null);
@@ -1544,11 +1548,13 @@ function Main({
         return;
       }
       if (key === 'storefront') {
+        storefrontEpoch.current += 1;
         setStorefrontDraft(state.settings.storefront ?? '');
         setStorefrontSheetOpen(true);
         return;
       }
       if (key === 'qualityKbps') {
+        qualityEpoch.current += 1;
         setQualityPickerOpen(true);
         return;
       }
@@ -3572,21 +3578,23 @@ function Main({
                 }
                 // Dismiss only on commit — a failed save shows the
                 // toast, not a closed sheet over an unchanged row.
+                const opening = storefrontEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, storefront: code })
                   .then((saved) => {
                     reportResult('save storefront', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
                   });
               }}
               onClear={() => {
+                const opening = storefrontEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, storefront: null })
                   .then((saved) => {
                     reportResult('clear storefront', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
                   });
@@ -3609,11 +3617,12 @@ function Main({
                 if (!Number.isSafeInteger(qualityKbps)) {
                   return;
                 }
+                const opening = qualityEpoch.current;
                 void session
                   .updateSettings({ ...state.settings, qualityKbps })
                   .then((saved) => {
                     reportResult('save quality', saved);
-                    if (saved.ok) {
+                    if (saved.ok && opening === qualityEpoch.current) {
                       setQualityPickerOpen(false);
                     }
                   });
