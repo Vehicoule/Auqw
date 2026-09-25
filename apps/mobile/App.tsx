@@ -38,6 +38,7 @@ import type {
   AttemptTrace,
   EntityPage,
   EntityRef,
+  ImportPreview,
   LyricsSheet,
   MatchReview,
   OperationContext,
@@ -83,6 +84,7 @@ import {
   ValueFieldSheet,
   entityIdForRef,
   formatClock,
+  languageOptionKey,
   languageOptions,
   resolveLocale,
   setLocale,
@@ -929,6 +931,24 @@ function Main({
   // file's text is stashed between preview and confirm.
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
+  // The staged import preview is a localized snapshot — its row
+  // labels freeze at file-choice time. The raw document is kept
+  // beside it so the model can be rebuilt in the current language
+  // whenever the locale changes (localeTick effect below).
+  const importPreviewRaw = useRef<{
+    preview: ImportPreview;
+    sourceLabel: string;
+  } | null>(null);
+  useEffect(() => {
+    const raw = importPreviewRaw.current;
+    if (raw === null) {
+      return;
+    }
+    setTransfer((prev) => ({
+      ...prev,
+      preview: toImportPreviewModel(raw.preview, raw.sourceLabel),
+    }));
+  }, [localeTick]);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
@@ -1652,6 +1672,7 @@ function Main({
       }
       if (key === 'exportLibrary' || key === 'importLibrary') {
         importText.current = null;
+        importPreviewRaw.current = null;
         setTransfer(IDLE_TRANSFER);
         pushOverlay({ type: 'transfer' });
         return;
@@ -2085,6 +2106,7 @@ function Main({
   }, [session]);
 
   const onPickImportFile = useCallback(() => {
+    importPreviewRaw.current = null;
     setTransfer((prev) => ({
       ...prev,
       importPhase: 'reading',
@@ -2106,6 +2128,7 @@ function Main({
         // the honest reject; nothing was applied.
         const preview = previewImport(text);
         if (!preview.ok) {
+          importPreviewRaw.current = null;
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
@@ -2114,16 +2137,16 @@ function Main({
           }));
           return;
         }
+        const sourceLabel = file.uri.split('/').pop() ?? file.uri;
         importText.current = text;
+        importPreviewRaw.current = { preview: preview.value, sourceLabel };
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'preview',
-          preview: toImportPreviewModel(
-            preview.value,
-            file.uri.split('/').pop() ?? file.uri,
-          ),
+          preview: toImportPreviewModel(preview.value, sourceLabel),
         }));
       } catch (thrown) {
+        importPreviewRaw.current = null;
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'error',
@@ -2174,6 +2197,7 @@ function Main({
 
   const onResetImport = useCallback(() => {
     importText.current = null;
+    importPreviewRaw.current = null;
     setTransfer((prev) => ({
       ...prev,
       importPhase: 'idle',
@@ -3032,6 +3056,7 @@ function Main({
           const importPath = params.get('import');
           if (importPath !== null) {
             importText.current = null;
+            importPreviewRaw.current = null;
             // A deep link must not read outside the app's own
             // document/cache roots — anywhere else is a file-read
             // primitive reachable by any intent sender. The fence
@@ -3051,6 +3076,7 @@ function Main({
                 const text = await new File(uri).text();
                 const preview = previewImport(text);
                 if (!preview.ok) {
+                  importPreviewRaw.current = null;
                   setTransfer((prev) => ({
                     ...prev,
                     importPhase: 'error',
@@ -3059,16 +3085,16 @@ function Main({
                   }));
                   return;
                 }
+                const sourceLabel = importPath.split('/').pop() ?? importPath;
                 importText.current = text;
+                importPreviewRaw.current = { preview: preview.value, sourceLabel };
                 setTransfer((prev) => ({
                   ...prev,
                   importPhase: 'preview',
-                  preview: toImportPreviewModel(
-                    preview.value,
-                    importPath.split('/').pop() ?? importPath,
-                  ),
+                  preview: toImportPreviewModel(preview.value, sourceLabel),
                 }));
               } catch (thrown) {
+                importPreviewRaw.current = null;
                 setTransfer((prev) => ({
                   ...prev,
                   importPhase: 'error',
@@ -3084,10 +3110,12 @@ function Main({
             onApplyImport();
           } else if (params.has('export')) {
             importText.current = null;
+            importPreviewRaw.current = null;
             setTransfer(IDLE_TRANSFER);
             onExport();
           } else {
             importText.current = null;
+            importPreviewRaw.current = null;
             setTransfer(IDLE_TRANSFER);
           }
           break;
@@ -3697,12 +3725,22 @@ function Main({
           >
             <LanguagePickerSheet
               options={languageOptions()}
-              selectedKey={state.settings.language ?? 'system'}
+              selectedKey={languageOptionKey(state.settings.language)}
               onPick={(key) => {
                 const language = key === 'system' ? null : key;
-                void session.updateSettings({ ...state.settings, language });
-                applyLocale(language);
-                setLanguagePickerOpen(false);
+                // Apply the locale only once the save landed — a
+                // failed save must not leave the UI on a selection
+                // storage never recorded. The sheet closes either
+                // way; the failure surfaces through the toast.
+                void session
+                  .updateSettings({ ...state.settings, language })
+                  .then((saved) => {
+                    reportResult('settings.language', saved);
+                    if (saved.ok) {
+                      applyLocale(language);
+                    }
+                    setLanguagePickerOpen(false);
+                  });
               }}
               onDismiss={() => setLanguagePickerOpen(false)}
             />

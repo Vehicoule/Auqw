@@ -1,7 +1,8 @@
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { CollectionModel, CollectionRowModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
+import type { CollectionModel, CollectionRowModel, MessageId } from '@auqw/ui-shared';
 
 export type CollectionScreenProps = {
   readonly model: CollectionModel;
@@ -13,12 +14,14 @@ export type CollectionScreenProps = {
   readonly onContext?: ((row: CollectionRowModel) => void) | undefined;
 };
 
-const EMPTY_HINTS = {
-  liked: 'liked tracks land here',
-  top50: 'plays count once you listen',
-  history: 'played tracks land here',
-  downloads: 'downloaded tracks land here',
-} as const;
+// Hint ids resolve at render — never cache translated strings at
+// module scope or they go stale on a locale switch.
+const EMPTY_HINTS: Record<CollectionModel['key'], MessageId> = {
+  liked: 'collection.emptyHint.liked',
+  top50: 'collection.emptyHint.top50',
+  history: 'collection.emptyHint.history',
+  downloads: 'collection.emptyHint.downloads',
+};
 
 export function CollectionScreen({
   model,
@@ -56,32 +59,32 @@ export function CollectionScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-collection-screen__head">
-        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Text variant="display" color="bright" className="uw-collection-screen__title">
           {model.title}
         </Text>
         <Text variant="metadata" color="secondary">
-          {model.rows.length} {model.rows.length === 1 ? 'track' : 'tracks'}
+          {t('common.trackCount', { count: model.rows.length })}
         </Text>
         <Pressable
           onPress={model.rows.length === 0 ? undefined : onPlayAll}
-          ariaLabel={`play ${model.title}`}
+          ariaLabel={t('collection.playAllA11y', { title: model.title })}
           className={`uw-playall${model.rows.length === 0 ? ' uw-off' : ''}`}
         >
           <Text
             variant="metadata"
             color={model.rows.length === 0 ? 'secondary' : 'accent'}
           >
-            play all
+            {t('collection.playAll')}
           </Text>
         </Pressable>
       </div>
       {model.rows.length === 0 ? (
         <EmptyState
-          title={`${model.title} is empty`}
-          hint={EMPTY_HINTS[model.key]}
+          title={t('collection.empty', { title: model.title })}
+          hint={t(EMPTY_HINTS[model.key])}
           icon={model.key === 'history' ? 'clock' : 'note'}
         />
       ) : (

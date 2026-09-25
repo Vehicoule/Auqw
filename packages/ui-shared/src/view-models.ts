@@ -1426,12 +1426,28 @@ export function languageOptions(): readonly LanguageOption[] {
   ];
 }
 
+/**
+ * Reduce a stored `Settings.language` to a `languageOptions()` key —
+ * a persisted value may be a full BCP-47 tag ('de-DE'), so match on
+ * the primary language subtag. Absent and unsupported values read as
+ * 'system', mirroring how resolveLocale treats them.
+ */
+export function languageOptionKey(setting: string | null | undefined): string {
+  const primary =
+    setting === undefined || setting === null
+      ? 'system'
+      : (setting.toLowerCase().split('-').shift() ?? '');
+  return languageOptions().some((option) => option.key === primary)
+    ? primary
+    : 'system';
+}
+
 /** Display name for a `Settings.language` value; unknown reads system. */
 function languageLabel(setting: string | null | undefined): string {
-  const wanted = setting === undefined || setting === null ? 'system' : setting;
   return (
-    languageOptions().find((option) => option.key === wanted)?.label ??
-    t('settings.languageValue.system')
+    languageOptions().find(
+      (option) => option.key === languageOptionKey(setting),
+    )?.label ?? t('settings.languageValue.system')
   );
 }
 

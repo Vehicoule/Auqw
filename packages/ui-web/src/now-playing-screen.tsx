@@ -13,9 +13,11 @@ import { WaveformSeek } from './progress.tsx';
 import { useOverlayDismiss } from './stack.tsx';
 import { QueueList } from './queue-list.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type {
   DownloadChip,
   LyricsModel,
+  MessageId,
   PlayerModel,
   QueueModel,
   RadioModel,
@@ -58,13 +60,13 @@ export function TransportControls({
   const playing = status === 'playing';
   const playColor = variant === 'm3e' ? 'var(--canvas)' : 'var(--text-bright)';
   return (
-    <div className={`uw-transport uw-transport--${variant}`} role="group" aria-label="transport">
+    <div className={`uw-transport uw-transport--${variant}`} role="group" aria-label={t('player.a11y.transport')}>
       <IconButton
         icon={liked ? 'heart-filled' : 'heart'}
         size={32}
         iconSize={14}
         color={liked ? 'var(--liked)' : 'var(--text-secondary)'}
-        ariaLabel={liked ? 'unlike' : 'like'}
+        ariaLabel={liked ? t('common.unlike') : t('common.like')}
         active={liked}
         onPress={onToggleLike}
         className="uw-transport__side"
@@ -74,14 +76,14 @@ export function TransportControls({
         size={36}
         iconSize={15}
         color="var(--text-primary)"
-        ariaLabel="previous"
+        ariaLabel={t('common.previous')}
         disabled={!canPrevious}
         onPress={onPrevious}
         className="uw-transport__main"
       />
       <Pressable
         onPress={onPlayPause}
-        ariaLabel={playing ? 'pause' : 'play'}
+        ariaLabel={playing ? t('common.pause') : t('common.play')}
         ariaPressed={playing}
         className="uw-transport__play"
       >
@@ -96,7 +98,7 @@ export function TransportControls({
         size={36}
         iconSize={15}
         color="var(--text-primary)"
-        ariaLabel="next"
+        ariaLabel={t('common.next')}
         disabled={!canNext}
         onPress={onNext}
         className="uw-transport__main"
@@ -121,12 +123,12 @@ export function TransportControls({
           }
           ariaLabel={
             download === 'stored'
-              ? 'downloaded — remove'
+              ? t('stage.download.storedA11y')
               : download === 'failed'
-                ? 'download failed — retry'
+                ? t('stage.download.failedA11y')
                 : download === 'queued' || download === 'downloading'
-                  ? 'downloading — cancel'
-                  : 'download'
+                  ? t('stage.download.busyA11y')
+                  : t('stage.download.idleA11y')
           }
           active={download === 'stored'}
           onPress={onDownload}
@@ -137,10 +139,12 @@ export function TransportControls({
   );
 }
 
-const MODES: readonly { key: StageMode; label: string; icon: IconName }[] = [
-  { key: 'player', label: 'player', icon: 'note' },
-  { key: 'lyrics', label: 'lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'queue', icon: 'queue' },
+// Labels resolve at render (never cached in the module constant) so a
+// locale switch re-translates every tab.
+const MODES: readonly { key: StageMode; label: MessageId; icon: IconName }[] = [
+  { key: 'player', label: 'stage.mode.player', icon: 'note' },
+  { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
+  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
 ];
 
 export function ModeSegment({
@@ -151,14 +155,14 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   return (
-    <div className="uw-segment" role="tablist" aria-label="now playing panes">
+    <div className="uw-segment" role="tablist" aria-label={t('stage.modeTabsA11y')}>
       {MODES.map((m) => {
         const active = m.key === mode;
         return (
           <Pressable
             key={m.key}
             onPress={onSelect === undefined ? undefined : () => onSelect(m.key)}
-            ariaLabel={m.label}
+            ariaLabel={t(m.label)}
             ariaSelected={active}
             className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
           >
@@ -172,7 +176,7 @@ export function ModeSegment({
               color={active ? 'bright' : 'secondary'}
               className={active ? 'uw-text--bold' : undefined}
             >
-              {m.label}
+              {t(m.label)}
             </Text>
           </Pressable>
         );
@@ -308,27 +312,27 @@ export function NowPlayingScreen({
                     color={radio.status === 'failed' ? 'warn' : 'secondary'}
                   >
                     {radio.label}
-                    {radio.fetching ? ' · fetching' : ''}
+                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
                     {radio.detail === null ? '' : ` · ${radio.detail}`}
                   </Text>
                   <Pressable
                     onPress={onStopRadio}
-                    ariaLabel="stop radio"
+                    ariaLabel={t('stage.radio.stopA11y')}
                     className="uw-stage__radio-action"
                   >
                     <Text variant="metadata" color="primary">
-                      stop
+                      {t('stage.radio.stop')}
                     </Text>
                   </Pressable>
                 </>
               ) : (
                 <Pressable
                   onPress={onStartRadio}
-                  ariaLabel="start radio"
+                  ariaLabel={t('stage.radio.start')}
                   className="uw-stage__radio-action"
                 >
                   <Text variant="metadata" color="secondary">
-                    start radio
+                    {t('stage.radio.start')}
                   </Text>
                 </Pressable>
               )}
@@ -354,29 +358,29 @@ export function NowPlayingScreen({
            * loading is bounded by the session's own op deadline.
            */}
           {lyrics === undefined ? (
-            <EmptyState title="no lyrics" icon="lyrics" />
+            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : lyrics.state === 'loading' ? (
-            <LoadingState title="loading lyrics" />
+            <LoadingState title={t('lyrics.loading')} />
           ) : lyrics.state === 'error' ? (
             <ErrorState
-              title="couldn't load lyrics"
+              title={t('lyrics.errorTitle')}
               hint={lyrics.message}
               onRetry={onRetryLyrics}
             />
           ) : lyrics.state === 'instrumental' ? (
             <EmptyState
-              title="instrumental"
+              title={t('lyrics.instrumental')}
               hint={lyrics.message}
               icon="lyrics"
             />
           ) : lyrics.state === 'unavailable' ? (
             <EmptyState
-              title="no lyrics"
+              title={t('lyrics.empty')}
               hint={lyrics.message}
               icon="lyrics"
             />
           ) : lyrics.lines.length === 0 ? (
-            <EmptyState title="no lyrics" icon="lyrics" />
+            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : (
             <div className="uw-lyrics" data-state={lyrics.state}>
               {lyrics.lines.map((line, i) => (
@@ -402,7 +406,7 @@ export function NowPlayingScreen({
       {activeMode === 'queue' && (
         <div className="uw-stage__queue">
           {queue === undefined ? (
-            <EmptyState title="queue is empty" icon="queue" />
+            <EmptyState title={t('queue.empty')} icon="queue" />
           ) : (
             <>
               {onToggleQueueReorder !== undefined && (
@@ -417,7 +421,7 @@ export function NowPlayingScreen({
                         : 'var(--text-secondary)'
                     }
                     ariaLabel={
-                      queueReordering ? 'done reordering' : 'reorder queue'
+                      queueReordering ? t('queue.reorderDone') : t('queue.reorder')
                     }
                     active={queueReordering}
                     onPress={onToggleQueueReorder}
@@ -476,7 +480,7 @@ export function StageSheet({ expanded, onExpandChange, ...rest }: StageSheetProp
       className="uw-sheet-host"
       role="dialog"
       aria-modal="true"
-      aria-label="now playing"
+      aria-label={t('stage.sheetA11y')}
       data-sheet="stage"
     >
       <NowPlayingScreen {...rest} />

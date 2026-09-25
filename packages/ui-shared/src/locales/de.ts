@@ -53,6 +53,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   // ---- player -------------------------------------------------------------
   'player.a11y.nowPlaying':
     'läuft gerade, {title}{artist}, {status}, player öffnen',
+  'player.a11y.transport': 'steuerung',
+  'player.a11y.stopDismiss': 'stoppen und schließen',
   'player.status.preparing': 'wird vorbereitet',
   'player.status.buffering': 'puffert',
   'player.status.playing': 'wird abgespielt',
@@ -73,12 +75,14 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'track.a11y.drag': 'zum umsortieren ziehen',
   'track.a11y.remove': 'aus der warteschlange entfernen',
   'track.a11y.longPressHint': 'lange drücken für mehr aktionen',
+  'track.a11y.rowActions': 'zeilenaktionen',
   'track.download.complete': 'abgeschlossen',
   'track.download.idle': 'inaktiv',
   'track.download.queued': 'wartend',
   'track.download.downloading': 'wird geladen',
   'track.download.stored': 'gespeichert',
   'track.download.failed': 'fehlgeschlagen',
+  'track.download.tooltip': 'download {state}',
   'track.unknown': 'unbekannter titel',
   'track.fallbackTitle': 'titel',
 
@@ -110,6 +114,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'search.noResultsHint': 'versuche eine andere suche',
   'search.failed': 'suche fehlgeschlagen',
   'search.unavailableTitle': 'suche nicht verfügbar',
+  'search.resultsA11y': 'suchergebnisse',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'deine bibliothek',
@@ -126,6 +131,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'library.filter.playlists': 'playlists',
   'library.filter.albums': 'alben',
   'library.filter.artists': 'künstler',
+  'library.kindFilterA11y': 'typ-filter',
   'library.artistsHeading': 'künstler',
   'library.recentlyLiked': 'zuletzt gemerkt',
   'library.emptyTitle': 'hier ist noch nichts',
@@ -176,6 +182,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   },
   'sheets.countryCodePlaceholder': 'ländercode (z. b. US)',
   'sheets.autoClear': 'automatisch — der systemsprache folgen',
+  'sheets.closeA11y': 'dialog schließen',
 
   // ---- entity screen ------------------------------------------------------
   'entity.kind.playlist': 'playlist',
@@ -194,6 +201,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'stage.mode.player': 'player',
   'stage.mode.lyrics': 'songtext',
   'stage.mode.queue': 'warteschlange',
+  'stage.modeTabsA11y': 'wiedergabe-ansichten',
+  'stage.sheetA11y': 'läuft gerade',
   'stage.download.storedA11y': 'heruntergeladen — entfernen',
   'stage.download.failedA11y': 'download fehlgeschlagen — erneut versuchen',
   'stage.download.busyA11y': 'wird heruntergeladen — abbrechen',
@@ -226,6 +235,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'corrections.filter.resolved': 'erledigt',
   'corrections.filter.all': 'alle',
   'corrections.filterA11y': '{label} anzeigen',
+  'corrections.statusFilterA11y': 'status-filter',
   'corrections.loading': 'prüfungen werden geladen',
   'corrections.errorTitle': 'prüfungen konnten nicht geladen werden',
   'corrections.empty': 'nichts zu prüfen',
@@ -336,6 +346,24 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'sync.cameraNeeded':
     'kamerazugriff wird benötigt, um den kopplungs-qr-code zu scannen',
   'sync.cameraGrantA11y': 'kamerazugriff erlauben',
+  // Desktop sync panel rows + pairing sheet (ui-web surfaces).
+  'sync.engineSuffix': ' · engine {label}',
+  'sync.sessionsSuffix': ' · sessions {label}',
+  'sync.panel.listener': 'listener',
+  'sync.panel.thisDevice': 'dieses gerät',
+  'sync.panel.advertise': 'sichtbarkeit',
+  'sync.panel.lastSync': 'letzte synchronisierung',
+  'sync.panel.fingerprint': 'fingerabdruck',
+  'sync.panel.pairedDevices': 'gekoppelte geräte',
+  'sync.panel.deltaExchange': 'delta-austausch',
+  'sync.panel.copyDelta': 'delta kopieren',
+  'sync.panel.pasteDelta': 'delta einfügen',
+  'sync.pairDevice': 'gerät koppeln',
+  'pairing.scanHint': 'mit der app auf dem anderen gerät scannen',
+  'pairing.typeHint': '…oder code und adresse eingeben',
+  'pairing.copyPayload': 'payload kopieren',
+  'pairing.copyPayloadA11y': 'kopplungs-payload kopieren',
+  'pairing.qrA11y': 'kopplungs-qr-code',
 
   // ---- relative time ------------------------------------------------------
   'ago.justNow': 'gerade eben',
@@ -353,6 +381,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.languageValue.de': 'deutsch',
   'settings.heading.settings': 'einstellungen',
   'settings.heading.diagnostics': 'diagnose',
+  'settings.heading.sync': 'sync',
   'settings.diag.providers': 'anbieter',
   'settings.diag.none': 'keine',
   'settings.diag.attemptTrace': 'versuchsverlauf',
@@ -414,6 +443,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'nav.explore': 'entdecken',
   'nav.library': 'bibliothek',
   'nav.settings': 'einstellungen',
+  'nav.primaryA11y': 'hauptnavigation',
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} fehlgeschlagen — {message}',

@@ -52,6 +52,8 @@ export const en = {
 
   // ---- player -------------------------------------------------------------
   'player.a11y.nowPlaying': 'now playing, {title}{artist}, {status}, open player',
+  'player.a11y.transport': 'transport',
+  'player.a11y.stopDismiss': 'stop and dismiss',
   'player.status.preparing': 'preparing',
   'player.status.buffering': 'buffering',
   'player.status.playing': 'playing',
@@ -72,12 +74,14 @@ export const en = {
   'track.a11y.drag': 'drag to reorder',
   'track.a11y.remove': 'remove from queue',
   'track.a11y.longPressHint': 'long-press for more actions',
+  'track.a11y.rowActions': 'row actions',
   'track.download.complete': 'complete',
   'track.download.idle': 'idle',
   'track.download.queued': 'queued',
   'track.download.downloading': 'downloading',
   'track.download.stored': 'stored',
   'track.download.failed': 'failed',
+  'track.download.tooltip': 'download {state}',
   'track.unknown': 'unknown track',
   'track.fallbackTitle': 'track',
 
@@ -106,6 +110,7 @@ export const en = {
   'search.noResultsHint': 'try a different search',
   'search.failed': 'search failed',
   'search.unavailableTitle': 'search unavailable',
+  'search.resultsA11y': 'search results',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'your library',
@@ -119,6 +124,7 @@ export const en = {
   'library.filter.playlists': 'playlists',
   'library.filter.albums': 'albums',
   'library.filter.artists': 'artists',
+  'library.kindFilterA11y': 'kind filter',
   'library.artistsHeading': 'artists',
   'library.recentlyLiked': 'recently liked',
   'library.emptyTitle': 'nothing here yet',
@@ -165,6 +171,7 @@ export const en = {
   'sheets.itemA11y': { other: '{name}, {count} tracks' },
   'sheets.countryCodePlaceholder': 'country code (e.g. US)',
   'sheets.autoClear': 'auto — defer to system locale',
+  'sheets.closeA11y': 'close sheet',
 
   // ---- entity screen ------------------------------------------------------
   'entity.kind.playlist': 'playlist',
@@ -182,6 +189,8 @@ export const en = {
   'stage.mode.player': 'player',
   'stage.mode.lyrics': 'lyrics',
   'stage.mode.queue': 'queue',
+  'stage.modeTabsA11y': 'now playing panes',
+  'stage.sheetA11y': 'now playing',
   'stage.download.storedA11y': 'downloaded — remove',
   'stage.download.failedA11y': 'download failed — retry',
   'stage.download.busyA11y': 'downloading — cancel',
@@ -214,6 +223,7 @@ export const en = {
   'corrections.filter.resolved': 'resolved',
   'corrections.filter.all': 'all',
   'corrections.filterA11y': 'show {label}',
+  'corrections.statusFilterA11y': 'status filter',
   'corrections.loading': 'loading reviews',
   'corrections.errorTitle': "couldn't load reviews",
   'corrections.empty': 'nothing to review',
@@ -317,6 +327,24 @@ export const en = {
   'sync.expires.minutes': 'expires in {minutes}m',
   'sync.cameraNeeded': 'camera access is needed to scan the pairing QR',
   'sync.cameraGrantA11y': 'grant camera access',
+  // Desktop sync panel rows + pairing sheet (ui-web surfaces).
+  'sync.engineSuffix': ' · engine {label}',
+  'sync.sessionsSuffix': ' · sessions {label}',
+  'sync.panel.listener': 'listener',
+  'sync.panel.thisDevice': 'this device',
+  'sync.panel.advertise': 'advertise',
+  'sync.panel.lastSync': 'last sync',
+  'sync.panel.fingerprint': 'fingerprint',
+  'sync.panel.pairedDevices': 'paired devices',
+  'sync.panel.deltaExchange': 'delta exchange',
+  'sync.panel.copyDelta': 'copy delta',
+  'sync.panel.pasteDelta': 'paste delta',
+  'sync.pairDevice': 'pair a device',
+  'pairing.scanHint': 'scan with the app on the other device',
+  'pairing.typeHint': '…or type the code and address',
+  'pairing.copyPayload': 'copy payload',
+  'pairing.copyPayloadA11y': 'copy pairing payload',
+  'pairing.qrA11y': 'pairing QR code',
 
   // ---- relative time ------------------------------------------------------
   'ago.justNow': 'just now',
@@ -334,6 +362,7 @@ export const en = {
   'settings.languageValue.de': 'deutsch',
   'settings.heading.settings': 'settings',
   'settings.heading.diagnostics': 'diagnostics',
+  'settings.heading.sync': 'sync',
   'settings.diag.providers': 'providers',
   'settings.diag.none': 'none',
   'settings.diag.attemptTrace': 'attempt trace',
@@ -394,6 +423,7 @@ export const en = {
   'nav.explore': 'explore',
   'nav.library': 'library',
   'nav.settings': 'settings',
+  'nav.primaryA11y': 'primary',
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} failed — {message}',

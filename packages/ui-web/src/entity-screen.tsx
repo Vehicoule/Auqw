@@ -9,6 +9,7 @@ import {
 import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type { EntityScreenModel, TrackRowModel } from '@auqw/ui-shared';
 
 export type EntityScreenProps = {
@@ -68,7 +69,7 @@ function HeaderPill({
 function BackRow({ onBack }: { readonly onBack?: (() => void) | undefined }) {
   return (
     <div className="uw-back-row">
-      <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+      <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
         <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
       </Pressable>
     </div>
@@ -113,7 +114,7 @@ export function EntityScreen({
     return (
       <div className="uw-screen uw-entity">
         <BackRow onBack={onBack} />
-        <LoadingState title="loading" />
+        <LoadingState title={t('state.loading')} />
       </div>
     );
   }
@@ -122,7 +123,7 @@ export function EntityScreen({
       <div className="uw-screen uw-entity">
         <BackRow onBack={onBack} />
         <ErrorState
-          title="couldn't load this page"
+          title={t('entity.errorTitle')}
           hint={model.message}
           onRetry={onRetry}
         />
@@ -145,7 +146,7 @@ export function EntityScreen({
           uppercase
           className="uw-entity__kind"
         >
-          {model.kind ?? 'entity'}
+          {model.kind === null ? t('entity.kind.fallback') : t(`entity.kind.${model.kind}`)}
         </Text>
         <Text variant="heading" color="bright" numberOfLines={2}>
           {model.title}
@@ -159,14 +160,14 @@ export function EntityScreen({
 
       <div className="uw-entity__actions">
         <HeaderPill
-          label="play"
+          label={t('common.play')}
           icon="play"
           accent
           disabled={model.items.length === 0}
           onPress={onPlayAll}
         />
         <HeaderPill
-          label="shuffle"
+          label={t('entity.shuffle')}
           icon="shuffle"
           disabled={model.items.length === 0}
           onPress={onShuffleAll}
@@ -181,7 +182,7 @@ export function EntityScreen({
           size={34}
           iconSize={16}
           color={model.liked ? 'var(--liked)' : undefined}
-          ariaLabel={model.liked ? 'unlike' : 'like'}
+          ariaLabel={model.liked ? t('common.unlike') : t('common.like')}
           onPress={model.canLike ? onToggleLike : undefined}
         />
       </div>
@@ -191,16 +192,15 @@ export function EntityScreen({
         <div className="uw-notice uw-notice--warn">
           <Icon name="warn" size={14} color="var(--warn)" />
           <Text variant="metadata" color="secondary">
-            {model.message ??
-              'partial page — some sections are unavailable upstream'}
+            {model.message ?? t('entity.partial')}
           </Text>
         </div>
       )}
 
       {model.items.length === 0 ? (
         <EmptyState
-          title="no tracks on this page"
-          hint="the provider returned an empty listing"
+          title={t('entity.empty')}
+          hint={t('entity.emptyHint')}
           icon="note"
         />
       ) : (
@@ -227,7 +227,7 @@ export function EntityScreen({
           {model.hasMore && (
             <Pressable
               onPress={model.loadingMore ? undefined : onLoadMore}
-              ariaLabel="load more"
+              ariaLabel={t('entity.loadMore')}
               className="uw-load-more"
             >
               {model.loadingMore ? (
@@ -240,7 +240,7 @@ export function EntityScreen({
                 />
               )}
               <Text variant="metadata" color="secondary">
-                {model.loadingMore ? 'loading' : 'load more'}
+                {model.loadingMore ? t('state.loading') : t('entity.loadMore')}
               </Text>
             </Pressable>
           )}

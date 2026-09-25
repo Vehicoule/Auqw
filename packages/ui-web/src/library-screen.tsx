@@ -4,11 +4,13 @@ import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { NameField } from './sheets.tsx';
+import { t } from '@auqw/ui-shared';
 import type {
   ArtistRailModel,
   CollectionKey,
   LibraryCardModel,
   LibraryModel,
+  MessageId,
 } from '@auqw/ui-shared';
 
 export type LibraryScreenProps = {
@@ -35,13 +37,15 @@ const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
   history: 'clock',
 };
 
+// Labels are message ids resolved at render — never cache translated
+// strings at module scope or they go stale on a locale switch.
 const KIND_FILTERS: readonly {
   readonly key: 'playlist' | 'album' | 'artist';
-  readonly label: string;
+  readonly label: MessageId;
 }[] = [
-  { key: 'playlist', label: 'playlists' },
-  { key: 'album', label: 'albums' },
-  { key: 'artist', label: 'artists' },
+  { key: 'playlist', label: 'library.filter.playlists' },
+  { key: 'album', label: 'library.filter.albums' },
+  { key: 'artist', label: 'library.filter.artists' },
 ];
 
 function CollectionTile({
@@ -62,7 +66,7 @@ function CollectionTile({
       <Pressable
         onPress={enabled ? onOpen : undefined}
         disabled={!enabled}
-        ariaLabel={`${tile.label}, ${tile.count} tracks`}
+        ariaLabel={t('library.tileA11y', { label: tile.label, count: tile.count })}
         className="uw-collection__body"
       >
         <Icon
@@ -75,7 +79,7 @@ function CollectionTile({
             {tile.label}
           </Text>
           <Text variant="metadata" color="secondary" numberOfLines={2}>
-            {tile.note ?? `${tile.count} ${tile.count === 1 ? 'track' : 'tracks'}`}
+            {tile.note ?? t('common.trackCount', { count: tile.count })}
           </Text>
         </span>
       </Pressable>
@@ -85,7 +89,7 @@ function CollectionTile({
           size={30}
           iconSize={13}
           color="var(--text-bright)"
-          ariaLabel={`play ${tile.label}`}
+          ariaLabel={t('library.tilePlayA11y', { label: tile.label })}
           onPress={tile.count === 0 ? undefined : onPlay}
         />
       )}
@@ -127,14 +131,14 @@ function NewPlaylistCard({
     return (
       <Pressable
         onPress={onPress}
-        ariaLabel="new playlist"
+        ariaLabel={t('common.newPlaylist')}
         className="uw-newpl uw-newpl--row"
       >
         <span className="uw-newpl__art">
           <Icon name="list-plus" size={15} color="var(--text-secondary)" />
         </span>
         <Text variant="body" color="secondary">
-          new playlist
+          {t('common.newPlaylist')}
         </Text>
       </Pressable>
     );
@@ -142,12 +146,12 @@ function NewPlaylistCard({
   return (
     <Pressable
       onPress={onPress}
-      ariaLabel="new playlist"
+      ariaLabel={t('common.newPlaylist')}
       className="uw-newpl uw-newpl--grid"
     >
       <Icon name="list-plus" size={16} color="var(--text-secondary)" />
       <Text variant="metadata" color="secondary" className="uw-newpl__label">
-        new playlist
+        {t('common.newPlaylist')}
       </Text>
     </Pressable>
   );
@@ -164,7 +168,7 @@ function LibraryCard({
 }) {
   const openable = card.playlistId !== null || card.entityRef !== null;
   const press = openable ? onPress : undefined;
-  const label = `${card.title}, ${card.subtitle}`;
+  const label = t('common.cardA11y', { title: card.title, subtitle: card.subtitle });
   if (view === 'list') {
     return (
       <Pressable
@@ -267,7 +271,7 @@ export function LibraryScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <Text variant="display" color="bright">
-        library
+        {t('nav.library')}
       </Text>
 
       {/* collections — liked · downloads · top 50 · history */}
@@ -297,29 +301,29 @@ export function LibraryScreen({
       <div className="uw-library__controls">
         <div className="uw-library__controls-row">
           <Text variant="heading" color="bright">
-            your library
+            {t('library.heading')}
           </Text>
           <ToggleChip
-            label={sort}
+            label={t(`library.sort.${sort}`)}
             active={false}
             onPress={() => setSort(sort === 'recent' ? 'title' : 'recent')}
           />
           <ToggleChip
-            label={view}
+            label={t(`library.view.${view}`)}
             active={false}
             onPress={() => setView(view === 'grid' ? 'list' : 'grid')}
           />
         </div>
-        <div className="uw-library__filters" role="toolbar" aria-label="kind filter">
+        <div className="uw-library__filters" role="toolbar" aria-label={t('library.kindFilterA11y')}>
           <ToggleChip
-            label="all"
+            label={t('library.filter.all')}
             active={filter === 'all'}
             onPress={() => setFilter('all')}
           />
           {kindsPresent.map((f) => (
             <ToggleChip
               key={f.key}
-              label={f.label}
+              label={t(f.label)}
               active={filter === f.key}
               onPress={() => setFilter(f.key)}
             />
@@ -330,7 +334,7 @@ export function LibraryScreen({
       {creating && (
         <NameField
           value={draft}
-          placeholder="new playlist name"
+          placeholder={t('common.newPlaylistName')}
           autoFocus
           onChange={setDraft}
           onSubmit={
@@ -352,8 +356,8 @@ export function LibraryScreen({
       {cards.length === 0 && !creating ? (
         <div className="uw-library__empty">
           <EmptyState
-            title="nothing here yet"
-            hint="playlists and liked albums land here"
+            title={t('library.emptyTitle')}
+            hint={t('library.emptyHint')}
             icon="list-plus"
           />
           <NewPlaylistCard
@@ -416,7 +420,7 @@ export function LibraryScreen({
       {model.artists.length > 0 && (
         <div className="uw-library__section">
           <Text variant="heading" color="bright">
-            artists
+            {t('library.artistsHeading')}
           </Text>
           <div className="uw-artist-rail" role="list">
             {model.artists.map((artist) => {
@@ -448,11 +452,11 @@ export function LibraryScreen({
       {model.recentlyAdded.length > 0 && (
         <div className="uw-library__section">
           <Text variant="heading" color="bright">
-            recently liked
+            {t('library.recentlyLiked')}
           </Text>
           <div
             role="list"
-            aria-label="recently liked"
+            aria-label={t('library.recentlyLiked')}
             className="uw-list"
             onKeyDown={list.listProps.onKeyDown}
           >

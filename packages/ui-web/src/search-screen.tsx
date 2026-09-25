@@ -7,6 +7,7 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
 
 export type SearchScreenProps = {
@@ -83,8 +84,8 @@ export function SearchScreen({
           ref={inputRef}
           type="search"
           className="uw-search__input"
-          aria-label="search"
-          placeholder="search"
+          aria-label={t('search.fieldLabel')}
+          placeholder={t('search.fieldLabel')}
           autoComplete="off"
           spellCheck={false}
           autoFocus={autoFocus}
@@ -107,11 +108,11 @@ export function SearchScreen({
             {onCancel !== undefined && (
               <Pressable
                 onPress={onCancel}
-                ariaLabel="cancel search"
+                ariaLabel={t('search.a11y.cancel')}
                 className="uw-search__cancel"
               >
                 <Text variant="metadata" color="accent">
-                  cancel
+                  {t('common.cancel')}
                 </Text>
               </Pressable>
             )}
@@ -120,7 +121,7 @@ export function SearchScreen({
         {!loading && editing !== '' && onQueryChange !== undefined && (
           <Pressable
             onPress={() => onQueryChange('')}
-            ariaLabel="clear search"
+            ariaLabel={t('search.a11y.clear')}
             className="uw-search__clear"
           >
             <Icon name="close" size={12} color="var(--text-secondary)" />
@@ -130,10 +131,13 @@ export function SearchScreen({
       {state.phase === 'ready' && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
-            results
+            {t('search.results')}
           </Text>
           <Text variant="metadata" color="secondary" className="uw-search__count">
-            {state.providerId ?? 'catalog'} · {state.results.length} matches
+            {t('search.resultsMeta', {
+              provider: state.providerId ?? t('search.providerFallback'),
+              count: state.results.length,
+            })}
           </Text>
         </div>
       )}
@@ -146,7 +150,7 @@ export function SearchScreen({
               uppercase
               className="uw-search__recents-label"
             >
-              recent searches
+              {t('search.recent')}
             </Text>
             {recents.map((recent) => (
               <Pressable
@@ -156,7 +160,7 @@ export function SearchScreen({
                     ? undefined
                     : () => onRecentPress(recent)
                 }
-                ariaLabel={`search again for ${recent}`}
+                ariaLabel={t('search.a11y.again', { query: recent })}
                 className="uw-search__recent"
               >
                 <Icon name="clock" size={14} color="var(--text-secondary)" />
@@ -168,31 +172,31 @@ export function SearchScreen({
           </div>
         ) : (
           <EmptyState
-            title="search the catalog"
-            hint="results show up here"
+            title={t('search.emptyTitle')}
+            hint={t('search.emptyHint')}
             icon="search"
           />
         ))}
       {state.phase === 'loading' && state.results.length === 0 && (
-        <LoadingState title="searching" hint={state.query} />
+        <LoadingState title={t('search.loading')} hint={state.query} />
       )}
       {state.phase === 'empty' && (
         <EmptyState
-          title={`no results for “${state.query}”`}
-          hint="try a different search"
+          title={t('search.noResults', { query: state.query })}
+          hint={t('search.noResultsHint')}
           icon="search"
         />
       )}
       {state.phase === 'error' && (
         <ErrorState
-          title="search failed"
+          title={t('search.failed')}
           hint={state.message}
           onRetry={state.retryable ? onRetry : undefined}
         />
       )}
       {state.phase === 'unavailable' && (
         <UnavailableState
-          title="search unavailable"
+          title={t('search.unavailableTitle')}
           hint={state.message}
         />
       )}
@@ -200,7 +204,7 @@ export function SearchScreen({
         state.results.length > 0 && (
           <div
             role="list"
-            aria-label="search results"
+            aria-label={t('search.resultsA11y')}
             className="uw-list"
             data-scroll={scrollEnabled ? 'true' : 'false'}
             onKeyDown={list.listProps.onKeyDown}

@@ -5,11 +5,15 @@ import type {
   CorrectionsModel,
   ReviewRowModel,
 } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
+import type { MessageId } from '@auqw/ui-shared';
 
-const FILTERS: readonly { value: CorrectionsFilter; label: string }[] = [
-  { value: 'pending', label: 'pending' },
-  { value: 'resolved', label: 'resolved' },
-  { value: 'all', label: 'all' },
+// Filter labels are message ids resolved at render — never cache
+// translated strings at module scope or they go stale on a locale switch.
+const FILTERS: readonly { value: CorrectionsFilter; label: MessageId }[] = [
+  { value: 'pending', label: 'corrections.filter.pending' },
+  { value: 'resolved', label: 'corrections.filter.resolved' },
+  { value: 'all', label: 'corrections.filter.all' },
 ];
 
 export type CorrectionsScreenProps = {
@@ -48,24 +52,27 @@ export function CorrectionsScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-collection__head">
-        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Text variant="display" color="bright" className="uw-collection__title">
-          corrections
+          {t('corrections.title')}
         </Text>
         <Text variant="metadata" color="secondary">
-          {model.pendingCount} pending · {model.resolvedCount} resolved
+          {t('corrections.counts', {
+            pending: model.pendingCount,
+            resolved: model.resolvedCount,
+          })}
         </Text>
       </div>
-      <div className="uw-corrections__filters" role="toolbar" aria-label="status filter">
+      <div className="uw-corrections__filters" role="toolbar" aria-label={t('corrections.statusFilterA11y')}>
         {FILTERS.map((filter) => (
           <Pressable
             key={filter.value}
             onPress={
               onFilter === undefined ? undefined : () => onFilter(filter.value)
             }
-            ariaLabel={`show ${filter.label}`}
+            ariaLabel={t('corrections.filterA11y', { label: t(filter.label) })}
             ariaSelected={model.filter === filter.value}
             className={`uw-chip${model.filter === filter.value ? ' uw-chip--active' : ''}`}
           >
@@ -73,31 +80,31 @@ export function CorrectionsScreen({
               variant="metadata"
               color={model.filter === filter.value ? 'bright' : 'secondary'}
             >
-              {filter.label}
+              {t(filter.label)}
             </Text>
           </Pressable>
         ))}
       </div>
       {model.state === 'loading' ? (
-        <LoadingState title="loading reviews" />
+        <LoadingState title={t('corrections.loading')} />
       ) : model.state === 'error' ? (
         <ErrorState
-          title="couldn't load reviews"
+          title={t('corrections.errorTitle')}
           hint={model.message}
           onRetry={onRetry}
         />
       ) : model.rows.length === 0 ? (
         <EmptyState
-          title="nothing to review"
+          title={t('corrections.empty')}
           hint={
             model.filter === 'pending'
-              ? 'no match candidates are waiting on you'
-              : 'no reviews in this filter'
+              ? t('corrections.emptyHint.pending')
+              : t('corrections.emptyHint.other')
           }
           icon="check"
         />
       ) : (
-        <div role="list" aria-label="match reviews">
+        <div role="list" aria-label={t('settings.diag.matchReviews')}>
           {model.rows.map((row) => (
             <ReviewRow
               key={row.reviewId}
@@ -156,7 +163,7 @@ function ReviewRow({
               : undefined
           }
           disabled={!pending || onConfirm === undefined}
-          ariaLabel={`confirm ${candidate.title}`}
+          ariaLabel={t('corrections.a11y.confirm', { title: candidate.title })}
           className={`uw-review__candidate${pending ? '' : ' uw-off'}`}
         >
           {pending && (
@@ -186,11 +193,11 @@ function ReviewRow({
             onPress={
               onReject === undefined ? undefined : () => onReject(row.reviewId)
             }
-            ariaLabel={`reject ${row.title}`}
+            ariaLabel={t('corrections.a11y.reject', { title: row.title })}
             className="uw-review__action"
           >
             <Text variant="metadata" color="warn">
-              reject all
+              {t('corrections.rejectAll')}
             </Text>
           </Pressable>
         ) : (
@@ -198,11 +205,11 @@ function ReviewRow({
             onPress={
               onUndo === undefined ? undefined : () => onUndo(row.reviewId)
             }
-            ariaLabel={`undo ${row.title}`}
+            ariaLabel={t('corrections.a11y.undo', { title: row.title })}
             className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
-              undo
+              {t('corrections.undo')}
             </Text>
           </Pressable>
         )}

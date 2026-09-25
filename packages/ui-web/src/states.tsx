@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Icon, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { Pressable } from './primitives.tsx';
+import { t } from '@auqw/ui-shared';
 
 export type StateViewProps = {
   readonly title: string;
@@ -42,7 +43,7 @@ function StateShell({
   );
 }
 
-export function LoadingState({ title = 'loading', hint = null }: StateViewProps) {
+export function LoadingState({ title = t('state.loading'), hint = null }: StateViewProps) {
   return (
     <div className="uw-state" role="status" aria-live="polite">
       <span className="uw-state__icon">
@@ -76,11 +77,11 @@ export function ErrorState({
       {onRetry !== undefined && (
         <Pressable
           onPress={onRetry}
-          ariaLabel="retry"
+          ariaLabel={t('state.retry')}
           className="uw-state__retry"
         >
           <Text variant="metadata" color="accent">
-            retry
+            {t('state.retry')}
           </Text>
         </Pressable>
       )}

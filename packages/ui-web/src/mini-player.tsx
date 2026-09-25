@@ -6,6 +6,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { ArtworkRing } from './progress.tsx';
+import { t } from '@auqw/ui-shared';
 import type { PlayerModel } from '@auqw/ui-shared';
 
 export type MiniPlayerProps = {
@@ -39,7 +40,11 @@ export function MiniPlayer({
     <div className="uw-mini" data-status={player.status}>
       <Pressable
         onPress={onPress}
-        ariaLabel={`now playing, ${player.title}${player.artist === null ? '' : `, ${player.artist}`}, ${player.status}, open player`}
+        ariaLabel={t('player.a11y.nowPlaying', {
+          title: player.title,
+          artist: player.artist === null ? '' : t('track.a11y.artistSuffix', { artist: player.artist }),
+          status: t(`player.status.${player.status}`),
+        })}
         className="uw-mini__open"
       >
         <ArtworkRing artworkUrl={player.artworkUrl} progress={progress} />
@@ -57,13 +62,13 @@ export function MiniPlayer({
           icon="previous"
           size={30}
           iconSize={13}
-          ariaLabel="previous"
+          ariaLabel={t('common.previous')}
           onPress={onPrevious}
         />
       )}
       <Pressable
         onPress={onPlayPause}
-        ariaLabel={player.status === 'playing' ? 'pause' : 'play'}
+        ariaLabel={player.status === 'playing' ? t('common.pause') : t('common.play')}
         className="uw-mini__play"
       >
         {busy ? (
@@ -81,7 +86,7 @@ export function MiniPlayer({
           icon="next"
           size={30}
           iconSize={13}
-          ariaLabel="next"
+          ariaLabel={t('common.next')}
           onPress={onNext}
         />
       )}
@@ -91,7 +96,7 @@ export function MiniPlayer({
           size={30}
           iconSize={14}
           color={player.liked ? 'var(--liked)' : 'var(--text-secondary)'}
-          ariaLabel={player.liked ? 'unlike' : 'like'}
+          ariaLabel={player.liked ? t('common.unlike') : t('common.like')}
           onPress={onToggleLike}
         />
       )}
@@ -100,7 +105,7 @@ export function MiniPlayer({
           icon="close"
           size={30}
           iconSize={12}
-          ariaLabel="stop and dismiss"
+          ariaLabel={t('player.a11y.stopDismiss')}
           onPress={onDismiss}
         />
       )}

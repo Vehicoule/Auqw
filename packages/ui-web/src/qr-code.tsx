@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { encode } from 'uqr';
+import { t } from '@auqw/ui-shared';
 
 /**
  * QR payload rendered as an inline SVG: uqr produces the module
@@ -36,7 +37,7 @@ export function QrCode({
       width={size}
       height={size}
       role="img"
-      aria-label="pairing QR code"
+      aria-label={t('pairing.qrA11y')}
       shapeRendering="crispEdges"
     >
       <rect width={modules} height={modules} fill="#ffffff" />

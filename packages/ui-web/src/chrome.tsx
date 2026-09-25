@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
+import { t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
 
 const NAV_ICONS: Record<string, IconName> = {
@@ -34,7 +35,7 @@ export function DesktopSidebar({
   onSelect,
 }: DesktopSidebarProps) {
   return (
-    <nav className="uw-sidebar" aria-label="primary">
+    <nav className="uw-sidebar" aria-label={t('nav.primaryA11y')}>
       <div className="uw-sidebar__brand">
         <Icon name="note" size={15} color="var(--accent)" />
         <Text variant="label" color="bright" uppercase>
@@ -90,7 +91,7 @@ export function DesktopHeader({
   return (
     <header className="uw-header">
       {onBack !== undefined && (
-        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
       )}

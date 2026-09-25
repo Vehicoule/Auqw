@@ -21,6 +21,7 @@ import type {
   AttemptTrace,
   EntityPage,
   EntityRef,
+  ImportPreview,
   LyricsSheet,
   MatchReview,
   OperationContext,
@@ -61,6 +62,7 @@ import {
   ValueFieldSheet,
   entityIdForRef,
   formatClock,
+  languageOptionKey,
   languageOptions,
   resolveLocale,
   setLocale,
@@ -106,6 +108,11 @@ import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
+
+// Boot and gate strings render before the ready settings arrive —
+// seed the UI language from the system tag so those first screens
+// translate too; Main still pins the persisted language afterwards.
+setLocale(resolveLocale(undefined, systemLocaleTag()));
 
 const SEARCH_LIMIT = 25;
 const DIAGNOSTICS_LIMIT = 20;
@@ -754,6 +761,24 @@ function Main({
   // file's text is stashed between preview and confirm.
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
+  // The staged import preview is a localized snapshot — its row
+  // labels freeze at file-choice time. The raw document is kept
+  // beside it so the model can be rebuilt in the current language
+  // whenever the locale changes (localeTick effect below).
+  const importPreviewRaw = useRef<{
+    preview: ImportPreview;
+    sourceLabel: string;
+  } | null>(null);
+  useEffect(() => {
+    const raw = importPreviewRaw.current;
+    if (raw === null) {
+      return;
+    }
+    setTransfer((prev) => ({
+      ...prev,
+      preview: toImportPreviewModel(raw.preview, raw.sourceLabel),
+    }));
+  }, [localeTick]);
   const importInput = useRef<HTMLInputElement | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
@@ -1358,6 +1383,7 @@ function Main({
       }
       if (key === 'exportLibrary' || key === 'importLibrary') {
         importText.current = null;
+        importPreviewRaw.current = null;
         setTransfer(IDLE_TRANSFER);
         pushOverlay({ type: 'transfer' });
         return;
@@ -1751,6 +1777,7 @@ function Main({
           // the honest reject; nothing was applied.
           const preview = previewImport(text);
           if (!preview.ok) {
+            importPreviewRaw.current = null;
             setTransfer((prev) => ({
               ...prev,
               importPhase: 'error',
@@ -1760,6 +1787,10 @@ function Main({
             return;
           }
           importText.current = text;
+          importPreviewRaw.current = {
+            preview: preview.value,
+            sourceLabel: file.name,
+          };
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'preview',
@@ -1767,6 +1798,7 @@ function Main({
           }));
         },
         (thrown) => {
+          importPreviewRaw.current = null;
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
@@ -1794,6 +1826,7 @@ function Main({
   }, []);
 
   const onPickImportFile = useCallback(() => {
+    importPreviewRaw.current = null;
     setTransfer((prev) => ({
       ...prev,
       importPhase: 'reading',
@@ -1879,6 +1912,7 @@ function Main({
 
   const onResetImport = useCallback(() => {
     importText.current = null;
+    importPreviewRaw.current = null;
     setTransfer((prev) => ({
       ...prev,
       importPhase: 'idle',
@@ -2928,12 +2962,22 @@ function Main({
             <ProviderPickerSheet
               title={t('sheets.languageTitle')}
               options={languageOptions()}
-              selectedKey={state.settings.language ?? 'system'}
+              selectedKey={languageOptionKey(state.settings.language)}
               onPick={(key) => {
                 const language = key === 'system' ? null : key;
-                void session.updateSettings({ ...state.settings, language });
-                applyLocale(language);
-                setLanguagePickerOpen(false);
+                // Apply the locale only once the save landed — a
+                // failed save must not leave the UI on a selection
+                // storage never recorded. The sheet closes either
+                // way; the failure surfaces through the toast.
+                void session
+                  .updateSettings({ ...state.settings, language })
+                  .then((saved) => {
+                    reportResult('settings.language', saved);
+                    if (saved.ok) {
+                      applyLocale(language);
+                    }
+                    setLanguagePickerOpen(false);
+                  });
               }}
               onDismiss={() => setLanguagePickerOpen(false)}
             />

@@ -4,6 +4,7 @@ import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { useTrackList } from './track-row.tsx';
+import { t } from '@auqw/ui-shared';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 
 // ---- optimistic reorder bookkeeping ----------------------------------
@@ -220,7 +221,7 @@ export function QueueList({
     }
   }, [queue.items, list, useAbsolute, onMoveItem]);
   if (queue.items.length === 0) {
-    return <EmptyState title="queue is empty" icon="queue" />;
+    return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
   const orderedIds = pendingIds.current ?? authIds;
@@ -283,7 +284,7 @@ export function QueueList({
   return (
     <div
       role="list"
-      aria-label="queue"
+      aria-label={t('queue.title')}
       className="uw-list"
       data-scroll={scrollEnabled ? 'true' : 'false'}
       onKeyDown={onKeyDown}
@@ -297,12 +298,12 @@ export function QueueList({
               uppercase
               className="uw-now-playing-label"
             >
-              now playing
+              {t('queue.nowPlaying')}
             </Text>
           )}
           <TrackRow
             row={item.row}
-            badge={item.duplicate ? 'repeat' : null}
+            badge={item.duplicate ? t('queue.badge.repeat') : null}
             reorderControls={reordering ? 'buttons' : 'none'}
             tabIndex={list.rowTabIndex(index)}
             onFocusRow={() => {
