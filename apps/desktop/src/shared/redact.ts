@@ -24,27 +24,52 @@ const URL_LIKE = /[a-z][a-z0-9+.-]*:\/\/[^\s]*/gi;
 const HEADER_SECRET =
   /\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Amz-Security-Token)(\s*:\s*)[^\r\n]*/gi;
 
-/** `Bearer x` / `Basic x` anywhere — no length floor on `x`. */
-const CREDENTIAL = /\b(Bearer|Basic)(\s+)([^\s;,]+)/gi;
-
 /**
- * `Token x` / `ApiKey x` outside a header. Unlike Bearer these are
- * ordinary English words too, so the value has to look token-ish before
- * anything is masked.
+ * Bare auth schemes. Case-sensitive on purpose: the scheme is
+ * capitalised by convention (`Bearer abc`), while prose writes `token`
+ * in lower case ("the token was set"), so case is what separates a
+ * credential from a sentence. No length floor — `Bearer abc123` is a
+ * credential even though it is short.
  */
-const LOOSE_CREDENTIAL =
-  /\b(Token|ApiKey)(\s+)([A-Za-z0-9._~+/=-]{2,})/gi;
+const CREDENTIAL = /\b(Bearer|Basic|Token|ApiKey)(\s+)([^\s;,]+)/g;
 
-/**
- * `token=…`, `api_key=…`, `session: …` — the key name says what it is,
- * so the value goes without guessing at its shape. The keyword must end
- * the key (`\b`), or `author:` would read as `auth`.
- */
-const KEYED_SECRET =
-  /\b[A-Za-z0-9_-]*(?:signature|authorization|password|passwd|token|secret|pwd|api_key|apikey|auth|sig|session|cookie)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi;
+/** `key=value` / `key: value`; the key decides whether it is a secret. */
+const KEYED = /\b([A-Za-z0-9_-]+)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/g;
 
 /** Long key-shaped runs: 20+ chars of key charset. */
 const OPAQUE_RUN = /[A-Za-z0-9+/_-]{20,}/g;
+
+/**
+ * Secret key names, matched as whole segments of the key or as its
+ * suffix. Segment-aware on purpose: `access_token_v2` carries `token`
+ * as a segment and is a credential, while `author` merely starts with
+ * `auth` and is not.
+ */
+const SECRET_KEYWORDS = [
+  'signature',
+  'authorization',
+  'password',
+  'passwd',
+  'token',
+  'secret',
+  'pwd',
+  'apikey',
+  'api_key',
+  'auth',
+  'sig',
+  'session',
+  'cookie',
+] as const;
+
+function looksLikeSecretKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return (
+    lower.split(/[_-]/).some((part) =>
+      (SECRET_KEYWORDS as readonly string[]).includes(part),
+    ) ||
+    SECRET_KEYWORDS.some((keyword) => lower.endsWith(keyword))
+  );
+}
 
 function redactUrl(url: string): string {
   const cut = url.search(/[?#]/);
@@ -53,22 +78,38 @@ function redactUrl(url: string): string {
   return cut === -1 ? withoutUserinfo : `${withoutUserinfo}?…`;
 }
 
+/**
+ * `/` is the one signal that separates a filesystem location from a
+ * base64 key — both contain it, and losing the failing file's path from
+ * a startup log costs more than the reverse. So a slash-bearing run is
+ * kept only when the surrounding text says "path": it starts one
+ * (`/Users/…`) or carries a file extension after it (`…state-2024.db`).
+ */
+function isPathContext(run: string, offset: number, whole: string): boolean {
+  if (!run.includes('/')) return false;
+  const before = offset > 0 ? whole[offset - 1] : undefined;
+  const tail = whole.slice(offset + run.length);
+  // Leading `/` or `~/` starts the path; a `/` immediately before the
+  // run continues one; a file extension right after it ends one.
+  return (
+    run.startsWith('/') ||
+    before === '/' ||
+    before === '~' ||
+    /^\.[A-Za-z0-9]{1,8}\b/.test(tail)
+  );
+}
+
 export function redactSensitive(text: string): string {
   return text
     .replace(URL_LIKE, redactUrl)
     .replace(HEADER_SECRET, (_m: string, name: string, sep: string) => `${name}${sep}…`)
     .replace(CREDENTIAL, (_m: string, scheme: string, gap: string) => `${scheme}${gap}…`)
-    .replace(
-      LOOSE_CREDENTIAL,
-      (_m: string, scheme: string, gap: string, value: string) =>
-        /\d|[_+/=-]/.test(value) ? `${scheme}${gap}…` : `${scheme}${gap}${value}`,
+    .replace(KEYED, (match: string, key: string, sep: string, value: string) =>
+      looksLikeSecretKey(key) ? `${key}${sep}…` : match,
     )
-    .replace(KEYED_SECRET, (_m: string, sep: string) => `${sep}…`)
-    .replace(OPAQUE_RUN, (run: string) =>
-      // A `/` means a filesystem location, not a credential: a startup
-      // failure's single most useful fact is which file it died on, so
-      // paths are never masked however long or digit-bearing they are.
-      // Digit-bearing key-shaped runs without a slash are masked.
-      run.includes('/') || !/\d|[_+-]/.test(run) ? run : '…',
+    .replace(
+      OPAQUE_RUN,
+      (run: string, offset: number, whole: string) =>
+        isPathContext(run, offset, whole) || !/\d|[_+-]/.test(run) ? run : '…',
     );
 }
