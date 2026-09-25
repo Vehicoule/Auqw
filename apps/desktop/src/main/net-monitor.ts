@@ -33,6 +33,10 @@ export function createNetService(opts: {
 }): NetService {
   const pollMs = opts.pollMs ?? 2_000;
   const senders = new Map<NetSender, number>();
+  // A `destroyed` hook is registered once per sender and outlives a
+  // full detach (drop is reference-based and stays correct), so
+  // re-attachment must never stack another copy of it.
+  const destroyedHooked = new WeakSet<NetSender>();
   let online = opts.readOnline();
 
   function drop(sender: NetSender): void {
@@ -71,7 +75,10 @@ export function createNetService(opts: {
       const count = senders.get(sender) ?? 0;
       senders.set(sender, count + 1);
       if (count === 0) {
-        sender.on?.('destroyed', () => drop(sender));
+        if (sender.on !== undefined && !destroyedHooked.has(sender)) {
+          destroyedHooked.add(sender);
+          sender.on('destroyed', () => drop(sender));
+        }
         sendTo(sender, { online });
       }
     },

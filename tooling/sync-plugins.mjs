@@ -35,6 +35,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse,
   relative,
   resolve,
   sep,
@@ -78,8 +79,12 @@ const syncSpin =
 const resolveSourcePath = (rel) => {
   const abs = resolve(ROOT, rel);
   if (existsSync(abs)) return abs;
-  let cur = '/';
-  for (const part of abs.split('/')) {
+  let cur = parse(abs).root;
+  // Split on the platform separator and start from the volume root —
+  // `resolve` yields backslash paths and a drive root on Windows, where
+  // splitting on '/' never separates a segment and the walk silently
+  // degrades to the un-resolved path.
+  for (const part of abs.slice(cur.length).split(sep)) {
     if (!part) continue;
     let entries;
     try {

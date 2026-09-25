@@ -7,9 +7,15 @@ directories:
   output: dist-packages
 
 # The packaged app is exactly the esbuild bundles + its own manifest —
-# never src/, node_modules, or the cargo target tree.
+# never src/, node_modules, or the cargo target tree. The esbuild .map
+# sidecars are excluded as well: they embed sourcesContent, so a
+# shipped map is the whole TS tree inside app.asar. dist/ keeps its
+# maps so `pnpm dev` stack traces stay useful; a packaged crash log
+# falls back to the unminified bundle lines — the accepted tradeoff
+# for a source-free artifact.
 files:
   - "dist/**/*"
+  - "!dist/**/*.map"
   - "package.json"
 
 # utilityProcess.fork resolves the entry by real path — a fork target
@@ -31,6 +37,16 @@ extraResources:
     to: plugins
 
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+# electron-builder skips its signing pass when no identity is
+# configured — the alpha case — which leaves the bundle worse than
+# unsigned: every Mach-O keeps the arm64 linker's ad-hoc signature but
+# no _CodeSignature/CodeResources seal is ever written, so `codesign
+# --verify --strict` fails and Gatekeeper reports the download as
+# damaged. after-pack.mjs seals the bundle ad-hoc and fails the build
+# when the result still will not verify. It runs before target
+# creation, so the .dmg ships the sealed app rather than the broken one.
+afterPack: ./after-pack.mjs
 
 linux:
   executableName: auqw
@@ -61,10 +77,12 @@ flatpak:
   base: org.electronjs.Electron2.BaseApp
   baseVersion: "24.08"
 
-# Unsigned alpha: adhoc-signed, no Apple notarization. macOS runners
-# are arm64 — the artifacts are Apple-silicon only (Intel macs get no
-# alpha build until a signing/universal decision). Gatekeeper flags
-# the quarantine bit; `xattr -dr com.apple.quarantine` clears it.
+# No Developer ID, no Apple notarization (parked decision) — the
+# bundle is ad-hoc sealed by after-pack.mjs so it at least verifies.
+# macOS runners are arm64: the artifacts are Apple-silicon only (Intel
+# macs get no alpha build until a universal/signing decision).
+# Gatekeeper still flags the quarantine bit; `xattr -dr
+# com.apple.quarantine` clears it.
 mac:
   category: public.app-category.music
   target:

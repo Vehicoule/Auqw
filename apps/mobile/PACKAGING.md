@@ -162,15 +162,19 @@ key" only makes sense under Play App Signing.*
 
 ## Versioning
 
-*Open — one owner for `versionCode` must be picked before any release
-build; reopen if the EAS-vs-local decision flips.*
+**Status: Decided (local path)** — `tooling/stamp-version.mjs` owns both
+numbers and stamps them from the release tag. Reopen if the
+EAS-vs-local decision flips to `appVersionSource: remote` +
+`autoIncrement`, which hands `versionCode` back to EAS.
 
 - `version` (semver, user-facing): `app.config.ts` `version` is the
   single source of truth (kept in step with `package.json`
   `"version"`).
-- `versionCode` (integer, Play-facing): today absent → prebuild emits
-  `1`. Add `android.versionCode` to `app.config.ts` for the local path,
-  or let EAS own it (`appVersionSource: remote`, `autoIncrement`).
+- `versionCode` (integer, Play-facing): derived from that version by
+  `versionCodeOf()` in `tooling/stamp-version.mjs` and stamped into
+  `android.versionCode`. Never hand-edit it — `--check` fails on a
+  mismatch, because PackageManager refuses an upgrade whose
+  `versionCode` does not rise.
 
 ## APK vs AAB
 

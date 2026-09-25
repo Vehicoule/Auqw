@@ -9,8 +9,10 @@ on:
   push:
     tags: ['v*']
 
+# read is all the build jobs need — write stays scoped to the publish
+# job below so a compromised build step can't rewrite the repo.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,7 +22,15 @@ env:
   VERSION: ${{ github.ref_name }}
 
 jobs:
+  # A tag used to publish straight from untested builds — gate on
+  # ci.yml's real check surface by calling it as a reusable workflow
+  # instead of copying its steps here, so CI and the release gate
+  # can't drift apart and a new CI check gates the next tag for free.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
   desktop:
+    needs: [gate]
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -108,8 +118,9 @@ jobs:
             org.freedesktop.Platform/x86_64/24.08 \
             org.freedesktop.Sdk/x86_64/24.08 \
             org.electronjs.Electron2.BaseApp/x86_64/24.08
-          # The cache key is fixed — without an explicit update, warm
-          # restores would pin stale runtime refs forever.
+          # The cache key rotates weekly and restore-keys pulls last
+          # week's snapshot, so a warm restore can hold stale runtime
+          # refs — this refreshes them before the build relies on them.
           flatpak update --user -y
       - name: build desktop packages
         working-directory: auqw
@@ -125,7 +136,25 @@ jobs:
       # otherwise collide on a single SHA256SUMS.txt asset.
       - name: checksums
         working-directory: auqw/apps/desktop/dist-packages
-        run: node ../../../tooling/checksums.mjs . "SHA256SUMS-${{ runner.os }}.txt"
+        run: |
+          # A target renamed outside auqw-* drops out of both this
+          # checksums glob and the upload globs without erroring
+          # anywhere — assert the expected bundles landed before
+          # hashing, so a packaging change fails here instead of
+          # shipping a silently thin release.
+          case "${{ runner.os }}" in
+            Linux) expected=("auqw-*.AppImage" "auqw-*.flatpak") ;;
+            macOS) expected=("auqw-*.dmg") ;;
+            Windows) expected=("auqw-*-setup.exe") ;;
+          esac
+          found=$(ls auqw-* 2>/dev/null | tr '\n' ' ')
+          for pattern in "${expected[@]}"; do
+            if ! ls $pattern >/dev/null 2>&1; then
+              echo "::error::missing $pattern — expected [${expected[*]}], found [${found:-nothing}]"
+              exit 1
+            fi
+          done
+          node ../../../tooling/checksums.mjs . "SHA256SUMS-${{ runner.os }}.txt"
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-packages-${{ runner.os }}
@@ -140,6 +169,7 @@ jobs:
             !auqw/apps/desktop/dist-packages/*.blockmap
 
   android:
+    needs: [gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -221,13 +251,37 @@ jobs:
             mv "$apk" "auqw-${VERSION#v}-android-${abi}.apk"
           done
           ls -la auqw-*-android-*.apk
+      - name: checksums
+        working-directory: auqw/apps/mobile
+        run: |
+          # Same silent-drop guard as desktop: if the rename loop
+          # matched nothing, the checksums and upload globs both come
+          # up empty without any error.
+          expected=("auqw-*-android-*.apk")
+          found=$(ls auqw-* 2>/dev/null | tr '\n' ' ')
+          for pattern in "${expected[@]}"; do
+            if ! ls $pattern >/dev/null 2>&1; then
+              echo "::error::missing $pattern — expected [${expected[*]}], found [${found:-nothing}]"
+              exit 1
+            fi
+          done
+          # The sums file takes the platform name, not runner.os —
+          # this job runs on ubuntu and runner.os would collide with
+          # the desktop Linux sums asset on the release.
+          node ../../tooling/checksums.mjs . SHA256SUMS-Android.txt
       - uses: actions/upload-artifact@v7
         with:
           name: android-packages
-          path: auqw/apps/mobile/auqw-*-android-*.apk
+          path: |
+            auqw/apps/mobile/auqw-*-android-*.apk
+            auqw/apps/mobile/SHA256SUMS*
 
   release:
     needs: [desktop, android]
+    # the only job that mutates anything — gh writes the release and
+    # its assets with this token, so it alone scopes up to write.
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -244,9 +298,12 @@ jobs:
           # A `-` in the tag marks a prerelease channel (alpha/beta/rc);
           # bare v*.*.* publishes stable.
           if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          # Verify every desktop bundle before any of it goes public —
-          # each OS dir ships its own SHA256SUMS-<os>.txt, itself an asset.
-          for d in artifacts/desktop-packages-*/; do
+          # Verify every bundle before any of it goes public — each
+          # package dir ships its own sums file (SHA256SUMS-<os>.txt,
+          # SHA256SUMS-Android.txt), itself an asset. The glob is
+          # `*-packages*` not `*-packages-*`: the android-packages dir
+          # name has no trailing segment to match.
+          for d in artifacts/*-packages*/; do
             (cd "$d" && sha256sum -c SHA256SUMS*)
           done
           if ! gh release view "$VERSION" >/dev/null 2>&1; then
@@ -272,13 +329,19 @@ jobs:
             [ "$attempt" -lt 3 ] || exit 1
           done
           mapfile -t names < <(basename -a artifacts/desktop-packages-*/* artifacts/android-packages/*)
-          gh release view "$VERSION" --json assets -q '.assets[].name' \
-            | while read -r old; do
-                case " ${names[*]} " in
-                  *" $old "*) ;;
-                  *) gh release delete-asset "$VERSION" "$old" --yes ;;
-                esac
-              done
+          # Prune in the main shell, not as the tail of a `gh | while`
+          # pipeline: that loop runs in a subshell where a delete
+          # failure can surface as a zero pipeline status and the step
+          # stays green — a stale asset keeps serving with no signal.
+          # mapfile the asset list first, then a plain loop whose
+          # delete-asset failures errexit sees directly.
+          mapfile -t old_assets < <(gh release view "$VERSION" --json assets -q '.assets[].name')
+          for old in "${old_assets[@]}"; do
+            case " ${names[*]} " in
+              *" $old "*) ;;
+              *) gh release delete-asset "$VERSION" "$old" --yes ;;
+            esac
+          done
           notes=$(gh api "repos/$GH_REPO/releases/generate-notes" \
             -f tag_name="$VERSION" -q .body)
           gh release edit "$VERSION" --notes "$notes"

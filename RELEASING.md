@@ -1,8 +1,8 @@
 # Releasing auqw
 
-**Status: Decided** — alpha channel mechanics (rows in
-`docs/decisions.md`); post-alpha signing and store channels stay Open
-in `apps/mobile/PACKAGING.md`.
+**Status: Decided** — alpha channel mechanics (rows in the docs repo's
+`decisions.md`, a sibling checkout not vendored here); post-alpha
+signing and store channels stay Open in `apps/mobile/PACKAGING.md`.
 
 ## Scheme
 
@@ -12,12 +12,19 @@ in `apps/mobile/PACKAGING.md`.
   bumps it, a bare `v0.0.1` publishes the first stable of that line.
 - Repo manifests (`apps/desktop/package.json`,
   `apps/mobile/package.json`, `app.config.ts`) carry the version
-  *currently in development* — today `0.0.1-alpha.1`. One product
-  version across the monorepo; internal package.json versions ride
-  the same stamp.
+  *currently in development* — today `0.0.1-alpha.1`. Only those three
+  are stamped; the private `packages/*` manifests are not
+  release-facing and never follow the tag.
 - The **git tag is the build-time source of truth**: the release
   workflow runs `tooling/stamp-version.mjs <tag>` before any build,
   so every artifact embeds its own tag — never the repo's line.
+- Android's **`versionCode` derives from that same tag**, stamped by the
+  same run and never hand-maintained
+  (`MAJOR*10^6 + MINOR*10^4 + PATCH*100 + slot`, where `slot` is the
+  `-alpha.N` counter or 99 on a bare stable tag). PackageManager
+  refuses an upgrade whose code does not rise, so `--check` fails on a
+  hand-edited value instead of shipping a build that cannot
+  upgrade-install over the previous one.
 
 ## Cutting a release
 
@@ -31,14 +38,17 @@ git push origin v0.0.1-alpha.1
 
 | Job | Produces |
 |-----|----------|
+| `gate` | nothing — runs `ci.yml` (cargo fmt/clippy/test, `pnpm typecheck`, `pnpm test`) and blocks `desktop` + `android`, so a tag cannot publish untested binaries |
 | `desktop` (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg` · win: `auqw-<ver>-win-x64-setup.exe` (nsis installer) — each OS dir gets its own `SHA256SUMS-<os>.txt` (`.blockmap` updater internals are not shipped) |
-| `android` | `auqw-<ver>-android-arm64-v8a.apk` (`assembleRelease`, alpha-signed, arm64-only via `-Pauqw.abis` — local builds default to `arm64-v8a,x86_64` so emulator debug still works; standalone, upgrade-installs across alphas; not Play-ready) |
+| `android` | `auqw-<ver>-android-arm64-v8a.apk` (`assembleRelease`, alpha-signed, arm64-only via `-Pauqw.abis` — local builds default to `arm64-v8a,x86_64` so emulator debug still works; standalone, upgrade-installs across alphas; not Play-ready) — plus its own `SHA256SUMS-Android.txt` |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
 
-macOS and Windows artifacts ship **unsigned** (same parked signing
-decision as Linux): macOS Gatekeeper quarantine clears with
-`xattr -dr com.apple.quarantine auqw.app`, Windows SmartScreen warns
-via "More info → Run anyway". macOS runs build for Apple silicon only —
+macOS and Windows artifacts ship **without a code certificate** (same
+parked signing decision as Linux). The mac bundle is ad-hoc sealed by
+`apps/desktop/after-pack.mjs` — enough for `codesign --verify --strict`
+to pass, not enough for Gatekeeper: the download quarantine clears with
+`xattr -dr com.apple.quarantine auqw.app`. Windows SmartScreen warns
+via "More info → Run anyway". macOS builds for Apple silicon only —
 Intel macs get no alpha artifact until a universal/signing decision.
 
 ## Downloads
@@ -50,8 +60,10 @@ ships; for alpha, link the tag page.
 
 ## Open decisions (carried from PACKAGING.md)
 
-- **Desktop signing**: alpha ships unsigned binaries + `SHA256SUMS-<os>.txt` per platform.
-  Signing/notarization reopens when a distribution channel is picked.
+- **Desktop signing**: alpha ships ad-hoc-sealed mac bundles and
+  unsigned Windows/Linux binaries + `SHA256SUMS-<os>.txt` per platform.
+  Developer ID + notarization reopens when a distribution channel is
+  picked.
 - **Android signing**: alpha ships an `assembleRelease` APK signed
   with an alpha keystore decoded from the `AUQW_ALPHA_KEYSTORE_B64`
   repo secret (+ `AUQW_ALPHA_STORE_PASSWORD` / `AUQW_ALPHA_KEY_PASSWORD`),

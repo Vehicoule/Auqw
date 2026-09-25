@@ -8,6 +8,7 @@ import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  isPublicHttpsUrl,
   isSafeNonNegative,
   isSettings,
   isString,
@@ -117,7 +118,7 @@ export function artworkCacheBudgetBytes(settings: Settings): number {
 }
 
 function isArtworkUrl(url: unknown): url is string {
-  return isString(url, 2048) && url.startsWith('https://');
+  return isString(url, 2048) && isPublicHttpsUrl(url);
 }
 
 type Section = {
