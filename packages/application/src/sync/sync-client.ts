@@ -1099,19 +1099,25 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             appError('permission-denied', 'sync: fingerprint mismatch'),
           );
         }
-        if (peers.get(fp) !== peer) {
-          // The peer vanished or was re-paired while the dial was in
-          // flight — unpair couldn't kill a session that was never
-          // registered, so it lands here instead of resurrecting
-          // custody the user just revoked.
+        const current = peers.get(fp);
+        if (current === undefined) {
+          // The peer vanished while the dial was in flight — unpair
+          // couldn't kill a session that was never registered, so it
+          // lands here instead of resurrecting revoked custody. A
+          // present same-fp record — the one dialed, a pot refresh a
+          // coalesced syncNow published, or a re-pair — is still live
+          // custody; only its absence revokes.
           killSession(
             session,
-            appError('auth-required', 'sync: peer changed mid-connect'),
+            appError('auth-required', 'sync: peer unpaired mid-connect'),
           );
           return err(
-            appError('auth-required', 'sync: peer changed mid-connect'),
+            appError('auth-required', 'sync: peer unpaired mid-connect'),
           );
         }
+        // Ride the freshest record — a coalesced caller may already
+        // have published the welcome's refresh.
+        peer = current;
         const prior = sessions.get(fp);
         if (prior !== undefined && prior !== session && !prior.closed) {
           // A connect that slipped the dedupe window already owns the

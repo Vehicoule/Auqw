@@ -247,6 +247,8 @@ type ScriptedServer = {
   muteOnSync: boolean;
   /** Reply `more:true` on every delta — a peer that never converges. */
   forceDeltaMore: boolean;
+  /** Advertise this `host:port` as `pot` in the welcome, when set. */
+  welcomePot: string | undefined;
 };
 
 async function createEngine(
@@ -326,6 +328,7 @@ async function rig(): Promise<{
     dropOnSync: false,
     muteOnSync: false,
     forceDeltaMore: false,
+    welcomePot: undefined,
   };
 
   servers.set('10.0.0.4:7777', (socket) => {
@@ -409,6 +412,9 @@ async function handle(
           lastSeenAt: 1_000,
         },
         name: 'auqw-desk',
+        ...(server.welcomePot !== undefined
+          ? { pot: server.welcomePot }
+          : {}),
       }),
     );
     return;
@@ -751,6 +757,36 @@ async function concurrentSyncSharesOneDial(): Promise<void> {
   await client.close();
 }
 
+// 14b. Two coalesced syncNow calls ride the same dial: when the
+// welcome refreshes the peer's pot, the second caller resuming after
+// the refresh must see same-fp custody — not a revoked peer — or it
+// kills the session both callers share.
+async function coalescedSyncSurvivesPotRefresh(): Promise<void> {
+  const { client, server, keys } = await rig();
+  server.welcomePot = '10.0.0.4:4000';
+  keys.seed({
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+    pot: '10.0.0.4:3000',
+  });
+  const [a, b] = await Promise.all([
+    client.syncNow(SERVER_FP),
+    client.syncNow(SERVER_FP),
+  ]);
+  assert(a.ok && b.ok, 'both rounds resolve across the refresh');
+  assertEqual(server.hello.length, 1, 'one handshake only');
+  assertEqual(
+    keys.peers.get(SERVER_FP)?.pot,
+    '10.0.0.4:4000',
+    'pot record refreshed',
+  );
+  await client.close();
+}
+
 // 15. A request that outlives its deadline is session-fatal: the wire
 // has no request ids, so a late reply must never complete a retried
 // request — the next op redials a clean session.
@@ -996,6 +1032,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['keepalivePings', keepalivePings],
   ['restartHydratesPeers', restartHydratesPeers],
   ['concurrentSyncSharesOneDial', concurrentSyncSharesOneDial],
+  ['coalescedSyncSurvivesPotRefresh', coalescedSyncSurvivesPotRefresh],
   ['timeoutKillsSessionAndRedials', timeoutKillsSessionAndRedials],
   ['closeDisposesSocketPort', closeDisposesSocketPort],
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
