@@ -36,14 +36,42 @@ let current: Locale = SYSTEM_LOCALE;
 
 const pluralRules = new Map<Locale, Intl.PluralRules>();
 
-function rulesFor(locale: Locale): Intl.PluralRules {
+/**
+ * `null` when the runtime has no usable `Intl.PluralRules` — the one
+ * surface question the language decision row leaves open (Hermes).
+ * `systemLocaleTag` already degrades safely; this covers the plural
+ * path so a counted message can never throw at render.
+ */
+function rulesFor(locale: Locale): Intl.PluralRules | null {
   const cached = pluralRules.get(locale);
   if (cached !== undefined) {
     return cached;
   }
-  const rules = new Intl.PluralRules(locale);
+  if (typeof Intl === 'undefined' || typeof Intl.PluralRules !== 'function') {
+    return null;
+  }
+  let rules: Intl.PluralRules;
+  try {
+    rules = new Intl.PluralRules(locale);
+  } catch {
+    return null;
+  }
   pluralRules.set(locale, rules);
   return rules;
+}
+
+/**
+ * CLDR plural category for `count`. Degrades to the `one`/`other`
+ * split (correct for `en` and `de`) when `Intl.PluralRules` is absent,
+ * so the app renders instead of throwing.
+ */
+function pluralCategory(locale: Locale, count: number): PluralCategory {
+  const rules = rulesFor(locale);
+  return rules === null
+    ? count === 1
+      ? 'one'
+      : 'other'
+    : rules.select(count);
 }
 
 /**
@@ -139,7 +167,7 @@ export function t(
 ): string {
   const count = params === undefined ? undefined : params['count'];
   const category: PluralCategory =
-    typeof count === 'number' ? rulesFor(current).select(count) : 'other';
+    typeof count === 'number' ? pluralCategory(current, count) : 'other';
   const template =
     lookup(current, id, category) ??
     lookup(SYSTEM_LOCALE, id, category) ??
