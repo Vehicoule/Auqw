@@ -22,6 +22,7 @@ import type { SchemeName } from '@auqw/design-tokens';
 import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { fromUnknown, shellError } from '../shared/errors.ts';
+import { redactSensitive } from '../shared/redact.ts';
 import { isSyncAppliedEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
@@ -140,24 +141,13 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   return env;
 }
 
-// A signed URL's secret rides in its query, and credentials can ride in
-// userinfo, so both go before the text reaches the log. This bounds the
-// case the no-secrets-in-logs rule names — it is not a general secret
-// scrubber: a bare token with no URL around it is not recognisable
-// without a secret list.
-function redactUrls(text: string): string {
-  return text.replace(/https?:\/\/[^\s]*/g, (url) => {
-    const cut = url.search(/[?#]/);
-    const head = cut === -1 ? url : url.slice(0, cut);
-    return `${head.replace(/\/\/[^/@]*@/, '//…@')}${cut === -1 ? '' : '?…'}`;
-  });
-}
-
 // A fatal startup failure logs locally, so the cause has to stay
 // diagnosable — but only as a redacted, bounded rendering. The raw value
 // is never logged whole (it may be circular or unbounded) and never
 // crosses a port boundary: only fields that are already strings are
 // read, so this renderer cannot throw from inside a failure handler.
+// `redactSensitive` is pattern masking rather than a proof — see its
+// comment for the shape a credential can still hide behind.
 function boundedCause(thrown: unknown): string {
   let raw: string;
   if (thrown instanceof Error) {
@@ -167,7 +157,7 @@ function boundedCause(thrown: unknown): string {
   } else {
     raw = 'non-error thrown';
   }
-  const safe = redactUrls(raw);
+  const safe = redactSensitive(raw);
   return safe.length > 512 ? `${safe.slice(0, 512)}…` : safe;
 }
 
