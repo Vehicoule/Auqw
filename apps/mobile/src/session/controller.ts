@@ -49,7 +49,12 @@ import {
   createExpoSync,
   type ExpoSyncSurface,
 } from '../adapters/expo-sync.ts';
-import { createClock, createIds, createLog } from '../adapters/runtime.ts';
+import {
+  createClock,
+  createIds,
+  createLog,
+  createRandom,
+} from '../adapters/runtime.ts';
 import { createSyncEmit } from './sync-emit.ts';
 
 // Metro asset requires must be static literals. All pairs are
@@ -295,6 +300,7 @@ export async function createSessionController(
     providers,
     clock,
     ids,
+    random: createRandom(),
     log,
     defaults: DEFAULT_SETTINGS,
     // Android-only: the auqw-expo player attaches local files; the

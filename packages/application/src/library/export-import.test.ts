@@ -31,6 +31,7 @@ import {
   FakeProvider,
   FakeStorage,
   SequenceIds,
+  SequenceRandom,
 } from '../testing/fakes.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 
@@ -200,6 +201,7 @@ function sessionFor(state: PersistedState): {
     providers: [new FakeProvider('itunes'), ytm],
     clock: new FakeClock(1_000),
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: SETTINGS,
   });

@@ -2,6 +2,7 @@ import type {
   ClockPort,
   IdPort,
   LogPort,
+  RandomPort,
   Result,
 } from '@auqw/application';
 import { appError, err, ok } from '@auqw/application';
@@ -64,6 +65,13 @@ export function createIds(): IdPort {
         .toString(36)
         .slice(2, 10)}`;
     },
+  };
+}
+
+/** Platform-edge entropy: the one place `Math.random` may be called. */
+export function createRandom(): RandomPort {
+  return {
+    unit: () => Math.random(),
   };
 }
 

@@ -18,6 +18,7 @@ import {
   FakeProvider,
   FakeStorage,
   SequenceIds,
+  SequenceRandom,
 } from '../testing/fakes.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 import {
@@ -477,6 +478,7 @@ function rig(state: PersistedState, extra: ProviderPort[] = []): Rig {
     ],
     clock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log,
     defaults: SETTINGS,
   });

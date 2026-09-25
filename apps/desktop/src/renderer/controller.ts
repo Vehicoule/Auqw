@@ -38,7 +38,12 @@ import {
 } from './provider.ts';
 import type { PluginProvider } from './provider.ts';
 import { createSqliteDriver } from './sqlite-driver.ts';
-import { createClock, createIds, createLog } from './runtime.ts';
+import {
+  createClock,
+  createIds,
+  createLog,
+  createRandom,
+} from './runtime.ts';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike } from './web-player.ts';
@@ -362,6 +367,7 @@ export async function createSessionController(
     providers,
     clock,
     ids,
+    random: createRandom(),
     log,
     defaults,
     // `probe`/`localSource` are closure boxes — both fill in after
