@@ -19,15 +19,14 @@ asarUnpack:
   - "dist/utility/**"
   - "**/*.node"
 
-# crates/node-bindings builds the cdylib libauqw_node_bindings.so; the
-# packaged utility host scans process.resourcesPath for
-# auqw_node_bindings.node (see src/utility/host.ts bindingsCandidates).
-# `plugins/` is the synced provider set (tooling/sync-plugins.mjs
+# The napi cdylib name is per-OS (.so/.dylib/.dll) — the packaged
+# utility host scans process.resourcesPath for auqw_node_bindings.node
+# (see src/utility/host.ts bindingsCandidates), so each platform
+# section ships its own artifact under the shared name. `plugins/` is
+# the synced provider set (tooling/sync-plugins.mjs
 # apps/desktop/plugins) — the fork env defaults AUQW_PLUGIN_DIR to it
 # in packaged mode (src/main/index.ts utilityEnv).
 extraResources:
-  - from: ../../target/release/libauqw_node_bindings.so
-    to: auqw_node_bindings.node
   - from: plugins
     to: plugins
 
@@ -44,6 +43,9 @@ linux:
     - AppImage
     - tar.gz
     - flatpak
+  extraResources:
+    - from: ../../target/release/libauqw_node_bindings.so
+      to: auqw_node_bindings.node
   desktop:
     entry:
       Name: auqw
@@ -59,3 +61,37 @@ flatpak:
   sdk: org.freedesktop.Sdk
   base: org.electronjs.Electron2.BaseApp
   baseVersion: "24.08"
+
+# Unsigned alpha: adhoc-signed, no Apple notarization. macOS runners
+# are arm64 — the artifacts are Apple-silicon only (Intel macs get no
+# alpha build until a signing/universal decision). Gatekeeper flags
+# the quarantine bit; `xattr -dr com.apple.quarantine` clears it.
+mac:
+  category: public.app-category.music
+  target:
+    - dmg
+    - zip
+  extraResources:
+    - from: ../../target/release/libauqw_node_bindings.dylib
+      to: auqw_node_bindings.node
+
+# Unsigned alpha: Windows SmartScreen flags the installer until a code
+# certificate exists (same parked signing decision as macOS). NSIS and
+# portable both emit .exe — the global artifactName collides, so each
+# target carries its own name.
+win:
+  target:
+    - nsis
+    - portable
+  extraResources:
+    - from: ../../target/release/auqw_node_bindings.dll
+      to: auqw_node_bindings.node
+
+# Assisted installer: alpha users should see the install-dir choice
+# and per-user install (no admin) — oneClick's silent install hides it.
+nsis:
+  oneClick: false
+  perMachine: false
+  artifactName: ${productName}-${version}-${os}-${arch}-setup.${ext}
+portable:
+  artifactName: ${productName}-${version}-${os}-${arch}-portable.${ext}
