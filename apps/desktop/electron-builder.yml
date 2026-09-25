@@ -14,9 +14,13 @@ files:
 
 # utilityProcess.fork resolves the entry by real path — a fork target
 # must live outside app.asar. The napi binding ships outside it too
-# (extraResources below).
+# (extraResources below). jsdom joins them because the sync-XHR worker
+# (dist/utility/xhr-sync-worker.js) is a real file Node resolves
+# require("jsdom") against by walking ancestor node_modules — inside
+# app.asar it can't be seen from app.asar.unpacked.
 asarUnpack:
   - "dist/utility/**"
+  - "node_modules/jsdom/**"
   - "**/*.node"
 
 # The napi cdylib name is per-OS (.so/.dylib/.dll) — the packaged

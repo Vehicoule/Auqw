@@ -68,6 +68,24 @@ const FAILURE_COOLDOWN_MS = 15_000;
  * remote code gets a budget, not the host's whole network. */
 const SANDBOX_FETCH_MAX_CALLS = 32;
 const SANDBOX_FETCH_MAX_CHARS = 1_024 * 1_024;
+/** Attestation bodies are small; a request past this stops being one. */
+const SANDBOX_REQ_MAX_CHARS = 256 * 1_024;
+/** Header fields the interpreter may legitimately set on a probe —
+ * everything else (auth-ish or tracking headers) is dropped. The CORS
+ * machinery fields stay because a cross-origin attestation POST
+ * preflights them and google denies the POST without them. Hop-by-hop
+ * and framing fields (host, content-length, transfer-encoding,
+ * connection) are absent on purpose: undici derives those itself. */
+const SANDBOX_HEADER_ALLOW = new Set([
+  'accept',
+  'accept-language',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'content-type',
+  'origin',
+  'referer',
+  'user-agent',
+]);
 /** Refresh before GenerateIT's `estimatedTtlSecs` actually ends. */
 const SESSION_MARGIN_MS = 60_000;
 const DEFAULT_SESSION_TTL_MS = 21_600 * 1_000;
@@ -216,9 +234,10 @@ class AllowlistDispatcher extends Dispatcher {
     }
     const method = String(options.method ?? 'GET').toUpperCase();
     // Same grant window.fetch gets: https only, exact host, read-mostly
-    // verbs (POST stays — the interpreter legitimately ships attestation
-    // bodies to google hosts, still inside the allowlist), per-sandbox
-    // call budget.
+    // verbs — POST stays because the interpreter legitimately ships
+    // attestation bodies to google hosts, and OPTIONS because a
+    // cross-origin XHR POST preflights before it sends. Everything is
+    // bounded by the same per-sandbox call budget.
     if (
       parsed === null ||
       parsed.protocol !== 'https:' ||
@@ -226,18 +245,61 @@ class AllowlistDispatcher extends Dispatcher {
     ) {
       return reject('host not allowed');
     }
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+    if (
+      method !== 'GET' &&
+      method !== 'HEAD' &&
+      method !== 'POST' &&
+      method !== 'OPTIONS'
+    ) {
       return reject('method not allowed');
     }
     if (this.#calls >= SANDBOX_FETCH_MAX_CALLS) {
       return reject('budget exhausted');
     }
     this.#calls += 1;
-    // Response bytes capped mid-stream — a bombed page weight must
-    // not out-read the sandbox's body budget.
+    // Request headers carry the same allowlist window.fetch enforces;
+    // undici accepts several header shapes, normalize them all.
+    const filtered: Record<string, string | string[]> = {};
+    const addHeader = (name: string, value: unknown): void => {
+      const key = name.toLowerCase();
+      const vals = Array.isArray(value) ? value : [value];
+      const clean = vals.filter(
+        (v): v is string => typeof v === 'string' && v.length <= 512,
+      );
+      if (SANDBOX_HEADER_ALLOW.has(key) && clean.length > 0) {
+        filtered[key] = Array.isArray(value) ? clean : (clean[0] ?? '');
+      }
+    };
+    const raw = options.headers;
+    if (Array.isArray(raw)) {
+      for (const entry of raw) {
+        if (typeof entry !== 'string') continue;
+        const colon = entry.indexOf(':');
+        if (colon > 0) {
+          addHeader(entry.slice(0, colon).trim(), entry.slice(colon + 1).trim());
+        }
+      }
+    } else if (raw !== null && raw !== undefined) {
+      for (const [name, value] of Object.entries(raw)) {
+        addHeader(name, value);
+      }
+    }
+    // Both bodies bound mid-transfer: an oversized upload stops being
+    // an attestation payload, an oversized download stops being a page.
+    let ctl: Dispatcher.DispatchController | null = null;
+    let dead = false;
+    const oversize = (what: string): void => {
+      if (dead) return;
+      dead = true;
+      ctl?.abort(new TypeError(`pot: sandboxed ${what} oversized`));
+    };
+    let sent = 0;
     let seen = 0;
     const bounded: Dispatcher.DispatchHandler = {
-      onRequestStart: (c, ctx) => handler.onRequestStart?.(c, ctx),
+      onRequestStart: (c, ctx) => {
+        ctl = c;
+        handler.onRequestStart?.(c, ctx);
+      },
       onRequestUpgrade: (c, s, h, sk) =>
         handler.onRequestUpgrade?.(c, s, h, sk),
       onResponseStart: (c, s, h, m) =>
@@ -245,21 +307,29 @@ class AllowlistDispatcher extends Dispatcher {
       onResponseData: (c, chunk) => {
         seen += chunk.byteLength;
         if (seen > SANDBOX_FETCH_MAX_CHARS) {
-          handler.onResponseError?.(
-            c,
-            new TypeError('pot: sandboxed response oversized'),
-          );
+          oversize('response');
           return;
         }
         handler.onResponseData?.(c, chunk);
       },
-      onResponseEnd: (c, t) => handler.onResponseEnd?.(c, t),
+      onResponseEnd: (c, t) => {
+        if (!dead) handler.onResponseEnd?.(c, t);
+      },
       onResponseError: (c, e) => handler.onResponseError?.(c, e),
       onResponseStarted: () => handler.onResponseStarted?.(),
-      onBodySent: (chunk) => handler.onBodySent?.(chunk),
-      onRequestSent: () => handler.onRequestSent?.(),
+      onBodySent: (chunk) => {
+        sent += chunk.byteLength;
+        if (sent > SANDBOX_REQ_MAX_CHARS) {
+          oversize('request');
+          return;
+        }
+        handler.onBodySent?.(chunk);
+      },
+      onRequestSent: () => {
+        if (!dead) handler.onRequestSent?.();
+      },
     };
-    return this.#upstream.dispatch(options, bounded);
+    return this.#upstream.dispatch({ ...options, headers: filtered }, bounded);
   }
 
   close(callback?: () => void): Promise<void> {
@@ -462,13 +532,6 @@ function botGuardSandbox(
     return facade;
   };
   let sandboxFetches = 0;
-  // Header fields the interpreter may legitimately set on a probe —
-  // everything else (auth-ish or tracking headers) is dropped.
-  const SANDBOX_HEADER_ALLOW = new Set([
-    'accept',
-    'accept-language',
-    'content-type',
-  ]);
   const sandboxFetch = (
     input: unknown,
     init?: unknown,
