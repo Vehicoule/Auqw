@@ -684,9 +684,13 @@ function Main({
     [],
   );
   // A persisted language (or 'system' resolution) applies once the
-  // ready settings arrive — never during render.
+  // ready settings arrive — never during render. The ready UI stays
+  // gated until that apply has landed: an ungated effect commits one
+  // ready frame in the system language and only flips afterwards.
+  const [localeApplied, setLocaleApplied] = useState(false);
   useEffect(() => {
     applyLocale(state.settings.language);
+    setLocaleApplied(true);
   }, [applyLocale, state.settings.language]);
   const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
     useState(false);
@@ -697,6 +701,11 @@ function Main({
   // user dismissed and reopened the sheet must not close the new one.
   const storefrontEpoch = useRef(0);
   const qualityEpoch = useRef(0);
+  // Theme and language also bump on dismiss and on each pick, so a
+  // late save from an earlier pick can neither close the sheet nor
+  // apply a stale locale over a newer pick.
+  const themeEpoch = useRef(0);
+  const languageEpoch = useRef(0);
   // Transient failure pill: reportResult routes its text here through
   // the module-level sink (installed on mount), and it self-clears.
   const [toast, setToast] = useState<string | null>(null);
@@ -1654,10 +1663,12 @@ function Main({
   const onSettingsSelect = useCallback(
     (key: string) => {
       if (key === 'theme') {
+        themeEpoch.current += 1;
         setThemePickerOpen(true);
         return;
       }
       if (key === 'language') {
+        languageEpoch.current += 1;
         setLanguagePickerOpen(true);
         return;
       }
@@ -3442,6 +3453,24 @@ function Main({
     }
   };
 
+  // Gate frame: the ready UI must not render before the persisted
+  // language has been applied — only gate copy (whose system-language
+  // rendering is correct) shows until the effect above has landed.
+  if (!localeApplied) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: theme.colors.canvas,
+          justifyContent: 'center',
+        }}
+      >
+        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <LoadingState title={t('boot.restoring')} />
+      </View>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
@@ -3702,42 +3731,66 @@ function Main({
         {themePickerOpen && (
           <SheetScreen
             stackKey="sheet-theme"
-            onDismissed={() => setThemePickerOpen(false)}
+            onDismissed={() => {
+              themeEpoch.current += 1;
+              setThemePickerOpen(false);
+            }}
           >
             <ProviderPickerSheet
               title={t('settings.theme')}
               options={themeOptions()}
               selectedKey={state.settings.theme}
               onPick={(key) => {
+                // Each pick claims a fresh epoch — a save from an
+                // earlier pick must not close this sheet.
+                themeEpoch.current += 1;
+                const opening = themeEpoch.current;
                 const theme =
-                  THEME_ORDER.find((t) => t === key) ?? 'system';
+                  THEME_ORDER.find((tag) => tag === key) ?? 'system';
                 // Same contract as the language picker: report a
                 // failed save and keep the sheet open so an unapplied
                 // pick still reads unselected.
                 void session
                   .updateSettings({ ...state.settings, theme })
                   .then((saved) => {
-                    reportResult('settings.theme', saved);
-                    if (!saved.ok) {
+                    if (opening !== themeEpoch.current) {
+                      // A newer pick or a dismissal superseded this
+                      // save — reject the stale result outright: it
+                      // must not close the sheet nor report an outcome
+                      // over the newer pick.
                       return;
                     }
-                    setThemePickerOpen(false);
+                    reportResult('settings.theme', saved);
+                    if (saved.ok) {
+                      setThemePickerOpen(false);
+                    }
                   });
               }}
-              onDismiss={() => setThemePickerOpen(false)}
+              onDismiss={() => {
+                themeEpoch.current += 1;
+                setThemePickerOpen(false);
+              }}
             />
           </SheetScreen>
         )}
         {languagePickerOpen && (
           <SheetScreen
             stackKey="sheet-language"
-            onDismissed={() => setLanguagePickerOpen(false)}
+            onDismissed={() => {
+              languageEpoch.current += 1;
+              setLanguagePickerOpen(false);
+            }}
           >
             <LanguagePickerSheet
               options={languageOptions()}
               selectedKey={languageOptionKey(state.settings.language)}
               onPick={(key) => {
                 const language = key === 'system' ? null : key;
+                // Each pick claims a fresh epoch — a save from an
+                // earlier pick must neither apply its locale nor
+                // close this sheet.
+                languageEpoch.current += 1;
+                const opening = languageEpoch.current;
                 // Apply the locale only once the save landed — a
                 // failed save must not leave the UI on a selection
                 // storage never recorded. On failure the sheet stays
@@ -3746,15 +3799,24 @@ function Main({
                 void session
                   .updateSettings({ ...state.settings, language })
                   .then((saved) => {
-                    reportResult('settings.language', saved);
-                    if (!saved.ok) {
+                    if (opening !== languageEpoch.current) {
+                      // A newer pick or a dismissal superseded this
+                      // save — reject the stale result outright: it
+                      // must not apply a stale locale, close the sheet,
+                      // nor report an outcome over the newer pick.
                       return;
                     }
-                    applyLocale(language);
-                    setLanguagePickerOpen(false);
+                    reportResult('settings.language', saved);
+                    if (saved.ok) {
+                      applyLocale(language);
+                      setLanguagePickerOpen(false);
+                    }
                   });
               }}
-              onDismiss={() => setLanguagePickerOpen(false)}
+              onDismiss={() => {
+                languageEpoch.current += 1;
+                setLanguagePickerOpen(false);
+              }}
             />
           </SheetScreen>
         )}

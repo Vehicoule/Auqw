@@ -87,7 +87,7 @@ export const en = {
 
   // ---- queue --------------------------------------------------------------
   'queue.title': 'queue',
-  'queue.count': { other: '{count} tracks' },
+  'queue.count': { one: '{count} track', other: '{count} tracks' },
   'queue.empty': 'queue is empty',
   'queue.nowPlaying': 'now playing',
   'queue.reorder': 'reorder queue',
@@ -100,7 +100,7 @@ export const en = {
   'search.a11y.clear': 'clear search',
   'search.a11y.again': 'search again for {query}',
   'search.results': 'results',
-  'search.resultsMeta': { other: '{provider} · {count} matches' },
+  'search.resultsMeta': { one: '{provider} · {count} match', other: '{provider} · {count} matches' },
   'search.providerFallback': 'catalog',
   'search.recent': 'recent searches',
   'search.emptyTitle': 'search the catalog',
@@ -114,7 +114,7 @@ export const en = {
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'your library',
-  'library.tileA11y': { other: '{label}, {count} tracks' },
+  'library.tileA11y': { one: '{label}, {count} track', other: '{label}, {count} tracks' },
   'library.tilePlayA11y': 'play {label}',
   'library.sort.recent': 'recent',
   'library.sort.title': 'title',
@@ -168,7 +168,7 @@ export const en = {
   'sheets.noProvider': 'no provider declares this capability',
   'sheets.languageTitle': 'language',
   'sheets.addToPlaylist': 'add to playlist',
-  'sheets.itemA11y': { other: '{name}, {count} tracks' },
+  'sheets.itemA11y': { one: '{name}, {count} track', other: '{name}, {count} tracks' },
   'sheets.countryCodePlaceholder': 'country code (e.g. US)',
   'sheets.autoClear': 'auto — defer to system locale',
   'sheets.closeA11y': 'close sheet',
