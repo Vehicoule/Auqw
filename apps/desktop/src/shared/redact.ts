@@ -13,18 +13,35 @@
 // of the failure survives — the point is to lose the secret, not the
 // diagnosis.
 
-/** `https://user:pass@host/path?sig=…` keeps host+path, loses the rest. */
-const URL_LIKE = /https?:\/\/[^\s]*/g;
-
-/** `Bearer x`, `Basic x`, `Token x`, `ApiKey x`. */
-const CREDENTIAL = /\b(?:Bearer|Basic|Token|ApiKey)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+/** Any scheme's URL, not just http(s): `ws://`, `wss://`, `file://`. */
+const URL_LIKE = /[a-z][a-z0-9+.-]*:\/\/[^\s]*/gi;
 
 /**
- * `token=…`, `Authorization: …`, `api_key=…` — a key whose name says
- * what it is, so the value can go without guessing at its shape.
+ * Header-style secrets. The value runs to the end of the line, because
+ * that is what a header carries — masking only the first word would
+ * leave `Bearer abc123` or the tail of a cookie list behind.
+ */
+const HEADER_SECRET =
+  /\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Amz-Security-Token)(\s*:\s*)[^\r\n]*/gi;
+
+/** `Bearer x` / `Basic x` anywhere — no length floor on `x`. */
+const CREDENTIAL = /\b(Bearer|Basic)(\s+)([^\s;,]+)/gi;
+
+/**
+ * `Token x` / `ApiKey x` outside a header. Unlike Bearer these are
+ * ordinary English words too, so the value has to look token-ish before
+ * anything is masked.
+ */
+const LOOSE_CREDENTIAL =
+  /\b(Token|ApiKey)(\s+)([A-Za-z0-9._~+/=-]{2,})/gi;
+
+/**
+ * `token=…`, `api_key=…`, `session: …` — the key name says what it is,
+ * so the value goes without guessing at its shape. The keyword must end
+ * the key (`\b`), or `author:` would read as `auth`.
  */
 const KEYED_SECRET =
-  /\b[A-Za-z0-9_-]*(?:token|secret|password|passwd|pwd|api[_-]?key|apikey|auth|authorization|signature|sig|cookie|session)[A-Za-z0-9_-]*(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi;
+  /\b[A-Za-z0-9_-]*(?:signature|authorization|password|passwd|token|secret|pwd|api_key|apikey|auth|sig|session|cookie)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi;
 
 /** Long key-shaped runs: 20+ chars of key charset. */
 const OPAQUE_RUN = /[A-Za-z0-9+/_-]{20,}/g;
@@ -39,15 +56,19 @@ function redactUrl(url: string): string {
 export function redactSensitive(text: string): string {
   return text
     .replace(URL_LIKE, redactUrl)
-    .replace(CREDENTIAL, '…')
-    .replace(KEYED_SECRET, (_match: string, sep: string) => `${sep}…`)
+    .replace(HEADER_SECRET, (_m: string, name: string, sep: string) => `${name}${sep}…`)
+    .replace(CREDENTIAL, (_m: string, scheme: string, gap: string) => `${scheme}${gap}…`)
+    .replace(
+      LOOSE_CREDENTIAL,
+      (_m: string, scheme: string, gap: string, value: string) =>
+        /\d|[_+/=-]/.test(value) ? `${scheme}${gap}…` : `${scheme}${gap}${value}`,
+    )
+    .replace(KEYED_SECRET, (_m: string, sep: string) => `${sep}…`)
     .replace(OPAQUE_RUN, (run: string) =>
-      // A digit or a key separator is what sets a credential apart from
-      // `createSecureStore` or a file path: long plain words and paths
-      // survive so the message stays readable. `/` is deliberately not
-      // a trigger — base64 keys and filesystem paths both contain it,
-      // and mangling every path in a startup log costs more than the
-      // occasional `/`-bearing key is worth.
-      /\d|[_+-]/.test(run) ? '…' : run,
+      // A `/` means a filesystem location, not a credential: a startup
+      // failure's single most useful fact is which file it died on, so
+      // paths are never masked however long or digit-bearing they are.
+      // Digit-bearing key-shaped runs without a slash are masked.
+      run.includes('/') || !/\d|[_+-]/.test(run) ? run : '…',
     );
 }
