@@ -1056,6 +1056,7 @@ mod tests {
     use sha2::Digest;
 
     const SPIN_WASM: &[u8] = include_bytes!("../../../sdk/conformance/spin/spin.wasm");
+    const ECHO_WASM: &[u8] = include_bytes!("../../../sdk/conformance/echo/echo.wasm");
 
     fn manifest_json(id: &str, wasm: &[u8], permissions: &str) -> String {
         let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
@@ -1293,15 +1294,29 @@ mod tests {
         // post-delivery cleanup must then not delete the NEW entry
         // (that would strand a live request: uncancellable, and a
         // third generation could double-admit).
-        let host = match PluginHost::new(config()) {
+        // Gen B must still be in flight when the third admission
+        // lands — a deep fuel grant keeps its spin burn unsettled at
+        // any interpreter speed (the grant, not wall clock, bounds it).
+        // Gen A runs the instantly-completing echo guest: it settles on
+        // its own and parks its delivery on the gate — that settled-
+        // but-mid-delivery state is what the readmission contract needs.
+        let mut cfg = config();
+        cfg.fuel_per_entry = 1_000_000_000;
+        cfg.fuel_total = 1_000_000_000;
+        let host = match PluginHost::new(cfg) {
             Ok(h) => h,
             Err(e) => panic!("host: {e}"),
         };
-        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
-        {
-            Ok(id) => id,
-            Err(e) => panic!("load: {e}"),
-        };
+        let id_a =
+            match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]")) {
+                Ok(id) => id,
+                Err(e) => panic!("load echo: {e}"),
+            };
+        let id_b =
+            match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]")) {
+                Ok(id) => id,
+                Err(e) => panic!("load spin: {e}"),
+            };
         let kind_of = |_: String, o: ResolveOutcome| match o {
             ResolveOutcome::Failed { kind, .. } => kind,
             ResolveOutcome::Resolved { .. } => "resolved".to_string(),
@@ -1311,7 +1326,7 @@ mod tests {
         let (tx_a, rx_a) = std::sync::mpsc::channel::<String>();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        match host.start_resolve(id.clone(), "x".into(), "gen".into(), move |id, o| {
+        match host.start_resolve(id_a.clone(), "x".into(), "gen".into(), move |id, o| {
             let _ = tx_a.send(kind_of(id, o));
             async move {
                 let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(60));
@@ -1334,7 +1349,7 @@ mod tests {
         // A's delivery is still parked on the gate — yet the id must
         // already admit a new generation.
         let (tx_b, rx_b) = std::sync::mpsc::channel::<String>();
-        match host.start_resolve(id.clone(), "x".into(), "gen".into(), move |id, o| {
+        match host.start_resolve(id_b.clone(), "x".into(), "gen".into(), move |id, o| {
             let _ = tx_b.send(kind_of(id, o));
             async move {}
         }) {
@@ -1356,7 +1371,7 @@ mod tests {
         // entry is live and unsettled. If A's cleanup erased it, this
         // admission would double-admit on a burning request.
         let deliver = |_: String, _: ResolveOutcome| async move {};
-        match host.start_resolve(id.clone(), "x".into(), "gen".into(), deliver) {
+        match host.start_resolve(id_b.clone(), "x".into(), "gen".into(), deliver) {
             Err(HostError::RequestInFlight { id }) => assert_eq!(id, "gen"),
             other => panic!("expected RequestInFlight for third generation, got {other:?}"),
         }

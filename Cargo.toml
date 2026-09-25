@@ -13,6 +13,19 @@ members = [
     "sdk/rust",
 ]
 
+# Wasmi executes guests far slower in debug than in any opt build —
+# plugin-host and mobile-bindings tests burn fuel budgets and
+# deadline/cancel loops through it. opt-level 1 recovers ~30x on those
+# paths; do NOT raise it: at opt-level >= 2 the interpreter grows
+# native frames enough that the scenario guest overflows a tokio
+# worker's stack (repro: cargo test -p auqw-plugin-host --test
+# scenario). Release builds run wasmi at opt3 regardless — this
+# override only widens debug/test coverage of that risk, it does not
+# create it.
+[profile.dev.package.wasmi]
+opt-level = 1
+debug-assertions = false
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

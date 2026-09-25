@@ -266,9 +266,11 @@ fn done_wat(result_json: &str) -> String {
 }
 
 /// Guest that burns fuel inside `alloc` or `handle` before answering.
-/// `busy_in` is `"alloc"` or `"handle"`.
+/// `busy_in` is `"alloc"` or `"handle"`. The burn must comfortably
+/// outlast the wall-clock cancel/deadline tests race against it —
+/// ~20M iterations keeps ~0.2-0.5s of headroom on an optimized wasmi.
 fn busy_wat(busy_in: &str) -> String {
-    let busy = "(local $i i32) (local.set $i (i32.const 1000000)) (loop $spin \
+    let busy = "(local $i i32) (local.set $i (i32.const 20000000)) (loop $spin \
                 (local.set $i (i32.sub (local.get $i) (i32.const 1))) \
                 (br_if $spin (local.get $i)))";
     let raw = "{\"type\":\"done\",\"result\":{\"ok\":true}}";
