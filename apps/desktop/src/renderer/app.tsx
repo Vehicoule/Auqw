@@ -61,6 +61,11 @@ import {
   ValueFieldSheet,
   entityIdForRef,
   formatClock,
+  languageOptions,
+  resolveLocale,
+  setLocale,
+  systemLocaleTag,
+  t,
   toCollectionModel,
   toCorrectionsModel,
   toEntityModel,
@@ -83,6 +88,7 @@ import type {
   DiagnosticsModel,
   DownloadChip,
   LyricsModel,
+  MessageId,
   NavItemModel,
   ProviderPickerOption,
   SearchStateModel,
@@ -104,32 +110,55 @@ import { createClock, createIds } from './runtime.ts';
 const SEARCH_LIMIT = 25;
 const DIAGNOSTICS_LIMIT = 20;
 
-const NAV_ITEMS: readonly NavItemModel[] = [
-  { key: 'home', label: 'home' },
-  { key: 'explore', label: 'explore' },
-  { key: 'library', label: 'library' },
-  { key: 'settings', label: 'settings' },
-];
+function navItems(): readonly NavItemModel[] {
+  return [
+    { key: 'home', label: t('nav.home') },
+    { key: 'explore', label: t('nav.explore') },
+    { key: 'library', label: t('nav.library') },
+    { key: 'settings', label: t('nav.settings') },
+  ];
+}
 
 const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
 
-const THEME_OPTIONS: readonly ProviderPickerOption[] = [
-  { key: 'system', label: 'system', detail: 'follow the OS' },
-  { key: 'dark', label: 'dark', detail: 'tokyo night' },
-  { key: 'light', label: 'light', detail: 'daylight' },
-  { key: 'oled', label: 'oled', detail: 'true black' },
-];
+function themeOptions(): readonly ProviderPickerOption[] {
+  return [
+    {
+      key: 'system',
+      label: t('settings.themeValue.system'),
+      detail: t('optionDetail.themeSystem'),
+    },
+    // 'tokyo night' is the color scheme's name, not UI copy.
+    {
+      key: 'dark',
+      label: t('settings.themeValue.dark'),
+      detail: 'tokyo night',
+    },
+    {
+      key: 'light',
+      label: t('settings.themeValue.light'),
+      detail: t('optionDetail.themeLight'),
+    },
+    {
+      key: 'oled',
+      label: t('settings.themeValue.oled'),
+      detail: t('optionDetail.themeOled'),
+    },
+  ];
+}
 
 // Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
 // bound; 128 is the spec default (providers.md).
-const QUALITY_OPTIONS: readonly ProviderPickerOption[] = [
-  { key: '64', label: '64 kbps' },
-  { key: '96', label: '96 kbps' },
-  { key: '128', label: '128 kbps', detail: 'default' },
-  { key: '192', label: '192 kbps' },
-  { key: '256', label: '256 kbps' },
-  { key: '320', label: '320 kbps', detail: 'maximum' },
-];
+function qualityOptions(): readonly ProviderPickerOption[] {
+  return [
+    { key: '64', label: '64 kbps' },
+    { key: '96', label: '96 kbps' },
+    { key: '128', label: '128 kbps', detail: t('optionDetail.default') },
+    { key: '192', label: '192 kbps' },
+    { key: '256', label: '256 kbps' },
+    { key: '320', label: '320 kbps', detail: t('optionDetail.maximum') },
+  ];
+}
 
 function formatBytes(bytes: number, free: number): string {
   const gb = (n: number) =>
@@ -140,7 +169,7 @@ function formatBytes(bytes: number, free: number): string {
         : n === 0
           ? '0 kb'
           : `${Math.max(1, Math.round(n / 1e3))} kb`;
-  return `${gb(bytes)} used · ${gb(free)} free`;
+  return t('storage.usage', { used: gb(bytes), free: gb(free) });
 }
 
 type Boot =
@@ -173,7 +202,9 @@ function App() {
           setBoot({
             type: 'failed',
             message:
-              thrown instanceof Error ? thrown.message : 'boot failed',
+              thrown instanceof Error
+                ? thrown.message
+                : t('boot.failedMessage'),
           });
         }
       }
@@ -217,12 +248,12 @@ function BootGate({
     >
       {boot.type === 'failed' ? (
         <ErrorState
-          title="couldn't start"
+          title={t('boot.startFailed')}
           hint={boot.message}
           onRetry={onRetry}
         />
       ) : (
-        <LoadingState title="loading plugins" />
+        <LoadingState title={t('boot.loadingPlugins')} />
       )}
     </div>
   );
@@ -282,12 +313,12 @@ function SessionGate({
     >
       {state.type === 'restore-failed' ? (
         <ErrorState
-          title="couldn't restore your library"
+          title={t('boot.restoreFailed')}
           hint={state.error.message}
           onRetry={() => void controller.session.restore()}
         />
       ) : (
-        <LoadingState title="restoring" />
+        <LoadingState title={t('boot.restoring')} />
       )}
     </div>
   );
@@ -351,14 +382,19 @@ function toSearchModel(state: SearchState): SearchStateModel {
 
 function greeting(now: Date): string {
   const h = now.getHours();
-  if (h < 5) return 'night';
-  if (h < 12) return 'morning';
-  if (h < 18) return 'afternoon';
-  return 'evening';
+  if (h < 5) return t('home.greeting.night');
+  if (h < 12) return t('home.greeting.morning');
+  if (h < 18) return t('home.greeting.afternoon');
+  return t('home.greeting.evening');
 }
 
 function attemptLabel(trace: AttemptTrace): string {
-  return `${trace.requestId} · ${trace.steps} steps · ${trace.httpCalls} http · ${formatClock(trace.elapsedMs)}`;
+  return t('settings.diag.attemptLabel', {
+    requestId: trace.requestId,
+    steps: trace.steps,
+    httpCalls: trace.httpCalls,
+    elapsed: formatClock(trace.elapsedMs),
+  });
 }
 
 type Overlay =
@@ -420,11 +456,11 @@ const SLOT_CAPABILITIES: Record<
   radioProvider: ['radio.seed'],
 };
 
-const SLOT_LABELS: Record<ProviderSlot, string> = {
-  catalogProvider: 'catalog provider',
-  playbackProvider: 'playback provider',
-  lyricsProvider: 'lyrics provider',
-  radioProvider: 'radio provider',
+const SLOT_LABEL_IDS: Record<ProviderSlot, MessageId> = {
+  catalogProvider: 'settings.catalogProvider',
+  playbackProvider: 'settings.playbackProvider',
+  lyricsProvider: 'settings.lyricsProvider',
+  radioProvider: 'settings.radioProvider',
 };
 
 // Lyrics and radio are nullable overrides — 'auto' returns routing
@@ -453,12 +489,17 @@ const IDLE_TRANSFER: TransferModel = {
  */
 let toastSink: ((text: string) => void) | null = null;
 
-function reportResult(action: string, result: Result<unknown>): void {
+function reportResult(action: MessageId, result: Result<unknown>): void {
   if (!result.ok) {
     console.warn(
       `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
     );
-    toastSink?.(`${action} failed — ${result.error.message}`);
+    toastSink?.(
+      t('toast.failed', {
+        action: t(action),
+        message: result.error.message,
+      }),
+    );
   }
 }
 
@@ -482,6 +523,23 @@ function Main({
   // would be a storage-schema decision, so they die with the app.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [languagePickerOpen, setLanguagePickerOpen] = useState(false);
+  // setLocale mutates module state and never notifies React — every
+  // apply bumps localeTick so the localized model memos below rebuild
+  // their t() strings in the new language (they carry it as a dep).
+  const [localeTick, setLocaleTick] = useState(0);
+  const applyLocale = useCallback(
+    (setting: string | null | undefined) => {
+      setLocale(resolveLocale(setting, systemLocaleTag()));
+      setLocaleTick((tick) => tick + 1);
+    },
+    [],
+  );
+  // A persisted language (or 'system' resolution) applies once the
+  // ready settings arrive — never during render.
+  useEffect(() => {
+    applyLocale(state.settings.language);
+  }, [applyLocale, state.settings.language]);
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Library-world overlay stack: pushed routes — collection list,
@@ -530,7 +588,16 @@ function Main({
   // `local().list()` — the source is storage-backed, not evented, and
   // scans here are user-initiated only.
   const [localTick, setLocalTick] = useState(0);
-  const [storageText, setStorageText] = useState<string | null>(null);
+  // Raw usage — formatted per render so the storage line follows the
+  // UI language instead of freezing the phrasing at probe time.
+  const [storageUsage, setStorageUsage] = useState<{
+    readonly bytes: number;
+    readonly free: number;
+  } | null>(null);
+  const storageText =
+    storageUsage === null
+      ? null
+      : formatBytes(storageUsage.bytes, storageUsage.free);
   // Transfer events can outpace the statfs probe — each read stamps a
   // sequence, and only a success newer than the last applied success
   // lands. A failed probe advances nothing, so it can't knock out an
@@ -545,7 +612,7 @@ function Main({
       .then((u) => {
         if (u.ok && seq > usageApplied.current) {
           usageApplied.current = seq;
-          setStorageText(formatBytes(u.value.bytes, u.value.free));
+          setStorageUsage({ bytes: u.value.bytes, free: u.value.free });
         }
       });
   }, [controller]);
@@ -849,7 +916,7 @@ function Main({
         recordings: state.recordings,
         likes: state.likes,
       }),
-    [state],
+    [state, localeTick],
   );
   const queueModel = useMemo(
     () =>
@@ -862,7 +929,7 @@ function Main({
             ? new Set(state.queue.occurrences.map((o) => o.recordingId))
             : undefined,
       }),
-    [state, online],
+    [state, online, localeTick],
   );
   const libraryModel = useMemo(() => {
     const model = toLibraryModel({
@@ -902,7 +969,7 @@ function Main({
         playing: recordingId === playingId ? true : row.playing,
       };
       return offline && controller.localPlaybackFor(recordingId) === null
-        ? { ...base, state: 'unavailable', note: 'offline' }
+        ? { ...base, state: 'unavailable', note: t('note.offline') }
         : base;
     };
     const mark = (row: CollectionRowModel): CollectionRowModel => ({
@@ -922,7 +989,7 @@ function Main({
         downloads: model.collectionRows.downloads.map(mark),
       },
     };
-  }, [state, online, downloads]);
+  }, [state, online, downloads, localeTick]);
   const playlistModelFor = useCallback(
     (playlistId: string) => {
       const model = toPlaylistModel({
@@ -947,13 +1014,13 @@ function Main({
             playing:
               entry.recordingId === playingId ? true : entry.row.playing,
             ...(offline
-              ? { state: 'unavailable' as const, note: 'offline' }
+              ? { state: 'unavailable' as const, note: t('note.offline') }
               : {}),
           },
         })),
       };
     },
-    [state, online],
+    [state, online, localeTick],
   );
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
@@ -1010,10 +1077,10 @@ function Main({
         greeting: greeting(new Date()),
         subline:
           state.likes.length === 0
-            ? 'search to start your library'
-            : `${state.likes.length} liked`,
+            ? t('home.subline.empty')
+            : t('home.subline.likes', { count: state.likes.length }),
       }),
-    [state, searchState],
+    [state, searchState, localeTick],
   );
   // Suggestion cards key by `${provider}:${id}` — provider refs, not
   // materialized recording ids — so a press needs the TrackMetadata
@@ -1042,7 +1109,7 @@ function Main({
       persistenceDetail: state.persistenceError?.message ?? null,
       pendingReviews,
     }),
-    [state, controller, attempts, pendingReviews],
+    [state, controller, attempts, pendingReviews, localeTick],
   );
   const settingsModel = useMemo(() => {
     const model = toSettingsModel(state.settings, diagnostics, {
@@ -1073,6 +1140,7 @@ function Main({
     controller,
     downloads,
     localTick,
+    localeTick,
   ]);
   const syncModel = useMemo(
     () =>
@@ -1083,7 +1151,7 @@ function Main({
         Date.now(),
         pairingError,
       ),
-    [syncStatus, syncDevices, pairing, pairingTick, pairingError],
+    [syncStatus, syncDevices, pairing, pairingTick, pairingError, localeTick],
   );
 
   const onPairDevice = useCallback(() => {
@@ -1275,6 +1343,10 @@ function Main({
         setThemePickerOpen(true);
         return;
       }
+      if (key === 'language') {
+        setLanguagePickerOpen(true);
+        return;
+      }
       if (
         key === 'catalogProvider' ||
         key === 'playbackProvider' ||
@@ -1305,7 +1377,7 @@ function Main({
         void controller.downloads
           .removeAll(new CancellationSource().signal)
           .then((removed) => {
-            reportResult('remove all downloads', removed);
+            reportResult('settings.removeAllDownloads', removed);
             refreshUsage();
           });
         return;
@@ -1318,7 +1390,7 @@ function Main({
         void local
           .addFolder(new CancellationSource().signal)
           .then((added) => {
-            reportResult('add local folder', added);
+            reportResult('settings.addLocalFolder', added);
             if (added.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1335,7 +1407,7 @@ function Main({
         void local
           .removeSource(sourceId, new CancellationSource().signal)
           .then((removed) => {
-            reportResult('remove local folder', removed);
+            reportResult('action.removeLocalFolder', removed);
             if (removed.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1351,7 +1423,7 @@ function Main({
         void local
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
-            reportResult('rescan local folders', scanned);
+            reportResult('settings.rescanLocal', scanned);
             if (scanned.ok) {
               session.syncLocalRecordings(local.recordings());
               refreshLocal();
@@ -1507,7 +1579,7 @@ function Main({
       loading: fetch === null ? true : fetch.loading,
       positionMs: player?.positionMs ?? 0,
     });
-  }, [lyricsFetch, currentRecordingId, player]);
+  }, [lyricsFetch, currentRecordingId, player, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {
@@ -1517,7 +1589,10 @@ function Main({
 
   // ---- radio (session.radio tail — start from the playing ref) ---
 
-  const radioModel = useMemo(() => toRadioModel(state.radio), [state.radio]);
+  const radioModel = useMemo(() => toRadioModel(state.radio), [
+    state.radio,
+    localeTick,
+  ]);
   // Radio seeds route by the seed reference's own provider — a track
   // is only seedable when THAT provider declares radio.seed, not just
   // any loaded one.
@@ -1562,12 +1637,12 @@ function Main({
     if (ref !== null && radioSeedable(ref)) {
       void session
         .startRadio(ref)
-        .then((r) => reportResult('start radio', r));
+        .then((r) => reportResult('stage.radio.start', r));
     }
   }, [session, radioSeedRef, radioSeedable]);
 
   const onStopRadio = useCallback(() => {
-    reportResult('stop radio', session.stopRadio());
+    reportResult('action.stopRadio', session.stopRadio());
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
@@ -1599,7 +1674,7 @@ function Main({
         recordings: state.recordings,
         filter: reviewFilter,
       }),
-    [reviewFetch, state.recordings, reviewFilter],
+    [reviewFetch, state.recordings, reviewFilter, localeTick],
   );
 
   // A failed op surfaces its typed error as the screen's error state;
@@ -1649,14 +1724,16 @@ function Main({
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'done',
-          exportDetail: `saved ${name} to downloads`,
+          exportDetail: t('transfer.savedToDownloads', { name }),
         }));
       } catch (thrown) {
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
           exportDetail:
-            thrown instanceof Error ? thrown.message : 'export write failed',
+            thrown instanceof Error
+              ? thrown.message
+              : t('transfer.exportWriteFailed'),
         }));
       }
     });
@@ -1696,7 +1773,7 @@ function Main({
             importDetail:
               thrown instanceof Error
                 ? thrown.message
-                : 'could not read the picked file',
+                : t('transfer.readFailed'),
             preview: null,
           }));
         },
@@ -1791,7 +1868,11 @@ function Main({
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'done',
-          importDetail: `imported ${counts.recordings} tracks · ${counts.likes} likes · ${counts.playlists} playlists`,
+          importDetail: t('transfer.importSummary', {
+            tracks: counts.recordings,
+            likes: counts.likes,
+            playlists: counts.playlists,
+          }),
         }));
       });
   }, [controller]);
@@ -1826,20 +1907,20 @@ function Main({
       }));
     const selected = state.settings[providerSlot];
     return {
-      title: SLOT_LABELS[providerSlot],
+      title: t(SLOT_LABEL_IDS[providerSlot]),
       options: OPTIONAL_SLOTS.has(providerSlot)
         ? [
             {
               key: 'auto',
-              label: 'auto',
-              detail: 'route by declared capability',
+              label: t('settings.value.auto'),
+              detail: t('optionDetail.autoRoute'),
             },
             ...options,
           ]
         : options,
       selectedKey: selected ?? 'auto',
     };
-  }, [providerSlot, controller, state.settings]);
+  }, [providerSlot, controller, state.settings, localeTick]);
 
   const onPickProvider = useCallback(
     (key: string) => {
@@ -2056,7 +2137,7 @@ function Main({
               .ensureRecording(target.meta)
               .then((r) => {
                 if (!r.ok) {
-                  reportResult('prepare track', r);
+                  reportResult('action.prepareTrack', r);
                 }
                 return r.ok ? r.value : null;
               });
@@ -2064,7 +2145,7 @@ function Main({
         return;
       }
       reportResult(
-        'add to playlist',
+        'sheets.addToPlaylist',
         await session.addPlaylistEntry(
           playlistId,
           recordingId,
@@ -2091,7 +2172,7 @@ function Main({
       const target = pickerFor;
       void session.createPlaylist(name).then((created) => {
         if (!created.ok) {
-          reportResult('create playlist', created);
+          reportResult('action.createPlaylist', created);
           return;
         }
         if (target !== null) {
@@ -2115,14 +2196,14 @@ function Main({
           if (target.kind === 'recording') {
             void session
               .toggleLike(target.recordingId)
-              .then((r) => reportResult('toggle like', r));
+              .then((r) => reportResult('action.toggleLike', r));
           }
           break;
         case 'enqueue':
           void (target.kind === 'recording'
             ? session.enqueueRecording(target.recordingId)
             : session.enqueueMetadata(target.meta)
-          ).then((r) => reportResult('add to queue', r));
+          ).then((r) => reportResult('action.addToQueue', r));
           break;
         case 'add':
           setPickerFor(target);
@@ -2145,7 +2226,7 @@ function Main({
           if (ref !== null && radioSeedable(ref)) {
             void session
               .startRadio(ref)
-              .then((r) => reportResult('start radio', r));
+              .then((r) => reportResult('stage.radio.start', r));
           }
           break;
         }
@@ -2188,7 +2269,7 @@ function Main({
     (name: string) => {
       void session.createPlaylist(name).then((created) => {
         if (!created.ok) {
-          reportResult('create playlist', created);
+          reportResult('action.createPlaylist', created);
           return;
         }
         pushOverlay({ type: 'playlist', playlistId: created.value });
@@ -2320,12 +2401,12 @@ function Main({
             onRename={(name) =>
               void session
                 .renamePlaylist(current.playlistId, name)
-                .then((r) => reportResult('rename playlist', r))
+                .then((r) => reportResult('action.renamePlaylist', r))
             }
             onDelete={() => {
               void session
                 .deletePlaylist(current.playlistId)
-                .then((r) => reportResult('delete playlist', r));
+                .then((r) => reportResult('action.deletePlaylist', r));
               dismissOverlay(entry.key);
             }}
             onPressEntry={(entry) => {
@@ -2349,7 +2430,7 @@ function Main({
             onRemoveEntry={(entry) =>
               void session
                 .removePlaylistEntry(entry.entryId)
-                .then((r) => reportResult('remove track', r))
+                .then((r) => reportResult('action.removeTrack', r))
             }
             onMoveEntry={(move, direction) => {
               if (playlistModel === null) {
@@ -2369,7 +2450,7 @@ function Main({
                     ? { before: sibling.entryId }
                     : { after: sibling.entryId },
                 )
-                .then((r) => reportResult('reorder playlist', r));
+                .then((r) => reportResult('action.reorderPlaylist', r));
             }}
           />
         );
@@ -2494,7 +2575,7 @@ function Main({
       <AppStack>
         <StackItem stackKey="root">
           <DesktopChrome
-            items={NAV_ITEMS}
+            items={navItems()}
             activeKey={tab}
             onSelect={(key) => {
               setTab(key);
@@ -2576,7 +2657,7 @@ function Main({
               }}
             >
               <Text variant="metadata" color="secondary">
-                offline — streams wait for connectivity
+                {t('offline.bannerStreams')}
               </Text>
             </div>
           )}
@@ -2610,7 +2691,7 @@ function Main({
                 actionsFor.kind === 'recording'
                   ? (state.recordings.find(
                       (r) => r.id === actionsFor.recordingId,
-                    )?.title ?? 'track')
+                    )?.title ?? t('track.fallbackTitle'))
                   : actionsFor.meta.title
               }
               actions={[
@@ -2625,20 +2706,20 @@ function Main({
                             l.entityKind === 'track' &&
                             l.targetId === actionsFor.recordingId,
                         )
-                          ? 'unlike'
-                          : 'like',
+                          ? t('common.unlike')
+                          : t('common.like'),
                         icon: 'heart' as const,
                       },
                     ]
                   : []),
                 {
                   key: 'enqueue',
-                  label: 'add to queue',
+                  label: t('action.addToQueue'),
                   icon: 'queue' as const,
                 },
                 {
                   key: 'add',
-                  label: 'add to playlist',
+                  label: t('sheets.addToPlaylist'),
                   icon: 'list-plus' as const,
                 },
                 // Download affordance where a provider ref can mint a
@@ -2656,12 +2737,12 @@ function Main({
                             actionsFor.recordingId,
                           );
                           return row === null
-                            ? 'download'
+                            ? t('action.download')
                             : row.state === 'available'
-                              ? 'remove download'
+                              ? t('action.removeDownload')
                               : row.state === 'failed_with_retry'
-                                ? 'retry download'
-                                : 'cancel download';
+                                ? t('action.retryDownload')
+                                : t('action.cancelDownload');
                         })(),
                         icon: 'download' as const,
                       },
@@ -2674,7 +2755,7 @@ function Main({
                   ? [
                       {
                         key: 'radio',
-                        label: 'start radio',
+                        label: t('stage.radio.start'),
                         icon: 'radio' as const,
                       },
                     ]
@@ -2684,7 +2765,7 @@ function Main({
                   ? [
                       {
                         key: 'album',
-                        label: 'open album',
+                        label: t('action.openAlbum'),
                         icon: 'note' as const,
                       },
                     ]
@@ -2694,7 +2775,7 @@ function Main({
                   ? [
                       {
                         key: 'artist',
-                        label: 'open artist',
+                        label: t('action.openArtist'),
                         icon: 'library' as const,
                       },
                     ]
@@ -2738,19 +2819,17 @@ function Main({
             onDismissed={() => setStorefrontSheetOpen(false)}
           >
             <ValueFieldSheet
-              title="storefront"
+              title={t('settings.storefront')}
               initial={storefrontDraft}
-              placeholder="country code (e.g. US)"
-              submitLabel="save"
-              clearLabel="auto — defer to system locale"
+              placeholder={t('sheets.countryCodePlaceholder')}
+              submitLabel={t('common.save')}
+              clearLabel={t('sheets.autoClear')}
               onSubmit={(value) => {
                 const code = value.toUpperCase();
                 // The domain bound: ISO-3166 alpha-2, or null for
                 // system-locale resolution.
                 if (!/^[A-Z]{2}$/.test(code)) {
-                  setToast(
-                    'storefront must be a two-letter country code',
-                  );
+                  setToast(t('toast.storefrontCode'));
                   return;
                 }
                 // Dismiss only on commit — a failed save shows the
@@ -2759,7 +2838,7 @@ function Main({
                 void session
                   .updateSettings({ ...state.settings, storefront: code })
                   .then((saved) => {
-                    reportResult('save storefront', saved);
+                    reportResult('action.saveStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
@@ -2770,7 +2849,7 @@ function Main({
                 void session
                   .updateSettings({ ...state.settings, storefront: null })
                   .then((saved) => {
-                    reportResult('clear storefront', saved);
+                    reportResult('action.clearStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
@@ -2786,8 +2865,8 @@ function Main({
             onDismissed={() => setQualityPickerOpen(false)}
           >
             <ProviderPickerSheet
-              title="quality"
-              options={QUALITY_OPTIONS}
+              title={t('settings.quality')}
+              options={qualityOptions()}
               selectedKey={`${state.settings.qualityKbps}`}
               onPick={(key) => {
                 const qualityKbps = Number(key);
@@ -2798,7 +2877,7 @@ function Main({
                 void session
                   .updateSettings({ ...state.settings, qualityKbps })
                   .then((saved) => {
-                    reportResult('save quality', saved);
+                    reportResult('action.saveQuality', saved);
                     if (saved.ok && opening === qualityEpoch.current) {
                       setQualityPickerOpen(false);
                     }
@@ -2828,8 +2907,8 @@ function Main({
             onDismissed={() => setThemePickerOpen(false)}
           >
             <ProviderPickerSheet
-              title="theme"
-              options={THEME_OPTIONS}
+              title={t('settings.theme')}
+              options={themeOptions()}
               selectedKey={state.settings.theme}
               onPick={(key) => {
                 const theme =
@@ -2838,6 +2917,25 @@ function Main({
                 setThemePickerOpen(false);
               }}
               onDismiss={() => setThemePickerOpen(false)}
+            />
+          </SheetScreen>
+        )}
+        {languagePickerOpen && (
+          <SheetScreen
+            stackKey="sheet-language"
+            onDismissed={() => setLanguagePickerOpen(false)}
+          >
+            <ProviderPickerSheet
+              title={t('sheets.languageTitle')}
+              options={languageOptions()}
+              selectedKey={state.settings.language ?? 'system'}
+              onPick={(key) => {
+                const language = key === 'system' ? null : key;
+                void session.updateSettings({ ...state.settings, language });
+                applyLocale(language);
+                setLanguagePickerOpen(false);
+              }}
+              onDismiss={() => setLanguagePickerOpen(false)}
             />
           </SheetScreen>
         )}

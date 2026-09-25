@@ -793,6 +793,7 @@ export const SYNC_FIELD_RULES: Readonly<
     radioProvider: rule(optStr(64)),
     qualityKbps: rule(isQualityKbps),
     prefetch: rule(isBooleanValue),
+    language: rule(optStr(24)),
   },
 };
 

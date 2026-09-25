@@ -3,7 +3,12 @@ import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { CollectionModel, CollectionRowModel } from '@auqw/ui-shared';
+import type {
+  CollectionModel,
+  CollectionRowModel,
+  MessageId,
+} from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type CollectionScreenProps = {
   readonly model: CollectionModel;
@@ -16,12 +21,14 @@ export type CollectionScreenProps = {
   readonly onContext?: ((row: CollectionRowModel) => void) | undefined;
 };
 
-const EMPTY_HINTS = {
-  liked: 'liked tracks land here',
-  top50: 'plays count once you listen',
-  history: 'played tracks land here',
-  downloads: 'downloaded tracks land here',
-} as const;
+const EMPTY_HINTS: Readonly<
+  Record<'liked' | 'top50' | 'history' | 'downloads', MessageId>
+> = {
+  liked: 'collection.emptyHint.liked',
+  top50: 'collection.emptyHint.top50',
+  history: 'collection.emptyHint.history',
+  downloads: 'collection.emptyHint.downloads',
+};
 
 export function CollectionScreen({
   model,
@@ -54,7 +61,7 @@ export function CollectionScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel="back"
+          accessibilityLabel={t('common.back')}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -67,12 +74,12 @@ export function CollectionScreen({
           {model.title}
         </Text>
         <Text variant="metadata" color="secondary">
-          {model.rows.length} {model.rows.length === 1 ? 'track' : 'tracks'}
+          {t('common.trackCount', { count: model.rows.length })}
         </Text>
         <Pressable
           compact
           onPress={model.rows.length === 0 ? undefined : onPlayAll}
-          accessibilityLabel={`play ${model.title}`}
+          accessibilityLabel={t('collection.playAllA11y', { title: model.title })}
           accessibilityState={{ disabled: model.rows.length === 0 }}
           style={{
             paddingHorizontal: theme.spacing.md,
@@ -89,14 +96,14 @@ export function CollectionScreen({
             variant="metadata"
             color={model.rows.length === 0 ? 'secondary' : 'accent'}
           >
-            play all
+            {t('collection.playAll')}
           </Text>
         </Pressable>
       </View>
       {model.rows.length === 0 ? (
         <EmptyState
-          title={`${model.title} is empty`}
-          hint={EMPTY_HINTS[model.key]}
+          title={t('collection.empty', { title: model.title })}
+          hint={t(EMPTY_HINTS[model.key])}
           icon={model.key === 'history' ? 'clock' : 'note'}
         />
       ) : (

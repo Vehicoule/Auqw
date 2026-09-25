@@ -8,7 +8,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 import type { TrackRowModel } from '@auqw/ui-shared';
 
 const DRAG_HANDLE_SLOP = { top: 8, bottom: 8, left: 10, right: 10 };
@@ -59,6 +59,24 @@ export function TrackRow({
         ]
           .filter((part): part is string => part !== null && part !== '')
           .join(' · ');
+  const downloadNote =
+    row.download === null
+      ? ''
+      : t('track.a11y.downloadSuffix', {
+          state:
+            row.download === 'stored'
+              ? t('track.download.complete')
+              : t(`track.download.${row.download}`),
+        });
+  const rowLabel =
+    row.title +
+    (row.artist === null
+      ? ''
+      : t('track.a11y.artistSuffix', { artist: row.artist })) +
+    (unavailable ? t('track.a11y.unavailableSuffix') : '') +
+    (row.playing ? t('track.a11y.playingSuffix') : '') +
+    (row.liked ? t('track.a11y.likedSuffix') : '') +
+    downloadNote;
   return (
     <View
       style={{
@@ -78,7 +96,7 @@ export function TrackRow({
               compact
               onLongPress={onDragStart}
               delayLongPress={120}
-              accessibilityLabel="drag to reorder"
+              accessibilityLabel={t('track.a11y.drag')}
               hitSlop={DRAG_HANDLE_SLOP}
               style={{ padding: 3 }}
             >
@@ -96,7 +114,7 @@ export function TrackRow({
                 icon="chevron-up"
                 size={20}
                 iconSize={10}
-                accessibilityLabel="move up"
+                accessibilityLabel={t('track.a11y.moveUp')}
                 onPress={onMoveUp}
                 hitSlop={{ top: 6, bottom: 1, left: 12, right: 12 }}
               />
@@ -104,7 +122,7 @@ export function TrackRow({
                 icon="chevron-down"
                 size={20}
                 iconSize={10}
-                accessibilityLabel="move down"
+                accessibilityLabel={t('track.a11y.moveDown')}
                 onPress={onMoveDown}
                 hitSlop={{ top: 1, bottom: 6, left: 12, right: 12 }}
               />
@@ -121,11 +139,11 @@ export function TrackRow({
         onPress={onPress}
         onLongPress={onLongPress ?? onContext}
         compact
-        accessibilityLabel={`${row.title}${row.artist === null ? '' : `, ${row.artist}`}${unavailable ? ', unavailable' : ''}${row.playing ? ', playing' : ''}${row.liked ? ', liked' : ''}${row.download === null ? '' : `, download ${row.download === 'stored' ? 'complete' : row.download}`}`}
+        accessibilityLabel={rowLabel}
         accessibilityRole="button"
         accessibilityState={{ selected: row.playing }}
         accessibilityHint={
-          onContext === undefined ? undefined : 'long-press for more actions'
+          onContext === undefined ? undefined : t('track.a11y.longPressHint')
         }
         style={({ pressed }) => [
           {
@@ -259,7 +277,7 @@ export function TrackRow({
             size={30}
             iconSize={14}
             color={row.liked ? theme.colors.liked : undefined}
-            accessibilityLabel={row.liked ? 'unlike' : 'like'}
+            accessibilityLabel={row.liked ? t('common.unlike') : t('common.like')}
             onPress={onToggleLike}
           />
         )}
@@ -268,7 +286,7 @@ export function TrackRow({
             icon="close"
             size={30}
             iconSize={14}
-            accessibilityLabel="remove from queue"
+            accessibilityLabel={t('track.a11y.remove')}
             onPress={onRemove}
           />
         )}

@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -306,6 +306,17 @@ const MIGRATION_5: readonly string[] = [
 )`,
 ];
 
+/**
+ * v5 -> v6: `settings.language` — the UI-language pin (BCP-47 tag).
+ * Nullable with no default: a NULL (or pre-column) row means "follow
+ * the platform locale", so the column must never mint a concrete
+ * language of its own — only a value the user explicitly chose is
+ * ever written.
+ */
+const MIGRATION_6: readonly string[] = [
+  `ALTER TABLE settings ADD COLUMN language TEXT`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -313,6 +324,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_3]),
   Object.freeze([...MIGRATION_4]),
   Object.freeze([...MIGRATION_5]),
+  Object.freeze([...MIGRATION_6]),
 ]);
 
 const CREATED_OBJECT_NAME =

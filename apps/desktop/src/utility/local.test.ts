@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,10 @@ import { createLocalService } from './local.ts';
 import { createTagService } from './tags.ts';
 
 export async function run(): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), 'auqw-local-'));
+  // realpath: local:add canonicalizes picks before minting grant URIs,
+  // and macOS tmpdir() is a symlink (/var → /private/var) — expected
+  // URIs must be built from the same canonical root the service sees.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'auqw-local-')));
   const userData = join(root, 'userData');
   const mediaDir = join(userData, 'media');
   const dbPath = join(userData, 'auqw.db');

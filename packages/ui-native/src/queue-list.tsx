@@ -4,6 +4,7 @@ import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 // Shared fallback (web/desktop + any platform without gesture-handler):
 // reorder uses paired chevron controls; the native variant swaps this
@@ -32,7 +33,7 @@ export function QueueList({
 }: QueueListProps) {
   const theme = useTheme();
   if (queue.items.length === 0) {
-    return <EmptyState title="queue is empty" icon="queue" />;
+    return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
   return (
     <FlatList
@@ -49,12 +50,12 @@ export function QueueList({
               style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
               uppercase
             >
-              now playing
+              {t('queue.nowPlaying')}
             </Text>
           )}
           <TrackRow
             row={item.row}
-            badge={item.duplicate ? 'repeat' : null}
+            badge={item.duplicate ? t('queue.badge.repeat') : null}
             reorderControls={reordering ? 'buttons' : 'none'}
             onPress={
               onPressItem === undefined || reordering

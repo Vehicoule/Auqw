@@ -11,6 +11,7 @@ import {
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type { EntityScreenModel, TrackRowModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 import type { IconName } from './primitives.tsx';
 
 export type EntityScreenProps = {
@@ -94,7 +95,7 @@ function BackRow({ onBack }: { readonly onBack?: (() => void) | undefined }) {
       <Pressable
         compact
         onPress={onBack}
-        accessibilityLabel="back"
+        accessibilityLabel={t('common.back')}
         style={{ padding: theme.spacing.xs }}
       >
         <Icon
@@ -131,7 +132,7 @@ export function EntityScreen({
         }}
       >
         <BackRow onBack={onBack} />
-        <LoadingState title="loading" />
+        <LoadingState title={t('state.loading')} />
       </View>
     );
   }
@@ -146,7 +147,7 @@ export function EntityScreen({
       >
         <BackRow onBack={onBack} />
         <ErrorState
-          title="couldn't load this page"
+          title={t('entity.errorTitle')}
           hint={model.message}
           onRetry={onRetry}
         />
@@ -171,7 +172,7 @@ export function EntityScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel="back"
+          accessibilityLabel={t('common.back')}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -191,7 +192,7 @@ export function EntityScreen({
           uppercase
           style={{ marginTop: theme.spacing.md }}
         >
-          {model.kind ?? 'entity'}
+          {model.kind === null ? t('entity.kind.fallback') : t(`entity.kind.${model.kind}`)}
         </Text>
         <Text
           variant="heading"
@@ -222,14 +223,14 @@ export function EntityScreen({
         }}
       >
         <HeaderPill
-          label="play"
+          label={t('common.play')}
           icon="play"
           accent
           disabled={model.items.length === 0}
           onPress={onPlayAll}
         />
         <HeaderPill
-          label="shuffle"
+          label={t('entity.shuffle')}
           icon="shuffle"
           disabled={model.items.length === 0}
           onPress={onShuffleAll}
@@ -244,7 +245,9 @@ export function EntityScreen({
           size={34}
           iconSize={16}
           color={model.liked ? theme.colors.liked : undefined}
-          accessibilityLabel={model.liked ? 'unlike' : 'like'}
+          accessibilityLabel={
+            model.liked ? t('common.unlike') : t('common.like')
+          }
           onPress={model.canLike ? onToggleLike : undefined}
         />
       </View>
@@ -266,16 +269,15 @@ export function EntityScreen({
         >
           <Icon name="warn" size={14} color={theme.colors.warn} />
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
-            {model.message ??
-              'partial page — some sections are unavailable upstream'}
+            {model.message ?? t('entity.partial')}
           </Text>
         </View>
       )}
 
       {model.items.length === 0 ? (
         <EmptyState
-          title="no tracks on this page"
-          hint="the provider returned an empty listing"
+          title={t('entity.empty')}
+          hint={t('entity.emptyHint')}
           icon="note"
         />
       ) : (
@@ -303,7 +305,7 @@ export function EntityScreen({
             model.hasMore ? (
               <Pressable
                 onPress={model.loadingMore ? undefined : onLoadMore}
-                accessibilityLabel="load more"
+                accessibilityLabel={t('entity.loadMore')}
                 accessibilityState={{ busy: model.loadingMore }}
                 style={({ pressed }) => [
                   {
@@ -330,7 +332,7 @@ export function EntityScreen({
                   />
                 )}
                 <Text variant="metadata" color="secondary">
-                  {model.loadingMore ? 'loading' : 'load more'}
+                  {model.loadingMore ? t('state.loading') : t('entity.loadMore')}
                 </Text>
               </Pressable>
             ) : null

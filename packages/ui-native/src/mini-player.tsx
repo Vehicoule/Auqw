@@ -13,6 +13,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { ArtworkRing } from './progress.tsx';
+import { t } from '@auqw/ui-shared';
 import type { PlatformVariant, PlayerModel } from '@auqw/ui-shared';
 
 export type MiniPlayerProps = {
@@ -112,8 +113,14 @@ export function MiniPlayer({
           <Pressable
             compact
             onPress={onPress}
-            accessibilityLabel={`now playing, ${player.title}${player.artist === null ? '' : `, ${player.artist}`
-              }, ${player.status}, open player`}
+            accessibilityLabel={t('player.a11y.nowPlaying', {
+              title: player.title,
+              artist:
+                player.artist === null
+                  ? ''
+                  : t('track.a11y.artistSuffix', { artist: player.artist }),
+              status: t(`player.status.${player.status}`),
+            })}
             style={{
               flex: 1,
               minWidth: 0,
@@ -153,14 +160,18 @@ export function MiniPlayer({
               color={
                 player.liked ? theme.colors.liked : theme.colors.textSecondary
               }
-              accessibilityLabel={player.liked ? 'unlike' : 'like'}
+              accessibilityLabel={
+                player.liked ? t('common.unlike') : t('common.like')
+              }
               onPress={onToggleLike}
             />
           )}
           <Pressable
             compact
             onPress={onPlayPause}
-            accessibilityLabel={player.status === 'playing' ? 'pause' : 'play'}
+            accessibilityLabel={
+              player.status === 'playing' ? t('common.pause') : t('common.play')
+            }
             style={{
               width: 32,
               height: 32,

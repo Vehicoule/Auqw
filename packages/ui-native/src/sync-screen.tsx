@@ -4,6 +4,7 @@ import { ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import type { SyncModel, SyncPeerModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type SyncScreenProps = {
   readonly model: SyncModel;
@@ -100,7 +101,7 @@ function PeerRow({
           peer.lastSyncLabel,
         ]
           .filter((s) => s !== null)
-          .join(' · ') || `fp ${peer.fpShort}…`}
+          .join(' · ') || t('sync.fpFallback', { fp: peer.fpShort })}
       </Text>
       {peer.lastError !== null && (
         <Text variant="metadata" color="warn" numberOfLines={2}>
@@ -111,23 +112,23 @@ function PeerRow({
         <Pressable
           onPress={onSyncNow === undefined ? undefined : () => onSyncNow(peer.key)}
           disabled={onSyncNow === undefined || peer.syncing}
-          accessibilityLabel={`sync now ${peer.name}`}
+          accessibilityLabel={t('sync.syncNowA11y', { name: peer.name })}
           accessibilityRole="button"
           style={({ pressed }) => [{ opacity: peer.syncing || pressed ? 0.5 : 1 }]}
         >
           <Text variant="metadata" color="accent">
-            {peer.syncing ? 'syncing…' : 'sync now'}
+            {peer.syncing ? t('sync.syncing') : t('sync.syncNow')}
           </Text>
         </Pressable>
         <Pressable
           onPress={onUnpair === undefined ? undefined : () => onUnpair(peer.key)}
           disabled={onUnpair === undefined}
-          accessibilityLabel={`unpair ${peer.name}`}
+          accessibilityLabel={t('sync.unpairA11y', { name: peer.name })}
           accessibilityRole="button"
           style={({ pressed }) => [pressed && { opacity: 0.5 }]}
         >
           <Text variant="metadata" color="warn">
-            unpair
+            {t('sync.unpair')}
           </Text>
         </Pressable>
       </View>
@@ -171,8 +172,7 @@ function PairForm({
   return (
     <View style={{ padding: 14, gap: theme.spacing.sm }}>
       <Text variant="metadata" color="secondary">
-        type the 6-digit code shown on the desktop with its
-        address:port — e.g. 192.168.1.20 and 48715
+        {t('sync.form.help')}
       </Text>
       <View
         style={{
@@ -185,12 +185,14 @@ function PairForm({
       >
         <TextInput
           value={code}
-          onChangeText={(t) => setCode(t.replace(/[^0-9]/g, '').slice(0, 6))}
+          onChangeText={(next) =>
+            setCode(next.replace(/[^0-9]/g, '').slice(0, 6))
+          }
           placeholder="123456"
           placeholderTextColor={theme.colors.textSecondary}
           keyboardType="number-pad"
           maxLength={6}
-          accessibilityLabel="pairing code"
+          accessibilityLabel={t('sync.form.codeA11y')}
           style={inputStyle}
         />
       </View>
@@ -206,12 +208,12 @@ function PairForm({
         <TextInput
           value={host}
           onChangeText={setHost}
-          placeholder="desktop address"
+          placeholder={t('sync.form.host')}
           placeholderTextColor={theme.colors.textSecondary}
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
-          accessibilityLabel="desktop address"
+          accessibilityLabel={t('sync.form.host')}
           style={inputStyle}
         />
         <View
@@ -223,12 +225,14 @@ function PairForm({
         >
           <TextInput
             value={port}
-            onChangeText={(t) => setPort(t.replace(/[^0-9]/g, '').slice(0, 5))}
-            placeholder="port"
+            onChangeText={(next) =>
+              setPort(next.replace(/[^0-9]/g, '').slice(0, 5))
+            }
+            placeholder={t('sync.form.port')}
             placeholderTextColor={theme.colors.textSecondary}
             keyboardType="number-pad"
             maxLength={5}
-            accessibilityLabel="desktop port"
+            accessibilityLabel={t('sync.form.portA11y')}
             style={inputStyle}
           />
         </View>
@@ -250,7 +254,7 @@ function PairForm({
                 })
         }
         disabled={onPairCode === undefined || !ready}
-        accessibilityLabel="pair"
+        accessibilityLabel={t('sync.form.pair')}
         accessibilityRole="button"
         style={({ pressed }) => [
           {
@@ -264,7 +268,7 @@ function PairForm({
         ]}
       >
         <Text variant="metadata" color="bright">
-          {disabled ? 'pairing…' : 'pair'}
+          {disabled ? t('sync.form.pairing') : t('sync.form.pair')}
         </Text>
       </Pressable>
     </View>
@@ -305,7 +309,7 @@ export function SyncScreen({
         <Pressable
           onPress={onBack}
           disabled={onBack === undefined}
-          accessibilityLabel="back"
+          accessibilityLabel={t('common.back')}
           accessibilityRole="button"
           style={({ pressed }) => [pressed && { opacity: 0.5 }]}
         >
@@ -316,7 +320,7 @@ export function SyncScreen({
           />
         </Pressable>
         <Text variant="title" color="primary">
-          desktop sync
+          {t('sync.title')}
         </Text>
       </View>
 
@@ -332,7 +336,7 @@ export function SyncScreen({
           }}
         >
           <Text variant="metadata" color="secondary">
-            sync isn't available on this device yet
+            {t('sync.unavailable')}
           </Text>
         </View>
       ) : (
@@ -345,12 +349,14 @@ export function SyncScreen({
           >
             <Text variant="metadata" color="secondary">
               {model.statusLabel}
-              {model.deviceId === null ? '' : ` · id ${model.deviceId}`}
+              {model.deviceId === null
+                ? ''
+                : t('sync.deviceIdSuffix', { id: model.deviceId })}
             </Text>
           </View>
 
           {model.peers.length > 0 && (
-            <Section title="devices">
+            <Section title={t('sync.section.devices')}>
               {model.peers.map((peer, i) => (
                 <View key={peer.key}>
                   {i > 0 && <Hairline style={{ marginLeft: 14 }} />}
@@ -364,7 +370,7 @@ export function SyncScreen({
             </Section>
           )}
 
-          <Section title="pair">
+          <Section title={t('sync.section.pair')}>
             {renderScanner !== undefined && (
               <>
                 {scanning ? (
@@ -378,7 +384,7 @@ export function SyncScreen({
                   <Pressable
                     onPress={() => setScanning(true)}
                     disabled={pairing}
-                    accessibilityLabel="scan QR code"
+                    accessibilityLabel={t('sync.scanA11y')}
                     accessibilityRole="button"
                     style={({ pressed }) => [
                       { padding: 14 },
@@ -386,7 +392,7 @@ export function SyncScreen({
                     ]}
                   >
                     <Text variant="metadata" color="accent">
-                      scan the QR shown on the desktop
+                      {t('sync.scan')}
                     </Text>
                   </Pressable>
                 )}

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { KeyboardAvoidingView, StyleSheet, View } from 'react-native';
 import { Pressable } from './primitives.tsx';
 import { useTheme } from './theme.tsx';
+import { t } from '@auqw/ui-shared';
 
 /**
  * Web/desktop fallback for `stack.native.tsx`: no native stack exists
@@ -66,7 +67,7 @@ export function SheetScreen({ onDismissed, children }: SheetScreenProps) {
       <Pressable
         compact
         onPress={onDismissed}
-        accessibilityLabel="dismiss"
+        accessibilityLabel={t('common.dismiss')}
         style={StyleSheet.absoluteFill}
       />
       {/* Native formSheets resize with the keyboard on their own; the

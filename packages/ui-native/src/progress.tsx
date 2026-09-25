@@ -17,7 +17,7 @@ import { scheduleOnRN } from 'react-native-worklets';
 import Svg, { Path } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import { Artwork, Text } from './primitives.tsx';
-import { formatClock, formatRemaining } from '@auqw/ui-shared';
+import { formatClock, formatRemaining, t } from '@auqw/ui-shared';
 import type { PlatformVariant } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
@@ -323,12 +323,15 @@ export function LinearScrubber({
       <View
         onLayout={onLayout}
         accessibilityRole="adjustable"
-        accessibilityLabel="seek"
+        accessibilityLabel={t('progress.a11y.seek')}
         accessibilityValue={{
           min: 0,
           max: durationMs ?? 0,
           now: Math.round(positionMs),
-          text: `${formatClock(positionMs)} of ${formatClock(durationMs)}`,
+          text: t('progress.a11y.value', {
+            position: formatClock(positionMs),
+            duration: formatClock(durationMs),
+          }),
         }}
         accessibilityActions={[
           { name: 'increment' },
@@ -397,12 +400,15 @@ export function WaveformSeek({
         <View
           onLayout={onLayout}
           accessibilityRole="adjustable"
-          accessibilityLabel="seek"
+          accessibilityLabel={t('progress.a11y.seek')}
           accessibilityValue={{
             min: 0,
             max: durationMs ?? 0,
             now: Math.round(positionMs),
-            text: `${formatClock(positionMs)} of ${formatClock(durationMs)}`,
+            text: t('progress.a11y.value', {
+            position: formatClock(positionMs),
+            duration: formatClock(durationMs),
+          }),
           }}
           accessibilityActions={[
             { name: 'increment' },

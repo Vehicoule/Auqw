@@ -1,6 +1,7 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { t } from '@auqw/ui-shared';
 import type { SettingsModel, SettingsRowModel } from '@auqw/ui-shared';
 
 export type SettingsScreenProps = {
@@ -130,7 +131,7 @@ export function SettingsScreen({
         uppercase
         style={{ paddingHorizontal: theme.spacing.screen, marginTop: theme.spacing.sm, marginBottom: theme.spacing.sm }}
       >
-        settings
+        {t('settings.heading.settings')}
       </Text>
       <View
         style={{
@@ -162,7 +163,7 @@ export function SettingsScreen({
           marginBottom: theme.spacing.sm,
         }}
       >
-        diagnostics
+        {t('settings.heading.diagnostics')}
       </Text>
       <View
         style={{
@@ -176,31 +177,33 @@ export function SettingsScreen({
       >
         <View style={{ flexDirection: 'row' }}>
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
-            providers
+            {t('settings.diag.providers')}
           </Text>
           <Text variant="metadata" color="primary" style={{ flexShrink: 1 }}>
             {diagnostics.providerIds.length === 0
-              ? 'none'
+              ? t('settings.diag.none')
               : diagnostics.providerIds.join(', ')}
           </Text>
         </View>
         <Hairline />
         <View style={{ flexDirection: 'row' }}>
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
-            attempt trace
+            {t('settings.diag.attemptTrace')}
           </Text>
           <Text variant="metadata" color="primary" numeric>
-            {diagnostics.attemptCount} attempts
+            {t('settings.diag.attempts', { count: diagnostics.attemptCount })}
             {diagnostics.lastAttemptLabel === null
               ? ''
-              : ` · last: ${diagnostics.lastAttemptLabel}`}
+              : ` · ${t('settings.diag.last', { value: diagnostics.lastAttemptLabel })}`}
           </Text>
         </View>
         <Hairline />
         <View style={{ flexDirection: 'row' }}>
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
-            persistence
+            {t('settings.diag.persistence')}
           </Text>
+          {/* Domain status values render verbatim — they are data from
+              the model, the same treatment as provider ids above. */}
           <Text variant="metadata" color={persistenceColor}>
             {diagnostics.persistence}
             {diagnostics.persistenceDetail === null
@@ -217,7 +220,7 @@ export function SettingsScreen({
         <Pressable
           onPress={onOpenCorrections}
           disabled={onOpenCorrections === undefined}
-          accessibilityLabel="match reviews"
+          accessibilityLabel={t('settings.diag.matchReviews')}
           accessibilityRole="button"
           style={({ pressed }) => [
             {
@@ -229,11 +232,11 @@ export function SettingsScreen({
           ]}
         >
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
-            match reviews
+            {t('settings.diag.matchReviews')}
           </Text>
           {diagnostics.pendingReviews !== null && (
             <Text variant="metadata" color="primary" numeric>
-              {diagnostics.pendingReviews} pending
+              {t('settings.diag.pending', { count: diagnostics.pendingReviews })}
             </Text>
           )}
           <Icon

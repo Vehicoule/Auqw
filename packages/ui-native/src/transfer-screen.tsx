@@ -4,6 +4,7 @@ import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type TransferScreenProps = {
   readonly model: TransferModel;
@@ -58,7 +59,7 @@ export function TransferScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel="back"
+          accessibilityLabel={t('common.back')}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -68,7 +69,7 @@ export function TransferScreen({
           />
         </Pressable>
         <Text variant="display" color="bright" style={{ flex: 1 }}>
-          library transfer
+          {t('transfer.title')}
         </Text>
       </View>
       <ScrollView
@@ -86,10 +87,12 @@ export function TransferScreen({
             uppercase
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
-            export
+            {t('transfer.exportSection')}
           </Text>
           <TransferRow
-            label={exportBusy ? 'exporting…' : 'export library'}
+            label={
+              exportBusy ? t('transfer.exporting') : t('transfer.export')
+            }
             detail={
               model.exportPhase === 'done' || model.exportPhase === 'error'
                 ? model.exportDetail
@@ -107,10 +110,10 @@ export function TransferScreen({
             uppercase
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
-            import
+            {t('transfer.importSection')}
           </Text>
           <TransferRow
-            label={importBusy ? 'working…' : 'choose file…'}
+            label={importBusy ? t('transfer.working') : t('transfer.import')}
             detail={model.importPhase === 'error' ? model.importDetail : null}
             detailTone="warn"
             disabled={importBusy || onPickImportFile === undefined}
@@ -203,18 +206,18 @@ function ImportBody({
       }}
     >
       <Text variant="body" color="bright">
-        import preview
+        {t('transfer.previewTitle')}
       </Text>
       <Text
         variant="metadata"
         color="secondary"
         style={{ marginTop: theme.spacing.xs }}
       >
-        format v{preview.formatVersion}
+        {t('transfer.format', { version: preview.formatVersion })}
         {preview.exportedLabel === null
           ? ''
-          : ` · exported ${preview.exportedLabel}`}
-        {` · ${preview.sourceLabel}`}
+          : t('transfer.exportedSuffix', { date: preview.exportedLabel })}
+        {t('transfer.sourceSuffix', { source: preview.sourceLabel })}
       </Text>
       <View style={{ marginTop: theme.spacing.sm, gap: 4 }}>
         {preview.rows.map((row) => (
@@ -242,30 +245,30 @@ function ImportBody({
         >
           <Icon name="check" size={14} color={theme.colors.accent} />
           <Text variant="metadata" color="accent" style={{ flex: 1 }}>
-            {model.importDetail ?? 'import applied'}
+            {model.importDetail ?? t('transfer.applied')}
           </Text>
           <Pressable
             compact
             onPress={onResetImport}
-            accessibilityLabel="reset import"
+            accessibilityLabel={t('transfer.resetA11y')}
             style={{ paddingHorizontal: theme.spacing.xs }}
           >
             <Text variant="metadata" color="primary">
-              done
+              {t('common.done')}
             </Text>
           </Pressable>
         </View>
       ) : model.importPhase === 'error' ? (
         <View style={{ marginTop: theme.spacing.sm }}>
-          <ErrorState title="import failed" hint={model.importDetail} />
+          <ErrorState title={t('transfer.failed')} hint={model.importDetail} />
           <Pressable
             compact
             onPress={onResetImport}
-            accessibilityLabel="reset import"
+            accessibilityLabel={t('transfer.resetA11y')}
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
             <Text variant="metadata" color="primary">
-              start over
+              {t('transfer.startOver')}
             </Text>
           </Pressable>
         </View>
@@ -281,7 +284,7 @@ function ImportBody({
             compact
             onPress={onApplyImport}
             disabled={model.importPhase === 'applying'}
-            accessibilityLabel="apply import"
+            accessibilityLabel={t('transfer.apply')}
             style={{
               paddingHorizontal: theme.spacing.sm,
               paddingVertical: theme.spacing.xs,
@@ -291,13 +294,15 @@ function ImportBody({
             }}
           >
             <Text variant="metadata" color="canvas">
-              {model.importPhase === 'applying' ? 'applying…' : 'apply import'}
+              {model.importPhase === 'applying'
+                ? t('transfer.applying')
+                : t('transfer.apply')}
             </Text>
           </Pressable>
           <Pressable
             compact
             onPress={onResetImport}
-            accessibilityLabel="cancel import"
+            accessibilityLabel={t('transfer.cancelA11y')}
             style={{
               paddingHorizontal: theme.spacing.md,
               minHeight: 26,
@@ -307,7 +312,7 @@ function ImportBody({
             }}
           >
             <Text variant="metadata" color="secondary">
-              cancel
+              {t('common.cancel')}
             </Text>
           </Pressable>
         </View>

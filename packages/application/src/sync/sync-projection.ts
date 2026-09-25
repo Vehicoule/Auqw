@@ -249,6 +249,7 @@ const SETTINGS_SYNC_FIELDS = [
   'radioProvider',
   'qualityKbps',
   'prefetch',
+  'language',
 ] as const;
 
 function fieldWrite(

@@ -2,7 +2,7 @@ import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
 export type HomeScreenProps = {
@@ -30,7 +30,10 @@ function ResumeCard({
     <Pressable
       compact
       onPress={onResume}
-      accessibilityLabel={`resume ${resume.card.title}, paused at ${formatClock(resume.positionMs)}`}
+      accessibilityLabel={t('home.resumeA11y', {
+        title: resume.card.title,
+        position: formatClock(resume.positionMs),
+      })}
       style={({ pressed }) => [
         {
           flexDirection: 'row',
@@ -50,7 +53,7 @@ function ResumeCard({
       <Artwork url={resume.card.artworkUrl} size={44} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="label" color="accent" uppercase>
-          paused · continue
+          {t('home.resumeLabel')}
         </Text>
         <Text
           variant="body"
@@ -124,7 +127,7 @@ function Rail({
             <Pressable
               compact
               onPress={() => onPressSeeAll(section)}
-              accessibilityLabel={`see all ${title}`}
+              accessibilityLabel={t('home.seeAllA11y', { title })}
               style={{
                 paddingHorizontal: theme.spacing.md,
                 minHeight: 26,
@@ -134,14 +137,14 @@ function Rail({
               }}
             >
               <Text variant="metadata" color="secondary">
-                see all
+                {t('home.seeAll')}
               </Text>
             </Pressable>
           </>
         )}
       </View>
       {cards.length === 0 ? (
-        <EmptyState title="nothing here yet" icon="note" />
+        <EmptyState title={t('home.empty')} icon="note" />
       ) : (
         <FlatList
           horizontal
@@ -158,9 +161,14 @@ function Rail({
               onPress={
                 onPressCard === undefined ? undefined : () => onPressCard(item)
               }
-              accessibilityLabel={`${item.title}${
-                item.subtitle === null ? '' : `, ${item.subtitle}`
-              }`}
+              accessibilityLabel={
+                item.subtitle === null
+                  ? item.title
+                  : t('common.cardA11y', {
+                      title: item.title,
+                      subtitle: item.subtitle,
+                    })
+              }
               style={{ width: 112 }}
             >
               <Artwork url={item.artworkUrl} size={112} />
@@ -229,16 +237,16 @@ export function HomeScreen({
         <ResumeCard resume={model.resume} onResume={onResume} />
       )}
       <Rail
-        title="jump back in"
-        subtitle="pick up where you left off"
+        title={t('home.recents.title')}
+        subtitle={t('home.recents.subtitle')}
         section="recents"
         cards={model.recents}
         onPressCard={onPressCard}
         onPressSeeAll={onPressSeeAll}
       />
       <Rail
-        title="suggested for you"
-        subtitle="from your providers"
+        title={t('home.suggestions.title')}
+        subtitle={t('home.suggestions.subtitle')}
         section="suggestions"
         cards={model.suggestions}
         onPressCard={onPressCard}
