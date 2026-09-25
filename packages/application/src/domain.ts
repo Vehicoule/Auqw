@@ -259,14 +259,60 @@ function isStorefront(value: unknown): value is string | null {
   );
 }
 
+/**
+ * Host of an `https://` URL, or null when it is not a plain name-based
+ * destination. Mirrors `https_host` in
+ * `crates/plugin-host/src/manifest.rs`: userinfo and bracketed IPv6 are
+ * the two shapes that smuggle a host past a naive prefix check.
+ */
+function httpsHost(url: string): string | null {
+  if (!url.startsWith('https://')) return null;
+  const authority = url.slice('https://'.length).split(/[/?#]/)[0];
+  if (authority === undefined || authority === '') return null;
+  if (authority.includes('@') || authority.includes('[')) return null;
+  const host = authority.split(':')[0];
+  return host === undefined || host === '' ? null : host;
+}
+
+const IP_V4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+/**
+ * Whether a plugin-supplied URL is a destination the shell may fetch
+ * and render on that plugin's behalf. A provider result is untrusted
+ * input — these URLs are downloaded and drawn as images, so a loopback
+ * or private host would turn a plugin into LAN and cloud-metadata
+ * probing.
+ *
+ * This is a reachability floor, not the destination policy. The policy
+ * is `allows_destination` in `crates/plugin-host/src/manifest.rs`, and
+ * it is deliberately not applied to artwork yet: every provider serves
+ * art from a CDN outside its `network:` list (deezer draws from
+ * `cdn-images.dzcdn.net` while declaring `api.deezer.com`), so
+ * enforcing it needs artwork hosts added to the provider manifests
+ * first. DNS rebinding is out of scope as well — this inspects the
+ * name, not where it resolves.
+ */
+export function isPublicHttpsUrl(url: string): boolean {
+  const host = httpsHost(url);
+  if (host === null) return false;
+  const name = host.toLowerCase();
+  // Same public-DNS-name test as the manifest grammar: charset, at
+  // least one dot, no empty label, no bare IP, no `.localhost`.
+  if (!/^[a-z0-9.-]+$/.test(name)) return false;
+  const labels = name.split('.');
+  if (labels.length < 2) return false;
+  if (labels.some((label) => label === '')) return false;
+  const tld = labels[labels.length - 1];
+  if (tld === undefined || /^\d+$/.test(tld)) return false;
+  if (name.endsWith('.localhost')) return false;
+  return !IP_V4_LITERAL.test(name);
+}
+
 export function isArtworkRef(value: unknown): value is ArtworkRef {
   if (!isRecord(value) || !hasExactKeys(value, ['url', 'width', 'height'])) {
     return false;
   }
-  if (
-    !isString(value['url'], 2048) ||
-    !(value['url'] as string).startsWith('https://')
-  ) {
+  if (!isString(value['url'], 2048) || !isPublicHttpsUrl(value['url'])) {
     return false;
   }
   for (const key of ['width', 'height'] as const) {

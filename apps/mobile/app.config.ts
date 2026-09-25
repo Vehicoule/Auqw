@@ -19,6 +19,12 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'com.vehicoule.auqw',
+    // Stamped from the release tag by tooling/stamp-version.mjs — see
+    // tooling/version-code.mjs for the derivation. Never hand-edit:
+    // PackageManager refuses an upgrade whose versionCode does not
+    // rise, which is exactly what a second hand-maintained number
+    // breaks by going stale.
+    versionCode: 1001,
     adaptiveIcon: {
       backgroundColor: '#eef0f7',
       foregroundImage: './assets/android-icon-foreground.png',

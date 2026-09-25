@@ -1322,6 +1322,67 @@ async fn fail_message_is_redacted() {
     assert!(!e.to_string().contains("SYNTHETIC_SECRET"), "{e}");
 }
 
+/// A key name is guest-controlled text reaching an error surface like
+/// any other: an unknown `done` key named after the token material the
+/// host merged into the payload must not write that token out.
+#[tokio::test]
+async fn unknown_done_key_never_echoes_token_material() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"done\",\"result\":{},\"guest-access-token-123\":1}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({ "access_token": "guest-access-token-123" }),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let e = err(result);
+    let InvokeError::InvalidMessage(msg) = &e else {
+        panic!("expected InvalidMessage, got {e:?}");
+    };
+    assert!(msg.contains("is not in the ABI schema"), "{msg}");
+    assert!(
+        !msg.contains("guest-access-token-123"),
+        "token leaked: {msg}"
+    );
+    assert!(!e.to_string().contains("guest-access-token-123"), "{e}");
+}
+
+/// The same invariant holds for a nested payload key — checked by a
+/// different call site from the top-level message.
+#[tokio::test]
+async fn unknown_payload_key_never_echoes_token_material() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_request\",\
+         \"payload\":{\"guest-access-token-456\":1}}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({ "access_token": "guest-access-token-456" }),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let e = err(result);
+    let InvokeError::InvalidMessage(msg) = &e else {
+        panic!("expected InvalidMessage, got {e:?}");
+    };
+    assert!(
+        !msg.contains("guest-access-token-456"),
+        "token leaked: {msg}"
+    );
+    assert!(!e.to_string().contains("guest-access-token-456"), "{e}");
+}
+
 // ---------- preemption between guest entries ----------
 
 /// A cancel that lands while a CPU-bound `alloc` runs is observed

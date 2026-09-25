@@ -245,10 +245,10 @@ function rig(state: PersistedState, now = 1_000): Rig {
   return { cache, storage, fetch, paths, clock, log };
 }
 
-const A = 'https://img/a.jpg';
-const B = 'https://img/b.jpg';
-const C = 'https://img/c.jpg';
-const D = 'https://img/d.jpg';
+const A = 'https://art.example/a.jpg';
+const B = 'https://art.example/b.jpg';
+const C = 'https://art.example/c.jpg';
+const D = 'https://art.example/d.jpg';
 
 async function storedUrls(storage: FakeStorage): Promise<string[]> {
   const loaded = await storage.load(ctx());
@@ -308,7 +308,7 @@ async function fetchErrorsPropagate(): Promise<void> {
 
 async function invalidUrls(): Promise<void> {
   const r = rig(persisted());
-  const http = await r.cache.get('http://img/x.jpg', ctx());
+  const http = await r.cache.get('http://art.example/x.jpg', ctx());
   assert(!http.ok && http.error.kind === 'invalid-response');
   const empty = await r.cache.get('', ctx());
   assert(!empty.ok && empty.error.kind === 'invalid-response');

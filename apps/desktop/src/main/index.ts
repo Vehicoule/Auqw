@@ -21,7 +21,8 @@ import { schemes } from '@auqw/design-tokens';
 import type { SchemeName } from '@auqw/design-tokens';
 import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
-import { shellError } from '../shared/errors.ts';
+import { fromUnknown, shellError } from '../shared/errors.ts';
+import { redactSensitive } from '../shared/redact.ts';
 import { isSyncAppliedEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
@@ -140,12 +141,37 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   return env;
 }
 
+// A fatal startup failure logs locally, so the cause has to stay
+// diagnosable — but only as a redacted, bounded rendering. The raw value
+// is never logged whole (it may be circular or unbounded) and never
+// crosses a port boundary: only fields that are already strings are
+// read, so this renderer cannot throw from inside a failure handler.
+// `redactSensitive` is pattern masking rather than a proof — see its
+// comment for the shape a credential can still hide behind.
+function boundedCause(thrown: unknown): string {
+  let raw: string;
+  if (thrown instanceof Error) {
+    raw = `${thrown.name}: ${thrown.message}`;
+  } else if (typeof thrown === 'string') {
+    raw = thrown;
+  } else {
+    raw = 'non-error thrown';
+  }
+  const safe = redactSensitive(raw);
+  return safe.length > 512 ? `${safe.slice(0, 512)}…` : safe;
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   main().catch((thrown: unknown) => {
-    console.error('fatal startup failure:', thrown);
+    // `fromUnknown` supplies the typed kind; `boundedCause` keeps the
+    // cause debuggable without echoing a raw value into the log.
+    const error = fromUnknown(thrown);
+    console.error(
+      `fatal startup failure: ${error.kind}: ${boundedCause(thrown)}`,
+    );
     app.exit(1);
   });
 }

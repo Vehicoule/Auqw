@@ -44,6 +44,30 @@ export type SupervisorOptions = {
   readonly services?: Readonly<
     Record<string, (args: unknown) => Promise<unknown>>
   >;
+  /**
+   * Ceiling on requests waiting for a child to come up. A caller that
+   * outpaces a crash-looping utility would otherwise grow `queued`
+   * without limit; past the cap a request is refused typed instead of
+   * being buffered forever.
+   */
+  readonly maxQueued?: number;
+  /**
+   * Ceiling on requests in flight to a live child. A child that stays
+   * up but stops answering would otherwise accumulate `pending` with
+   * nothing to settle it — `onExit` only clears the map when the child
+   * actually dies.
+   */
+  readonly maxPending?: number;
+  /**
+   * How long a *queued* request may wait for a child before it is
+   * refused. Only the wait for a spawn gets a deadline: an in-flight
+   * request is doing real work whose duration is the utility's to
+   * govern (a transfer legitimately runs for minutes), and `onExit`
+   * already settles the whole `pending` map on a crash. A queued
+   * request that expires has never been posted, so refusing it cannot
+   * double-run work.
+   */
+  readonly queueDeadlineMs?: number;
 };
 
 export interface UtilitySupervisor {
@@ -69,6 +93,8 @@ type Queued = Pending & {
   readonly id: number;
   readonly channel: string;
   readonly args: unknown;
+  /** Deadline timer — cleared when the entry is posted or refused. */
+  timer: NodeJS.Timeout | null;
 };
 
 export function createSupervisor(
@@ -77,6 +103,9 @@ export function createSupervisor(
   const baseBackoffMs = opts.baseBackoffMs ?? 100;
   const maxBackoffMs = opts.maxBackoffMs ?? 4_000;
   const stableAfterMs = opts.stableAfterMs ?? 10_000;
+  const maxQueued = opts.maxQueued ?? 256;
+  const maxPending = opts.maxPending ?? 1_024;
+  const queueDeadlineMs = opts.queueDeadlineMs ?? 30_000;
 
   let child: UtilityChildLike | null = null;
   let spawned = false;
@@ -123,6 +152,22 @@ export function createSupervisor(
     }, stableAfterMs);
     stabilityTimer.unref();
     for (const entry of queued.splice(0)) {
+      if (entry.timer !== null) {
+        clearTimeout(entry.timer);
+        entry.timer = null;
+      }
+      // Promotion honours the in-flight ceiling too. Admission was
+      // checked against `maxQueued` on the way in, so a config with a
+      // larger queue than `maxPending` would otherwise flush a whole
+      // queue into `pending` and blow past the limit it exists to
+      // enforce. Refusing is safe here: the entry was never posted, so
+      // it cannot have started work.
+      if (pending.size >= maxPending) {
+        entry.reject(
+          shellError('unavailable', 'too many in-flight utility requests'),
+        );
+        continue;
+      }
       pending.set(entry.id, entry);
       try {
         postTo({ id: entry.id, channel: entry.channel, args: entry.args });
@@ -254,10 +299,24 @@ export function createSupervisor(
           shellError('released', 'supervisor is shut down'),
         );
       }
+      const live = child !== null && spawned;
+      // Refuse past the cap rather than buffer without limit — a caller
+      // outpacing a crash-looping utility, or a child that has quietly
+      // stopped answering, would otherwise grow these maps forever.
+      if (live ? pending.size >= maxPending : queued.length >= maxQueued) {
+        return Promise.reject(
+          shellError(
+            'unavailable',
+            live
+              ? 'too many in-flight utility requests'
+              : 'utility request queue is full',
+          ),
+        );
+      }
       const id = nextId;
       nextId += 1;
       return new Promise<unknown>((resolve, reject) => {
-        if (child !== null && spawned) {
+        if (live) {
           pending.set(id, { resolve, reject });
           try {
             postTo({ id, channel, args });
@@ -266,7 +325,33 @@ export function createSupervisor(
             reject(shellError('io-error', 'utility post failed'));
           }
         } else {
-          queued.push({ id, channel, args, resolve, reject });
+          const entry: Queued = {
+            id,
+            channel,
+            args,
+            resolve,
+            reject,
+            timer: null,
+          };
+          // Deadline only the wait for a spawn. This entry has not been
+          // posted yet, so expiring it cannot double-run work; an
+          // in-flight request's duration is the utility's to govern.
+          entry.timer = setTimeout(() => {
+            entry.timer = null;
+            const at = queued.indexOf(entry);
+            if (at !== -1) {
+              queued.splice(at, 1);
+            }
+            reject(
+              shellError('unavailable', 'utility did not start in time'),
+            );
+          }, queueDeadlineMs);
+          // Deliberately not `unref`d, unlike the respawn timers: this
+          // one owes the caller a settlement, so it has to be able to
+          // fire even when nothing else holds the process open. It is
+          // short-lived — cleared the moment the entry is posted,
+          // refused, or shut down.
+          queued.push(entry);
           ensureChild();
         }
       });
@@ -298,6 +383,10 @@ export function createSupervisor(
       }
       pending.clear();
       for (const entry of queued.splice(0)) {
+        if (entry.timer !== null) {
+          clearTimeout(entry.timer);
+          entry.timer = null;
+        }
         entry.reject(error);
       }
       const current = child;
