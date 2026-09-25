@@ -18,10 +18,14 @@ async function socketPair(): Promise<{
   await once(server, 'listening');
   const port = (server.address() as { port: number }).port;
   const b = createConnection({ host: '127.0.0.1', port });
+  // Arm the connect waiter before any await: while the server side is
+  // being awaited below, the client's 'connect' can already fire — a
+  // listener attached afterwards would miss the event and hang the pair.
+  const connected = once(b, 'connect');
   const a = await new Promise<Socket>((resolve) => {
     server.once('connection', resolve);
   });
-  await once(b, 'connect');
+  await connected;
   return {
     a,
     b,
