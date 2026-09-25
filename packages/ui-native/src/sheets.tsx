@@ -156,6 +156,73 @@ export function NameField({
   );
 }
 
+/**
+ * Single-value editor sheet — free-form settings values like the
+ * storefront's ISO-3166 alpha-2 code. `onSubmit` gets the trimmed
+ * draft; the caller validates and dismisses on accept. `clearLabel`
+ * renders a dashed reset row for values with an auto/null state.
+ */
+export function ValueFieldSheet({
+  title,
+  initial = '',
+  placeholder,
+  submitLabel = 'save',
+  clearLabel,
+  onSubmit,
+  onClear,
+  onDismiss,
+}: {
+  readonly title: string;
+  readonly initial?: string | undefined;
+  readonly placeholder: string;
+  readonly submitLabel?: string | undefined;
+  readonly clearLabel?: string | undefined;
+  readonly onSubmit?: ((value: string) => void) | undefined;
+  readonly onClear?: (() => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  const [draft, setDraft] = useState(initial);
+  return (
+    <SheetScaffold title={title} onDismiss={onDismiss}>
+      <NameField
+        value={draft}
+        placeholder={placeholder}
+        submitLabel={submitLabel}
+        autoFocus
+        onChange={setDraft}
+        onSubmit={onSubmit}
+        onCancel={onDismiss}
+      />
+      {clearLabel !== undefined && onClear !== undefined && (
+        <Pressable
+          onPress={onClear}
+          accessibilityLabel={clearLabel}
+          style={({ pressed }) => [
+            {
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.md,
+              minHeight: theme.sizes.touch,
+              paddingHorizontal: theme.spacing.sm,
+              borderRadius: theme.radius.control,
+              borderWidth: theme.strokes.hairline,
+              borderStyle: 'dashed',
+              borderColor: theme.colors.fg25,
+            },
+            pressed && { backgroundColor: theme.colors.fg08 },
+          ]}
+        >
+          <Icon name="close" size={15} color={theme.colors.textSecondary} />
+          <Text variant="body" color="secondary">
+            {clearLabel}
+          </Text>
+        </Pressable>
+      )}
+    </SheetScaffold>
+  );
+}
+
 export function RowActionsSheet({
   title,
   actions,
