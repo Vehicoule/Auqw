@@ -78,7 +78,7 @@ import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { MatchOutcome } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
-import type { IdPort } from '../ports/runtime.ts';
+import type { IdPort, RandomPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
 import type {
   PlaybackIdentity,
@@ -223,6 +223,7 @@ export type SessionDeps = {
   readonly providers: readonly ProviderPort[];
   readonly clock: ClockPort;
   readonly ids: IdPort;
+  readonly random: RandomPort;
   readonly log: LogPort;
   readonly defaults: Settings;
   /**
@@ -633,6 +634,7 @@ export class Session {
   readonly #router: ProviderRouter;
   readonly #clock: ClockPort;
   readonly #ids: IdPort;
+  readonly #random: RandomPort;
   readonly #log: LogPort;
 
   #state: SessionState = { type: 'unhydrated' };
@@ -708,6 +710,7 @@ export class Session {
     this.#router = new ProviderRouter(deps.providers);
     this.#clock = deps.clock;
     this.#ids = deps.ids;
+    this.#random = deps.random;
     this.#log = deps.log;
     this.#localPlaybackFor = deps.localPlaybackFor ?? (() => null);
     this.#isOnline = deps.isOnline ?? (() => true);
@@ -2039,7 +2042,7 @@ export class Session {
         ? items
           // Random-key sort — uniform over permutations, no index
           // access under noUncheckedIndexedAccess.
-          .map((item) => ({ item, rank: Math.random() }))
+          .map((item) => ({ item, rank: this.#random.unit() }))
           .sort((a, b) => a.rank - b.rank)
           .map(({ item }) => item)
         : items;

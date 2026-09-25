@@ -103,6 +103,18 @@ function cancelled(signal?: CancellationSignal): Result<never> | null {
 }
 
 export function createSecureSyncKeys(): SyncClientKeys {
+  // Index mutations are read-modify-write over two keys — serialized
+  // so concurrent peerPut/peerDelete can't lose each other's entry
+  // (a lost index row makes a durable peer record invisible).
+  let indexChain: Promise<unknown> = Promise.resolve();
+  const withIndexLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = indexChain.then(fn);
+    indexChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
   return {
     async identityGet(signal) {
       const hit = cancelled(signal);
@@ -181,19 +193,24 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      const wrote = await writeJsonStore(peerKey(peer.fp), peer);
-      if (!wrote.ok) {
-        return wrote;
-      }
-      const indexRead = await readJsonStore(PEER_INDEX_KEY);
-      if (!indexRead.ok) {
-        return indexRead;
-      }
-      const fps = isFpList(indexRead.value) ? indexRead.value : [];
-      if (fps.includes(peer.fp)) {
-        return ok(undefined);
-      }
-      return writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
+      // Record + index inside one lock: a racing peerDelete between
+      // the two writes would remove the freshly indexed record and
+      // leave the pairing half-visible.
+      return withIndexLock(async () => {
+        const wrote = await writeJsonStore(peerKey(peer.fp), peer);
+        if (!wrote.ok) {
+          return wrote;
+        }
+        const indexRead = await readJsonStore(PEER_INDEX_KEY);
+        if (!indexRead.ok) {
+          return indexRead;
+        }
+        const fps = isFpList(indexRead.value) ? indexRead.value : [];
+        if (fps.includes(peer.fp)) {
+          return ok(undefined);
+        }
+        return writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
+      });
     },
 
     async peerDelete(fp, signal) {
@@ -201,27 +218,30 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      // Index before the record: a failed delete then leaves an
-      // unreferenced record (inert — the index drives listing) rather
-      // than a stale index entry every peerList reads forever.
-      const indexRead = await readJsonStore(PEER_INDEX_KEY);
-      if (!indexRead.ok) {
-        return indexRead;
-      }
-      const fps = isFpList(indexRead.value) ? indexRead.value : [];
-      const wrote = await writeJsonStore(
-        PEER_INDEX_KEY,
-        fps.filter((f) => f !== fp),
-      );
-      if (!wrote.ok) {
-        return wrote;
-      }
-      try {
-        await deleteItemAsync(peerKey(fp));
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-      return ok(undefined);
+      // Index before the record, both inside the lock: a failed delete
+      // leaves an unreferenced record (inert — the index drives
+      // listing) rather than a stale index entry every peerList reads
+      // forever, and a racing peerPut can't interleave between them.
+      return withIndexLock(async () => {
+        const indexRead = await readJsonStore(PEER_INDEX_KEY);
+        if (!indexRead.ok) {
+          return indexRead;
+        }
+        const fps = isFpList(indexRead.value) ? indexRead.value : [];
+        const wrote = await writeJsonStore(
+          PEER_INDEX_KEY,
+          fps.filter((f) => f !== fp),
+        );
+        if (!wrote.ok) {
+          return wrote;
+        }
+        try {
+          await deleteItemAsync(peerKey(fp));
+        } catch (thrown) {
+          return err(nativeError(thrown));
+        }
+        return ok(undefined);
+      });
     },
   };
 }

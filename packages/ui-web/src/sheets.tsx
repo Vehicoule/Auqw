@@ -191,6 +191,59 @@ export function NameField({
   );
 }
 
+/**
+ * Single-value editor sheet — free-form settings values like the
+ * storefront's ISO-3166 alpha-2 code. `onSubmit` gets the trimmed
+ * draft; the caller validates and dismisses on accept. `clearLabel`
+ * renders a dashed reset row for values with an auto/null state.
+ */
+export function ValueFieldSheet({
+  title,
+  initial = '',
+  placeholder,
+  submitLabel = 'save',
+  clearLabel,
+  onSubmit,
+  onClear,
+  onDismiss,
+}: {
+  readonly title: string;
+  readonly initial?: string | undefined;
+  readonly placeholder: string;
+  readonly submitLabel?: string | undefined;
+  readonly clearLabel?: string | undefined;
+  readonly onSubmit?: ((value: string) => void) | undefined;
+  readonly onClear?: (() => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const [draft, setDraft] = useState(initial);
+  return (
+    <SheetScaffold title={title} onDismiss={onDismiss}>
+      <NameField
+        value={draft}
+        placeholder={placeholder}
+        submitLabel={submitLabel}
+        autoFocus
+        onChange={setDraft}
+        onSubmit={onSubmit}
+        onCancel={onDismiss}
+      />
+      {clearLabel !== undefined && onClear !== undefined && (
+        <Pressable
+          onPress={onClear}
+          ariaLabel={clearLabel}
+          className="uw-sheet-row uw-sheet-row--dashed"
+        >
+          <Icon name="close" size={15} color="var(--text-secondary)" />
+          <Text variant="body" color="secondary">
+            {clearLabel}
+          </Text>
+        </Pressable>
+      )}
+    </SheetScaffold>
+  );
+}
+
 export function RowActionsSheet({
   title,
   actions,

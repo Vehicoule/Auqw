@@ -33,7 +33,11 @@ import {
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
-import { createTestPeer, type SessionCodec } from './sync-crypto.ts';
+import {
+  createTestPeer,
+  fingerprintOf,
+  type SessionCodec,
+} from './sync-crypto.ts';
 import {
   createMemoryKeys,
   type SyncDeviceRecord,
@@ -398,6 +402,144 @@ export async function run(): Promise<void> {
         `connection closed after reject (${reason})`,
       );
       assertEqual(keys.records.size, 0, 'rejected device never registers');
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Expired re-pair keeps the live registration ——
+  // A code that lapses between mint and consume rolls back its half-
+  // written record — but a re-pair for an id already registered must
+  // NOT delete the still-valid prior registration.
+  {
+    const { service, keys, port } = await startService({
+      codeTtlMs: 100,
+    });
+    try {
+      const first = await pairingCode(service);
+      const { client } = await pairPhone({
+        port,
+        deviceId: 'dev-repair-01',
+        code: first.code,
+        fp: first.fp,
+      });
+      client.close();
+      assertEqual(keys.records.size, 1, 'first pair registered');
+
+      // Second code lapses before the pair frame lands — consume
+      // fails and the rollback must restore, not unpair.
+      const second = await pairingCode(service);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const client2 = await dial(port);
+      const peer = createTestPeer({
+        deviceId: 'dev-repair-01',
+        name: 'pixel-test',
+      });
+      const { codec } = await phoneHandshake(client2, peer, second.fp);
+      client2.send(sealJson(codec, { t: 'pair', code: second.code }));
+      const reply = await openJson(codec, await client2.recv());
+      assertDeepEqual(reply, { t: 'reject', reason: 'pairing-expired' });
+      assertEqual(
+        keys.records.size,
+        1,
+        'live registration survives the expired re-pair',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— A mid-write mint can't steal an in-flight pair's code ——
+  {
+    const inner = createMemoryKeys();
+    // Hold the pair handler open during its registry write so a fresh
+    // sync:pairing mint — minted off the pair lock — lands mid-flight.
+    // The pair already consumed the code before the write began: the
+    // mint only opens the NEXT window, this pair still completes, and
+    // the taken code can't pair a second device.
+    let releaseWrite: () => void = () => undefined;
+    const writeHold = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let holdPuts = false;
+    const gatedKeys: SyncKeys & {
+      records: Map<string, SyncDeviceRecord>;
+    } = {
+      ...inner,
+      records: inner.records,
+      async devicePut(record) {
+        await inner.devicePut(record);
+        if (holdPuts) {
+          holdPuts = false;
+          await writeHold;
+        }
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: gatedKeys,
+      endpointHost: '127.0.0.1',
+      advertise: null,
+    });
+    try {
+      const status = await service.ready;
+      assert(status.boundPort !== null);
+      const port = status.boundPort;
+
+      // An established phone — a same-id re-pair displaces it.
+      const p1 = await pairingCode(service);
+      const first = await pairPhone({
+        port,
+        deviceId: 'phone-old',
+        code: p1.code,
+        fp: p1.fp,
+      });
+      first.client.close();
+
+      const p2 = await pairingCode(service);
+      // Same device id under a fresh device key: a completed pair
+      // overwrites the incumbent record outright.
+      const c = await dial(port);
+      const rogue = createTestPeer({
+        deviceId: 'phone-old',
+        name: 'rogue',
+      });
+      const hs = await phoneHandshake(c, rogue, p2.fp);
+      holdPuts = true;
+      c.send(sealJson(hs.codec, { t: 'pair', code: p2.code }));
+      // Wait for the gated write to reach its hold, then retire the
+      // pending window — the consumed code is already taken, so the
+      // mint only re-opens the window for a later pair.
+      for (let i = 0; i < 200 && holdPuts; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(!holdPuts, 'pair write reached the hold');
+      await pairingCode(service);
+      releaseWrite();
+      const reply = await openJson(hs.codec, await c.recv());
+      assert(
+        isRecord(reply) && reply['t'] === 'welcome',
+        'in-flight pair completes across the mid-write mint',
+      );
+      assertEqual(
+        inner.records.get('phone-old')?.fp,
+        fingerprintOf(rogue.identity.pub),
+        're-pair displaced the incumbent record',
+      );
+      assertEqual(inner.records.size, 1, 'no shadow records remain');
+      c.close();
+      // The consumed code is spent even though a newer window opened.
+      const c2 = await dial(port);
+      const peer2 = createTestPeer({
+        deviceId: 'phone-second',
+        name: 'second',
+      });
+      const hs2 = await phoneHandshake(c2, peer2, p2.fp);
+      c2.send(sealJson(hs2.codec, { t: 'pair', code: p2.code }));
+      const reply2 = await openJson(hs2.codec, await c2.recv());
+      assertDeepEqual(reply2, { t: 'reject', reason: 'bad-code' });
+      c2.close();
     } finally {
       await service.close();
     }

@@ -188,6 +188,10 @@ export function createTransferService(
    * concurrent begins can't split the check across the acquire await.
    */
   const reserved = new Set<string>();
+  // Names mid-removal — the synchronous counterpart to `reserved` on
+  // the delete side; `begin` refuses them so a new `.part` can't be
+  // unlinked out from under it.
+  const removals = new Set<string>();
   let openCount = 0;
   const waiters: { resolve(): void; reject(e: unknown): void }[] = [];
   let shutdown = false;
@@ -364,6 +368,12 @@ export function createTransferService(
         'destination already has a pending sink',
       );
     }
+    if (removals.has(destPath)) {
+      throw shellError(
+        'unavailable',
+        'destination removal is in flight',
+      );
+    }
     reserved.add(destPath);
     let acquired = false;
     try {
@@ -525,12 +535,40 @@ export function createTransferService(
     if (!isBareName(args.name)) {
       throw shellError('invalid-request', 'not a managed file name');
     }
+    // A live sink's `.part` is `name + '.part'` — unlinking either
+    // file out from under an open (or pending) sink deletes the bytes
+    // it is mid-write on and strands its finalize. In-flight transfers
+    // end through `transfer:abort`, not here.
+    if (
+      reserved.has(args.name) ||
+      [...sinks.values()].some((sink) => sink.destPath === args.name)
+    ) {
+      throw shellError(
+        'unavailable',
+        'destination has an in-flight transfer',
+      );
+    }
+    // A duplicate removal refuses outright: the entry is shared, so
+    // the first completion would clear it while the second unlink is
+    // still queued — reopening the name to `begin` mid-delete.
+    if (removals.has(args.name)) {
+      throw shellError(
+        'unavailable',
+        'destination removal is in flight',
+      );
+    }
+    // Claim before the first await — a `begin` starting mid-removal
+    // refuses the name rather than writing a `.part` the unlink below
+    // would delete out from under it.
+    removals.add(args.name);
     try {
       await rm(join(dir(), args.name), { force: true });
       await rm(join(dir(), `${args.name}${PART_SUFFIX}`), { force: true });
       return undefined;
     } catch (thrown) {
       asIo('transfer remove failed', thrown);
+    } finally {
+      removals.delete(args.name);
     }
   }
 

@@ -25,6 +25,7 @@ import {
   FakeStorage,
   FakeSyncLogStore,
   SequenceIds,
+  SequenceRandom,
 } from '@auqw/application/testing';
 import type {
   AuqwExpoSubscription,
@@ -154,6 +155,7 @@ function newSession(): Session {
     ],
     clock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: empty.settings,
     localPlaybackFor: () => null,

@@ -221,6 +221,13 @@ export function createExpoSyncSockets(
             void native.syncDestroy(socketId).catch(() => undefined);
             return err(appError('cancelled', 'sync: dial cancelled'));
           }
+          if (released) {
+            // close() ran mid-dial — the live set was already cleared,
+            // so registering now would leak a native socket nobody
+            // owns. Destroy the dial and answer released.
+            void native.syncDestroy(socketId).catch(() => undefined);
+            return err(appError('released', 'sync: socket port closed'));
+          }
           const socket = new ExpoSyncSocket({
             native,
             socketId,

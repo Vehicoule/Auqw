@@ -32,7 +32,9 @@
 .ui-web *::after {
   box-sizing: border-box;
 }
-.ui-web button {
+/* :where() keeps this normalization layer at (0,0,1) specificity so
+   every single-class component rule still wins over it. */
+:where(.ui-web) button {
   font: inherit;
   color: inherit;
   background: none;
@@ -40,7 +42,7 @@
   padding: 0;
   cursor: pointer;
 }
-.ui-web button:disabled {
+:where(.ui-web) button:disabled {
   cursor: default;
 }
 .ui-web input[type='range'] {
@@ -1364,6 +1366,14 @@
 
 /* ---- now playing ---------------------------------------------------------- */
 
+/* The sheet host aligns children to its bottom edge and never clips —
+ * an unbounded stage lets a long lyrics list overflow the top and cut
+ * the track meta header off. Bound the stage to the host's height so
+ * `.uw-lyrics`/`.uw-stage__queue` keep their internal scroll.
+ */
+.uw-sheet-host .uw-stage {
+  height: 100%;
+}
 .uw-stage {
   display: flex;
   flex-direction: column;
@@ -1496,6 +1506,22 @@
 .uw-lyrics__line--active {
   font-weight: 700;
   background: var(--fg08);
+}
+
+/* Transient action-failure pill — bottom-center, above the mini
+   player and every sheet; replaces the console-only reportResult. */
+.uw-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  max-width: min(480px, calc(100% - 32px));
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--raised);
+  border: var(--stroke-hairline) solid var(--hairline);
+  z-index: 70;
+  text-align: center;
 }
 
 /* ---- mini player / chrome ------------------------------------------------- */

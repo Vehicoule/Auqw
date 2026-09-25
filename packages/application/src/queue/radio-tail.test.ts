@@ -31,6 +31,7 @@ import {
   FakeProvider,
   FakeStorage,
   SequenceIds,
+  SequenceRandom,
 } from '../testing/fakes.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 
@@ -185,6 +186,7 @@ function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
     providers: [itunes, ytm, ...extraProviders],
     clock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log,
     defaults: SETTINGS,
   });

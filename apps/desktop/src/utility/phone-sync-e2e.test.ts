@@ -13,6 +13,7 @@ import {
   FakeProvider,
   FakeStorage,
   SequenceIds,
+  SequenceRandom,
 } from '@auqw/application/testing';
 import type {
   CancellationSignal,
@@ -547,6 +548,7 @@ async function drainProjectsIntoSession(): Promise<void> {
     ],
     clock: realClock,
     ids: new SequenceIds(),
+    random: new SequenceRandom(),
     log: new FakeLog(),
     defaults: {
       catalogProvider: 'itunes',

@@ -35,6 +35,13 @@ pub struct Upstream {
     /// Substring matched against the outbound request URL. First
     /// matching upstream wins; an unmatched request fails the journey.
     pub url_contains: String,
+    /// Request headers the matching upstream asserts: each declared
+    /// name must arrive (case-insensitive) with a value containing
+    /// the given substring. A request that matches the URL but not
+    /// the headers is an uncanned upstream — the canned response must
+    /// never answer a probe the spec declared differently.
+    #[serde(default)]
+    pub request_headers: BTreeMap<String, String>,
     #[serde(default = "default_status")]
     pub status: u16,
     #[serde(default)]
@@ -45,6 +52,38 @@ pub struct Upstream {
 
 fn default_status() -> u16 {
     200
+}
+
+/// First violated request-header assertion, if any: `name`
+/// matches case-insensitively and ANY of its values may carry the
+/// declared substring (repeated headers are legal on the wire).
+/// Diagnostics name the header but never values — the spec's
+/// assertion and the request's credentials both stay out of logs.
+fn header_miss(req: &HttpRequest, want: &BTreeMap<String, String>) -> Option<String> {
+    'outer: for (name, needle) in want {
+        let mut present = false;
+        for (k, v) in &req.headers {
+            if !k.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            present = true;
+            if v.contains(needle.as_str()) {
+                continue 'outer;
+            }
+        }
+        return Some(if present {
+            format!("header {name}: assertion failed")
+        } else {
+            format!("header {name}: missing")
+        });
+    }
+    None
+}
+
+/// URL minus query and fragment — signed params and token-bearing
+/// query strings never reach logs or guest-visible errors.
+fn safe_url(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
 }
 
 #[derive(Deserialize)]
@@ -92,7 +131,9 @@ pub fn load_journeys(dir: &Path) -> Result<Vec<Journey>, String> {
 }
 
 /// Scripted network: upstreams matched by `url_contains` in declared
-/// order. Misses and their URLs are recorded for the report.
+/// order. Misses (URLs with query stripped) are recorded for the
+/// report and fail the journey — the guest call only sees a typed
+/// transient error, never the request's credentials.
 struct CannedHttp {
     upstreams: Vec<Upstream>,
     bodies: Vec<Vec<u8>>,
@@ -117,6 +158,7 @@ impl CannedHttp {
                 .iter()
                 .map(|u| Upstream {
                     url_contains: u.url_contains.clone(),
+                    request_headers: u.request_headers.clone(),
                     status: u.status,
                     headers: u.headers.clone(),
                     body_file: u.body_file.clone(),
@@ -145,6 +187,19 @@ impl HttpClient for CannedHttp {
         match idx {
             Some(i) => {
                 let up = &self.upstreams[i];
+                if let Some(miss) = header_miss(&req, &up.request_headers) {
+                    let url = safe_url(&req.url).to_string();
+                    if let Ok(mut misses) = self.misses.lock() {
+                        misses.push(format!("{url} ({miss})"));
+                    }
+                    return Box::pin(async move {
+                        Err(HttpError {
+                            kind: HttpErrorKind::Transient,
+                            message: format!("canned upstream for {url} refused request: {miss}"),
+                            bytes_received: 0,
+                        })
+                    });
+                }
                 let response = HttpResponse {
                     status: up.status,
                     headers: up
@@ -301,6 +356,17 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
             }
         }
     }
+    // Every outbound request must be canned: a miss the guest
+    // absorbed still means the script left a hole — absorbable
+    // transient errors can't let a spec pass against a request it
+    // never declared (a failed header assertion above all).
+    if passed {
+        let misses = http.misses.lock().map(|m| m.clone()).unwrap_or_default();
+        if !misses.is_empty() {
+            passed = false;
+            detail = format!("uncanned upstreams: {}", misses.join("; "));
+        }
+    }
     if passed {
         detail = format!(
             "{} steps, {} http calls, {} bytes",
@@ -320,4 +386,151 @@ pub async fn run_journey(plugin: &LoadedPlugin, journey: &Journey) -> JourneyOut
 /// verbatim the signed file).
 pub fn manifest_of(release_manifest_json: &str) -> Result<Manifest, String> {
     Manifest::from_json(release_manifest_json).map_err(|e| format!("manifest: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(url: &str, headers: &[(&str, &str)]) -> HttpRequest {
+        HttpRequest {
+            method: "GET".into(),
+            url: url.into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: None,
+            max_response_bytes: 1 << 20,
+        }
+    }
+
+    fn want(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn header_miss_satisfied_by_any_repeated_value() {
+        // Repeated header: the second value carries the substring.
+        let r = req(
+            "https://x/",
+            &[("range", "bytes=0-1"), ("Range", "bytes=100-200")],
+        );
+        assert_eq!(header_miss(&r, &want(&[("RANGE", "bytes=100")])), None);
+    }
+
+    #[test]
+    fn header_miss_reports_first_violated_assertion() {
+        let r = req("https://x/", &[("a", "yes"), ("b", "wrong")]);
+        assert_eq!(
+            header_miss(&r, &want(&[("a", "yes"), ("b", "needle"), ("c", "m")])),
+            Some("header b: assertion failed".to_string())
+        );
+    }
+
+    #[test]
+    fn header_miss_distinguishes_missing_from_mismatched() {
+        let r = req("https://x/", &[("a", "value")]);
+        assert_eq!(
+            header_miss(&r, &want(&[("absent", "x")])),
+            Some("header absent: missing".to_string())
+        );
+        assert_eq!(
+            header_miss(&r, &want(&[("a", "other")])),
+            Some("header a: assertion failed".to_string())
+        );
+    }
+
+    fn canned(upstreams: Vec<Upstream>) -> CannedHttp {
+        CannedHttp {
+            bodies: vec![vec![1, 2, 3]; upstreams.len()],
+            upstreams,
+            misses: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn upstream(url: &str, headers: &[(&str, &str)]) -> Upstream {
+        Upstream {
+            url_contains: url.into(),
+            request_headers: want(headers),
+            status: 200,
+            headers: BTreeMap::new(),
+            body_file: "body.bin".into(),
+        }
+    }
+
+    async fn send(c: &CannedHttp, r: HttpRequest) -> Result<HttpResponse, HttpError> {
+        c.send(r, Duration::from_secs(1), CancellationToken::new())
+            .await
+    }
+
+    fn misses(c: &CannedHttp) -> Vec<String> {
+        c.misses.lock().map(|m| m.clone()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn send_serves_canonical_response_on_full_match() {
+        let c = canned(vec![upstream("videoplayback", &[("range", "bytes=0-")])]);
+        let out = send(
+            &c,
+            req(
+                "https://h/videoplayback?sig=1",
+                &[("Range", "bytes=0-1023")],
+            ),
+        )
+        .await;
+        let Ok(resp) = out else {
+            panic!("expected canned response");
+        };
+        assert_eq!(resp.body, vec![1, 2, 3]);
+        assert!(misses(&c).is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_refuses_and_records_header_violation() {
+        let c = canned(vec![upstream("videoplayback", &[("range", "bytes=0-")])]);
+        let out = send(
+            &c,
+            req(
+                "https://h/videoplayback?sig=SECRET",
+                &[("Range", "bytes=99-")],
+            ),
+        )
+        .await;
+        let Err(err) = out else {
+            panic!("expected refusal");
+        };
+        assert_eq!(err.kind, HttpErrorKind::Transient);
+        let misses = misses(&c);
+        assert_eq!(
+            misses,
+            vec!["https://h/videoplayback (header range: assertion failed)"]
+        );
+        // The signed query never reaches diagnostics.
+        assert!(!misses[0].contains("SECRET") && !err.message.contains("SECRET"));
+    }
+
+    #[tokio::test]
+    async fn send_records_uncanned_url() {
+        let c = canned(vec![upstream("videoplayback", &[])]);
+        let out = send(&c, req("https://elsewhere.example/x", &[])).await;
+        let Err(err) = out else {
+            panic!("expected refusal");
+        };
+        assert_eq!(err.kind, HttpErrorKind::Transient);
+        assert_eq!(misses(&c), vec!["https://elsewhere.example/x"]);
+    }
+
+    #[test]
+    fn safe_url_strips_query_and_fragment() {
+        assert_eq!(
+            safe_url("https://h/videoplayback?sig=x&expire=1#frag"),
+            "https://h/videoplayback"
+        );
+        assert_eq!(safe_url("https://h/path"), "https://h/path");
+    }
 }

@@ -1,7 +1,9 @@
+import type { Stats } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
+import { errorCode } from '../shared/check.ts';
 import type {
   LocalAddArgs,
   LocalProbeArgs,
@@ -63,6 +65,45 @@ function asIo(message: string, thrown: unknown): never {
 }
 
 /**
+ * A name that does not resolve is absent; a name that resolves but
+ * refuses is typed. 'missing' is reserved for genuinely-gone files —
+ * the sweep prunes index rows on it, so a permission fault must never
+ * read as missing. Same split as `scanFailure` in the tag plane.
+ */
+function statError(thrown: unknown): null {
+  const code = errorCode(thrown);
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return null;
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    throw shellError('permission-denied', 'path is not readable');
+  }
+  throw shellError('io-error', 'path could not be statted');
+}
+
+async function statChecked(path: string): Promise<Stats | null> {
+  try {
+    return await stat(path);
+  } catch (thrown) {
+    return statError(thrown);
+  }
+}
+
+async function realpathChecked(path: string): Promise<string | null> {
+  try {
+    return await realpath(path);
+  } catch (thrown) {
+    return statError(thrown);
+  }
+}
+
+/** True for the typed faults a probe/sweep row tolerates: the file
+ * exists but can't be served — skipped, never counted missing. */
+function unreadable(thrown: unknown): boolean {
+  return isShellError(thrown) && thrown.kind === 'permission-denied';
+}
+
+/**
  * One picked path → a grant descriptor. The "allowed root" on desktop
  * is whatever the user picked in the OS dialog — the honest checks are
  * that the path is absolute, resolves to something real, is readable,
@@ -75,11 +116,11 @@ async function describePick(path: string): Promise<PickedTree> {
       'picked path must be an absolute path',
     );
   }
-  const real = await realpath(path).catch(() => null);
+  const real = await realpathChecked(path);
   if (real === null) {
     throw shellError('invalid-request', 'picked path does not resolve');
   }
-  const info = await stat(real).catch(() => null);
+  const info = await statChecked(real);
   if (info === null) {
     throw shellError('invalid-request', 'picked path is not statable');
   }
@@ -120,22 +161,22 @@ async function probeDocAbs(
     return null;
   }
   if (tree.kind === 'file') {
-    const info = await stat(tree.absPath).catch(() => null);
+    const info = await statChecked(tree.absPath);
     return info !== null && info.isFile() ? tree.absPath : null;
   }
   if (!docIdConfined(docId)) {
     return null;
   }
-  const rootReal = await realpath(tree.absPath).catch(() => null);
+  const rootReal = await realpathChecked(tree.absPath);
   if (rootReal === null) {
     return null;
   }
   const joined = join(rootReal, ...docId.split('/'));
-  const real = await realpath(joined).catch(() => null);
+  const real = await realpathChecked(joined);
   if (real === null || !pathConfined(rootReal, real)) {
     return null;
   }
-  const info = await stat(real).catch(() => null);
+  const info = await statChecked(real);
   return info !== null && info.isFile() ? real : null;
 }
 
@@ -214,9 +255,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           continue;
         }
         const abs = join(options.mediaDir, download.filePath);
-        const info = await stat(abs).catch(() => null);
-        if (info !== null && info.isFile()) {
-          return { uri: toFileUri(abs) };
+        try {
+          const info = await statChecked(abs);
+          if (info !== null && info.isFile()) {
+            return { uri: toFileUri(abs) };
+          }
+        } catch (thrown) {
+          if (!unreadable(thrown)) {
+            throw thrown;
+          }
         }
       }
       const rows = db
@@ -234,7 +281,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         ) {
           continue;
         }
-        const abs = await probeDocAbs(row.treeUri, row.docId);
+        let abs: string | null;
+        try {
+          abs = await probeDocAbs(row.treeUri, row.docId);
+        } catch (thrown) {
+          if (unreadable(thrown)) {
+            continue;
+          }
+          throw thrown;
+        }
         if (abs !== null) {
           return { uri: docUriFor(row.treeUri, row.docId) };
         }
@@ -318,13 +373,19 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
             continue;
           }
           const abs = join(options.mediaDir, row['filePath']);
-          const info = await stat(abs).catch(() => null);
-          if (info !== null && info.isFile()) {
-            entries.push({
-              recordingId: row['recordingId'],
-              uri: toFileUri(abs),
-            });
-            seen.add(row['recordingId']);
+          try {
+            const info = await statChecked(abs);
+            if (info !== null && info.isFile()) {
+              entries.push({
+                recordingId: row['recordingId'],
+                uri: toFileUri(abs),
+              });
+              seen.add(row['recordingId']);
+            }
+          } catch (thrown) {
+            if (!unreadable(thrown)) {
+              throw thrown;
+            }
           }
         }
       }
@@ -332,7 +393,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         if (seen.has(row.recordingId)) {
           continue;
         }
-        const abs = await probeDocAbs(row.treeUri, row.docId);
+        let abs: string | null;
+        try {
+          abs = await probeDocAbs(row.treeUri, row.docId);
+        } catch (thrown) {
+          if (unreadable(thrown)) {
+            continue;
+          }
+          throw thrown;
+        }
         if (abs !== null) {
           entries.push({
             recordingId: row.recordingId,
@@ -366,7 +435,16 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     const missingBySource = new Map<string, number>();
     let missing = 0;
     for (const row of localRows(db)) {
-      const abs = await probeDocAbs(row.treeUri, row.docId);
+      let abs: string | null;
+      try {
+        abs = await probeDocAbs(row.treeUri, row.docId);
+      } catch (thrown) {
+        // An unreadable file is not missing — the row stays.
+        if (unreadable(thrown)) {
+          continue;
+        }
+        throw thrown;
+      }
       if (abs === null) {
         missing += 1;
         missingBySource.set(

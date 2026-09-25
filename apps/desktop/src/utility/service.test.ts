@@ -49,6 +49,15 @@ export async function run(): Promise<void> {
   assertEqual(client.onMessage({ id: 999, ok: true, result: 1 }), true);
   assertEqual(client.onMessage({ id: 999, ok: false, error: { kind: 'internal', message: 'm', retryable: true } }), true);
 
+  // Malformed response-shaped messages are consumed too — a bounced
+  // 'malformed request' reply shares the id space and can collide
+  // with an in-flight request in the other direction.
+  assertEqual(client.onMessage({ id: 999, ok: 'yes' }), true);
+  assertEqual(client.onMessage({ id: 999, ok: false, stray: 1 }), true);
+  assertEqual(client.onMessage({ id: 999 }), true);
+  // A genuine request still reaches the dispatcher.
+  assertEqual(client.onMessage({ id: 999, channel: 'sync:keys' }), false);
+
   // Typed failures reject; unknown ids are dropped.
   const failing = client.request('sync:keys', { op: 'x' });
   const failingId = (posted[posted.length - 1] as { id?: number }).id;
@@ -63,6 +72,37 @@ export async function run(): Promise<void> {
   // Timeout settles a request main never answers.
   const hanging = client.request('sync:keys', { op: 'device-list' });
   await assertRejectsKind(hanging, 'io-error');
+
+  // A malformed reply that names an outstanding id settles the call
+  // immediately — the caller gets invalid-response, not the timeout.
+  const duped = client.request('sync:keys', { op: 'device-list' });
+  const dupedId = (posted[posted.length - 1] as { id?: number }).id;
+  assertEqual(client.onMessage({ id: dupedId, ok: 'yes' }), true);
+  await assertRejectsKind(duped, 'invalid-response');
+
+  // A malformed message still carrying a request channel is consumed
+  // but must not reject the call it names — a well-formed reply can
+  // still settle it afterwards.
+  const shielded = client.request('sync:keys', { op: 'device-list' });
+  const shieldedId = (posted[posted.length - 1] as { id?: number }).id;
+  assertEqual(
+    client.onMessage({ id: shieldedId, ok: 'yes', channel: 'sync:keys' }),
+    true,
+  );
+  assertEqual(
+    client.onMessage({
+      id: shieldedId,
+      ok: true,
+      result: { devices: [] },
+    }),
+    true,
+  );
+  const shieldedReply = await shielded;
+  assertEqual(
+    JSON.stringify(shieldedReply),
+    JSON.stringify({ devices: [] }),
+    'channel-carrying malformed message never rejected the call',
+  );
 
   // isServiceCall recognizes exactly the request shape.
   assert(isServiceCall({ id: 1, channel: 'sync:keys', args: { op: 'x' } }));

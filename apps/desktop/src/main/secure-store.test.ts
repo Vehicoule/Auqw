@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assert, assertEqual } from '@auqw/application/testing';
@@ -49,10 +49,36 @@ export async function run(): Promise<void> {
     assertEqual(await store.get('session.token'), 's3cret');
     await store.set('session.token', 'rotated');
     assertEqual(await store.get('session.token'), 'rotated');
+    // The write publishes atomically — no staging residue survives.
+    assertEqual(
+      readdirSync(join(dir, 'secure')).filter((f) => f.endsWith('.tmp'))
+        .length,
+      0,
+      'no staging files left behind',
+    );
     await store.delete('session.token');
     assertEqual(await store.get('session.token'), null);
     // Deleting a missing key is not an error.
     await store.delete('session.token');
+
+    // Concurrent sets on one key never share a staging path — every
+    // published file is complete, whichever rename lands last.
+    await Promise.all([
+      store.set('race.key', 'a'),
+      store.set('race.key', 'bb'),
+      store.set('race.key', 'ccc'),
+    ]);
+    const raced = await store.get('race.key');
+    assert(
+      raced === 'a' || raced === 'bb' || raced === 'ccc',
+      `concurrent set published a complete value, got ${raced}`,
+    );
+    assertEqual(
+      readdirSync(join(dir, 'secure')).filter((f) => f.endsWith('.tmp'))
+        .length,
+      0,
+      'no staging residue after concurrent sets',
+    );
 
     // Corrupt content surfaces typed errors.
     writeFileSync(join(dir, 'secure', 'bad.b64'), '\u0000\u0001!!!', 'utf8');

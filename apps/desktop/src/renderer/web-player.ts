@@ -249,6 +249,43 @@ export function createWebPlayerPort(deps: {
     }
   }
 
+  /**
+   * Drop a pending-play marker. The play's late completion is
+   * invalidated by generation, but the global bump must only fire
+   * while the dropped play is still the newest op — a younger op
+   * already holding `opGen` would otherwise be killed by a route it
+   * never registered.
+   */
+  function dropPendingPlay(handle: string): void {
+    const pending = pendingPlayGens.get(handle);
+    if (pending === undefined) {
+      return;
+    }
+    pendingPlayGens.delete(handle);
+    if (pending.gen === opGen) {
+      opGen++;
+    }
+  }
+
+  /**
+   * Handles a prepared outcome reports as superseded/pruned — dead
+   * registry-side, so every local route that could still aim a mime
+   * hint, attach, or pending play at them is dropped. `current` is
+   * left alone: it is only ever superseded by the very op installing
+   * its replacement, and stale-identity reporting needs the entry.
+   */
+  function dropSuperseded(handles: readonly string[] | undefined): void {
+    if (handles === undefined) {
+      return;
+    }
+    for (const handle of handles) {
+      handleMimes.delete(handle);
+      abortPendingAttaches(handle);
+      dropMse(handle);
+      dropPendingPlay(handle);
+    }
+  }
+
   function installMse(handle: string, source: MseSource | null): void {
     activeMse = source === null ? null : { handle, source };
     // Post-attach pump/SourceBuffer death — the element's own error
@@ -379,9 +416,8 @@ export function createWebPlayerPort(deps: {
   function invalidatePendingPlays(identity: PlaybackIdentity | null): void {
     for (const [handle, pending] of [...pendingPlayGens]) {
       if (identity === null || identityEq(identity, pending.identity)) {
-        pendingPlayGens.delete(handle);
         abortPendingAttaches(handle);
-        opGen++;
+        dropPendingPlay(handle);
       }
     }
   }
@@ -490,8 +526,7 @@ export function createWebPlayerPort(deps: {
         // A stale op's failure is not the live attempt's — suppress it
         // rather than label the stream the session already moved to.
         if (gen === opGen && projection === p) {
-          const kind =
-            outcome.type === 'superseded' ? 'superseded' : toKind(outcome.kind);
+          const kind = toKind(outcome.kind);
           status(
             'failed',
             appError(kind, outcome.message ?? 'successor prepare failed'),
@@ -500,6 +535,10 @@ export function createWebPlayerPort(deps: {
         return;
       }
       handle = outcome.stream.handle;
+      // Sessions this prepare superseded are dead registry-side —
+      // drop every local route aimed at them before they can serve
+      // a later attach.
+      dropSuperseded(outcome.superseded);
       noteMime(handle, outcome.stream.mime);
       const first = await attachUrl(handle, outcome.stream.mime);
       pendingAttaches.set(gen, { handle, abort: first.abort });
@@ -831,6 +870,7 @@ export function createWebPlayerPort(deps: {
             outcome.stream !== undefined
           ) {
             const prepared = toPreparedStream(outcome.stream);
+            dropSuperseded(outcome.superseded);
             noteMime(prepared.handle, prepared.mime);
             emit({
               type: 'prepare',
@@ -843,10 +883,7 @@ export function createWebPlayerPort(deps: {
               },
             });
           } else {
-            const kind =
-              outcome.type === 'superseded'
-                ? 'superseded'
-                : toKind(outcome.kind);
+            const kind = toKind(outcome.kind);
             emit({
               type: 'prepare',
               requestId,
@@ -1045,9 +1082,7 @@ export function createWebPlayerPort(deps: {
       // Releasing a handle an in-flight play is about to attach must
       // invalidate that op — otherwise its late serveUrl resolves into
       // an already-dropped host stream and audio resumes post-teardown.
-      if (pendingPlayGens.delete(input.handle)) {
-        opGen++;
-      }
+      dropPendingPlay(input.handle);
       return guard(() => stream.release({ handle: input.handle }));
     },
 

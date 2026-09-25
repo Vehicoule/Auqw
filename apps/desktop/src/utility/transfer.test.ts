@@ -306,6 +306,68 @@ export async function run(): Promise<void> {
       'removed file reports gone',
     );
 
+    // Remove refuses a name held by a live sink — unlinking its
+    // `.part` mid-write strands the finalize. Abort is the end for
+    // in-flight transfers, not remove.
+    const liveBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'live.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(liveBegin.ok, 'live begin resolves');
+    const liveSink = (liveBegin.result as { sinkId: string }).sinkId;
+    await call(CHANNELS.transferWrite, {
+      sinkId: liveSink,
+      data: payload.subarray(0, 4).toString('base64'),
+    });
+    const removeLive = await call(CHANNELS.transferRemove, {
+      name: 'live.mp4',
+    });
+    assert(
+      !removeLive.ok && removeLive.error?.kind === 'unavailable',
+      'remove refuses a live destination',
+    );
+    await call(CHANNELS.transferAbort, { sinkId: liveSink, keep: false });
+    const removeAfter = await call(CHANNELS.transferRemove, {
+      name: 'live.mp4',
+    });
+    assert(removeAfter.ok, 'remove resolves once the sink is gone');
+
+    // A begin racing a removal refuses — it can't write a `.part`
+    // the in-flight unlink would delete out from under it.
+    const racing = call(CHANNELS.transferRemove, { name: 'race.mp4' });
+    const deniedBegin = await call(CHANNELS.transferBegin, {
+      destPath: 'race.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(
+      !deniedBegin.ok && deniedBegin.error?.kind === 'unavailable',
+      'begin refuses a name mid-removal',
+    );
+    await racing;
+    const postRace = await call(CHANNELS.transferBegin, {
+      destPath: 'race.mp4',
+      resumeAtBytes: 0,
+    });
+    assert(postRace.ok, 'begin resolves once the removal lands');
+    const postRaceSink = (postRace.result as { sinkId: string }).sinkId;
+    await call(CHANNELS.transferAbort, {
+      sinkId: postRaceSink,
+      keep: false,
+    });
+
+    // A second removal of the same name refuses while the first is
+    // still in flight — the shared claim must not clear early and
+    // reopen the name to begin mid-delete.
+    const dupeFirst = call(CHANNELS.transferRemove, { name: 'dupe.mp4' });
+    const dupeSecond = await call(CHANNELS.transferRemove, {
+      name: 'dupe.mp4',
+    });
+    assert(
+      !dupeSecond.ok && dupeSecond.error?.kind === 'unavailable',
+      'overlapping removal refuses',
+    );
+    await dupeFirst;
+
     // keep: true retains the partial for a later resume.
     const keepable = await call(CHANNELS.transferBegin, {
       destPath: 'keep.mp4',

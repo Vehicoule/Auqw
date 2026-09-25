@@ -28,7 +28,10 @@ import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
 import { createAppliedPushService } from './sync-events.ts';
-import { createSyncKeysHandler } from './sync-keys.ts';
+import {
+  createSyncKeysHandler,
+  migrateSyncCustody,
+} from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -87,7 +90,6 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_STREAM_DIR',
     'AUQW_USER_DATA',
     'AUQW_REPO_ROOT',
-    'AUQW_DEV_GATE',
     'AUQW_DB_PATH',
     'AUQW_SYNC_HOST',
     'AUQW_SYNC_PORT',
@@ -108,6 +110,10 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     }
   }
   env['AUQW_USER_DATA'] = userDataPath;
+  // The dev gate is armed by this process alone — an inherited
+  // AUQW_DEV_GATE in a packaged launch env must never reach the child
+  // (it is not in the allowlist, so this also strips any set upstream).
+  delete env['AUQW_DEV_GATE'];
   // The database lives in the utility child; its path is fork env
   // because the child owns no app.getPath('userData').
   env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
@@ -116,6 +122,10 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     // may arm the dev-gate channel; packaged runs use resourcesPath.
     env['AUQW_REPO_ROOT'] = join(here, '../../../..');
     env['AUQW_DEV_GATE'] = '1';
+    // The sync tool stages released providers in apps/desktop/plugins —
+    // without it AUQW_PLUGIN_DIR is unset and boot fails with 'no
+    // plugin providers available'.
+    env['AUQW_PLUGIN_DIR'] ??= join(here, '../../plugins');
   } else {
     // Packaged installs carry the locked provider set under
     // resources/plugins (electron-builder.yml extraResources). An
@@ -145,6 +155,17 @@ async function main(): Promise<void> {
     dir: join(userDataPath, 'secure'),
     safeStorage,
   });
+  // Sync custody lives in its own store+dir: `secure:*` channels reach
+  // only the renderer-facing store, so the pairing identity and device
+  // records are never readable or writable from the sandboxed renderer.
+  const syncSecureDir = join(userDataPath, 'sync-secure');
+  // Pre-split builds kept sync entries in the renderer-facing dir —
+  // carry them over so an upgrade doesn't orphan existing pairings.
+  await migrateSyncCustody(join(userDataPath, 'secure'), syncSecureDir);
+  const syncSecure = createSecureStore({
+    dir: syncSecureDir,
+    safeStorage,
+  });
   const netService = createNetService({
     readOnline: () => net.isOnline(),
   });
@@ -162,8 +183,8 @@ async function main(): Promise<void> {
     // SecureStore. The child gets no other main-process reach.
     services: {
       'sync:keys': createSyncKeysHandler({
-        secure,
-        dir: join(userDataPath, 'secure'),
+        secure: syncSecure,
+        dir: syncSecureDir,
       }),
       // Utility→main→renderer push: the sync service posts after every
       // applyDelta; subscribed renderers pull sync:drainApplied on it.
@@ -312,6 +333,21 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
     win.maximize();
   }
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // The renderer owns exactly one document — a navigation that kept
+  // the `window.auqw` preload surface would carry every ipc bridge
+  // into whatever page it landed on.
+  win.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+  });
+  // Sandbox-first: the app requests no web permissions, so a renderer
+  // that asks (media, notifications, geolocation…) is refused rather
+  // than silently granted by Electron's default handler.
+  win.webContents.session.setPermissionRequestHandler(
+    (_wc, _permission, callback) => {
+      callback(false);
+    },
+  );
+  win.webContents.session.setPermissionCheckHandler(() => false);
   trackWindowState(win, statePath, stateRef);
   void win.loadFile(RENDERER);
   return win;

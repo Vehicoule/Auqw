@@ -152,7 +152,14 @@ export function createSupervisor(
     if (isServiceCall(raw)) {
       // Utility→main service call — same envelope, other direction.
       // The channel must be whitelisted; handler failures answer typed.
-      const handler = opts.services?.[raw.channel];
+      // Own-property only — an `Object.prototype` member (e.g.
+      // 'constructor') resolves through the chain on a plain index
+      // and would pass the whitelist check.
+      const handler =
+        opts.services !== undefined &&
+        Object.hasOwn(opts.services, raw.channel)
+          ? opts.services[raw.channel]
+          : undefined;
       const target = child;
       const reply = (message: unknown): void => {
         try {

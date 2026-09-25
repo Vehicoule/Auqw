@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -188,6 +188,24 @@ export async function run(): Promise<void> {
       'src-1',
       'sweep groups by source',
     );
+
+    // Unreadable is not vanished: a permission-denied row is skipped,
+    // never counted missing — 'missing' prunes index rows, and a
+    // permission fault must not cost the row. POSIX-only: EACCES
+    // needs DAC bits.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      await writeFile(audio, Buffer.alloc(16, 3));
+      await chmod(audio, 0o000);
+      const deniedSweep = await call(CHANNELS.localSweep);
+      assert(deniedSweep.ok, 'sweep resolves over denied rows');
+      assertEqual(
+        (deniedSweep.result as { missing: number }).missing,
+        0,
+        'permission-denied rows are not missing',
+      );
+      await chmod(audio, 0o644);
+      await rm(audio, { force: true });
+    }
 
     // Picked files validate as audio-only, single-doc trees.
     const filePick = await call(CHANNELS.localAdd, { paths: [audio] });
