@@ -2,7 +2,7 @@
 
 # Auqw — for Android, Linux, macOS & Windows
 
-[![Latest release](https://img.shields.io/github/v/release/Vehicoule/Auqw?include_prereleases&label=latest%20release&style=for-the-badge)](https://github.com/Vehicoule/Auqw/releases) [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue?style=for-the-badge)](LICENSE) [![Platforms](https://img.shields.io/badge/platforms-Android%20%C2%B7%20Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-informational&style=for-the-badge)](#download--install)
+[![Latest release](https://img.shields.io/github/v/release/Vehicoule/Auqw?include_prereleases&label=latest%20release&style=for-the-badge)](https://github.com/Vehicoule/Auqw/releases) [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue?style=for-the-badge)](LICENSE) [![Platforms](https://img.shields.io/badge/platforms-Android%20%C2%B7%20Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-informational?style=for-the-badge)](#download--install)
 
 Auqw is a music player for all your devices: search for a track, build
 your queue, like what you love, and sync your library between your
