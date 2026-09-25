@@ -21,7 +21,9 @@
 // crash on the first FFI call; consumer-rules.pro uses full keeps.)
 const { withAppBuildGradle, withGradleProperties } = require('expo/config-plugins');
 
-const ABIS = "(findProperty('auqw.abis') ?: 'arm64-v8a,x86_64').split(',') as String[]";
+// Groovy parses `include (expr).split(',')` as `.split` chained on
+// include()'s void return — keep .split inside the arg parens.
+const ABIS = "((findProperty('auqw.abis') ?: 'arm64-v8a,x86_64').split(','))";
 const SPLITS = `splits {
         abi {
             enable true
