@@ -82,11 +82,38 @@ export function createServiceClient(opts: {
       });
     },
     onMessage(raw) {
-      if (!isRecord(raw) || raw['ok'] === undefined) {
+      if (!isRecord(raw)) {
+        return false;
+      }
+      // Response-shaped: an `ok` field marks a reply; a numeric id
+      // without a request channel is a malformed reply. Either stays
+      // out of the request dispatcher — a bounced 'malformed request'
+      // reply shares the id space and can collide with an in-flight
+      // request in the other direction.
+      if (
+        raw['ok'] === undefined &&
+        !(typeof raw['id'] === 'number' && typeof raw['channel'] !== 'string')
+      ) {
         return false;
       }
       if (!isUtilityResponse(raw)) {
-        return false;
+        // Malformed, but names an outstanding call — settle it now
+        // rather than leaving the caller to wait out the timeout.
+        // Still carrying a request channel makes it ambiguous whether
+        // this is a reply at all: consume it without rejecting — a
+        // genuine reply (or the timeout) settles the call instead.
+        if (
+          typeof raw['id'] === 'number' &&
+          typeof raw['channel'] !== 'string' &&
+          pending.has(raw['id'])
+        ) {
+          settle(raw['id'], (slot) =>
+            slot.reject(
+              shellError('invalid-response', 'malformed service reply'),
+            ),
+          );
+        }
+        return true;
       }
       const response: UtilityResponse = raw;
       if (!pending.has(response.id)) {

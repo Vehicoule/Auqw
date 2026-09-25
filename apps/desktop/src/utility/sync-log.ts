@@ -177,6 +177,14 @@ function parseFile(raw: string): Parsed {
       }
       break;
     }
+    // A writer commits `line + '\n'` before fsync — a non-empty FINAL
+    // line is a torn write whose terminator never landed. It parses,
+    // but treating it as durable would admit a write the fsync never
+    // covered. (A lone first line drops to 'foreign' — repair renames
+    // it aside rather than truncating to an empty, headerless file.)
+    if (i === lines.length - 1) {
+      return { ok: false, truncateAt: i === 0 ? -1 : lineStart };
+    }
     if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
       return { ok: false, truncateAt: lineStart };
     }

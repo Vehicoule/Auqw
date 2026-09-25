@@ -278,6 +278,24 @@ export async function run(): Promise<void> {
     });
     assert(!badPort.ok && badPort.error.kind === 'invalid-request');
 
+    // sync:local-changes forwards renderer-committed writes to the
+    // sync engine seam — the channel is registered, not dead.
+    const localWrites = {
+      writes: [
+        { kind: 'recordings', recordId: 'rec-1', field: 'title', value: 'x' },
+      ],
+    };
+    const synced = await invoke(CHANNELS.syncLocalChanges, localWrites);
+    assert(synced.ok, 'sync:local-changes is registered');
+    assertDeepEqual(synced.result, {
+      routed: 'sync:localChanges',
+      args: localWrites,
+    });
+    const badWrites = await invoke(CHANNELS.syncLocalChanges, {
+      writes: [],
+    });
+    assert(!badWrites.ok && badWrites.error.kind === 'invalid-request');
+
     // Renderer dies mid-handshake: postMessage throws after port1
     // already attached the utility pump. The still-owned peer must be
     // closed — the peer 'close' is the pump's own detach path, so

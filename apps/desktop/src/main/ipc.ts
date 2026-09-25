@@ -17,6 +17,7 @@ import type {
   StreamReadArgs,
   SyncDeltasArgs,
   SyncImportDeltaArgs,
+  SyncLocalChangesArgs,
   SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
@@ -427,15 +428,15 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     ),
   ],
   [
-    CHANNELS.syncTrigger,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncTrigger, undefined),
+    CHANNELS.syncLocalChanges,
+    channel(isSyncLocalChangesArgs, (args: SyncLocalChangesArgs, deps) =>
+      deps.utility.request(CHANNELS.syncLocalChanges, args),
     ),
   ],
   [
-    CHANNELS.syncLocalChanges,
-    channel(isSyncLocalChangesArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.syncLocalChanges, args),
+    CHANNELS.syncTrigger,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncTrigger, undefined),
     ),
   ],
   [

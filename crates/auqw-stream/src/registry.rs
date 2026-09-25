@@ -286,6 +286,19 @@ impl StreamRegistry {
         self.session(handle)?.attach(position)
     }
 
+    /// Probe attach for requests that spend no body bytes (HEAD):
+    /// the same liveness verdict as [`Registry::attach`] but without
+    /// re-anchoring `read_pos` or claiming consumer intent.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle;
+    /// [`StreamError::Expired`] when the URL is inside the expiry
+    /// margin or the prepare TTL has passed; the session's terminal
+    /// error if it already ended.
+    pub fn attach_probe(&self, handle: &str) -> Result<(), StreamError> {
+        self.session(handle)?.attach_probe()
+    }
+
     /// Blocking read — **foreign (JNI/DataSource) threads only**;
     /// parking a runtime worker is a bug. Empty `Vec` = EOF. Bounded by
     /// `StreamConfig::read_deadline`; every terminal transition wakes

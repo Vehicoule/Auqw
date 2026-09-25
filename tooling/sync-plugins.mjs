@@ -322,12 +322,18 @@ const HOLD = join(
 );
 try {
   renameSync(OUT, HOLD);
-  try {
-    renameSync(STAGE, OUT);
-  } catch (thrown) {
-    renameSync(HOLD, OUT);
-    throw thrown;
-  }
-} finally {
+  renameSync(STAGE, OUT);
+  // Only the success path removes the hold — on any failure the hold
+  // keeps the complete previous set on disk for the recovery pass.
   rmSync(HOLD, { recursive: true, force: true });
+} catch (thrown) {
+  // Restore the hold if the publish rename left OUT missing (either
+  // the publish failed or restore itself will report). If restore
+  // also fails, the hold stays for the next run's recovery pass.
+  try {
+    renameSync(HOLD, OUT);
+  } catch {
+    // OUT exists or restore failed — the recovery pass handles it.
+  }
+  throw thrown;
 }

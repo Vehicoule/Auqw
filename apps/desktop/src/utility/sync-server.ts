@@ -1128,6 +1128,18 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           pairedAt: now,
           lastSeenAt: now,
         };
+        // Records this put can displace — a same-id registration (a
+        // live re-pair) or a same-fp record custody dedupes away. The
+        // consume-fail rollback must restore them, not leave the phone
+        // unpaired behind a still-valid prior registration.
+        const { devices: displaced } = await deps.keys
+          .deviceList()
+          .then((list) => ({
+            devices: list.devices.filter(
+              (d) => d.id === record.id || (d.fp !== '' && d.fp === record.fp),
+            ),
+          }))
+          .catch(() => ({ devices: [] as SyncDeviceRecord[] }));
         try {
           await deps.keys.devicePut(record);
         } catch (thrown) {
@@ -1140,8 +1152,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           };
         }
         if (!pairing.consume(msg.code)) {
-          // Defensive: inside the lock a peek-ok always consumes —
-          // this can only mean state was cleared out-of-band.
+          // Mint/expire run off-lock, so a peek-ok can still lose —
+          // the durable record must not stand: a 'no-pairing' reply
+          // with the record kept would grant the phone sync access
+          // through the resume path despite the failed pair.
+          await deps.keys.deviceDelete(record.id).catch(() => undefined);
+          for (const prior of displaced) {
+            await deps.keys.devicePut(prior).catch(() => undefined);
+          }
           return { ok: false, reason: 'no-pairing' };
         }
         badAttempts.delete(session.remoteIp);

@@ -29,7 +29,7 @@ import type { UtilityHandler } from './router.ts';
  * `internal` — a raw napi throw never crosses the IPC boundary.
  */
 const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
-  'invalid-arg': 'invalid-request',
+  'invalid-argument': 'invalid-request',
   'not-found': 'invalid-request',
   'invalid-response': 'invalid-response',
   released: 'released',
@@ -71,17 +71,18 @@ function napiSlug(thrown: unknown): string | null {
   return null;
 }
 
-/** Wrap a napi rejection into a typed ShellError for the envelope. */
+/** Wrap a napi rejection into a typed ShellError for the envelope.
+ * The slug is taxonomy-safe; the native message is not (it can carry
+ * paths and provider text), so it never reaches the message field. */
 export function napiError(thrown: unknown): ShellError {
   const slug = napiSlug(thrown);
-  const detail =
-    thrown instanceof Error && thrown.message.length <= 512
-      ? thrown.message
-      : 'host call failed';
   if (slug !== null) {
-    return shellError(SLUG_KIND[slug] ?? 'internal', `${slug}: ${detail}`);
+    return shellError(
+      SLUG_KIND[slug] ?? 'internal',
+      `host call failed: ${slug}`,
+    );
   }
-  return shellError('internal', detail);
+  return shellError('internal', 'host call failed');
 }
 
 function validated<A>(

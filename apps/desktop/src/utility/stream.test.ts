@@ -88,6 +88,19 @@ export async function run(): Promise<void> {
   assertEqual(napiError(slugError).kind, 'released');
   const untyped = napiError(new Error('plain'));
   assertEqual(untyped.kind, 'internal');
+  // The bindings' arg-validation slug maps to invalid-request, and
+  // raw native text (paths, provider messages) never crosses into
+  // the message field — the slug is taxonomy-safe, the detail is not.
+  const argError = new Error('dlopen failed: /home/u/lib.so');
+  (argError as { cause?: unknown }).cause = {
+    message: '{"code":"invalid-argument","detail":"/home/u/lib.so"}',
+  };
+  const mapped = napiError(argError);
+  assertEqual(mapped.kind, 'invalid-request');
+  assert(
+    !mapped.message.includes('/home/u') && mapped.message.length < 64,
+    `message redacted: ${mapped.message}`,
+  );
 
   const runtime = fakeRuntime(fakeHost());
   const handlers = runtime.handlers;

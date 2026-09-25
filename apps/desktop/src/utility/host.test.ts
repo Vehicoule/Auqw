@@ -43,6 +43,15 @@ export async function run(): Promise<void> {
       unavailable.bindingsError.length > 0,
     'unavailable carries a reason',
   );
+  // The reason is redacted: candidate paths are utility-side
+  // diagnostics — never part of a message that crosses to the
+  // renderer.
+  assert(
+    unavailable.bindingsError !== undefined &&
+      !unavailable.bindingsError.includes('/') &&
+      !unavailable.bindingsError.includes('auqw_node_bindings'),
+    `bindingsError redacted: ${unavailable.bindingsError}`,
+  );
   try {
     missing.host();
     assert(false, 'host() must throw when bindings are absent');
@@ -155,6 +164,37 @@ export async function run(): Promise<void> {
       loaded.manifests[0]?.capabilities.includes('catalog.search'),
     'status carries the manifest fields',
   );
+
+  // An empty manifest id isn't a provider id — the pair loads under
+  // its file stem instead of shipping providerId '' downstream.
+  {
+    const stemFiles = new Map<string, Buffer>([
+      ['/b/auqw_node_bindings.node', Buffer.from('')],
+      ['/plugins/quiet.wasm', Buffer.from('wasm-quiet')],
+      ['/plugins/quiet.manifest.json', Buffer.from('{"id":""}')],
+    ]);
+    const stemRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+        AUQW_PLUGIN_DIR: '/plugins',
+        AUQW_USER_DATA: '/ud',
+      },
+      require: () => fakeModule,
+      fs: {
+        exists: (p) => stemFiles.has(p) || p === '/plugins',
+        read: (p) => stemFiles.get(p) ?? Buffer.alloc(0),
+        list: (d) =>
+          d === '/plugins'
+            ? ['quiet.manifest.json', 'quiet.wasm']
+            : [],
+        mkdir: () => {},
+        copy: () => {},
+      },
+    });
+    await stemRuntime.pluginsReady();
+    const stemStatus = await stemRuntime.status();
+    assertEqual(stemStatus.manifests[0]?.providerId, 'quiet');
+  }
 
   // A platform-named cdylib (what cargo emits) is staged to a .node
   // copy under userData before require — direct .node paths are not.
