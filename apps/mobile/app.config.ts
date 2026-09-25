@@ -14,10 +14,13 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: 'com.vehicoule.auqw',
   },
+  web: {
+    favicon: './assets/favicon.png',
+  },
   android: {
     package: 'com.vehicoule.auqw',
     adaptiveIcon: {
-      backgroundColor: '#E6F4FE',
+      backgroundColor: '#eef0f7',
       foregroundImage: './assets/android-icon-foreground.png',
       backgroundImage: './assets/android-icon-background.png',
       monochromeImage: './assets/android-icon-monochrome.png',
@@ -25,6 +28,19 @@ const config: ExpoConfig = {
     predictiveBackGestureEnabled: true,
   },
   plugins: [
+    [
+      'expo-splash-screen',
+      {
+        image: './assets/splash-icon.png',
+        imageWidth: 320,
+        resizeMode: 'contain',
+        backgroundColor: '#eef0f7',
+        dark: {
+          image: './assets/splash-icon-dark.png',
+          backgroundColor: '#1a1b26',
+        },
+      },
+    ],
     [
       'expo-audio',
       {

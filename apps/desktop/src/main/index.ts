@@ -42,6 +42,10 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const PRELOAD = join(here, '../preload/index.cjs');
 const UTILITY = join(here, '../utility/index.cjs');
+// Dev-mode window/taskbar icon. Packaged builds take theirs from the
+// binary/icon resources electron-builder generates out of build/;
+// build/ itself is not shipped in the packaged files.
+const WINDOW_ICON = join(here, '../../build/icon.png');
 // The product UI is the default window; the Phase-2 dev harness stays
 // reachable byte-for-byte for the E2E skills behind AUQW_DEV_HARNESS=1
 // (read here in main only — the sandboxed renderer never sees env).
@@ -320,6 +324,9 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
       nodeIntegration: false,
     },
   };
+  if (!app.isPackaged) {
+    options.icon = WINDOW_ICON;
+  }
   if (
     state.x !== undefined &&
     state.y !== undefined &&
