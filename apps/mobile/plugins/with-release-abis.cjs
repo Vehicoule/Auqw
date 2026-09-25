@@ -9,9 +9,14 @@
 //   app-x86_64-release.apk      (x86 emulators / testing)
 // shrinkResources joins minify in the release buildType to trim
 // unreferenced res entries.
-const { withAppBuildGradle, withDangerousMod, withGradleProperties } = require('expo/config-plugins');
-const fs = require('fs');
-const path = require('path');
+// JNA/UniFFI ProGuard keeps used to be injected into
+// app/proguard-rules.pro here. They moved to
+// modules/auqw-expo/android/consumer-rules.pro — the library that owns the
+// JNA dependency now ships its own consumer rules, and AGP merges them
+// automatically. (The old member-only keepclassmembers rule also let R8
+// strip the @FieldOrder class annotation → Structure.getFieldOrder()
+// crash on the first FFI call; consumer-rules.pro uses full keeps.)
+const { withAppBuildGradle, withGradleProperties } = require('expo/config-plugins');
 
 const ABIS = "'arm64-v8a', 'x86_64'";
 const SPLITS = `splits {
@@ -70,27 +75,5 @@ module.exports = function withReleaseAbis(config) {
     config.modResults.contents = gradle;
     return config;
   });
-  // JNA ships desktop AWT references that can't resolve under R8 — the
-  // host paths using them never run on Android anyway. android/ is
-  // generated, so the rules land at prebuild via a dangerous mod.
-  config = withDangerousMod(config, [
-    'android',
-    (config) => {
-      const rulesPath = path.join(
-        config.modRequest.platformProjectRoot,
-        'app',
-        'proguard-rules.pro',
-      );
-      const rules = fs.readFileSync(rulesPath, 'utf8');
-      const marker = '-keep class com.sun.jna.**';
-      if (!rules.includes(marker)) {
-        fs.writeFileSync(
-          rulesPath,
-          `${rules}\n# JNA ships desktop AWT references that can't resolve under R8 — the\n# host paths using them never run on Android anyway — and reaches its\n# own members reflectively: dontwarn alone lets R8 strip Pointer.peer\n# and the release APK dies on boot (UnsatisfiedLinkError).\n-dontwarn java.awt.**\n-dontwarn com.sun.jna.**\n-keep class com.sun.jna.** { *; }\n-keepclassmembers class * extends com.sun.jna.** { *; }\n`,
-        );
-      }
-      return config;
-    },
-  ]);
   return config;
 };

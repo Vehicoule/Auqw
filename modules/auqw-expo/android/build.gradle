@@ -11,6 +11,10 @@ android {
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
+    // JNA/UniFFI reflection keeps — see consumer-rules.pro. Merged into the
+    // consuming app's R8 config so release minification can't strip the
+    // @FieldOrder annotations JNA resolves at runtime.
+    consumerProguardFiles "consumer-rules.pro"
   }
   lintOptions {
     abortOnError false
