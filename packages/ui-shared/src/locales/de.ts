@@ -388,6 +388,9 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.diag.attempts': { one: '{count} versuch', other: '{count} versuche' },
   'settings.diag.last': 'zuletzt: {value}',
   'settings.diag.persistence': 'persistenz',
+  'settings.diag.persistenceValue.ok': 'ok',
+  'settings.diag.persistenceValue.degraded': 'beeinträchtigt',
+  'settings.diag.persistenceValue.failed': 'fehlgeschlagen',
   'settings.diag.matchReviews': 'zuordnungsprüfungen',
   'settings.diag.pending': '{count} offen',
   'settings.diag.attemptLabel':

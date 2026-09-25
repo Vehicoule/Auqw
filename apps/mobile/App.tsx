@@ -683,6 +683,35 @@ function Main({
     },
     [],
   );
+  // Settings writes are serialized so picks land in submission order,
+  // and each write MERGES ITS OWN FIELD onto the newest known settings
+  // at execution time. `updateSettings` persists a complete snapshot,
+  // so replaying one captured at selection time would revert whatever
+  // landed in between (a direct prefetch/toggle write, say).
+  const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
+  const latestSettingsRef = useRef(state.settings);
+  useEffect(() => {
+    latestSettingsRef.current = state.settings;
+  }, [state.settings]);
+  const queueSettingsWrite = useCallback(
+    (patch: Partial<Parameters<typeof session.updateSettings>[0]>) => {
+      const run = settingsWriteChain.current.then(() => {
+        const next = { ...latestSettingsRef.current, ...patch };
+        return session.updateSettings(next).then((result) => {
+          if (result.ok) {
+            latestSettingsRef.current = next;
+          }
+          return result;
+        });
+      });
+      settingsWriteChain.current = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
+    [session],
+  );
   // A persisted language (or 'system' resolution) applies once the
   // ready settings arrive — never during render. The ready UI stays
   // gated until that apply has landed: an ungated effect commits one
@@ -3750,8 +3779,7 @@ function Main({
                 // Same contract as the language picker: report a
                 // failed save and keep the sheet open so an unapplied
                 // pick still reads unselected.
-                void session
-                  .updateSettings({ ...state.settings, theme })
+                void queueSettingsWrite({ theme })
                   .then((saved) => {
                     if (opening !== themeEpoch.current) {
                       // A newer pick or a dismissal superseded this
@@ -3796,8 +3824,7 @@ function Main({
                 // storage never recorded. On failure the sheet stays
                 // open: the pick still reads unselected, so the
                 // failure is visible without relying on the toast.
-                void session
-                  .updateSettings({ ...state.settings, language })
+                void queueSettingsWrite({ language })
                   .then((saved) => {
                     if (opening !== languageEpoch.current) {
                       // A newer pick or a dismissal superseded this

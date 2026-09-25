@@ -202,10 +202,8 @@ export function SettingsScreen({
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
             {t('settings.diag.persistence')}
           </Text>
-          {/* Domain status values render verbatim — they are data from
-              the model, the same treatment as provider ids above. */}
           <Text variant="metadata" color={persistenceColor}>
-            {diagnostics.persistence}
+            {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}
             {diagnostics.persistenceDetail === null
               ? ''
               : ` · ${diagnostics.persistenceDetail}`}

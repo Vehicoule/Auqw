@@ -369,6 +369,9 @@ export const en = {
   'settings.diag.attempts': { one: '{count} attempt', other: '{count} attempts' },
   'settings.diag.last': 'last: {value}',
   'settings.diag.persistence': 'persistence',
+  'settings.diag.persistenceValue.ok': 'ok',
+  'settings.diag.persistenceValue.degraded': 'degraded',
+  'settings.diag.persistenceValue.failed': 'failed',
   'settings.diag.matchReviews': 'match reviews',
   'settings.diag.pending': '{count} pending',
   'settings.diag.attemptLabel':
