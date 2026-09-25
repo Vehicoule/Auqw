@@ -4,9 +4,12 @@
 // reactNativeArchitectures to arm64-v8a + x86_64 and turns on AGP
 // ABI splits — prebuild emits per-ABI APKs (no universal: it would
 // carry only third-party jniLibs for the dropped ABIs, no RN runtime,
-// and crash on the very 32-bit devices it claims to cover):
+// and crash on the very 32-bit devices it claims to cover).
+// The release workflow narrows packaging to arm64 via
+// -Pauqw.abis=arm64-v8a; the default keeps x86_64 for emulator
+// debug/testing:
 //   app-arm64-v8a-release.apk   (phones — the ~53 MB download)
-//   app-x86_64-release.apk      (x86 emulators / testing)
+//   app-x86_64-release.apk      (local builds only, x86 emulators)
 // shrinkResources joins minify in the release buildType to trim
 // unreferenced res entries.
 // JNA/UniFFI ProGuard keeps used to be injected into
@@ -18,7 +21,7 @@
 // crash on the first FFI call; consumer-rules.pro uses full keeps.)
 const { withAppBuildGradle, withGradleProperties } = require('expo/config-plugins');
 
-const ABIS = "'arm64-v8a', 'x86_64'";
+const ABIS = "(findProperty('auqw.abis') ?: 'arm64-v8a,x86_64').split(',') as String[]";
 const SPLITS = `splits {
         abi {
             enable true
