@@ -14,6 +14,9 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: 'com.vehicoule.auqw',
   },
+  web: {
+    favicon: './assets/favicon.png',
+  },
   android: {
     package: 'com.vehicoule.auqw',
     adaptiveIcon: {
