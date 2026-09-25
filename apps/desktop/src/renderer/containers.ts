@@ -142,7 +142,11 @@ export type WebmWalk = {
 
 function readUint(buf: Uint8Array, off: number, len: number): number {
   let value = 0;
-  for (let i = 0; i < len; i++) {
+  // The declared length comes from untrusted bytes — cap at the EBML
+  // uint maximum (8) and the buffer end, or a crafted size field loops
+  // for 2^56 iterations on `?? 0` reads.
+  const n = Math.min(len, 8, buf.length - off);
+  for (let i = 0; i < n; i++) {
     value = value * 256 + (buf[off + i] ?? 0);
   }
   return value;

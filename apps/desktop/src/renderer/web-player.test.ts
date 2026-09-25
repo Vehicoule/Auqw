@@ -821,6 +821,111 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A pending play superseded by the successor's own prepare must not
+  // invalidate that successor — the dropped play's generation is older
+  // than the op that dropped it, so no global bump is owed.
+  {
+    const audio = fakeAudio();
+    const resolvers: Array<(v: { url: string }) => void> = [];
+    const stream = fakeStream({
+      prepare: () =>
+        Promise.resolve({
+          type: 'prepared',
+          stream: { handle: 'h-2', mime: 'audio/mp4' },
+          superseded: ['h-1'],
+        }),
+      serveUrl: (args) =>
+        (args as { handle: string }).handle === 'h-1'
+          ? new Promise((resolve) => {
+              resolvers.push(resolve);
+            })
+          : Promise.resolve({ url: 'http://127.0.0.1:9/s/h-2' }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    const playA = player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    assert(
+      events.some((e) => e.type === 'queue-transition'),
+      'successor attach completes despite a superseded pending play',
+    );
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-2',
+      'successor owns the element',
+    );
+    assert(
+      !stream.calls.some(
+        (c) =>
+          c.method === 'release' &&
+          (c.args as { handle: string }).handle === 'h-2',
+      ),
+      'the live successor handle is not released as stale',
+    );
+    // The dropped play's late serveUrl resolution stays inert.
+    resolvers[0]?.({ url: 'http://127.0.0.1:9/s/h-1' });
+    await playA;
+    await settle();
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-2',
+      'the superseded play never attaches',
+    );
+  }
+
+  // Releasing a pending play while a younger attach op is in flight
+  // must not bump the generation — the released play's gen is already
+  // stale, and the attach must still land.
+  {
+    const audio = fakeAudio();
+    const resolvers: Array<(v: { url: string }) => void> = [];
+    let resolvePrepare:
+      | ((o: PrepareOutcomePayload) => void)
+      | undefined;
+    const stream = fakeStream({
+      prepare: () =>
+        new Promise((resolve) => {
+          resolvePrepare = resolve;
+        }),
+      serveUrl: (args) =>
+        (args as { handle: string }).handle === 'h-1'
+          ? new Promise((resolve) => {
+              resolvers.push(resolve);
+            })
+          : Promise.resolve({ url: 'http://127.0.0.1:9/s/h-2' }),
+    });
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    const playA = player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await player.release({ handle: 'h-1', identity });
+    resolvePrepare?.({
+      type: 'prepared',
+      stream: { handle: 'h-2', mime: 'audio/mp4' },
+    });
+    await settle();
+    assert(
+      events.some((e) => e.type === 'queue-transition'),
+      'release of an older pending play does not kill the in-flight attach',
+    );
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-2',
+      'successor owns the element',
+    );
+    resolvers[0]?.({ url: 'http://127.0.0.1:9/s/h-1' });
+    await playA;
+    await settle();
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/h-2',
+      'the released play never attaches',
+    );
+  }
+
   // serveUrl rejecting after a successful prepare releases the minted
   // handle — the registry never sees a leak.
   {
