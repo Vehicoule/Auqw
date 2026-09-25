@@ -272,11 +272,12 @@ class AllowlistDispatcher extends Dispatcher {
     };
     const raw = options.headers;
     if (Array.isArray(raw)) {
-      for (const entry of raw) {
-        if (typeof entry !== 'string') continue;
-        const colon = entry.indexOf(':');
-        if (colon > 0) {
-          addHeader(entry.slice(0, colon).trim(), entry.slice(colon + 1).trim());
+      // undici's array form is flat name/value pairs, not "name: value"
+      // lines — walk it two at a time.
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        const name = raw[i];
+        if (typeof name === 'string') {
+          addHeader(name, raw[i + 1]);
         }
       }
     } else if (raw !== null && raw !== undefined) {
