@@ -2947,8 +2947,18 @@ function Main({
               onPick={(key) => {
                 const theme =
                   THEME_ORDER.find((t) => t === key) ?? 'system';
-                void session.updateSettings({ ...state.settings, theme });
-                setThemePickerOpen(false);
+                // Same contract as the language picker: report a
+                // failed save and keep the sheet open so an unapplied
+                // pick still reads unselected.
+                void session
+                  .updateSettings({ ...state.settings, theme })
+                  .then((saved) => {
+                    reportResult('settings.theme', saved);
+                    if (!saved.ok) {
+                      return;
+                    }
+                    setThemePickerOpen(false);
+                  });
               }}
               onDismiss={() => setThemePickerOpen(false)}
             />
@@ -2967,15 +2977,17 @@ function Main({
                 const language = key === 'system' ? null : key;
                 // Apply the locale only once the save landed — a
                 // failed save must not leave the UI on a selection
-                // storage never recorded. The sheet closes either
-                // way; the failure surfaces through the toast.
+                // storage never recorded. On failure the sheet stays
+                // open: the pick still reads unselected, so the
+                // failure is visible without relying on the toast.
                 void session
                   .updateSettings({ ...state.settings, language })
                   .then((saved) => {
                     reportResult('settings.language', saved);
-                    if (saved.ok) {
-                      applyLocale(language);
+                    if (!saved.ok) {
+                      return;
                     }
+                    applyLocale(language);
                     setLanguagePickerOpen(false);
                   });
               }}
