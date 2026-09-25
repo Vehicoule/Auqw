@@ -78,7 +78,7 @@ manifest checks only.)
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |
 | `providers.lock.json` | Pin of known plugin artifact digests |
-| `tooling` | `build-android-bindings.sh`, `sync-plugins.mjs` |
+| `tooling` | `build-android-bindings.sh`, `build-ios-bindings.sh`, `sync-plugins.mjs`, `checksums.mjs`, `stamp-version.mjs` |
 
 ### Smoke test
 
