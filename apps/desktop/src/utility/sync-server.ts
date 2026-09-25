@@ -220,13 +220,19 @@ function createPairing(opts: {
   ttlMs: number;
 }): {
   mint(): { code: string; expiresAt: number };
-  /** Validate without consuming — the registry write must land first. */
+  /** Validate without consuming — a wrong code never burns the mint. */
   peek(code: string): PairCheck;
   /**
    * Consume iff the same code is still pending — one winner only, so a
-   * racing session can't double-register off one mint.
+   * racing session can't double-register off one mint. Returns the
+   * taken state so a failed custody write can `restore` it.
    */
-  consume(code: string): boolean;
+  consume(code: string): PairingState | null;
+  /**
+   * Re-pend a consumed code after its custody write failed — a no-op
+   * once a newer mint already owns the window.
+   */
+  restore(taken: PairingState): void;
   expire(): void;
 } {
   let current: PairingState | null = null;
@@ -255,10 +261,16 @@ function createPairing(opts: {
         current.code !== code ||
         opts.nowMs() >= current.expiresAt
       ) {
-        return false;
+        return null;
       }
+      const taken = current;
       current = null; // a code pairs exactly once
-      return true;
+      return taken;
+    },
+    restore(taken) {
+      if (current === null) {
+        current = taken;
+      }
     },
     expire() {
       current = null;
@@ -739,21 +751,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         const off = await readSpillOffset(offPath, path);
         const scan = await spillScan(path, off, budget - bytes);
         servedFileBytes = scan.servedBytes;
-        // A page that served ONLY poison skips holds nothing the
-        // renderer could commit — the durable offset advances now,
-        // inside the serialized tail, or the same line re-scans on
-        // every later drain (the ack path waits on served bytes;
-        // Review #46 round-9).
-        if (scan.skippedLines > 0 && scan.served.length === 0) {
-          servedFileBytes = 0;
-          await advanceSpillOffset(path, offPath, off + scan.servedBytes);
-        }
+        let parsedLines = 0;
         for (const line of scan.served) {
           try {
             const parsed: unknown = JSON.parse(line);
             if (isJsonValue(parsed)) {
               bytes += Buffer.byteLength(line, 'utf8') + 1;
               chunk.push(parsed);
+              parsedLines += 1;
             } else {
               appliedDropped = true;
             }
@@ -768,6 +773,15 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         // reports the loss honestly (materialized reconcile covers).
         if (scan.skippedLines > 0) {
           appliedDropped = true;
+        }
+        // A page that committed nothing — only poison skips, or every
+        // served line unparseable — holds nothing the renderer could
+        // ack, and the ack path is what advances the durable offset.
+        // Advance it here, inside the serialized tail, or the same
+        // lines re-scan on every later drain (Review #46 round-9).
+        if (parsedLines === 0 && scan.servedBytes > 0) {
+          servedFileBytes = 0;
+          await advanceSpillOffset(path, offPath, off + scan.servedBytes);
         }
         spilledBacklog =
           scan.totalLines - scan.served.length - scan.skippedLines;
@@ -1120,6 +1134,18 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         if (check !== 'ok') {
           return { ok: false, reason: check };
         }
+        // Consume BEFORE the durable write closes the mint window: a
+        // code consumed while its registry write is in flight can't
+        // also be claimed by a second session racing in. A failed
+        // write restores the taken state — the code stays pending so
+        // the same retry still pairs, unless a fresh mint already
+        // replaced the window.
+        const taken = pairing.consume(msg.code);
+        if (taken === null) {
+          // Defensive: inside the lock a peek-ok always consumes —
+          // this can only mean state was cleared out-of-band.
+          return { ok: false, reason: 'no-pairing' };
+        }
         const record = {
           id: session.deviceId ?? '',
           name: session.name,
@@ -1128,39 +1154,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           pairedAt: now,
           lastSeenAt: now,
         };
-        // Records this put can displace — a same-id registration (a
-        // live re-pair) or a same-fp record custody dedupes away. The
-        // consume-fail rollback must restore them, not leave the phone
-        // unpaired behind a still-valid prior registration.
-        const { devices: displaced } = await deps.keys
-          .deviceList()
-          .then((list) => ({
-            devices: list.devices.filter(
-              (d) => d.id === record.id || (d.fp !== '' && d.fp === record.fp),
-            ),
-          }))
-          .catch(() => ({ devices: [] as SyncDeviceRecord[] }));
         try {
           await deps.keys.devicePut(record);
         } catch (thrown) {
-          // Consume only AFTER the registry write — a transient
-          // custody failure leaves the still-valid code open for
-          // retry.
+          pairing.restore(taken);
           return {
             ok: false,
             reason: isShellError(thrown) ? thrown.kind : 'internal',
           };
-        }
-        if (!pairing.consume(msg.code)) {
-          // Mint/expire run off-lock, so a peek-ok can still lose —
-          // the durable record must not stand: a 'no-pairing' reply
-          // with the record kept would grant the phone sync access
-          // through the resume path despite the failed pair.
-          await deps.keys.deviceDelete(record.id).catch(() => undefined);
-          for (const prior of displaced) {
-            await deps.keys.devicePut(prior).catch(() => undefined);
-          }
-          return { ok: false, reason: 'no-pairing' };
         }
         badAttempts.delete(session.remoteIp);
         return { ok: true, record };

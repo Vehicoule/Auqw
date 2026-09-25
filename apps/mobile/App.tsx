@@ -1053,7 +1053,11 @@ function Main({
       downloads,
     });
     const playingId =
-      state.playback.type === 'idle' ? null : state.playback.recordingId;
+      state.playback.type === 'idle' ||
+      state.playback.type === 'paused' ||
+      state.playback.type === 'failed'
+        ? null
+        : state.playback.recordingId;
     const chipByRecording = new Map<string, DownloadChip>(
       downloads
         .filter((d) => d.state !== 'removing')
@@ -1122,7 +1126,11 @@ function Main({
         likes: state.likes,
       });
       const playingId =
-        state.playback.type === 'idle' ? null : state.playback.recordingId;
+        state.playback.type === 'idle' ||
+        state.playback.type === 'paused' ||
+        state.playback.type === 'failed'
+          ? null
+          : state.playback.recordingId;
       if (model === null) {
         return model;
       }

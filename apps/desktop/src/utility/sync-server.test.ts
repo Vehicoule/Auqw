@@ -449,14 +449,14 @@ export async function run(): Promise<void> {
     }
   }
 
-  // —— A consume-losing pair restores the records its write displaced ——
+  // —— A mid-write mint can't steal an in-flight pair's code ——
   {
     const inner = createMemoryKeys();
-    // Hold the pair handler open right after its registry write so a
-    // fresh sync:pairing mint — minted off the pair lock — can retire
-    // the pending code mid-flight: consume loses, and the rollback
-    // must restore the record the write overwrote instead of leaving
-    // the registry gutted.
+    // Hold the pair handler open during its registry write so a fresh
+    // sync:pairing mint — minted off the pair lock — lands mid-flight.
+    // The pair already consumed the code before the write began: the
+    // mint only opens the NEXT window, this pair still completes, and
+    // the taken code can't pair a second device.
     let releaseWrite: () => void = () => undefined;
     const writeHold = new Promise<void>((resolve) => {
       releaseWrite = resolve;
@@ -487,7 +487,7 @@ export async function run(): Promise<void> {
       assert(status.boundPort !== null);
       const port = status.boundPort;
 
-      // An established phone — the incumbent a losing pair clobbers.
+      // An established phone — a same-id re-pair displaces it.
       const p1 = await pairingCode(service);
       const first = await pairPhone({
         port,
@@ -495,12 +495,10 @@ export async function run(): Promise<void> {
         code: p1.code,
         fp: p1.fp,
       });
-      const incumbent = inner.records.get('phone-old');
-      assert(incumbent !== undefined, 'incumbent registered');
       first.client.close();
 
       const p2 = await pairingCode(service);
-      // Same device id under a fresh device key: the pair's put
+      // Same device id under a fresh device key: a completed pair
       // overwrites the incumbent record outright.
       const c = await dial(port);
       const rogue = createTestPeer({
@@ -508,37 +506,40 @@ export async function run(): Promise<void> {
         name: 'rogue',
       });
       const hs = await phoneHandshake(c, rogue, p2.fp);
-      assertEqual(hs.registered, false, 'new key is unregistered');
-      const rogueFp = fingerprintOf(rogue.identity.pub);
       holdPuts = true;
       c.send(sealJson(hs.codec, { t: 'pair', code: p2.code }));
-      // Wait for the gated write to land (the incumbent's fp is
-      // displaced) before minting the code away.
-      for (
-        let i = 0;
-        i < 200 && inner.records.get('phone-old')?.fp === incumbent.fp;
-        i += 1
-      ) {
+      // Wait for the gated write to reach its hold, then retire the
+      // pending window — the consumed code is already taken, so the
+      // mint only re-opens the window for a later pair.
+      for (let i = 0; i < 200 && holdPuts; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
-      assert(
-        inner.records.get('phone-old')?.fp === rogueFp &&
-          inner.records.get('phone-old')?.fp !== incumbent.fp,
-        'pair write overwrote the incumbent',
-      );
-      // Retire the pending code while the write holds — consume now
-      // loses even though peek passed.
+      assert(!holdPuts, 'pair write reached the hold');
       await pairingCode(service);
       releaseWrite();
       const reply = await openJson(hs.codec, await c.recv());
-      assertDeepEqual(reply, { t: 'reject', reason: 'no-pairing' });
-      // Rollback deleted the half-registered record AND restored the
-      // incumbent it had displaced.
-      const restored = inner.records.get('phone-old');
-      assert(restored !== undefined, 'incumbent record restored');
-      assertEqual(restored.fp, incumbent.fp);
+      assert(
+        isRecord(reply) && reply['t'] === 'welcome',
+        'in-flight pair completes across the mid-write mint',
+      );
+      assertEqual(
+        inner.records.get('phone-old')?.fp,
+        fingerprintOf(rogue.identity.pub),
+        're-pair displaced the incumbent record',
+      );
       assertEqual(inner.records.size, 1, 'no shadow records remain');
       c.close();
+      // The consumed code is spent even though a newer window opened.
+      const c2 = await dial(port);
+      const peer2 = createTestPeer({
+        deviceId: 'phone-second',
+        name: 'second',
+      });
+      const hs2 = await phoneHandshake(c2, peer2, p2.fp);
+      c2.send(sealJson(hs2.codec, { t: 'pair', code: p2.code }));
+      const reply2 = await openJson(hs2.codec, await c2.recv());
+      assertDeepEqual(reply2, { t: 'reject', reason: 'bad-code' });
+      c2.close();
     } finally {
       await service.close();
     }

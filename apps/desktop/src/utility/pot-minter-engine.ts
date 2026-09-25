@@ -12,8 +12,11 @@ import type { ShellError } from '../shared/errors.ts';
  * (host-realm escapes are reachable through callable prototypes).
  * Keeping it in a bare child means an escaped interpreter lands in a
  * process with no Electron surface, no bindings, and a scrubbed
- * environment — the worst it can do is poison tokens, which the
- * upstream already rejects.
+ * environment — never the utility's custody or credential surface.
+ * The containment is blast radius, not a boundary: the child still
+ * runs a plain Node with ambient filesystem and network reach
+ * (PATH/HOME and the proxy family pass through), so a realm escape
+ * keeps token-poisoning plus whatever a bare process can reach.
  */
 
 export type MinterEngine = {
@@ -156,7 +159,10 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
       fork(path, {
         env: childEnv(),
         execArgv: [],
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        // Guest stdout/stderr is remote-code output, not lifecycle
+        // signal — interpreter-thrown text can carry URLs or
+        // challenge material, so it never reaches this log.
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       }));
 
   let child: ChildProcess | null = null;
@@ -208,20 +214,6 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
     if (child === null) {
       const proc = spawn(modulePath);
       child = proc;
-      proc.stdout?.on('data', (chunk: Buffer) => {
-        for (const line of String(chunk).split('\n')) {
-          if (line.trim().length > 0) {
-            log(`pot-minter: ${line.trim()}`);
-          }
-        }
-      });
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        for (const line of String(chunk).split('\n')) {
-          if (line.trim().length > 0) {
-            log(`pot-minter: ${line.trim()}`);
-          }
-        }
-      });
       proc.on('message', (msg: unknown) => {
         const reply = msg as MinterReply;
         const waiter = pending.get(reply.id);
@@ -239,6 +231,7 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
         if (child === proc) {
           child = null;
         }
+        log('pot-minter: child exited');
         failProc(
           proc,
           new HttpError(503, 'unavailable', 'pot: minter exited'),
@@ -249,6 +242,7 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
         if (child === proc) {
           child = null;
         }
+        log('pot-minter: child failed');
         failProc(
           proc,
           new HttpError(503, 'unavailable', 'pot: minter failed'),

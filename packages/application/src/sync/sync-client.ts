@@ -1099,6 +1099,28 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
             appError('permission-denied', 'sync: fingerprint mismatch'),
           );
         }
+        const current = peers.get(fp);
+        if (current !== peer) {
+          if (current === undefined || current.pairedAt !== peer.pairedAt) {
+            // The peer vanished or was re-paired while the dial was in
+            // flight — unpair couldn't kill a session that was never
+            // registered, so it lands here instead of resurrecting
+            // custody the user just revoked. Pairing identity is the
+            // record's pairedAt: a re-pair mints a new one.
+            killSession(
+              session,
+              appError('auth-required', 'sync: peer changed mid-connect'),
+            );
+            return err(
+              appError('auth-required', 'sync: peer changed mid-connect'),
+            );
+          }
+          // Same pairing, refreshed in place — e.g. a coalesced
+          // caller's welcome POT refresh landed between our dial and
+          // this check. Adopt the newer record rather than killing
+          // the session both callers share.
+          peer = current;
+        }
         const prior = sessions.get(fp);
         if (prior !== undefined && prior !== session && !prior.closed) {
           // A connect that slipped the dedupe window already owns the

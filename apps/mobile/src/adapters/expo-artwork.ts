@@ -144,7 +144,8 @@ export function createExpoArtwork(
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), DEFAULT_TIMEOUT_MS);
       const unsub = signal.subscribe(() => abort.abort());
-      const temp = new File(`${destPath}.dl`);
+      const tempPath = `${destPath}.dl`;
+      const temp = new File(tempPath);
       try {
         const response = await fetchImpl(url, { signal: abort.signal });
         if (!response.ok) {
@@ -203,8 +204,12 @@ export function createExpoArtwork(
         clearTimeout(timer);
         unsub();
         try {
-          if (temp.exists) {
-            temp.delete();
+          // `moveSync` retargets the File object onto the entry path,
+          // so cleanup must name the literal temp path — deleting via
+          // `temp` after a finalize would remove the download itself.
+          const lingering = new File(tempPath);
+          if (lingering.exists) {
+            lingering.delete();
           }
         } catch {
           // A lingering temp file is reclaimed with the OS cache dir.

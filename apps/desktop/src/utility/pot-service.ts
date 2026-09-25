@@ -196,6 +196,10 @@ function botGuardSandbox(
   // Timers the interpreter schedules land on the host loop — track
   // the handles so a dropped session can't leave callbacks firing.
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  const immediates = new Set<ReturnType<typeof setImmediate>>();
+  // A microtask can't be cancelled once queued — its callback gates
+  // on the session being live instead.
+  let live = true;
   const trackTimeout = (
     cb: (...args: unknown[]) => void,
     ms?: number,
@@ -215,6 +219,30 @@ function botGuardSandbox(
   const untrack = (handle: ReturnType<typeof setTimeout>): void => {
     timers.delete(handle);
     clearTimeout(handle);
+  };
+  const trackImmediate = (
+    cb: (...args: unknown[]) => void,
+    ...args: unknown[]
+  ): ReturnType<typeof setImmediate> => {
+    const handle = setImmediate((...inner: unknown[]) => {
+      immediates.delete(handle);
+      cb(...inner);
+    }, ...args);
+    immediates.add(handle);
+    return handle;
+  };
+  const untrackImmediate = (
+    handle: ReturnType<typeof setImmediate>,
+  ): void => {
+    immediates.delete(handle);
+    clearImmediate(handle);
+  };
+  const trackMicrotask = (cb: () => void): void => {
+    queueMicrotask(() => {
+      if (live) {
+        cb();
+      }
+    });
   };
   // The interpreter's network surface is capped to exact hosts (its
   // own origin + the homepage), read-only methods, no caller body,
@@ -528,10 +556,10 @@ function botGuardSandbox(
       return handle;
     },
     clearInterval: untrack,
-    queueMicrotask,
+    queueMicrotask: trackMicrotask,
     console,
-    setImmediate: globalThis.setImmediate,
-    clearImmediate: globalThis.clearImmediate,
+    setImmediate: trackImmediate,
+    clearImmediate: untrackImmediate,
     structuredClone: globalThis.structuredClone,
     DOMException,
     Uint8Array,
@@ -572,10 +600,15 @@ function botGuardSandbox(
   return {
     globals: sandbox,
     dispose(): void {
+      live = false;
       for (const handle of timers) {
         clearTimeout(handle);
       }
       timers.clear();
+      for (const handle of immediates) {
+        clearImmediate(handle);
+      }
+      immediates.clear();
     },
   };
 }
@@ -949,6 +982,30 @@ export function createPotService(opts: PotServiceDeps): PotService {
   let session: PotSession | null = null;
   let sessionPending: Promise<PotSession> | null = null;
   let lastFailureAt = 0;
+  // Disposal waits out in-flight mints — sessions share one
+  // interpreter context, so tearing one down while another request
+  // still mints through it clears the vm timers that mint parks on
+  // and wedges the shared child until the op timeout.
+  const inflightMints = new Map<PotSession, number>();
+  const deferredDispose = new Set<PotSession>();
+  const disposeWhenIdle = (dead: PotSession): void => {
+    if ((inflightMints.get(dead) ?? 0) > 0) {
+      deferredDispose.add(dead);
+      return;
+    }
+    dead.dispose?.();
+  };
+  const settleMint = (done: PotSession): void => {
+    const left = (inflightMints.get(done) ?? 1) - 1;
+    if (left > 0) {
+      inflightMints.set(done, left);
+      return;
+    }
+    inflightMints.delete(done);
+    if (deferredDispose.delete(done)) {
+      done.dispose?.();
+    }
+  };
   const clientKey =
     opts.clientKey ??
     ((req: IncomingMessage) => req.socket.remoteAddress ?? 'unknown');
@@ -973,7 +1030,9 @@ export function createPotService(opts: PotServiceDeps): PotService {
     // failed refresh.
     const stale = session;
     session = null;
-    stale?.dispose?.();
+    if (stale !== null) {
+      disposeWhenIdle(stale);
+    }
     // An in-flight rebuild coalesces every concurrent caller —
     // the cooldown check only gates NEW builds.
     if (sessionPending !== null) {
@@ -1029,31 +1088,36 @@ export function createPotService(opts: PotServiceDeps): PotService {
   const dropSession = (dead: PotSession): void => {
     if (session === dead) {
       session = null;
-      dead.dispose?.();
+      disposeWhenIdle(dead);
     }
   };
 
   async function mint(contentBinding: string): Promise<MintResult> {
     const active = await ensureSession();
-    let poToken: string;
+    inflightMints.set(active, (inflightMints.get(active) ?? 0) + 1);
     try {
-      poToken = await active.mint(contentBinding);
-    } catch (thrown) {
-      // A dead mint usually means the integrity session went stale —
-      // drop it so the next request rebuilds rather than retrying a
-      // corpse. The thrown value stays taxonomy-shaped.
-      dropSession(active);
-      throw thrown instanceof HttpError
-        ? thrown
-        : new HttpError(503, 'unavailable', 'pot: mint failed');
+      let poToken: string;
+      try {
+        poToken = await active.mint(contentBinding);
+      } catch (thrown) {
+        // A dead mint usually means the integrity session went stale —
+        // drop it so the next request rebuilds rather than retrying a
+        // corpse. The thrown value stays taxonomy-shaped.
+        dropSession(active);
+        throw thrown instanceof HttpError
+          ? thrown
+          : new HttpError(503, 'unavailable', 'pot: mint failed');
+      }
+      if (typeof poToken !== 'string' || poToken.length === 0) {
+        // An empty mint is as dead as a thrown one — evict it, or every
+        // later request replays the same bad session until expiry.
+        dropSession(active);
+        throw new HttpError(503, 'unavailable', 'pot: empty mint');
+      }
+      return { poToken, expiresAtMs: active.expiresAtMs };
+    } finally {
+      settleMint(active);
     }
-    if (typeof poToken !== 'string' || poToken.length === 0) {
-      // An empty mint is as dead as a thrown one — evict it, or every
-      // later request replays the same bad session until expiry.
-      dropSession(active);
-      throw new HttpError(503, 'unavailable', 'pot: empty mint');
-    }
-    return { poToken, expiresAtMs: active.expiresAtMs };
   }
 
   function admit(clientId: string): boolean {
@@ -1239,7 +1303,9 @@ export function createPotService(opts: PotServiceDeps): PotService {
     },
     async close() {
       closing = true;
-      session?.dispose?.();
+      if (session !== null) {
+        disposeWhenIdle(session);
+      }
       session = null;
       const srv = server;
       server = null;

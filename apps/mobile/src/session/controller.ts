@@ -467,7 +467,14 @@ export async function createSessionController(
     local: () => localSource,
     connectivity,
     sync: () => syncSurface,
-    setPotProvider: (url) => host.setPotProvider(url),
+    setPotProvider: (url) => {
+      // A stale native module predating the pot seam has no such
+      // function — the provider keeps its boot value rather than
+      // crashing the sync-status effect that calls this.
+      if (typeof host.setPotProvider === 'function') {
+        host.setPotProvider(url);
+      }
+    },
     async start(signal) {
       const loaded = await storage.load({
         requestId: ids.next('local-boot'),

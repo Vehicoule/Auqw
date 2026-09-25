@@ -257,19 +257,21 @@ jobs:
             (cd "$d" && sha256sum -c SHA256SUMS*)
           done
           if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            # First-run create lands as a DRAFT — the shared tail
+            # below uploads the assets and flips it live, so a
+            # mid-upload failure never ships a public release
+            # carrying a partial asset set.
             gh release create "$VERSION" \
               --title "$VERSION" \
               --generate-notes \
-              "${flags[@]}" \
-              artifacts/desktop-packages-*/* \
-              artifacts/android-packages/*
-            exit 0
+              --draft \
+              "${flags[@]}"
           fi
-          # Rerun on a published release. Never delete the release: a
-          # failed attempt must leave existing downloads serving. Assets
-          # refresh in place (bounded retries shrink the per-asset
-          # clobber window); obsolete names prune only after uploads
-          # succeed; notes regenerate since the tag may have moved.
+          # Never delete the release: a failed attempt must leave
+          # existing downloads serving. Assets refresh in place
+          # (bounded retries shrink the per-asset clobber window);
+          # obsolete names prune only after uploads succeed; notes
+          # regenerate since the tag may have moved.
           for attempt in 1 2 3; do
             if gh release upload "$VERSION" --clobber \
               artifacts/desktop-packages-*/* \
@@ -287,6 +289,15 @@ jobs:
           notes=$(gh api "repos/$GH_REPO/releases/generate-notes" \
             -f tag_name="$VERSION" -q .body)
           gh release edit "$VERSION" --notes "$notes"
+          # The tag's channel is enforced on every run — a release
+          # created out-of-band (e.g. a hand-made draft) must not
+          # publish with the wrong channel: an alpha tag stays
+          # prerelease and never 'Latest', a stable tag clears it.
+          if [[ "$VERSION" == *-* ]]; then
+            gh release edit "$VERSION" --prerelease --latest=false
+          else
+            gh release edit "$VERSION" --prerelease=false
+          fi
           # A leftover draft publishes only now — after every asset and
           # note update succeeded — so a failed retry never ships a
           # half-populated release.
