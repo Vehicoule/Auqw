@@ -41,7 +41,6 @@ linux:
   maintainer: Vehicoule
   target:
     - AppImage
-    - tar.gz
     - flatpak
   extraResources:
     - from: ../../target/release/libauqw_node_bindings.so
@@ -70,19 +69,15 @@ mac:
   category: public.app-category.music
   target:
     - dmg
-    - zip
   extraResources:
     - from: ../../target/release/libauqw_node_bindings.dylib
       to: auqw_node_bindings.node
 
 # Unsigned alpha: Windows SmartScreen flags the installer until a code
-# certificate exists (same parked signing decision as macOS). NSIS and
-# portable both emit .exe — the global artifactName collides, so each
-# target carries its own name.
+# certificate exists (same parked signing decision as macOS).
 win:
   target:
     - nsis
-    - portable
   extraResources:
     - from: ../../target/release/auqw_node_bindings.dll
       to: auqw_node_bindings.node
@@ -93,5 +88,3 @@ nsis:
   oneClick: false
   perMachine: false
   artifactName: ${productName}-${version}-${os}-${arch}-setup.${ext}
-portable:
-  artifactName: ${productName}-${version}-${os}-${arch}-portable.${ext}

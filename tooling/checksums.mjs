@@ -16,8 +16,11 @@ import { join } from 'node:path';
 
 const dir = process.argv[2] ?? '.';
 const outName = process.argv[3] ?? 'SHA256SUMS.txt';
+// *.blockmap is electron-updater differential-update internals — not
+// shipped in alpha (excluded from upload), so it isn't checksummed
+// either or the release-side `sha256sum -c` would fail on missing files.
 const names = readdirSync(dir)
-  .filter((n) => n.startsWith('auqw-') && !n.startsWith('SHA256SUMS'))
+  .filter((n) => n.startsWith('auqw-') && !n.startsWith('SHA256SUMS') && !n.endsWith('.blockmap'))
   .sort();
 
 if (names.length === 0) {

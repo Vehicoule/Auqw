@@ -31,8 +31,8 @@ git push origin v0.0.1-alpha.1
 
 | Job | Produces |
 |-----|----------|
-| `desktop` (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.tar.gz`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg`, `.zip` · win: `auqw-<ver>-win-x64-setup.exe` (nsis installer), `auqw-<ver>-win-x64-portable.exe` — each OS dir gets its own `SHA256SUMS-<os>.txt` |
-| `android` | `auqw-<ver>-android-arm64-v8a.apk` + `auqw-<ver>-android-x86_64.apk` (`assembleRelease`, alpha-signed, per-ABI splits — standalone, upgrade-installs across alphas; not Play-ready) |
+| `desktop` (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg` · win: `auqw-<ver>-win-x64-setup.exe` (nsis installer) — each OS dir gets its own `SHA256SUMS-<os>.txt` (`.blockmap` updater internals are not shipped) |
+| `android` | `auqw-<ver>-android-arm64-v8a.apk` (`assembleRelease`, alpha-signed, arm64-only via `-Pauqw.abis` — local builds default to `arm64-v8a,x86_64` so emulator debug still works; standalone, upgrade-installs across alphas; not Play-ready) |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
 
 macOS and Windows artifacts ship **unsigned** (same parked signing
