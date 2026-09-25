@@ -48,10 +48,10 @@ jobs:
     steps:
       # providers.lock.json resolves `release:../auqw-plugins/...` —
       # the plugins repo must sit as a sibling of the Auqw checkout.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: auqw
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
@@ -66,13 +66,13 @@ jobs:
       # Pinned rustup over a toolchain action — one less node-runtime
       # dep, identical result.
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: pnpm
@@ -80,7 +80,7 @@ jobs:
       # electron-builder downloads the Electron dist + packaging tools
       # on every build — cache the per-OS cache dirs (linux ~/.cache,
       # mac ~/Library/Caches, win ~/AppData/Local/*/Cache).
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cache/electron
@@ -100,7 +100,7 @@ jobs:
       - id: flatpak-period
         if: runner.os == 'Linux'
         run: echo "period=$(date +%Y-%U)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         if: runner.os == 'Linux'
         with:
           path: |
@@ -155,7 +155,7 @@ jobs:
             fi
           done
           node ../../../tooling/checksums.mjs . "SHA256SUMS-${{ runner.os }}.txt"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-packages-${{ runner.os }}
           # auqw-* globs only the shipped files — dist-packages also
@@ -172,10 +172,10 @@ jobs:
     needs: [gate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: auqw
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Vehicoule/Auqw-plugins
           path: auqw-plugins
@@ -184,23 +184,23 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal \
             --target aarch64-linux-android --target x86_64-linux-android
           rustup default 1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: auqw
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: auqw/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: auqw/pnpm-lock.yaml
       # Prebuilt cargo-ndk — `cargo install` compiles it from source.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-ndk
       # Caches gradle deps + wrapper downloads between runs.
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
       # Alpha signing key lives in repo secrets — decoded to a runner
       # temp file, never committed. A release must never silently ship
       # debug-signed: missing secrets fail the job (the plugin's no-env
@@ -269,7 +269,7 @@ jobs:
           # this job runs on ubuntu and runner.os would collide with
           # the desktop Linux sums asset on the release.
           node ../../tooling/checksums.mjs . SHA256SUMS-Android.txt
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: android-packages
           path: |
@@ -284,7 +284,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
       - name: publish prerelease

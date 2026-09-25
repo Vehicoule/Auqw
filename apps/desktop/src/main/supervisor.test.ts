@@ -361,4 +361,102 @@ export async function run(): Promise<void> {
       sup.shutdown();
     }
   }
+
+  // ---- backpressure: bounded queues, deadline only on the spawn wait ----
+  {
+    // A queued request with no child coming up settles on its own
+    // deadline instead of waiting forever — and leaves the queue, so a
+    // late spawn cannot post it and double-run the work.
+    const kids: FakeChild[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const child = new FakeChild();
+        kids.push(child);
+        return child;
+      },
+      queueDeadlineMs: 15,
+    });
+    await assertRejectsKind(
+      sup.request('utility:ping', { message: 'late' }),
+      'unavailable',
+    );
+    const child = kids[0];
+    assert(child !== undefined);
+    child.emit('spawn');
+    await sleep(1);
+    assertEqual(child.posted.length, 0, 'expired request is never posted');
+    sup.shutdown();
+  }
+  {
+    // The queue is capped: a caller outpacing a crash-looping utility is
+    // refused typed instead of buffering without limit.
+    const sup = createSupervisor({
+      fork: () => new FakeChild(),
+      maxQueued: 2,
+      queueDeadlineMs: 60_000,
+    });
+    const first = sup.request('utility:ping', { message: '1' });
+    const second = sup.request('utility:ping', { message: '2' });
+    await assertRejectsKind(
+      sup.request('utility:ping', { message: '3' }),
+      'unavailable',
+    );
+    sup.shutdown();
+    await assertRejectsKind(first, 'released');
+    await assertRejectsKind(second, 'released');
+  }
+  {
+    // In-flight requests are capped too — a child that stays up but
+    // stops answering would otherwise accumulate `pending` forever.
+    const kids: FakeChild[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const child = new FakeChild();
+        kids.push(child);
+        return child;
+      },
+      maxPending: 1,
+    });
+    const inflight = sup.request('utility:ping', { message: 'a' });
+    const child = kids[0];
+    assert(child !== undefined);
+    child.emit('spawn');
+    await sleep(1);
+    assertEqual(child.posted.length, 1);
+    await assertRejectsKind(
+      sup.request('utility:ping', { message: 'b' }),
+      'unavailable',
+    );
+    const post = child.posted[0] as { id?: number };
+    child.emit('message', { id: post.id, ok: true, result: 'done' });
+    assertEqual(await inflight, 'done', 'the one in-flight request still settles');
+    sup.shutdown();
+  }
+  {
+    // Promotion to `pending` cancels the spawn deadline, so a slow
+    // in-flight request is never settled twice — once by a stale timer
+    // and once by its real answer.
+    const kids: FakeChild[] = [];
+    const sup = createSupervisor({
+      fork: () => {
+        const child = new FakeChild();
+        kids.push(child);
+        return child;
+      },
+      queueDeadlineMs: 15,
+    });
+    const request = sup.request('utility:ping', { message: 'slow' });
+    const child = kids[0];
+    assert(child !== undefined);
+    child.emit('spawn');
+    await sleep(30);
+    const post = child.posted[0] as { id?: number };
+    child.emit('message', { id: post.id, ok: true, result: 'kept' });
+    assertEqual(
+      await request,
+      'kept',
+      'promoted request survives its old spawn deadline',
+    );
+    sup.shutdown();
+  }
 }
