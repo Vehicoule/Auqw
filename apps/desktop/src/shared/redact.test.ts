@@ -31,12 +31,22 @@ export async function run(): Promise<void> {
     assert(!masked.includes('abc123'), masked);
   }
 
-  // A bare auth scheme has no length floor and no digit requirement:
-  // `Token abcDEFghi` is a credential despite being alphabetic.
-  for (const line of ['refused Token abcDEFghi', 'refused ApiKey zyxwvutsrq']) {
+  // A bare auth scheme has no length floor, no digit requirement and no
+  // case requirement: `bearer abc123` is a credential whatever the
+  // casing, and `Token abcDEFghi` is one despite being alphabetic.
+  for (const line of [
+    'refused Token abcDEFghi',
+    'refused ApiKey zyxwvutsrq',
+    'refused bearer abc123',
+    'refused token xyz',
+    'refused basic dXNlcjpwYXNz',
+  ]) {
     const masked = redactSensitive(line);
     assert(!masked.includes('abcDEFghi'), masked);
     assert(!masked.includes('zyxwvutsrq'), masked);
+    assert(!masked.includes('abc123'), masked);
+    assert(!masked.includes('xyz'), masked);
+    assert(!masked.includes('dXNlcjpwYXNz'), masked);
   }
 
   // Secret keys match as a whole segment of the key or as its suffix,

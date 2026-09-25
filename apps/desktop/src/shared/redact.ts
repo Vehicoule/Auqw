@@ -25,13 +25,15 @@ const HEADER_SECRET =
   /\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Amz-Security-Token)(\s*:\s*)[^\r\n]*/gi;
 
 /**
- * Bare auth schemes. Case-sensitive on purpose: the scheme is
- * capitalised by convention (`Bearer abc`), while prose writes `token`
- * in lower case ("the token was set"), so case is what separates a
- * credential from a sentence. No length floor — `Bearer abc123` is a
- * credential even though it is short.
+ * Bare auth schemes. Case-insensitive and with no length floor:
+ * `bearer abc123` and `Token abc` are credentials whatever their case
+ * or length. The cost is that prose which merely mentions a scheme word
+ * gets its next word masked — "the token was set" reads "the token …
+ * set". That is the right way round: over-masking a log line is
+ * cosmetic, under-masking one is a leak, and only one of those is a
+ * security failure.
  */
-const CREDENTIAL = /\b(Bearer|Basic|Token|ApiKey)(\s+)([^\s;,]+)/g;
+const CREDENTIAL = /\b(Bearer|Basic|Token|ApiKey)(\s+)([^\s;,]+)/gi;
 
 /** `key=value` / `key: value`; the key decides whether it is a secret. */
 const KEYED = /\b([A-Za-z0-9_-]+)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/g;
