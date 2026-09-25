@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "expo": "*"
+    "expo": "*",
+    "react": "19.2.3"
   }
 }
