@@ -531,11 +531,16 @@ function Main({
   // scans here are user-initiated only.
   const [localTick, setLocalTick] = useState(0);
   const [storageText, setStorageText] = useState<string | null>(null);
+  // Transfer events can outpace the statfs probe — sequence the reads
+  // so only the newest usage may land in the row's display.
+  const usageSeq = useRef(0);
   const refreshUsage = useCallback(() => {
+    usageSeq.current += 1;
+    const seq = usageSeq.current;
     void controller.downloads
       .usage(new CancellationSource().signal)
       .then((u) => {
-        if (u.ok) {
+        if (u.ok && seq === usageSeq.current) {
           setStorageText(formatBytes(u.value.bytes, u.value.free));
         }
       });
@@ -865,20 +870,33 @@ function Main({
     });
     const playingId =
       state.playback.type === 'idle' ? null : state.playback.recordingId;
+    const chipByRecording = new Map<string, DownloadChip>(
+      downloads.map((d) => [
+        d.recordingId,
+        d.state === 'requested'
+          ? ('queued' as const)
+          : d.state === 'transferring'
+            ? ('downloading' as const)
+            : d.state === 'available'
+              ? ('stored' as const)
+              : ('failed' as const),
+      ]),
+    );
     // Honest-offline: with connectivity explicitly down, remote rows
     // degrade to 'unavailable' instead of spinning on a dead attempt.
+    // Owned bytes are the exception — rows the local probe resolves
+    // (download ledger or local files) stay playable.
     const offline = online === false;
-    const decorate = (row: TrackRowModel, recordingId: string): TrackRowModel =>
-      offline
-        ? {
-            ...row,
-            playing: recordingId === playingId ? true : row.playing,
-            state: 'unavailable',
-            note: 'offline',
-          }
-        : recordingId === playingId
-          ? { ...row, playing: true }
-          : row;
+    const decorate = (row: TrackRowModel, recordingId: string): TrackRowModel => {
+      const base: TrackRowModel = {
+        ...row,
+        download: chipByRecording.get(recordingId) ?? row.download,
+        playing: recordingId === playingId ? true : row.playing,
+      };
+      return offline && controller.localPlaybackFor(recordingId) === null
+        ? { ...base, state: 'unavailable', note: 'offline' }
+        : base;
+    };
     const mark = (row: CollectionRowModel): CollectionRowModel => ({
       ...row,
       row: decorate(row.row, row.recordingId),
@@ -1021,7 +1039,9 @@ function Main({
   const settingsModel = useMemo(() => {
     const model = toSettingsModel(state.settings, diagnostics, {
       storageText,
-      localSupported: true,
+      // The probe surface only exists once rehydrateMedia ran — gate
+      // the rows on it instead of dead-pressing behind a null local().
+      localSupported: controller.local() !== null,
       localFolderCount: controller.local()?.list().length,
       localSources: controller
         .local()
@@ -2723,18 +2743,26 @@ function Main({
                   );
                   return;
                 }
-                void session.updateSettings({
-                  ...state.settings,
-                  storefront: code,
-                });
-                setStorefrontSheetOpen(false);
+                // Dismiss only on commit — a failed save shows the
+                // toast, not a closed sheet over an unchanged row.
+                void session
+                  .updateSettings({ ...state.settings, storefront: code })
+                  .then((saved) => {
+                    reportResult('save storefront', saved);
+                    if (saved.ok) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
               }}
               onClear={() => {
-                void session.updateSettings({
-                  ...state.settings,
-                  storefront: null,
-                });
-                setStorefrontSheetOpen(false);
+                void session
+                  .updateSettings({ ...state.settings, storefront: null })
+                  .then((saved) => {
+                    reportResult('clear storefront', saved);
+                    if (saved.ok) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
               }}
               onDismiss={() => setStorefrontSheetOpen(false)}
             />
@@ -2751,13 +2779,17 @@ function Main({
               selectedKey={`${state.settings.qualityKbps}`}
               onPick={(key) => {
                 const qualityKbps = Number(key);
-                if (Number.isSafeInteger(qualityKbps)) {
-                  void session.updateSettings({
-                    ...state.settings,
-                    qualityKbps,
-                  });
+                if (!Number.isSafeInteger(qualityKbps)) {
+                  return;
                 }
-                setQualityPickerOpen(false);
+                void session
+                  .updateSettings({ ...state.settings, qualityKbps })
+                  .then((saved) => {
+                    reportResult('save quality', saved);
+                    if (saved.ok) {
+                      setQualityPickerOpen(false);
+                    }
+                  });
               }}
               onDismiss={() => setQualityPickerOpen(false)}
             />

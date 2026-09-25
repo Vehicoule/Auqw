@@ -3570,18 +3570,26 @@ function Main({
                   );
                   return;
                 }
-                void session.updateSettings({
-                  ...state.settings,
-                  storefront: code,
-                });
-                setStorefrontSheetOpen(false);
+                // Dismiss only on commit — a failed save shows the
+                // toast, not a closed sheet over an unchanged row.
+                void session
+                  .updateSettings({ ...state.settings, storefront: code })
+                  .then((saved) => {
+                    reportResult('save storefront', saved);
+                    if (saved.ok) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
               }}
               onClear={() => {
-                void session.updateSettings({
-                  ...state.settings,
-                  storefront: null,
-                });
-                setStorefrontSheetOpen(false);
+                void session
+                  .updateSettings({ ...state.settings, storefront: null })
+                  .then((saved) => {
+                    reportResult('clear storefront', saved);
+                    if (saved.ok) {
+                      setStorefrontSheetOpen(false);
+                    }
+                  });
               }}
               onDismiss={() => setStorefrontSheetOpen(false)}
             />
@@ -3598,13 +3606,17 @@ function Main({
               selectedKey={`${state.settings.qualityKbps}`}
               onPick={(key) => {
                 const qualityKbps = Number(key);
-                if (Number.isSafeInteger(qualityKbps)) {
-                  void session.updateSettings({
-                    ...state.settings,
-                    qualityKbps,
-                  });
+                if (!Number.isSafeInteger(qualityKbps)) {
+                  return;
                 }
-                setQualityPickerOpen(false);
+                void session
+                  .updateSettings({ ...state.settings, qualityKbps })
+                  .then((saved) => {
+                    reportResult('save quality', saved);
+                    if (saved.ok) {
+                      setQualityPickerOpen(false);
+                    }
+                  });
               }}
               onDismiss={() => setQualityPickerOpen(false)}
             />
