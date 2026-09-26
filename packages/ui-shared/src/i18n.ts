@@ -9,6 +9,9 @@
  */
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
+import { es } from './locales/es.ts';
+import { fr } from './locales/fr.ts';
+import { zh } from './locales/zh.ts';
 
 /** CLDR plural categories `Intl.PluralRules` can select. */
 export type PluralCategory = 'zero' | 'one' | 'two' | 'few' | 'many' | 'other';
@@ -20,7 +23,7 @@ export type PluralCategory = 'zero' | 'one' | 'two' | 'few' | 'many' | 'other';
  */
 export type Message = string | Readonly<Record<string, string>>;
 
-export type Locale = 'en' | 'de';
+export type Locale = 'en' | 'de' | 'es' | 'fr' | 'zh';
 
 export type MessageId = keyof typeof en;
 
@@ -28,6 +31,9 @@ export type MessageId = keyof typeof en;
 const catalogs: Readonly<Record<Locale, Readonly<Record<string, Message>>>> = {
   en,
   de,
+  es,
+  fr,
+  zh,
 };
 
 const SYSTEM_LOCALE: Locale = 'en';
@@ -62,8 +68,9 @@ function rulesFor(locale: Locale): Intl.PluralRules | null {
 
 /**
  * CLDR plural category for `count`. Degrades to the `one`/`other`
- * split (correct for `en` and `de`) when `Intl.PluralRules` is absent,
- * so the app renders instead of throwing.
+ * split (correct for `en`, `de`, `es`, `fr`; `zh` only ever selects
+ * `other` anyway) when `Intl.PluralRules` is absent, so the app
+ * renders instead of throwing.
  */
 function pluralCategory(locale: Locale, count: number): PluralCategory {
   const rules = rulesFor(locale);
@@ -100,14 +107,24 @@ export function getLocale(): Locale {
 
 /**
  * Map a BCP-47 tag to a supported `Locale` by primary-language subtag
- * ('de-DE' → 'de'), or `null` when the language is not supported.
+ * ('de-DE' → 'de', 'zh-Hans-CN' → 'zh'), or `null` when the language
+ * is not supported.
  */
 function fromTag(tag: string | null | undefined): Locale | null {
   if (tag === undefined || tag === null || tag === '') {
     return null;
   }
   const primary = tag.trim().toLowerCase().split('-')[0];
-  return primary === 'en' || primary === 'de' ? primary : null;
+  switch (primary) {
+    case 'en':
+    case 'de':
+    case 'es':
+    case 'fr':
+    case 'zh':
+      return primary;
+    default:
+      return null;
+  }
 }
 
 /**

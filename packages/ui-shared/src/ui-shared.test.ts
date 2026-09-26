@@ -18,6 +18,9 @@ import {
 import type { Locale, MessageId } from './index.ts';
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
+import { es } from './locales/es.ts';
+import { fr } from './locales/fr.ts';
+import { zh } from './locales/zh.ts';
 import {
   fixtureDiagnostics,
   fixtureHomeModel,
@@ -176,8 +179,8 @@ assertEqual(t('collection.plays', { count: 2 }), '2 wiedergaben');
 assertEqual(t('state.loading'), 'wird geladen');
 
 // fallback to en for a missing catalog / unknown id — never `undefined`
-setLocale('fr' as unknown as Locale);
-assertEqual(getLocale(), 'fr' as unknown as Locale);
+setLocale('ja' as unknown as Locale);
+assertEqual(getLocale(), 'ja' as unknown as Locale);
 assertEqual(
   t('state.loading'),
   'loading',
@@ -197,31 +200,36 @@ assertEqual(resolveLocale(null, 'en-US'), 'en');
 assertEqual(resolveLocale('system', 'de-DE'), 'de', "'system' follows the system");
 assertEqual(resolveLocale('de', 'en-US'), 'de', 'a supported tag pins the UI');
 assertEqual(resolveLocale('de-DE', 'en-US'), 'de', 'BCP-47 pins by primary subtag');
-assertEqual(resolveLocale('fr', 'en-US'), 'en', 'unsupported tag falls back to en');
-assertEqual(resolveLocale('fr', 'de-DE'), 'de', 'unsupported setting follows the system');
-assertEqual(resolveLocale('system', 'fr-FR'), 'en', 'unsupported system defaults to en');
+assertEqual(resolveLocale('ja', 'en-US'), 'en', 'unsupported tag falls back to en');
+assertEqual(resolveLocale('ja', 'de-DE'), 'de', 'unsupported setting follows the system');
+assertEqual(resolveLocale('system', 'ja-JP'), 'en', 'unsupported system defaults to en');
+assertEqual(resolveLocale('fr-FR', 'en-US'), 'fr', 'supported non-base tag pins the UI');
+assertEqual(resolveLocale('zh-Hans-CN', 'en-US'), 'zh', 'zh primary subtag pins');
 
 // languageOptionKey: the picker's displayed key must agree with what
 // resolveLocale activates — a padded stored tag pins 'de', not 'system'
 assertEqual(languageOptionKey(undefined), 'system');
 assertEqual(languageOptionKey('de-DE'), 'de', 'BCP-47 reduces to primary subtag');
 assertEqual(languageOptionKey(' de '), 'de', 'padding still selects the pinned locale');
-assertEqual(languageOptionKey('fr'), 'system', 'unsupported reads as system');
+assertEqual(languageOptionKey('fr'), 'fr', 'supported primary subtag selects');
+assertEqual(languageOptionKey('ja'), 'system', 'unsupported reads as system');
 
-// completeness guard: en and de carry the same message ids
+// completeness guard: every shipped catalog carries the same message ids as en
 const enIds = Object.keys(en);
-const deIds = new Set(Object.keys(de));
-for (const id of enIds) {
-  assert(deIds.has(id), `de is missing the message id ${id}`);
-  assert(
-    de[id as MessageId] !== undefined,
-    `de has no message for ${id}`,
+for (const [tag, catalog] of Object.entries({ de, es, fr, zh })) {
+  const ids = new Set(Object.keys(catalog));
+  for (const id of enIds) {
+    assert(ids.has(id), `${tag} is missing the message id ${id}`);
+    assert(
+      catalog[id as MessageId] !== undefined,
+      `${tag} has no message for ${id}`,
+    );
+  }
+  assertEqual(
+    ids.size,
+    enIds.length,
+    `${tag} must not carry ids en does not know`,
   );
 }
-assertEqual(
-  deIds.size,
-  enIds.length,
-  'de must not carry ids en does not know',
-);
 
 console.log('ui-shared tests passed');

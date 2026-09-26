@@ -1450,6 +1450,9 @@ export function languageOptions(): readonly LanguageOption[] {
     { key: 'system', label: t('settings.languageValue.system') },
     { key: 'en', label: t('settings.languageValue.en') },
     { key: 'de', label: t('settings.languageValue.de') },
+    { key: 'es', label: t('settings.languageValue.es') },
+    { key: 'fr', label: t('settings.languageValue.fr') },
+    { key: 'zh', label: t('settings.languageValue.zh') },
   ];
 }
 
