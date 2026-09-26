@@ -3225,6 +3225,13 @@ export class Session {
     ) {
       record.fetching = false;
       this.#publish();
+      // A fetch-ahead queued before a drain aborts here: the window
+      // closed because the queue is now empty, not because the tail
+      // finished. Hand back to the drained-queue chase or the armed
+      // continuation strands with nothing in flight.
+      if (snap.currentOccurrenceId === null) {
+        this.#resumeDrainedQueue(r, record, undefined);
+      }
       return;
     }
     // The continuation token's issuer is the only honest target —
@@ -3803,15 +3810,6 @@ export class Session {
       // First occurrence at position 0: a complete no-op.
       return ok(undefined);
     }
-    if (after.currentOccurrenceId === null && before.mode === 'playing') {
-      // Playback consumed the queue while this tail was armed — the
-      // landed page may resume even if the seed began paused. A
-      // paused skip-to-end never earns it: no playback ran.
-      const rec = r.radio;
-      if (rec !== null && rec.status === 'growing') {
-        rec.resumeOnDrain = true;
-      }
-    }
     if (
       method === 'previous' &&
       after.currentOccurrenceId === before.currentOccurrenceId
@@ -3867,6 +3865,19 @@ export class Session {
         this.#own(this.#startAttempt(durable.currentOccurrenceId));
       }
       return moved;
+    }
+    {
+      // Playback consuming the queue while this tail was armed
+      // authorizes the landed page to resume; any other move revokes
+      // it — a paused skip-to-end never earns it, and a rolled-back
+      // skip drains nothing. The flag marks only once the drain is
+      // durable (moved.ok was checked above), so a failed persist
+      // cannot authorize a later paused drain to resume.
+      const rec = r.radio;
+      if (rec !== null && rec.status === 'growing') {
+        rec.resumeOnDrain =
+          after.currentOccurrenceId === null && before.mode === 'playing';
+      }
     }
     this.#derived();
     // Transport ops are not serialized — a concurrent next/previous
@@ -5176,15 +5187,6 @@ export class Session {
     }
     marker.currentOccurrenceId = toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
-    if (toId === null && wasPlaying) {
-      // Service-side drain with a tail armed — same authorization as
-      // the app-driven drain in #advance, and same rule: a stale
-      // transition landing on an already-paused queue earns nothing.
-      const rec = r.radio;
-      if (rec !== null && rec.status === 'growing') {
-        rec.resumeOnDrain = true;
-      }
-    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -5280,7 +5282,25 @@ export class Session {
         );
       }
     }
-    await queueWrite;
+    const queueWritten = await queueWrite;
+    {
+      // Service-side drain with a tail armed — same authorization as
+      // the app-driven drain in #advance: a committed drain while
+      // playing earns the resume; a stale transition landing on an
+      // already-paused queue, a non-drain, or a failed write revokes
+      // it. The flag marks only when the drain committed — a failed
+      // write must not authorize a later paused drain to resume.
+      const rec = r.radio;
+      if (rec !== null && rec.status === 'growing') {
+        rec.resumeOnDrain =
+          toId === null && wasPlaying && queueWritten.ok;
+      }
+      // A native drain bypasses #derived: chase the armed tail's
+      // continuation here too, or a drained queue strands forever.
+      if (toId === null && wasPlaying && rec !== null) {
+        this.#resumeDrainedQueue(r, rec, undefined);
+      }
+    }
     // Native may already be several moves ahead. Re-projecting this
     // intermediate cursor would stop its live stream and reject queued moves.
     this.#mappingSource?.cancel();

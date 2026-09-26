@@ -1578,6 +1578,87 @@ async function dupePageChasesContinuation(): Promise<void> {
   await r.session.dispose();
 }
 
+async function nativeDrainChasesContinuation(): Promise<void> {
+  // A native-driven drain bypasses #derived: when the fetch-ahead was
+  // starved (offline for the whole walk to the end), the armed tail
+  // holds a continuation with nothing in flight — the drain itself
+  // must chase it or the queue strands stopped.
+  let online = true;
+  const r = rig(pausedTailQueue(), [], { isOnline: () => online });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  r.ytm.settleRadio(
+    ok(
+      page(
+        [
+          meta('youtube-music', 'v9', 'Next', 'A', 200_000),
+          meta('youtube-music', 'v10', 'Mid', 'A', 200_000),
+          meta('youtube-music', 'v11', 'End', 'A', 200_000),
+          meta('youtube-music', 'v12', 'Last', 'A', 200_000),
+        ],
+        'c1',
+      ),
+    ),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    5,
+    'first page appended',
+  );
+  // Walk to the last item while offline — the fetch-ahead window
+  // opens along the way but every grow is skipped, so nothing is in
+  // flight when the service drains.
+  online = false;
+  for (const occ of readyOf(r).queue.occurrences.slice(1)) {
+    const proj = r.player.projections[r.player.projections.length - 1];
+    serviceTransition(r, {
+      from: readyOf(r).queue.currentOccurrenceId ?? '',
+      to: occ.occurrenceId,
+      identity: {
+        attemptId: `svc-${occ.occurrenceId}`,
+        queueRev: proj?.queueRev ?? 0,
+      },
+      handle: `h-${occ.occurrenceId}`,
+    });
+    await pump();
+    assertEqual(readyOf(r).queue.currentOccurrenceId, occ.occurrenceId);
+  }
+  assertEqual(radioCalls(r).length, 1, 'offline fetch-ahead starved');
+  // Connectivity returns and the service drains the last item — the
+  // drain itself must chase continuation c1.
+  online = true;
+  serviceTransition(r, {
+    from: readyOf(r).queue.currentOccurrenceId ?? '',
+    to: null,
+  });
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, null, 'drained');
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'a native drain chases the live continuation',
+  );
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v99', 'After', 'B', 200_000)], 'c2')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'playing', 'chased page resumes playback');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[snap.queue.occurrences.length - 1]
+      ?.occurrenceId,
+    'resumes at the chased page’s first item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
 async function drainChaseIsBounded(): Promise<void> {
   const r = rig(pausedTailQueue());
   await restoreOk(r);
@@ -1812,6 +1893,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['offlineArmRetriesOnReconnect', offlineArmRetriesOnReconnect],
   ['armWaitsForAttemptRef', armWaitsForAttemptRef],
   ['dupePageChasesContinuation', dupePageChasesContinuation],
+  ['nativeDrainChasesContinuation', nativeDrainChasesContinuation],
   ['drainChaseIsBounded', drainChaseIsBounded],
   ['pausedSeedDrainsThenResumes', pausedSeedDrainsThenResumes],
   ['unroutableActiveRefBlocksSeed', unroutableActiveRefBlocksSeed],
