@@ -309,15 +309,24 @@ function ChromeSchemeReporter(): null {
         windowControlsOverlay?: {
           readonly visible: boolean;
           getTitlebarAreaRect(): DOMRect;
+          addEventListener(type: 'geometrychange', listener: () => void): void;
+          removeEventListener(type: 'geometrychange', listener: () => void): void;
         };
       }
     ).windowControlsOverlay;
-    const captionW =
-      wco !== undefined && wco.visible
-        ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
-        : 0;
-    root.style.setProperty('--uw-caption-w', `${captionW}px`);
+    const measureCaptions = () => {
+      const captionW =
+        wco !== undefined && wco.visible
+          ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
+          : 0;
+      root.style.setProperty('--uw-caption-w', `${captionW}px`);
+    };
+    measureCaptions();
+    // The caption zone can change without a theme change (resize,
+    // overlay visibility) — re-measure on geometrychange.
+    wco?.addEventListener('geometrychange', measureCaptions);
     window.auqw.chrome.setScheme(scheme);
+    return () => wco?.removeEventListener('geometrychange', measureCaptions);
   }, [scheme]);
   return null;
 }
@@ -2784,6 +2793,7 @@ function Main({
             }}
             stageOpen={stageOpen}
             onStageOpenChange={setStageOpen}
+            onStopPlayback={player !== null ? () => void session.stop() : undefined}
             stage={
               player !== null ? (
                 <NowPlayingScreen

@@ -1707,10 +1707,11 @@
   padding-left: 96px;
 }
 .uw-tabs {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  /* In-flow centering: auto margins split the free space between the
+     start controls and the menu/caption end, so pills can never
+     overlap either cluster the way absolute centering could. */
+  margin-inline: auto;
+  min-width: 0;
   display: flex;
   gap: var(--spacing-xxs);
 }
@@ -1734,9 +1735,6 @@
 .uw-menu {
   position: relative;
   flex: none;
-  /* tabs are centered absolutely, so the menu still needs the
-     explicit push to the bar's end */
-  margin-left: auto;
 }
 .uw-menu-backdrop {
   position: fixed;

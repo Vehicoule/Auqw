@@ -114,6 +114,12 @@ export type DesktopChromeProps = {
   readonly stageOpen?: boolean | undefined;
   readonly onStageOpenChange?: ((open: boolean) => void) | undefined;
   /**
+   * Stops playback and clears the stage's track (the queue keeps its
+   * items — the old mini-player's dismiss). Omitted when nothing is
+   * loaded, so no dead button shows over the empty state.
+   */
+  readonly onStopPlayback?: (() => void) | undefined;
+  /**
    * '/' targets the search field app-wide — the chrome owns the global
    * keydown so screens never duplicate it. Editable elements keep
    * their keys (isEditableTarget guards inside globalKeyAction).
@@ -131,6 +137,7 @@ export function DesktopChrome({
   stage,
   stageOpen,
   onStageOpenChange,
+  onStopPlayback,
   onFocusSearch,
   onOpenSettings,
   children,
@@ -159,6 +166,16 @@ export function DesktopChrome({
       <aside className="uw-stage-col">
         <div className="uw-stage-head">
           <span className="uw-stage-head__fill" />
+          {onStopPlayback !== undefined && (
+            <IconButton
+              icon="close"
+              size={32}
+              iconSize={14}
+              color="var(--text-secondary)"
+              ariaLabel={t('player.a11y.stopDismiss')}
+              onPress={onStopPlayback}
+            />
+          )}
           <IconButton
             icon="chevron-left"
             size={32}

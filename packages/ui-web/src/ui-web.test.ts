@@ -511,6 +511,7 @@ function render(node: ReactNode): string {
       onFocusSearch: () => {},
       onOpenSettings: () => {},
       stage: h(NowPlayingScreen, { player: fixturePlayerPlaying }),
+      onStopPlayback: () => {},
       children: h('div'),
     }),
   );
@@ -518,6 +519,10 @@ function render(node: ReactNode): string {
   check('chrome marks the active tab', markup.includes('aria-selected="true"'));
   check('chrome renders the stage column', markup.includes('uw-stage-col'));
   check('chrome renders the world toolbar', markup.includes('uw-world-bar'));
+  check(
+    'chrome offers a stage stop control',
+    markup.includes('aria-label="stop and dismiss"'),
+  );
   for (const item of fixtureNavItems) {
     assertIncludes('chrome renders tab', markup, item.label);
   }
