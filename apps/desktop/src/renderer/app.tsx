@@ -292,11 +292,14 @@ function Shell({ controller }: { readonly controller: SessionController }) {
   );
 }
 
-/** Pushes the resolved scheme to main so the titlebar overlay
-    matches the canvas even when the user picked an explicit scheme. */
+/** Chrome integration: pushes the resolved scheme to main so the
+    titlebar overlay matches the canvas even when the user picked an
+    explicit scheme, and stamps the platform so CSS can clear the
+    macOS traffic lights. */
 function ChromeSchemeReporter(): null {
   const { scheme } = useTheme();
   useEffect(() => {
+    document.documentElement.dataset.platform = window.auqw.chrome.platform;
     window.auqw.chrome.setScheme(scheme);
   }, [scheme]);
   return null;

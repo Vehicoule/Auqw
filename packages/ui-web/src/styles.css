@@ -20,8 +20,9 @@
   accent-color: var(--accent);
   color-scheme: dark;
   /* Matches titleBarOverlay.height in apps/desktop main/index.ts —
-     reserves the strip the window-control overlay draws over. */
-  --uw-titlebar-h: 56px;
+     reserves the strip the window-control overlay draws over (and the
+     macOS traffic lights inset into). */
+  --uw-titlebar-h: 40px;
   -webkit-user-select: none;
 }
 .ui-web.t-light {
@@ -1576,6 +1577,11 @@
   border-right: var(--stroke-hairline) solid var(--hairline);
   /* frameless window: the sidebar dead space doubles as a drag grip */
   -webkit-app-region: drag;
+}
+/* macOS traffic lights overlay the sidebar's top-left corner —
+   push its content clear of them. */
+[data-platform='darwin'] .uw-sidebar {
+  padding-top: var(--uw-titlebar-h);
 }
 .uw-sidebar__item,
 .uw-sidebar__item * {

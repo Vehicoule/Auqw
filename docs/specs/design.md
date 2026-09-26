@@ -15,10 +15,10 @@ Omarchy rules, non-negotiable: depth comes from the background ramp only (no sha
 
 ## Shell contract — desktop (Electron)
 
-One window, no titlebar band. The Stage column runs to the top edge; the World's first row is its toolbar. A single 56 px line carries all chrome:
+One window, no titlebar band. The Stage column runs to the top edge; the World's first row is its toolbar. A single 40 px line carries all chrome:
 
-- **Stage strip:** macOS traffic lights pin left, the output-device pill centers, the sidebar-collapse button pins right.
-- **World toolbar:** expanding search icon (left, at the panel seam) · centered `home | explore | library` tabs · menu · caption buttons (Windows/Linux overlay the strip's right edge; close hover → `#e81123`). Electron: `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme.
+- **Stage strip:** macOS traffic lights pin left (inset into the sidebar's top edge), the output-device pill centers, the sidebar-collapse button pins right.
+- **World toolbar:** expanding search icon (left, at the panel seam) · centered `home | explore | library` tabs · menu · caption buttons (Windows/Linux overlay the strip's right edge; close hover → `#e81123`). Electron: `titleBarStyle: 'hiddenInset'` + `trafficLightPosition` on macOS (no drawn strip); `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme on Windows and Linux.
 - **Search (GTK pattern):** a compact icon that expands on hover/focus; when open it takes the toolbar's width and the nav tabs step aside — overlap is impossible by construction.
 - **Stage player mode:** artwork → meta (title/artist/album + download/add) → waveform-style seek → centered transport `like · prev · play · next · repeat` → volume → mode segment (pinned at the bottom edge). Play is a solid fg-bright block; liked is pink.
 - **Stage lyrics mode:** title + honest sync state (`estimated timing` when unsynced) + scrollable lines; active line in accent; pin control; thin scrollbar. No transport controls inside lyrics.

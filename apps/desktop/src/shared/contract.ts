@@ -2070,6 +2070,9 @@ export type AuqwApi = {
     readonly meta: () => Promise<AppMeta>;
   };
   readonly chrome: {
+    /** `process.platform` captured in preload — the sandboxed renderer
+        cannot read it itself but needs it for platform chrome tweaks. */
+    readonly platform: string;
     /** Reports the resolved ui-web scheme so main can re-tint the
         titlebar overlay. One-way send; nothing to await. */
     readonly setScheme: (scheme: 'dark' | 'light' | 'oled') => void;
