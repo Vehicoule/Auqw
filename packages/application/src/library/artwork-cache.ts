@@ -399,6 +399,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   async function runGet(
     url: string,
     context: OperationContext,
+    record: Inflight,
   ): Promise<Result<ArtworkLookup>> {
     // Phase 1 (serialized): a present entry is touched write-through,
     // but only after proving its file still exists — the directory is
@@ -470,7 +471,13 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     });
     if (!downloaded.ok) {
       // Honest miss: the typed error crosses back, nothing is cached.
-      if (downloaded.error.kind !== 'cancelled') {
+      // Only a live run writes the negative verdict — a fetch whose
+      // waiters all left can report a late HTTP error while its
+      // replacement already downloaded the same url successfully.
+      if (
+        downloaded.error.kind !== 'cancelled' &&
+        !record.work.signal.cancelled
+      ) {
         const now = safeNow();
         if (now !== null) {
           failures.delete(url);
@@ -510,6 +517,11 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       return err(
         appError('internal', 'clock returned an unsafe timestamp'),
       );
+    }
+    // A live success clears any stale verdict a racing run stored —
+    // the proof the url fetches is fresher than the failure.
+    if (!record.work.signal.cancelled) {
+      failures.delete(url);
     }
 
     // Phase 2 (serialized): insert under the current budget.
@@ -655,7 +667,11 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       try {
         // The download answers to `work`, not any caller's signal —
         // it outlives a waiter until every waiter is gone.
-        return await runGet(url, { ...context, signal: record.work.signal });
+        return await runGet(
+          url,
+          { ...context, signal: record.work.signal },
+          record,
+        );
       } catch (thrown) {
         return err(fromUnknown(thrown));
       } finally {

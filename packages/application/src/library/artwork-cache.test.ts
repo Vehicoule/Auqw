@@ -107,6 +107,11 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     destPath: string;
     signal: CancellationSignal;
   }[] = [];
+  /**
+   * When set, downloads ignore the caller's cancel signal — models
+   * a port that reports its own verdict even after cancellation.
+   */
+  deaf = false;
   #deferreds: Deferred<Result<{ bytes: number }>>[] = [];
   #auto: ((url: string) => Result<{ bytes: number }>) | null = null;
 
@@ -138,12 +143,14 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     }
     const deferred = new Deferred<Result<{ bytes: number }>>();
     this.#deferreds.push(deferred);
-    signal.subscribe(() => {
-      deferred.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
+    if (!this.deaf) {
+      signal.subscribe(() => {
+        deferred.resolve({
+          ok: false,
+          error: appError('cancelled', 'cancelled'),
+        });
       });
-    });
+    }
     return deferred.promise;
   }
 
@@ -586,6 +593,43 @@ async function coalescedConcurrentGets(): Promise<void> {
   assert(r9.ok && r9.value.filePath === destOf(D));
 }
 
+async function abandonedGetCannotPoison(): Promise<void> {
+  const r = rig(persisted());
+  // This port answers on its own schedule — a cancelled signal does
+  // not stop it returning a late HTTP error for the abandoned run.
+  r.fetch.deaf = true;
+  const s1 = new CancellationSource();
+  const s2 = new CancellationSource();
+  const p1 = r.cache.get(A, ctx(s1));
+  const p2 = r.cache.get(A, ctx(s2));
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  s1.cancel();
+  s2.cancel();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert(!r1.ok && !r2.ok, 'all waiters cancelled');
+  // A fresh get takes over while the abandoned download still flies.
+  const p3 = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 2, 'replacement run started');
+  // The abandoned run reports a late HTTP failure — a teardown
+  // artifact, not a verdict: it must not negative-cache over the
+  // replacement's success.
+  assert(
+    r.fetch.settleDownload(err(appError('transient', 'server 500'))),
+    'old download still pending',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 4 * MB })));
+  const res3 = await p3;
+  assert(res3.ok, 'replacement get succeeded');
+  const after = await r.cache.get(A, ctx());
+  assert(
+    after.ok && after.value.hit,
+    'stale verdict must not mask the stored file',
+  );
+  assertEqual(r.fetch.calls.length, 2, 'no refetch after the race');
+}
+
 async function cancellation(): Promise<void> {
   const r = rig(persisted());
   const dead = new CancellationSource();
@@ -783,6 +827,7 @@ export async function run(): Promise<void> {
   await touchOnHitReorders();
   await oversizeEntryRejected();
   await coalescedConcurrentGets();
+  await abandonedGetCannotPoison();
   await cancellation();
   await storageFailures();
   await sweepShrinkAndNoop();

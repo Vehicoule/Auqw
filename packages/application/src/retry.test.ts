@@ -386,6 +386,38 @@ async function nonFiniteRetryAfterStandsVerdict(): Promise<void> {
   assertEqual(s2.calls.length, 2);
 }
 
+async function cancelledSignalNeverCallsAgain(): Promise<void> {
+  const { clock, source } = rig();
+  // Pre-cancelled: the loop must not start a single call.
+  source.cancel();
+  const s0 = scripted([ok('never')]);
+  const pre = await retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    call: s0.call,
+  });
+  assert(!pre.ok && pre.error.kind === 'cancelled');
+  assertEqual(s0.calls.length, 0, 'pre-cancelled never calls');
+
+  // Cancellation landing after the backoff woke — before the next
+  // call starts — must not spend another port call either.
+  const { clock: clock2, source: source2 } = rig();
+  const s = scripted([err(appError('transient', 'blip')), ok('never')]);
+  const pending = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source2.signal,
+    clock: clock2,
+    call: s.call,
+  });
+  await settle();
+  clock2.advance(400);
+  source2.cancel();
+  const result = await pending;
+  assert(!result.ok && result.error.kind === 'cancelled');
+  assertEqual(s.calls.length, 1, 'cancel after wake skips the call');
+}
+
 export async function run(): Promise<void> {
   await succeedsFirstTry();
   await transientThenSuccess();
@@ -402,4 +434,5 @@ export async function run(): Promise<void> {
   await brokenClockIsInternal();
   await invalidOptionsFallBackSafely();
   await nonFiniteRetryAfterStandsVerdict();
+  await cancelledSignalNeverCallsAgain();
 }

@@ -257,6 +257,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
   }
 
   function onStatus(status: SyncClientStatus): void {
+    const prevViews = views;
     views = status;
     const seen = new Set<string>();
     for (const view of status.peers) {
@@ -293,6 +294,21 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // reconnects on the backoff ladder — non-retryable verdicts
         // (auth-required, peer revoked) wait for the peer list to
         // change instead of hammering a dead route.
+        const wait = track.backoffMs;
+        track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+        schedule(view.peer.fp, wait, 'stand');
+      } else if (
+        view.state === 'offline' &&
+        view.lastError === undefined &&
+        !track.running &&
+        track.timer === null &&
+        prevViews?.peers.find((v) => v.peer.fp === view.peer.fp)
+          ?.state === 'open'
+      ) {
+        // A clean socket close publishes offline with no verdict at
+        // all — the peer was live a moment ago, so it earns the same
+        // bounded ladder instead of waiting silently for the next
+        // local write or connectivity flap.
         const wait = track.backoffMs;
         track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         schedule(view.peer.fp, wait, 'stand');

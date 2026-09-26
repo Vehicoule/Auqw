@@ -1692,12 +1692,16 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   /**
-   * Debounced auto-trigger: a pending timer already covers the
-   * writes landing before it fires, so bursts arm once.
+   * Debounced auto-trigger — trailing edge, matching the mobile
+   * scheduler: each write re-arms the wake so a sustained burst
+   * fires once when it goes quiet instead of mid-burst.
    */
   function scheduleAutoTrigger(): void {
-    if (closing || autoSyncTimer !== null) {
+    if (closing) {
       return;
+    }
+    if (autoSyncTimer !== null) {
+      clearTimeout(autoSyncTimer);
     }
     autoSyncTimer = setTimeout(() => {
       autoSyncTimer = null;

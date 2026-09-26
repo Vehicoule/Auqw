@@ -641,6 +641,54 @@ async function stopStartAcrossInFlightRound(): Promise<void> {
   scheduler.stop();
 }
 
+async function cleanCloseReconnects(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A clean socket close publishes offline with no verdict — the
+  // peer was live, so the ladder still reconnects it.
+  client.peerViews.set('fp-a', { state: 'offline' });
+  client.emitStatus();
+  await pump();
+  clock.advance(999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'backoff holds below base');
+  clock.advance(1);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'clean close reconnects');
+  // A peer that never opened must not take this path: it still earns
+  // its first round via the new-peer branch, but the clean-close
+  // ladder needs a live→offline transition — absent that, no churn.
+  client.peersList = [peer('fp-a'), peer('fp-b')];
+  client.peerViews.set('fp-b', { state: 'offline' });
+  client.emitStatus();
+  await pump();
+  clock.advance(500);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.filter((fp) => fp === 'fp-b').length,
+    1,
+    'new peer still earns its first round',
+  );
+  clock.advance(10_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.filter((fp) => fp === 'fp-b').length,
+    1,
+    'never-opened peer does not reconnect-loop',
+  );
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
@@ -658,4 +706,5 @@ export async function run(): Promise<void> {
   await intermediateOpenKeepsBackoff();
   await recoveryEdgeConsumesDirty();
   await replacedTimerStaysCancelable();
+  await cleanCloseReconnects();
 }

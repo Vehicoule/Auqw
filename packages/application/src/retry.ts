@@ -82,6 +82,12 @@ export async function retryBounded<T>(
       : DEFAULT_BACKOFF_MS;
   let lastError: AppError = timeoutError();
   for (let attempt = 1; ; attempt += 1) {
+    // A cancellation landing after a successful backoff must not
+    // spend another port call — the signal is consulted at every
+    // attempt, not only through the backoff sleep.
+    if (opts.signal.cancelled) {
+      return err(appError('cancelled', 'cancelled'));
+    }
     let now: number;
     try {
       now = opts.clock.nowMs();
