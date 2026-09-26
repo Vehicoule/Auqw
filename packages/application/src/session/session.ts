@@ -3074,13 +3074,16 @@ export class Session {
    * applied.
    */
   #clearRadio(r: Ready): void {
+    // The epoch bumps even with no record: an auto-arm queued on
+    // #radioTail behind another op must still die when a stop or
+    // disarm lands before it starts.
+    this.#radioArmEpoch += 1;
     const record = r.radio;
     if (record === null) {
       return;
     }
     record.source?.cancel();
     r.radio = null;
-    this.#radioArmEpoch += 1;
   }
 
   async #startRadio(ref: SourceRef): Promise<Result<void>> {
@@ -3366,28 +3369,11 @@ export class Session {
     ) {
       return;
     }
-    const occurrence = snap.occurrences.find(
-      (o) => o.occurrenceId === snap.currentOccurrenceId,
-    );
-    const recording = r.recordings.find(
-      (rec) => rec.id === occurrence?.recordingId,
-    );
-    if (occurrence === undefined || recording === undefined) {
-      return;
-    }
-    const ref = this.#radioSeedRef(occurrence, recording);
-    if (ref === null) {
-      // Nothing seedable here — the verdict sticks so the scan
-      // never reruns against the same tail position.
-      this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
-      return;
-    }
-    if (!this.#isOnline()) {
-      // Offline is weather, not a verdict — the reconnect
-      // transition's #derived retries the arm.
-      return;
-    }
+    // One attempt per tail position — the marker holds even when the
+    // queued work finds nothing seedable: that verdict is sticky, not
+    // weather.
     this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
+    const armedFor = snap.currentOccurrenceId;
     const epoch = this.#radioArmEpoch;
     const work = this.#radioTail.then(async () => {
       const cur = this.#ready;
@@ -3398,6 +3384,39 @@ export class Session {
         (cur.radio !== null && cur.radio.status === 'growing')
       ) {
         // Cleared or reseeded while queued — the later decision wins.
+        return ok(undefined);
+      }
+      // Re-evaluate at run time: the tail may have moved while this
+      // arm was queued (a stop is caught by the epoch; a cursor move
+      // reseeds from the item actually on the tail).
+      const live = cur.queue.snapshot();
+      if (
+        live.mode !== 'playing' ||
+        live.currentOccurrenceId === null ||
+        remainingAfterCurrent(live) !== 0
+      ) {
+        // The cursor left the tail before this arm ran — the
+        // occurrence was never judged, so a later return to it may
+        // still arm.
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
+        return ok(undefined);
+      }
+      const liveOccurrence = live.occurrences.find(
+        (o) => o.occurrenceId === live.currentOccurrenceId,
+      );
+      const liveRecording = cur.recordings.find(
+        (rec) => rec.id === liveOccurrence?.recordingId,
+      );
+      if (liveOccurrence === undefined || liveRecording === undefined) {
+        return ok(undefined);
+      }
+      // The verdict binds to the occurrence actually judged — the
+      // cursor may have moved since the trigger fired.
+      this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
+      const ref = this.#radioSeedRef(liveOccurrence, liveRecording);
+      if (ref === null || !this.#isOnline()) {
         return ok(undefined);
       }
       const seeded = await this.#startRadio(ref);
@@ -3414,16 +3433,23 @@ export class Session {
   }
 
   /**
-   * Pick the seed ref for a queue occurrence: the pinned ref first
-   * — it's the source actually playing — then the recording's
-   * source refs in order. Each must route to a `radio.seed`
-   * provider; a foreign-provider or undeclaring ref can't seed.
+   * Pick the seed ref for a queue occurrence: the live attempt's
+   * resolved ref first — `#pickRef` may have chosen an effective
+   * mapping over the stored order, and the seed must follow the
+   * version actually playing — then the pinned ref, then the
+   * recording's source refs in order. Each must route to a
+   * `radio.seed` provider; a foreign-provider or undeclaring ref
+   * can't seed.
    */
   #radioSeedRef(
     occurrence: QueueOccurrence,
     recording: Recording,
   ): SourceRef | null {
+    const active = this.#active;
     const candidates: (SourceRef | null)[] = [
+      active !== null && active.occurrenceId === occurrence.occurrenceId
+        ? (active.ref ?? null)
+        : null,
       occurrence.selectedRef,
       ...recording.sourceRefs,
     ];
@@ -5033,8 +5059,10 @@ export class Session {
     this.#mappingSource = null;
     this.#maybeMapSuccessor();
     // The cursor moved inside the projection — the radio tail's
-    // fetch-ahead window may have opened.
+    // fetch-ahead window may have opened, and landing on the last
+    // item arms it.
     this.#maybeGrowRadio();
+    this.#maybeArmRadio();
   }
 
   // ---- successor mapping ----------------------------------------------

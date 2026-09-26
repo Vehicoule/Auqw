@@ -1104,20 +1104,32 @@ async function emitPrepared(
   return identity;
 }
 
-function endViaService(r: Rig, fromOccurrenceId: string): void {
+function serviceTransition(
+  r: Rig,
+  fields: {
+    from: string;
+    to: string | null;
+    identity?: PlaybackIdentity | null;
+    handle?: string | null;
+  },
+): void {
   const projection = r.player.projections[r.player.projections.length - 1];
   assert(projection !== undefined, 'expected an installed projection');
   r.player.emit({
     type: 'queue-transition',
     projectionId: projection.projectionId,
     projectedQueueRev: projection.queueRev,
-    fromOccurrenceId,
-    toOccurrenceId: null,
+    fromOccurrenceId: fields.from,
+    toOccurrenceId: fields.to,
     reason: 'ended',
     positionMs: 0,
-    identity: null,
-    handle: null,
+    identity: fields.identity ?? null,
+    handle: fields.handle ?? null,
   });
+}
+
+function endViaService(r: Rig, fromOccurrenceId: string): void {
+  serviceTransition(r, { from: fromOccurrenceId, to: null });
 }
 
 function pausedTailQueue(): PersistedState {
@@ -1333,6 +1345,86 @@ async function seedOnStoppedQueueStaysIdle(): Promise<void> {
   await r.session.dispose();
 }
 
+async function nativeAdvanceArmsTail(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('youtube-music', 'u')]),
+        recording('rV', [ref('youtube-music', 'v')]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU'), occurrence('u2', 'rV')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'u2 still ahead — no arm');
+  // A native-driven move lands on the last item: the arm must fire
+  // from the transition reconcile, not only session commands.
+  serviceTransition(r, {
+    from: 'u1',
+    to: 'u2',
+    identity: { attemptId: 'svc-u2', queueRev: 2 },
+    handle: 'h-u2',
+  });
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'u2');
+  assertEqual(radioCalls(r).length, 1, 'native advance onto the tail arms');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'v') },
+    'seed comes from the item the service landed on',
+  );
+  await r.session.dispose();
+}
+
+async function seedPrefersAttemptRef(): Promise<void> {
+  // Unpinned occurrence whose playback pick is NOT the first stored
+  // source ref: the seed must follow the ref actually playing.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [
+          ref('itunes', 'i1'),
+          ref('youtube-music', 'y1'),
+        ]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'the sibling provider’s ref must not seed',
+  );
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'y1') },
+    'seed follows the attempt’s resolved ref, not stored order',
+  );
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1362,6 +1454,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['autoArmServiceDrainResumes', autoArmServiceDrainResumes],
   ['stopDropsInFlightArm', stopDropsInFlightArm],
   ['seedOnStoppedQueueStaysIdle', seedOnStoppedQueueStaysIdle],
+  ['nativeAdvanceArmsTail', nativeAdvanceArmsTail],
+  ['seedPrefersAttemptRef', seedPrefersAttemptRef],
 ] as const;
 
 export async function run(): Promise<void> {
