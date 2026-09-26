@@ -535,6 +535,7 @@ export function StageSheet({
             onSeek={onSeek}
             seed={`${player.title}|${player.artist ?? ''}`}
             loading={player.status === 'preparing' || player.durationMs === null}
+            visible={expanded}
           />
           <View style={{ marginTop: theme.spacing.md }}>
             <TransportControls

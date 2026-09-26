@@ -431,6 +431,7 @@ export type WaveformSeekProps = {
   readonly seed?: string | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
+  readonly visible?: boolean | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -441,6 +442,7 @@ export function WaveformSeek({
   seed = 'auqw',
   loading = false,
   labels = true,
+  visible = true,
   style,
 }: WaveformSeekProps) {
   const theme = useTheme();
@@ -513,7 +515,7 @@ export function WaveformSeek({
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
   }, [bloom, seed, theme.reducedMotion]);
   useEffect(() => {
-    if (isLoading && !theme.reducedMotion) {
+    if (isLoading && visible && !theme.reducedMotion) {
       shimmer.value = 0;
       shimmer.value = withRepeat(
         withTiming(1, { duration: 1600, easing: Easing.linear }),
@@ -524,7 +526,7 @@ export function WaveformSeek({
       cancelAnimation(shimmer);
       shimmer.value = 0;
     }
-  }, [isLoading, shimmer, theme.reducedMotion]);
+  }, [isLoading, shimmer, theme.reducedMotion, visible]);
 
   const preview = useCallback(
     (fraction: number) => {
@@ -570,6 +572,18 @@ export function WaveformSeek({
     },
     [durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
   );
+  // A cancelled pan clears the preview and restores the real fill —
+  // only a finished gesture may move playback.
+  const cancelScrub = useCallback(() => {
+    scrubActive.current = false;
+    scrubSec.current = -1;
+    setScrubMs(null);
+    fill.value = theme.reducedMotion
+      ? latestProgress.current
+      : withTiming(latestProgress.current, {
+          duration: theme.motion.state,
+        });
+  }, [fill, theme.motion.state, theme.reducedMotion]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -592,13 +606,13 @@ export function WaveformSeek({
           fill.value = f;
           scheduleOnRN(preview, f);
         })
-        .onFinalize((e) => {
+        .onFinalize((e, success) => {
           'worklet';
           const f = Math.min(1, Math.max(0, e.x / width));
           scrubbing.value = 0;
-          scheduleOnRN(commit, f);
+          scheduleOnRN(success ? commit : cancelScrub, f);
         }),
-    [commit, enabled, fill, preview, scrubbing, width],
+    [cancelScrub, commit, enabled, fill, preview, scrubbing, width],
   );
   const dLow = useDerivedValue(() =>
     barsPathD(
