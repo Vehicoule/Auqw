@@ -438,7 +438,16 @@ function GalleryBody({
           <Artwork url={null} size={40} monogram="TC" />
         </View>
         <LinearScrubber positionMs={61_000} durationMs={180_000} onSeek={noop} />
-        <WaveformSeek positionMs={90_000} durationMs={180_000} onSeek={noop} />
+        <WaveformSeek
+          positionMs={90_000}
+          durationMs={180_000}
+          onSeek={noop}
+          seed="Self Aware|Temper City"
+        />
+        <Text variant="metadata" color="secondary">
+          loading · shimmer baseline
+        </Text>
+        <WaveformSeek positionMs={0} durationMs={null} loading onSeek={noop} />
       </Section>
 
       <Section title="states" note="loading · empty · error · unavailable">

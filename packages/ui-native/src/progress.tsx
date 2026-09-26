@@ -611,9 +611,16 @@ export function WaveformSeek({
   const scrubActive = useRef(false);
   const scrubSec = useRef(-1);
   const previousProgress = useRef(progress);
+  const latestProgress = useRef(progress);
+  latestProgress.current = progress;
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const delta = Math.abs(progress - previousProgress.current);
     previousProgress.current = progress;
+    if (delta > 0 && settleTimer.current !== null) {
+      clearTimeout(settleTimer.current);
+      settleTimer.current = null;
+    }
     if (scrubActive.current) {
       return;
     }
@@ -622,6 +629,14 @@ export function WaveformSeek({
       ? progress
       : withTiming(progress, { duration });
   }, [fill, progress, theme.motion.state, theme.reducedMotion]);
+  useEffect(
+    () => () => {
+      if (settleTimer.current !== null) {
+        clearTimeout(settleTimer.current);
+      }
+    },
+    [],
+  );
   useEffect(() => {
     bloom.value = 0;
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
@@ -664,8 +679,25 @@ export function WaveformSeek({
       if (durationMs !== null && durationMs > 0) {
         onSeek?.(Math.round(fraction * durationMs));
       }
+      // Optimistic fill: when no position tick confirms the seek
+      // (paused playback, noop onSeek) fall back to the real
+      // progress instead of disagreeing with the labels forever.
+      if (settleTimer.current !== null) {
+        clearTimeout(settleTimer.current);
+      }
+      settleTimer.current = setTimeout(() => {
+        settleTimer.current = null;
+        if (scrubActive.current) {
+          return;
+        }
+        fill.value = theme.reducedMotion
+          ? latestProgress.current
+          : withTiming(latestProgress.current, {
+              duration: theme.motion.state,
+            });
+      }, 400);
     },
-    [durationMs, onSeek],
+    [durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
   );
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
