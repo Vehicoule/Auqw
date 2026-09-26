@@ -573,6 +573,30 @@ function edgeTests(): void {
     assert(out.type === 'matched', `feat credit: ${out.type}`);
     assertEqual(out.candidate.artist, 'Artist A feat. Artist C');
   }
+
+  // Canonical act names containing 'and' are not collab credits:
+  // 'Florence and the Machine' vs a listing for just 'Florence'
+  // must not collapse to a confident same-act match.
+  {
+    const out = MatchingEngine.match(
+      recording({
+        title: 'Home',
+        artist: 'Florence and the Machine',
+        durationMs: 200_000,
+      }),
+      [
+        candidate({
+          title: 'Home',
+          artist: 'Florence',
+          durationMs: 200_000,
+        }),
+      ],
+    );
+    assert(
+      out.type !== 'matched' || out.candidate.artist !== 'Florence',
+      `'and' band name must not fragment-match: ${out.type}`,
+    );
+  }
 }
 
 function xorshift32(seed: number): () => number {

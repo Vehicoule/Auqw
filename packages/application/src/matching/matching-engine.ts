@@ -223,10 +223,16 @@ function normalizeFree(text: string): string {
 /**
  * Featuring/collab credit separators in an artist field. Splitting
  * happens on the raw string — normalizeFree would already have
- * folded the punctuation away.
+ * folded the punctuation away. 'and'/'with' are deliberately absent:
+ * they live inside canonical act names ('Florence and the Machine'),
+ * so splitting on them would promote a fragment to full-artist
+ * certainty. Punctuation-based separators ('Earth, Wind & Fire')
+ * remain ambiguous — an inherent limit of string-level matching —
+ * but at least the act's own canonical name can't be confused with
+ * collab syntax.
  */
 const ARTIST_SPLIT =
-  /[&,+]|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b|\bvs\.?\b|\band\b|\bx\b/iu;
+  /[&,+]|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bvs\.?\b|\bx\b/iu;
 
 /**
  * The whole normalized name plus each credited act it splits into.

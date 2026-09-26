@@ -996,6 +996,29 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     return (await deps.keys.deviceList()).devices.length;
   }
 
+  /**
+   * The answer observational reads give while dormant — no listener,
+   * no custody read, no devices. Dormant means never paired (a paired
+   * install's device records arm eager startup), so zero paired
+   * devices is the truth, not a custody shortcut.
+   */
+  function idleStatus(
+    state: SyncStatusResult['listener'],
+  ): SyncStatusResult {
+    return {
+      listener: state,
+      endpoint: null,
+      boundPort: null,
+      advertise: 'off',
+      pairedDevices: 0,
+      sessions: 0,
+      lastSyncAt,
+      engine: engine === undefined ? 'absent' : 'ready',
+      name: deviceName,
+      fingerprint,
+    };
+  }
+
   async function status(): Promise<SyncStatusResult> {
     return {
       listener,
@@ -1642,7 +1665,22 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   const handlers: Record<string, UtilityHandler> = {
     'sync:status': async () => {
-      await ensureStarted();
+      // Observational read: the settings panel polls this on every
+      // settings visit. Starting sync here would mint an identity and
+      // (on macOS) fire the Keychain ACL prompt for users who only
+      // opened settings — the explicit start edge is sync:pairing.
+      if (startPromise === null) {
+        await engineReady;
+        return checked(isSyncStatusResult, 'sync:status')(
+          idleStatus(
+            closing
+              ? 'unavailable'
+              : deps.disabled === true
+                ? 'disabled'
+                : 'dormant',
+          ),
+        );
+      }
       return checked(isSyncStatusResult, 'sync:status')(await status());
     },
 
@@ -1681,7 +1719,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:devices': async () => {
-      await ensureStarted();
+      // Dormant ⟺ never paired — the empty list is truthful without
+      // a custody read.
+      if (startPromise === null) {
+        return checked(isSyncDevicesResult, 'sync:devices')({
+          devices: [],
+        });
+      }
       const { devices } = await deps.keys.deviceList();
       return checked(isSyncDevicesResult, 'sync:devices')({
         devices: devices.map((d) => ({
@@ -1697,7 +1741,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!isSyncUnpairArgs(args) || !isDeviceId(args.id)) {
         throw shellError('invalid-request', 'sync:unpair expects {id}');
       }
-      await ensureStarted();
+      // Dormant installs have no device records to delete — a truthful
+      // no-op that keeps custody untouched.
+      if (startPromise === null) {
+        return undefined;
+      }
       await deps.keys.deviceDelete(args.id);
       pendingSync.delete(args.id);
       kickDevice(args.id);
@@ -1753,7 +1801,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:trigger': async () => {
-      await ensureStarted();
+      // No paired devices exist while dormant — nothing to kick.
+      if (startPromise === null) {
+        return checked(isSyncTriggerResult, 'sync:trigger')({
+          triggered: false,
+          pending: false,
+        });
+      }
       // Mark offline devices pending FIRST, then do a final live pass
       // that sends + clears: a device that opened during the registry
       // await is caught by the pass and never left with a stale mark
@@ -1851,13 +1905,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
   };
 
-  // Custody access is deferred until a sync handler needs it: a
+  // Custody access is deferred until an explicit sync action — a
   // dormant install never touches safeStorage, so the macOS Keychain
-  // prompt only fires once the user actually engages sync. An
-  // `armed` install (a persisted identity record exists) starts
-  // eagerly as before — paired devices expect to find the listener.
+  // prompt only fires once the user actually pairs. An `armed`
+  // install (paired-device records exist) starts eagerly as before —
+  // paired devices expect to find the listener.
   let startPromise: Promise<SyncStatusResult> | null = null;
   function ensureStarted(): Promise<SyncStatusResult> {
+    if (closing) {
+      // A late request must not bind a listener after teardown — a
+      // second close() is a no-op and the socket would leak.
+      return Promise.reject(
+        shellError('cancelled', 'sync service closed'),
+      );
+    }
     startPromise ??= start()
       .then((status) => {
         resolveReady(status);
@@ -1908,6 +1969,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
       closing = true;
       serviceCancel.cancel();
+      if (startPromise === null) {
+        // Never started — settle `ready` so a dormant awaiter doesn't
+        // hang, and mark the listener terminally unavailable: the
+        // closing guard above blocks any post-close ensureStarted.
+        listener = 'unavailable';
+        resolveReady(idleStatus('unavailable'));
+      }
       await (startPromise ?? Promise.resolve()).catch(() => undefined);
       for (const session of [...sessions]) {
         killSession(session);

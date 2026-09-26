@@ -311,6 +311,7 @@ export const en = {
   'sync.listener.starting': 'starting',
   'sync.listener.listening': 'listening',
   'sync.listener.unavailable': 'unavailable',
+  'sync.listener.dormant': 'off',
   'sync.listener.disabled': 'disabled',
   'sync.engine.ready': 'ready',
   'sync.engine.absent': 'absent',

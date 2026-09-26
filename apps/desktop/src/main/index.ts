@@ -15,7 +15,6 @@ import type {
   TitleBarOverlay,
   WebContents,
 } from 'electron';
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { schemes } from '@auqw/design-tokens';
@@ -33,7 +32,7 @@ import { createAppliedPushService } from './sync-events.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
-  SYNC_IDENTITY_FILE,
+  syncHasPairedDevices,
 } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -124,12 +123,14 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   // The database lives in the utility child; its path is fork env
   // because the child owns no app.getPath('userData').
   env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
-  // A persisted sync identity marks an install that has synced — it
-  // keeps an eager listener so paired devices still find it. Fresh
-  // installs stay dormant: binding requires custody, and on macOS
-  // the safeStorage read is what fires the Keychain ACL prompt.
-  env['AUQW_SYNC_ARMED'] = existsSync(
-    join(userDataPath, 'sync-secure', SYNC_IDENTITY_FILE),
+  // Paired-device records mark an install that actually synced — an
+  // identity alone doesn't (the utility mints one on any sync start,
+  // including a passive settings visit). Armed installs keep an
+  // eager listener so paired devices still find it; fresh installs
+  // stay dormant — binding requires custody, and on macOS the
+  // safeStorage read is what fires the Keychain ACL prompt.
+  env['AUQW_SYNC_ARMED'] = syncHasPairedDevices(
+    join(userDataPath, 'sync-secure'),
   )
     ? '1'
     : '0';

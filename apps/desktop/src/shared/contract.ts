@@ -853,6 +853,10 @@ export type SyncListenerState =
   | 'starting'
   | 'listening'
   | 'unavailable'
+  // Never started: a never-paired install defers listener+custody until
+  // an explicit sync action (pairing), so observational status reads
+  // stay free of the safeStorage/keychain read.
+  | 'dormant'
   | 'disabled';
 
 export type SyncStatusResult = {
@@ -889,6 +893,7 @@ export function isSyncStatusResult(
     (value['listener'] === 'starting' ||
       value['listener'] === 'listening' ||
       value['listener'] === 'unavailable' ||
+      value['listener'] === 'dormant' ||
       value['listener'] === 'disabled') &&
     (value['endpoint'] === null ||
       isBoundedString(value['endpoint'], 128)) &&
