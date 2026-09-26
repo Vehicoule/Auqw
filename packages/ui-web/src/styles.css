@@ -995,6 +995,10 @@
   display: flex;
   gap: var(--spacing-lg);
   overflow-x: auto;
+  /* Room for the artwork rings (hairline rest, 2px hover) without
+     clipping at the scroll edges; negative margin keeps alignment. */
+  padding: var(--spacing-xs);
+  margin: calc(-1 * var(--spacing-xs));
 }
 .uw-artist {
   width: 96px;
