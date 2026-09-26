@@ -212,7 +212,7 @@ impl HttpClient for CannedHttp {
                 Box::pin(async move { Ok(response) })
             }
             None => {
-                let url = req.url.clone();
+                let url = safe_url(&req.url).to_string();
                 if let Ok(mut misses) = self.misses.lock() {
                     misses.push(url.clone());
                 }

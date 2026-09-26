@@ -104,14 +104,30 @@ function toCount(value: number | bigint): number {
  * file out from under the tx, and most `PRAGMA` forms flip
  * connection-global or schema-level state (`writable_schema`,
  * `journal_mode`/`foreign_keys = OFF`) the tx model can't isolate.
- * The one pragma the renderer's own driver legitimately issues is
- * `PRAGMA foreign_keys = ON`; anything else is refused.
+ * Transaction control is the fourth form: a guest-run COMMIT/END
+ * closes the managed tx early (later statements autocommit and a
+ * rollback lands nothing) and BEGIN/SAVEPOINT nest into its
+ * bookkeeping — tx lifetime belongs to `storage:begin`/`commit`/
+ * `rollback`, not to SQL. The one pragma the renderer's own driver
+ * legitimately issues is `PRAGMA foreign_keys = ON`; anything else is
+ * refused.
  */
 const PRAGMA_FOREIGN_KEYS_ON = /^pragma\s+foreign_keys\s*=\s*on\s*;?$/i;
 // `;` counts as trivia: prepare() skips leading empty statements, so
 // ';ATTACH' would otherwise reach the driver under an empty head.
 const STATEMENT_HEAD = /^(?:[\s;]|--[^\n]*\n|\/\*[^]*?\*\/)*([a-z]+)/i;
-const BLOCKED_HEADS = new Set(['attach', 'detach', 'vacuum', 'pragma']);
+const BLOCKED_HEADS = new Set([
+  'attach',
+  'detach',
+  'vacuum',
+  'pragma',
+  'begin',
+  'commit',
+  'end',
+  'rollback',
+  'savepoint',
+  'release',
+]);
 
 function checkStatement(sql: string): void {
   const keyword = (STATEMENT_HEAD.exec(sql)?.[1] ?? '').toLowerCase();

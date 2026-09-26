@@ -33,10 +33,16 @@ const HEADER_SECRET =
  * cosmetic, under-masking one is a leak, and only one of those is a
  * security failure.
  */
-const CREDENTIAL = /\b(Bearer|Basic|Token|ApiKey)(\s+)([^\s;,]+)/gi;
+const CREDENTIAL =
+  /\b(Bearer|Basic|Token|ApiKey|OAuth|Negotiate|Digest|DPoP|HOBA)(\s+)("[^"]*"|'[^']*'|[^\s;,]+)/gi;
 
-/** `key=value` / `key: value`; the key decides whether it is a secret. */
-const KEYED = /\b([A-Za-z0-9_-]+)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/g;
+/**
+ * `key=value` / `key: value`; the key decides whether it is a secret.
+ * The key may itself be quoted — `{"token":"abc"}` in a JSON fragment
+ * carries the same credential a bare `token=abc` does.
+ */
+const KEYED =
+  /("([^"\n]{1,128})"|'([^'\n]{1,128})'|\b[A-Za-z0-9_-]{1,128})(\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/g;
 
 /** Long key-shaped runs: 20+ chars of key charset. */
 const OPAQUE_RUN = /[A-Za-z0-9+/_-]{20,}/g;
@@ -65,11 +71,16 @@ const SECRET_KEYWORDS = [
 
 function looksLikeSecretKey(key: string): boolean {
   const lower = key.toLowerCase();
+  // `api-key` and `api_key` are the same name — squash separators for
+  // the suffix test so either spelling still lands.
+  const squashed = lower.replace(/[-_]/g, '');
   return (
     lower.split(/[_-]/).some((part) =>
       (SECRET_KEYWORDS as readonly string[]).includes(part),
     ) ||
-    SECRET_KEYWORDS.some((keyword) => lower.endsWith(keyword))
+    SECRET_KEYWORDS.some((keyword) =>
+      squashed.endsWith(keyword.replace(/[-_]/g, '')),
+    )
   );
 }
 
@@ -91,11 +102,12 @@ function isPathContext(run: string, offset: number, whole: string): boolean {
   if (!run.includes('/')) return false;
   const before = offset > 0 ? whole[offset - 1] : undefined;
   const tail = whole.slice(offset + run.length);
-  // Leading `/` or `~/` starts the path; a `/` immediately before the
-  // run continues one; a file extension right after it ends one.
+  // A leading `/` alone proves nothing — a base64 run starts with one
+  // about 1/64 of the time — so a self-starting absolute path must
+  // continue past its first segment. `~` before the run is a home
+  // path, and a file extension right after it ends one.
   return (
-    run.startsWith('/') ||
-    before === '/' ||
+    (run.startsWith('/') && run.indexOf('/', 1) > 0) ||
     before === '~' ||
     /^\.[A-Za-z0-9]{1,8}\b/.test(tail)
   );
@@ -106,8 +118,18 @@ export function redactSensitive(text: string): string {
     .replace(URL_LIKE, redactUrl)
     .replace(HEADER_SECRET, (_m: string, name: string, sep: string) => `${name}${sep}…`)
     .replace(CREDENTIAL, (_m: string, scheme: string, gap: string) => `${scheme}${gap}…`)
-    .replace(KEYED, (match: string, key: string, sep: string, value: string) =>
-      looksLikeSecretKey(key) ? `${key}${sep}…` : match,
+    .replace(
+      KEYED,
+      (
+        match: string,
+        keyToken: string,
+        doubleQuoted: string | undefined,
+        singleQuoted: string | undefined,
+        sep: string,
+      ) =>
+        looksLikeSecretKey(doubleQuoted ?? singleQuoted ?? keyToken)
+          ? `${keyToken}${sep}…`
+          : match,
     )
     .replace(
       OPAQUE_RUN,

@@ -75,7 +75,12 @@ export function isPickFilesArgs(value: unknown): value is PickFilesArgs {
  */
 export function isSecureKey(value: unknown): value is string {
   return (
-    typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value)
+    typeof value === 'string' &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value) &&
+    // `auqw.sync.*` is the pairing-custody namespace — it lives in the
+    // sync-secure store behind `sync:keys`, never on these
+    // renderer-facing channels.
+    !value.toLowerCase().startsWith('auqw.sync.')
   );
 }
 

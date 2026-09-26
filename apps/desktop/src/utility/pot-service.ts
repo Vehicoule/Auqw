@@ -382,6 +382,82 @@ function botGuardSandbox(
     },
   });
   const win = dom.window;
+  // jsdom's JSDOMDispatcher serves `data:` and `file:` itself — before
+  // the configured dispatcher is ever consulted — and hands everything
+  // else to it, so `window._dispatcher` is the single choke point that
+  // subresource loads and async XHR share. Gate it to the same surface
+  // `sandboxFetch` allows: https on exactly the sandbox hosts.
+  {
+    const dispatcher = (win as unknown as Record<string, unknown>)[
+      '_dispatcher'
+    ] as {
+      dispatch: (opts: unknown, handler: unknown) => boolean;
+    };
+    const innerDispatch = dispatcher.dispatch.bind(dispatcher);
+    dispatcher.dispatch = (opts: unknown, handler: unknown): boolean => {
+      const request = opts as {
+        opaque?: { url?: unknown };
+        origin?: unknown;
+        path?: unknown;
+      } | null;
+      const urlString =
+        typeof request?.opaque?.url === 'string'
+          ? request.opaque.url
+          : `${request?.origin ?? ''}${request?.path ?? ''}`;
+      let allowed = false;
+      try {
+        const parsed = new URL(urlString);
+        allowed =
+          parsed.protocol === 'https:' &&
+          sandboxFetchHosts.has(parsed.hostname.toLowerCase());
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) {
+        const h = handler as {
+          onResponseError?: (dispatcher: unknown, error: Error) => void;
+        };
+        h.onResponseError?.(
+          null,
+          new TypeError('pot: sandboxed request target not allowed'),
+        );
+        return false;
+      }
+      return innerDispatch(opts, handler);
+    };
+  }
+  // A synchronous XHR never touches that dispatcher: jsdom spawns a
+  // worker thread that re-dispatches on the AMBIENT (ungated) one.
+  // The interpreter has no sync-XHR need — refuse it at open() so the
+  // worker can never start.
+  {
+    const xhrProto = (
+      win as unknown as {
+        XMLHttpRequest: { prototype: { open: unknown } };
+      }
+    ).XMLHttpRequest.prototype as {
+      open: (
+        this: unknown,
+        method: unknown,
+        url: unknown,
+        asynchronous?: unknown,
+        ...rest: unknown[]
+      ) => unknown;
+    };
+    const innerOpen = xhrProto.open;
+    xhrProto.open = function (
+      this: unknown,
+      method: unknown,
+      url: unknown,
+      asynchronous?: unknown,
+      ...rest: unknown[]
+    ): unknown {
+      if (asynchronous !== undefined && !asynchronous) {
+        throw new TypeError('pot: synchronous XHR is not available');
+      }
+      return innerOpen.call(this, method, url, asynchronous, ...rest);
+    };
+  }
   // The interpreter's network surface is capped to exact hosts (its
   // own origin + the homepage), read-only methods, no caller body,
   // allowlisted headers only, https only, no redirect following (a
