@@ -533,6 +533,8 @@ export function StageSheet({
             positionMs={player.positionMs}
             durationMs={player.durationMs}
             onSeek={onSeek}
+            seed={`${player.title}|${player.artist ?? ''}`}
+            loading={player.status === 'preparing' || player.durationMs === null}
           />
           <View style={{ marginTop: theme.spacing.md }}>
             <TransportControls

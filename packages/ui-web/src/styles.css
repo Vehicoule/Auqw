@@ -610,27 +610,39 @@
   gap: var(--spacing-xs);
 }
 .uw-wave__bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 36px;
+  display: block;
+  width: 100%;
+  height: 48px;
 }
-.uw-wave__bar {
-  flex: 1;
-  min-width: 2px;
-  border-radius: var(--radius-frame);
-  background: var(--fg18);
-}
-.uw-wave__bar--hot {
-  background: var(--accent);
+.uw-wave__fill {
+  transition: width 180ms linear;
 }
 .uw-wave__input {
   position: absolute;
   inset: 0 0 auto;
   width: 100%;
-  height: 36px;
+  height: 48px;
   opacity: 0;
   cursor: pointer;
+}
+@keyframes uw-wave-shimmer {
+  from {
+    transform: translateX(-20%);
+  }
+  to {
+    transform: translateX(720%);
+  }
+}
+.uw-wave__shimmer {
+  animation: uw-wave-shimmer 1600ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .uw-wave__shimmer {
+    animation: none;
+  }
+  .uw-wave__fill {
+    transition: none;
+  }
 }
 .uw-wave__labels {
   display: flex;

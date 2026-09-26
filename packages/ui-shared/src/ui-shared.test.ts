@@ -16,6 +16,15 @@ import {
   toSyncPanel,
 } from './index.ts';
 import type { Locale, MessageId } from './index.ts';
+import {
+  ringTrackDash,
+  shimmerHighlight,
+  staggerProgress,
+  waveAmplitudeFor,
+  waveformAmplitudes,
+  waveformBarExtent,
+  waveformBarLayout,
+} from './waveform.ts';
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
 import {
@@ -223,5 +232,116 @@ assertEqual(
   enIds.length,
   'de must not carry ids en does not know',
 );
+
+// waveformAmplitudes: deterministic per seed, every bar in [0.12, 1]
+const amps = waveformAmplitudes('track-a', 60);
+assertEqual(amps.length, 60);
+assert(
+  amps.every((v) => v >= 0.12 && v <= 1),
+  'every amplitude stays inside [0.12, 1]',
+);
+assertEqual(
+  JSON.stringify(amps),
+  JSON.stringify(waveformAmplitudes('track-a', 60)),
+  'same seed and count is deterministic',
+);
+assert(
+  JSON.stringify(amps) !== JSON.stringify(waveformAmplitudes('track-b', 60)),
+  'a different seed produces a different pattern',
+);
+assertEqual(waveformAmplitudes('track-a', 0).length, 0, 'count 0 yields no bars');
+assertEqual(
+  waveformAmplitudes('track-a', -3).length,
+  0,
+  'negative count yields no bars',
+);
+assert(
+  new Set(amps).size > 10,
+  'the pattern actually varies bar to bar',
+);
+
+// waveformBarLayout: count from width, bars centered
+const layout = waveformBarLayout(200);
+assert(layout.count > 0, 'a real width fits bars');
+assertEqual(
+  layout.count,
+  Math.floor((200 - 2.5) / (3 + 2.5)),
+  'count follows the barWidth+gap budget',
+);
+assertEqual(layout.xs.length, layout.count, 'one center per bar');
+const expectedLeftover = 200 - (layout.count * (3 + 2.5) - 2.5);
+assertEqual(
+  layout.xs[0],
+  expectedLeftover / 2 + 1.5,
+  'first bar centers in the leftover margin',
+);
+const symmetric = 200 - ((layout.xs[layout.count - 1] ?? 0) + 1.5);
+assert(
+  Math.abs(symmetric - expectedLeftover / 2) < 1e-9,
+  'bars are centered within the measured width',
+);
+assertEqual(waveformBarLayout(2).count, 0, 'width at the gap fits nothing');
+assertEqual(waveformBarLayout(0).count, 0, 'zero width fits nothing');
+
+// waveformBarExtent: eased bloom between the floor and the max
+assertEqual(waveformBarExtent(0, 20), 2.4, 'zero amplitude keeps the floor');
+assertEqual(waveformBarExtent(1, 20, 2.4, 1), 20, 'full amplitude reaches max');
+assert(
+  waveformBarExtent(0.5, 20) > 2.4 && waveformBarExtent(0.5, 20) < 20,
+  'mid amplitude lands between floor and max',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, 0),
+  2.4,
+  'zero bloom collapses to the floor',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, Number.NaN),
+  2.4,
+  'non-finite bloom falls back to the floor',
+);
+
+// staggerProgress: delayed sweep that always completes
+assertEqual(staggerProgress(1, 0, 10), 1, 'finished progress is done');
+assertEqual(staggerProgress(0, 9, 10), 0, 'the tail has not started at 0');
+assert(
+  staggerProgress(0.5, 1, 10) > staggerProgress(0.5, 8, 10),
+  'earlier bars lead the sweep',
+);
+assertEqual(staggerProgress(0, 0, 0), 1, 'empty count is complete');
+
+// shimmerHighlight: wraps around the ends of the phase cycle
+assertEqual(shimmerHighlight(0.5, 0.5), 1, 'aligned phase is fully lit');
+assertEqual(shimmerHighlight(0, 0.5), 0, 'a half cycle away is dark');
+assert(
+  shimmerHighlight(0.02, 0.98) > 0.7,
+  'the band wraps across the 1→0 boundary',
+);
+
+// ringTrackDash: the unplayed track starts after the indicator head
+const gapDash = ringTrackDash(0.5, 200, 4);
+assertEqual(gapDash.dashArray, '92 200', 'track runs head+gap to end-gap');
+assertEqual(gapDash.dashOffset, -104, 'dash start sits past the wave head');
+assert(gapDash.visible, 'mid progress leaves visible track');
+const startDash = ringTrackDash(0, 200, 4);
+assertEqual(startDash.dashOffset, -4, 'progress 0 still leaves the head gap');
+assertEqual(startDash.dashArray, '192 200');
+const endDash = ringTrackDash(1, 200, 4);
+assertEqual(endDash.visible, false, 'no track remains past full progress');
+assertEqual(endDash.dashOffset, -204, 'offset still reports the head+gap start');
+
+// waveAmplitudeFor: blooms while playing, flat paused, eased at the ends
+assertEqual(waveAmplitudeFor(0.5, false), 0, 'paused is flat');
+assertEqual(waveAmplitudeFor(0.5, true), 1, 'mid-track playing is full bloom');
+assert(
+  Math.abs(waveAmplitudeFor(0.07, true) - 0.5) < 1e-9,
+  'entry ramp midpoint',
+);
+assertEqual(waveAmplitudeFor(0.04, true), 0, 'ramp starts flat');
+assert(
+  Math.abs(waveAmplitudeFor(0.95, true) - 0.5) < 1e-9,
+  'exit ramp midpoint',
+);
+assertEqual(waveAmplitudeFor(0.98, true), 0, 'ramp ends flat');
 
 console.log('ui-shared tests passed');

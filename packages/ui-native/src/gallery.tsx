@@ -421,6 +421,7 @@ function GalleryBody({
             artworkUrl={fixturePlayerPlaying.artworkUrl}
             progress={0.54}
             platform="android"
+            playing
           />
           <ArtworkRing
             artworkUrl={fixturePlayerPlaying.artworkUrl}

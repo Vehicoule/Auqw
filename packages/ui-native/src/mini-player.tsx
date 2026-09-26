@@ -133,6 +133,7 @@ export function MiniPlayer({
               artworkUrl={player.artworkUrl}
               progress={progress}
               platform={platform}
+              playing={player.status === 'playing'}
             />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text

@@ -1,7 +1,15 @@
-import { formatClock, formatRemaining, t } from '@auqw/ui-shared';
+import {
+  formatClock,
+  formatRemaining,
+  t,
+  waveformAmplitudes,
+  waveformBarExtent,
+  waveformBarLayout,
+} from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
 import { progressPathState } from './motion.ts';
 import { seekStepMs } from './keyboard.ts';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 
 // Same squared ring the native 'arc' variant draws — the desktop
@@ -165,15 +173,61 @@ export function LinearScrubber({
   );
 }
 
-const PATTERN = [
-  14, 24, 38, 52, 34, 62, 44, 28, 42, 68, 52, 36, 26, 40, 58, 72, 54, 40,
-  30, 44, 62, 50, 36, 24, 38, 56, 64, 44, 30, 18,
-] as const;
+const WAVE_HEIGHT = 48;
+const WAVE_MID = 24;
+const WAVE_MAX_EXTENT = 20;
+const WAVE_MIN_EXTENT = 2.4;
+const WAVE_BAR_WIDTH = 3;
+const WAVE_BAR_GAP = 2.5;
+
+// One `M x y1 L x y2` segment per bar — the same model the native
+// control draws, so both ports share the helper math verbatim.
+function barsPathD(
+  xs: readonly number[],
+  amps: readonly number[],
+): string {
+  let d = '';
+  for (let i = 0; i < xs.length; i += 1) {
+    const extent = waveformBarExtent(
+      amps[i] ?? 0,
+      WAVE_MAX_EXTENT,
+      WAVE_MIN_EXTENT,
+      1,
+    );
+    d += `M${(xs[i] ?? 0).toFixed(2)} ${(WAVE_MID - extent).toFixed(2)} L${(
+      xs[i] ?? 0
+    ).toFixed(2)} ${(WAVE_MID + extent).toFixed(2)}`;
+  }
+  return d;
+}
+
+// Three amplitude terciles → three stroke opacities (mirrors native).
+function partitionBars(
+  xs: readonly number[],
+  amps: readonly number[],
+): readonly [string, string, string] {
+  const sorted = [...amps].sort((a, b) => a - b);
+  const t1 = sorted[Math.floor(sorted.length / 3)] ?? Infinity;
+  const t2 = sorted[Math.floor((sorted.length * 2) / 3)] ?? Infinity;
+  const groups: [number[], number[], number[]] = [[], [], []];
+  for (let i = 0; i < xs.length; i += 1) {
+    const amp = amps[i] ?? 0;
+    groups[amp <= t1 ? 0 : amp <= t2 ? 1 : 2].push(i);
+  }
+  return groups.map((g) =>
+    barsPathD(
+      g.map((i) => xs[i] ?? 0),
+      g.map((i) => amps[i] ?? 0),
+    ),
+  ) as [string, string, string];
+}
 
 export type WaveformSeekProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly seed?: string | undefined;
+  readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly className?: string | undefined;
 };
@@ -184,11 +238,46 @@ export function WaveformSeek({
   positionMs,
   durationMs,
   onSeek,
+  seed = 'auqw',
+  loading = false,
   labels = true,
   className,
 }: WaveformSeekProps) {
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(320);
+  const [hover, setHover] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (el === null || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (w > 0) {
+        setWidth(w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const enabled = durationMs !== null && durationMs > 0 && onSeek !== undefined;
+  const isLoading = loading || durationMs === null;
   const p = progressOf(positionMs, durationMs);
+  const fill = hover ?? p;
+  const layout = useMemo(
+    () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
+    [width],
+  );
+  const amps = useMemo(
+    () => waveformAmplitudes(seed, layout.count),
+    [seed, layout.count],
+  );
+  const [dLow, dMid, dHigh] = useMemo(
+    () => partitionBars(layout.xs, amps),
+    [layout, amps],
+  );
+  const dAll = useMemo(() => barsPathD(layout.xs, amps), [layout, amps]);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     const stepped =
       onSeek === undefined ? null : seekStepMs(event.key, positionMs, durationMs);
@@ -197,21 +286,122 @@ export function WaveformSeek({
       onSeek?.(stepped);
     }
   };
+  const bandStart = Math.min(p, fill);
+  const bandEnd = Math.max(p, fill);
   return (
-    <div className={`uw-wave${className ? ` ${className}` : ''}`}>
-      <div className="uw-wave__bars" aria-hidden="true">
-        {PATTERN.map((h, i) => (
-          <span
-            key={i}
-            className="uw-wave__bar"
-            style={{
-              height: `${h}%`,
-              backgroundColor:
-                i / PATTERN.length < p ? 'var(--accent)' : 'var(--fg18)',
-            }}
-          />
-        ))}
-      </div>
+    <div className={`uw-wave${className ? ` ${className}` : ''}`} ref={rootRef}>
+      <svg
+        className="uw-wave__bars"
+        width={width}
+        height={WAVE_HEIGHT}
+        aria-hidden="true"
+      >
+        {isLoading ? (
+          <>
+            {layout.xs.map((x, i) => (
+              <rect
+                key={i}
+                x={x - WAVE_BAR_WIDTH / 2}
+                y={WAVE_MID - WAVE_MIN_EXTENT}
+                width={WAVE_BAR_WIDTH}
+                height={WAVE_MIN_EXTENT * 2}
+                rx={1.5}
+                fill="var(--fg18)"
+              />
+            ))}
+            <clipPath id={`bars-${uid}`}>
+              {layout.xs.map((x, i) => (
+                <rect
+                  key={i}
+                  x={x - WAVE_BAR_WIDTH / 2}
+                  y={WAVE_MID - WAVE_MIN_EXTENT}
+                  width={WAVE_BAR_WIDTH}
+                  height={WAVE_MIN_EXTENT * 2}
+                  rx={1.5}
+                />
+              ))}
+            </clipPath>
+            <g clipPath={`url(#bars-${uid})`}>
+              <rect
+                className="uw-wave__shimmer"
+                x={0}
+                y={0}
+                width={width * 0.16}
+                height={WAVE_HEIGHT}
+                fill="var(--accent)"
+                opacity={0.55}
+              />
+            </g>
+          </>
+        ) : (
+          <>
+            <clipPath id={`played-${uid}`}>
+              <rect
+                className="uw-wave__fill"
+                x={0}
+                y={0}
+                height={WAVE_HEIGHT}
+                width={fill * width}
+              />
+            </clipPath>
+            {hover !== null && (
+              <clipPath id={`hover-${uid}`}>
+                <rect
+                  x={bandStart * width}
+                  y={0}
+                  height={WAVE_HEIGHT}
+                  width={(bandEnd - bandStart) * width}
+                />
+              </clipPath>
+            )}
+            <path
+              d={dLow}
+              stroke="var(--fg18)"
+              strokeWidth={WAVE_BAR_WIDTH}
+              strokeLinecap="round"
+              fill="none"
+              opacity={0.6}
+            />
+            <path
+              d={dMid}
+              stroke="var(--fg18)"
+              strokeWidth={WAVE_BAR_WIDTH}
+              strokeLinecap="round"
+              fill="none"
+              opacity={0.8}
+            />
+            <path
+              d={dHigh}
+              stroke="var(--fg18)"
+              strokeWidth={WAVE_BAR_WIDTH}
+              strokeLinecap="round"
+              fill="none"
+              opacity={1}
+            />
+            <g clipPath={`url(#played-${uid})`}>
+              <path
+                d={dAll}
+                stroke="var(--accent)"
+                strokeWidth={WAVE_BAR_WIDTH}
+                strokeLinecap="round"
+                fill="none"
+              />
+            </g>
+            {hover !== null && (
+              <g clipPath={`url(#hover-${uid})`}>
+                <path
+                  d={dAll}
+                  stroke="var(--accent)"
+                  strokeWidth={WAVE_BAR_WIDTH}
+                  strokeLinecap="round"
+                  fill="none"
+                  opacity={0.55}
+                />
+              </g>
+            )}
+          </>
+        )}
+      </svg>
       <input
         type="range"
         className={`uw-scrubber uw-wave__input${enabled ? '' : ' uw-off'}`}
@@ -229,7 +419,16 @@ export function WaveformSeek({
         onChange={
           enabled ? (event) => onSeek?.(Number(event.currentTarget.value)) : undefined
         }
-        style={{ '--uw-fill': `${p * 100}%` } as React.CSSProperties}
+        onPointerMove={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (rect.width > 0) {
+            setHover(
+              Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+            );
+          }
+        }}
+        onPointerLeave={() => setHover(null)}
+        style={{ '--uw-fill': `${fill * 100}%` } as React.CSSProperties}
       />
       {labels && (
         <div className="uw-wave__labels">
