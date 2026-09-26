@@ -471,6 +471,7 @@ export type IconName =
   | 'heart'
   | 'heart-filled'
   | 'queue'
+  | 'podium'
   | 'settings'
   | 'close'
   | 'drag-handle'
@@ -571,6 +572,10 @@ const GLYPHS: Record<IconName, Glyph> = {
       p('M5 6h14M5 11h14M5 16h9'),
       p('M17 14v6m0 0-2-2m2 2 2-2'),
     ],
+  },
+  podium: {
+    filled: false,
+    shapes: [rr(4, 10, 4, 9, 1), rr(10, 5, 4, 14, 1), rr(16, 13, 4, 6, 1)],
   },
   settings: {
     filled: false,

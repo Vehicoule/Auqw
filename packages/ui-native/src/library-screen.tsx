@@ -36,7 +36,7 @@ export type LibraryScreenProps = {
 const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
   liked: 'heart',
   downloads: 'download',
-  top50: 'queue',
+  top50: 'podium',
   history: 'clock',
 };
 

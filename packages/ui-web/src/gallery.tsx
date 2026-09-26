@@ -189,6 +189,8 @@ const ICON_SET: readonly IconName[] = [
   'check',
   'menu',
   'monitor',
+  'sidebar',
+  'podium',
 ];
 
 export function GalleryScreen() {

@@ -33,7 +33,7 @@ export type LibraryScreenProps = {
 const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
   liked: 'heart',
   downloads: 'download',
-  top50: 'queue',
+  top50: 'podium',
   history: 'clock',
 };
 
@@ -72,7 +72,7 @@ function CollectionTile({
         <span className="uw-collection__icon">
           <Icon
             name={COLLECTION_ICONS[tile.key]}
-            size={15}
+            size={20}
             color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
           />
         </span>

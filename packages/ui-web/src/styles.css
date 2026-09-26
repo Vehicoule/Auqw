@@ -463,6 +463,11 @@
 .uw-track-row:hover {
   background: var(--fg08);
 }
+/* The row tints as one surface — the inner pressable doesn't add a
+   second layer of gray over the main area. */
+.uw-track-row .uw-track-row__main:hover:not(:disabled) {
+  background: transparent;
+}
 .uw-track-row[data-playing='true'] {
   background: var(--accent-soft);
 }
@@ -850,6 +855,15 @@
 }
 .uw-collection:hover:not(:disabled) {
   border-color: var(--fg40);
+  background: var(--fg08);
+}
+/* The tile tints as one surface — the inner pressable and the play
+   chip don't layer their own grays over it. */
+.uw-collection .uw-collection__body:hover:not(:disabled) {
+  background: transparent;
+}
+.uw-collection .uw-icon-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
 }
 .uw-collection__body {
   display: flex;
@@ -857,12 +871,12 @@
   gap: var(--spacing-md);
   flex: 1;
   min-width: 0;
-  padding: var(--spacing-md);
+  padding: var(--spacing-lg);
   text-align: left;
 }
 .uw-collection__icon {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -1732,15 +1746,17 @@
 }
 /* WCO caption buttons overlay the bar's far right — controls keep
    clear of them. `--uw-caption-w` is measured in the renderer
-   (windowControlsOverlay) since its width is platform-drawn. */
+   (windowControlsOverlay) since its width is platform-drawn. The
+   padding is symmetric on purpose: the pills center on the world
+   column's midpoint, not on the bar minus its caption zone. */
 [data-platform='win32'] .uw-world-bar,
 [data-platform='linux'] .uw-world-bar {
-  padding-right: var(--uw-caption-w, 140px);
+  padding-inline: var(--uw-caption-w, 140px);
 }
 /* On macOS the lights land over the world bar once the stage column
-   that hosts them is collapsed. */
+   that hosts them is collapsed — same symmetric reserve. */
 [data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
-  padding-left: 96px;
+  padding-inline: 96px;
 }
 .uw-world-bar__start,
 .uw-world-bar__end {
