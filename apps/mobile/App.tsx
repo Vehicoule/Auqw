@@ -648,16 +648,20 @@ let toastSink: ((text: string) => void) | null = null;
  * reported tick would otherwise keep extrapolating from the pre-seek
  * anchor. The anchor clock is `performance.now()` — `Date.now()`
  * follows system-clock adjustments, which would jump the highlight.
- * Anchoring is keyed only to position/generation: re-entering the
- * pane (`active` flipping) must not re-anchor — the anchor keeps the
- * tick's real arrival time, so the elapsed fraction since the last
- * engine event is preserved instead of discarded.
- * Ticking only while `active` (lyrics pane open AND playing) keeps
- * the periodic re-render off the idle path.
+ * Anchoring is keyed to position/generation/transport: a fresh
+ * position or a seek re-anchors, and a `playing` transition re-anchors
+ * too — the anchor's clock must freeze with the pause, otherwise
+ * resume would count the paused wall-time as elapsed playback.
+ * Re-entering the pane (`visible` flipping) must NOT re-anchor: the
+ * anchor keeps the tick's real arrival time, so the elapsed fraction
+ * since the last engine event is preserved instead of discarded.
+ * Ticking only while the lyrics pane is live keeps the periodic
+ * re-render off the idle path.
  */
 function useSmoothedPosition(
   positionMs: number,
-  active: boolean,
+  playing: boolean,
+  visible: boolean,
   generation: number,
 ): number {
   const anchor = useRef({ ms: positionMs, at: performance.now() });
@@ -665,9 +669,9 @@ function useSmoothedPosition(
   useEffect(() => {
     anchor.current = { ms: positionMs, at: performance.now() };
     setSmoothMs(positionMs);
-  }, [positionMs, generation]);
+  }, [positionMs, generation, playing]);
   useEffect(() => {
-    if (!active) {
+    if (!playing || !visible) {
       return undefined;
     }
     const tick = () => {
@@ -677,7 +681,7 @@ function useSmoothedPosition(
     tick();
     const id = setInterval(tick, 200);
     return () => clearInterval(id);
-  }, [active]);
+  }, [playing, visible]);
   return smoothMs;
 }
 
@@ -2098,7 +2102,8 @@ function Main({
   );
   const lyricsPositionMs = useSmoothedPosition(
     player?.positionMs ?? 0,
-    playing && expanded && stageMode === 'lyrics',
+    playing,
+    expanded && stageMode === 'lyrics',
     seekGeneration,
   );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
