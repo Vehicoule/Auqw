@@ -1680,6 +1680,77 @@ async function unroutableActiveRefBlocksSeed(): Promise<void> {
   await r.session.dispose();
 }
 
+async function disarmDuringCommitDropsPage(): Promise<void> {
+  // A page commit waiting on storage outlives a synchronous
+  // stopRadio() — the disarm must drop the page, not append it.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  r.storage.holdNextCommit();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert(r.session.stopRadio().ok, 'disarm lands mid-commit');
+  r.storage.settleCommit(ok(undefined));
+  await pump();
+  assert((await seeded).ok, 'seed resolves — the page was dropped');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 1, 'page never entered');
+  assertEqual(snap.radio, null, 'record gone');
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function pausedDrainDoesNotResume(): Promise<void> {
+  // Skipping the last track while PAUSED earns no resume — the
+  // armed tail appends its page but playback stays stopped.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  assert((await r.session.next()).ok, 'paused skip drains');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'page appends');
+  assertEqual(snap.queue.mode, 'stopped', 'no resurrection without playback');
+  await r.session.dispose();
+}
+
+async function pausedServiceDrainDoesNotResume(): Promise<void> {
+  // Same rule on the service path: a transition-to-null landing on
+  // a paused queue is stale — it never earns the drain resume.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assert((await r.session.pause()).ok, 'paused');
+  serviceTransition(r, { from: 'u1', to: null });
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped', 'stale drain applied');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'page appends');
+  assertEqual(snap.queue.mode, 'stopped', 'no resume from a stale drain');
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1718,6 +1789,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['drainChaseIsBounded', drainChaseIsBounded],
   ['pausedSeedDrainsThenResumes', pausedSeedDrainsThenResumes],
   ['unroutableActiveRefBlocksSeed', unroutableActiveRefBlocksSeed],
+  ['disarmDuringCommitDropsPage', disarmDuringCommitDropsPage],
+  ['pausedDrainDoesNotResume', pausedDrainDoesNotResume],
+  ['pausedServiceDrainDoesNotResume', pausedServiceDrainDoesNotResume],
 ] as const;
 
 export async function run(): Promise<void> {

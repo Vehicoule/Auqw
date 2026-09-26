@@ -3151,8 +3151,8 @@ export class Session {
       this.#publish();
       return err(seeded.error);
     }
-    const staged = await this.#commitStaged((cur) =>
-      this.#stageRadioPage(cur, seeded.value),
+    const staged = await this.#commitStaged(
+      this.#guardRadioStage(record, seeded.value),
     );
     if (!staged.ok) {
       r.radio = null;
@@ -3259,8 +3259,8 @@ export class Session {
       this.#publish();
       return;
     }
-    const staged = await this.#commitStaged((cur) =>
-      this.#stageRadioPage(cur, result.value),
+    const staged = await this.#commitStaged(
+      this.#guardRadioStage(record, result.value),
     );
     if (!staged.ok) {
       record.status = 'failed';
@@ -3543,6 +3543,40 @@ export class Session {
    * `stopRadio()` drop the record, so a stopped queue never
    * resurrects when an in-flight page lands.
    */
+  /**
+   * A disarm landing while a page's commit waits on storage must
+   * never let the page reach the queue: the record check happens
+   * inside the segment (a disarm queued before it drops the commit
+   * entirely) and again inside `apply` (a disarm landing during the
+   * commit await skips the in-memory apply).
+   */
+  #guardRadioStage(
+    record: RadioTailRecord,
+    page: RadioPage,
+  ): (cur: Ready) => Result<
+    CommitStage<{ changed: boolean; firstAppended: string | undefined }>
+  > {
+    return (cur) => {
+      if (cur.radio !== record) {
+        return ok({
+          apply: () => ({ changed: false, firstAppended: undefined }),
+        });
+      }
+      const staged = this.#stageRadioPage(cur, page);
+      if (!staged.ok) {
+        return staged;
+      }
+      const inner = staged.value;
+      return ok({
+        ...(inner.batch !== undefined ? { batch: inner.batch } : {}),
+        apply: (rr) =>
+          rr.radio === record
+            ? inner.apply(rr)
+            : { changed: false, firstAppended: undefined },
+      });
+    };
+  }
+
   #resumeDrainedQueue(
     r: Ready,
     record: RadioTailRecord,
@@ -3696,9 +3730,10 @@ export class Session {
       // First occurrence at position 0: a complete no-op.
       return ok(undefined);
     }
-    if (after.currentOccurrenceId === null) {
+    if (after.currentOccurrenceId === null && before.mode === 'playing') {
       // Playback consumed the queue while this tail was armed — the
-      // landed page may resume even if the seed began paused.
+      // landed page may resume even if the seed began paused. A
+      // paused skip-to-end never earns it: no playback ran.
       const rec = r.radio;
       if (rec !== null && rec.status === 'growing') {
         rec.resumeOnDrain = true;
@@ -5054,6 +5089,7 @@ export class Session {
       }
     }
     const toId = event.toOccurrenceId;
+    const wasPlaying = r.queue.snapshot().mode === 'playing';
     try {
       // A null target means the cursor ran off the end: stopped.
       r.queue.reconcileNativeCurrent(
@@ -5067,9 +5103,10 @@ export class Session {
     }
     marker.currentOccurrenceId = toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
-    if (toId === null) {
+    if (toId === null && wasPlaying) {
       // Service-side drain with a tail armed — same authorization as
-      // the app-driven drain in #advance.
+      // the app-driven drain in #advance, and same rule: a stale
+      // transition landing on an already-paused queue earns nothing.
       const rec = r.radio;
       if (rec !== null && rec.status === 'growing') {
         rec.resumeOnDrain = true;
