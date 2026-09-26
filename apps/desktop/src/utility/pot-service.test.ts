@@ -446,6 +446,88 @@ export async function run(): Promise<void> {
   assertEqual(itRes.body['poToken'], 'Cyo=');
   await itSvc.close();
 
+  // jsdom's own dispatcher answers `file:`/`data:` above the configured
+  // one, and a synchronous XHR replays on a private ungated JSDOM in a
+  // worker thread — the guest must not reach either. The interpreter
+  // encodes the read verdict into the mint bytes, so a leak lands in
+  // the token itself: 'clean' only when every probe failed.
+  const sentinel = 'pot-sandbox-xhr-sentinel';
+  const selfUrl = new URL(import.meta.url).href;
+  const xhrProbeJs = `
+    globalThis.TR = {
+      a: async function (program, setupCb) {
+        const asyncSnapshot = function (cb, argsArr) {
+          argsArr[2].push(async function () {
+            return async function (binding) {
+              var verdict = 'clean';
+              try {
+                var sx = new XMLHttpRequest();
+                sx.open('GET', ${JSON.stringify(selfUrl)}, false);
+                sx.send();
+                if (String(sx.responseText).indexOf('${sentinel}') !== -1) {
+                  verdict = 'leak-sync';
+                }
+              } catch (e) {}
+              try {
+                await new Promise(function (resolve) {
+                  var ax = new XMLHttpRequest();
+                  ax.open('GET', ${JSON.stringify(selfUrl)});
+                  ax.onload = function () {
+                    if (
+                      String(ax.responseText).indexOf('${sentinel}') !== -1
+                    ) {
+                      verdict = 'leak-async';
+                    }
+                    resolve();
+                  };
+                  ax.onerror = function () { resolve(); };
+                  ax.send();
+                });
+              } catch (e) {}
+              var out = [];
+              for (var i = 0; i < verdict.length; i++) {
+                out.push(verdict.charCodeAt(i));
+              }
+              return out;
+            };
+          });
+          cb(['snap', 1]);
+        };
+        setupCb(
+          asyncSnapshot,
+          function () {},
+          function () {},
+          function () {},
+        );
+        return [asyncSnapshot];
+      },
+    };
+  `;
+  const xhrWire = fakeWire(
+    '//www.google.com/js/th/fake.js',
+    '["aXRrZW4", 3600, 0, "fb"]',
+    xhrProbeJs,
+  );
+  const xhrSvc = createPotService({
+    fetchImpl: xhrWire.impl,
+    nowMs: () => now.ms,
+    log: () => {},
+  });
+  const xhrPort = await xhrSvc.bind();
+  assert(xhrPort !== null);
+  const xhrRes = await post(
+    `http://127.0.0.1:${xhrPort}`,
+    JSON.stringify({ content_binding: 'bind1' }),
+  );
+  assertEqual(xhrRes.status, 200);
+  assert(isRecord(xhrRes.body));
+  assertEqual(
+    xhrRes.body['poToken'],
+    Buffer.from('clean').toString('base64'),
+    'guest XHR escaped the sandbox gate',
+  );
+  await xhrSvc.close();
+
   // A 30-second TTL still gets a reuse window — the refresh margin
   // shrinks with the TTL instead of leaving nothing to cache, so the
   // second mint reuses the same session (no homepage refetch).
