@@ -648,6 +648,10 @@ let toastSink: ((text: string) => void) | null = null;
  * reported tick would otherwise keep extrapolating from the pre-seek
  * anchor. The anchor clock is `performance.now()` — `Date.now()`
  * follows system-clock adjustments, which would jump the highlight.
+ * Anchoring is keyed only to position/generation: re-entering the
+ * pane (`active` flipping) must not re-anchor — the anchor keeps the
+ * tick's real arrival time, so the elapsed fraction since the last
+ * engine event is preserved instead of discarded.
  * Ticking only while `active` (lyrics pane open AND playing) keeps
  * the periodic re-render off the idle path.
  */
@@ -661,15 +665,19 @@ function useSmoothedPosition(
   useEffect(() => {
     anchor.current = { ms: positionMs, at: performance.now() };
     setSmoothMs(positionMs);
+  }, [positionMs, generation]);
+  useEffect(() => {
     if (!active) {
       return undefined;
     }
-    const id = setInterval(() => {
+    const tick = () => {
       const a = anchor.current;
       setSmoothMs(a.ms + (performance.now() - a.at));
-    }, 200);
+    };
+    tick();
+    const id = setInterval(tick, 200);
     return () => clearInterval(id);
-  }, [active, positionMs, generation]);
+  }, [active]);
   return smoothMs;
 }
 
