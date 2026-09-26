@@ -497,6 +497,33 @@ const IDLE_TRANSFER: TransferModel = {
  */
 let toastSink: ((text: string) => void) | null = null;
 
+/**
+ * Lyrics-highlight position clock: engine ticks arrive ~1Hz (mobile)
+ * to ~4Hz (desktop), so between ticks the raw snapshot position sits
+ * stale and the active line lands visibly late. While `active`, the
+ * last engine position is extrapolated forward at a fixed cadence —
+ * each fresh engine position re-anchors the clock. Ticking only while
+ * `active` (lyrics pane open AND playing) keeps the periodic
+ * re-render off the idle path.
+ */
+function useSmoothedPosition(positionMs: number, active: boolean): number {
+  const anchor = useRef({ ms: positionMs, at: Date.now() });
+  const [smoothMs, setSmoothMs] = useState(positionMs);
+  useEffect(() => {
+    anchor.current = { ms: positionMs, at: Date.now() };
+    setSmoothMs(positionMs);
+    if (!active) {
+      return undefined;
+    }
+    const id = setInterval(() => {
+      const a = anchor.current;
+      setSmoothMs(a.ms + (Date.now() - a.at));
+    }, 200);
+    return () => clearInterval(id);
+  }, [active, positionMs]);
+  return smoothMs;
+}
+
 function reportResult(action: MessageId, result: Result<unknown>): void {
   if (!result.ok) {
     console.warn(
@@ -1702,6 +1729,13 @@ function Main({
     fetchLyrics,
   ]);
 
+  // Lyrics highlight rides a smoothed clock so the active line tracks
+  // playback between the engine's sparse position ticks; it only ticks
+  // while the lyrics pane is actually on screen.
+  const lyricsPositionMs = useSmoothedPosition(
+    player?.positionMs ?? 0,
+    playing && expanded && stageMode === 'lyrics',
+  );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
       return undefined;
@@ -1714,9 +1748,9 @@ function Main({
       sheet: fetch?.sheet ?? null,
       error: fetch?.error ?? null,
       loading: fetch === null ? true : fetch.loading,
-      positionMs: player?.positionMs ?? 0,
+      positionMs: lyricsPositionMs,
     });
-  }, [lyricsFetch, currentRecordingId, player, localeTick]);
+  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {

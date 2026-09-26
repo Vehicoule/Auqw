@@ -907,6 +907,26 @@ function testLyricsModel(): void {
   // tMs:0 line is active at position 0 — the first timed line is the
   // earliest honest highlight, never a phantom earlier line.
   assertEqual(ahead.activeIndex, 0);
+  // Before the first timestamp the intro holds line 0 highlighted —
+  // no-gap highlighting beats a blanked first seconds.
+  const introSheet: LyricsSheet = {
+    provider: 'lyrics-lrclib',
+    fetchedMs: 1_700_000_000_000,
+    cached: false,
+    matched: null,
+    kind: 'synced',
+    lines: [
+      { tMs: 5_000, text: 'first' },
+      { tMs: 15_000, text: 'second' },
+    ],
+  };
+  const intro = toLyricsModel({
+    sheet: introSheet,
+    error: null,
+    loading: false,
+    positionMs: 0,
+  });
+  assertEqual(intro.activeIndex, 0, 'intro holds line 0 pre-first-timestamp');
   // Plain is plain — untimed text never receives a highlight.
   const plain = toLyricsModel({
     sheet: sheetOf('plain'),
