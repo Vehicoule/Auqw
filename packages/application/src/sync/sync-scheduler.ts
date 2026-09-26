@@ -155,7 +155,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     track.timer = timer;
     const work = (async () => {
       const slept = await deps.clock.sleep(delayMs, timer.signal);
-      track.timer = null;
+      // Only OUR sleep clears the slot — a replacement armed while
+      // this one was in flight must stay cancelable.
+      if (track.timer === timer) {
+        track.timer = null;
+      }
       if (!slept.ok || lifecycle.signal.cancelled) {
         return;
       }
@@ -207,11 +211,23 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     const seen = new Set<string>();
     for (const view of status.peers) {
       seen.add(view.peer.fp);
+      // A peer absent from the tracks appeared after start() — a
+      // fresh pairing — and the launch fan-out never covered it;
+      // its first round converges edits that predate the pair.
+      const isNew = !tracks.has(view.peer.fp);
       const track = trackFor(view.peer.fp);
+      if (isNew) {
+        schedule(view.peer.fp, debounceMs, false);
+      }
       if (view.state === 'open') {
-        // A live session resets the reconnect ladder — and writes
-        // queued while it was down converge on a debounced round.
-        track.backoffMs = reconnectBaseMs;
+        // 'open' during a scheduler-owned round is that round's
+        // intermediate dial status — syncNow publishes it before
+        // the exchange resolves — so the round's own result decides
+        // the ladder. Resetting here would pin every live-but-
+        // failing peer to the base delay forever.
+        if (!track.running) {
+          track.backoffMs = reconnectBaseMs;
+        }
         if (track.dirty && !track.running) {
           track.dirty = false;
           schedule(view.peer.fp, debounceMs, true);
@@ -293,6 +309,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         for (const [fp, track] of tracks) {
           track.backoffMs = reconnectBaseMs;
           if (!track.running) {
+            // The immediate round exports everything the flag stood
+            // for — consume it so a successful round doesn't book a
+            // redundant second pass. schedule() re-marks dirty if
+            // the online read races back down.
+            track.dirty = false;
             schedule(fp, 0, true);
           } else {
             track.dirty = true;

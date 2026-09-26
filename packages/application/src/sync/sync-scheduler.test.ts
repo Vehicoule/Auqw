@@ -304,6 +304,144 @@ async function nudgeMidRoundIsDirty(): Promise<void> {
   scheduler.stop();
 }
 
+async function newPeerFirstRound(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [];
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 0, 'no peers at start');
+  // A pairing lands mid-session: the peer appears in the next status
+  // emission — its first round must run without another trigger.
+  client.peersList = [peer('fp-b')];
+  client.peerViews.set('fp-b', { state: 'open' });
+  client.emitStatus();
+  await pump();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.join(','), 'fp-b', 'new peer synced once');
+  scheduler.stop();
+}
+
+async function intermediateOpenKeepsBackoff(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'offline' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A round that dials (publishes 'open' mid-flight, like the real
+  // client) then fails the exchange — the intermediate open must
+  // NOT reset the reconnect ladder.
+  client.syncNow = (fp) => {
+    client.syncNowCalls.push(fp);
+    client.peerViews.set(fp, { state: 'open' });
+    client.emitStatus();
+    client.peerViews.set(fp, {
+      state: 'offline',
+      lastError: appError('transient', 'page timed out'),
+    });
+    client.emitStatus();
+    return Promise.resolve(err(appError('transient', 'page timed out')));
+  };
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'debounced round ran');
+  // First failure → reconnect at base 1s.
+  clock.advance(999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'backoff holds below 1s');
+  clock.advance(1);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'reconnect at base');
+  // Second consecutive failure → doubled to 2s despite the
+  // intermediate open status each round emitted.
+  clock.advance(1_999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'ladder doubled to 2s');
+  clock.advance(1);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 4, 'doubled backoff fired');
+  scheduler.stop();
+}
+
+async function recoveryEdgeConsumesDirty(): Promise<void> {
+  let isOnline = true;
+  const { client, clock, scheduler } = rig({
+    isOnline: () => isOnline,
+    debounceMs: 500,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // Writes arrive while offline — dirty marks them; the recovery
+  // edge's immediate round covers them, so no second round follows.
+  isOnline = false;
+  scheduler.notifyConnectivity(false);
+  scheduler.notifyLocalWrites();
+  await pump();
+  isOnline = true;
+  scheduler.notifyConnectivity(true);
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'immediate recovery round');
+  clock.advance(10_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'consumed dirty books no redundant follow-up',
+  );
+  scheduler.stop();
+}
+
+async function replacedTimerStaysCancelable(): Promise<void> {
+  let isOnline = true;
+  const { client, clock, scheduler } = rig({
+    isOnline: () => isOnline,
+    debounceMs: 500,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // Arm a debounced timer, then go offline → its sleeper resolves
+  // cancelled. A replacement armed by the recovery edge must not be
+  // clobbered by the dead sleeper clearing track.timer.
+  scheduler.notifyLocalWrites();
+  clock.advance(100);
+  isOnline = false;
+  scheduler.notifyConnectivity(false);
+  isOnline = true;
+  scheduler.notifyConnectivity(true);
+  await pump();
+  // Offline again before the replacement fires: a clobbered
+  // reference would leave the live sleeper uncancellable.
+  isOnline = false;
+  scheduler.notifyConnectivity(false);
+  clock.advance(10_000);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'replaced timer stayed dead');
+  assertEqual(clock.pendingSleepers, 0, 'no orphaned sleeper');
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
@@ -313,4 +451,8 @@ export async function run(): Promise<void> {
   await unpairedPeerDrops();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
+  await newPeerFirstRound();
+  await intermediateOpenKeepsBackoff();
+  await recoveryEdgeConsumesDirty();
+  await replacedTimerStaysCancelable();
 }

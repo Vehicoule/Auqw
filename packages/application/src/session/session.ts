@@ -1631,12 +1631,12 @@ export class Session {
           : r.settings.playbackProvider,
         lyricsProvider:
           s.lyricsProvider != null &&
-          !this.#providers.has(s.lyricsProvider)
+            !this.#providers.has(s.lyricsProvider)
             ? null
             : (s.lyricsProvider ?? null),
         radioProvider:
           s.radioProvider != null &&
-          !this.#providers.has(s.radioProvider)
+            !this.#providers.has(s.radioProvider)
             ? null
             : (s.radioProvider ?? null),
       };
@@ -3838,7 +3838,7 @@ export class Session {
 
   async #startAttempt(
     occurrenceId: string,
-    retry?: { deadlineMs: number },
+    retry?: { deadlineMs: number; listenedMsAccum: number },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -3879,7 +3879,12 @@ export class Session {
       autoRetried: retry !== undefined,
       preparedHandled: false,
       endedHandled: false,
-      listenedMsAccum: 0,
+      // Listening validated before a retried failure still counts —
+      // the fresh handle re-baselines position, not the threshold.
+      listenedMsAccum:
+        retry !== undefined && isSafeNonNegative(retry.listenedMsAccum)
+          ? retry.listenedMsAccum
+          : 0,
     };
     this.#active = attempt;
     r.playback = {
@@ -4297,12 +4302,19 @@ export class Session {
   ): Promise<void> {
     const now = this.#safeNow();
     const remaining = now === null ? 0 : attempt.deadlineMs - now;
+    // retryAfterMs is the provider's floor — squeezing it to fit the
+    // budget would re-attempt sooner than permitted, so a wait that
+    // leaves too little room fails with the original verdict.
+    const wait = Math.max(
+      error.retryAfterMs ?? 0,
+      AUTO_RETRY_BACKOFF_MS,
+    );
     if (
       !error.retryable ||
       attempt.autoRetried === true ||
       this.#disposed ||
       this.#isStale(attempt) ||
-      remaining <= AUTO_RETRY_MIN_BUDGET_MS
+      wait + AUTO_RETRY_MIN_BUDGET_MS > remaining
     ) {
       await this.#failAttempt(attempt, error);
       return;
@@ -4330,10 +4342,6 @@ export class Session {
     attempt.timer?.cancel();
     const timer = new CancellationSource();
     attempt.timer = timer;
-    const wait = Math.min(
-      Math.max(error.retryAfterMs ?? 0, AUTO_RETRY_BACKOFF_MS),
-      remaining - AUTO_RETRY_MIN_BUDGET_MS,
-    );
     // Backoff and the re-attempt run as owned work, not on the event
     // tail — a re-prepare that blocks must not stall every player
     // event queued behind it.
@@ -4367,9 +4375,12 @@ export class Session {
     }
     // A returned err is already published by #failAttempt inside
     // #startAttempt — the Result is for the original caller chain
-    // that no longer exists here.
+    // that no longer exists here. Validated listening time carries
+    // across the retry so a mid-play failure doesn't zero the play
+    // threshold's progress.
     await this.#startAttempt(attempt.occurrenceId, {
       deadlineMs: attempt.deadlineMs,
+      listenedMsAccum: attempt.listenedMsAccum,
     });
   }
 
@@ -4957,8 +4968,8 @@ export class Session {
         projProvider === null || projRefId === null
           ? undefined
           : toRecording?.sourceRefs.find(
-                (s) => s.provider === projProvider && s.id === projRefId,
-              ) ?? { provider: projProvider, kind: 'track', id: projRefId };
+            (s) => s.provider === projProvider && s.id === projRefId,
+          ) ?? { provider: projProvider, kind: 'track', id: projRefId };
       // Statuses continue to echo the immutable service projection until
       // app intent installs a new one; reconciliation alone must not re-key it.
       const identity = event.identity;
@@ -5002,7 +5013,7 @@ export class Session {
     const queueEpoch = r.queueEpoch;
     const queueWrite = this.#persist(() =>
       r.queueEpoch === queueEpoch &&
-      queueSnap.revision > r.queueCommittedRev
+        queueSnap.revision > r.queueCommittedRev
         ? { queue: queueSnap }
         : {},
     );

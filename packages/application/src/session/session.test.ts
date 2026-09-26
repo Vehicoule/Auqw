@@ -2590,6 +2590,108 @@ async function earlyPrepareFailure(): Promise<void> {
   assertEqual(calls(r, 'play').length, 0, 'never played');
 }
 
+async function retryAfterBeyondBudget(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // A provider-requested wait that can't fit the remaining budget
+  // stands — squeezing it would re-attempt sooner than permitted.
+  const failure: PlayerEvent = {
+    type: 'prepare',
+    requestId: 'req-early',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('rate-limit', 'slow down', 30_000),
+      attempt: TRACE,
+    },
+  };
+  r.player.emit(failure);
+  await pump();
+  r.clock.advance(20_000);
+  await pump();
+  assertEqual(
+    calls(r, 'prepare').length,
+    1,
+    'no re-attempt inside the floor',
+  );
+  assertEqual(readyOf(r).playback.type, 'failed', 'verdict stands');
+  r.player.settlePrepare(ok('req-early'));
+  await pump();
+  const res = await playing;
+  assert(!res.ok && res.error.kind === 'rate-limit', 'rate-limit surfaces');
+}
+
+async function listenedMsCarriesAcrossRetry(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        { ...recording('r1', [ref('youtube-music', 'y1')]), durationMs: 20_000 },
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const snap = readyOf(r);
+  const idA = 'identity' in snap.playback ? snap.playback.identity : undefined;
+  assert(idA !== undefined, 'attempt identity');
+  // 7.5 s of validated listening on a 20 s recording (bar is 10 s —
+  // the first tick only baselines position).
+  for (const pos of [2_500, 5_000, 7_500, 10_000]) {
+    r.player.emit(statusEvent(idA, 'h-o1', 'playing', pos));
+    await pump(4);
+  }
+  // Mid-play transient failure → the auto-retry re-attempts; the
+  // published state holds 'playing' through the backoff — no failed
+  // flicker while recovery is still possible.
+  r.player.emit(statusEvent(idA, 'h-o1', 'failed', 10_000));
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 1, 'backoff, not re-prepare');
+  assertEqual(readyOf(r).playback.type, 'playing', 'no failed flicker');
+  r.clock.advance(600);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'retry re-prepares');
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-o1b'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-h-o1b')), 'pending retry prepare');
+  await pump();
+  // The retried stream restarts at 0 — listening still stacks on the
+  // carried accumulator: 7.5 s + 4 s crosses the 10 s bar (ticks stay
+  // under the 2.5 s per-tick delta cap).
+  for (const pos of [0, 2_000, 4_000]) {
+    r.player.emit(statusEvent(idB, 'h-o1b', 'playing', pos));
+    await pump(4);
+  }
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    1,
+    'listening time survives the retry',
+  );
+  assertEqual(readyOf(r).playCounts[0]?.count, 1);
+}
+
 async function releaseRetry(): Promise<void> {
   const r = rig(
     persisted({
@@ -4047,6 +4149,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['previousNoOp', previousNoOp],
   ['controlFailure', controlFailure],
   ['earlyPrepareFailure', earlyPrepareFailure],
+  ['retryAfterBeyondBudget', retryAfterBeyondBudget],
+  ['listenedMsCarriesAcrossRetry', listenedMsCarriesAcrossRetry],
   ['releaseRetry', releaseRetry],
   ['statusBoundary', statusBoundary],
   ['staleFailCannotClobber', staleFailCannotClobber],

@@ -684,6 +684,18 @@ export async function createSessionController(
         });
         if (built.ok) {
           syncSurface = built.value;
+          // Flush buffered pre-surface writes BEFORE the scheduler's
+          // on-launch round — a round that exports first carries a
+          // page missing them, and a flush landing after notifies
+          // nobody, so they'd sit unsynced until the next trigger.
+          const flushed = await emitWrites([]);
+          if (!flushed.ok) {
+            void log.write({
+              level: 'warn',
+              message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+              atMs: clock.nowMs(),
+            });
+          }
           // Trigger layer lives with the client: on-launch round per
           // peer now, debounced rounds on committed writes, reconnect
           // backoff on session drops, and rounds on the connectivity
@@ -744,17 +756,6 @@ export async function createSessionController(
             }
             await session.emitUnsynced(synced).catch(() => undefined);
           })().catch(() => undefined);
-          // Flush buffered pre-surface writes NOW — the next edit
-          // may never come, and the buffer only rides emit calls.
-          void emitWrites([]).then((flushed) => {
-            if (!flushed.ok) {
-              void log.write({
-                level: 'warn',
-                message: `sync pre-surface flush failed: ${flushed.error.kind}`,
-                atMs: clock.nowMs(),
-              });
-            }
-          });
         } else {
           void log.write({
             level: 'warn',

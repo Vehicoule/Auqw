@@ -4,7 +4,7 @@
  * it — baseline main vs the hardening branch — and prints one JSON
  * object per scenario on stdout.
  *
- *   node --experimental-strip-types src/reliability-measure.ts
+ *   node --experimental-strip-types harness/reliability-measure.ts
  */
 import { CancellationSource } from '../src/cancellation.ts';
 import { appError, err, ok } from '../src/errors.ts';
