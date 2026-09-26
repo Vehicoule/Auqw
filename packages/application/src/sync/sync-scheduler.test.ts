@@ -689,10 +689,80 @@ async function cleanCloseReconnects(): Promise<void> {
   scheduler.stop();
 }
 
+async function unreachableDialReconnects(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'offline' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // The desktop is off: the dial lands 'unavailable' — non-retryable
+  // in the taxonomy, but a transport-absent peer earns the ladder.
+  client.outcomes = [
+    err(appError('unavailable', 'sync: no usable endpoints')),
+  ];
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'unreachable round ran');
+  clock.advance(999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'backoff holds below base');
+  clock.advance(1);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'unreachable peer reconnects');
+  // The reconnect succeeded — the ladder reset books nothing more.
+  clock.advance(10_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    3,
+    'a landed reconnect ends the ladder',
+  );
+  scheduler.stop();
+}
+
+async function rateLimitHintFloorsBackoff(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A rate-limit asks for 30 s — the 1 s ladder step floors at the
+  // peer's own hint instead of retrying early.
+  client.outcomes = [err(appError('rate-limit', 'slow down', 30_000))];
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'rate-limited round ran');
+  clock.advance(29_999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'ladder cannot duck the hint');
+  clock.advance(1);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'retry lands after the asked wait');
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
   await writeBurstTrailingEdge();
+  await unreachableDialReconnects();
+  await rateLimitHintFloorsBackoff();
   await writeStandsBehindBackoff();
   await pageCapProgressContinues();
   await stopStartAcrossInFlightRound();

@@ -2696,6 +2696,93 @@ async function listenedMsCarriesAcrossRetry(): Promise<void> {
   assertEqual(readyOf(r).playCounts[0]?.count, 1);
 }
 
+async function prepareBudgetIsPerIntent(): Promise<void> {
+  // A rejected prepare consumes the same budget the event-level
+  // re-attempt draws on — one intent never stacks to 3+ prepares.
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // Prepare-1 rejected transient: retryBounded spends the intent's
+  // second prepare inside the shared deadline.
+  r.player.settlePrepare(err(appError('transient', 'prepare blip')));
+  await pump();
+  r.clock.advance(400);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'bounded retry re-prepares');
+  // Prepare-2 lands, then the stream reports failed — the budget is
+  // spent, so the failure publishes instead of arming a third.
+  r.player.settlePrepare(ok('req-2'));
+  await pump();
+  const failure: PlayerEvent = {
+    type: 'prepare',
+    requestId: 'req-2',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('transient', 'stream died'),
+      attempt: TRACE,
+    },
+  };
+  r.player.emit(failure);
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'failed', 'spent budget fails');
+  r.clock.advance(20_000);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'no stacked third prepare');
+  // playOccurrence itself resolved once the retried prepare landed —
+  // the failure event lands after the call's verdict.
+  const res = await playing;
+  assert(res.ok, 'prepare-2 accepted before the failure event');
+
+  // Fresh chain: the event-level retry fires, and the retried
+  // attempt's own rejected prepare gets no inner second chance.
+  const r2 = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r2);
+  await playThrough(r2, 'o1');
+  const snap = readyOf(r2);
+  const idA = 'identity' in snap.playback ? snap.playback.identity : undefined;
+  assert(idA !== undefined, 'attempt identity');
+  r2.player.emit(statusEvent(idA, 'h-o1', 'failed', 1_000));
+  await pump();
+  r2.clock.advance(600);
+  await pump();
+  assertEqual(calls(r2, 'prepare').length, 2, 're-attempt prepared once');
+  r2.player.settlePrepare(err(appError('transient', 'still bad')));
+  await pump();
+  r2.clock.advance(20_000);
+  await pump();
+  assertEqual(
+    calls(r2, 'prepare').length,
+    2,
+    'retried attempt cannot stack its own retry',
+  );
+  assertEqual(readyOf(r2).playback.type, 'failed', 'terminal on spent budget');
+}
+
 async function releaseRetry(): Promise<void> {
   const r = rig(
     persisted({
@@ -4206,6 +4293,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['earlyPrepareFailure', earlyPrepareFailure],
   ['retryAfterBeyondBudget', retryAfterBeyondBudget],
   ['listenedMsCarriesAcrossRetry', listenedMsCarriesAcrossRetry],
+  ['prepareBudgetIsPerIntent', prepareBudgetIsPerIntent],
   ['releaseRetry', releaseRetry],
   ['failedRetryReleaseIsNotStranded', failedRetryReleaseIsNotStranded],
   ['statusBoundary', statusBoundary],

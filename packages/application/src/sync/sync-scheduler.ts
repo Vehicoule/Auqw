@@ -219,9 +219,22 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // Our own lifecycle cancel — no verdict to schedule on.
       } else {
         warn(`sync round failed: ${result.error.kind}`);
-        if (result.error.retryable) {
+        // 'unavailable' is non-retryable in the taxonomy, but at this
+        // boundary a dial landing on nobody listening is a temporarily
+        // unreachable peer, not a dead route — it earns the same
+        // bounded ladder as a retryable drop.
+        if (
+          result.error.retryable ||
+          result.error.kind === 'unavailable'
+        ) {
           // Reconnect backoff: double per consecutive failure, capped.
-          reconnectMs = track.backoffMs;
+          // A peer's retryAfterMs (rate-limit) floors the wait — the
+          // ladder never schedules under what the peer asked for.
+          const hint = result.error.retryAfterMs;
+          reconnectMs =
+            hint !== undefined && isSafeNonNegative(hint)
+              ? Math.max(track.backoffMs, hint)
+              : track.backoffMs;
           track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         } else if (
           result.error.kind === 'budget-exceeded' &&
@@ -286,15 +299,22 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       } else if (
         view.state === 'offline' &&
         view.lastError !== undefined &&
-        view.lastError.retryable &&
+        (view.lastError.retryable ||
+          view.lastError.kind === 'unavailable') &&
         !track.running &&
         track.timer === null
       ) {
         // A session the client dropped (dead socket, keepalive miss)
-        // reconnects on the backoff ladder — non-retryable verdicts
-        // (auth-required, peer revoked) wait for the peer list to
-        // change instead of hammering a dead route.
-        const wait = track.backoffMs;
+        // or a dial that found nobody listening reconnects on the
+        // backoff ladder — a carried retryAfterMs floors the wait,
+        // while non-transport verdicts (auth-required, peer revoked)
+        // wait for the peer list to change instead of hammering a
+        // dead route.
+        const hint = view.lastError.retryAfterMs;
+        const wait =
+          hint !== undefined && isSafeNonNegative(hint)
+            ? Math.max(track.backoffMs, hint)
+            : track.backoffMs;
         track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         schedule(view.peer.fp, wait, 'stand');
       } else if (

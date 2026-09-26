@@ -266,6 +266,12 @@ const CANDIDATE_LIMIT = 25;
  */
 const AUTO_RETRY_BACKOFF_MS = 400;
 const AUTO_RETRY_MIN_BUDGET_MS = 1_000;
+/**
+ * `player.prepare` calls one play intent may spend across its whole
+ * attempt chain — the in-attempt bounded retry and the event-level
+ * re-attempt draw on the same budget instead of stacking ceilings.
+ */
+const PREPARE_CALL_BUDGET = 2;
 // Status ticks fire ~1 s; a position delta above this between ticks
 // is a seek/jump, not played time.
 const MAX_TICK_DELTA_MS = 2_500;
@@ -358,6 +364,8 @@ type ActiveAttempt = {
   lastStatusPositionMs?: number;
   /** Actual played span summed from tick deltas (seeks don't count). */
   listenedMsAccum: number;
+  /** Prepare calls spent so far across this intent's attempt chain. */
+  preparesUsed: number;
 };
 
 type Ready = {
@@ -4268,7 +4276,11 @@ export class Session {
 
   async #startAttempt(
     occurrenceId: string,
-    retry?: { deadlineMs: number; listenedMsAccum: number },
+    retry?: {
+      deadlineMs: number;
+      listenedMsAccum: number;
+      preparesUsed: number;
+    },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -4314,6 +4326,10 @@ export class Session {
       listenedMsAccum:
         retry !== undefined && isSafeNonNegative(retry.listenedMsAccum)
           ? retry.listenedMsAccum
+          : 0,
+      preparesUsed:
+        retry !== undefined && isSafeNonNegative(retry.preparesUsed)
+          ? retry.preparesUsed
           : 0,
     };
     this.#active = attempt;
@@ -4396,8 +4412,15 @@ export class Session {
       deadlineMs,
       signal: attempt.source.signal,
       clock: this.#clock,
-      call: () =>
-        this.#withDeadline(
+      // The prepare budget is per intent, not per attempt — a
+      // retried attempt spends only what its predecessor left.
+      maxAttempts: Math.max(
+        1,
+        PREPARE_CALL_BUDGET - attempt.preparesUsed,
+      ),
+      call: () => {
+        attempt.preparesUsed += 1;
+        return this.#withDeadline(
           () =>
             this.#player.prepare({
               provider: ref.provider,
@@ -4408,7 +4431,8 @@ export class Session {
           // Every call shares the attempt's source — a supersede
           // aborts whichever prepare is in flight.
           attempt.source,
-        ),
+        );
+      },
     });
     if (this.#isStale(attempt)) {
       return err(
@@ -4768,6 +4792,7 @@ export class Session {
     if (
       !error.retryable ||
       attempt.autoRetried === true ||
+      attempt.preparesUsed >= PREPARE_CALL_BUDGET ||
       this.#disposed ||
       this.#isStale(attempt) ||
       wait + AUTO_RETRY_MIN_BUDGET_MS > remaining
@@ -4837,6 +4862,7 @@ export class Session {
     await this.#startAttempt(attempt.occurrenceId, {
       deadlineMs: attempt.deadlineMs,
       listenedMsAccum: attempt.listenedMsAccum,
+      preparesUsed: attempt.preparesUsed,
     });
   }
 
@@ -5448,6 +5474,9 @@ export class Session {
         // from the adopted position so threshold math stays honest.
         listenedMsAccum: event.positionMs,
         lastStatusPositionMs: event.positionMs,
+        // The adopted stream was attached outside this intent's
+        // attempt chain — its own prepare budget starts fresh.
+        preparesUsed: 0,
       };
       this.#active = attempt;
       r.playback = {
