@@ -122,6 +122,10 @@ export async function run(): Promise<void> {
         attach: () => undefined,
         detach: () => undefined,
       },
+      syncNearby: {
+        attach: () => undefined,
+        detach: () => undefined,
+      },
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {
         request: (channel, args) => {

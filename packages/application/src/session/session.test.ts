@@ -1439,6 +1439,7 @@ async function portThrows(): Promise<void> {
   const badProvider: ProviderPort = {
     id: 'youtube-music',
     capabilities: ['playback.candidates'],
+    version: null,
     search: () => Promise.resolve(ok({ items: [], storefront: null })),
     candidates: () => Promise.reject(new Error('secret-boom')),
     resolvePlayback: () =>

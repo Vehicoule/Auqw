@@ -108,6 +108,12 @@ class FakeSyncClient implements SyncClient {
     return Promise.resolve(ok(null));
   }
 
+  refreshPeers(): Promise<Result<void>> {
+    return Promise.resolve(ok(undefined));
+  }
+
+  dropSession(): void { }
+
   unpair(): Promise<Result<void>> {
     return Promise.resolve(ok(undefined));
   }

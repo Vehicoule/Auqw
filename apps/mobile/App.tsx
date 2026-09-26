@@ -18,10 +18,10 @@ import { NavigationBar } from 'expo-navigation-bar';
 import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
-  JetBrainsMono_400Regular,
-  JetBrainsMono_500Medium,
-  JetBrainsMono_700Bold,
-} from '@expo-google-fonts/jetbrains-mono';
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_700Bold,
+} from '@expo-google-fonts/inter';
 import * as AuqwExpo from 'auqw-expo';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
@@ -30,6 +30,7 @@ import {
   ProviderRouter,
   SearchSession,
   effectiveMapping,
+  formatEndpoint,
   isMatchGate,
   isRefRejected,
   previewImport,
@@ -106,6 +107,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  formatExpiry,
   toSyncModel,
   toTrackRowModel,
   useTheme,
@@ -264,9 +266,9 @@ type Boot =
 
 export function App() {
   const [fontsLoaded] = useFonts({
-    JetBrainsMono_400Regular,
-    JetBrainsMono_500Medium,
-    JetBrainsMono_700Bold,
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_700Bold,
   });
   const [attempt, setAttempt] = useState(0);
   const [boot, setBoot] = useState<Boot>({ type: 'loading' });
@@ -639,6 +641,53 @@ const IDLE_TRANSFER: TransferModel = {
  * every dependency list.
  */
 let toastSink: ((text: string) => void) | null = null;
+
+/**
+ * Lyrics-highlight position clock: engine ticks arrive ~1Hz (mobile)
+ * to ~4Hz (desktop), so between ticks the raw snapshot position sits
+ * stale and the active line lands visibly late. While `active`, the
+ * last engine position is extrapolated forward at a fixed cadence —
+ * each fresh engine position re-anchors the clock. `generation`
+ * re-anchors without a position change: a seek landing on the last
+ * reported tick would otherwise keep extrapolating from the pre-seek
+ * anchor. The anchor clock is `performance.now()` — `Date.now()`
+ * follows system-clock adjustments, which would jump the highlight.
+ * Anchoring is keyed to position/generation/transport: a fresh
+ * position or a seek re-anchors, and a `playing` transition re-anchors
+ * too — the anchor's clock must freeze with the pause, otherwise
+ * resume would count the paused wall-time as elapsed playback.
+ * Re-entering the pane (`visible` flipping) must NOT re-anchor: the
+ * anchor keeps the tick's real arrival time, so the elapsed fraction
+ * since the last engine event is preserved instead of discarded.
+ * Ticking only while the lyrics pane is live keeps the periodic
+ * re-render off the idle path.
+ */
+function useSmoothedPosition(
+  positionMs: number,
+  playing: boolean,
+  visible: boolean,
+  generation: number,
+): number {
+  const anchor = useRef({ ms: positionMs, at: performance.now() });
+  const [smoothMs, setSmoothMs] = useState(positionMs);
+  useEffect(() => {
+    anchor.current = { ms: positionMs, at: performance.now() };
+    setSmoothMs(positionMs);
+  }, [positionMs, generation, playing]);
+  useEffect(() => {
+    if (!playing || !visible) {
+      return undefined;
+    }
+    const tick = () => {
+      const a = anchor.current;
+      setSmoothMs(a.ms + (performance.now() - a.at));
+    };
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [playing, visible]);
+  return smoothMs;
+}
 
 function reportResult(action: MessageId, result: Result<unknown>): void {
   if (!result.ok) {
@@ -1038,6 +1087,37 @@ function Main({
   );
   const [pairing, setPairing] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
+  // Symmetric pairing: `share` = this device hosting a QR/code offer;
+  // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
+  // live only while the sync screen is open — the listener is
+  // pairing-only (rounds still dial out via the client).
+  const [share, setShare] = useState<{
+    readonly active: boolean;
+    readonly busy: boolean;
+    readonly code: string | null;
+    readonly payload: string | null;
+    readonly expiresAt: number | null;
+  }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
+  // Share generations, not a bool: a stale start()/stop() from a
+  // dismissed share must not resolve into — or tear down — a NEWER
+  // share's listener. Nonzero means "a share attempt owns the host".
+  const shareGenRef = useRef(0);
+  // Bounded remint retries — a failed mint clears the dead offer and
+  // retries a few times rather than leaving an expired code on screen.
+  const shareRetryRef = useRef(0);
+  // Last-mint-wins: overlapping remints (expiry + inbound pair) apply
+  // only their newest result — a stale mint finishing last must not
+  // display a code the host no longer honors.
+  const shareMintRef = useRef(0);
+  const [nearbyPeers, setNearbyPeers] = useState<
+    readonly {
+      key: string;
+      name: string;
+      host: string;
+      port: number;
+      fp: string | null;
+    }[]
+  >([]);
   useEffect(() => {
     if (syncSurface === null) {
       return;
@@ -1921,7 +2001,11 @@ function Main({
     (
       request:
         | { readonly payload: string }
-        | { readonly code: string; readonly endpoints: readonly string[] },
+        | {
+            readonly code: string;
+            readonly endpoints: readonly string[];
+            readonly fp?: string;
+          },
     ) => {
       const client = syncSurface?.client;
       if (client === undefined || pairing) {
@@ -1954,7 +2038,7 @@ function Main({
       }
       runPair({
         code: input.code,
-        endpoints: [`${input.host}:${input.port}`],
+        endpoints: [formatEndpoint(input.host, input.port)],
       });
     },
     [runPair],
@@ -1965,6 +2049,293 @@ function Main({
     },
     [runPair],
   );
+  // Browse for nearby pair hosts while the sync screen is open —
+  // discovery is advisory (a dead browse just yields an empty list).
+  const syncOpen = overlay?.type === 'sync';
+  useEffect(() => {
+    const discovery = syncSurface?.discovery;
+    if (!syncOpen || discovery === undefined || discovery === null) {
+      return;
+    }
+    let session: { close(): void } | null = null;
+    let gone = false;
+    void discovery
+      .browse({
+        onFound: (peer) => {
+          // A late event after close must not repopulate the list the
+          // cleanup just cleared — the new browse owns the next open.
+          if (gone) {
+            return;
+          }
+          // Service identity (name|host) is the row key — a
+          // re-advertised peer on a new port replaces its row, a
+          // same-named neighbor keeps its own.
+          setNearbyPeers((prev) => [
+            ...prev.filter((p) => p.key !== peer.key),
+            {
+              key: peer.key,
+              name: peer.name,
+              host: peer.host,
+              port: peer.port,
+              fp: peer.fp,
+            },
+          ]);
+        },
+        onLost: (key) => {
+          if (gone) {
+            return;
+          }
+          setNearbyPeers((prev) =>
+            prev.filter((p) => p.key !== key),
+          );
+        },
+      })
+      .then((opened) => {
+        if (gone) {
+          opened.ok && opened.value.close();
+          return;
+        }
+        if (opened.ok) {
+          session = opened.value;
+        }
+      });
+    return () => {
+      gone = true;
+      session?.close();
+      setNearbyPeers([]);
+    };
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOpen, controller]);
+
+  // Share (this device as the pair host): stop whenever the sync
+  // screen isn't open — the listener is pairing-only and its minted
+  // code dies with the sheet.
+  useEffect(() => {
+    if (syncOpen) {
+      return;
+    }
+    if (shareGenRef.current !== 0) {
+      shareGenRef.current = 0;
+      shareRetryRef.current = 0;
+      void syncSurface?.host?.stop();
+    }
+    setShare({
+      active: false,
+      busy: false,
+      code: null,
+      payload: null,
+      expiresAt: null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOpen]);
+
+  // Mint + apply a fresh offer — gated on a share still owning the
+  // host (shareGenRef) and share still active inside the set.
+  const remintShareOffer = useCallback(() => {
+    const host = syncSurface?.host;
+    if (host === undefined || host === null || shareGenRef.current === 0) {
+      return;
+    }
+    const attempt = ++shareMintRef.current;
+    // A failed mint while sharing stays on: the host has nothing left
+    // to honor, so the dead offer must come OFF screen — then a
+    // bounded retry tries to get a live code back.
+    const mintFailed = () => {
+      if (shareGenRef.current === 0 || attempt !== shareMintRef.current) {
+        return;
+      }
+      setShare((prev) =>
+        prev.active
+          ? { ...prev, code: null, payload: null, expiresAt: null }
+          : prev,
+      );
+      shareRetryRef.current += 1;
+      if (shareRetryRef.current <= 3) {
+        setTimeout(remintShareOffer, 10_000);
+      }
+    };
+    void host
+      .mintOffer()
+      .then((offer) => {
+        if (
+          shareGenRef.current === 0 ||
+          attempt !== shareMintRef.current
+        ) {
+          return;
+        }
+        if (!offer.ok) {
+          setPairError(offer.error.message);
+          mintFailed();
+          return;
+        }
+        shareRetryRef.current = 0;
+        setShare((prev) =>
+          prev.active
+            ? {
+                ...prev,
+                code: offer.value.code,
+                payload: offer.value.payload,
+                expiresAt: offer.value.expiresAt,
+              }
+            : prev,
+        );
+      })
+      .catch(mintFailed);
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+
+  // Offers expire after ~2m — remint while sharing stays on so the
+  // displayed code/QR never outlives what the host will accept.
+  useEffect(() => {
+    if (!share.active || share.expiresAt === null) {
+      return;
+    }
+    const timer = setTimeout(
+      remintShareOffer,
+      Math.max(0, share.expiresAt - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [share.active, share.expiresAt, remintShareOffer]);
+
+  // An accepted inbound pair CONSUMES the displayed code — remint so
+  // the UI never shows a dead offer the next caller can't redeem.
+  useEffect(() => {
+    const host = syncSurface?.host;
+    if (!share.active || host === undefined || host === null) {
+      return;
+    }
+    const unPair = host.onPaired(remintShareOffer);
+    // A dead advert leaves the offer code-valid but undiscoverable —
+    // tell the user rather than imply nearby visibility.
+    const unAdvert = host.onAdvertiseError(() =>
+      setPairError(
+        'nearby discovery unavailable — share the code instead',
+      ),
+    );
+    return () => {
+      unPair();
+      unAdvert();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [share.active, controller, remintShareOffer]);
+
+  // The 'expires in Nm' label is a render-time read — tick while an
+  // offer is live so the countdown doesn't freeze between mints.
+  const [shareTick, setShareTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!share.active || share.expiresAt === null) {
+      return;
+    }
+    setShareTick(Date.now());
+    const timer = setInterval(() => setShareTick(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [share.active, share.expiresAt]);
+
+  const onShareToggle = useCallback(() => {
+    const host = syncSurface?.host;
+    if (host === undefined || host === null || share.busy) {
+      return;
+    }
+    if (share.active) {
+      shareGenRef.current = 0;
+      void host.stop();
+      setShare({
+        active: false,
+        busy: false,
+        code: null,
+        payload: null,
+        expiresAt: null,
+      });
+      return;
+    }
+    setShare((prev) => ({ ...prev, busy: true }));
+    // Mark wanted BEFORE the async work: the screen-close cleanup reads
+    // shareGenRef to decide whether a stop is owed — a start() that
+    // lands after dismissal would otherwise leave a live listener. The
+    // generation also distinguishes THIS share from any newer one, so a
+    // stale start() resolution can't stop a successor's listener.
+    const gen = ++shareGenRef.current;
+    shareRetryRef.current = 0;
+    void (async () => {
+      const started = await host.start();
+      if (shareGenRef.current !== gen) {
+        return; // cleanup stopped the host, or a newer share owns it
+      }
+      if (!started.ok) {
+        shareGenRef.current = 0;
+        await host.stop();
+        setShare({
+          active: false,
+          busy: false,
+          code: null,
+          payload: null,
+          expiresAt: null,
+        });
+        setPairError(started.error.message);
+        return;
+      }
+      const offer = await host.mintOffer();
+      if (shareGenRef.current !== gen) {
+        return;
+      }
+      if (!offer.ok) {
+        shareGenRef.current = 0;
+        await host.stop();
+        setShare({
+          active: false,
+          busy: false,
+          code: null,
+          payload: null,
+          expiresAt: null,
+        });
+        setPairError(offer.error.message);
+        return;
+      }
+      setShare({
+        active: true,
+        busy: false,
+        code: offer.value.code,
+        payload: offer.value.payload,
+        expiresAt: offer.value.expiresAt,
+      });
+      setPairError(null);
+    })().catch(() => {
+      // Gate the whole unwind on our generation — a stale start's
+      // rejection must not clear a NEWER share's code or stop control.
+      if (shareGenRef.current !== gen) {
+        return;
+      }
+      shareGenRef.current = 0;
+      void host.stop();
+      setShare({
+        active: false,
+        busy: false,
+        code: null,
+        payload: null,
+        expiresAt: null,
+      });
+      setPairError('pairing failed');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, share.active, share.busy]);
+
+  const onPairNearby = useCallback(
+    (key: string, code: string) => {
+      const peer = nearbyPeers.find((p) => p.key === key);
+      if (peer === undefined) {
+        return;
+      }
+      runPair({
+        code,
+        endpoints: [formatEndpoint(peer.host, peer.port)],
+        ...(peer.fp !== null ? { fp: peer.fp } : {}),
+      });
+    },
+    [nearbyPeers, runPair],
+  );
+
   const onSyncNow = useCallback(
     (fp: string) => {
       const client = syncSurface?.client;
@@ -2094,6 +2465,23 @@ function Main({
     fetchLyrics,
   ]);
 
+  // Lyrics highlight rides a smoothed clock so the active line tracks
+  // playback between the engine's sparse position ticks; it only ticks
+  // while the lyrics pane is actually on screen.
+  const [seekGeneration, bumpSeekGeneration] = useState(0);
+  const seekToPosition = useCallback(
+    (ms: number): Promise<Result<void>> => {
+      bumpSeekGeneration((n) => n + 1);
+      return session.seekTo(ms);
+    },
+    [session],
+  );
+  const lyricsPositionMs = useSmoothedPosition(
+    player?.positionMs ?? 0,
+    playing,
+    expanded && stageMode === 'lyrics',
+    seekGeneration,
+  );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
       return undefined;
@@ -2106,9 +2494,9 @@ function Main({
       sheet: fetch?.sheet ?? null,
       error: fetch?.error ?? null,
       loading: fetch === null ? true : fetch.loading,
-      positionMs: player?.positionMs ?? 0,
+      positionMs: lyricsPositionMs,
     });
-  }, [lyricsFetch, currentRecordingId, player, localeTick]);
+  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {
@@ -2820,6 +3208,7 @@ function Main({
     downloadRefFor,
     reportPlay,
     queueSettingsWrite,
+    seekToPosition,
   });
   journeyDeps.current = {
     session,
@@ -2829,6 +3218,7 @@ function Main({
     downloadRefFor,
     reportPlay,
     queueSettingsWrite,
+    seekToPosition,
   };
   useEffect(() => {
     if (!__DEV__) {
@@ -2863,6 +3253,7 @@ function Main({
         downloadRefFor: refFor,
         reportPlay,
         queueSettingsWrite: queueWrite,
+        seekToPosition: seekTo,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
@@ -2963,7 +3354,7 @@ function Main({
         case 'seek': {
           const ms = Number(params.get('ms') ?? '0');
           if (Number.isSafeInteger(ms) && ms >= 0) {
-            void s.seekTo(ms).then((r) => reportResult('action.seek', r));
+            void seekTo(ms).then((r) => reportResult('action.seek', r));
           }
           break;
         }
@@ -3572,6 +3963,43 @@ function Main({
             onUnpair={onUnpair}
             pairing={pairing}
             pairError={pairError}
+            share={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : {
+                    supported: true,
+                    active: share.active,
+                    busy: share.busy,
+                    code: share.code,
+                    payload: share.payload,
+                    expiresLabel:
+                      share.expiresAt === null
+                        ? null
+                        : formatExpiry(share.expiresAt, shareTick),
+                  }
+            }
+            onShareToggle={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : onShareToggle
+            }
+            nearbyPeers={
+              syncSurface?.discovery === undefined ||
+              syncSurface?.discovery === null
+                ? undefined
+                : nearbyPeers.map((peer) => ({
+                    key: peer.key,
+                    name: peer.name,
+                    address: `${peer.host}:${peer.port}`,
+                    pinned: peer.fp !== null,
+                  }))
+            }
+            onPairNearby={
+              syncSurface?.discovery === undefined ||
+              syncSurface?.discovery === null
+                ? undefined
+                : onPairNearby
+            }
             renderScanner={
               Platform.OS === 'android'
                 ? (onScan) => <SyncScanner onScan={onScan} />
@@ -3662,7 +4090,7 @@ function Main({
                   ? () => onDownloadAction(currentRecordingId)
                   : undefined
               }
-              onSeek={(ms) => void session.seekTo(ms)}
+              onSeek={seekToPosition}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={radioCapable ? onStartRadio : undefined}
               onStopRadio={onStopRadio}

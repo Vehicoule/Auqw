@@ -231,6 +231,7 @@ export function linesToLrc(lines: readonly LyricsLine[]): string {
 export function lyricsCacheEntry(
   recordingId: string,
   provider: string,
+  providerVersion: string | null,
   accepted: LyricsResult,
   fetchedMs: number,
 ): LyricsCacheEntry | null {
@@ -241,6 +242,7 @@ export function lyricsCacheEntry(
       return {
         recordingId,
         provider,
+        providerVersion,
         kind: 'plain',
         payload: {
           plainLyrics: null,
@@ -253,6 +255,7 @@ export function lyricsCacheEntry(
       return {
         recordingId,
         provider,
+        providerVersion,
         kind: 'plain',
         payload: {
           plainLyrics: accepted.text,
@@ -266,6 +269,7 @@ export function lyricsCacheEntry(
       return {
         recordingId,
         provider,
+        providerVersion,
         kind: 'synced',
         payload: {
           plainLyrics: hasText(text) ? text : null,

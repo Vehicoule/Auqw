@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { Icon, PillButton, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
 
@@ -54,22 +54,7 @@ export function LoadingState({
         </Text>
       )}
       {onCancel !== undefined && (
-        <Pressable
-          onPress={onCancel}
-          accessibilityLabel={t('common.cancel')}
-          style={{
-            paddingHorizontal: theme.spacing.lg,
-            borderRadius: theme.radius.control,
-            borderWidth: theme.strokes.hairline,
-            borderColor: theme.colors.hairline,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text variant="metadata" color="primary">
-            {t('common.cancel')}
-          </Text>
-        </Pressable>
+        <PillButton label={t('common.cancel')} onPress={onCancel} />
       )}
     </StateShell>
   );
@@ -116,22 +101,7 @@ export function ErrorState({
         </Text>
       )}
       {onRetry !== undefined && (
-        <Pressable
-          onPress={onRetry}
-          accessibilityLabel={retryLabel}
-          style={{
-            paddingHorizontal: theme.spacing.lg,
-            borderRadius: theme.radius.control,
-            borderWidth: theme.strokes.hairline,
-            borderColor: theme.colors.hairline,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text variant="metadata" color="primary">
-            {retryLabel}
-          </Text>
-        </Pressable>
+        <PillButton label={retryLabel} onPress={onRetry} />
       )}
     </StateShell>
   );

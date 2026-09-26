@@ -66,6 +66,8 @@ private const val EVENT_QUEUE_TRANSITION = "onQueueTransition"
 private const val EVENT_CONNECTIVITY = "onConnectivityChanged"
 private const val EVENT_SYNC_DATA = "onSyncSocketData"
 private const val EVENT_SYNC_CLOSED = "onSyncSocketClosed"
+private const val EVENT_SYNC_ACCEPTED = "onSyncSocketAccepted"
+private const val EVENT_SYNC_DISCOVERY = "onSyncDiscovery"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
@@ -254,6 +256,18 @@ class AuqwExpoModule : Module() {
    * cost for a build that never pairs. */
   private var syncSockets: AuqwSyncSockets? = null
 
+  /** NSD advertise/browse — created on first use (a pairing sheet
+   * open), torn down with the module. */
+  private var syncNsd: AuqwNsd? = null
+
+  private fun syncNsdInstance(): AuqwNsd {
+    val ctx = appContext.reactContext
+      ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+    return syncNsd
+      ?: AuqwNsd(ctx) { event -> sendEvent(EVENT_SYNC_DISCOVERY, event) }
+        .also { syncNsd = it }
+  }
+
   private fun syncSocketsInstance(): AuqwSyncSockets =
     syncSockets
       ?: AuqwSyncSockets(
@@ -406,7 +420,9 @@ class AuqwExpoModule : Module() {
       EVENT_QUEUE_TRANSITION,
       EVENT_CONNECTIVITY,
       EVENT_SYNC_DATA,
-      EVENT_SYNC_CLOSED
+      EVENT_SYNC_CLOSED,
+      EVENT_SYNC_ACCEPTED,
+      EVENT_SYNC_DISCOVERY
     )
 
     OnCreate {
@@ -421,6 +437,8 @@ class AuqwExpoModule : Module() {
       try {
         connectivityMonitor?.stop()
         connectivityMonitor = null
+        syncNsd?.shutdown()
+        syncNsd = null
         syncSockets?.destroyAll()
         syncSockets = null
         boundService?.remoteDispatcher = null
@@ -481,6 +499,59 @@ class AuqwExpoModule : Module() {
 
     AsyncFunction("syncDestroy") { socketId: String ->
       syncSocketsInstance().destroy(socketId)
+      null
+    }
+
+    /**
+     * Pairing listener (docs/specs/sync.md symmetric pairing): bind an
+     * ephemeral TCP port; each accepted socket joins the registry as
+     * `accept-<n>` and emits `onSyncSocketAccepted` with its remote
+     * address. Resolves with {port}. One listener at a time.
+     */
+    AsyncFunction("syncListen") { ->
+      val port =
+        syncSocketsInstance().listen { socketId, remoteAddress ->
+          sendEvent(
+            EVENT_SYNC_ACCEPTED,
+            mapOf("socketId" to socketId, "remoteAddress" to remoteAddress)
+          )
+        }
+      mapOf("port" to port)
+    }
+
+    AsyncFunction("syncListenStop") { ->
+      syncSocketsInstance().stopListening()
+      null
+    }
+
+    /** IPv4 addresses the listener is reachable on — QR payload
+     * endpoints alongside the mDNS name. */
+    AsyncFunction("syncLocalHosts") { ->
+      mapOf("hosts" to syncSocketsInstance().localHosts())
+    }
+
+    /** mDNS advertise of the pairing listener — `_auqw._tcp` with the
+     * identity fp in TXT `dev` so browsers can pin before they dial. */
+    AsyncFunction("syncAdvertise") { name: String, port: Double, fp: String ->
+      syncNsdInstance().advertise(name, port.toInt(), fp)
+      null
+    }
+
+    AsyncFunction("syncAdvertiseStop") { ->
+      syncNsd?.unadvertise()
+      null
+    }
+
+    /** Browse `_auqw._tcp` — `{type:'found'|'lost', name, host?, port?,
+     * fp?}` events on `onSyncDiscovery`. Holds a MulticastLock while
+     * browsing; stopped when the pair sheet closes. */
+    AsyncFunction("syncBrowse") { ->
+      syncNsdInstance().browse()
+      null
+    }
+
+    AsyncFunction("syncBrowseStop") { ->
+      syncNsd?.stopBrowse()
       null
     }
 

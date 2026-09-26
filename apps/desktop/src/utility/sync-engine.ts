@@ -10,6 +10,7 @@ import type {
   LocalWrite,
   Result,
   SyncCursor,
+  SyncEngine,
   SyncEngineDeps,
   SyncEnginePort,
 } from '@auqw/application';
@@ -39,6 +40,12 @@ const MAX_EXPORT_PAGE = 10_000;
 export type UtilitySyncEngine = {
   /** The transport-facing seam (string cursor ⇄ typed engine). */
   readonly port: SyncEnginePort;
+  /**
+   * The full engine — the dialer's SyncClient dep needs it for
+   * custody-adjacent identity work even though pair-only hosts never
+   * run rounds in this direction.
+   */
+  readonly engine: SyncEngine;
   /**
    * One atomic local-write batch into the engine log. Returns the
    * serialized per-write results — 'rejected' outcomes ride inside
@@ -139,5 +146,5 @@ export async function createUtilitySyncEngine(
     return ok(JSON.parse(JSON.stringify(result.value)));
   };
 
-  return ok({ port, localChanges });
+  return ok({ port, engine, localChanges });
 }

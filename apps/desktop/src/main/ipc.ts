@@ -18,6 +18,8 @@ import type {
   SyncDeltasArgs,
   SyncImportDeltaArgs,
   SyncLocalChangesArgs,
+  SyncDialArgs,
+  SyncDialPayloadArgs,
   SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
@@ -48,6 +50,8 @@ import {
   isSyncImportDeltaArgs,
   isSyncLocalChangesArgs,
   isSyncMaterializedArgs,
+  isSyncDialArgs,
+  isSyncDialPayloadArgs,
   isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
@@ -108,6 +112,11 @@ export interface ChannelDeps {
   readonly meta: () => AppMeta;
   /** `sync:applied` push registry — refcounted like `net`. */
   readonly syncApplied: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
+  /** `sync:nearby` push registry — same refcounted sender pattern. */
+  readonly syncNearby: {
     readonly attach: (sender: NetSender) => void;
     readonly detach: (sender: NetSender) => void;
   };
@@ -451,6 +460,33 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
       deps.utility.request(CHANNELS.syncAckApplied, undefined),
     ),
   ],
+  // Symmetric pairing: outbound dial + mDNS browse of other pair
+  // hosts. `nearby` browse needs no custody — it must not wake
+  // safeStorage just to show the list.
+  [
+    CHANNELS.syncNearbyStart,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncNearbyStart, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncNearbyStop,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncNearbyStop, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncDial,
+    channel(isSyncDialArgs, (args: SyncDialArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDial, args),
+    ),
+  ],
+  [
+    CHANNELS.syncDialPayload,
+    channel(isSyncDialPayloadArgs, (args: SyncDialPayloadArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDialPayload, args),
+    ),
+  ],
   [
     CHANNELS.syncMaterialized,
     channel(isSyncMaterializedArgs, (args, deps) =>
@@ -721,5 +757,12 @@ export function registerChannels(
   });
   ipcMain.on(CHANNELS.syncAppliedUnsubscribe, (event) => {
     deps.syncApplied.detach(event.sender);
+  });
+
+  ipcMain.on(CHANNELS.syncNearbySubscribe, (event) => {
+    deps.syncNearby.attach(event.sender);
+  });
+  ipcMain.on(CHANNELS.syncNearbyUnsubscribe, (event) => {
+    deps.syncNearby.detach(event.sender);
   });
 }

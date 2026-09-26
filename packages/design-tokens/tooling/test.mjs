@@ -66,6 +66,7 @@ const ROLES = [
   'glassControl',
   'scrim',
   'hairline',
+  'thumb',
 ];
 const SCHEMES = ['dark', 'light', 'oled'];
 const SPACING = {
@@ -80,7 +81,7 @@ const SPACING = {
   xxxl: 32,
   display: 48,
 };
-const RADIUS = { frame: 0, control: 6, float: 12, thumb: 5, pill: 999 };
+const RADIUS = { frame: 0, control: 8, float: 16, thumb: 5, pill: 999 };
 const SIZES = {
   trackRow: 50,
   touch: 44,
@@ -91,9 +92,9 @@ const SIZES = {
 };
 const STROKES = { hairline: 1, progress: 2, progressAndroid: 2.5 };
 const FAMILIES = {
-  regular: 'JetBrainsMono_400Regular',
-  medium: 'JetBrainsMono_500Medium',
-  bold: 'JetBrainsMono_700Bold',
+  regular: 'Inter_400Regular',
+  medium: 'Inter_500Medium',
+  bold: 'Inter_700Bold',
 };
 const STYLES = {
   display: { fontSize: 20, lineHeight: 24, fontFamily: 'bold' },

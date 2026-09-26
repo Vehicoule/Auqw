@@ -609,11 +609,27 @@ export function manifestCapabilities(
   return [...new Set(raw)].filter(isProviderCapability);
 }
 
+/**
+ * The manifest's `version` string — null when absent or malformed.
+ * The provider port carries it so the session can age cache rows
+ * written under older plugin builds.
+ */
+export function manifestVersion(manifest: unknown): string | null {
+  if (!isRecord(manifest)) {
+    return null;
+  }
+  const version = manifest['version'];
+  return typeof version === 'string' && version.length > 0
+    ? version
+    : null;
+}
+
 export function createPluginProvider(
   host: AuqwExpoHostLike,
   pluginId: string,
   providerId: string,
   capabilities: readonly ProviderCapability[],
+  version: string | null = null,
 ): PluginProvider {
   const pending = new Map<string, Pending>();
   /** Outcomes that arrived before their pending entry existed. */
@@ -842,6 +858,7 @@ export function createPluginProvider(
   return {
     id: providerId,
     capabilities,
+    version,
     search(input, context) {
       const blocked = guard('catalog.search');
       if (blocked !== null) {

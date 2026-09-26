@@ -1,6 +1,6 @@
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type {
@@ -76,29 +76,13 @@ export function CollectionScreen({
         <Text variant="metadata" color="secondary">
           {t('common.trackCount', { count: model.rows.length })}
         </Text>
-        <Pressable
-          compact
-          onPress={model.rows.length === 0 ? undefined : onPlayAll}
+        <PillButton
+          label={t('collection.playAll')}
+          tone="soft"
+          disabled={model.rows.length === 0}
+          onPress={onPlayAll}
           accessibilityLabel={t('collection.playAllA11y', { title: model.title })}
-          accessibilityState={{ disabled: model.rows.length === 0 }}
-          style={{
-            paddingHorizontal: theme.spacing.md,
-            minHeight: 30,
-            justifyContent: 'center',
-            borderRadius: theme.radius.pill,
-            backgroundColor:
-              model.rows.length === 0
-                ? theme.colors.fg08
-                : theme.colors.accentSoft,
-          }}
-        >
-          <Text
-            variant="metadata"
-            color={model.rows.length === 0 ? 'secondary' : 'accent'}
-          >
-            {t('collection.playAll')}
-          </Text>
-        </Pressable>
+        />
       </View>
       {model.rows.length === 0 ? (
         <EmptyState

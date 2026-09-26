@@ -48,6 +48,7 @@ import {
   DEVICE_ID_PATTERN,
   HANDSHAKE_CAP,
   MAX_SYNC_DOC_BYTES,
+  FINGERPRINT_PATTERN,
   PAIR_CODE_PATTERN,
   SEAL_OVERHEAD,
   SESSION_CAP,
@@ -61,6 +62,7 @@ import {
   type SyncWirePump,
   type WelcomeMsg,
 } from './sync-wire.ts';
+import { isPairableLanHost } from './lan.ts';
 
 /**
  * The phone half of LAN sync (docs/specs/sync.md, slice 4): dials a
@@ -93,6 +95,13 @@ export interface SyncClient {
       | {
           readonly code: string;
           readonly endpoints: readonly string[];
+          /**
+           * mDNS TXT `dev` pin — a discovered device's fingerprint.
+           * Without it the typed-code path learns fp TOFU (the code is
+           * the auth secret); discovery adds an out-of-band pin so a
+           * same-LAN responder can't substitute its key.
+           */
+          readonly fp?: string;
         },
     signal?: CancellationSignal,
   ): Promise<Result<SyncPeer>>;
@@ -112,6 +121,23 @@ export interface SyncClient {
    * owns its side.
    */
   unpair(fp: string, signal?: CancellationSignal): Promise<Result<void>>;
+  /**
+   * Re-read peer custody — symmetric pairing writes through the
+   * registry seam, not this client, so a phone-hosted pair lands in
+   * storage invisible to the in-memory map until reloaded. New rows
+   * merge in as 'offline' views; existing rows (already tracked, with
+   * cursors) stay authoritative.
+   */
+  refreshPeers(
+    signal?: CancellationSignal,
+  ): Promise<Result<void>>;
+  /**
+   * Drop a peer's live session without touching custody — after a
+   * re-pair refreshed the record's endpoints, the next connect must
+   * dial the NEW address, not reuse a socket to the old one (or to a
+   * pairing-only listener).
+   */
+  dropSession(fp: string): void;
   close(): Promise<void>;
 }
 
@@ -162,6 +188,20 @@ export type SyncClientDeps = {
   readonly requestMs?: number;
   /** Keepalive cadence — under the server's 120s idle kill. */
   readonly pingMs?: number;
+  /**
+   * The caller's own sync listener port, when it runs one — carried
+   * in the hello so the responder can learn a dialable endpoint for
+   * this device (symmetric pairing: the answering peer may host
+   * future pair offers). Absent or null → hello omits `port`.
+   */
+  readonly listenPort?: () => number | null;
+  /**
+   * The caller's own dialable listener endpoints (`host:port`,
+   * bracketed v6) — carried in the hello so the responder prefers
+   * them over the socket's remote address, which a NAT/VPN can
+   * mistranslate. Empty/absent → hello omits `endpoints`.
+   */
+  readonly listenEndpoints?: () => readonly string[];
 };
 
 type SessionPhase = 'challenge' | 'auth' | 'open';
@@ -334,12 +374,44 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     if (peersLoaded) {
       return ok(undefined);
     }
+    return refreshPeers(signal);
+  }
+
+  async function refreshPeers(
+    signal?: CancellationSignal,
+  ): Promise<Result<void>> {
     const listed = await deps.keys.peerList(signal);
     if (!listed.ok) {
       return listed;
     }
+    // Reconcile, not just merge: custody is authoritative for the
+    // peer set — the pair host can write (pair) or remove (remote
+    // unpair... nothing today, but the seam shouldn't assume) rows
+    // outside this client's ops.
+    const seen = new Set(listed.value.map((peer) => peer.fp));
     for (const peer of listed.value) {
-      peers.set(peer.fp, peer);
+      const existing = peers.get(peer.fp);
+      if (existing === undefined) {
+        peers.set(peer.fp, peer);
+        continue;
+      }
+      // Refresh host-side edits (name/endpoints/lastSeenAt, custody
+      // id+pub, pot) while keeping the fields sync rounds own —
+      // the cursor watermark and lastSyncAt.
+      peers.set(peer.fp, {
+        ...peer,
+        peerCursor: existing.peerCursor,
+        ...(existing.lastSyncAt === undefined
+          ? {}
+          : { lastSyncAt: existing.lastSyncAt }),
+      });
+    }
+    for (const fp of [...peers.keys()]) {
+      // A peer mid-pair has a session but may not have committed
+      // custody yet — never evict a live session's row.
+      if (!seen.has(fp) && !sessions.has(fp)) {
+        peers.delete(fp);
+      }
     }
     peersLoaded = true;
     // Custody hydration changes what status() reports — subscribers
@@ -570,11 +642,16 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     endpoints: readonly SyncEndpoint[],
     signal?: CancellationSignal,
   ): Promise<Result<{ socket: SyncSocket; endpoint: SyncEndpoint }>> {
+    // Pairing targets are LAN-scoped: a compromised caller (renderer
+    // IPC, a hostile QR payload, a spoofed advert) must never be able
+    // to aim this socket at a routable host. Checked here so every
+    // path — pair, resume, syncNow — inherits the gate.
+    const targets = endpoints.filter((ep) => isPairableLanHost(ep.host));
     let lastError: AppError = appError(
-      'unavailable',
-      'sync: no usable endpoints',
+      'permission-denied',
+      'sync: no LAN-scoped endpoint to dial',
     );
-    for (const ep of endpoints) {
+    for (const ep of targets) {
       if (signal?.cancelled || closing) {
         return err(appError('cancelled', 'cancelled'));
       }
@@ -654,9 +731,15 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       kickQueued: false,
       activeOps: 0,
     };
+    const ownPort = deps.listenPort?.() ?? null;
+    const ownEndpoints = deps.listenEndpoints?.() ?? [];
     const challenged = await sessionRequest(
       session,
-      handshake.hello(),
+      {
+        ...handshake.hello(),
+        ...(ownPort === null ? {} : { port: ownPort }),
+        ...(ownEndpoints.length === 0 ? {} : { endpoints: ownEndpoints }),
+      },
       isServerChallenge,
       handshakeMs,
       opts.signal,
@@ -957,6 +1040,25 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       return err(opened.error);
     }
     const { session, welcome, endpoint } = opened.value;
+    // The welcome's claimed host key MUST hash to the fp the
+    // handshake just verified — a responder asserting a different
+    // identity pub in-band would get its row custody-mislabeled.
+    if (
+      welcome.host !== undefined &&
+      welcome.host.pub !== undefined &&
+      deps.crypto.fingerprintOf(welcome.host.pub) !== session.peerFp
+    ) {
+      killSession(
+        session,
+        appError('permission-denied', 'sync: host key mismatch'),
+      );
+      return err(
+        appError(
+          'permission-denied',
+          'sync: welcome host key mismatches the verified identity',
+        ),
+      );
+    }
     // The welcome's `pot` is the answering server's own
     // advertisement — authoritative over the QR payload's copy and
     // the only channel a typed-code pairing learns it through.
@@ -975,6 +1077,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       ...(existing?.lastSyncAt !== undefined
         ? { lastSyncAt: existing.lastSyncAt }
         : {}),
+      ...(welcome.host === undefined
+        ? {}
+        : {
+            deviceId: welcome.host.id,
+            ...(welcome.host.pub === undefined
+              ? {}
+              : { pub: welcome.host.pub }),
+          }),
       ...(storedPot !== undefined ? { pot: storedPot } : {}),
     };
     const prior = sessions.get(stored.fp);
@@ -1066,8 +1176,18 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           appError('invalid-message', 'sync: pairing code must be 6 digits'),
         );
       }
-      return pairOp(opts.endpoints, opts.code, undefined, undefined, signal);
+      if (
+        opts.fp !== undefined &&
+        !FINGERPRINT_PATTERN.test(opts.fp)
+      ) {
+        return err(
+          appError('invalid-message', 'sync: malformed device fingerprint'),
+        );
+      }
+      return pairOp(opts.endpoints, opts.code, opts.fp, undefined, signal);
     },
+
+    refreshPeers,
 
     async syncNow(fp, signal) {
       if (closing) {
@@ -1247,6 +1367,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           reply.value.devices.find((d) => d.id === deps.deviceId) ?? null,
         );
       });
+    },
+
+    dropSession(fp) {
+      const session = sessions.get(fp);
+      if (session !== undefined && !session.closed) {
+        sendSealed(session, { t: 'bye' });
+        killSession(session, null);
+      }
     },
 
     async unpair(fp, signal) {

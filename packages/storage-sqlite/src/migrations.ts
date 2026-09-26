@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -317,6 +317,10 @@ const MIGRATION_6: readonly string[] = [
   `ALTER TABLE settings ADD COLUMN language TEXT`,
 ];
 
+const MIGRATION_7: readonly string[] = [
+  `ALTER TABLE lyrics_cache ADD COLUMN provider_version TEXT`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -325,6 +329,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_4]),
   Object.freeze([...MIGRATION_5]),
   Object.freeze([...MIGRATION_6]),
+  Object.freeze([...MIGRATION_7]),
 ]);
 
 const CREATED_OBJECT_NAME =

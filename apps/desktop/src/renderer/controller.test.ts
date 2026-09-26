@@ -188,6 +188,12 @@ function fakeApi(): Rig {
         materialized: () =>
           Promise.reject(new Error('seam: inject sync')),
         onApplied: () => () => {},
+        nearbyStart: () => Promise.reject(new Error('seam: inject sync')),
+        nearbyStop: () => Promise.reject(new Error('seam: inject sync')),
+        onNearby: () => () => {},
+        dial: () => Promise.reject(new Error('seam: inject sync')),
+        dialPayload: () =>
+          Promise.reject(new Error('seam: inject sync')),
       },
       utility: {
         ping: () => Promise.reject(new Error('unused')),
@@ -264,6 +270,7 @@ function stubProvider(
   return {
     id,
     capabilities,
+    version: '0.0.0-stub',
     search: unavailable,
     candidates: unavailable,
     resolvePlayback: unavailable,
@@ -291,11 +298,13 @@ const MANIFESTS: readonly PluginManifestPayload[] = [
     pluginId: 'plugin-itunes',
     providerId: 'itunes',
     capabilities: ['catalog.search', 'catalog.metadata', 'bogus-cap'],
+    version: '1.0.0',
   },
   {
     pluginId: 'plugin-ytm',
     providerId: 'youtube-music',
     capabilities: ['playback.candidates', 'playback.resolve'],
+    version: null,
   },
 ];
 

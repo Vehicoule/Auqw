@@ -31,7 +31,7 @@ import {
   matchDisplayKey,
   topPlayed,
 } from '@auqw/application';
-import { fromTag, t } from './i18n.ts';
+import { fromTag, t, type MessageId } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -241,6 +241,11 @@ export type SettingsRowModel = {
   readonly value: string | null;
   readonly kind: 'navigation' | 'toggle' | 'value';
   readonly enabled: boolean;
+  /**
+   * Marks remove/clear actions so surfaces can render the label in
+   * the warn color — mirrors the `destructive` flag on sheet actions.
+   */
+  readonly destructive?: boolean;
 };
 
 export type DiagnosticsModel = {
@@ -299,9 +304,9 @@ export type LyricsModel = {
 /**
  * Maps the session's `LyricsSheet` (plus the fetch lifecycle the
  * caller tracks) to the Stage lyrics model. `activeIndex` is the
- * last timed line at or before `positionMs` — null before the first
- * line — and provenance rides the sync label as
- * `<state> · <provider>[ · cached]`.
+ * last timed line at or before `positionMs` — line 0 during the
+ * intro, before the first timestamp — and provenance rides the sync
+ * label as `<state> · <provider>[ · cached]`.
  */
 export function toLyricsModel(input: {
   readonly sheet: LyricsSheet | null;
@@ -334,6 +339,11 @@ export function toLyricsModel(input: {
           activeIndex = index;
         }
       });
+      // Before the first timestamp the intro still owns a highlighted
+      // line — holding line 0 beats showing no highlight at all.
+      if (activeIndex === null && sheet.lines.length > 0) {
+        activeIndex = 0;
+      }
       return {
         state: 'synced',
         lines: sheet.lines.map((line) => line.text),
@@ -1611,6 +1621,7 @@ export function toSettingsModel(
             : `${media.downloadCount}`,
         kind: 'navigation',
         enabled: (media.downloadCount ?? 0) > 0,
+        destructive: true,
       },
       {
         key: 'localSources',
@@ -1632,6 +1643,7 @@ export function toSettingsModel(
         value: null,
         kind: 'navigation' as const,
         enabled: media.localSupported !== false,
+        destructive: true,
       })),
       {
         key: 'addLocalFolder',
@@ -1674,6 +1686,56 @@ export function toSettingsModel(
     ],
     diagnostics,
   };
+}
+
+/**
+ * The flat settings row list chunked into labeled cards for
+ * presentation. Boundaries are keyed, not positional: a row whose key
+ * starts a group opens a new card, every other row continues the
+ * current one — model order is preserved verbatim and a row added mid-
+ * list lands inside whatever group surrounds it.
+ */
+export type SettingsGroup = {
+  /** The boundary row's key — stable React key for the group. */
+  readonly key: string;
+  readonly label: string;
+  readonly rows: readonly SettingsRowModel[];
+};
+
+const SETTINGS_GROUP_STARTS: readonly (readonly [string, MessageId])[] = [
+  ['theme', 'settings.section.appearance'],
+  ['catalogProvider', 'settings.section.providers'],
+  ['qualityKbps', 'settings.section.playback'],
+  ['downloadMetered', 'settings.section.downloads'],
+  ['localSources', 'settings.section.localFiles'],
+  ['sync', 'settings.section.library'],
+];
+
+export function settingsGroups(
+  rows: readonly SettingsRowModel[],
+): readonly SettingsGroup[] {
+  const starts = new Map<string, MessageId>(SETTINGS_GROUP_STARTS);
+  const groups: {
+    key: string;
+    labelId: MessageId;
+    rows: SettingsRowModel[];
+  }[] = [];
+  for (const row of rows) {
+    const labelId = starts.get(row.key);
+    if (labelId !== undefined || groups.length === 0) {
+      groups.push({
+        key: row.key,
+        labelId: labelId ?? 'settings.section.appearance',
+        rows: [],
+      });
+    }
+    groups[groups.length - 1]!.rows.push(row);
+  }
+  return groups.map((group) => ({
+    key: group.key,
+    label: t(group.labelId),
+    rows: group.rows,
+  }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1785,7 +1847,7 @@ export function formatAgo(ms: number, nowMs: number): string {
   return formatExportDate(ms) ?? '—';
 }
 
-function formatExpiry(expiresAt: number, nowMs: number): string {
+export function formatExpiry(expiresAt: number, nowMs: number): string {
   if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
     return t('sync.expires.expired');
   }

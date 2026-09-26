@@ -103,6 +103,7 @@ import type {
 } from '@auqw/ui-web';
 import type {
   SyncDeviceInfo,
+  SyncNearbyPeer,
   SyncPairingResult,
   SyncStatusResult,
 } from '../shared/contract.ts';
@@ -501,6 +502,53 @@ const IDLE_TRANSFER: TransferModel = {
  * every dependency list.
  */
 let toastSink: ((text: string) => void) | null = null;
+
+/**
+ * Lyrics-highlight position clock: engine ticks arrive ~1Hz (mobile)
+ * to ~4Hz (desktop), so between ticks the raw snapshot position sits
+ * stale and the active line lands visibly late. While `active`, the
+ * last engine position is extrapolated forward at a fixed cadence —
+ * each fresh engine position re-anchors the clock. `generation`
+ * re-anchors without a position change: a seek landing on the last
+ * reported tick would otherwise keep extrapolating from the pre-seek
+ * anchor. The anchor clock is `performance.now()` — `Date.now()`
+ * follows system-clock adjustments, which would jump the highlight.
+ * Anchoring is keyed to position/generation/transport: a fresh
+ * position or a seek re-anchors, and a `playing` transition re-anchors
+ * too — the anchor's clock must freeze with the pause, otherwise
+ * resume would count the paused wall-time as elapsed playback.
+ * Re-entering the pane (`visible` flipping) must NOT re-anchor: the
+ * anchor keeps the tick's real arrival time, so the elapsed fraction
+ * since the last engine event is preserved instead of discarded.
+ * Ticking only while the lyrics pane is live keeps the periodic
+ * re-render off the idle path.
+ */
+function useSmoothedPosition(
+  positionMs: number,
+  playing: boolean,
+  visible: boolean,
+  generation: number,
+): number {
+  const anchor = useRef({ ms: positionMs, at: performance.now() });
+  const [smoothMs, setSmoothMs] = useState(positionMs);
+  useEffect(() => {
+    anchor.current = { ms: positionMs, at: performance.now() };
+    setSmoothMs(positionMs);
+  }, [positionMs, generation, playing]);
+  useEffect(() => {
+    if (!playing || !visible) {
+      return undefined;
+    }
+    const tick = () => {
+      const a = anchor.current;
+      setSmoothMs(a.ms + (performance.now() - a.at));
+    };
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [playing, visible]);
+  return smoothMs;
+}
 
 function reportResult(action: MessageId, result: Result<unknown>): void {
   if (!result.ok) {
@@ -905,6 +953,195 @@ function Main({
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
+  // The sheet opens on the user's tap, not on a successful mint — a
+  // failed listener mint must still show the nearby/paste half.
+  const [pairSheetOpen, setPairSheetOpen] = useState(false);
+  // The accept half of symmetric pairing: mDNS-found pair hosts the
+  // sheet can dial into (tap → type the code that device shows), plus
+  // the payload-paste fallback. Browse lives only while the sheet is
+  // open — it needs no custody, so it starts immediately.
+  const [nearbyPeers, setNearbyPeers] = useState<
+    readonly (SyncNearbyPeer & { readonly key: string })[]
+  >([]);
+  const [dialing, setDialing] = useState(false);
+  const [dialError, setDialError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pairSheetOpen) {
+      setNearbyPeers([]);
+      setDialing(false);
+      setDialError(null);
+      return;
+    }
+    // Subscribe BEFORE starting the browse — early `found` events for
+    // already-advertised peers would otherwise fire with no receiver.
+    const unsubscribe = window.auqw.sync.onNearby((event) => {
+      if (event.type === 'paired') {
+        // Our minted offer was just consumed — remint immediately so
+        // the sheet never displays a dead code (gen-gated like every
+        // other mint path).
+        const gen = pairSheetGen.current;
+        const attempt = ++pairMintRef.current;
+        void window.auqw.sync
+          .pairing()
+          .then((offer) => {
+            if (
+              gen === pairSheetGen.current &&
+              attempt === pairMintRef.current
+            ) {
+              setPairing(offer);
+            }
+          })
+          .catch(() => {
+            // The code we displayed was just consumed — a failed
+            // remint must not leave the dead QR on screen.
+            if (
+              gen === pairSheetGen.current &&
+              attempt === pairMintRef.current
+            ) {
+              setPairing(null);
+            }
+          });
+        return;
+      }
+      setNearbyPeers((prev) => {
+        if (event.type === 'lost') {
+          return prev.filter((peer) => peer.key !== event.key);
+        }
+        // Service identity (name|host) is the row key — a re-advertised
+        // peer on a new port replaces its row, a same-named neighbor
+        // keeps its own.
+        const next = prev.filter((peer) => peer.key !== event.peer.key);
+        return [...next, event.peer];
+      });
+    });
+    void window.auqw.sync.nearbyStart().catch(() => undefined);
+    return () => {
+      void window.auqw.sync.nearbyStop().catch(() => undefined);
+      unsubscribe();
+    };
+  }, [pairSheetOpen]);
+  // Sheet-open generation — a mint resolving after dismissal must not
+  // resurrect an offer the remint effect would keep refreshing forever.
+  const pairSheetGen = useRef(0);
+  // Last-mint-wins + in-flight serialization: pairing() isn't instant,
+  // and a slow mint must not let an EARLIER reply overwrite a newer
+  // offer or stack concurrent mints behind the tick.
+  const pairMintRef = useRef(0);
+  const pairMintInFlight = useRef(false);
+  const onPairDevice = useCallback(() => {
+    setPairSheetOpen(true);
+    const gen = ++pairSheetGen.current;
+    const attempt = ++pairMintRef.current;
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => {
+        if (
+          gen !== pairSheetGen.current ||
+          attempt !== pairMintRef.current
+        ) {
+          return;
+        }
+        setPairing(offer);
+        setPairingError(null);
+      })
+      // A mint failure (listener down, no LAN address) must surface —
+      // a silent reject leaves the row looking dead-clicked.
+      .catch((thrown: unknown) => {
+        if (gen !== pairSheetGen.current) {
+          return;
+        }
+        setPairing(null);
+        setPairingError(
+          isShellError(thrown)
+            ? thrown.message
+            : thrown instanceof Error
+              ? thrown.message
+              : 'could not mint a pairing offer',
+        );
+      });
+  }, []);
+  const syncRefresh = useCallback(() => {
+    const { sync } = window.auqw;
+    void sync
+      .status()
+      .then((status) => setSyncStatus(status))
+      .catch(() => setSyncStatus(null));
+    void sync
+      .devices()
+      .then((result) => setSyncDevices(result.devices))
+      .catch(() => setSyncDevices([]));
+  }, []);
+  const onUnpairDevice = useCallback(
+    (deviceId: string) => {
+      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
+    },
+    [syncRefresh],
+  );
+  const onSyncNow = useCallback(() => {
+    void window.auqw.sync.trigger().then(syncRefresh);
+  }, [syncRefresh]);
+  const onDialNearby = useCallback(
+    (key: string, code: string) => {
+      const peer = nearbyPeers.find((entry) => entry.key === key);
+      if (peer === undefined || dialing) {
+        return;
+      }
+      setDialing(true);
+      setDialError(null);
+      void window.auqw.sync
+        .dial({
+          host: peer.host,
+          port: peer.port,
+          code,
+          ...(peer.fp !== null ? { fp: peer.fp } : {}),
+        })
+        .then(() => {
+          setDialing(false);
+          setPairing(null);
+          setPairSheetOpen(false);
+          syncRefresh();
+        })
+        .catch((thrown: unknown) => {
+          setDialing(false);
+          setDialError(
+            isShellError(thrown)
+              ? thrown.message
+              : thrown instanceof Error
+                ? thrown.message
+                : 'pairing failed',
+          );
+        });
+    },
+    [nearbyPeers, dialing, syncRefresh],
+  );
+  const onPastePayload = useCallback(
+    (payload: string) => {
+      if (dialing) {
+        return;
+      }
+      setDialing(true);
+      setDialError(null);
+      void window.auqw.sync
+        .dialPayload({ payload })
+        .then(() => {
+          setDialing(false);
+          setPairing(null);
+          setPairSheetOpen(false);
+          syncRefresh();
+        })
+        .catch((thrown: unknown) => {
+          setDialing(false);
+          setDialError(
+            isShellError(thrown)
+              ? thrown.message
+              : thrown instanceof Error
+                ? thrown.message
+                : 'pairing failed',
+          );
+        });
+    },
+    [dialing, syncRefresh],
+  );
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
   // sync polls.
@@ -919,17 +1156,42 @@ function Main({
     );
     return () => window.clearInterval(timer);
   }, [pairing]);
-  const syncRefresh = useCallback(() => {
-    const { sync } = window.auqw;
-    void sync
-      .status()
-      .then((status) => setSyncStatus(status))
-      .catch(() => setSyncStatus(null));
-    void sync
-      .devices()
-      .then((result) => setSyncDevices(result.devices))
-      .catch(() => setSyncDevices([]));
-  }, []);
+  // Offers die at expiresAt — remint quietly while the sheet stays
+  // open so a displayed QR never outlives what the host accepts.
+  useEffect(() => {
+    if (
+      !pairSheetOpen ||
+      pairing === null ||
+      Date.now() < pairing.expiresAt ||
+      pairMintInFlight.current
+    ) {
+      return;
+    }
+    const gen = pairSheetGen.current;
+    const attempt = ++pairMintRef.current;
+    pairMintInFlight.current = true;
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => {
+        pairMintInFlight.current = false;
+        if (
+          gen === pairSheetGen.current &&
+          attempt === pairMintRef.current
+        ) {
+          setPairing(offer);
+        }
+      })
+      .catch(() => {
+        pairMintInFlight.current = false;
+        if (
+          gen === pairSheetGen.current &&
+          attempt === pairMintRef.current
+        ) {
+          setPairing(null);
+        }
+      });
+    // pairingTick drives the re-check; pairing.expiresAt is the gate.
+  }, [pairSheetOpen, pairing, pairingTick]);
   useEffect(() => {
     if (tab !== 'settings') {
       return;
@@ -1340,35 +1602,6 @@ function Main({
     [syncStatus, syncDevices, pairing, pairingTick, pairingError, localeTick],
   );
 
-  const onPairDevice = useCallback(() => {
-    void window.auqw.sync
-      .pairing()
-      .then((offer) => {
-        setPairing(offer);
-        setPairingError(null);
-      })
-      // A mint failure (listener down, no LAN address) must surface —
-      // a silent reject leaves the row looking dead-clicked.
-      .catch((thrown: unknown) => {
-        setPairing(null);
-        setPairingError(
-          isShellError(thrown)
-            ? thrown.message
-            : thrown instanceof Error
-              ? thrown.message
-              : 'could not mint a pairing offer',
-        );
-      });
-  }, []);
-  const onUnpairDevice = useCallback(
-    (deviceId: string) => {
-      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
-    },
-    [syncRefresh],
-  );
-  const onSyncNow = useCallback(() => {
-    void window.auqw.sync.trigger().then(syncRefresh);
-  }, [syncRefresh]);
   const onExportDelta = useCallback(() => {
     void (async () => {
       // Large logs page over the wire — `more` means follow up with a
@@ -1757,6 +1990,23 @@ function Main({
     fetchLyrics,
   ]);
 
+  // Lyrics highlight rides a smoothed clock so the active line tracks
+  // playback between the engine's sparse position ticks; it only ticks
+  // while the lyrics pane is actually on screen.
+  const [seekGeneration, bumpSeekGeneration] = useState(0);
+  const seekToPosition = useCallback(
+    (ms: number): Promise<Result<void>> => {
+      bumpSeekGeneration((n) => n + 1);
+      return session.seekTo(ms);
+    },
+    [session],
+  );
+  const lyricsPositionMs = useSmoothedPosition(
+    player?.positionMs ?? 0,
+    playing,
+    expanded && stageMode === 'lyrics',
+    seekGeneration,
+  );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
       return undefined;
@@ -1769,9 +2019,9 @@ function Main({
       sheet: fetch?.sheet ?? null,
       error: fetch?.error ?? null,
       loading: fetch === null ? true : fetch.loading,
-      positionMs: player?.positionMs ?? 0,
+      positionMs: lyricsPositionMs,
     });
-  }, [lyricsFetch, currentRecordingId, player, localeTick]);
+  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {
@@ -2861,7 +3111,7 @@ function Main({
                   ? () => onDownloadAction(currentRecordingId)
                   : undefined
               }
-              onSeek={(ms) => void session.seekTo(ms)}
+              onSeek={seekToPosition}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={
                 radioSeedable(radioSeedRef) ? onStartRadio : undefined
@@ -3117,17 +3367,39 @@ function Main({
             />
           </SheetScreen>
         )}
-        {pairing !== null && syncModel.pairing !== null && (
+        {pairSheetOpen && (
           <SheetScreen
             stackKey="sheet-pairing"
-            onDismissed={() => setPairing(null)}
+            onDismissed={() => {
+              pairSheetGen.current += 1;
+              setPairing(null);
+              setPairSheetOpen(false);
+            }}
           >
             <PairingSheet
               pairing={syncModel.pairing}
-              onCopyPayload={() => {
-                void navigator.clipboard.writeText(pairing.payload);
+              nearbyPeers={nearbyPeers.map((peer) => ({
+                key: peer.key,
+                name: peer.name,
+                address: `${peer.host}:${peer.port}`,
+                pinned: peer.fp !== null,
+              }))}
+              onPairNearby={onDialNearby}
+              onPastePayload={onPastePayload}
+              dialing={dialing}
+              dialError={dialError ?? pairingError}
+              onCopyPayload={
+                pairing === null
+                  ? undefined
+                  : () => {
+                      void navigator.clipboard.writeText(pairing.payload);
+                    }
+              }
+              onDismiss={() => {
+                pairSheetGen.current += 1;
+                setPairing(null);
+                setPairSheetOpen(false);
               }}
-              onDismiss={() => setPairing(null)}
             />
           </SheetScreen>
         )}

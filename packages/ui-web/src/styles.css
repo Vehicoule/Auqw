@@ -5,8 +5,8 @@
  * two documented fallbacks (layout lengths that have no token). */
 
 .ui-web {
-  --uw-font-stack: var(--font-body-family), 'JetBrains Mono', ui-monospace,
-    SFMono-Regular, Menlo, Consolas, monospace;
+  --uw-font-stack: var(--font-body-family), 'Inter', ui-sans-serif, system-ui,
+    -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   --uw-scale: var(--ui-web-text-scale, 1);
   background: var(--canvas);
   color: var(--text-primary);
@@ -406,9 +406,6 @@
   padding: 0 var(--spacing-sm);
   margin-bottom: var(--spacing-sm);
 }
-.uw-section-label--block {
-  margin-top: var(--spacing-xl);
-}
 .uw-card {
   border: var(--stroke-hairline) solid var(--hairline);
   border-radius: var(--radius-float);
@@ -568,10 +565,12 @@
   margin-top: var(--spacing-xs);
   padding: var(--spacing-xs) var(--spacing-lg);
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-state__retry:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 /* Inside a rail the state is a quiet stub — the default flex:1 shell
    would stretch into a column of dead space mid-screen. */
@@ -715,10 +714,12 @@
   margin-left: auto;
   padding: var(--spacing-xs) var(--spacing-md);
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-rail__see-all:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-rail__cards {
   display: flex;
@@ -1044,6 +1045,21 @@
 
 /* ---- settings ------------------------------------------------------------ */
 
+/* Grouped cards breathe like iOS settings — wider rhythm between groups
+   than the screen's default child gap. */
+.uw-settings {
+  gap: var(--spacing-xl);
+}
+.uw-settings__group {
+  display: flex;
+  flex-direction: column;
+}
+/* Row separators stop at the label edge instead of running full-bleed;
+   padded cards (diagnostics, sync) keep their full-width dividers. */
+.uw-settings__group .uw-card:not(.uw-card--padded) .uw-hairline {
+  margin-left: var(--spacing-md);
+}
+
 .uw-settings-row {
   display: flex;
   align-items: center;
@@ -1061,10 +1077,11 @@
   background: var(--fg08);
 }
 .uw-toggle {
-  width: 36px;
-  height: 20px;
+  width: 46px;
+  height: 26px;
   border-radius: var(--radius-pill);
   background: var(--fg18);
+  border: var(--stroke-hairline) solid var(--hairline);
   display: inline-flex;
   align-items: center;
   padding: 0 2px;
@@ -1072,15 +1089,18 @@
 }
 .uw-toggle--on {
   background: var(--accent);
+  border-color: transparent;
 }
 .uw-toggle__thumb {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   border-radius: var(--radius-pill);
-  background: var(--text-bright);
+  background: var(--thumb);
+  border: var(--stroke-hairline) solid var(--fg40);
 }
 .uw-toggle--on .uw-toggle__thumb {
-  transform: translateX(16px);
+  transform: translateX(18px);
+  border-color: transparent;
 }
 
 /* ---- entity / collection / playlist -------------------------------------- */
@@ -1110,13 +1130,19 @@
   padding: 0 var(--spacing-lg);
   min-height: 34px;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-pill:hover:not(:disabled):not(.uw-pill--accent) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-pill--accent {
-  background: var(--accent-soft);
+  background: var(--accent);
+  border-color: transparent;
+}
+.uw-pill--accent:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 999px var(--fg18);
 }
 .uw-load-more {
   display: flex;
@@ -1169,10 +1195,12 @@
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-headbtn:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-headbtn--warn .uw-text {
   color: var(--warn);
@@ -1232,10 +1260,12 @@
   padding: var(--spacing-xs) var(--spacing-md);
   min-height: 26px;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-review__action:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 
 /* ---- transfer ------------------------------------------------------------- */
@@ -1840,4 +1870,20 @@
 .uw-pairing__payload {
   word-break: break-all;
   opacity: 0.6;
+}
+.uw-nearby {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+  text-align: left;
+}
+.uw-nearby__dial {
+  display: flex;
+  gap: var(--spacing-sm);
+  width: 100%;
+  margin-top: var(--spacing-xs);
+}
+.uw-nearby__dial .uw-namefield__input {
+  flex: 1;
 }

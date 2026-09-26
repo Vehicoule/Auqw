@@ -12,12 +12,17 @@ import { createLocalService } from './local.ts';
 import { createStorageService } from './storage.ts';
 import { createStreamHandlers } from './stream.ts';
 import { createServiceKeys } from './sync-keys.ts';
-import { createBonjourAdvertise } from './sync-mdns.ts';
+import {
+  createBonjourAdvertise,
+  createBonjourBrowse,
+} from './sync-mdns.ts';
+import { createSyncDialer } from './sync-dialer.ts';
+import type { SyncDiscoveryPort } from '@auqw/application';
 import {
   createSyncService,
   type SyncAdvertise,
 } from './sync-server.ts';
-import { openSyncLogStore } from './sync-log.ts';
+import { openSyncLogStore, type OpenedSyncLog } from './sync-log.ts';
 import {
   createUtilitySyncEngine,
   type UtilitySyncEngine,
@@ -77,6 +82,17 @@ function lazyBonjour(): SyncAdvertise {
   return (opts) => {
     factory ??= createBonjourAdvertise();
     return factory(opts);
+  };
+}
+
+/** Same lazy posture for the browse side — defer Bonjour to first use. */
+function lazyBrowse() {
+  let port: ReturnType<typeof createBonjourBrowse> | null = null;
+  return {
+    browse: (opts: Parameters<SyncDiscoveryPort['browse']>[0]) => {
+      port ??= createBonjourBrowse();
+      return port.browse(opts);
+    },
   };
 }
 
@@ -175,25 +191,28 @@ if (port === null) {
   // promise inside start() — a failed build degrades to
   // engine-absent and the listener/pairing still serve.
   const userData = process.env['AUQW_USER_DATA'];
-  const enginePromise: Promise<UtilitySyncEngine | null> | null =
+  const syncLogOpened: Promise<OpenedSyncLog | null> | null =
     userData === undefined
       ? null
-      : (async () => {
-          const opened = await openSyncLogStore(
-            `${userData}/sync-log.jsonl`,
-          );
-          if (!opened.ok) {
+      : openSyncLogStore(`${userData}/sync-log.jsonl`).then((opened) =>
+          opened.ok ? opened.value : null,
+        );
+  const enginePromise: Promise<UtilitySyncEngine | null> | null =
+    syncLogOpened === null
+      ? null
+      : syncLogOpened.then(async (opened) => {
+          if (opened === null) {
             return null;
           }
           const built = await createUtilitySyncEngine({
-            store: opened.value.store,
+            store: opened.store,
             clock: createClock(),
             ids: createIds(),
             log: createLog(),
-            deviceId: opened.value.deviceId,
+            deviceId: opened.deviceId,
           });
           return built.ok ? built.value : null;
-        })();
+        });
   // The LAN sync service: listener + pairing + device registry +
   // engine seam.
   const syncPort = syncPortEnv();
@@ -229,6 +248,36 @@ if (port === null) {
     armed: process.env['AUQW_SYNC_ARMED'] !== '0',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),
     keys: createServiceKeys(serviceClient.request),
+    // The caller half — pair TO a phone's offer. Shares the custody
+    // channel + the sync-log deviceId; the bound-port getter comes
+    // from the service so the hello advertises a dialable endpoint.
+    dialer: ({ listenPort, listenEndpoints, deviceName }) =>
+      createSyncDialer({
+        keys: createServiceKeys(serviceClient.request),
+        ownDeviceId: async () =>
+          (await syncLogOpened)?.deviceId ?? null,
+        engine: async () =>
+          (await enginePromise)?.engine ?? null,
+        deviceName,
+        listenPort,
+        listenEndpoints,
+      }),
+    discovery:
+      process.env['AUQW_SYNC_NO_MDNS'] === '1' ? null : lazyBrowse(),
+    notifyNearby: (event) =>
+      serviceClient
+        .request('sync:nearby', event)
+        .then(
+          () => undefined,
+          () => undefined,
+        ),
+    ...(syncLogOpened === null
+      ? {}
+      : {
+          ownDeviceId: syncLogOpened.then(
+            (opened) => opened?.deviceId ?? null,
+          ),
+        }),
     ...(enginePromise === null
       ? {}
       : {

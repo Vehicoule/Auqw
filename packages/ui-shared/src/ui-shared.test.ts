@@ -9,6 +9,7 @@ import {
   languageOptionKey,
   resolveLocale,
   setLocale,
+  settingsGroups,
   t,
   toHomeModel,
   toQueueModel,
@@ -92,6 +93,36 @@ assert(
 
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
 assertEqual(settings.rows.length, fixtureSettingsModel.rows.length);
+
+// ---- settings groups --------------------------------------------------
+const settingsGrouped = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+  localSources: [{ sourceId: 'src-a', label: 'Music' }],
+});
+const groups = settingsGroups(settingsGrouped.rows);
+assertEqual(groups.length, 6, 'six labeled groups');
+assertEqual(
+  groups.map((g) => g.key).join(','),
+  'theme,catalogProvider,qualityKbps,downloadMetered,localSources,sync',
+  'group boundaries land on their keys',
+);
+assertEqual(
+  groups.flatMap((g) => g.rows.map((r) => r.key)).join(','),
+  settingsGrouped.rows.map((r) => r.key).join(','),
+  'groups preserve every row in order',
+);
+assertEqual(groups[0]?.label, 'appearance', 'labels resolve');
+const localGroup = groups.find((g) => g.key === 'localSources');
+assert(
+  localGroup?.rows.some(
+    (r) => r.key === 'localSourceRemove:src-a' && r.destructive === true,
+  ) === true,
+  'local-source removal lands in local files, marked destructive',
+);
+assert(
+  settingsGrouped.rows.find((r) => r.key === 'removeAllDownloads')
+    ?.destructive === true,
+  'remove-all-downloads marked destructive',
+);
 
 // ---- sync panel ------------------------------------------------------------
 const NOW = 1_800_000_000_000;
