@@ -212,7 +212,11 @@ assertEqual(resolveLocale('zh-TW', 'en-US'), 'en', 'zh-TW falls back');
 assertEqual(resolveLocale('zh-HK', 'en-US'), 'en', 'zh-HK falls back');
 assertEqual(resolveLocale('zh-MO', 'en-US'), 'en', 'zh-MO falls back');
 assertEqual(resolveLocale('zh-CN', 'en-US'), 'zh', 'zh-CN stays Simplified');
+// explicit Hans script beats a Traditional-leaning region
+assertEqual(resolveLocale('zh-Hans-HK', 'en-US'), 'zh', 'zh-Hans-HK pins zh');
+assertEqual(resolveLocale('zh-Hans-TW', 'en-US'), 'zh', 'zh-Hans-TW pins zh');
 assertEqual(languageOptionKey('zh-Hant-TW'), 'system', 'Traditional reads as system');
+assertEqual(languageOptionKey('zh-Hans-HK'), 'zh', 'explicit Hans selects');
 
 // languageOptionKey: the picker's displayed key must agree with what
 // resolveLocale activates — a padded stored tag pins 'de', not 'system'

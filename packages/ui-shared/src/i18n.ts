@@ -112,7 +112,8 @@ export function getLocale(): Locale {
  * is not supported. The shipped `zh` catalog is Simplified only, so
  * Traditional-script or Traditional-region tags (zh-Hant, zh-TW,
  * zh-HK, zh-MO) do not map — they fall back to the system default
- * rather than render the wrong script.
+ * rather than render the wrong script. An explicit `Hans` script
+ * subtag always maps (zh-Hans-HK → zh).
  */
 export function fromTag(tag: string | null | undefined): Locale | null {
   if (tag === undefined || tag === null || tag === '') {
@@ -126,12 +127,19 @@ export function fromTag(tag: string | null | undefined): Locale | null {
     case 'es':
     case 'fr':
       return primary;
-    case 'zh':
-      return parts
-        .slice(1)
-        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
+    case 'zh': {
+      const rest = parts.slice(1);
+      // An explicit Hans script wins even over a Traditional-leaning
+      // region (zh-Hans-HK): the shipped catalog is what was asked for.
+      if (rest.includes('hans')) {
+        return 'zh';
+      }
+      return rest.some(
+        (p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo',
+      )
         ? null
         : 'zh';
+    }
     default:
       return null;
   }
