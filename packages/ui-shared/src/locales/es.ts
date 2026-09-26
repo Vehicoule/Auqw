@@ -322,8 +322,14 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'sync.state.offline': 'sin conexión',
   'sync.status.unavailable': 'no disponible',
   'sync.status.notPaired': 'sin emparejar',
-  'sync.status.connectedCount': { other: '{count} conectados' },
-  'sync.status.pairedCount': { other: '{count} emparejados' },
+  'sync.status.connectedCount': {
+    one: '{count} conectado',
+    other: '{count} conectados',
+  },
+  'sync.status.pairedCount': {
+    one: '{count} emparejado',
+    other: '{count} emparejados',
+  },
   'sync.lastSync': 'última sync {date}',
   'sync.listener.starting': 'arrancando',
   'sync.listener.listening': 'escuchando',

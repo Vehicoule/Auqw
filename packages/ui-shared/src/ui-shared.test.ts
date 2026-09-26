@@ -255,6 +255,11 @@ setLocale('es');
 assertEqual(t('common.trackCount', { count: 1 }), '1 pista', 'es one');
 assertEqual(t('common.trackCount', { count: 3 }), '3 pistas', 'es other');
 assertEqual(
+  t('sync.status.connectedCount', { count: 1 }),
+  '1 conectado',
+  'es sync count agrees in number',
+);
+assertEqual(
   t('common.cardA11y', { title: 'a', subtitle: 'b' }),
   'a, b',
   'es interpolates',
@@ -263,6 +268,11 @@ setLocale('fr');
 assertEqual(t('common.trackCount', { count: 0 }), '0 titre', 'fr zero is one');
 assertEqual(t('common.trackCount', { count: 1 }), '1 titre', 'fr one');
 assertEqual(t('common.trackCount', { count: 2 }), '2 titres', 'fr other');
+assertEqual(
+  t('sync.status.pairedCount', { count: 1 }),
+  '1 appairé',
+  'fr sync count agrees in number',
+);
 assertEqual(
   t('common.cardA11y', { title: 'a', subtitle: 'b' }),
   'a, b',
