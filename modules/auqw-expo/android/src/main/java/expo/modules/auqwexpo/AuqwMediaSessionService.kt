@@ -1,5 +1,6 @@
 package expo.modules.auqwexpo
 
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
@@ -150,12 +151,17 @@ class AuqwMediaSessionService : MediaSessionService() {
         Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
         Player.COMMAND_SEEK_TO_NEXT -> {
           remoteDispatcher?.dispatch("remote-next")
-          // Consumed — the player's own single-item seek must not run.
+            // Consumed only when the projection cursor heard it — a
+            // dead dispatcher (module destroyed, service surviving on
+            // foreground playback) falls through to the player's own
+            // seek instead of swallowing the press.
+            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
           return SessionResult.RESULT_ERROR_NOT_SUPPORTED
         }
         Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
         Player.COMMAND_SEEK_TO_PREVIOUS -> {
           remoteDispatcher?.dispatch("remote-previous")
+            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
           return SessionResult.RESULT_ERROR_NOT_SUPPORTED
         }
       }
@@ -177,10 +183,12 @@ class AuqwMediaSessionService : MediaSessionService() {
         when (keyEvent.keyCode) {
           KeyEvent.KEYCODE_MEDIA_NEXT -> {
             remoteDispatcher?.dispatch("remote-next")
+              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
             return true
           }
           KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
             remoteDispatcher?.dispatch("remote-previous")
+              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
             return true
           }
         }
@@ -224,9 +232,29 @@ class AuqwMediaSessionService : MediaSessionService() {
     // The session sees the player through QueuePlayer — the module
     // keeps the raw ExoPlayer, the wrapper only advertises the
     // next/previous commands the projection cursor consumes.
-    session = MediaSession.Builder(this, QueuePlayer(p))
+    val builder = MediaSession.Builder(this, QueuePlayer(p))
       .setCallback(sessionCallback)
-      .build()
+    // Notification card tap opens the app — without a session
+    // activity the notification posts with contentIntent=null and
+    // taps are dead. getLaunchIntentForPackage resolves the app's
+    // launcher activity without hardcoding its class.
+    packageManager.getLaunchIntentForPackage(packageName)?.let {
+      builder.setSessionActivity(
+        PendingIntent.getActivity(
+          this, 0, it,
+          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+      )
+    }
+    val s = builder.build()
+    session = s
+    // The module's only service contact is the ACTION_LOCAL_BIND
+    // binder, which bypasses the SERVICE_INTERFACE/controller-connect
+    // path where MediaSessionService.addSession normally runs — and
+    // only added sessions feed MediaNotificationManager. Without this,
+    // the media notification is never posted and the service never
+    // promotes to foreground.
+    addSession(s)
   }
 
   override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
