@@ -1080,9 +1080,11 @@
   height: 17px;
   border-radius: var(--radius-pill);
   background: var(--thumb);
+  border: var(--stroke-hairline) solid var(--fg40);
 }
 .uw-toggle--on .uw-toggle__thumb {
   transform: translateX(17px);
+  border-color: transparent;
 }
 
 /* ---- entity / collection / playlist -------------------------------------- */

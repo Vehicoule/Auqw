@@ -37,6 +37,8 @@ function Toggle({ enabled }: { readonly enabled: boolean }) {
           height: 17,
           borderRadius: 8.5,
           backgroundColor: theme.colors.thumb,
+          borderWidth: theme.strokes.hairline,
+          borderColor: enabled ? 'transparent' : theme.colors.fg40,
           alignSelf: enabled ? 'flex-end' : 'flex-start',
         }}
       />
