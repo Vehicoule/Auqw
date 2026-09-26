@@ -27,11 +27,13 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
   CancellationSource,
+  ProviderRouter,
   SearchSession,
   effectiveMapping,
   isMatchGate,
   isRefRejected,
   previewImport,
+  selectionFromSettings,
 } from '@auqw/application';
 import type {
   AppError,
@@ -1085,9 +1087,25 @@ function Main({
     return search.subscribe(setSearchState);
   }, [search]);
 
+  // Suggestions are capability-routed, not catalog-routed: any loaded
+  // provider declaring `catalog.suggest` serves the draft pane, so the
+  // typing experience is identical whatever catalog provider is set.
+  const providerRouter = useMemo(
+    () => new ProviderRouter(controller.providers),
+    [controller.providers],
+  );
+  const [suggestions, setSuggestions] = useState<readonly string[]>([]);
+  const suggestSource = useRef<CancellationSource | null>(null);
+  const suggestSeq = useRef(0);
+
   const runSearch = useCallback(
     (q: string) => {
       const trimmed = q.trim();
+      // A committed search supersedes the suggest stream — the draft
+      // pane closes and in-flight completions are dropped.
+      suggestSource.current?.cancel();
+      suggestSource.current = null;
+      setSuggestions([]);
       if (trimmed === '') {
         search?.cancel();
         return;
@@ -1111,16 +1129,39 @@ function Main({
     );
   }, []);
 
-  // Live results: keystrokes debounce into a real search; an emptied
-  // box cancels in-flight work and lands back on the idle/recents.
+  // Keystrokes debounce into `catalog.suggest` completions routed over
+  // declaring providers — the typing surface is suggestions, not live
+  // result pages, so the debounce runs tighter than a catalog search
+  // ever could. Only a commit (Enter or a row tap) runs catalog.search.
   useEffect(() => {
-    if (query.trim() === '') {
+    const trimmed = query.trim();
+    if (trimmed === '') {
+      suggestSource.current?.cancel();
+      suggestSource.current = null;
+      setSuggestions([]);
       search?.cancel();
       return undefined;
     }
-    const timer = setTimeout(() => runSearch(query), 350);
+    const timer = setTimeout(() => {
+      suggestSource.current?.cancel();
+      const source = new CancellationSource();
+      suggestSource.current = source;
+      const seq = ++suggestSeq.current;
+      const context: OperationContext = {
+        requestId: createIds().next('suggest'),
+        deadlineMs: Date.now() + 10_000,
+        signal: source.signal,
+      };
+      void providerRouter
+        .suggest(selectionFromSettings(state.settings), { input: trimmed }, context)
+        .then((result) => {
+          if (suggestSeq.current === seq && !source.signal.cancelled) {
+            setSuggestions(result.ok ? result.value : []);
+          }
+        });
+    }, 150);
     return () => clearTimeout(timer);
-  }, [query, search, runSearch]);
+  }, [query, search, providerRouter, state.settings]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
@@ -3263,6 +3304,13 @@ function Main({
             onRecentPress={(recent) => {
               setQuery(recent);
               recordRecentSearch(recent);
+              runSearch(recent);
+            }}
+            suggestions={suggestions}
+            onSuggestionPress={(suggestion) => {
+              setQuery(suggestion);
+              recordRecentSearch(suggestion);
+              runSearch(suggestion);
             }}
           />
         );

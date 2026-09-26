@@ -32,6 +32,13 @@ export type SearchScreenProps = {
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
   readonly onRecentPress?: ((query: string) => void) | undefined;
+  /**
+   * Keystroke completions for the live text — rendered whenever the
+   * box's text differs from the committed `state.query`, so results
+   * from an older search never impersonate matches for the draft.
+   */
+  readonly suggestions?: readonly string[] | undefined;
+  readonly onSuggestionPress?: ((query: string) => void) | undefined;
 };
 
 export function SearchScreen({
@@ -48,10 +55,15 @@ export function SearchScreen({
   onContext,
   recents = [],
   onRecentPress,
+  suggestions = [],
+  onSuggestionPress,
 }: SearchScreenProps) {
   const theme = useTheme();
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
+  // Draft mode: the box carries text that was never committed as the
+  // shown query — completions own the pane until submit.
+  const draft = editing.trim() !== '' && editing.trim() !== state.query;
   return (
     <View
       style={{
@@ -122,7 +134,79 @@ export function SearchScreen({
           </Pressable>
         )}
       </View>
-      {state.phase === 'ready' && (
+      {draft && (
+        <View>
+          <Text
+            variant="label"
+            color="secondary"
+            uppercase
+            style={{
+              paddingHorizontal: theme.spacing.screen,
+              marginBottom: theme.spacing.xs,
+            }}
+          >
+            {t('search.suggestions')}
+          </Text>
+          <Pressable
+            compact
+            onPress={onSubmit}
+            accessibilityLabel={t('search.a11y.suggestion', {
+              query: editing.trim(),
+            })}
+            style={({ pressed }) => [
+              {
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: theme.spacing.md,
+                minHeight: theme.sizes.touch,
+                paddingHorizontal: theme.spacing.screen,
+                borderRadius: theme.radius.control,
+              },
+              pressed && { backgroundColor: theme.colors.fg08 },
+            ]}
+          >
+            <Icon name="search" size={14} color={theme.colors.textSecondary} />
+            <Text variant="body" color="primary" numberOfLines={1}>
+              {t('search.commitQuery', { query: editing.trim() })}
+            </Text>
+          </Pressable>
+          {suggestions.map((suggestion) => (
+            <Pressable
+              key={suggestion}
+              compact
+              onPress={
+                onSuggestionPress === undefined
+                  ? undefined
+                  : () => onSuggestionPress(suggestion)
+              }
+              accessibilityLabel={t('search.a11y.suggestion', {
+                query: suggestion,
+              })}
+              style={({ pressed }) => [
+                {
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: theme.spacing.md,
+                  minHeight: theme.sizes.touch,
+                  paddingHorizontal: theme.spacing.screen,
+                  borderRadius: theme.radius.control,
+                },
+                pressed && { backgroundColor: theme.colors.fg08 },
+              ]}
+            >
+              <Icon
+                name="clock"
+                size={14}
+                color={theme.colors.textSecondary}
+              />
+              <Text variant="body" color="primary" numberOfLines={1}>
+                {suggestion}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {!draft && state.phase === 'ready' && (
         <View
           style={{
             flexDirection: 'row',
@@ -146,7 +230,8 @@ export function SearchScreen({
           </Text>
         </View>
       )}
-      {state.phase === 'idle' &&
+      {!draft &&
+        state.phase === 'idle' &&
         (recents.length > 0 ? (
           <View>
             <Text
@@ -200,30 +285,31 @@ export function SearchScreen({
             icon="search"
           />
         ))}
-      {state.phase === 'loading' && state.results.length === 0 && (
+      {!draft && state.phase === 'loading' && state.results.length === 0 && (
         <LoadingState title={t('search.loading')} hint={state.query} />
       )}
-      {state.phase === 'empty' && (
+      {!draft && state.phase === 'empty' && (
         <EmptyState
           title={t('search.noResults', { query: state.query })}
           hint={t('search.noResultsHint')}
           icon="search"
         />
       )}
-      {state.phase === 'error' && (
+      {!draft && state.phase === 'error' && (
         <ErrorState
           title={t('search.failed')}
           hint={state.message}
           onRetry={state.retryable ? onRetry : undefined}
         />
       )}
-      {state.phase === 'unavailable' && (
+      {!draft && state.phase === 'unavailable' && (
         <UnavailableState
           title={t('search.unavailableTitle')}
           hint={state.message}
         />
       )}
-      {(state.phase === 'ready' || state.phase === 'loading') &&
+      {!draft &&
+        (state.phase === 'ready' || state.phase === 'loading') &&
         state.results.length > 0 && (
           <FlatList
             data={state.results}

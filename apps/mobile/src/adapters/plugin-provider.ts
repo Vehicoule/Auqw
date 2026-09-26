@@ -472,6 +472,25 @@ function toPlainLyrics(value: unknown): LyricsResult | null {
   return null;
 }
 
+/** Wire `{suggestions: string[]}` → flat completion list. */
+function toSuggestionList(value: unknown): readonly string[] | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['suggestions'])) {
+    return null;
+  }
+  const suggestions = value['suggestions'];
+  if (!Array.isArray(suggestions)) {
+    return null;
+  }
+  const out: string[] = [];
+  for (const item of suggestions) {
+    if (typeof item !== 'string' || item.length === 0) {
+      return null;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 /** Wire `radioSeedResult` → domain `RadioPage`. */
 function toRadioPage(value: unknown): RadioPage | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items', 'continuation'])) {
@@ -847,6 +866,18 @@ export function createPluginProvider(
           : { continuation: input.continuation },
         context,
         toRadioPage,
+      );
+    },
+    suggest(input, context) {
+      const blocked = guard('catalog.suggest');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'catalog.suggest',
+        { input: input.input, limit: input.limit },
+        context,
+        toSuggestionList,
       );
     },
     dispose() {

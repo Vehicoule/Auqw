@@ -458,6 +458,40 @@
         }
       }
     },
+    "catalogSuggestPayload": {
+      "type": "object",
+      "required": [
+        "input"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "catalogSuggestResult": {
+      "type": "object",
+      "required": [
+        "suggestions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "suggestions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "playbackCandidatesPayload": {
       "type": "object",
       "required": [
@@ -957,6 +991,22 @@
       "additionalProperties": false,
       "properties": {
         "capability": {
+          "const": "catalog.suggest"
+        },
+        "payload": {
+          "$ref": "#/$defs/catalogSuggestPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "payload"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
           "const": "playback.candidates"
         },
         "payload": {
@@ -1089,6 +1139,22 @@
         },
         "result": {
           "$ref": "#/$defs/catalogEntityResult"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "capability",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "catalog.suggest"
+        },
+        "result": {
+          "$ref": "#/$defs/catalogSuggestResult"
         }
       }
     },

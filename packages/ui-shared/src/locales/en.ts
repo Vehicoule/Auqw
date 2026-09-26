@@ -111,6 +111,9 @@ export const en = {
   'search.failed': 'search failed',
   'search.unavailableTitle': 'search unavailable',
   'search.resultsA11y': 'search results',
+  'search.suggestions': 'suggestions',
+  'search.commitQuery': 'search for “{query}”',
+  'search.a11y.suggestion': 'search for {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'your library',
