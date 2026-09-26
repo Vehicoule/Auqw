@@ -1699,6 +1699,18 @@ async function disarmDuringCommitDropsPage(): Promise<void> {
   const snap = readyOf(r);
   assertEqual(snap.queue.occurrences.length, 1, 'page never entered');
   assertEqual(snap.radio, null, 'record gone');
+  // The batch still committed durably — a compensating commit must
+  // restore the pre-page queue so restore never resurrects it.
+  const queueCommits = r.storage.commits.filter(
+    (c) => c.batch.queue !== undefined,
+  );
+  const lastQueue = queueCommits[queueCommits.length - 1];
+  assert(lastQueue !== undefined, 'compensating commit ran');
+  assertEqual(
+    lastQueue.batch.queue?.occurrences.length,
+    1,
+    'durable queue restored to pre-page state',
+  );
   r.player.cancelPendingPrepares();
   await r.session.dispose();
 }

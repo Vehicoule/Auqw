@@ -527,8 +527,20 @@ function retainMaterializedPending(
  * in-memory apply. An omitted `batch` means nothing durable changed
  * — the apply still runs and publishes.
  */
+type RadioPageOutcome = {
+  changed: boolean;
+  firstAppended: string | undefined;
+  rejected: boolean;
+};
+
 type CommitStage<T> = {
   readonly batch?: StorageBatch;
+  /**
+   * Post-commit gate on sync emission: when the batch committed but
+   * the write is no longer wanted (a disarm landed during the await),
+   * `emit(r)` returning false keeps the rejected writes off the wire.
+   */
+  readonly emit?: (r: Ready) => boolean;
   readonly apply: (r: Ready) => T;
 };
 
@@ -991,7 +1003,7 @@ export class Session {
         if (!staged.ok) {
           return err(staged.error);
         }
-        const { batch, apply } = staged.value;
+        const { batch, apply, emit } = staged.value;
         if (batch !== undefined) {
           const deadlineMs = this.#deadline();
           const context = this.#newContext(
@@ -1018,7 +1030,9 @@ export class Session {
           r.persistenceError = undefined;
           // Same post-commit seam as #persist — `r` still holds the
           // pre-apply sections the batch diffs against.
-          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
+          if (emit === undefined || emit(r)) {
+            this.#emitSync(emissionWrites(syncEmitInput(r), batch));
+          }
         }
         const outcome = apply(r);
         this.#publish();
@@ -3151,9 +3165,7 @@ export class Session {
       this.#publish();
       return err(seeded.error);
     }
-    const staged = await this.#commitStaged(
-      this.#guardRadioStage(record, seeded.value),
-    );
+    const staged = await this.#commitRadioPage(record, seeded.value);
     if (!staged.ok) {
       r.radio = null;
       this.#publish();
@@ -3259,9 +3271,7 @@ export class Session {
       this.#publish();
       return;
     }
-    const staged = await this.#commitStaged(
-      this.#guardRadioStage(record, result.value),
-    );
+    const staged = await this.#commitRadioPage(record, result.value);
     if (!staged.ok) {
       record.status = 'failed';
       record.error = staged.error;
@@ -3536,6 +3546,90 @@ export class Session {
   }
 
   /**
+   * A disarm landing while a page's commit waits on storage must
+   * never let the page reach the queue — or the durable doc: the
+   * record check runs inside the segment before staging (a disarm
+   * queued ahead drops the commit entirely), again inside `apply`
+   * (a disarm during the commit await skips the in-memory write),
+   * and the sync emission is gated on the same check so a rejected
+   * page never leaves the device. When the batch still committed
+   * durably, a compensating commit restores the pre-page queue and
+   * recordings — capture happens at stage time, before the await.
+   */
+  async #commitRadioPage(
+    record: RadioTailRecord,
+    page: RadioPage,
+  ): Promise<
+    Result<{ changed: boolean; firstAppended: string | undefined }>
+  > {
+    const pre: {
+      queue: QueueSnapshot | undefined;
+      recordings: readonly Recording[] | undefined;
+    } = { queue: undefined, recordings: undefined };
+    const staged = await this.#commitStaged((cur) => {
+      if (cur.radio !== record) {
+        return ok<CommitStage<RadioPageOutcome>>({
+          apply: () => ({
+            changed: false,
+            firstAppended: undefined,
+            rejected: false,
+          }),
+        });
+      }
+      pre.queue = cur.queue.snapshot();
+      pre.recordings = cur.recordings;
+      const inner = this.#stageRadioPage(cur, page);
+      if (!inner.ok) {
+        return err(inner.error);
+      }
+      return ok<CommitStage<RadioPageOutcome>>({
+        ...(inner.value.batch !== undefined
+          ? { batch: inner.value.batch }
+          : {}),
+        emit: (rr) => rr.radio === record,
+        apply: (rr) => {
+          if (rr.radio === record) {
+            const out = inner.value.apply(rr);
+            return { ...out, rejected: false };
+          }
+          return {
+            changed: false,
+            firstAppended: undefined,
+            rejected: true,
+          };
+        },
+      });
+    });
+    if (!staged.ok) {
+      return staged;
+    }
+    if (
+      staged.value.rejected &&
+      pre.queue !== undefined &&
+      pre.recordings !== undefined
+    ) {
+      const snapshot = pre.queue;
+      const recordings = pre.recordings;
+      const reverted = await this.#commitStaged(() =>
+        ok<CommitStage<void>>({
+          batch: { queue: snapshot, recordings: [...recordings] },
+          apply: (rr) => {
+            rr.queue = new QueueEngine(snapshot);
+            rr.recordings = [...recordings];
+          },
+        }),
+      );
+      if (!reverted.ok) {
+        this.#logWarn(`radio page revert failed: ${reverted.error.kind}`);
+      }
+    }
+    return ok({
+      changed: staged.value.changed,
+      firstAppended: staged.value.firstAppended,
+    });
+  }
+
+  /**
    * A page landing on a drained queue: the tail was armed while
    * playing (`resumeOnDrain`) and playback ran out of occurrences
    * before the fetch landed — resume at the first appended item.
@@ -3543,40 +3637,6 @@ export class Session {
    * `stopRadio()` drop the record, so a stopped queue never
    * resurrects when an in-flight page lands.
    */
-  /**
-   * A disarm landing while a page's commit waits on storage must
-   * never let the page reach the queue: the record check happens
-   * inside the segment (a disarm queued before it drops the commit
-   * entirely) and again inside `apply` (a disarm landing during the
-   * commit await skips the in-memory apply).
-   */
-  #guardRadioStage(
-    record: RadioTailRecord,
-    page: RadioPage,
-  ): (cur: Ready) => Result<
-    CommitStage<{ changed: boolean; firstAppended: string | undefined }>
-  > {
-    return (cur) => {
-      if (cur.radio !== record) {
-        return ok({
-          apply: () => ({ changed: false, firstAppended: undefined }),
-        });
-      }
-      const staged = this.#stageRadioPage(cur, page);
-      if (!staged.ok) {
-        return staged;
-      }
-      const inner = staged.value;
-      return ok({
-        ...(inner.batch !== undefined ? { batch: inner.batch } : {}),
-        apply: (rr) =>
-          rr.radio === record
-            ? inner.apply(rr)
-            : { changed: false, firstAppended: undefined },
-      });
-    };
-  }
-
   #resumeDrainedQueue(
     r: Ready,
     record: RadioTailRecord,
