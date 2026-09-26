@@ -1049,6 +1049,16 @@ export function projectAppliedEntries(
     seen.add(entryKey(outcome.entry));
     applied.push(outcome);
   }
+  // `pending` feeds the head of the next drain's union, where the
+  // last same-record outcome wins the materialized snapshot — so
+  // retained outcomes must keep ARRIVAL order, not the canonical
+  // fold order they get collected in below (an older drain's
+  // snapshot could otherwise override a newer one's).
+  const applyOrder = new Map<MergeOutcome, number>();
+  applied.forEach((outcome, i) => {
+    applyOrder.set(outcome, i);
+  });
+
   // Folds replay canonically (hlc, then deviceId) — the merge is
   // deterministic no matter the order a drain delivered outcomes in.
   const ordered = [...applied].sort((a, b) =>
@@ -1110,7 +1120,7 @@ export function projectAppliedEntries(
     fold.absolute = true;
   }
 
-  return finishProjection(folds, current, pending, skipped);
+  return finishProjection(folds, current, pending, skipped, applyOrder);
 }
 
 /**
@@ -1153,6 +1163,7 @@ function finishProjection(
   current: SyncProjectionInput,
   pending: MergeOutcome[],
   skipped: ProjectionSkip[],
+  applyOrder?: ReadonlyMap<MergeOutcome, number>,
 ): SyncProjection {
   const foldOf = (kind: SyncRecordKind, recordId: string): RecordFold | undefined =>
     folds.get(`${kind}${KEY_SEP}${recordId}`);
@@ -2176,7 +2187,16 @@ function finishProjection(
 
   return {
     batch,
-    pending,
+    // Restore arrival order — the caller unions retained pending
+    // ahead of the next drain's outcomes and the last same-record
+    // snapshot wins; fold-canonical order would let an older drain's
+    // snapshot beat the fresher one.
+    pending:
+      applyOrder === undefined
+        ? pending
+        : [...pending].sort(
+            (a, b) => (applyOrder.get(a) ?? 0) - (applyOrder.get(b) ?? 0),
+          ),
     pendingRecords,
     skipped,
     changedKinds: [...changedKinds],

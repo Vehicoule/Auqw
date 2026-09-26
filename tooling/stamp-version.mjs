@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { versionCodeOf } from './version-code.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,18 +42,28 @@ const isSemver = (value) => {
     .some((ident) => /^\d+$/.test(ident) && ident.length > 1 && ident.startsWith('0'));
 };
 
-const readVersions = () => ({
-  desktop: JSON.parse(
-    readFileSync(join(ROOT, 'apps/desktop/package.json'), 'utf8'),
-  ).version,
-  mobile: JSON.parse(
-    readFileSync(join(ROOT, 'apps/mobile/package.json'), 'utf8'),
-  ).version,
-  config: readFileSync(
-    join(ROOT, 'apps/mobile/app.config.ts'),
-    'utf8',
-  ).match(/^\s*version: '([^']+)',\s*$/m)?.[1],
-});
+// Android's versionCode derivation lives in ./version-code.mjs, which
+// range-checks every component and gives each prerelease channel a
+// disjoint ordered band (see its monotonicity tests). A version it
+// cannot order returns null and must fail the stamp rather than mint a
+// code that collides with a release already in the wild.
+
+const readAppConfig = () =>
+  readFileSync(join(ROOT, 'apps/mobile/app.config.ts'), 'utf8');
+
+const readVersions = () => {
+  const config = readAppConfig();
+  return {
+    desktop: JSON.parse(
+      readFileSync(join(ROOT, 'apps/desktop/package.json'), 'utf8'),
+    ).version,
+    mobile: JSON.parse(
+      readFileSync(join(ROOT, 'apps/mobile/package.json'), 'utf8'),
+    ).version,
+    config: config.match(/^\s*version: '([^']+)',\s*$/m)?.[1],
+    code: config.match(/^\s*versionCode: (\d+),\s*$/m)?.[1],
+  };
+};
 
 const arg = process.argv[2];
 
@@ -60,7 +71,7 @@ if (arg === '--check') {
   const wanted = process.argv[3];
   const found = readVersions();
   console.log(
-    `desktop: ${found.desktop}\nmobile: ${found.mobile}\napp.config: ${found.config}`,
+    `desktop: ${found.desktop}\nmobile: ${found.mobile}\napp.config: ${found.config}\nversionCode: ${found.code}`,
   );
   const versions = [found.desktop, found.mobile, found.config];
   const agree =
@@ -71,6 +82,23 @@ if (arg === '--check') {
       wanted === undefined
         ? 'stamp-version: manifests do not carry one version'
         : `stamp-version: manifests do not all carry ${wanted}`,
+    );
+    process.exit(1);
+  }
+  // versionCode derives from that version, so a mismatch means it was
+  // hand-edited — refuse rather than ship a build that cannot
+  // upgrade-install over the previous one.
+  const expectedCode = versionCodeOf(versions[0] ?? '');
+  if (expectedCode === null) {
+    console.error(
+      `stamp-version: '${versions[0] ?? ''}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
+    );
+    process.exit(1);
+  }
+  const expected = String(expectedCode);
+  if (found.code !== expected) {
+    console.error(
+      `stamp-version: app.config versionCode is ${found.code ?? 'missing'}, expected ${expected}`,
     );
     process.exit(1);
   }
@@ -90,6 +118,20 @@ if (!isSemver(version)) {
   process.exit(1);
 }
 
+// Derive before writing anything. `versionCodeOf` refuses a version it
+// cannot order (`-alpha.333`, an unknown channel), and stamping the
+// manifests first would leave the two package.json versions advanced
+// while app.config.ts still carried the old one — a half-stamped tree
+// that fails `--check` in a way no re-run explains.
+const derived = versionCodeOf(version);
+if (derived === null) {
+  console.error(
+    `stamp-version: '${version}' has no orderable versionCode — want x.y.z or x.y.z-<alpha|beta|rc>.<n>`,
+  );
+  process.exit(1);
+}
+const code = String(derived);
+
 for (const rel of [
   'apps/desktop/package.json',
   'apps/mobile/package.json',
@@ -103,14 +145,18 @@ for (const rel of [
 const configPath = join(ROOT, 'apps/mobile/app.config.ts');
 const config = readFileSync(configPath, 'utf8');
 const FIELD = /^(\s*version: ')[^']+(',\s*)$/m;
+const CODE_FIELD = /^(\s*versionCode: )\d+(,\s*)$/m;
 // Existence, not change — stamping the version the file already
 // carries is an idempotent no-op, not a missing-field failure.
-if (!FIELD.test(config)) {
+if (!FIELD.test(config) || !CODE_FIELD.test(config)) {
   console.error(
-    'stamp-version: version field not found in app.config.ts',
+    'stamp-version: version/versionCode field not found in app.config.ts',
   );
   process.exit(1);
 }
-writeFileSync(configPath, config.replace(FIELD, `$1${version}$2`));
+writeFileSync(
+  configPath,
+  config.replace(FIELD, `$1${version}$2`).replace(CODE_FIELD, `$1${code}$2`),
+);
 
-console.log(`stamped ${version}`);
+console.log(`stamped ${version} (versionCode ${code})`);

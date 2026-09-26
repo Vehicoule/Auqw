@@ -449,7 +449,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'nav.primaryA11y': 'hauptnavigation',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} fehlgeschlagen — {message}',
+  'toast.failed': '{action} fehlgeschlagen — {kind}',
   'toast.storefrontCode': 'storefront muss ein zweistelliger ländercode sein',
 
   // ---- reported operation names ------------------------------------------

@@ -1024,14 +1024,14 @@ async function exportPagination(): Promise<void> {
 async function remoteMutationImmunity(): Promise<void> {
   const a = await makeEngine('a', 100);
   const artwork = [
-    { url: 'https://img/a.png', width: 1, height: 1 },
+    { url: 'https://art.example/a.png', width: 1, height: 1 },
   ];
   const doc = delta([
     rawEntry('entity', 'artist:x', 'artwork', artwork, { l: 10, c: 0 }),
   ]);
   await mustApply(a.engine, doc);
   (artwork as unknown[]).push({
-    url: 'https://img/evil.png',
+    url: 'https://art.example/evil.png',
     width: 2,
     height: 2,
   });
@@ -2137,14 +2137,14 @@ async function localFreezeImmunity(): Promise<void> {
   // The engine owns a clone: caller objects must stay mutable after
   // localChange — including on a failed append.
   const { engine, store } = await makeEngine('a');
-  const artwork = [{ url: 'https://a/x', width: 1, height: 1 }];
+  const artwork = [{ url: 'https://art.example/x', width: 1, height: 1 }];
   await mustWrite(engine, {
     kind: 'recording',
     recordId: 'r1',
     field: 'artwork',
     value: artwork,
   });
-  artwork.push({ url: 'https://a/y', width: 2, height: 2 });
+  artwork.push({ url: 'https://art.example/y', width: 2, height: 2 });
   assertEqual(artwork.length, 2);
   assertEqual(
     materialized(engine, 'recording', 'r1')?.['artwork'] !== undefined
@@ -2153,7 +2153,7 @@ async function localFreezeImmunity(): Promise<void> {
     1,
   );
   store.failNextAppend(appError('unavailable', 'full'));
-  const second = { url: 'https://a/z', width: 3, height: 3 };
+  const second = { url: 'https://art.example/z', width: 3, height: 3 };
   const failed = await engine.localChange({
     kind: 'recording',
     recordId: 'r1',

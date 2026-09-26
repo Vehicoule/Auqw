@@ -5,6 +5,8 @@ import {
   type ServerResponse,
 } from 'node:http';
 import vm from 'node:vm';
+import { JSDOM } from 'jsdom';
+import { getGlobalDispatcher, Dispatcher } from 'undici';
 import { BotGuardClient } from 'bgutils-js/botguard';
 import { WebPoMinter } from 'bgutils-js/webpo';
 import { buildURL, getHeaders, parseLooseJSON } from 'bgutils-js/utils';
@@ -66,6 +68,24 @@ const FAILURE_COOLDOWN_MS = 15_000;
  * remote code gets a budget, not the host's whole network. */
 const SANDBOX_FETCH_MAX_CALLS = 32;
 const SANDBOX_FETCH_MAX_CHARS = 1_024 * 1_024;
+/** Attestation bodies are small; a request past this stops being one. */
+const SANDBOX_REQ_MAX_CHARS = 256 * 1_024;
+/** Header fields the interpreter may legitimately set on a probe —
+ * everything else (auth-ish or tracking headers) is dropped. The CORS
+ * machinery fields stay because a cross-origin attestation POST
+ * preflights them and google denies the POST without them. Hop-by-hop
+ * and framing fields (host, content-length, transfer-encoding,
+ * connection) are absent on purpose: undici derives those itself. */
+const SANDBOX_HEADER_ALLOW = new Set([
+  'accept',
+  'accept-language',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'content-type',
+  'origin',
+  'referer',
+  'user-agent',
+]);
 /** Refresh before GenerateIT's `estimatedTtlSecs` actually ends. */
 const SESSION_MARGIN_MS = 60_000;
 const DEFAULT_SESSION_TTL_MS = 21_600 * 1_000;
@@ -169,81 +189,275 @@ type MintResult = {
 /* -------------------------- BotGuard flow -------------------------- */
 
 /**
- * Browser-ish globals for the BotGuard VM — the minimal set the
- * interpreter probes. Nothing here touches the utility's own
- * globals; host capabilities (fetch/crypto/performance/encoders)
- * are injected explicitly, everything else is inert stubs.
+ * Gates jsdom-originated traffic onto the exact-host allowlist —
+ * jsdom routes every network path (subresources, XHR, WebSocket
+ * upgrades) through this dispatcher, so the same allowlist that
+ * narrows `window.fetch` covers them identically. Lifecycle calls
+ * never reach the base dispatcher: it is the shared global and
+ * closing it would sever every later host fetch.
+ */
+class AllowlistDispatcher extends Dispatcher {
+  readonly #upstream: Dispatcher;
+  readonly #hosts: ReadonlySet<string>;
+  #calls = 0;
+
+  constructor(upstream: Dispatcher, hosts: ReadonlySet<string>) {
+    super();
+    this.#upstream = upstream;
+    this.#hosts = hosts;
+  }
+
+  dispatch(
+    options: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandler,
+  ): boolean {
+    const reject = (reason: string): boolean => {
+      const error = new TypeError(`pot: sandboxed request ${reason}`);
+      // jsdom's own blocked-URL path signals `onResponseError` the
+      // same way — a dead request is its one failure shape.
+      handler.onResponseError?.(
+        null as unknown as Parameters<
+          NonNullable<typeof handler.onResponseError>
+        >[0],
+        error,
+      );
+      return true;
+    };
+    const opaque = (options as { opaque?: { url?: string } }).opaque;
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(
+        opaque?.url ?? `${options.origin ?? ''}${options.path}`,
+      );
+    } catch {
+      parsed = null;
+    }
+    const method = String(options.method ?? 'GET').toUpperCase();
+    // Same grant window.fetch gets: https only, exact host, read-mostly
+    // verbs — POST stays because the interpreter legitimately ships
+    // attestation bodies to google hosts, and OPTIONS because a
+    // cross-origin XHR POST preflights before it sends. Everything is
+    // bounded by the same per-sandbox call budget.
+    if (
+      parsed === null ||
+      parsed.protocol !== 'https:' ||
+      !this.#hosts.has(parsed.hostname.toLowerCase())
+    ) {
+      return reject('host not allowed');
+    }
+    if (
+      method !== 'GET' &&
+      method !== 'HEAD' &&
+      method !== 'POST' &&
+      method !== 'OPTIONS'
+    ) {
+      return reject('method not allowed');
+    }
+    if (this.#calls >= SANDBOX_FETCH_MAX_CALLS) {
+      return reject('budget exhausted');
+    }
+    this.#calls += 1;
+    // Request headers carry the same allowlist window.fetch enforces;
+    // undici accepts several header shapes, normalize them all.
+    const filtered: Record<string, string | string[]> = {};
+    const addHeader = (name: string, value: unknown): void => {
+      const key = name.toLowerCase();
+      const vals = Array.isArray(value) ? value : [value];
+      const clean = vals.filter(
+        (v): v is string => typeof v === 'string' && v.length <= 512,
+      );
+      if (SANDBOX_HEADER_ALLOW.has(key) && clean.length > 0) {
+        filtered[key] = Array.isArray(value) ? clean : (clean[0] ?? '');
+      }
+    };
+    const raw = options.headers;
+    if (Array.isArray(raw)) {
+      // undici's array form is flat name/value pairs, not "name: value"
+      // lines — walk it two at a time.
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        const name = raw[i];
+        if (typeof name === 'string') {
+          addHeader(name, raw[i + 1]);
+        }
+      }
+    } else if (raw !== null && raw !== undefined) {
+      for (const [name, value] of Object.entries(raw)) {
+        addHeader(name, value);
+      }
+    }
+    // Both bodies bound mid-transfer: an oversized upload stops being
+    // an attestation payload, an oversized download stops being a page.
+    let ctl: Dispatcher.DispatchController | null = null;
+    let dead = false;
+    const oversize = (what: string): void => {
+      if (dead) return;
+      dead = true;
+      ctl?.abort(new TypeError(`pot: sandboxed ${what} oversized`));
+    };
+    let sent = 0;
+    let seen = 0;
+    const bounded: Dispatcher.DispatchHandler = {
+      onRequestStart: (c, ctx) => {
+        ctl = c;
+        handler.onRequestStart?.(c, ctx);
+      },
+      onRequestUpgrade: (c, s, h, sk) =>
+        handler.onRequestUpgrade?.(c, s, h, sk),
+      onResponseStart: (c, s, h, m) =>
+        handler.onResponseStart?.(c, s, h, m),
+      onResponseData: (c, chunk) => {
+        seen += chunk.byteLength;
+        if (seen > SANDBOX_FETCH_MAX_CHARS) {
+          oversize('response');
+          return;
+        }
+        handler.onResponseData?.(c, chunk);
+      },
+      onResponseEnd: (c, t) => {
+        if (!dead) handler.onResponseEnd?.(c, t);
+      },
+      onResponseError: (c, e) => handler.onResponseError?.(c, e),
+      onResponseStarted: () => handler.onResponseStarted?.(),
+      onBodySent: (chunk) => {
+        sent += chunk.byteLength;
+        if (sent > SANDBOX_REQ_MAX_CHARS) {
+          oversize('request');
+          return;
+        }
+        handler.onBodySent?.(chunk);
+      },
+      onRequestSent: () => {
+        if (!dead) handler.onRequestSent?.();
+      },
+    };
+    return this.#upstream.dispatch({ ...options, headers: filtered }, bounded);
+  }
+
+  close(callback?: () => void): Promise<void> {
+    callback?.();
+    return Promise.resolve();
+  }
+
+  destroy(
+    err?: Error | null | (() => void),
+    callback?: () => void,
+  ): Promise<void> {
+    (typeof err === 'function' ? err : callback)?.();
+    return Promise.resolve();
+  }
+}
+
+/**
+ * A real DOM for the BotGuard VM — the interpreter walks document,
+ * navigator and window APIs that stubs cannot satisfy, and a fake
+ * environment never earns an integrity token from GenerateIT, so the
+ * sandbox is a jsdom page (the same posture upstream bgutil takes).
+ * `getInternalVMContext()` hands back the page's own global object:
+ * the interpreter sees a browser realm — and only a browser realm —
+ * while the page lives inside the dedicated minter child, so remote
+ * code still runs nowhere near the utility's address space.
  */
 function botGuardSandbox(
   ytcfg: unknown,
   fetchImpl: FetchLike,
   allowedFetchHost: string,
-): { globals: Record<string, unknown>; dispose(): void } {
-  const noOp = (): undefined => undefined;
-  const elementStub = (): Record<string, unknown> => ({
-    getContext: () => null,
-    style: {},
-    appendChild: noOp,
-    removeChild: noOp,
-    setAttribute: noOp,
-    remove: noOp,
-    getElementsByTagName: () => [],
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    addEventListener: noOp,
-    removeEventListener: noOp,
+): { ctx: vm.Context; dispose(): void } {
+  // The remote code's whole network surface is the two origins this
+  // flow already provably uses — the interpreter's own host and the
+  // homepage it rode in on — exact hosts, nothing wider.
+  const sandboxFetchHosts = new Set([
+    allowedFetchHost.toLowerCase(),
+    new URL(HOMEPAGE).hostname,
+  ]);
+  const dom = new JSDOM('', {
+    url: HOMEPAGE,
+    referrer: HOMEPAGE,
+    runScripts: 'outside-only',
+    resources: {
+      userAgent: HOMEPAGE_UA,
+      dispatcher: new AllowlistDispatcher(
+        getGlobalDispatcher(),
+        sandboxFetchHosts,
+      ),
+    },
   });
-  // Timers the interpreter schedules land on the host loop — track
-  // the handles so a dropped session can't leave callbacks firing.
-  const timers = new Set<ReturnType<typeof setTimeout>>();
-  const immediates = new Set<ReturnType<typeof setImmediate>>();
-  // A microtask can't be cancelled once queued — its callback gates
-  // on the session being live instead.
-  let live = true;
-  const trackTimeout = (
-    cb: (...args: unknown[]) => void,
-    ms?: number,
-    ...args: unknown[]
-  ): ReturnType<typeof setTimeout> => {
-    const handle = setTimeout(
-      (...inner: unknown[]) => {
-        timers.delete(handle);
-        cb(...inner);
-      },
-      ms,
-      ...args,
-    );
-    timers.add(handle);
-    return handle;
-  };
-  const untrack = (handle: ReturnType<typeof setTimeout>): void => {
-    timers.delete(handle);
-    clearTimeout(handle);
-  };
-  const trackImmediate = (
-    cb: (...args: unknown[]) => void,
-    ...args: unknown[]
-  ): ReturnType<typeof setImmediate> => {
-    const handle = setImmediate((...inner: unknown[]) => {
-      immediates.delete(handle);
-      cb(...inner);
-    }, ...args);
-    immediates.add(handle);
-    return handle;
-  };
-  const untrackImmediate = (
-    handle: ReturnType<typeof setImmediate>,
-  ): void => {
-    immediates.delete(handle);
-    clearImmediate(handle);
-  };
-  const trackMicrotask = (cb: () => void): void => {
-    queueMicrotask(() => {
-      if (live) {
-        cb();
+  const win = dom.window;
+  // jsdom's JSDOMDispatcher serves `data:` and `file:` itself — before
+  // the configured dispatcher is ever consulted — and hands everything
+  // else to it, so `window._dispatcher` is the single choke point that
+  // subresource loads and async XHR share. Gate it to the same surface
+  // `sandboxFetch` allows: https on exactly the sandbox hosts.
+  {
+    const dispatcher = (win as unknown as Record<string, unknown>)[
+      '_dispatcher'
+    ] as {
+      dispatch: (opts: unknown, handler: unknown) => boolean;
+    };
+    const innerDispatch = dispatcher.dispatch.bind(dispatcher);
+    dispatcher.dispatch = (opts: unknown, handler: unknown): boolean => {
+      const request = opts as {
+        opaque?: { url?: unknown };
+        origin?: unknown;
+        path?: unknown;
+      } | null;
+      const urlString =
+        typeof request?.opaque?.url === 'string'
+          ? request.opaque.url
+          : `${request?.origin ?? ''}${request?.path ?? ''}`;
+      let allowed = false;
+      try {
+        const parsed = new URL(urlString);
+        allowed =
+          parsed.protocol === 'https:' &&
+          sandboxFetchHosts.has(parsed.hostname.toLowerCase());
+      } catch {
+        allowed = false;
       }
-    });
-  };
+      if (!allowed) {
+        const h = handler as {
+          onResponseError?: (dispatcher: unknown, error: Error) => void;
+        };
+        h.onResponseError?.(
+          null,
+          new TypeError('pot: sandboxed request target not allowed'),
+        );
+        return false;
+      }
+      return innerDispatch(opts, handler);
+    };
+  }
+  // A synchronous XHR never touches that dispatcher: jsdom spawns a
+  // worker thread that re-dispatches on the AMBIENT (ungated) one.
+  // The interpreter has no sync-XHR need — refuse it at open() so the
+  // worker can never start.
+  {
+    const xhrProto = (
+      win as unknown as {
+        XMLHttpRequest: { prototype: { open: unknown } };
+      }
+    ).XMLHttpRequest.prototype as {
+      open: (
+        this: unknown,
+        method: unknown,
+        url: unknown,
+        asynchronous?: unknown,
+        ...rest: unknown[]
+      ) => unknown;
+    };
+    const innerOpen = xhrProto.open;
+    xhrProto.open = function (
+      this: unknown,
+      method: unknown,
+      url: unknown,
+      asynchronous?: unknown,
+      ...rest: unknown[]
+    ): unknown {
+      if (asynchronous !== undefined && !asynchronous) {
+        throw new TypeError('pot: synchronous XHR is not available');
+      }
+      return innerOpen.call(this, method, url, asynchronous, ...rest);
+    };
+  }
   // The interpreter's network surface is capped to exact hosts (its
   // own origin + the homepage), read-only methods, no caller body,
   // allowlisted headers only, https only, no redirect following (a
@@ -395,20 +609,6 @@ function botGuardSandbox(
     return facade;
   };
   let sandboxFetches = 0;
-  // Header fields the interpreter may legitimately set on a probe —
-  // everything else (auth-ish or tracking headers) is dropped.
-  const SANDBOX_HEADER_ALLOW = new Set([
-    'accept',
-    'accept-language',
-    'content-type',
-  ]);
-  // The remote code's whole network surface is the two origins this
-  // flow already provably uses — the interpreter's own host and the
-  // homepage it rode in on — exact hosts, nothing wider.
-  const sandboxFetchHosts = new Set([
-    allowedFetchHost.toLowerCase(),
-    new URL(HOMEPAGE).hostname,
-  ]);
   const sandboxFetch = (
     input: unknown,
     init?: unknown,
@@ -468,147 +668,55 @@ function botGuardSandbox(
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     }).then(boundedResponse);
   };
-  const sandbox: Record<string, unknown> = {
-    navigator: {
-      userAgent: HOMEPAGE_UA,
-      platform: 'Linux x86_64',
-      languages: ['en-US', 'en'],
-      language: 'en-US',
-      webdriver: false,
-      hardwareConcurrency: 8,
-      deviceMemory: 8,
-      plugins: [],
-      mimeTypes: [],
-      cookieEnabled: true,
-      maxTouchPoints: 0,
-      vendor: 'Google Inc.',
-      appName: 'Netscape',
-      appVersion: HOMEPAGE_UA.slice('Mozilla/'.length),
-      product: 'Gecko',
-      productSub: '20030107',
-      onLine: true,
-    },
-    document: {
-      documentElement: elementStub(),
-      head: elementStub(),
-      body: elementStub(),
-      cookie: '',
-      readyState: 'complete',
-      createElement: elementStub,
-      createTextNode: (text: string) => ({ nodeValue: text }),
-      getElementsByTagName: () => [],
-      querySelector: () => null,
-      querySelectorAll: () => [],
-      addEventListener: noOp,
-      removeEventListener: noOp,
-    },
-    location: new URL(HOMEPAGE),
-    origin: HOMEPAGE,
-    screen: {
-      width: 1920,
-      height: 1080,
-      availWidth: 1920,
-      availHeight: 1040,
-      colorDepth: 24,
-      pixelDepth: 24,
-    },
-    innerWidth: 1920,
-    innerHeight: 1080,
-    outerWidth: 1920,
-    outerHeight: 1080,
-    devicePixelRatio: 1,
-    addEventListener: noOp,
-    removeEventListener: noOp,
-    dispatchEvent: () => true,
-    requestAnimationFrame: (cb: () => void) => trackTimeout(cb, 0),
-    cancelAnimationFrame: untrack,
-    localStorage: new Map<string, string>(),
-    sessionStorage: new Map<string, string>(),
-    history: { length: 1, pushState: noOp, replaceState: noOp },
-    Image: class Image {},
-    XMLHttpRequest: class XMLHttpRequest {},
-    // The homepage's ytcfg — BotGuard reads yt.config_.EVENT_ID.
-    yt: ytcfg ?? { config_: {} },
+  // `window.fetch` gets the narrowed grant, not the ambient one —
+  // same read-only, exact-host, byte- and call-capped surface the
+  // dispatcher enforces on jsdom's own traffic.
+  win['fetch'] = sandboxFetch;
+  // Gaps in jsdom's web surface the interpreter may legitimately
+  // probe. The timing aliases land on the page's OWN timers so they
+  // die with `window.close()`; `Worker` is an inert shell — remote
+  // code sees the API, nothing ever runs.
+  const winSetTimeout = win['setTimeout'] as (
+    cb: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => number;
+  const winClearTimeout = win['clearTimeout'] as (id: number) => void;
+  win['structuredClone'] = globalThis.structuredClone;
+  win['ReadableStream'] = ReadableStream;
+  win['Request'] = Request;
+  win['Response'] = Response;
+  win['BroadcastChannel'] = BroadcastChannel;
+  win['requestAnimationFrame'] = (cb: (now: number) => void) =>
+    winSetTimeout(() => cb(Date.now()), 16);
+  win['cancelAnimationFrame'] = (id: number) => winClearTimeout(id);
+  win['setImmediate'] = (
+    cb: (...args: unknown[]) => void,
+    ...args: unknown[]
+  ) => winSetTimeout(cb, 0, ...args);
+  win['clearImmediate'] = (id: number) => winClearTimeout(id);
+  win['matchMedia'] = () => ({
+    matches: false,
+    media: '',
+    onchange: null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    dispatchEvent: () => false,
+  });
+  win['Worker'] = class {
+    addEventListener(): void {}
+    removeEventListener(): void {}
+    postMessage(): void {}
+    terminate(): void {}
   };
-  // Host-realm capabilities the interpreter legitimately uses —
-  // timers, encoders, crypto, fetch. Passed deliberately, not ambient.
-  const hostGlobals: Record<string, unknown> = {
-    fetch: sandboxFetch,
-    crypto: globalThis.crypto,
-    performance: globalThis.performance,
-    TextEncoder,
-    TextDecoder,
-    atob: globalThis.atob,
-    btoa: globalThis.btoa,
-    URL,
-    URLSearchParams,
-    AbortController,
-    AbortSignal,
-    setTimeout: trackTimeout,
-    clearTimeout: untrack,
-    setInterval: (
-      cb: (...args: unknown[]) => void,
-      ms?: number,
-      ...args: unknown[]
-    ) => {
-      const handle = setInterval(cb, ms, ...args);
-      timers.add(handle);
-      return handle;
-    },
-    clearInterval: untrack,
-    queueMicrotask: trackMicrotask,
-    console,
-    setImmediate: trackImmediate,
-    clearImmediate: untrackImmediate,
-    structuredClone: globalThis.structuredClone,
-    DOMException,
-    Uint8Array,
-    Uint16Array,
-    Uint32Array,
-    Int8Array,
-    Int16Array,
-    Int32Array,
-    Float32Array,
-    Float64Array,
-    ArrayBuffer,
-    DataView,
-    Map,
-    Set,
-    WeakMap,
-    WeakSet,
-    Symbol,
-    Proxy,
-    Reflect,
-    encodeURIComponent,
-    decodeURIComponent,
-    encodeURI,
-    decodeURI,
-    escape,
-    unescape,
-    parseInt,
-    parseFloat,
-    isNaN,
-    isFinite,
-  };
-  Object.assign(sandbox, hostGlobals);
-  sandbox['window'] = sandbox;
-  sandbox['self'] = sandbox;
-  sandbox['top'] = sandbox;
-  sandbox['parent'] = sandbox;
-  sandbox['frames'] = sandbox;
-  sandbox['globalThis'] = sandbox;
+  // The homepage's ytcfg — BotGuard reads yt.config_.EVENT_ID.
+  win['yt'] = ytcfg ?? { config_: {} };
   return {
-    globals: sandbox,
+    ctx: dom.getInternalVMContext(),
     dispose(): void {
-      live = false;
-      for (const handle of timers) {
-        clearTimeout(handle);
-      }
-      timers.clear();
-      for (const handle of immediates) {
-        clearImmediate(handle);
-      }
-      immediates.clear();
+      (dom.window['close'] as () => void)();
     },
   };
 }
@@ -819,6 +927,7 @@ export async function buildBotGuardSession(
     fetchImpl,
     new URL(challenge.interpreterUrl).hostname,
   );
+  // `ctx` is the jsdom page's contextified global — ready to run in.
   try {
     return await mintSession(
       challenge,
@@ -837,11 +946,11 @@ export async function buildBotGuardSession(
 async function mintSession(
   challenge: ChallengeData,
   interpreterJs: string,
-  sandbox: { globals: Record<string, unknown>; dispose(): void },
+  sandbox: { ctx: vm.Context; dispose(): void },
   fetchImpl: FetchLike,
   nowMs: () => number,
 ): Promise<PotSession> {
-  const ctx = vm.createContext(sandbox.globals);
+  const ctx = sandbox.ctx;
   vm.runInContext(interpreterJs, ctx, { timeout: VM_RUN_TIMEOUT_MS });
   const client = await BotGuardClient.create({
     program: challenge.program,
@@ -905,7 +1014,14 @@ async function mintSession(
                   'pot: minter callback missing',
                 );
               }
-              return async (binding: Uint8Array) => cb(binding);
+              // `cb` is realm code returning a realm Uint8Array —
+              // copy across the boundary: WebPoMinter checks
+              // `instanceof Uint8Array` against the host realm. `from`
+              // takes any array-like, realm slots included.
+              return async (binding: Uint8Array) =>
+                Uint8Array.from(
+                  (await cb(binding)) as ArrayLike<number>,
+                );
             },
           ]
         : webPoSignalOutput;

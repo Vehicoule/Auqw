@@ -8,6 +8,7 @@ import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  isPublicHttpsUrl,
   isSafeNonNegative,
   isSettings,
   isString,
@@ -31,6 +32,13 @@ import type { ArtworkCacheEntry } from './library.ts';
  * (honors `retryAfterMs`), 'invalid-response' (non-image or malformed
  * body), 'transient', 'timeout', 'cancelled'. The port never throws;
  * a throw crosses back as 'internal'.
+ *
+ * Implementations must additionally refuse a destination that resolves
+ * to a loopback, private, link-local or otherwise non-public address.
+ * `isPublicHttpsUrl` only inspects the spelling of the host, so a
+ * public-looking name can still point inward, DNS rebinding included.
+ * The check belongs here because the transfer is the only place the
+ * resolved address exists. Refusing counts as 'invalid-response'.
  */
 export interface ArtworkFetchPort {
   download(
@@ -117,7 +125,7 @@ export function artworkCacheBudgetBytes(settings: Settings): number {
 }
 
 function isArtworkUrl(url: unknown): url is string {
-  return isString(url, 2048) && url.startsWith('https://');
+  return isString(url, 2048) && isPublicHttpsUrl(url);
 }
 
 type Section = {

@@ -429,7 +429,7 @@ export const en = {
   'nav.primaryA11y': 'primary',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} failed — {message}',
+  'toast.failed': '{action} failed — {kind}',
   'toast.storefrontCode': 'storefront must be a two-letter country code',
 
   // ---- reported operation names ------------------------------------------

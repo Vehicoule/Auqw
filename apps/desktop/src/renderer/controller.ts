@@ -605,9 +605,12 @@ export async function createSessionController(
   const ACK_RETRY_MAX = 3;
   const ACK_RETRY_MS = 800;
   let ackRetries = 0;
+  // Resolves true when the pass walked every page — a false return
+  // means the materialized view never landed and the caller's
+  // reconcile flag must stay armed for the next drain.
   const reconcilePass = async (
     emitDiff = false,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     // Staged, not accumulated: each byte-bounded page applies on its
     // own and records that can't materialize yet (a dependent paging
     // ahead of its parent) ride the session's retained pending into
@@ -636,7 +639,7 @@ export async function createSessionController(
             setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
           );
           if (disposed) {
-            return;
+            return false;
           }
           applied = await session.applyMaterializedEntries([]);
         }
@@ -646,7 +649,7 @@ export async function createSessionController(
             message: `sync reconcile failed: ${applied.error.kind}`,
             atMs: clock.nowMs(),
           });
-          return;
+          return false;
         }
         if (applied.value.rehydrateMedia) {
           void rehydrateMedia(new CancellationSource().signal);
@@ -663,7 +666,7 @@ export async function createSessionController(
         if (emitDiff && !disposed) {
           await session.emitUnsynced(synced).catch(() => undefined);
         }
-        return;
+        return true;
       }
       offset = page.nextOffset;
     }
@@ -673,9 +676,9 @@ export async function createSessionController(
   // offset-0 pull would re-snapshot mid-pass and corrupt the other's
   // paging.
   let reconcileTail: Promise<void> = Promise.resolve();
-  const reconcileMaterialized = (emitDiff = false): Promise<void> => {
+  const reconcileMaterialized = (emitDiff = false): Promise<boolean> => {
     const run = reconcileTail.then(() =>
-      disposed ? undefined : reconcilePass(emitDiff),
+      disposed ? false : reconcilePass(emitDiff),
     );
     reconcileTail = run.then(
       () => undefined,
@@ -769,9 +772,15 @@ export async function createSessionController(
       }
       if (reconcileNeeded && !disposed) {
         // Clear before the pass — a batch dropped mid-reconcile
-        // re-arms the flag for the drain that follows it.
+        // re-arms the flag for the drain that follows it. A pass that
+        // fails or a channel that throws re-arms it too: clearing
+        // unconditionally would forget the dropped outcomes and leave
+        // the projection silently diverged.
         reconcileNeeded = false;
-        await reconcileMaterialized();
+        const done = await reconcileMaterialized().catch(() => false);
+        if (!done && !disposed) {
+          reconcileNeeded = true;
+        }
       }
     } finally {
       draining = false;

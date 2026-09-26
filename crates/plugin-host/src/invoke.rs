@@ -440,7 +440,7 @@ async fn run(
 
         match msg.get("type").and_then(Value::as_str) {
             Some("done") => {
-                check_keys(&msg, &["type", "result"], "done")?;
+                check_keys(&msg, &["type", "result"], "done", &attempt.secrets)?;
                 // `result` is required by the schema — its absence is a
                 // malformed message, not a null result.
                 let result = msg
@@ -495,9 +495,9 @@ async fn run(
                 return Ok(result);
             }
             Some("fail") => {
-                check_keys(&msg, &["type", "error"], "fail")?;
+                check_keys(&msg, &["type", "error"], "fail", &attempt.secrets)?;
                 let error = &msg["error"];
-                check_keys(error, &["kind", "message"], "fail.error")?;
+                check_keys(error, &["kind", "message"], "fail.error", &attempt.secrets)?;
                 let kind = error
                     .get("kind")
                     .and_then(Value::as_str)
@@ -537,7 +537,17 @@ async fn run(
 
 /// The schema marks every step-message object `additionalProperties:
 /// false` — an unknown key is a protocol violation, not trivia to skip.
-fn check_keys(obj: &Value, allowed: &[&str], what: &str) -> Result<(), InvokeError> {
+///
+/// A key name is guest-controlled text reaching an error surface, so it
+/// is redacted with the attempt's token material like every other one —
+/// a guest that names a key after a secret must not write that secret
+/// into diagnostics.
+fn check_keys(
+    obj: &Value,
+    allowed: &[&str],
+    what: &str,
+    secrets: &[String],
+) -> Result<(), InvokeError> {
     let Some(map) = obj.as_object() else {
         return Err(InvokeError::InvalidMessage(format!(
             "{what} must be an object"
@@ -547,7 +557,7 @@ fn check_keys(obj: &Value, allowed: &[&str], what: &str) -> Result<(), InvokeErr
         if !allowed.contains(&key.as_str()) {
             return Err(InvokeError::InvalidMessage(format!(
                 "{what}.{} is not in the ABI schema",
-                redact_text(key, &[])
+                redact_text(key, secrets)
             )));
         }
     }
@@ -694,7 +704,12 @@ async fn host_request_step(
     attempt: &mut Attempt,
     staged_kv: &mut StagedKv,
 ) -> Result<Vec<u8>, InvokeError> {
-    check_keys(msg, &["type", "id", "kind", "payload"], "host_request")?;
+    check_keys(
+        msg,
+        &["type", "id", "kind", "payload"],
+        "host_request",
+        &attempt.secrets,
+    )?;
     let id = msg
         .get("id")
         .and_then(Value::as_u64)
@@ -724,16 +739,20 @@ async fn host_request_step(
         _ => {}
     }
     match msg.get("kind").and_then(Value::as_str) {
-        Some("kv_get") => return kv_get_step(&msg["payload"], id, ctx, staged_kv),
-        Some("kv_set") => return kv_set_step(&msg["payload"], id, ctx, staged_kv),
+        Some("kv_get") => {
+            return kv_get_step(&msg["payload"], id, ctx, staged_kv, &attempt.secrets);
+        }
+        Some("kv_set") => {
+            return kv_set_step(&msg["payload"], id, ctx, staged_kv, &attempt.secrets);
+        }
         Some("log") => return log_step(&msg["payload"], id, attempt),
-        Some("now_ms") => return now_ms_step(&msg["payload"], id, ctx),
+        Some("now_ms") => return now_ms_step(&msg["payload"], id, ctx, &attempt.secrets),
         _ => {}
     }
     let authorized = match msg.get("kind").and_then(Value::as_str) {
-        Some("http_request") => authorize_http_request(&msg["payload"], id, ctx)?,
-        Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx)?,
-        Some("resume") => authorize_resume(&msg["payload"], id, ctx)?,
+        Some("http_request") => authorize_http_request(&msg["payload"], id, ctx, &attempt.secrets)?,
+        Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx, &attempt.secrets)?,
+        Some("resume") => authorize_resume(&msg["payload"], id, ctx, &attempt.secrets)?,
         _ => {
             return Err(InvokeError::InvalidMessage(
                 "unsupported host_request kind".into(),
@@ -762,9 +781,15 @@ fn authorize_resume(
     payload: &Value,
     id: u32,
     ctx: &StepCtx<'_>,
+    secrets: &[String],
 ) -> Result<Authorized, InvokeError> {
     let invalid = |m: &str| InvokeError::InvalidMessage(m.to_string());
-    check_keys(payload, &["url", "offset", "length"], "resume.payload")?;
+    check_keys(
+        payload,
+        &["url", "offset", "length"],
+        "resume.payload",
+        secrets,
+    )?;
     let url = payload
         .get("url")
         .and_then(Value::as_str)
@@ -862,8 +887,9 @@ fn authorize_http_request(
     payload: &Value,
     id: u32,
     ctx: &StepCtx<'_>,
+    secrets: &[String],
 ) -> Result<Authorized, InvokeError> {
-    let req = parse_http_request(payload)?;
+    let req = parse_http_request(payload, secrets)?;
     if !ctx.plugin.manifest.allows_destination(&req.url) {
         return host_error(id, "permission-denied", "destination not permitted")
             .map(Authorized::Denied);
@@ -882,8 +908,9 @@ fn authorize_pot_token(
     payload: &Value,
     id: u32,
     ctx: &StepCtx<'_>,
+    secrets: &[String],
 ) -> Result<Authorized, InvokeError> {
-    check_keys(payload, &["content_binding"], "pot_token.payload")?;
+    check_keys(payload, &["content_binding"], "pot_token.payload", secrets)?;
     let binding = payload
         .get("content_binding")
         .and_then(Value::as_str)
@@ -1055,12 +1082,16 @@ async fn perform_call(
 }
 
 /// Validate the `payload` of an `http_request` host request.
-fn parse_http_request(payload: &Value) -> Result<ParsedHttpRequest, InvokeError> {
+fn parse_http_request(
+    payload: &Value,
+    secrets: &[String],
+) -> Result<ParsedHttpRequest, InvokeError> {
     let invalid = |m: &str| InvokeError::InvalidMessage(m.to_string());
     check_keys(
         payload,
         &["method", "url", "headers", "body"],
         "http_request.payload",
+        secrets,
     )?;
     let method = payload
         .get("method")
@@ -1253,8 +1284,9 @@ fn kv_get_step(
     id: u32,
     ctx: &StepCtx<'_>,
     staged: &StagedKv,
+    secrets: &[String],
 ) -> Result<Vec<u8>, InvokeError> {
-    check_keys(payload, &["key"], "kv_get.payload")?;
+    check_keys(payload, &["key"], "kv_get.payload", secrets)?;
     let key = parse_kv_key(payload, "kv_get")?;
     if key.len() > MAX_KV_KEY_BYTES {
         return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
@@ -1276,8 +1308,9 @@ fn kv_set_step(
     id: u32,
     ctx: &StepCtx<'_>,
     staged: &mut StagedKv,
+    secrets: &[String],
 ) -> Result<Vec<u8>, InvokeError> {
-    check_keys(payload, &["key", "value"], "kv_set.payload")?;
+    check_keys(payload, &["key", "value"], "kv_set.payload", secrets)?;
     let key = parse_kv_key(payload, "kv_set")?;
     if key.len() > MAX_KV_KEY_BYTES {
         return host_error(id, "invalid-response", "kv key exceeds 128 bytes");
@@ -1312,7 +1345,12 @@ fn kv_set_step(
 
 /// Handle a `log` payload: append a redacted entry to the attempt.
 fn log_step(payload: &Value, id: u32, attempt: &mut Attempt) -> Result<Vec<u8>, InvokeError> {
-    check_keys(payload, &["level", "message"], "log.payload")?;
+    check_keys(
+        payload,
+        &["level", "message"],
+        "log.payload",
+        &attempt.secrets,
+    )?;
     let level = payload
         .get("level")
         .and_then(Value::as_str)
@@ -1341,8 +1379,13 @@ fn log_step(payload: &Value, id: u32, attempt: &mut Attempt) -> Result<Vec<u8>, 
 }
 
 /// Handle a `now_ms` payload: the host clock's epoch milliseconds.
-fn now_ms_step(payload: &Value, id: u32, ctx: &StepCtx<'_>) -> Result<Vec<u8>, InvokeError> {
-    check_keys(payload, &[], "now_ms.payload")?;
+fn now_ms_step(
+    payload: &Value,
+    id: u32,
+    ctx: &StepCtx<'_>,
+    secrets: &[String],
+) -> Result<Vec<u8>, InvokeError> {
+    check_keys(payload, &[], "now_ms.payload", secrets)?;
     serde_json::to_vec(&json!({
         "type": "now_response",
         "id": id,

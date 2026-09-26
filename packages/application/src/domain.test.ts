@@ -42,7 +42,7 @@ const META: TrackMetadata = {
   album: 'Roseland NYC Live',
   durationMs: 300_000,
   releaseYear: 1998,
-  artwork: [{ url: 'https://img/x.jpg', width: 120, height: 120 }],
+  artwork: [{ url: 'https://art.example/x.jpg', width: 120, height: 120 }],
   explicit: null,
   genre: 'Trip-hop',
   storefront: 'US',
@@ -73,19 +73,19 @@ export function run(): void {
   assert(
     !isTrackMetadata({
       ...META,
-      artwork: [{ url: 'http://img/x.jpg', width: 1, height: 1 }],
+      artwork: [{ url: 'http://art.example/x.jpg', width: 1, height: 1 }],
     }),
   );
   assert(
     !isTrackMetadata({
       ...META,
-      artwork: [{ url: 'https://img/x.jpg', width: 0, height: 1 }],
+      artwork: [{ url: 'https://art.example/x.jpg', width: 0, height: 1 }],
     }),
   );
   assert(
     isTrackMetadata({
       ...META,
-      artwork: [{ url: 'https://img/x.jpg', width: null, height: null }],
+      artwork: [{ url: 'https://art.example/x.jpg', width: null, height: null }],
     }),
   );
   assert(!isTrackMetadata({ ...META, stray: true }));

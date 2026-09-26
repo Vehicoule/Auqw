@@ -1061,13 +1061,19 @@ export async function run(): Promise<void> {
       const head = Buffer.alloc(4);
       head.writeUInt32LE(64 * 1_024, 0); // over the 16KiB handshake cap
       socket.write(head);
-      const [event] = await Promise.race([
-        once(socket, 'close'),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('hang')), 5_000),
-        ),
-      ]);
-      void event;
+      let hangTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const [event] = await Promise.race([
+          once(socket, 'close'),
+          new Promise<never>((_, reject) => {
+            hangTimer = setTimeout(() => reject(new Error('hang')), 5_000);
+          }),
+        ]);
+        void event;
+      } finally {
+        // A live timer would keep the event loop up for its full span.
+        clearTimeout(hangTimer);
+      }
     } finally {
       await service.close();
     }
@@ -1102,6 +1108,7 @@ export async function run(): Promise<void> {
     } finally {
       await service.close();
       blocker.close();
+      await once(blocker, 'close');
     }
   }
 

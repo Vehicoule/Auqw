@@ -643,10 +643,14 @@ function reportResult(action: MessageId, result: Result<unknown>): void {
     console.warn(
       `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
     );
+    // The toast carries the taxonomy kind, never the message: an error
+    // surfaced from a native bridge can embed raw exception text (a
+    // signed request URL inside a fetch failure, say) that has no
+    // business on a user-facing surface.
     toastSink?.(
       t('toast.failed', {
         action: t(action),
-        message: result.error.message,
+        kind: result.error.kind,
       }),
     );
   }

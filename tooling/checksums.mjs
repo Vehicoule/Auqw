@@ -6,9 +6,9 @@
 //
 //   node tooling/checksums.mjs <dir> [outName]
 //
-// `outName` defaults to SHA256SUMS.txt; the release matrix passes a
-// per-OS name (SHA256SUMS-Linux.txt) so the three OS bundles don't
-// collide on one release's asset list.
+// `outName` defaults to SHA256SUMS.txt; the release jobs pass a
+// per-platform name (SHA256SUMS-Linux.txt, SHA256SUMS-Android.txt) so
+// the bundle dirs don't collide on one release's asset list.
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';

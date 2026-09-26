@@ -13,12 +13,24 @@ const config: ExpoConfig = {
   scheme: 'auqw',
   ios: {
     bundleIdentifier: 'com.vehicoule.auqw',
+    // expo-audio's background-audio knob is disabled below — it would
+    // ship Android's AudioControlsService, a second media player — so
+    // the iOS background-audio mode is declared here directly instead.
+    infoPlist: {
+      UIBackgroundModes: ['audio'],
+    },
   },
   web: {
     favicon: './assets/favicon.png',
   },
   android: {
     package: 'com.vehicoule.auqw',
+    // Stamped from the release tag by tooling/stamp-version.mjs — see
+    // tooling/version-code.mjs for the derivation. Never hand-edit:
+    // PackageManager refuses an upgrade whose versionCode does not
+    // rise, which is exactly what a second hand-maintained number
+    // breaks by going stale.
+    versionCode: 1001,
     adaptiveIcon: {
       backgroundColor: '#eef0f7',
       foregroundImage: './assets/android-icon-foreground.png',
@@ -44,10 +56,14 @@ const config: ExpoConfig = {
     [
       'expo-audio',
       {
-        // Playback only — no mic permission, background playback
-        // stays enabled (FOREGROUND_SERVICE + AudioControlsService).
+        // Playback only — no mic permission. Background playback config
+        // is off: on Android it would ship AudioControlsService, a
+        // second MediaSessionService competing with the Media3 seam's
+        // AuqwMediaSessionService (docs/specs/playback.md: one player
+        // ships). iOS keeps background audio via ios.infoPlist above.
         microphonePermission: false,
         recordAudioAndroid: false,
+        enableBackgroundPlayback: false,
       },
     ],
     'expo-sqlite',
