@@ -293,17 +293,115 @@ async function fetchErrorsPropagate(): Promise<void> {
   r.fetch.respond(() =>
     err(appError('rate-limit', 'slow down', 30_000)),
   );
-  const res = await r.cache.get(A, ctx());
+  // A retryable failure earns one in-deadline retry; both attempts
+  // hit the same verdict, then the error propagates unchanged.
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  r.clock.advance(30_000);
+  const res = await pending;
   assert(!res.ok, 'rate-limited get must fail');
   assertEqual(res.error.kind, 'rate-limit');
   assertEqual(res.error.retryAfterMs, 30_000);
+  assertEqual(r.fetch.calls.length, 2, 'one bounded retry ran');
   assertEqual((await storedUrls(r.storage)).length, 0);
 
+  // Negative cache: inside the verdict's retryAfter window a second
+  // get answers from memory — no download at all.
+  const again = await r.cache.get(A, ctx());
+  assert(!again.ok && again.error.kind === 'rate-limit');
+  assertEqual(
+    r.fetch.calls.length,
+    2,
+    'negative cache suppresses the refetch',
+  );
+
   r.fetch.respond(() => err(appError('unavailable', 'offline')));
-  const off = await r.cache.get(B, ctx());
+  const second = r.cache.get(B, ctx());
+  await pump();
+  // 'unavailable' carries no retryAfter — the backoff fires next tick.
+  r.clock.advance(1_000);
+  const off = await second;
   assert(!off.ok);
   assertEqual(off.error.kind, 'unavailable');
   assertEqual((await storedUrls(r.storage)).length, 0);
+}
+
+async function negativeCacheExpiry(): Promise<void> {
+  const r = rig(persisted());
+  // Fail once transiently; the verdict caches for FAILURE_TTL_MS.
+  let call = 0;
+  r.fetch.respond(() => {
+    call += 1;
+    return call === 1
+      ? err(appError('transient', 'blip'))
+      : ok({ bytes: 4 * MB });
+  });
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const first = await pending;
+  // The in-get retry already recovered — this get succeeded.
+  assert(first.ok, 'transient then success must resolve');
+  assertEqual(r.fetch.calls.length, 2, 'retry recovered in-window');
+
+  // A hard-failing url: 'unavailable' isn't retryable, so one
+  // attempt lands and the verdict negative-caches.
+  r.fetch.respond(() => err(appError('unavailable', 'dead')));
+  const dead = r.cache.get(B, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await dead;
+  assert(!failed.ok);
+  assertEqual(r.fetch.calls.length, 3, 'one attempt for B');
+  // Remounts inside the TTL cost zero network calls.
+  for (let i = 0; i < 5; i += 1) {
+    const hit = await r.cache.get(B, ctx());
+    assert(!hit.ok && hit.error.kind === 'unavailable');
+  }
+  assertEqual(r.fetch.calls.length, 3, 'remounts stay suppressed');
+  // Past the TTL the url earns a fresh try — and can succeed.
+  r.fetch.respondBytes(4 * MB);
+  r.clock.advance(25_000);
+  const healed = await r.cache.get(B, ctx());
+  assert(healed.ok, 'expired negative verdict must refetch');
+  assertEqual(r.fetch.calls.length, 4);
+}
+
+async function cancelledGetIsNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  const source = new CancellationSource();
+  const pending = r.cache.get(A, ctx(source));
+  await pump();
+  source.cancel();
+  const res = await pending;
+  assert(!res.ok && res.error.kind === 'cancelled');
+  // A cancel is the caller's choice, not the url's verdict — the
+  // next get downloads afresh.
+  r.fetch.respondBytes(4 * MB);
+  const after = await r.cache.get(A, ctx());
+  assert(after.ok, 'post-cancel get must fetch');
+  assertEqual(r.fetch.calls.length, 2, 'cancel + refetch');
+}
+
+async function transientRetryRecovers(): Promise<void> {
+  const r = rig(persisted());
+  let call = 0;
+  r.fetch.respond(() => {
+    call += 1;
+    return call === 1
+      ? err(appError('timeout', 'upstream slow'))
+      : ok({ bytes: 2 * MB });
+  });
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  r.clock.advance(400);
+  const res = await pending;
+  assert(res.ok, 'timeout then success must resolve');
+  assertEqual(res.value.filePath, destOf(A));
+  assertEqual(r.fetch.calls.length, 2);
+  assertEqual((await storedUrls(r.storage)).length, 1);
 }
 
 async function invalidUrls(): Promise<void> {
@@ -647,6 +745,9 @@ async function sweepExistsErrorKeepsRow(): Promise<void> {
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
+  await negativeCacheExpiry();
+  await cancelledGetIsNotNegativeCached();
+  await transientRetryRecovers();
   await invalidUrls();
   await lruEvictionOrder();
   await touchOnHitReorders();

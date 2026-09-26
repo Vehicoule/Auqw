@@ -17,6 +17,7 @@ import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { StoragePort } from '../ports/storage.ts';
+import { retryBounded } from '../retry.ts';
 import { isArtworkCacheEntry } from './library.ts';
 import type { ArtworkCacheEntry } from './library.ts';
 
@@ -156,6 +157,25 @@ type Eviction = {
 };
 
 /**
+ * In-memory verdict on a url that just failed — see `failures`
+ * below. `untilMs` is the absolute expiry; a rate-limit's
+ * `retryAfterMs` sets it when the server asks for longer.
+ */
+type Failure = {
+  readonly error: AppError;
+  readonly untilMs: number;
+};
+
+/**
+ * A dead url's verdict is remembered for this long so a remounting
+ * image grid doesn't re-hammer the network on every mount. Short
+ * enough to recover quickly when the server heals — this only
+ * suppresses the retry loop, it never poisons the on-disk cache.
+ */
+const FAILURE_TTL_MS = 20_000;
+const FAILURE_MAX_ENTRIES = 512;
+
+/**
  * Bounded LRU on-disk artwork cache (docs/specs/data.md: ~200 MB,
  * managed in settings). Entries persist in the `artworkCache`
  * section of StoragePort; files live in the paths port's directory.
@@ -170,6 +190,13 @@ type Eviction = {
 export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   let tail: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Inflight>();
+  /**
+   * Per-url negative cache: a failed download is remembered briefly
+   * so repeated mounts of the same dead url answer with the stored
+   * error instead of re-downloading. Memory only — never persisted
+   * — and bounded so a hostile manifest can't grow it forever.
+   */
+  const failures = new Map<string, Failure>();
   const owned = new Set<Promise<unknown>>();
 
   /** Defensive clock read: unsafe values never reach downstream math. */
@@ -432,11 +459,37 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         ),
       );
     }
-    const downloaded = await call(() =>
-      deps.fetch.download(url, destPath, context.signal),
-    );
+    // Transient verdicts retry once inside the caller's deadline; a
+    // still-failing url lands in the negative cache so the next
+    // mount answers with the stored error rather than re-hammering.
+    const downloaded = await retryBounded({
+      deadlineMs: context.deadlineMs,
+      signal: context.signal,
+      clock: deps.clock,
+      call: () => call(() => deps.fetch.download(url, destPath, context.signal)),
+    });
     if (!downloaded.ok) {
       // Honest miss: the typed error crosses back, nothing is cached.
+      if (downloaded.error.kind !== 'cancelled') {
+        const now = safeNow();
+        if (now !== null) {
+          failures.delete(url);
+          failures.set(url, {
+            error: downloaded.error,
+            untilMs: Math.min(
+              now + (downloaded.error.retryAfterMs ?? FAILURE_TTL_MS),
+              Number.MAX_SAFE_INTEGER,
+            ),
+          });
+          while (failures.size > FAILURE_MAX_ENTRIES) {
+            const oldest = failures.keys().next();
+            if (oldest.done) {
+              break;
+            }
+            failures.delete(oldest.value);
+          }
+        }
+      }
       return downloaded;
     }
     const bytes = downloaded.value.bytes;
@@ -532,7 +585,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   ): Promise<Result<ArtworkLookup>> {
     record.waiters += 1;
     return new Promise<Result<ArtworkLookup>>((resolve) => {
-      let unsubscribe: () => void = () => {};
+      let unsubscribe: () => void = () => { };
       let done = false;
       const finish = (result: Result<ArtworkLookup>): void => {
         if (done) {
@@ -568,6 +621,16 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       return Promise.resolve(
         err(appError('cancelled', 'cancelled')),
       );
+    }
+    const remembered = failures.get(url);
+    if (remembered !== undefined) {
+      const now = safeNow();
+      if (now !== null && now < remembered.untilMs) {
+        return Promise.resolve(err(remembered.error));
+      }
+      // Expired — or a broken clock can't vouch for the verdict —
+      // either way the url earns a fresh try.
+      failures.delete(url);
     }
     // Concurrent gets for the same url coalesce onto one download —
     // except a record whose work is already cancelled but not yet

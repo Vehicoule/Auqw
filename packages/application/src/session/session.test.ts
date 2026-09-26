@@ -1451,11 +1451,12 @@ async function portThrows(): Promise<void> {
     getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };
+  const clock2 = new FakeClock(0);
   const r2 = new Session({
     storage: new FakeStorage(persisted()),
     player: new FakePlayer(),
     providers: [new FakeProvider('itunes'), badProvider],
-    clock: new FakeClock(0),
+    clock: clock2,
     ids: new SequenceIds(),
     random: new SequenceRandom(),
     log: new FakeLog(),
@@ -1465,6 +1466,10 @@ async function portThrows(): Promise<void> {
   const playing = r2.addAndPlay(
     meta('itunes', 'it-1', 'Song', 'Artist', 300_000),
   );
+  await pump();
+  // internal is retryable: the retryBounded backoff sleeps on the
+  // fake clock before the second (also throwing) candidates call.
+  clock2.advance(500);
   await pump();
   const res2 = await playing;
   assert(!res2.ok && res2.error.kind === 'internal', 'provider throw internal');
@@ -2539,8 +2544,35 @@ async function earlyPrepareFailure(): Promise<void> {
   };
   r.player.emit(failure);
   await pump();
+  // streams-capped is retryable: one re-attempt arms inside the
+  // original deadline instead of failing the item instantly.
+  assertEqual(
+    readyOf(r).playback.type,
+    'preparing',
+    'auto-retry holds preparing',
+  );
+  r.clock.advance(500);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'auto-retry re-prepares');
+  // The retried attempt's own prepare fails — terminal this time.
+  const retryIdentity = lastPrepareIdentity(r);
+  const failure2: PlayerEvent = {
+    type: 'prepare',
+    requestId: 'req-early-2',
+    identity: retryIdentity,
+    outcome: {
+      type: 'failed',
+      error: appError('streams-capped', 'provider capped'),
+      attempt: TRACE,
+    },
+  };
+  r.player.emit(failure2);
+  await pump();
   assertEqual(readyOf(r).playback.type, 'failed');
+  // The first attempt's pending prepare settles late — its caller
+  // gets the real verdict, not 'superseded'.
   r.player.settlePrepare(ok('req-early'));
+  await pump();
   const res = await playing;
   assert(!res.ok, 'attempt resolves failed');
   assertEqual(
@@ -3734,7 +3766,7 @@ async function applySyncedEntriesRemoteInsert(): Promise<void> {
   });
   assert(
     stored.ok &&
-      stored.value.recordings.some((rec) => rec.id === 'r-remote'),
+    stored.value.recordings.some((rec) => rec.id === 'r-remote'),
     'remote recording commits to storage',
   );
 }

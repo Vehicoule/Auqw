@@ -1,0 +1,326 @@
+import { CancellationSource } from '../cancellation.ts';
+import type { ClockPort } from '../ports/clock.ts';
+import type { LogPort } from '../ports/log.ts';
+import { isSafeNonNegative } from '../domain.ts';
+import type { SyncClient, SyncClientStatus } from './sync-client.ts';
+
+/**
+ * Application-level sync scheduling (docs/specs/sync.md): the client
+ * owns one round's wire work; this owns *when* rounds happen —
+ *   - on-launch: one round per known peer at start()
+ *   - on-change: a debounced round after committed local writes
+ *   - reconnect: capped exponential backoff after a dropped session
+ *   - connectivity: pending rounds cancel offline, reschedule on edge
+ *
+ * Rounds never overlap per peer: a nudge arriving mid-round marks
+ * the peer dirty and a follow-up runs after the round lands. All
+ * timers ride ClockPort.sleep through per-peer cancel sources, so
+ * stop() and unpairing abandon scheduled work immediately.
+ */
+export type SyncSchedulerDeps = {
+  readonly client: SyncClient;
+  readonly clock: ClockPort;
+  readonly log: LogPort;
+  /**
+   * Live connectivity read; when absent the scheduler assumes the
+   * network is up (the desktop's caller has no such port — its
+   * sync transport is the server it hosts, and kicks fan out at
+   * session accept instead).
+   */
+  readonly isOnline?: () => boolean;
+  /** Trailing-edge debounce for on-change rounds. Default 750 ms. */
+  readonly debounceMs?: number;
+  /** First reconnect delay after a dropped session. Default 2 s. */
+  readonly reconnectBaseMs?: number;
+  /** Reconnect backoff cap. Default 60 s. */
+  readonly reconnectMaxMs?: number;
+};
+
+export interface SyncScheduler {
+  /** On-launch sync: fan out one round per known peer, then stay live. */
+  start(): void;
+  /** Local writes committed to the engine log — converge soon. */
+  notifyLocalWrites(): void;
+  /** Connectivity edge: false cancels pending rounds, true reschedules. */
+  notifyConnectivity(online: boolean): void;
+  stop(): void;
+}
+
+const DEFAULT_DEBOUNCE_MS = 750;
+const DEFAULT_RECONNECT_BASE_MS = 2_000;
+const DEFAULT_RECONNECT_MAX_MS = 60_000;
+
+type PeerTrack = {
+  /** Pending scheduled round — cancelled when rescheduled or stopped. */
+  timer: CancellationSource | null;
+  /** A nudge arrived while a round was in flight. */
+  dirty: boolean;
+  /** Current reconnect delay; doubles on each failed round. */
+  backoffMs: number;
+  /** A scheduler-owned round is in flight. */
+  running: boolean;
+};
+
+export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
+  const debounceMs = deps.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const reconnectBaseMs = deps.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS;
+  const reconnectMaxMs = deps.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS;
+  /** Last status() emission — peer list and live views. */
+  let views: SyncClientStatus | null = null;
+  const tracks = new Map<string, PeerTrack>();
+  /** Cancels every scheduled timer and in-flight round on stop(). */
+  let lifecycle = new CancellationSource();
+  const owned = new Set<Promise<unknown>>();
+  let unsubscribe: (() => void) | null = null;
+  let running = false;
+
+  function safeNow(): number | null {
+    let now: number;
+    try {
+      now = deps.clock.nowMs();
+    } catch {
+      return null;
+    }
+    return isSafeNonNegative(now) ? now : null;
+  }
+
+  function online(): boolean {
+    try {
+      return deps.isOnline?.() ?? true;
+    } catch {
+      return false;
+    }
+  }
+
+  function own(work: Promise<unknown>): void {
+    owned.add(work);
+    void work.then(
+      () => {
+        owned.delete(work);
+      },
+      () => {
+        owned.delete(work);
+      },
+    );
+  }
+
+  /** Bounded, nonfatal, sanitized logging: never peer endpoints. */
+  function warn(message: string): void {
+    const atMs = safeNow();
+    if (atMs === null) {
+      return;
+    }
+    own(deps.log.write({ level: 'warn', message, atMs }));
+  }
+
+  function trackFor(fp: string): PeerTrack {
+    let track = tracks.get(fp);
+    if (track === undefined) {
+      track = {
+        timer: null,
+        dirty: false,
+        backoffMs: reconnectBaseMs,
+        running: false,
+      };
+      tracks.set(fp, track);
+    }
+    return track;
+  }
+
+  /**
+   * Arms the peer's next round at `delayMs` — the only timer-placing
+   * path. `replace` cancels a pending timer (backoff moves the wake);
+   * without it a pending timer stands, since it fires soon and a
+   * round exports everything pending at fire time — a write burst
+   * schedules once, not per write. Nudges during an in-flight round
+   * or while offline mark dirty so a follow-up still runs.
+   */
+  function schedule(fp: string, delayMs: number, replace: boolean): void {
+    if (!running || lifecycle.signal.cancelled) {
+      return;
+    }
+    const track = trackFor(fp);
+    if (track.running || !online()) {
+      track.dirty = true;
+      return;
+    }
+    if (track.timer !== null) {
+      if (!replace) {
+        return;
+      }
+      track.timer.cancel();
+      track.timer = null;
+    }
+    const timer = new CancellationSource();
+    track.timer = timer;
+    const work = (async () => {
+      const slept = await deps.clock.sleep(delayMs, timer.signal);
+      track.timer = null;
+      if (!slept.ok || lifecycle.signal.cancelled) {
+        return;
+      }
+      await runRound(fp);
+    })();
+    own(work);
+  }
+
+  async function runRound(fp: string): Promise<void> {
+    const track = trackFor(fp);
+    if (track.running || lifecycle.signal.cancelled || !online()) {
+      track.dirty = true;
+      return;
+    }
+    track.running = true;
+    /** Reconnect delay when the round failed retryably. */
+    let reconnectMs: number | null = null;
+    try {
+      const result = await deps.client.syncNow(fp, lifecycle.signal);
+      if (result.ok) {
+        track.backoffMs = reconnectBaseMs;
+      } else if (result.error.kind === 'cancelled') {
+        // Our own lifecycle cancel — no verdict to schedule on.
+      } else {
+        warn(`sync round failed: ${result.error.kind}`);
+        if (result.error.retryable) {
+          // Reconnect backoff: double per consecutive failure, capped.
+          reconnectMs = track.backoffMs;
+          track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+        }
+      }
+    } finally {
+      track.running = false;
+    }
+    if (reconnectMs !== null) {
+      // The reconnect round exports whatever accumulated, so pending
+      // writes are covered by it rather than a second debounced wake.
+      schedule(fp, reconnectMs, true);
+      return;
+    }
+    if (track.dirty) {
+      track.dirty = false;
+      schedule(fp, debounceMs, true);
+    }
+  }
+
+  function onStatus(status: SyncClientStatus): void {
+    views = status;
+    const seen = new Set<string>();
+    for (const view of status.peers) {
+      seen.add(view.peer.fp);
+      const track = trackFor(view.peer.fp);
+      if (view.state === 'open') {
+        // A live session resets the reconnect ladder — and writes
+        // queued while it was down converge on a debounced round.
+        track.backoffMs = reconnectBaseMs;
+        if (track.dirty && !track.running) {
+          track.dirty = false;
+          schedule(view.peer.fp, debounceMs, true);
+        }
+      } else if (
+        view.state === 'offline' &&
+        view.lastError !== undefined &&
+        view.lastError.retryable &&
+        !track.running &&
+        track.timer === null
+      ) {
+        // A session the client dropped (dead socket, keepalive miss)
+        // reconnects on the backoff ladder — non-retryable verdicts
+        // (auth-required, peer revoked) wait for the peer list to
+        // change instead of hammering a dead route.
+        const wait = track.backoffMs;
+        track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+        schedule(view.peer.fp, wait, false);
+      }
+    }
+    // An unpaired peer drops its track — pending timers die with it.
+    for (const [fp, track] of [...tracks]) {
+      if (!seen.has(fp)) {
+        track.timer?.cancel();
+        tracks.delete(fp);
+      }
+    }
+  }
+
+  return {
+    start(): void {
+      if (running) {
+        return;
+      }
+      running = true;
+      // A fresh source: start() after stop() re-arms instead of
+      // inheriting a cancelled lifecycle that dead-arms schedule().
+      lifecycle = new CancellationSource();
+      unsubscribe = deps.client.subscribe(onStatus);
+      views = deps.client.status();
+      for (const view of views.peers) {
+        trackFor(view.peer.fp);
+      }
+      // On-launch round per known peer — the custody read is the
+      // source of truth for devices that predate this status view.
+      own(
+        deps.client
+          .peers(lifecycle.signal)
+          .then((peers) => {
+            if (!peers.ok || lifecycle.signal.cancelled) {
+              return;
+            }
+            for (const peer of peers.value) {
+              schedule(peer.fp, 0, false);
+            }
+          })
+          .then(
+            () => undefined,
+            () => undefined,
+          ),
+      );
+    },
+
+    notifyLocalWrites(): void {
+      if (views === null) {
+        return;
+      }
+      for (const view of views.peers) {
+        schedule(view.peer.fp, debounceMs, false);
+      }
+    },
+
+    notifyConnectivity(isOnline: boolean): void {
+      if (isOnline) {
+        // Recovery edge: reset every ladder and converge now —
+        // peers with pending work fire immediately, the rest get a
+        // round anyway since a dropped session's last writes may
+        // never have landed.
+        for (const [fp, track] of tracks) {
+          track.backoffMs = reconnectBaseMs;
+          if (!track.running) {
+            schedule(fp, 0, true);
+          } else {
+            track.dirty = true;
+          }
+        }
+        return;
+      }
+      // Offline: pending rounds would only fail against a dead
+      // network — cancel the timers; the dirty flags stay so the
+      // recovery edge still converges.
+      for (const track of tracks.values()) {
+        if (track.timer !== null) {
+          track.timer.cancel();
+          track.timer = null;
+          track.dirty = true;
+        }
+      }
+    },
+
+    stop(): void {
+      running = false;
+      unsubscribe?.();
+      unsubscribe = null;
+      lifecycle.cancel();
+      for (const track of tracks.values()) {
+        track.timer?.cancel();
+        track.timer = null;
+      }
+    },
+  };
+}

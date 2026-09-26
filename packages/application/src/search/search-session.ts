@@ -1,7 +1,8 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { OperationContext } from '../cancellation.ts';
-import type { AppError } from '../errors.ts';
+import type { AppError, Result } from '../errors.ts';
 import { appError, fromUnknown } from '../errors.ts';
+import { retryBounded } from '../retry.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { ProviderPort, SearchPage } from '../ports/provider.ts';
@@ -209,14 +210,30 @@ export class SearchSession {
     revision: number,
     record: Inflight,
   ): Promise<SearchState> {
-    let result;
+    let result: Result<SearchPage>;
     try {
-      result = await this.#provider.search(
-        { query, limit: input.limit, storefront: input.storefront },
-        context,
-      );
-    } catch (thrown) {
-      result = { ok: false as const, error: fromUnknown(thrown) };
+      // Transient failures retry inside the request's own deadline —
+      // the same budget the UI already waits on — with per-attempt
+      // request ids for diagnostics.
+      result = await retryBounded({
+        deadlineMs: context.deadlineMs,
+        signal: context.signal,
+        clock: this.#clock,
+        call: async (signal) => {
+          try {
+            return await this.#provider.search(
+              { query, limit: input.limit, storefront: input.storefront },
+              {
+                requestId: this.#ids.next('search'),
+                deadlineMs: context.deadlineMs,
+                signal,
+              },
+            );
+          } catch (thrown) {
+            return { ok: false as const, error: fromUnknown(thrown) };
+          }
+        },
+      });
     } finally {
       // Only the record's own completion removes it — a superseded
       // same-key request must not delete the newer record.

@@ -37,6 +37,13 @@ function harness() {
   return { provider, clock, ids, session };
 }
 
+/** Lets the retry path settle + register its backoff sleeper. */
+async function flush(rounds = 10): Promise<void> {
+  for (let i = 0; i < rounds; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 const INPUT = { query: 'roads', limit: 5, storefront: 'US' as string | null };
 
 async function basics(): Promise<void> {
@@ -120,6 +127,15 @@ async function typedErrors(): Promise<void> {
     ok: false,
     error: appError('rate-limit', 'slow down', 5_000),
   });
+  // The retry honors the server's retryAfterMs inside the request's
+  // deadline — the second call still fails, so the verdict surfaces.
+  await flush();
+  clock.advance(5_000);
+  await flush();
+  provider.settleSearch({
+    ok: false,
+    error: appError('rate-limit', 'slow down', 5_000),
+  });
   const state = await pending;
   assertEqual(state.type, 'error');
   if (state.type === 'error') {
@@ -130,6 +146,10 @@ async function typedErrors(): Promise<void> {
   // Fallback retry window when retryAfterMs is absent.
   const again = session.search({ ...INPUT, query: 'rl2' });
   provider.settleSearch({ ok: false, error: appError('rate-limit', 'rl') });
+  await flush();
+  clock.advance(400);
+  await flush();
+  provider.settleSearch({ ok: false, error: appError('rate-limit', 'rl') });
   const rl = await again;
   if (rl.type === 'error') {
     assertEqual(rl.retryAtMs, clock.nowMs() + 60_000);
@@ -137,11 +157,16 @@ async function typedErrors(): Promise<void> {
     throw new Error('expected error state');
   }
 
-  // A throwing port maps to the fixed internal error.
+  // A throwing port maps to the fixed internal error — retryable,
+  // so it costs one extra call inside the deadline.
   const thrower = new FakeProvider('throwy');
   thrower.search = () => Promise.reject(new Error('raw'));
   const s2 = new SearchSession(thrower, clock, new SequenceIds());
-  const thrownState = await s2.search(INPUT);
+  const thrownPending = s2.search(INPUT);
+  await flush();
+  clock.advance(400);
+  await flush();
+  const thrownState = await thrownPending;
   assertEqual(thrownState.type, 'error');
   if (thrownState.type === 'error') {
     assertEqual(thrownState.error.kind, 'internal');
@@ -423,9 +448,15 @@ async function refreshError(): Promise<void> {
   provider.settleSearch(ok(page(['Roads'])));
   await p1;
 
-  // Expire the entry, then a failed refresh keeps the cached page.
+  // Expire the entry, then a failed refresh keeps the cached page —
+  // the transient retries once inside the deadline, fails again, and
+  // the stale page publishes with the verdict attached.
   clock.advance(8 * 24 * 60 * 60 * 1000);
   const p2 = session.search(INPUT);
+  provider.settleSearch({ ok: false, error: appError('transient', 'down') });
+  await flush();
+  clock.advance(400);
+  await flush();
   provider.settleSearch({ ok: false, error: appError('transient', 'down') });
   const state = await p2;
   assertEqual(state.type, 'content');
