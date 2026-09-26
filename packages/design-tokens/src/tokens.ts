@@ -89,8 +89,8 @@ export const spacing = {
 
 export const radius = {
   frame: 0,
-  control: 6,
-  float: 12,
+  control: 8,
+  float: 16,
   thumb: 5,
   pill: 999,
 } as const;
@@ -111,18 +111,18 @@ export const strokes = {
 } as const;
 
 export const fontFamilies = {
-  regular: 'JetBrainsMono_400Regular',
-  medium: 'JetBrainsMono_500Medium',
-  bold: 'JetBrainsMono_700Bold',
+  regular: 'Inter_400Regular',
+  medium: 'Inter_500Medium',
+  bold: 'Inter_700Bold',
 } as const;
 
 export const typography = {
-  display: { fontSize: 20, lineHeight: 24, fontFamily: 'JetBrainsMono_700Bold' },
-  title: { fontSize: 16, lineHeight: 20, fontFamily: 'JetBrainsMono_700Bold' },
-  heading: { fontSize: 13, lineHeight: 17, fontFamily: 'JetBrainsMono_700Bold' },
-  body: { fontSize: 12, lineHeight: 17, fontFamily: 'JetBrainsMono_500Medium' },
-  metadata: { fontSize: 10, lineHeight: 14, fontFamily: 'JetBrainsMono_400Regular' },
-  label: { fontSize: 10, lineHeight: 14, fontFamily: 'JetBrainsMono_700Bold', letterSpacing: 1.2 },
+  display: { fontSize: 20, lineHeight: 24, fontFamily: 'Inter_700Bold' },
+  title: { fontSize: 16, lineHeight: 20, fontFamily: 'Inter_700Bold' },
+  heading: { fontSize: 13, lineHeight: 17, fontFamily: 'Inter_700Bold' },
+  body: { fontSize: 12, lineHeight: 17, fontFamily: 'Inter_500Medium' },
+  metadata: { fontSize: 10, lineHeight: 14, fontFamily: 'Inter_400Regular' },
+  label: { fontSize: 10, lineHeight: 14, fontFamily: 'Inter_700Bold', letterSpacing: 1.2 },
 } as const;
 
 export const motion = {

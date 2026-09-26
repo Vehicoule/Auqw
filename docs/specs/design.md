@@ -11,7 +11,7 @@ Two surfaces, two jobs:
 - **Stage** listens — artwork, metadata, seek, transport, and `player | lyrics | queue` sub-modes.
 - **World** browses — home, explore, library, search results, settings.
 
-Omarchy rules, non-negotiable: depth comes from the background ramp only (no shadows); boundaries are hairlines; states are alpha fills; accent is reserved for active/selected/progress; radii are deliberate and small (frames square, controls rounded); type is monospaced; icons are custom-rendered and move (see Rendering).
+Omarchy rules, non-negotiable: depth comes from the background ramp only (no shadows); boundaries are hairlines; states are alpha fills; accent is reserved for active/selected/progress; radii are deliberate and small (frames square, controls rounded); type is one sans family (Inter); icons are custom-rendered and move (see Rendering).
 
 ## Shell contract — desktop (Electron)
 
@@ -75,7 +75,7 @@ Settings gains `adaptive` alongside `dark · light · oled · system`: dark/ligh
 
 ## Type
 
-- **One family, monospaced:** JetBrains Mono (OFL) in the preview — chrome, controls, metadata, lists, display. Hierarchy is built from size + weight + the fg ramp, not from a second family.
+- **One family, sans:** Inter (OFL, bundled via `@expo-google-fonts/inter` on mobile; `Inter → ui-sans-serif → system-ui` stack on web/desktop) — chrome, controls, metadata, lists, display. Hierarchy is built from size + weight + the fg ramp, not from a second family.
 - Track titles bold/bright; artists primary; album · year and durations muted; section labels uppercase-tracked.
 - CJK: platform fallbacks stay enabled; gallery fixtures include JP/KR/SC/TC titles and truncation is checked against CJK metrics, not Latin averages.
 

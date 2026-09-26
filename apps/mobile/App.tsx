@@ -18,10 +18,10 @@ import { NavigationBar } from 'expo-navigation-bar';
 import { File, Paths } from 'expo-file-system';
 import {
   useFonts,
-  JetBrainsMono_400Regular,
-  JetBrainsMono_500Medium,
-  JetBrainsMono_700Bold,
-} from '@expo-google-fonts/jetbrains-mono';
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_700Bold,
+} from '@expo-google-fonts/inter';
 import * as AuqwExpo from 'auqw-expo';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
@@ -264,9 +264,9 @@ type Boot =
 
 export function App() {
   const [fontsLoaded] = useFonts({
-    JetBrainsMono_400Regular,
-    JetBrainsMono_500Medium,
-    JetBrainsMono_700Bold,
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_700Bold,
   });
   const [attempt, setAttempt] = useState(0);
   const [boot, setBoot] = useState<Boot>({ type: 'loading' });
