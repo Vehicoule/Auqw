@@ -371,6 +371,37 @@ function adversarialTests(): void {
     assert(drift.type === 'matched', `9c-drift: ${drift.type}`);
   }
 
+  // 9d. The five-group cap admits new groups, never drops a member of
+  // an admitted one: a duplicate arriving after the cap still parks,
+  // so a reject vetoes it too (unparked duplicates stay playable).
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist' }),
+      [
+        // Five distinct display groups fill the cap...
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-a' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p2', kind: 'track', id: 'p2' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p3', kind: 'track', id: 'p3' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p4', kind: 'track', id: 'p4' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p5', kind: 'track', id: 'p5' } }),
+        // ...a sixth group is skipped...
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p6', kind: 'track', id: 'p6' } }),
+        // ...but a late member of the first group still parks.
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-b' } }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9d: ${out.type}`);
+    assertEqual(out.candidates.length, 6);
+    assert(
+      out.candidates.some((c) => c.candidate.sourceRef.id === 'p1-b'),
+      'late member of an admitted group must park',
+    );
+    assert(
+      !out.candidates.some((c) => c.candidate.sourceRef.id === 'p6'),
+      'sixth display group stays out',
+    );
+  }
+
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.
   {
     const out = MatchingEngine.match(

@@ -363,9 +363,12 @@ export class MatchingEngine {
       // The review parks every near-tie member — not just the display
       // representatives — because a reject vetoes each parked ref and
       // a hidden duplicate surviving the veto would auto-match on the
-      // next attempt, silently undoing the user's verdict. The cap
-      // counts display groups, so one provider listing the same song
-      // many times can't crowd the distinct choices out of the review.
+      // next attempt, silently undoing the user's verdict. At most
+      // five distinct display groups park — same-song listings from
+      // one provider can't crowd the real choices out — but once a
+      // group is admitted, every later member of it parks too, or the
+      // veto would leave a live duplicate behind. The 64-candidate
+      // persistence limit caps the total.
       const near: { candidate: MatchCandidate; evidence: MatchEvidence }[] =
         [];
       const parkedGroups = new Set<string>();
@@ -373,10 +376,13 @@ export class MatchingEngine {
         if (top.evidence.score - s.evidence.score >= 7) {
           break;
         }
+        if (near.length >= 64) {
+          break;
+        }
         const key = displayKey(s.candidate);
         if (!parkedGroups.has(key)) {
           if (parkedGroups.size >= 5) {
-            break;
+            continue;
           }
           parkedGroups.add(key);
         }
