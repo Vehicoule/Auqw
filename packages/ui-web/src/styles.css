@@ -1758,6 +1758,8 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* pushed pages cover this column only — the stage stays reachable */
+  position: relative;
 }
 .uw-menu {
   position: relative;
@@ -1795,9 +1797,21 @@
 .uw-menu-row:hover:not(:disabled) {
   background: var(--fg08);
 }
+.uw-stage-scrim {
+  display: none;
+}
 /* GTK breakpoint behavior: under ~860px the stage column stops
    shrinking and overlays the world instead. */
 @container (max-width: 860px) {
+  .uw-stage-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    border: 0;
+    padding: 0;
+    background: var(--scrim);
+  }
   .uw-stage-col {
     position: absolute;
     top: 0;

@@ -317,10 +317,14 @@ function ChromeSchemeReporter(): null {
       }
     ).windowControlsOverlay;
     const measureCaptions = () => {
-      const captionW =
-        wco !== undefined && wco.visible
-          ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
-          : 0;
+      // No overlay API at all → keep the CSS fallback rather than
+      // forcing 0 and losing the clearance guess on hosts without it.
+      if (wco === undefined) {
+        return;
+      }
+      const captionW = wco.visible
+        ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
+        : 0;
       root.style.setProperty('--uw-caption-w', `${captionW}px`);
     };
     measureCaptions();
@@ -2966,6 +2970,20 @@ function Main({
             }
           >
             {renderTabScreen(tab)}
+            {/* Pushed pages scope to the world column so the stage's
+                playback controls stay reachable while they're up. */}
+            {overlayStack.map((entry) => {
+              const content = renderOverlayEntry(entry);
+              return content === null ? null : (
+                <PushScreen
+                  key={entry.key}
+                  stackKey={entry.key}
+                  onDismissed={() => dismissOverlay(entry.key)}
+                >
+                  {content}
+                </PushScreen>
+              );
+            })}
           </DesktopChrome>
           {online === false && (
             <div
@@ -2994,18 +3012,6 @@ function Main({
             </div>
           )}
         </StackItem>
-        {overlayStack.map((entry) => {
-          const content = renderOverlayEntry(entry);
-          return content === null ? null : (
-            <PushScreen
-              key={entry.key}
-              stackKey={entry.key}
-              onDismissed={() => dismissOverlay(entry.key)}
-            >
-              {content}
-            </PushScreen>
-          );
-        })}
         {actionsFor !== null && (
           <SheetScreen
             stackKey="sheet-actions"

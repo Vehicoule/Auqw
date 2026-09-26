@@ -187,6 +187,16 @@ export function DesktopChrome({
         </div>
         <div className="uw-stage-col__body">{stage}</div>
       </aside>
+      {/* Only visible under the 860px overlay breakpoint — tap-outside
+          dismissal for the floating column. */}
+      {open && (
+        <button
+          type="button"
+          className="uw-stage-scrim"
+          aria-label={t('chrome.stage.hide')}
+          onClick={() => setOpen(false)}
+        />
+      )}
       <div className="uw-world">
         <header className="uw-world-bar">
           <div className="uw-world-bar__start">

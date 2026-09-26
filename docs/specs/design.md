@@ -15,7 +15,7 @@ Omarchy rules, non-negotiable: depth comes from the background ramp only (no sha
 
 ## Shell contract — desktop (Electron)
 
-One window, no titlebar band. The Stage column runs to the top edge at the golden-ratio split — `38.2%` clamped to 280–480 px, collapsible from its own head strip or the world's toggle; under ~860 px window width it stops shrinking and overlays the world instead (GTK breakpoint behavior). A single 40 px line carries all chrome on each column:
+One window, no titlebar band. The Stage column runs to the top edge at the golden-ratio split — `38.2%` clamped to 280–480 px, collapsible from its own head strip or the world's toggle; under ~860 px window width it stops shrinking and floats over a scrim instead (GTK breakpoint behavior, tap-outside dismisses). Pushed pages scope to the world column so the stage's playback controls stay reachable. A single 40 px line carries all chrome on each column:
 
 - **Stage strip:** macOS traffic lights pin left (inset over the strip's top edge); the trailing edge carries a stop control (halts playback, keeps the queue — the old mini-player's dismiss) while a track is loaded, then the collapse button.
 - **World toolbar:** stage toggle + search icon at the seam · centered `home | explore | library` pills · primary menu (settings) at the end · caption buttons (Windows/Linux overlay the strip's right edge — the renderer measures `windowControlsOverlay` into `--uw-caption-w` so controls keep clear). Electron: `titleBarStyle: 'hiddenInset'` + `trafficLightPosition` on macOS (no drawn strip); `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme on Windows and Linux.
