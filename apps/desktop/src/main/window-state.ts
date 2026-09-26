@@ -23,13 +23,19 @@ export type WindowState = {
   readonly maximized: boolean;
 };
 
+export const MIN_WINDOW_WIDTH = 640;
+export const MIN_WINDOW_HEIGHT = 480;
+
 export function defaultWindowState(): WindowState {
   return { width: 1280, height: 800, maximized: false };
 }
 
-function isDimension(value: unknown): value is number {
+function isDimension(
+  value: unknown,
+  minimum: number,
+): value is number {
   return (
-    isSafeNonNegativeInt(value) && value >= 200 && value <= 16_384
+    isSafeNonNegativeInt(value) && value >= minimum && value <= 16_384
   );
 }
 
@@ -51,8 +57,8 @@ export function parseWindowState(value: unknown): WindowState | null {
   }
   const { width, height, x, y, maximized } = value;
   if (
-    !isDimension(width) ||
-    !isDimension(height) ||
+    !isDimension(width, MIN_WINDOW_WIDTH) ||
+    !isDimension(height, MIN_WINDOW_HEIGHT) ||
     !isBoolean(maximized)
   ) {
     return null;

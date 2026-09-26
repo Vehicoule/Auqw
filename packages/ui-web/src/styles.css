@@ -1758,9 +1758,10 @@
 }
 .uw-tabs {
   min-width: 0;
-  /* last resort for narrow windows + long translations: clip pills
-     rather than overlap the clusters */
-  overflow: hidden;
+  /* last resort for narrow windows + long translations: pills scroll
+     (bar stays reachable, nothing overlaps the clusters) */
+  overflow-x: auto;
+  scrollbar-width: none;
   display: flex;
   gap: var(--spacing-xxs);
 }
