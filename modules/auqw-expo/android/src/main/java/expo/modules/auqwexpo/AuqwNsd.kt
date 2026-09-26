@@ -7,6 +7,9 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
 import expo.modules.kotlin.exception.CodedException
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -37,6 +40,16 @@ class AuqwNsd(
   private var discovery: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
   private var resolveExecutor: ExecutorService? = null
+
+  /** Dialability ranking for a resolved advert address: IPv4 (0) >
+   * v6 with scope or non-link-local (1) > bare fe80:: (2). */
+  private fun dialRank(address: InetAddress): Int =
+    when {
+      address is Inet4Address -> 0
+      address.isLinkLocalAddress &&
+        (address as? Inet6Address)?.scopedInterface == null -> 2
+      else -> 1
+    }
   // Bump per browse run — NSD resolve callbacks can land after a stop,
   // and a stale 'found' must not populate a later session's list.
   private var browseGeneration = 0
@@ -247,13 +260,20 @@ class AuqwNsd(
               lostNames.contains(resolved.serviceName)
             }
           if (gen == browseGeneration && !lost) {
-            val host =
+            val addresses =
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                resolved.hostAddresses.firstOrNull()?.hostAddress
+                resolved.hostAddresses
               } else {
                 @Suppress("DEPRECATION")
-                resolved.host?.hostAddress
+                listOfNotNull(resolved.host)
               }
+            // Rank by dialability: IPv4 first; a bare link-local v6
+            // (fe80:: without a scope) can't be connected to, so it is
+            // strictly the last resort.
+            val host =
+              addresses.minWithOrNull { a, b ->
+                dialRank(a).compareTo(dialRank(b))
+              }?.hostAddress
             val fp = resolved.attributes["dev"]?.let { String(it) }
             if (host != null) {
               emitDiscovery(

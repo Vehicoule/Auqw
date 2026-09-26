@@ -4,6 +4,8 @@ import {
   err,
   isPairableLanHost,
   ok,
+  parseIpv4,
+  parseIpv6,
   type SyncDiscoveredPeer,
   type SyncDiscoveryPort,
   type SyncDiscoverySession,
@@ -70,17 +72,33 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
 /** One discovered service → the port's peer shape, or null when unusable. */
 function peerOf(service: Service): SyncDiscoveredPeer | null {
   // Only LAN-pairable addresses are candidates — a public v6 listed
-  // first must not shadow a reachable private v4 behind it. Prefer an
-  // unscoped address among the survivors; keep a scoped (zone-suffixed)
-  // one — link-local v6 is only dialable WITH its zone, and the LAN
-  // gate validates the zone id.
+  // first must not shadow a reachable private v4 behind it. Rank by
+  // dialability: a bare link-local v6 (fe80:: without a zone) can't be
+  // connected to, so it is strictly the last resort even though the
+  // LAN gate accepts it.
   const pairable = (service.addresses ?? []).filter(
     (a): a is string =>
       typeof a === 'string' && isPairableLanHost(a),
   );
-  const host =
-    pairable.find((a) => !a.includes('%')) ??
-    pairable.find((a) => a.includes('%'));
+  const dialRank = (a: string): number => {
+    const bare =
+      a.startsWith('[') && a.endsWith(']') ? a.slice(1, -1) : a;
+    if (parseIpv4(bare) !== null) return 0;
+    const v6 = parseIpv6(bare);
+    const first = v6?.groups[0];
+    if (
+      v6 !== null &&
+      v6.zone === null &&
+      first !== undefined &&
+      (first & 0xffc0) === 0xfe80
+    ) {
+      return 2;
+    }
+    return 1;
+  };
+  const host = pairable
+    .map((a, i) => ({ a, i, r: dialRank(a) }))
+    .sort((x, y) => x.r - y.r || x.i - y.i)[0]?.a;
   if (
     typeof service.name !== 'string' ||
     host === undefined ||
