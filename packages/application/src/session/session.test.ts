@@ -2667,12 +2667,18 @@ async function listenedMsCarriesAcrossRetry(): Promise<void> {
     await pump(4);
   }
   // Mid-play transient failure → the auto-retry re-attempts; the
-  // published state holds 'playing' through the backoff — no failed
-  // flicker while recovery is still possible.
+  // published state drops to 'preparing' through the backoff — the
+  // released handle must not stay advertised as playing, and there
+  // is no failed flicker while recovery is still possible.
   r.player.emit(statusEvent(idA, 'h-o1', 'failed', 10_000));
   await pump();
   assertEqual(calls(r, 'prepare').length, 1, 'backoff, not re-prepare');
-  assertEqual(readyOf(r).playback.type, 'playing', 'no failed flicker');
+  const backoff = readyOf(r).playback;
+  assertEqual(backoff.type, 'preparing', 'no failed flicker');
+  assert(
+    !('handle' in backoff),
+    'released handle is not advertised',
+  );
   r.clock.advance(600);
   await pump();
   assertEqual(calls(r, 'prepare').length, 2, 'retry re-prepares');

@@ -2928,12 +2928,12 @@ export class Session {
         fetchedMs === null
           ? null
           : lyricsCacheEntry(
-              recording.id,
-              provider.id,
-              provider.version,
-              accepted,
-              fetchedMs,
-            );
+            recording.id,
+            provider.id,
+            provider.version,
+            accepted,
+            fetchedMs,
+          );
       if (entry !== null) {
         const next = [
           ...r.lyricsCache.filter((e) => e.recordingId !== recording.id),
@@ -4825,6 +4825,28 @@ export class Session {
     // resolve unwinds at its cancelled checkpoints with the real
     // verdict instead of racing the retry.
     attempt.source.cancel();
+    // Stop advertising the dead stream: while the backoff runs the
+    // occurrence republishes as preparing — a live playing/paused
+    // state would keep offering a handle that no longer exists, and
+    // controls (pause/seek) would spend calls on it.
+    const ready = this.#ready;
+    if (
+      ready !== null &&
+      this.#active === attempt &&
+      (ready.playback.type === 'playing' ||
+        ready.playback.type === 'paused' ||
+        ready.playback.type === 'buffering') &&
+      attemptEq(ready.playback.identity, attempt.identity)
+    ) {
+      ready.playback = {
+        type: 'preparing',
+        recordingId: attempt.recordingId,
+        occurrenceId: attempt.occurrenceId,
+        identity: attempt.identity,
+        ...(attempt.ref !== undefined ? { ref: attempt.ref } : {}),
+      };
+      this.#publish();
+    }
     // The dead stream's handle goes now — the retry prepares a fresh
     // one — and with it gone, stray status events for this attempt
     // are rejected instead of republishing mid-backoff.
