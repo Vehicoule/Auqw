@@ -180,17 +180,21 @@ function barsPathD(
   mid: number,
   maxExtent: number,
   bloom: number,
+  maxX = Infinity,
 ): string {
   'worklet';
   let d = '';
   for (let i = 0; i < xs.length; i += 1) {
+    const x = xs[i] ?? 0;
+    if (x > maxX) {
+      continue;
+    }
     const extent = barExtentW(
       amps[i] ?? 0,
       maxExtent,
       2.4,
       staggerW(bloom, idx[i] ?? i, count),
     );
-    const x = xs[i] ?? 0;
     d += `M${x.toFixed(2)} ${(mid - extent).toFixed(2)} L${x.toFixed(2)} ${(
       mid + extent
     ).toFixed(2)}`;
@@ -726,6 +730,9 @@ export function WaveformSeek({
       bloom.value,
     ),
   );
+  // No clip-path here: react-native-svg drops animated prop updates
+  // inside <ClipPath>, so the played layer is rebuilt each frame as
+  // the subset of bars whose center sits left of the fill edge.
   const dAll = useDerivedValue(() =>
     barsPathD(
       allBars.xs,
@@ -735,15 +742,13 @@ export function WaveformSeek({
       WAVE_MID,
       WAVE_MAX_EXTENT,
       bloom.value,
+      fill.value * width,
     ),
   );
   const lowProps = useAnimatedProps(() => ({ d: dLow.value }));
   const midProps = useAnimatedProps(() => ({ d: dMid.value }));
   const highProps = useAnimatedProps(() => ({ d: dHigh.value }));
   const playedProps = useAnimatedProps(() => ({ d: dAll.value }));
-  const clipProps = useAnimatedProps(() => ({
-    width: fill.value * width,
-  }));
   const shimmerProps = useAnimatedProps(() => ({
     x: shimmer.value * (width + width * 0.16) - width * 0.16,
   }));
@@ -821,16 +826,6 @@ export function WaveformSeek({
                 </>
               ) : (
                 <>
-                  <Defs>
-                    <ClipPath id={`played-${uid}`}>
-                      <AnimatedRect
-                        x={0}
-                        y={0}
-                        height={WAVE_HEIGHT}
-                        animatedProps={clipProps}
-                      />
-                    </ClipPath>
-                  </Defs>
                   <AnimatedPath
                     fill="none"
                     stroke={theme.colors.fg18}
@@ -855,15 +850,13 @@ export function WaveformSeek({
                     opacity={1}
                     animatedProps={highProps}
                   />
-                  <G clipPath={`url(#played-${uid})`}>
-                    <AnimatedPath
-                      fill="none"
-                      stroke={theme.colors.accent}
-                      strokeWidth={WAVE_BAR_WIDTH}
-                      strokeLinecap="round"
-                      animatedProps={playedProps}
-                    />
-                  </G>
+                  <AnimatedPath
+                    fill="none"
+                    stroke={theme.colors.accent}
+                    strokeWidth={WAVE_BAR_WIDTH}
+                    strokeLinecap="round"
+                    animatedProps={playedProps}
+                  />
                 </>
               )}
             </Svg>
