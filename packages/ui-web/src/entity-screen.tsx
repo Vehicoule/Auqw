@@ -52,13 +52,13 @@ function HeaderPill({
           disabled
             ? 'var(--fg25)'
             : accent
-              ? 'var(--accent)'
+              ? 'var(--canvas)'
               : 'var(--text-primary)'
         }
       />
       <Text
         variant="metadata"
-        color={disabled ? 'secondary' : accent ? 'accent' : 'primary'}
+        color={disabled ? 'secondary' : accent ? 'canvas' : 'primary'}
       >
         {label}
       </Text>

@@ -5,6 +5,7 @@ import {
   Artwork,
   Icon,
   IconButton,
+  PillButton,
   Pressable,
   Text,
 } from './primitives.tsx';
@@ -52,24 +53,8 @@ function HeaderButton({
   readonly warn?: boolean | undefined;
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   return (
-    <Pressable
-      compact
-      onPress={onPress}
-      accessibilityLabel={label}
-      style={{
-        paddingHorizontal: theme.spacing.md,
-        minHeight: 30,
-        justifyContent: 'center',
-        borderRadius: theme.radius.pill,
-        backgroundColor: theme.colors.fg08,
-      }}
-    >
-      <Text variant="metadata" color={warn ? 'warn' : 'primary'}>
-        {label}
-      </Text>
-    </Pressable>
+    <PillButton label={label} tone={warn ? 'warn' : 'outline'} onPress={onPress} />
   );
 }
 
