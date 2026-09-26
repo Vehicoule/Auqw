@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { Hairline, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import type { SyncModel, SyncPeerModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 
@@ -242,7 +242,9 @@ function PairForm({
           {error}
         </Text>
       )}
-      <Pressable
+      <PillButton
+        label={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
+        tone="accent"
         onPress={
           onPairCode === undefined || !ready
             ? undefined
@@ -255,22 +257,8 @@ function PairForm({
         }
         disabled={onPairCode === undefined || !ready}
         accessibilityLabel={t('sync.form.pair')}
-        accessibilityRole="button"
-        style={({ pressed }) => [
-          {
-            alignSelf: 'flex-start',
-            paddingHorizontal: 18,
-            paddingVertical: 8,
-            borderRadius: theme.radius.control,
-            backgroundColor: theme.colors.accent,
-          },
-          (!ready || pressed) && { opacity: 0.5 },
-        ]}
-      >
-        <Text variant="metadata" color="bright">
-          {disabled ? t('sync.form.pairing') : t('sync.form.pair')}
-        </Text>
-      </Pressable>
+        style={{ alignSelf: 'flex-start' }}
+      />
     </View>
   );
 }

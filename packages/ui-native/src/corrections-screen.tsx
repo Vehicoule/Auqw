@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   CorrectionsFilter,
@@ -273,45 +273,26 @@ function ReviewRow({
         }}
       >
         {pending ? (
-          <Pressable
-            compact
+          <PillButton
+            label={t('corrections.rejectAll')}
+            tone="warn"
+            minHeight={26}
             onPress={
               onReject === undefined ? undefined : () => onReject(row.reviewId)
             }
             accessibilityLabel={t('corrections.a11y.reject', {
               title: row.title,
             })}
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
-          >
-            <Text variant="metadata" color="warn">
-              {t('corrections.rejectAll')}
-            </Text>
-          </Pressable>
+          />
         ) : (
-          <Pressable
-            compact
+          <PillButton
+            label={t('corrections.undo')}
+            minHeight={26}
             onPress={
               onUndo === undefined ? undefined : () => onUndo(row.reviewId)
             }
             accessibilityLabel={t('corrections.a11y.undo', { title: row.title })}
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
-          >
-            <Text variant="metadata" color="primary">
-              {t('corrections.undo')}
-            </Text>
-          </Pressable>
+          />
         )}
       </View>
     </View>

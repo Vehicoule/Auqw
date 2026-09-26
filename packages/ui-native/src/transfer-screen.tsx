@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
@@ -280,41 +280,24 @@ function ImportBody({
             marginTop: theme.spacing.md,
           }}
         >
-          <Pressable
-            compact
+          <PillButton
+            label={
+              model.importPhase === 'applying'
+                ? t('transfer.applying')
+                : t('transfer.apply')
+            }
+            tone="accent"
             onPress={onApplyImport}
             disabled={model.importPhase === 'applying'}
             accessibilityLabel={t('transfer.apply')}
-            style={{
-              paddingHorizontal: theme.spacing.sm,
-              paddingVertical: theme.spacing.xs,
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.accent,
-              opacity: model.importPhase === 'applying' ? 0.5 : 1,
-            }}
-          >
-            <Text variant="metadata" color="canvas">
-              {model.importPhase === 'applying'
-                ? t('transfer.applying')
-                : t('transfer.apply')}
-            </Text>
-          </Pressable>
-          <Pressable
-            compact
+            style={{ paddingHorizontal: theme.spacing.sm }}
+          />
+          <PillButton
+            label={t('common.cancel')}
+            minHeight={26}
             onPress={onResetImport}
             accessibilityLabel={t('transfer.cancelA11y')}
-            style={{
-              paddingHorizontal: theme.spacing.md,
-              minHeight: 26,
-              justifyContent: 'center',
-              borderRadius: theme.radius.pill,
-              backgroundColor: theme.colors.fg08,
-            }}
-          >
-            <Text variant="metadata" color="secondary">
-              {t('common.cancel')}
-            </Text>
-          </Pressable>
+          />
         </View>
       )}
     </View>

@@ -4,6 +4,7 @@ import {
   Artwork,
   Icon,
   IconButton,
+  PillButton,
   Pressable,
   Spinner,
   Text,
@@ -41,43 +42,16 @@ function HeaderPill({
   readonly disabled?: boolean | undefined;
   readonly onPress?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   return (
-    <Pressable
-      compact
-      onPress={disabled ? undefined : onPress}
-      accessibilityLabel={label}
-      accessibilityState={{ disabled }}
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: theme.spacing.sm,
-        paddingHorizontal: theme.spacing.lg,
-        minHeight: 34,
-        flex: 1,
-        borderRadius: theme.radius.pill,
-        backgroundColor: accent
-          ? theme.colors.accentSoft
-          : theme.colors.fg08,
-      }}
-    >
-      <Icon
-        name={icon}
-        size={13}
-        color={disabled
-          ? theme.colors.fg25
-          : accent
-            ? theme.colors.accent
-            : theme.colors.textPrimary}
-      />
-      <Text
-        variant="metadata"
-        color={disabled ? 'secondary' : accent ? 'accent' : 'primary'}
-      >
-        {label}
-      </Text>
-    </Pressable>
+    <PillButton
+      label={label}
+      icon={icon}
+      tone={accent ? 'accent' : 'outline'}
+      disabled={disabled}
+      onPress={onPress}
+      minHeight={34}
+      style={{ flex: 1 }}
+    />
   );
 }
 
