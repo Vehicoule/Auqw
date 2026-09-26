@@ -27,6 +27,7 @@ export * from './matching/matching-engine.ts';
 export * from './search/search-session.ts';
 export * from './session/session.ts';
 export * from './sync/hlc.ts';
+export * from './sync/lan.ts';
 export * from './sync/sync-engine.ts';
 export * from './sync/sync-wire.ts';
 export * from './sync/engine-port.ts';

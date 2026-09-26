@@ -184,6 +184,7 @@ export type SyncServiceDeps = {
    */
   readonly dialer?: (opts: {
     listenPort: () => number | null;
+    listenEndpoints: () => readonly string[];
     deviceName: string;
   }) => SyncDialer;
   /** `_auqw._tcp` browse — powers the renderer's nearby list. */
@@ -1751,6 +1752,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     await ensureStarted();
     dialerInstance ??= deps.dialer({
       listenPort: () => boundPort,
+      listenEndpoints: endpoints,
       deviceName,
     });
     const result = await run(dialerInstance, serviceCancel.signal);

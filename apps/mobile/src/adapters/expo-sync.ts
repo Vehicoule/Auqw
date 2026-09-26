@@ -21,6 +21,7 @@ import {
   DEVICE_NAME_MAX,
   ensureSyncIdentity,
   err,
+  formatEndpoint,
   ok,
 } from '@auqw/application';
 import {
@@ -106,6 +107,9 @@ export type ExpoPairHostSurface = {
   readonly port: number | null;
   /** LAN IPv4:port list this host advertises — empty pre-start. */
   localEndpoints(): Promise<readonly string[]>;
+  /** Last-minted LAN endpoints with the CURRENT port — sync getter
+   * for the client hello's `endpoints` advert. */
+  advertisedEndpoints(): readonly string[];
   /** Unbind + deadvertise; a later start() binds a fresh port. */
   stop(): Promise<void>;
   /** Terminal teardown — session dispose. */
@@ -201,6 +205,11 @@ export async function createExpoSync(
       log: deps.log,
       deviceId,
       name: deviceName,
+      // Advertised endpoints let the responder prefer our real LAN
+      // addrs over the socket's (possibly NAT-mistranslated) source.
+      // `host` is built below — the getters only run at dial time.
+      listenPort: () => host?.port ?? null,
+      listenEndpoints: () => host?.advertisedEndpoints() ?? [],
     });
     // Hydrate custody before the surface is exposed — the UI reads
     // status() first, and it must already show the paired desktops.
@@ -226,15 +235,16 @@ export async function createExpoSync(
       kickResume: (fp) =>
         void client.refreshPeers().then(() => client.syncNow(fp)),
       onPair: (peer) => {
-        // The pair host wrote custody through the registry — reload
-        // into the client's map, kick a sync round at the fresh
-        // endpoint (the pair connection is pairing-only and dies on
-        // close), then let the UI remint its consumed offer.
+        // Custody is committed — the displayed code is already
+        // consumed, so remint IMMEDIATELY (a slow sync round must not
+        // hold a dead code on screen). The sync round then runs
+        // independently: reload custody into the client's map first
+        // so syncNow dials the fresh endpoint.
+        deps.onPaired?.();
         void client
           .refreshPeers()
           .then(() => client.syncNow(peer.fp))
-          .then(() => deps.onPaired?.())
-          .catch(() => deps.onPaired?.());
+          .catch(() => undefined);
       },
     });
     const discovery =
@@ -316,6 +326,10 @@ function buildPairHost(opts: {
       opts.onPair(peer);
     },
   });
+  // Last LAN hosts the native layer reported — refreshed on each
+  // mint; the advertised-endpoint getter formats them with whatever
+  // port the listener CURRENTLY holds.
+  let cachedLanHosts: readonly string[] = [];
   const localEndpoints = async (): Promise<readonly string[]> => {
     if (
       opts.native.syncLocalHosts === undefined ||
@@ -324,7 +338,9 @@ function buildPairHost(opts: {
       return [];
     }
     const { hosts } = await opts.native.syncLocalHosts();
-    return hosts.map((h) => `${h}:${pairHost.port}`);
+    cachedLanHosts = hosts;
+    const port = pairHost.port;
+    return port === null ? [] : hosts.map((h) => formatEndpoint(h, port));
   };
   return {
     start: (signal) => pairHost.start(signal),
@@ -357,6 +373,12 @@ function buildPairHost(opts: {
     },
     get port() {
       return pairHost.port;
+    },
+    advertisedEndpoints() {
+      const port = pairHost.port;
+      return port === null
+        ? []
+        : cachedLanHosts.map((h) => formatEndpoint(h, port));
     },
     localEndpoints,
     onPaired(cb) {

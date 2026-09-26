@@ -180,6 +180,13 @@ export type SyncClientDeps = {
    * future pair offers). Absent or null → hello omits `port`.
    */
   readonly listenPort?: () => number | null;
+  /**
+   * The caller's own dialable listener endpoints (`host:port`,
+   * bracketed v6) — carried in the hello so the responder prefers
+   * them over the socket's remote address, which a NAT/VPN can
+   * mistranslate. Empty/absent → hello omits `endpoints`.
+   */
+  readonly listenEndpoints?: () => readonly string[];
 };
 
 type SessionPhase = 'challenge' | 'auth' | 'open';
@@ -700,11 +707,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       activeOps: 0,
     };
     const ownPort = deps.listenPort?.() ?? null;
+    const ownEndpoints = deps.listenEndpoints?.() ?? [];
     const challenged = await sessionRequest(
       session,
-      ownPort === null
-        ? handshake.hello()
-        : { ...handshake.hello(), port: ownPort },
+      {
+        ...handshake.hello(),
+        ...(ownPort === null ? {} : { port: ownPort }),
+        ...(ownEndpoints.length === 0 ? {} : { endpoints: ownEndpoints }),
+      },
       isServerChallenge,
       handshakeMs,
       opts.signal,

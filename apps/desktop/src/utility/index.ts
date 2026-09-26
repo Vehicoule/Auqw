@@ -251,7 +251,7 @@ if (port === null) {
     // The caller half — pair TO a phone's offer. Shares the custody
     // channel + the sync-log deviceId; the bound-port getter comes
     // from the service so the hello advertises a dialable endpoint.
-    dialer: ({ listenPort, deviceName }) =>
+    dialer: ({ listenPort, listenEndpoints, deviceName }) =>
       createSyncDialer({
         keys: createServiceKeys(serviceClient.request),
         ownDeviceId: async () =>
@@ -260,6 +260,7 @@ if (port === null) {
           (await enginePromise)?.engine ?? null,
         deviceName,
         listenPort,
+        listenEndpoints,
       }),
     discovery:
       process.env['AUQW_SYNC_NO_MDNS'] === '1' ? null : lazyBrowse(),

@@ -30,6 +30,7 @@ import {
   ProviderRouter,
   SearchSession,
   effectiveMapping,
+  formatEndpoint,
   isMatchGate,
   isRefRejected,
   previewImport,
@@ -1097,7 +1098,10 @@ function Main({
     readonly payload: string | null;
     readonly expiresAt: number | null;
   }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
-  const shareHostRef = useRef(false);
+  // Share generations, not a bool: a stale start()/stop() from a
+  // dismissed share must not resolve into — or tear down — a NEWER
+  // share's listener. Nonzero means "a share attempt owns the host".
+  const shareGenRef = useRef(0);
   // Last-mint-wins: overlapping remints (expiry + inbound pair) apply
   // only their newest result — a stale mint finishing last must not
   // display a code the host no longer honors.
@@ -2031,7 +2035,7 @@ function Main({
       }
       runPair({
         code: input.code,
-        endpoints: [`${input.host}:${input.port}`],
+        endpoints: [formatEndpoint(input.host, input.port)],
       });
     },
     [runPair],
@@ -2100,8 +2104,8 @@ function Main({
     if (syncOpen) {
       return;
     }
-    if (shareHostRef.current) {
-      shareHostRef.current = false;
+    if (shareGenRef.current !== 0) {
+      shareGenRef.current = 0;
       void syncSurface?.host?.stop();
     }
     setShare({
@@ -2114,11 +2118,11 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
 
-  // Mint + apply a fresh offer — gated on the share host still being
-  // ours (shareHostRef) and share still active inside the set.
+  // Mint + apply a fresh offer — gated on a share still owning the
+  // host (shareGenRef) and share still active inside the set.
   const remintShareOffer = useCallback(() => {
     const host = syncSurface?.host;
-    if (host === undefined || host === null || !shareHostRef.current) {
+    if (host === undefined || host === null || shareGenRef.current === 0) {
       return;
     }
     const attempt = ++shareMintRef.current;
@@ -2127,7 +2131,7 @@ function Main({
       .then((offer) => {
         if (
           !offer.ok ||
-          !shareHostRef.current ||
+          shareGenRef.current === 0 ||
           attempt !== shareMintRef.current
         ) {
           return;
@@ -2190,7 +2194,7 @@ function Main({
       return;
     }
     if (share.active) {
-      shareHostRef.current = false;
+      shareGenRef.current = 0;
       void host.stop();
       setShare({
         active: false,
@@ -2203,16 +2207,18 @@ function Main({
     }
     setShare((prev) => ({ ...prev, busy: true }));
     // Mark wanted BEFORE the async work: the screen-close cleanup reads
-    // shareHostRef to decide whether a stop is owed — a start() that
-    // lands after dismissal would otherwise leave a live listener.
-    shareHostRef.current = true;
+    // shareGenRef to decide whether a stop is owed — a start() that
+    // lands after dismissal would otherwise leave a live listener. The
+    // generation also distinguishes THIS share from any newer one, so a
+    // stale start() resolution can't stop a successor's listener.
+    const gen = ++shareGenRef.current;
     void (async () => {
       const started = await host.start();
-      if (!shareHostRef.current) {
-        return; // cleanup already stopped the host
+      if (shareGenRef.current !== gen) {
+        return; // cleanup stopped the host, or a newer share owns it
       }
       if (!started.ok) {
-        shareHostRef.current = false;
+        shareGenRef.current = 0;
         await host.stop();
         setShare({
           active: false,
@@ -2225,11 +2231,11 @@ function Main({
         return;
       }
       const offer = await host.mintOffer();
-      if (!shareHostRef.current) {
+      if (shareGenRef.current !== gen) {
         return;
       }
       if (!offer.ok) {
-        shareHostRef.current = false;
+        shareGenRef.current = 0;
         await host.stop();
         setShare({
           active: false,
@@ -2250,8 +2256,10 @@ function Main({
       });
       setPairError(null);
     })().catch(() => {
-      shareHostRef.current = false;
-      void host.stop();
+      if (shareGenRef.current === gen) {
+        shareGenRef.current = 0;
+        void host.stop();
+      }
       setShare({
         active: false,
         busy: false,
@@ -2272,7 +2280,7 @@ function Main({
       }
       runPair({
         code,
-        endpoints: [`${peer.host}:${peer.port}`],
+        endpoints: [formatEndpoint(peer.host, peer.port)],
         ...(peer.fp !== null ? { fp: peer.fp } : {}),
       });
     },

@@ -62,6 +62,13 @@ export type ClientHello = {
    * desktop carries its sync port so the phone can reach it later).
    */
   readonly port?: number;
+  /**
+   * The caller's own dialable listener endpoints — self-reported
+   * `host:port`s (bracketed for v6). Preferred over the socket's
+   * remote address, which a NAT or VPN can mistranslate; the
+   * responder still filters them to LAN literals.
+   */
+  readonly endpoints?: readonly string[];
 };
 
 export type ServerChallenge = {
@@ -186,7 +193,7 @@ export function isClientHello(value: unknown): value is ClientHello {
     hasKeys(
       value,
       ['v', 'kind', 'deviceId', 'name', 'eph', 'dev'],
-      ['port'],
+      ['port', 'endpoints'],
     ) &&
     value['v'] === WIRE_VERSION &&
     value['kind'] === 'hello' &&
@@ -198,7 +205,13 @@ export function isClientHello(value: unknown): value is ClientHello {
     (value['port'] === undefined ||
       (Number.isSafeInteger(value['port']) &&
         (value['port'] as number) >= 1 &&
-        (value['port'] as number) <= 65_535))
+        (value['port'] as number) <= 65_535)) &&
+    (value['endpoints'] === undefined ||
+      (Array.isArray(value['endpoints']) &&
+        (value['endpoints'] as unknown[]).length <= 16 &&
+        (value['endpoints'] as unknown[]).every(
+          (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
+        )))
   );
 }
 
@@ -466,6 +479,14 @@ export function encodeJson(msg: unknown): Uint8Array {
 
 export function decodeJson(payload: Uint8Array): unknown {
   return JSON.parse(utf8Decode(payload));
+}
+
+/**
+ * Canonical `host:port` — IPv6 literals (incl. `%zone` scope ids) get
+ * brackets so the port boundary survives the colons.
+ */
+export function formatEndpoint(host: string, port: number): string {
+  return `${host.includes(':') ? `[${host}]` : host}:${port}`;
 }
 
 /**

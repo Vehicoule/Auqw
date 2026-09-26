@@ -68,8 +68,13 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
 
 /** One discovered service → the port's peer shape, or null when unusable. */
 function peerOf(service: Service): SyncDiscoveredPeer | null {
+  // Prefer an unscoped address; keep a scoped (zone-suffixed) one —
+  // link-local v6 is only dialable WITH its zone, and the LAN gate
+  // validates the zone id.
   const host = service.addresses?.find(
     (a) => typeof a === 'string' && !a.includes('%'),
+  ) ?? service.addresses?.find(
+    (a) => typeof a === 'string' && a.includes('%'),
   );
   if (
     typeof service.name !== 'string' ||
@@ -78,17 +83,25 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
   ) {
     return null;
   }
+  const txt = service.txt;
   const rawFp =
-    service.txt !== null &&
-    typeof service.txt === 'object' &&
-    typeof service.txt[TXT_FP] === 'string'
-      ? service.txt[TXT_FP]
-      : null;
+    txt !== null && typeof txt === 'object' && TXT_FP in txt
+      ? txt[TXT_FP]
+      : undefined;
+  // A PRESENT-but-malformed `dev` TXT can't be downgraded to an
+  // unpinned tap target — drop the whole advert. Absent stays a
+  // valid unpinned candidate.
+  if (
+    rawFp !== undefined &&
+    (typeof rawFp !== 'string' || !/^[0-9a-f]{64}$/.test(rawFp))
+  ) {
+    return null;
+  }
   return {
     name: service.name,
     host,
     port: service.port,
-    fp: rawFp !== null && /^[0-9a-f]{64}$/.test(rawFp) ? rawFp : null,
+    fp: rawFp ?? null,
   };
 }
 
@@ -114,16 +127,18 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
   };
   return {
     async browse({ onFound, onLost }) {
+      let browser: ReturnType<Bonjour['find']> | null = null;
       try {
         bonjour ??= new Bonjour({}, () => {
           // Async socket failure — the browser below emits no more
           // events; the session stays open but quiet rather than
           // crashing the utility host.
         });
-        const browser = bonjour.find({
+        const br = bonjour.find({
           type: SERVICE_TYPE,
           protocol: SERVICE_PROTOCOL,
         });
+        browser = br;
         const seen = new Map<string, SyncDiscoveredPeer>();
         const key = (service: Service): string =>
           `${service.name}|${service.host}`;
@@ -141,16 +156,16 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
             onLost(peer.name);
           }
         };
-        browser.on('up', up);
-        browser.on('down', down);
-        browser.start();
+        br.on('up', up);
+        br.on('down', down);
+        br.start();
         sessions += 1;
         const session: SyncDiscoverySession = {
           close() {
-            browser.off('up', up);
-            browser.off('down', down);
+            br.off('up', up);
+            br.off('down', down);
             try {
-              browser.stop();
+              br.stop();
             } catch {
               // best effort
             }
@@ -159,6 +174,23 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
         };
         return ok(session);
       } catch (thrown) {
+        // A mid-setup failure leaves no session to unwind it —
+        // stop the half-built browser and, when no session holds it,
+        // destroy the bonjour instance so a browse outage doesn't
+        // pin its socket for the process's life.
+        try {
+          browser?.stop();
+        } catch {
+          // best effort
+        }
+        if (sessions === 0 && bonjour !== null) {
+          try {
+            bonjour.destroy();
+          } catch {
+            // best effort
+          }
+          bonjour = null;
+        }
         // bonjour failure text can embed the service query — keep the
         // typed reason only.
         return err(appError('unavailable', 'sync: mdns browse failed'));

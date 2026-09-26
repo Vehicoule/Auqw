@@ -24,13 +24,16 @@ import {
   attachSyncPump,
   decodeJson,
   encodeJson,
+  formatEndpoint,
   isClientHello,
   HANDSHAKE_CAP,
   PAIR_CODE_PATTERN,
+  parseEndpoint,
   SESSION_CAP,
   type SyncDeviceRecord,
   type SyncWirePump,
 } from './sync-wire.ts';
+import { isPairableLanHost } from './lan.ts';
 
 /**
  * The responder half of LAN pairing, shared by any host that accepts a
@@ -241,6 +244,8 @@ type HostSession = {
   pairedAtMs: number | null;
   /** hello.port → the caller's own dialable listener port. */
   callerPort: number | null;
+  /** hello.endpoints → caller-advertised dialable listener addrs. */
+  advertisedEndpoints: readonly string[];
   handshakeTimer: CancellationSource | null;
   idleTimer: CancellationSource | null;
   ops: Promise<void>;
@@ -412,10 +417,34 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     });
   }
 
-  function endpointOf(session: HostSession): string | null {
-    return session.callerPort === null || session.remoteIp === ''
-      ? null
-      : `${session.remoteIp}:${session.callerPort}`;
+  /**
+   * The endpoints worth redialing for this caller: its own
+   * advertised listener addrs first (self-reported, so they survive
+   * a NAT/VPN-mistranslated source IP), then the observed
+   * remoteIp:callerPort as fallback. Advertised entries are
+   * validated LAN literals — anything else is dropped, not trusted.
+   */
+  function endpointsOf(session: HostSession): string[] {
+    const list: string[] = [];
+    for (const raw of session.advertisedEndpoints) {
+      const ep = parseEndpoint(raw);
+      if (ep !== null && isPairableLanHost(ep.host)) {
+        const normalized = formatEndpoint(ep.host, ep.port);
+        if (!list.includes(normalized)) {
+          list.push(normalized);
+          if (list.length >= 8) {
+            break;
+          }
+        }
+      }
+    }
+    if (session.callerPort !== null && session.remoteIp !== '') {
+      const derived = formatEndpoint(session.remoteIp, session.callerPort);
+      if (!list.includes(derived)) {
+        list.push(derived);
+      }
+    }
+    return list;
   }
 
   /* ----------------------------- hello ----------------------------- */
@@ -454,6 +483,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     session.devPub = accepted.peer.devPub;
     session.name = accepted.peer.name;
     session.callerPort = msg.port ?? null;
+    session.advertisedEndpoints = msg.endpoints ?? [];
     session.registered = prior !== null;
     // The registry — never the wire — names a resumed device. Rows
     // from before deviceId custody stay id-less (''), paired by fp
@@ -521,7 +551,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         if (taken === null) {
           return { ok: false, reason: 'no-pairing' };
         }
-        const endpoint = endpointOf(session);
+        const endpoints = endpointsOf(session);
         const record: SyncHostPeer = {
           id: session.deviceId ?? '',
           name: session.name,
@@ -529,7 +559,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
           fp: session.devFp ?? '',
           pairedAt: now,
           lastSeenAt: now,
-          endpoints: endpoint !== null ? [endpoint] : [],
+          endpoints,
         };
         // A stop() swapped the sessions set — a session not in the
         // live set belongs to a dead generation; its custody write
@@ -572,7 +602,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         reject('unpaired');
         return;
       }
-      const endpoint = endpointOf(session);
+      const endpoints = endpointsOf(session);
       const record: SyncHostPeer = {
         id: session.registeredId,
         name: session.name,
@@ -580,7 +610,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         fp: session.devFp,
         pairedAt: session.pairedAtMs ?? now,
         lastSeenAt: now,
-        endpoints: endpoint !== null ? [endpoint] : [],
+        endpoints,
       };
       if (!sessions.has(session)) {
         reject('unpaired');
@@ -716,6 +746,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       registeredId: null,
       pairedAtMs: null,
       callerPort: null,
+      advertisedEndpoints: [],
       handshakeTimer: null,
       idleTimer: null,
       ops: Promise.resolve(),

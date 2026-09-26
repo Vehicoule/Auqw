@@ -3,6 +3,8 @@ import {
   appError,
   createSyncClient,
   err,
+  formatEndpoint,
+  isPairableLanHost,
   ok,
   type CancellationSignal,
   type Result,
@@ -63,132 +65,6 @@ class NodeSyncSocket implements SyncSocket {
   destroy(): void {
     this.#socket.destroy();
   }
-}
-
-/**
- * Dotted-decimal IPv4 parse — returns null on anything that isn't a
- * strict `a.b.c.d` literal with each octet in range.
- */
-function parseIpv4(host: string): [number, number, number, number] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (m === null) {
-    return null;
-  }
-  const octets = m.slice(1).map(Number);
-  return octets.every((o) => o <= 255)
-    ? [octets[0]!, octets[1]!, octets[2]!, octets[3]!]
-    : null;
-}
-
-/**
- * Pairing targets are LAN-scoped: the IPC caller (renderer) may be
- * compromised, so `host` must be an address a LAN pairing protocol
- * legitimately dials — a private/loopback/link-local/CGNAT/ULA
- * literal, or an mDNS-style `.local`/`.lan` name. Public literals and
- * arbitrary DNS names are refused before `netConnect` runs.
- */
-/**
- * Whole-literal IPv6 parse → eight 16-bit groups, or null. Handles
- * `::` compression, a `%zone` scope suffix, and a trailing embedded
- * dotted-quad — and rejects every byte that isn't part of a valid
- * literal, so nothing here can smuggle a DNS name through.
- */
-function parseIpv6(addr: string): number[] | null {
-  const zoneless = addr.split('%', 1)[0] ?? '';
-  if (zoneless === '') {
-    return null;
-  }
-  const halves = zoneless.split('::');
-  if (halves.length > 2) {
-    return null;
-  }
-  const group = (g: string): number | null =>
-    /^[0-9a-f]{1,4}$/i.test(g) ? Number.parseInt(g, 16) : null;
-  const leftRaw = halves[0] === '' ? [] : (halves[0] ?? '').split(':');
-  const rightRaw =
-    halves[1] === undefined ? null : halves[1] === '' ? [] : halves[1].split(':');
-  // An embedded IPv4 tail contributes the last two groups.
-  const tailList = rightRaw ?? leftRaw;
-  const tail = tailList[tailList.length - 1];
-  let v4Groups: number[] = [];
-  if (tail !== undefined && tail.includes('.')) {
-    const v4 = parseIpv4(tail);
-    if (v4 === null) {
-      return null;
-    }
-    tailList.pop();
-    v4Groups = [(v4[0]! << 8) | v4[1]!, (v4[2]! << 8) | v4[3]!];
-  }
-  const left = leftRaw.map(group);
-  const right = (rightRaw ?? []).map(group);
-  if (left.includes(null) || right.includes(null)) {
-    return null;
-  }
-  const leftN = left as number[];
-  const rightN = right as number[];
-  const total = leftN.length + rightN.length + v4Groups.length;
-  if (rightRaw === null) {
-    // No `::` — the literal must carry all eight groups exactly.
-    return total === 8 ? [...leftN, ...v4Groups] : null;
-  }
-  if (total > 7) {
-    return null;
-  }
-  const pad = Array<number>(8 - total).fill(0);
-  return [...leftN, ...pad, ...rightN, ...v4Groups];
-}
-
-/**
- * Pairing targets are LAN-scoped: the IPC caller (renderer) may be
- * compromised, so `host` must be an IP literal a LAN pairing protocol
- * legitimately dials — private/loopback/link-local/CGNAT/ULA —
- * never a DNS name, which could resolve anywhere.
- */
-export function isPairableLanHost(host: string): boolean {
-  const bare =
-    host.startsWith('[') && host.endsWith(']')
-      ? host.slice(1, -1)
-      : host;
-  const v4direct = parseIpv4(bare);
-  const groups = v4direct === null ? parseIpv6(bare) : null;
-  const v4 =
-    v4direct ??
-    // IPv4-mapped form: ::ffff:a.b.c.d → groups [0,0,0,0,0,ffff,…].
-    (groups !== null &&
-    groups.slice(0, 5).every((g) => g === 0) &&
-    groups[5] === 0xffff
-      ? [
-          (groups[6]! >> 8) & 0xff,
-          groups[6]! & 0xff,
-          (groups[7]! >> 8) & 0xff,
-          groups[7]! & 0xff,
-        ]
-      : null);
-  if (v4 !== null) {
-    const [a, b] = v4;
-    return (
-      a === 10 || // RFC1918
-      a === 127 || // loopback
-      (a === 169 && b === 254) || // link-local
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127) // CGNAT (overlay VPNs)
-    );
-  }
-  if (groups === null) {
-    return false;
-  }
-  if (groups.every((g) => g === 0)) {
-    return false; // :: — unspecified
-  }
-  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) {
-    return true; // ::1 loopback
-  }
-  const first = groups[0]!;
-  return (
-    (first & 0xffc0) === 0xfe80 || // fe80::/10 link-local
-    (first & 0xfe00) === 0xfc00 // fc00::/7 ULA
-  );
 }
 
 export function createNodeSyncSockets(): SyncSocketPort {
@@ -461,6 +337,12 @@ export function createSyncDialer(deps: {
   /** The desktop listener's bound port — carried in the hello so the
    * phone can dial back for resume rounds. */
   listenPort: () => number | null;
+  /**
+   * This desktop's own dialable listener endpoints — advertised in
+   * the hello so the responder prefers them over the socket's
+   * (possibly NAT/VPN-mistranslated) remote address.
+   */
+  listenEndpoints: () => readonly string[];
 }): SyncDialer {
   async function withClient<T>(
     run: (client: SyncClient) => Promise<Result<T>>,
@@ -519,7 +401,7 @@ export function createSyncDialer(deps: {
           client.pair(
             {
               code,
-              endpoints: [`${host}:${port}`],
+              endpoints: [formatEndpoint(host, port)],
               ...(fp !== undefined ? { fp } : {}),
             },
             signal,

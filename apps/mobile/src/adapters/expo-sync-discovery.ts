@@ -89,12 +89,11 @@ export function createExpoSyncDiscovery(
           ) {
             // A PRESENT-but-malformed `fp` poisons the pin the pair
             // would dial with — drop the advert rather than serve an
-            // unpinned tap-target. A missing `fp` stays a valid
-            // unpinned candidate (typed-code path).
+            // unpinned tap-target. NSD reports `fp: null` for a
+            // TXT-less advert — that's a valid unpinned candidate.
             if (
-              event.fp !== undefined &&
-              (typeof event.fp !== 'string' ||
-                !/^[0-9a-f]{64}$/.test(event.fp))
+              event.fp != null &&
+              !/^[0-9a-f]{64}$/.test(event.fp)
             ) {
               return;
             }
