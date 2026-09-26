@@ -1065,26 +1065,30 @@
   background: var(--fg08);
 }
 .uw-toggle {
-  width: 36px;
-  height: 20px;
+  width: 42px;
+  height: 24px;
   border-radius: var(--radius-pill);
   background: var(--fg18);
+  border: var(--stroke-hairline) solid var(--hairline);
   display: inline-flex;
   align-items: center;
-  padding: 0 2px;
+  padding: 0 3px;
   flex-shrink: 0;
 }
 .uw-toggle--on {
   background: var(--accent);
+  border-color: transparent;
 }
 .uw-toggle__thumb {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
   border-radius: var(--radius-pill);
-  background: var(--text-bright);
+  background: var(--thumb);
+  border: var(--stroke-hairline) solid var(--fg40);
 }
 .uw-toggle--on .uw-toggle__thumb {
-  transform: translateX(16px);
+  transform: translateX(17px);
+  border-color: transparent;
 }
 
 /* ---- entity / collection / playlist -------------------------------------- */
