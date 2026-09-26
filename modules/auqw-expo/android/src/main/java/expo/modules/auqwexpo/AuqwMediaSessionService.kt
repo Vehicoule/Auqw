@@ -151,12 +151,17 @@ class AuqwMediaSessionService : MediaSessionService() {
         Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
         Player.COMMAND_SEEK_TO_NEXT -> {
           remoteDispatcher?.dispatch("remote-next")
-          // Consumed — the player's own single-item seek must not run.
+            // Consumed only when the projection cursor heard it — a
+            // dead dispatcher (module destroyed, service surviving on
+            // foreground playback) falls through to the player's own
+            // seek instead of swallowing the press.
+            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
           return SessionResult.RESULT_ERROR_NOT_SUPPORTED
         }
         Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
         Player.COMMAND_SEEK_TO_PREVIOUS -> {
           remoteDispatcher?.dispatch("remote-previous")
+            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
           return SessionResult.RESULT_ERROR_NOT_SUPPORTED
         }
       }
@@ -178,10 +183,12 @@ class AuqwMediaSessionService : MediaSessionService() {
         when (keyEvent.keyCode) {
           KeyEvent.KEYCODE_MEDIA_NEXT -> {
             remoteDispatcher?.dispatch("remote-next")
+              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
             return true
           }
           KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
             remoteDispatcher?.dispatch("remote-previous")
+              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
             return true
           }
         }
