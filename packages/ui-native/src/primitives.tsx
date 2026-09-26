@@ -352,7 +352,8 @@ export function PillButton({
         },
         pressed && {
           borderColor: bordered ? theme.colors.fg25 : theme.colors.hairline,
-          ...(bordered ? {} : { backgroundColor: bg[tone], opacity: 0.85 }),
+          backgroundColor: bordered ? theme.colors.fg08 : bg[tone],
+          ...(bordered ? {} : { opacity: 0.85 }),
         },
         style,
       ]}
