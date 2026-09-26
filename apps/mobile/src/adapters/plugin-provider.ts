@@ -671,34 +671,52 @@ export function createPluginProvider(
       return Promise.resolve(err(cancelledError()));
     }
     // The context deadline caps the handshake too — a stalled
-    // startRequest must not park the caller past it. Deadlines beyond
-    // the timer range (~24.8 days, e.g. an effectively-infinite
-    // MAX_SAFE_INTEGER sentinel) stay unarmed — arming would overflow
-    // the timeout and fire almost immediately.
+    // startRequest must not park the caller past it. Deadline timers
+    // re-arm in slices: setTimeout overflows past ~24.8 days, so a
+    // far-out deadline (e.g. a MAX_SAFE_INTEGER sentinel) re-checks
+    // instead of firing early.
     const msLeft = context.deadlineMs - Date.now();
     if (msLeft <= 0) {
       return Promise.resolve(err(timeoutError()));
     }
-    const armDeadline = msLeft < 0x7fffffff;
     return (async () => {
       // Race the handshake against the deadline — a startRequest that
       // outlives it still settles here, and its late id is cancelled.
       let startTimer: ReturnType<typeof setTimeout> | undefined;
-      const started = host
-        .startRequest(pluginId, capability, payload)
-        .then(
-          (id) => ({ kind: 'started' as const, id }),
-          (thrown) => ({ kind: 'threw' as const, thrown }),
-        );
+      let expireStart: (() => void) | undefined;
       const expired = new Promise<{ kind: 'expired' }>((res) => {
-        if (armDeadline) {
-          startTimer = setTimeout(() => res({ kind: 'expired' }), msLeft);
-        }
+        expireStart = () => res({ kind: 'expired' });
       });
-      const first = await Promise.race([started, expired]);
-      if (startTimer !== undefined) {
+      const armStartDeadline = (): void => {
+        startTimer = setTimeout(
+          () => {
+            if (context.deadlineMs - Date.now() <= 0) {
+              expireStart?.();
+            } else {
+              armStartDeadline();
+            }
+          },
+          Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
+        );
+      };
+      armStartDeadline();
+      let call: Promise<string>;
+      try {
+        // A synchronous host throw is a typed failure, never a
+        // rejection; resolve() also normalizes a non-promise return.
+        call = Promise.resolve(
+          host.startRequest(pluginId, capability, payload),
+        );
+      } catch (thrown) {
         clearTimeout(startTimer);
+        return err(nativeError(thrown));
       }
+      const started = call.then(
+        (id) => ({ kind: 'started' as const, id }),
+        (thrown) => ({ kind: 'threw' as const, thrown }),
+      );
+      const first = await Promise.race([started, expired]);
+      clearTimeout(startTimer);
       if (first.kind === 'expired') {
         void started.then((late) => {
           if (
@@ -792,6 +810,18 @@ export function createPluginProvider(
           host.cancel(requestId);
           resolve(err(timeoutError()));
         };
+        const armDeadlineTimer = (): void => {
+          deadlineTimer = setTimeout(
+            () => {
+              if (context.deadlineMs - Date.now() <= 0) {
+                timeoutInFlight();
+              } else {
+                armDeadlineTimer();
+              }
+            },
+            Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
+          );
+        };
         const entry: Pending = {
           unsubscribe: () => unsubscribe(),
           settle,
@@ -799,12 +829,7 @@ export function createPluginProvider(
         };
         pending.set(requestId, entry);
         unsubscribe = signal.subscribe(cancelInFlight);
-        if (armDeadline) {
-          deadlineTimer = setTimeout(
-            timeoutInFlight,
-            Math.max(0, context.deadlineMs - Date.now()),
-          );
-        }
+        armDeadlineTimer();
         const stashed = early.get(requestId);
         if (stashed !== undefined) {
           early.delete(requestId);

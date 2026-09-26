@@ -572,6 +572,18 @@ async function startFailure(): Promise<void> {
     ctx().context,
   );
   assert(!result.ok && result.error.kind === 'unavailable');
+
+  // A synchronous throw is also a typed failure, never a rejection.
+  const syncThrow = new FakeHost();
+  syncThrow.startRequest = () => {
+    throw Object.assign(new Error('host down'), { kind: 'unavailable' });
+  };
+  const p2 = provider(syncThrow);
+  const refused = await p2.search(
+    { query: 'x', limit: 5, storefront: null },
+    ctx().context,
+  );
+  assert(!refused.ok && refused.error.kind === 'unavailable');
 }
 
 const WIRE_ENTITY = {
