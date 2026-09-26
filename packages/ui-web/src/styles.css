@@ -878,7 +878,10 @@
   min-width: 0;
 }
 .uw-collection__count {
-  flex-shrink: 0;
+  /* Long counts ellipsize instead of squeezing the name to zero. */
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
   font-variant-numeric: tabular-nums;
 }
 .uw-library__controls {
