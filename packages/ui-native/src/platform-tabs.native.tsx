@@ -80,7 +80,19 @@ export function PlatformTabs({
     <TabView
       navigationState={{ index, routes: items.map(routeFor) }}
       renderScene={({ route }) => (
-        <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        // Padding and the dock overlay must share this view: the
+        // overlay's bottom anchor is this view's bottom edge — the
+        // tab bar's top edge — while the padding clears scene content.
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: theme.colors.canvas,
+            paddingBottom:
+              androidDock && route.key === activeKey
+                ? ACCESSORY_RESERVE
+                : 0,
+          }}
+        >
           {renderTab(route.key)}
           {androidDock && route.key === activeKey ? (
             <View
@@ -107,10 +119,6 @@ export function PlatformTabs({
       hapticFeedbackEnabled
       minimizeBehavior="onScrollDown"
       scrollEdgeAppearance="transparent"
-      getSceneStyle={({ route }) => ({
-        paddingBottom:
-          androidDock && route.key === activeKey ? ACCESSORY_RESERVE : 0,
-      })}
       {...(accessory != null && Platform.OS === 'ios'
         ? {
             renderBottomAccessoryView: () => (

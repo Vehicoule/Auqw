@@ -94,7 +94,7 @@ function defaultSettings(
   const catalog = pickProvider(
     providers,
     SLOT_CAPABILITIES.catalogProvider,
-    'itunes',
+    'deezer',
   );
   const playback = pickProvider(
     providers,
@@ -154,7 +154,7 @@ function repairedSettings(
     const repaired = pickProvider(
       providers,
       SLOT_CAPABILITIES.catalogProvider,
-      'itunes',
+      'deezer',
     );
     if (repaired !== null) {
       next.catalogProvider = repaired;

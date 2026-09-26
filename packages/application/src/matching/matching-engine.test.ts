@@ -257,7 +257,10 @@ function adversarialTests(): void {
     assertEqual(out.evidence.durationDeltaMs, null);
   }
 
-  // 9. Two identical candidates -> ambiguous, upstream order kept.
+  // 9. Display-identical candidates are one choice: the review row
+  // shows title + `artist · provider`, so a provider listing the same
+  // song under two ids is a phantom tie — the best-scored member wins
+  // (equal scores keep upstream order).
   {
     const rA = ref();
     const rB = ref();
@@ -278,10 +281,125 @@ function adversarialTests(): void {
         }),
       ],
     );
-    assert(out.type === 'ambiguous', `9: ${out.type}`);
-    assertEqual(out.candidates.length, 2);
+    assert(out.type === 'matched', `9: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rA);
+  }
+
+  // 9b. The collapse precedes the margin check: two identical display
+  // rows plus a genuinely different near-tie still gate. The review
+  // parks every member (a reject must veto hidden duplicates too);
+  // display collapsing is the view-model's job.
+  {
+    const rA = ref();
+    const rB = ref();
+    const rC = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rB,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist B',
+          durationMs: 200_000,
+          sourceRef: rC,
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9b: ${out.type}`);
+    assertEqual(out.candidates.length, 3);
     assertEqual(out.candidates[0]?.candidate.sourceRef, rA);
     assertEqual(out.candidates[1]?.candidate.sourceRef, rB);
+    assertEqual(out.candidates[2]?.candidate.sourceRef, rC);
+  }
+
+  // 9c. Same title and artist but a different shown duration is a
+  // distinct choice, not a duplicate: the review rows stay
+  // distinguishable, so the near-tie still gates. The recording has
+  // no duration, so scoring can't separate the two on that axis.
+  {
+    const rA = ref();
+    const rB = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist' }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 300_000,
+          sourceRef: rB,
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9c: ${out.type}`);
+    assertEqual(out.candidates.length, 2);
+    // Sub-second metadata drift still renders the same clock and stays
+    // one display group.
+    const drift = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_400,
+          sourceRef: rB,
+        }),
+      ],
+    );
+    assert(drift.type === 'matched', `9c-drift: ${drift.type}`);
+  }
+
+  // 9d. The five-group cap admits new groups, never drops a member of
+  // an admitted one: a duplicate arriving after the cap still parks,
+  // so a reject vetoes it too (unparked duplicates stay playable).
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist' }),
+      [
+        // Five distinct display groups fill the cap...
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-a' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p2', kind: 'track', id: 'p2' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p3', kind: 'track', id: 'p3' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p4', kind: 'track', id: 'p4' } }),
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p5', kind: 'track', id: 'p5' } }),
+        // ...a sixth group is skipped...
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p6', kind: 'track', id: 'p6' } }),
+        // ...but a late member of the first group still parks.
+        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-b' } }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9d: ${out.type}`);
+    assertEqual(out.candidates.length, 6);
+    assert(
+      out.candidates.some((c) => c.candidate.sourceRef.id === 'p1-b'),
+      'late member of an admitted group must park',
+    );
+    assert(
+      !out.candidates.some((c) => c.candidate.sourceRef.id === 'p6'),
+      'sixth display group stays out',
+    );
   }
 
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.

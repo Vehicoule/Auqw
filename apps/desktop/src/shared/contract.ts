@@ -253,16 +253,30 @@ export type HttpTracePayload = {
   readonly elapsedMs: number;
 };
 
+/**
+ * Mirrors the port's trace-URL rule: a redacted `http(s)` URL, or the
+ * literal `<pot-provider>` sentinel the host emits for pot mints (the
+ * LAN address never crosses at all). Signed-url material — queries
+ * and fragments — never crosses.
+ */
+function isTraceUrlPayload(value: unknown): boolean {
+  if (value === '<pot-provider>') {
+    return true;
+  }
+  return (
+    isBoundedString(value, 2048) &&
+    (value.startsWith('http://') || value.startsWith('https://')) &&
+    !value.includes('?') &&
+    !value.includes('#')
+  );
+}
+
 function isHttpTracePayload(value: unknown): value is HttpTracePayload {
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ['method', 'url', 'status', 'bytes', 'elapsedMs']) &&
     isBoundedString(value['method'], 32) &&
-    isBoundedString(value['url'], 2048) &&
-    // Signed-url material never crosses: queries and fragments are the
-    // host's redaction target, so the boundary enforces the invariant.
-    !(value['url'] as string).includes('?') &&
-    !(value['url'] as string).includes('#') &&
+    isTraceUrlPayload(value['url']) &&
     (value['status'] === undefined ||
       isSafeNonNegativeInt(value['status'])) &&
     isSafeNonNegativeInt(value['bytes']) &&
