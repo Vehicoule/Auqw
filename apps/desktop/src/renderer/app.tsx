@@ -2916,6 +2916,7 @@ function Main({
             }}
             onFocusSearch={() => {
               setTab('explore');
+              clearOverlays();
               setSearchFocusTick((n) => n + 1);
             }}
             stageOpen={stageOpen}
