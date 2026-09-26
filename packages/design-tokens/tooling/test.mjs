@@ -66,6 +66,7 @@ const ROLES = [
   'glassControl',
   'scrim',
   'hairline',
+  'thumb',
 ];
 const SCHEMES = ['dark', 'light', 'oled'];
 const SPACING = {

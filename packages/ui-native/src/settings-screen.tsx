@@ -21,20 +21,22 @@ function Toggle({ enabled }: { readonly enabled: boolean }) {
     <View
       accessible={false}
       style={{
-        width: 36,
-        height: 20,
-        borderRadius: 10,
+        width: 42,
+        height: 24,
+        borderRadius: 12,
         backgroundColor: enabled ? theme.colors.accent : theme.colors.fg18,
+        borderWidth: theme.strokes.hairline,
+        borderColor: enabled ? 'transparent' : theme.colors.hairline,
         justifyContent: 'center',
-        paddingHorizontal: 2,
+        paddingHorizontal: 3,
       }}
     >
       <View
         style={{
-          width: 16,
-          height: 16,
-          borderRadius: 8,
-          backgroundColor: theme.colors.textBright,
+          width: 17,
+          height: 17,
+          borderRadius: 8.5,
+          backgroundColor: theme.colors.thumb,
           alignSelf: enabled ? 'flex-end' : 'flex-start',
         }}
       />
