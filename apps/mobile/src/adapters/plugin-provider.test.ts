@@ -500,6 +500,66 @@ async function earlyOutcome(): Promise<void> {
   assertDeepEqual(result.value, { items: [DOMAIN_TRACK], storefront: 'US' });
 }
 
+// A context deadline caps the whole request: an already-elapsed
+// deadline never reaches the host, a stalled startRequest settles
+// 'timeout', and a hung outcome cancels the native request and
+// settles 'timeout'.
+async function requestDeadline(): Promise<void> {
+  const expired = new FakeHost();
+  const p1 = provider(expired);
+  const elapsed = await p1.search(
+    { query: 'x', limit: 5, storefront: null },
+    {
+      requestId: 't-expired',
+      deadlineMs: 0,
+      signal: new CancellationSource().signal,
+    },
+  );
+  assert(!elapsed.ok && elapsed.error.kind === 'timeout', 'elapsed deadline');
+  assertEqual(expired.requests.length, 0, 'expired request never starts');
+
+  const stalled = new FakeHost();
+  // The handshake answers long after the deadline — the caller still
+  // settles 'timeout', and the late request id is cancelled rather
+  // than orphaned.
+  stalled.startRequest = () =>
+    new Promise<string>((res) => setTimeout(() => res('req-late'), 30));
+  const p2 = provider(stalled);
+  const hanging = await p2.search(
+    { query: 'x', limit: 5, storefront: null },
+    {
+      requestId: 't-stall',
+      deadlineMs: Date.now() + 5,
+      signal: new CancellationSource().signal,
+    },
+  );
+  assert(
+    !hanging.ok && hanging.error.kind === 'timeout',
+    'stalled handshake times out',
+  );
+  await new Promise((res) => setTimeout(res, 40));
+  assertDeepEqual(stalled.cancelled, ['req-late'], 'late id cancelled');
+
+  const pending = new FakeHost();
+  const p3 = provider(pending);
+  const landed = p3.search(
+    { query: 'x', limit: 5, storefront: null },
+    {
+      requestId: 't-pend',
+      deadlineMs: Date.now() + 5,
+      signal: new CancellationSource().signal,
+    },
+  );
+  await flush();
+  const done = await landed;
+  assert(!done.ok && done.error.kind === 'timeout', 'outcome wait times out');
+  assertDeepEqual(
+    pending.cancelled,
+    [pending.lastId],
+    'native request cancelled at deadline',
+  );
+}
+
 // 9. A startRequest rejection becomes a typed error, never throws.
 async function startFailure(): Promise<void> {
   const host = new FakeHost();
@@ -848,6 +908,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['preCancelled', preCancelled],
   ['dispose', dispose],
   ['earlyOutcome', earlyOutcome],
+  ['requestDeadline', requestDeadline],
   ['startFailure', startFailure],
   ['entityOp', entityOp],
   ['entityMalformed', entityMalformed],

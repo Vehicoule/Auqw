@@ -1025,7 +1025,7 @@ function Main({
       searchState.type === 'idle' ? '' : searchState.query;
     // Committed text is no draft, and inputs past the payload cap
     // (256) can't be served — neither earns a fetch.
-    if (trimmed === committed || trimmed.length > 256) {
+    if (trimmed === committed || [...trimmed].length > 256) {
       setSuggestions([]);
       return undefined;
     }

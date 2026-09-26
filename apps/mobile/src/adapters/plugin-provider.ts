@@ -575,6 +575,10 @@ function cancelledError(): AppError {
   return appError('cancelled', 'cancelled');
 }
 
+function timeoutError(): AppError {
+  return appError('timeout', 'operation deadline exceeded');
+}
+
 function invalidResult(): AppError {
   return appError('invalid-response', 'plugin result failed validation');
 }
@@ -666,13 +670,51 @@ export function createPluginProvider(
     if (signal.cancelled) {
       return Promise.resolve(err(cancelledError()));
     }
+    // The context deadline caps the handshake too — a stalled
+    // startRequest must not park the caller past it. Deadlines beyond
+    // the timer range (~24.8 days, e.g. an effectively-infinite
+    // MAX_SAFE_INTEGER sentinel) stay unarmed — arming would overflow
+    // the timeout and fire almost immediately.
+    const msLeft = context.deadlineMs - Date.now();
+    if (msLeft <= 0) {
+      return Promise.resolve(err(timeoutError()));
+    }
+    const armDeadline = msLeft < 0x7fffffff;
     return (async () => {
-      let requestId: string;
-      try {
-        requestId = await host.startRequest(pluginId, capability, payload);
-      } catch (thrown) {
-        return err(nativeError(thrown));
+      // Race the handshake against the deadline — a startRequest that
+      // outlives it still settles here, and its late id is cancelled.
+      let startTimer: ReturnType<typeof setTimeout> | undefined;
+      const started = host
+        .startRequest(pluginId, capability, payload)
+        .then(
+          (id) => ({ kind: 'started' as const, id }),
+          (thrown) => ({ kind: 'threw' as const, thrown }),
+        );
+      const expired = new Promise<{ kind: 'expired' }>((res) => {
+        if (armDeadline) {
+          startTimer = setTimeout(() => res({ kind: 'expired' }), msLeft);
+        }
+      });
+      const first = await Promise.race([started, expired]);
+      if (startTimer !== undefined) {
+        clearTimeout(startTimer);
       }
+      if (first.kind === 'expired') {
+        void started.then((late) => {
+          if (
+            late.kind === 'started' &&
+            typeof late.id === 'string' &&
+            late.id.length > 0
+          ) {
+            host.cancel(late.id);
+          }
+        });
+        return err(timeoutError());
+      }
+      if (first.kind === 'threw') {
+        return err(nativeError(first.thrown));
+      }
+      const requestId = first.id;
       if (typeof requestId !== 'string' || requestId.length === 0) {
         return err(appError('invalid-response', 'empty request id'));
       }
@@ -686,12 +728,16 @@ export function createPluginProvider(
       }
       return new Promise<Result<T>>((resolve) => {
         let unsubscribe = (): void => { };
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         const finish = (result: Result<T>): void => {
           const entry = pending.get(requestId);
           if (entry === undefined) {
             return;
           }
           dropRequest(requestId, entry);
+          if (deadlineTimer !== undefined) {
+            clearTimeout(deadlineTimer);
+          }
           resolve(result);
         };
         const settle = (outcome: AuqwExpoRequestOutcome): void => {
@@ -729,10 +775,22 @@ export function createPluginProvider(
             return;
           }
           dropRequest(requestId, current);
+          if (deadlineTimer !== undefined) {
+            clearTimeout(deadlineTimer);
+          }
           // The request is dead to us either way; the host aborts it
           // and any late outcome is dropped.
           host.cancel(requestId);
           resolve(err(cancelledError()));
+        };
+        const timeoutInFlight = (): void => {
+          const current = pending.get(requestId);
+          if (current === undefined) {
+            return;
+          }
+          dropRequest(requestId, current);
+          host.cancel(requestId);
+          resolve(err(timeoutError()));
         };
         const entry: Pending = {
           unsubscribe: () => unsubscribe(),
@@ -741,6 +799,12 @@ export function createPluginProvider(
         };
         pending.set(requestId, entry);
         unsubscribe = signal.subscribe(cancelInFlight);
+        if (armDeadline) {
+          deadlineTimer = setTimeout(
+            timeoutInFlight,
+            Math.max(0, context.deadlineMs - Date.now()),
+          );
+        }
         const stashed = early.get(requestId);
         if (stashed !== undefined) {
           early.delete(requestId);
