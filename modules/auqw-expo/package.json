@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "expo": "*",
-    "react": "19.2.3"
+    "react": "19.2.3",
+    "react-native-worklets": "0.10.4"
   }
 }
