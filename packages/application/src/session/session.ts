@@ -9,6 +9,7 @@ import type {
   EntityKind,
   EntityRef,
   Like,
+  QueueOccurrence,
   Recording,
   Settings,
   SourceMapping,
@@ -665,6 +666,21 @@ export class Session {
   #disposed = false;
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
+  /**
+   * One auto-seed attempt per tail occurrence — set when the lazy
+   * radio arms itself on the queue's last item (and when the user
+   * disarms while it plays), so repeated #derived ticks on that
+   * item never reseed in a loop. The suppression clears implicitly:
+   * the next current occurrence carries a different id.
+   */
+  #radioAutoSeedOccurrence: string | null = null;
+  /**
+   * Bumped whenever an armed tail is cleared. An auto-seed queued
+   * behind #radioTail aborts on a stale epoch — a user's disarm or
+   * a replacement seed must never be undone by an arm scheduled
+   * before it.
+   */
+  #radioArmEpoch = 0;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
@@ -1113,6 +1129,7 @@ export class Session {
     this.#own(this.#projectQueue());
     this.#maybeMapSuccessor();
     this.#maybeGrowRadio();
+    this.#maybeArmRadio();
   }
 
   // ---- sync emission ------------------------------------------------
@@ -3041,7 +3058,12 @@ export class Session {
     if (!ready.ok) {
       return ready;
     }
-    this.#clearRadio(ready.value);
+    const r = ready.value;
+    this.#clearRadio(r);
+    // The disarm also counts as the auto-seed verdict for the item
+    // it landed on — the tail must not silently reseed under it.
+    this.#radioAutoSeedOccurrence =
+      r.queue.snapshot().currentOccurrenceId;
     this.#publish();
     return ok(undefined);
   }
@@ -3058,6 +3080,7 @@ export class Session {
     }
     record.source?.cancel();
     r.radio = null;
+    this.#radioArmEpoch += 1;
   }
 
   async #startRadio(ref: SourceRef): Promise<Result<void>> {
@@ -3088,6 +3111,9 @@ export class Session {
       error: undefined,
       fetching: true,
       source: null,
+      // A tail may only resurrect playback it was armed during — a
+      // seed issued on an idle queue appends for later instead.
+      resumeOnDrain: r.queue.snapshot().mode === 'playing',
     };
     r.radio = record;
     this.#publish();
@@ -3097,7 +3123,7 @@ export class Session {
       record,
     );
     record.fetching = false;
-    if (r.radio !== record) {
+    if (r.radio !== record || this.#disposed) {
       // Superseded or cleared while the seed was in flight — same
       // honesty rule as superseded playback attempts.
       return err(appError('superseded', 'radio seed superseded'));
@@ -3125,6 +3151,7 @@ export class Session {
     if (staged.value.changed) {
       this.#derived();
     }
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     return ok(undefined);
   }
 
@@ -3224,6 +3251,7 @@ export class Session {
       // the tail short chains the next continuation immediately.
       this.#derived();
     }
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     // A page that appended nothing does not chain — the next real
     // queue transition re-evaluates, so all-dupe pages cannot spin.
   }
@@ -3267,7 +3295,9 @@ export class Session {
   #stageRadioPage(
     r: Ready,
     page: RadioPage,
-  ): Result<CommitStage<{ changed: boolean }>> {
+  ): Result<
+    CommitStage<{ changed: boolean; firstAppended: string | undefined }>
+  > {
     if (!isRadioPage(page)) {
       return err(
         appError('invalid-response', 'radio page failed validation'),
@@ -3294,8 +3324,11 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    const firstAppended = plan.occurrences[0]?.occurrenceId;
     if (!recordingsChanged && plan.occurrences.length === 0) {
-      return ok({ apply: () => ({ changed: false }) });
+      return ok({
+        apply: () => ({ changed: false, firstAppended: undefined }),
+      });
     }
     const recordings = plan.recordings;
     const queue = draft.snapshot();
@@ -3304,9 +3337,136 @@ export class Session {
       apply: (rr) => {
         rr.recordings = [...recordings];
         rr.queue = draft;
-        return { changed: true };
+        return { changed: true, firstAppended };
       },
     });
+  }
+
+  /**
+   * Auto-arm: reaching the queue's LAST occurrence seeds the lazy
+   * tail from the playing track, so a finite queue rolls into a
+   * radio mix instead of ending (playing a single track arms it
+   * immediately). One attempt per occurrence; a disarm or a
+   * superseding seed invalidates a queued attempt via the arm
+   * epoch. Failures stay logged — an auto-seed is speculative,
+   * never user-visible.
+   */
+  #maybeArmRadio(): void {
+    const r = this.#ready;
+    if (r === null || this.#disposed) {
+      return;
+    }
+    const snap = r.queue.snapshot();
+    if (
+      snap.mode !== 'playing' ||
+      snap.currentOccurrenceId === null ||
+      remainingAfterCurrent(snap) !== 0 ||
+      this.#radioAutoSeedOccurrence === snap.currentOccurrenceId ||
+      (r.radio !== null && r.radio.status === 'growing')
+    ) {
+      return;
+    }
+    const occurrence = snap.occurrences.find(
+      (o) => o.occurrenceId === snap.currentOccurrenceId,
+    );
+    const recording = r.recordings.find(
+      (rec) => rec.id === occurrence?.recordingId,
+    );
+    if (occurrence === undefined || recording === undefined) {
+      return;
+    }
+    const ref = this.#radioSeedRef(occurrence, recording);
+    if (ref === null) {
+      // Nothing seedable here — the verdict sticks so the scan
+      // never reruns against the same tail position.
+      this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
+      return;
+    }
+    if (!this.#isOnline()) {
+      // Offline is weather, not a verdict — the reconnect
+      // transition's #derived retries the arm.
+      return;
+    }
+    this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
+    const epoch = this.#radioArmEpoch;
+    const work = this.#radioTail.then(async () => {
+      const cur = this.#ready;
+      if (
+        cur === null ||
+        this.#disposed ||
+        this.#radioArmEpoch !== epoch ||
+        (cur.radio !== null && cur.radio.status === 'growing')
+      ) {
+        // Cleared or reseeded while queued — the later decision wins.
+        return ok(undefined);
+      }
+      const seeded = await this.#startRadio(ref);
+      if (!seeded.ok) {
+        this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
+      }
+      return seeded;
+    });
+    this.#radioTail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#own(work);
+  }
+
+  /**
+   * Pick the seed ref for a queue occurrence: the pinned ref first
+   * — it's the source actually playing — then the recording's
+   * source refs in order. Each must route to a `radio.seed`
+   * provider; a foreign-provider or undeclaring ref can't seed.
+   */
+  #radioSeedRef(
+    occurrence: QueueOccurrence,
+    recording: Recording,
+  ): SourceRef | null {
+    const candidates: (SourceRef | null)[] = [
+      occurrence.selectedRef,
+      ...recording.sourceRefs,
+    ];
+    for (const candidate of candidates) {
+      if (candidate === null || candidate.kind !== 'track') {
+        continue;
+      }
+      if (this.#router.providerForRef(candidate, 'radio.seed').ok) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A page landing on a drained queue: the tail was armed while
+   * playing (`resumeOnDrain`) and playback ran out of occurrences
+   * before the fetch landed — resume at the first appended item.
+   * The record-identity check keeps a disarm sticky: `stop()` and
+   * `stopRadio()` drop the record, so a stopped queue never
+   * resurrects when an in-flight page lands.
+   */
+  #resumeDrainedQueue(
+    r: Ready,
+    record: RadioTailRecord,
+    firstAppended: string | undefined,
+  ): void {
+    if (
+      this.#disposed ||
+      firstAppended === undefined ||
+      !record.resumeOnDrain ||
+      r.radio !== record ||
+      r.queue.snapshot().currentOccurrenceId !== null
+    ) {
+      return;
+    }
+    this.#own(
+      this.playOccurrence(firstAppended).then((res) => {
+        if (!res.ok) {
+          this.#logWarn(`radio resume failed: ${res.error.kind}`);
+        }
+      }),
+    );
   }
 
   // ---- transport ----------------------------------------------------
@@ -3374,6 +3534,9 @@ export class Session {
     if (!persisted.ok) {
       return persisted;
     }
+    // Stop means stop: an armed tail drops with it — an in-flight
+    // page must never append-and-resume past a user's stop.
+    this.#clearRadio(r);
     await this.#supersede();
     const ready2 = this.#ready;
     if (ready2 !== null) {

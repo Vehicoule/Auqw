@@ -11,6 +11,10 @@ import { appError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
 import type { PersistedState } from '../ports/storage.ts';
 import type { ProviderPort, RadioPage } from '../ports/provider.ts';
+import type {
+  AttemptTrace,
+  PlaybackIdentity,
+} from '../ports/player.ts';
 import type { QueueSnapshot } from './queue-engine.ts';
 import {
   isRadioPage,
@@ -115,6 +119,7 @@ function tail(partial: Partial<RadioTailRecord> = {}): RadioTailRecord {
     error: undefined,
     fetching: false,
     source: null,
+    resumeOnDrain: false,
     ...partial,
   };
 }
@@ -1053,6 +1058,281 @@ async function radioInvalidPage(): Promise<void> {
   await r.session.dispose();
 }
 
+// ---------- auto-arm: last playing occurrence seeds the tail ----------
+
+const PREPARE_TRACE: AttemptTrace = {
+  requestId: 'req-x',
+  steps: 1,
+  httpCalls: 0,
+  bytes: 0,
+  fuelUsed: 0,
+  elapsedMs: 5,
+  httpTrace: [],
+  guestLog: [],
+};
+
+function lastPrepareIdentity(r: Rig): PlaybackIdentity {
+  const list = r.player.calls.filter((c) => c.method === 'prepare');
+  const last = list[list.length - 1];
+  assert(last !== undefined, 'expected a prepare call');
+  return (last.input as { identity: PlaybackIdentity }).identity;
+}
+
+/** Emit prepared + resolve the in-flight prepare for `handle`. */
+async function emitPrepared(
+  r: Rig,
+  handle: string,
+): Promise<PlaybackIdentity> {
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: `req-${handle}`,
+    identity,
+    outcome: {
+      type: 'prepared',
+      stream: { handle, mime: 'audio/mp4' },
+      attempt: PREPARE_TRACE,
+    },
+  });
+  await pump();
+  assert(
+    r.player.settlePrepare(ok(`req-${handle}`)),
+    'expected pending prepare',
+  );
+  await pump();
+  return identity;
+}
+
+function endViaService(r: Rig, fromOccurrenceId: string): void {
+  const projection = r.player.projections[r.player.projections.length - 1];
+  assert(projection !== undefined, 'expected an installed projection');
+  r.player.emit({
+    type: 'queue-transition',
+    projectionId: projection.projectionId,
+    projectedQueueRev: projection.queueRev,
+    fromOccurrenceId,
+    toOccurrenceId: null,
+    reason: 'ended',
+    positionMs: 0,
+    identity: null,
+    handle: null,
+  });
+}
+
+function pausedTailQueue(): PersistedState {
+  return persisted({
+    recordings: [recording('rU', [ref('youtube-music', 'u')])],
+    queue: queue({
+      revision: 1,
+      occurrences: [occurrence('u1', 'rU')],
+      currentOccurrenceId: 'u1',
+      positionMs: 0,
+      mode: 'paused',
+    }),
+  });
+}
+
+async function autoArmSeedsOnPlayingTail(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'restored-paused tail does not arm');
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'playing the last item arms the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'u') },
+    'seed taken from the playing item’s routable ref',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmSkipsMidQueue(): Promise<void> {
+  const paused = queue({
+    revision: 1,
+    occurrences: [occurrence('u1', 'rU'), occurrence('u2', 'rV')],
+    currentOccurrenceId: 'u1',
+    positionMs: 0,
+    mode: 'paused',
+  });
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('youtube-music', 'u')]),
+        recording('rV', [ref('youtube-music', 'v')]),
+      ],
+      queue: paused,
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'items remain ahead — no arm');
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmSuppressedAfterDisarm(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // Disarm while the seed is still in flight: the tail drops and
+  // the occurrence is marked so replaying it never reseeds.
+  const stopped = r.session.stopRadio();
+  assert(stopped.ok, 'stopRadio failed');
+  assertEqual(readyOf(r).radio, null, 'disarmed');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], 'cont-1')),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    1,
+    'late seed page discarded',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  const replayed = r.session.playOccurrence('u1');
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'disarm suppresses the auto-seed');
+  r.player.cancelPendingPrepares();
+  await replayed;
+  await r.session.dispose();
+}
+
+async function autoArmDrainResumesIntoTail(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed before the item ended');
+  // The item ends while the seed is still in flight — queue drains.
+  assert((await r.session.next()).ok, 'skip past end drains');
+  await pump();
+  const drained = readyOf(r);
+  assertEqual(drained.queue.currentOccurrenceId, null, 'queue drained');
+  assertEqual(drained.queue.mode, 'stopped', 'drained queue stops');
+  r.ytm.settleRadio(
+    ok(
+      page(
+        [
+          meta('youtube-music', 'v10', 'Follow', 'A', 200_000),
+          meta('youtube-music', 'v11', 'After', 'B', 200_000),
+        ],
+        'cont-1',
+      ),
+    ),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.occurrences.length,
+    3,
+    'page appended behind the drained item',
+  );
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'playback resumes at the first appended item',
+  );
+  assertEqual(snap.queue.mode, 'playing', 'playback continues');
+  const prep = r.player.calls.filter((c) => c.method === 'prepare');
+  assertEqual(prep.length, 2, 'resumed item prepares');
+  assertEqual(
+    (prep[1]?.input as { sourceRef: string }).sourceRef,
+    'v10',
+    'resumed item resolves its own ref',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmServiceDrainResumes(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  assert((await resumed).ok, 'resume failed');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'playing', 'playing u1');
+  assert(readyOf(r).playback.type !== 'idle', 'attempt in flight');
+  assertEqual(radioCalls(r).length, 1, 'armed while playing');
+  // The service reports the queue ran dry inside the installed
+  // projection (toOccurrenceId null on an 'ended' reason).
+  endViaService(r, 'u1');
+  await pump();
+  const drained = readyOf(r);
+  assertEqual(drained.queue.currentOccurrenceId, null, 'service drained');
+  assertEqual(readyOf(r).playback.type, 'idle', 'playhead idles');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v10', 'Follow', 'A', 200_000)], 'cont-1')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'the in-flight page resumes playback when it lands',
+  );
+  assertEqual(snap.queue.mode, 'playing', 'queue playing again');
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function stopDropsInFlightArm(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // A stop while the seed is in flight must leave the queue dead:
+  // the late page lands nothing and playback never resurrects.
+  const stopped = r.session.stop();
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Late', 'A', 1000)], 'x')),
+  );
+  await pump();
+  assert((await stopped).ok, 'stop failed');
+  const snap = readyOf(r);
+  assertEqual(snap.radio, null, 'stop drops the tail');
+  assertEqual(snap.queue.occurrences.length, 1, 'no page appended');
+  assertEqual(snap.queue.mode, 'stopped', 'queue stays stopped');
+  assertEqual(snap.playback.type, 'idle', 'playback stays idle');
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function seedOnStoppedQueueStaysIdle(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const started = r.session.startRadio(ref('youtube-music', 'seed-1'));
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], 'cont-1')),
+  );
+  assert((await started).ok);
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 1, 'items landed');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    null,
+    'a seed armed while idle appends for later — never resurrects',
+  );
+  assertEqual(snap.playback.type, 'idle', 'stays idle');
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1075,6 +1355,13 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['radioOccurrencePlays', radioOccurrencePlays],
   ['radioStop', radioStop],
   ['radioInvalidPage', radioInvalidPage],
+  ['autoArmSeedsOnPlayingTail', autoArmSeedsOnPlayingTail],
+  ['autoArmSkipsMidQueue', autoArmSkipsMidQueue],
+  ['autoArmSuppressedAfterDisarm', autoArmSuppressedAfterDisarm],
+  ['autoArmDrainResumesIntoTail', autoArmDrainResumesIntoTail],
+  ['autoArmServiceDrainResumes', autoArmServiceDrainResumes],
+  ['stopDropsInFlightArm', stopDropsInFlightArm],
+  ['seedOnStoppedQueueStaysIdle', seedOnStoppedQueueStaysIdle],
 ] as const;
 
 export async function run(): Promise<void> {

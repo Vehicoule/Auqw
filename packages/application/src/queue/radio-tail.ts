@@ -71,6 +71,13 @@ export type RadioTailRecord = {
   error: AppError | undefined;
   fetching: boolean;
   source: CancellationSource | null;
+  /**
+   * Armed while the queue was playing: a page landing on a drained
+   * (stopped, no current) queue resumes playback at the first
+   * appended item — a finite queue rolls into the mix instead of
+   * ending. A tail seeded on an idle queue appends for later.
+   */
+  resumeOnDrain: boolean;
 };
 
 /** Projects the internal record into the published tail shape. */
