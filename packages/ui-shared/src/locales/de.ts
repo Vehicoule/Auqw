@@ -329,6 +329,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'sync.listener.starting': 'startet',
   'sync.listener.listening': 'hört',
   'sync.listener.unavailable': 'nicht verfügbar',
+  'sync.listener.dormant': 'aus',
   'sync.listener.disabled': 'deaktiviert',
   'sync.engine.ready': 'bereit',
   'sync.engine.absent': 'fehlt',

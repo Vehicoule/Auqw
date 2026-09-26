@@ -1967,6 +1967,92 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Dormant install: armed:false defers custody until first use ——
+  {
+    const inner = createMemoryKeys();
+    let identityReads = 0;
+    const counting: SyncKeys = {
+      ...inner,
+      async identityGet() {
+        identityReads += 1;
+        return inner.identityGet();
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: counting,
+      engine: createEchoEngine(),
+      endpointHost: '127.0.0.1',
+      advertise: null,
+      armed: false,
+    });
+    try {
+      // Let any mistakenly-eager start settle before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assertEqual(
+        identityReads,
+        0,
+        'a dormant service never touches custody',
+      );
+      // The engine-only and observational surfaces answer while
+      // dormant — the renderer's boot-time drain and the settings
+      // panel's status/devices polls must not wake custody.
+      const mat = await invokeHandler(service, 'sync:materialized', {
+        offset: 0,
+      });
+      assert(mat.ok, 'sync:materialized serves while dormant');
+      const statusReply = await invokeHandler(
+        service,
+        'sync:status',
+        undefined,
+      );
+      assert(
+        statusReply.ok &&
+          isRecord(statusReply.value) &&
+          statusReply.value['listener'] === 'dormant',
+        'dormant sync:status reports dormant without custody',
+      );
+      const devicesReply = await invokeHandler(
+        service,
+        'sync:devices',
+        undefined,
+      );
+      assert(
+        devicesReply.ok &&
+          isRecord(devicesReply.value) &&
+          Array.isArray(devicesReply.value['devices']) &&
+          devicesReply.value['devices'].length === 0,
+        'dormant sync:devices answers [] without custody',
+      );
+      assertEqual(identityReads, 0, 'observational reads are custody-free');
+      // The explicit start edge: a pairing request wakes custody,
+      // binds the listener, and resolves ready.
+      const pairingReply = await invokeHandler(
+        service,
+        'sync:pairing',
+        undefined,
+      );
+      assert(pairingReply.ok, 'sync:pairing starts a dormant service');
+      assert(identityReads > 0, 'pairing reads the identity');
+      const status = await service.ready;
+      assertEqual(status.listener, 'listening', 'late start binds');
+      // A post-close request must not reopen the listener.
+      await service.close();
+      const closed = await invokeHandler(
+        service,
+        'sync:pairing',
+        undefined,
+      );
+      assert(
+        closed.ok === false,
+        'sync:pairing after close must not restart the listener',
+      );
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Custody failure propagates: sync:status fails typed ——
   {
     const keys = createMemoryKeys();

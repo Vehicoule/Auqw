@@ -1683,7 +1683,12 @@ export function toSettingsModel(
 /* ------------------------------------------------------------------ */
 
 export type SyncStatusInput = {
-  readonly listener: 'starting' | 'listening' | 'unavailable' | 'disabled';
+  readonly listener:
+    | 'starting'
+    | 'listening'
+    | 'unavailable'
+    | 'dormant'
+    | 'disabled';
   /** `ip:port` a peer dials, or null when nothing is up. */
   readonly endpoint: string | null;
   readonly boundPort: number | null;

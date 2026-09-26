@@ -10,9 +10,10 @@ import {
 } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { createServer, type Server } from 'node:net';
-import { networkInterfaces } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import {
   CancellationSource,
+  DEVICE_NAME_MAX,
   type AppError,
   type CancellationSignal,
   type Result,
@@ -158,6 +159,14 @@ export type SyncServiceDeps = {
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
   readonly deviceName?: string;
+  /**
+   * `false` defers the listener and custody (the safeStorage read is
+   * what fires the macOS Keychain ACL prompt on ad-hoc builds) until
+   * the first sync handler actually runs. Undefined/true starts
+   * eagerly — the fail-safe default, and what a previously-synced
+   * install passes so paired devices keep finding this desktop.
+   */
+  readonly armed?: boolean;
   /** mDNS announce factory — null skips advertising entirely. */
   readonly advertise?: SyncAdvertise | null;
   /** Forced endpoint host for payloads; otherwise first LAN IPv4. */
@@ -414,7 +423,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const maxConnections = deps.maxConnections ?? 16;
   const handshakeMs = deps.handshakeMs ?? 15_000;
   const idleMs = deps.idleMs ?? 120_000;
-  const deviceName = deps.deviceName ?? 'auqw-desktop';
+  const deviceName =
+    deps.deviceName ??
+    (hostname().trim().slice(0, DEVICE_NAME_MAX) || 'auqw-desktop');
   const pairing = createPairing({
     nowMs,
     ttlMs: deps.codeTtlMs ?? 90_000,
@@ -470,6 +481,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     engine = candidate;
   }
+  // The engine carries no key material — resolve it eagerly so the
+  // renderer's boot-time log drain works even on a dormant install.
+  const engineReady = resolveEngine();
   // Renderer-originated engine ops bind to the service's lifetime —
   // there is no per-request cancel on the IPC boundary, so close() is
   // the cancellation edge (sessions use their own per-socket source).
@@ -982,6 +996,29 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     return (await deps.keys.deviceList()).devices.length;
   }
 
+  /**
+   * The answer observational reads give while dormant — no listener,
+   * no custody read, no devices. Dormant means never paired (a paired
+   * install's device records arm eager startup), so zero paired
+   * devices is the truth, not a custody shortcut.
+   */
+  function idleStatus(
+    state: SyncStatusResult['listener'],
+  ): SyncStatusResult {
+    return {
+      listener: state,
+      endpoint: null,
+      boundPort: null,
+      advertise: 'off',
+      pairedDevices: 0,
+      sessions: 0,
+      lastSyncAt,
+      engine: engine === undefined ? 'absent' : 'ready',
+      name: deviceName,
+      fingerprint,
+    };
+  }
+
   async function status(): Promise<SyncStatusResult> {
     return {
       listener,
@@ -1485,7 +1522,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     // An async engine resolves before anything reads the seam —
     // status then answers 'ready'/'absent' truthfully even when the
     // listener is disabled.
-    await resolveEngine();
+    await engineReady;
     if (deps.disabled === true) {
       listener = 'disabled';
       return status();
@@ -1627,10 +1664,28 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   };
 
   const handlers: Record<string, UtilityHandler> = {
-    'sync:status': async () =>
-      checked(isSyncStatusResult, 'sync:status')(await status()),
+    'sync:status': async () => {
+      // Observational read: the settings panel polls this on every
+      // settings visit. Starting sync here would mint an identity and
+      // (on macOS) fire the Keychain ACL prompt for users who only
+      // opened settings — the explicit start edge is sync:pairing.
+      if (startPromise === null) {
+        await engineReady;
+        return checked(isSyncStatusResult, 'sync:status')(
+          idleStatus(
+            closing
+              ? 'unavailable'
+              : deps.disabled === true
+                ? 'disabled'
+                : 'dormant',
+          ),
+        );
+      }
+      return checked(isSyncStatusResult, 'sync:status')(await status());
+    },
 
     'sync:pairing': async () => {
+      await ensureStarted();
       if (listener !== 'listening') {
         throw shellError(
           'unavailable',
@@ -1664,6 +1719,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:devices': async () => {
+      // Dormant ⟺ never paired — the empty list is truthful without
+      // a custody read.
+      if (startPromise === null) {
+        return checked(isSyncDevicesResult, 'sync:devices')({
+          devices: [],
+        });
+      }
       const { devices } = await deps.keys.deviceList();
       return checked(isSyncDevicesResult, 'sync:devices')({
         devices: devices.map((d) => ({
@@ -1679,6 +1741,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!isSyncUnpairArgs(args) || !isDeviceId(args.id)) {
         throw shellError('invalid-request', 'sync:unpair expects {id}');
       }
+      // Dormant installs have no device records to delete — a truthful
+      // no-op that keeps custody untouched.
+      if (startPromise === null) {
+        return undefined;
+      }
       await deps.keys.deviceDelete(args.id);
       pendingSync.delete(args.id);
       kickDevice(args.id);
@@ -1692,6 +1759,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!isSyncDeltasArgs(args)) {
         throw shellError('invalid-request', 'sync:deltas expects {since}');
       }
+      await engineReady;
       if (engine === undefined) {
         throw shellError('unavailable', 'sync engine not installed');
       }
@@ -1714,6 +1782,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           'sync:importDelta expects {delta}',
         );
       }
+      await engineReady;
       if (engine === undefined) {
         throw shellError('unavailable', 'sync engine not installed');
       }
@@ -1732,6 +1801,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:trigger': async () => {
+      // No paired devices exist while dormant — nothing to kick.
+      if (startPromise === null) {
+        return checked(isSyncTriggerResult, 'sync:trigger')({
+          triggered: false,
+          pending: false,
+        });
+      }
       // Mark offline devices pending FIRST, then do a final live pass
       // that sends + clears: a device that opened during the registry
       // await is caught by the pass and never left with a stale mark
@@ -1822,56 +1898,85 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           'sync:materialized expects {offset}',
         );
       }
+      await engineReady;
       return checked(isSyncMaterializedResult, 'sync:materialized')(
         materializedChunk(args.offset),
       );
     },
   };
 
-  const started = start()
-    .then((status) => {
-      resolveReady(status);
-      return status;
-    })
-    .catch(async () => {
-      listener = 'unavailable';
-      try {
-        const assembled = await status();
-        resolveReady(assembled);
-        return assembled;
-      } catch {
-        // Custody is down — status() can't assemble the count, but
-        // ready must still resolve or the wiring hangs. listener:
-        // 'unavailable' is the honest dominant signal; sync:status
-        // calls keep failing typed against the same custody error.
-        const degraded: SyncStatusResult = {
-          listener,
-          endpoint: endpoint(),
-          boundPort,
-          advertise: advertiseState,
-          pairedDevices: 0,
-          sessions: 0,
-          lastSyncAt,
-          engine: engine === undefined ? 'absent' : 'ready',
-          name: deviceName,
-          fingerprint,
-        };
-        resolveReady(degraded);
-        return degraded;
-      }
-    });
+  // Custody access is deferred until an explicit sync action — a
+  // dormant install never touches safeStorage, so the macOS Keychain
+  // prompt only fires once the user actually pairs. An `armed`
+  // install (paired-device records exist) starts eagerly as before —
+  // paired devices expect to find the listener.
+  let startPromise: Promise<SyncStatusResult> | null = null;
+  function ensureStarted(): Promise<SyncStatusResult> {
+    if (closing) {
+      // A late request must not bind a listener after teardown — a
+      // second close() is a no-op and the socket would leak.
+      return Promise.reject(
+        shellError('cancelled', 'sync service closed'),
+      );
+    }
+    startPromise ??= start()
+      .then((status) => {
+        resolveReady(status);
+        return status;
+      })
+      .catch(async () => {
+        listener = 'unavailable';
+        try {
+          const assembled = await status();
+          resolveReady(assembled);
+          return assembled;
+        } catch {
+          // Custody is down — status() can't assemble the count, but
+          // ready must still resolve or the wiring hangs. listener:
+          // 'unavailable' is the honest dominant signal; sync:status
+          // calls keep failing typed against the same custody error.
+          const degraded: SyncStatusResult = {
+            listener,
+            endpoint: endpoint(),
+            boundPort,
+            advertise: advertiseState,
+            pairedDevices: 0,
+            sessions: 0,
+            lastSyncAt,
+            engine: engine === undefined ? 'absent' : 'ready',
+            name: deviceName,
+            fingerprint,
+          };
+          resolveReady(degraded);
+          return degraded;
+        }
+      });
+    return startPromise;
+  }
+  if (deps.armed !== false) {
+    void ensureStarted();
+  }
 
   return {
     handlers,
     status,
-    ready: started,
+    // Resolves once the service has actually run — a dormant install
+    // (armed === false, no sync use yet) has no ready status.
+    ready,
     async close() {
       if (closing) {
         return;
       }
       closing = true;
       serviceCancel.cancel();
-      await started.catch(() => undefined);
+      if (startPromise === null) {
+        // Never started — settle `ready` so a dormant awaiter doesn't
+        // hang, and mark the listener terminally unavailable: the
+        // closing guard above blocks any post-close ensureStarted.
+        listener = 'unavailable';
+        resolveReady(idleStatus('unavailable'));
+      }
+      await (startPromise ?? Promise.resolve()).catch(() => undefined);
       for (const session of [...sessions]) {
         killSession(session);
       }
