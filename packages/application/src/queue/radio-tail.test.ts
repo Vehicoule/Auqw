@@ -9,7 +9,7 @@ import type {
 } from '../domain.ts';
 import { appError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
-import type { PersistedState } from '../ports/storage.ts';
+import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { ProviderPort, RadioPage } from '../ports/provider.ts';
 import type {
   AttemptTrace,
@@ -1692,24 +1692,38 @@ async function disarmDuringCommitDropsPage(): Promise<void> {
     ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
   );
   await pump();
+  // An edit queued behind the held commit must survive the revert —
+  // the compensating commit runs inside the same segment, before this
+  // edit's segment can stage.
+  const enqueued = r.session.enqueueRecording('rU');
   assert(r.session.stopRadio().ok, 'disarm lands mid-commit');
   r.storage.settleCommit(ok(undefined));
   await pump();
   assert((await seeded).ok, 'seed resolves — the page was dropped');
+  assert((await enqueued).ok, 'queued edit committed after the revert');
   const snap = readyOf(r);
-  assertEqual(snap.queue.occurrences.length, 1, 'page never entered');
+  assertEqual(snap.queue.occurrences.length, 2, 'page never entered');
   assertEqual(snap.radio, null, 'record gone');
-  // The batch still committed durably — a compensating commit must
-  // restore the pre-page queue so restore never resurrects it.
+  // The batch still committed durably — the in-segment compensation
+  // must have rewritten a page-free queue before the queued edit ran.
   const queueCommits = r.storage.commits.filter(
     (c) => c.batch.queue !== undefined,
   );
-  const lastQueue = queueCommits[queueCommits.length - 1];
-  assert(lastQueue !== undefined, 'compensating commit ran');
-  assertEqual(
-    lastQueue.batch.queue?.occurrences.length,
-    1,
-    'durable queue restored to pre-page state',
+  const ids = (c: { batch: StorageBatch }) =>
+    c.batch.queue?.occurrences.map((o) => o.occurrenceId);
+  const pageCommit = queueCommits[queueCommits.length - 3];
+  const revertCommit = queueCommits[queueCommits.length - 2];
+  const editCommit = queueCommits[queueCommits.length - 1];
+  assertEqual(pageCommit?.batch.queue?.occurrences.length, 2, 'page wrote');
+  assertDeepEqual(
+    ids(revertCommit ?? { batch: {} }),
+    ['u1'],
+    'revert restored the pre-page queue before later segments ran',
+  );
+  assertDeepEqual(
+    ids(editCommit ?? { batch: {} }),
+    snap.queue.occurrences.map((o) => o.occurrenceId),
+    'the queued edit landed on the reverted lineage',
   );
   r.player.cancelPendingPrepares();
   await r.session.dispose();

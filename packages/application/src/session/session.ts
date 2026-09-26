@@ -527,20 +527,8 @@ function retainMaterializedPending(
  * in-memory apply. An omitted `batch` means nothing durable changed
  * — the apply still runs and publishes.
  */
-type RadioPageOutcome = {
-  changed: boolean;
-  firstAppended: string | undefined;
-  rejected: boolean;
-};
-
 type CommitStage<T> = {
   readonly batch?: StorageBatch;
-  /**
-   * Post-commit gate on sync emission: when the batch committed but
-   * the write is no longer wanted (a disarm landed during the await),
-   * `emit(r)` returning false keeps the rejected writes off the wire.
-   */
-  readonly emit?: (r: Ready) => boolean;
   readonly apply: (r: Ready) => T;
 };
 
@@ -1003,7 +991,7 @@ export class Session {
         if (!staged.ok) {
           return err(staged.error);
         }
-        const { batch, apply, emit } = staged.value;
+        const { batch, apply } = staged.value;
         if (batch !== undefined) {
           const deadlineMs = this.#deadline();
           const context = this.#newContext(
@@ -1030,9 +1018,7 @@ export class Session {
           r.persistenceError = undefined;
           // Same post-commit seam as #persist — `r` still holds the
           // pre-apply sections the batch diffs against.
-          if (emit === undefined || emit(r)) {
-            this.#emitSync(emissionWrites(syncEmitInput(r), batch));
-          }
+          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
         }
         const outcome = apply(r);
         this.#publish();
@@ -3547,14 +3533,18 @@ export class Session {
 
   /**
    * A disarm landing while a page's commit waits on storage must
-   * never let the page reach the queue — or the durable doc: the
+   * never let the page reach the queue — or the durable doc. The
    * record check runs inside the segment before staging (a disarm
-   * queued ahead drops the commit entirely), again inside `apply`
-   * (a disarm during the commit await skips the in-memory write),
-   * and the sync emission is gated on the same check so a rejected
-   * page never leaves the device. When the batch still committed
-   * durably, a compensating commit restores the pre-page queue and
-   * recordings — capture happens at stage time, before the await.
+   * queued ahead drops the commit entirely) and again after the
+   * commit await: a rejected page skips the sync emission and the
+   * in-memory apply, then the SAME segment — which still owns the
+   * storage tail, so nothing can have committed in between — issues
+   * a compensating commit that rewrites the live, page-free queue
+   * and recordings at a fresh queue revision. Writing the freshest
+   * mirror keeps mutations queued during the await durable (their
+   * own segments later no-op on the revision check), and bumping
+   * `queueCommittedRev` onto that new lineage keeps the next queue
+   * write from being skipped.
    */
   async #commitRadioPage(
     record: RadioTailRecord,
@@ -3562,71 +3552,94 @@ export class Session {
   ): Promise<
     Result<{ changed: boolean; firstAppended: string | undefined }>
   > {
-    const pre: {
-      queue: QueueSnapshot | undefined;
-      recordings: readonly Recording[] | undefined;
-    } = { queue: undefined, recordings: undefined };
-    const staged = await this.#commitStaged((cur) => {
-      if (cur.radio !== record) {
-        return ok<CommitStage<RadioPageOutcome>>({
-          apply: () => ({
-            changed: false,
-            firstAppended: undefined,
-            rejected: false,
-          }),
-        });
-      }
-      pre.queue = cur.queue.snapshot();
-      pre.recordings = cur.recordings;
-      const inner = this.#stageRadioPage(cur, page);
-      if (!inner.ok) {
-        return err(inner.error);
-      }
-      return ok<CommitStage<RadioPageOutcome>>({
-        ...(inner.value.batch !== undefined
-          ? { batch: inner.value.batch }
-          : {}),
-        emit: (rr) => rr.radio === record,
-        apply: (rr) => {
-          if (rr.radio === record) {
-            const out = inner.value.apply(rr);
-            return { ...out, rejected: false };
-          }
-          return {
-            changed: false,
-            firstAppended: undefined,
-            rejected: true,
-          };
-        },
+    const generation = this.#ready;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const r = this.#ready;
+        if (generation === null || r !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        if (r.radio !== record) {
+          return ok({ changed: false, firstAppended: undefined });
+        }
+        const staged = this.#stageRadioPage(r, page);
+        if (!staged.ok) {
+          return err(staged.error);
+        }
+        const inner = staged.value;
+        if (inner.batch === undefined) {
+          const outcome = inner.apply(r);
+          this.#publish();
+          return ok(outcome);
+        }
+        const batch = inner.batch;
+        const deadlineMs = this.#deadline();
+        const context = this.#newContext('persist', deadlineMs, source.signal);
+        const committed = await this.#withDeadline(
+          () => this.#storage.commit(batch, context),
+          deadlineMs,
+          source,
+        );
+        if (!committed.ok) {
+          r.persistenceError = committed.error;
+          this.#publish();
+          return err(committed.error);
+        }
+        if (batch.queue !== undefined) {
+          r.queueCommittedRev = Math.max(
+            r.queueCommittedRev,
+            batch.queue.revision,
+          );
+        }
+        r.persistenceError = undefined;
+        if (r.radio === record) {
+          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
+          const outcome = inner.apply(r);
+          this.#publish();
+          return ok(outcome);
+        }
+        // The page committed but the disarm already ran — the mirror
+        // never applied it, so live sections are the inverse image.
+        const revertedQueue: QueueSnapshot = {
+          ...r.queue.snapshot(),
+          revision: r.queueCommittedRev + 1,
+        };
+        const revertBatch: StorageBatch = {
+          queue: revertedQueue,
+          recordings: [...r.recordings],
+        };
+        const revertDeadlineMs = this.#deadline();
+        const revertContext = this.#newContext(
+          'persist',
+          revertDeadlineMs,
+          source.signal,
+        );
+        const reverted = await this.#withDeadline(
+          () => this.#storage.commit(revertBatch, revertContext),
+          revertDeadlineMs,
+          source,
+        );
+        if (!reverted.ok) {
+          r.persistenceError = reverted.error;
+          this.#publish();
+          return err(reverted.error);
+        }
+        r.queueCommittedRev = revertedQueue.revision;
+        // Peers never saw the page — emit only the revert delta.
+        this.#emitSync(emissionWrites(syncEmitInput(r), revertBatch));
+        // The mirror keeps its live content and adopts the fresh
+        // revision so queued commands stay on the durable lineage.
+        r.queue = new QueueEngine(revertedQueue);
+        this.#publish();
+        return ok({ changed: false, firstAppended: undefined });
       });
-    });
-    if (!staged.ok) {
-      return staged;
+    } finally {
+      this.#opSources.delete(source);
     }
-    if (
-      staged.value.rejected &&
-      pre.queue !== undefined &&
-      pre.recordings !== undefined
-    ) {
-      const snapshot = pre.queue;
-      const recordings = pre.recordings;
-      const reverted = await this.#commitStaged(() =>
-        ok<CommitStage<void>>({
-          batch: { queue: snapshot, recordings: [...recordings] },
-          apply: (rr) => {
-            rr.queue = new QueueEngine(snapshot);
-            rr.recordings = [...recordings];
-          },
-        }),
-      );
-      if (!reverted.ok) {
-        this.#logWarn(`radio page revert failed: ${reverted.error.kind}`);
-      }
-    }
-    return ok({
-      changed: staged.value.changed,
-      firstAppended: staged.value.firstAppended,
-    });
   }
 
   /**
