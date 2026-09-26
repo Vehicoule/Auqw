@@ -1,5 +1,5 @@
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
-import { t } from '@auqw/ui-shared';
+import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
   SettingsModel,
   SettingsRowModel,
@@ -53,7 +53,11 @@ function SettingsRow({
   const label = `${row.label}${row.value === null ? '' : `, ${row.value}`}`;
   const body = (
     <>
-      <Text variant="body" color="primary" className="uw-settings-row__label">
+      <Text
+        variant="body"
+        color={row.destructive === true ? 'warn' : 'primary'}
+        className="uw-settings-row__label"
+      >
         {row.label}
       </Text>
       {row.kind === 'toggle' ? (
@@ -124,31 +128,39 @@ export function SettingsScreen({
       className="uw-screen uw-settings"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
+      <Text variant="display" color="bright">
+        {t('nav.settings')}
+      </Text>
+      {settingsGroups(model.rows).map((group) => (
+        <section key={group.key} className="uw-settings__group">
+          <Text
+            variant="label"
+            color="secondary"
+            uppercase
+            className="uw-section-label"
+          >
+            {group.label}
+          </Text>
+          <div className="uw-card">
+            {group.rows.map((row, i) => (
+              <div key={row.key}>
+                {i > 0 && <Hairline />}
+                <SettingsRow
+                  row={row}
+                  onSelectRow={onSelectRow}
+                  onToggleRow={onToggleRow}
+                />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+      <section className="uw-settings__group">
       <Text
         variant="label"
         color="secondary"
         uppercase
         className="uw-section-label"
-      >
-        {t('settings.heading.settings')}
-      </Text>
-      <div className="uw-card">
-        {model.rows.map((row, i) => (
-          <div key={row.key}>
-            {i > 0 && <Hairline />}
-            <SettingsRow
-              row={row}
-              onSelectRow={onSelectRow}
-              onToggleRow={onToggleRow}
-            />
-          </div>
-        ))}
-      </div>
-      <Text
-        variant="label"
-        color="secondary"
-        uppercase
-        className="uw-section-label uw-section-label--block"
       >
         {t('settings.heading.diagnostics')}
       </Text>
@@ -210,13 +222,14 @@ export function SettingsScreen({
           <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
         </Pressable>
       </div>
+      </section>
       {sync !== undefined && (
-        <>
+        <section className="uw-settings__group">
           <Text
             variant="label"
             color="secondary"
             uppercase
-            className="uw-section-label uw-section-label--block"
+            className="uw-section-label"
           >
             {t('settings.heading.sync')}
           </Text>
@@ -456,7 +469,7 @@ export function SettingsScreen({
               </>
             )}
           </div>
-        </>
+        </section>
       )}
     </div>
   );
