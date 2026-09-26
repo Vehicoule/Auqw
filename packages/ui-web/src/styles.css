@@ -1745,9 +1745,13 @@
   align-items: center;
   gap: var(--spacing-xxs);
   min-width: 0;
+  /* shrink to content: the rest of the outer track stays the bar's
+     own surface, so the gaps keep dragging the window */
+  justify-self: start;
 }
 .uw-world-bar__end {
   justify-content: flex-end;
+  justify-self: end;
 }
 .uw-tabs {
   min-width: 0;
