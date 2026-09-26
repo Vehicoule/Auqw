@@ -22,6 +22,7 @@ import {
   publishRadio,
   remainingAfterCurrent,
   shouldGrowRadio,
+  RADIO_DRAIN_CHASE_PAGES,
   RADIO_FETCH_AHEAD,
   RADIO_PAGE_MAX_ITEMS,
 } from './radio-tail.ts';
@@ -29,6 +30,7 @@ import type { RadioTailRecord } from './radio-tail.ts';
 import { Session } from '../session/session.ts';
 import type { ReadySession, SessionState } from '../session/session.ts';
 import {
+  ALL_CAPABILITIES,
   FakeClock,
   FakeLog,
   FakePlayer,
@@ -120,6 +122,7 @@ function tail(partial: Partial<RadioTailRecord> = {}): RadioTailRecord {
     fetching: false,
     source: null,
     resumeOnDrain: false,
+    dupPages: 0,
     ...partial,
   };
 }
@@ -1535,6 +1538,148 @@ async function armWaitsForAttemptRef(): Promise<void> {
   await r.session.dispose();
 }
 
+async function dupePageChasesContinuation(): Promise<void> {
+  // Armed while playing; the first page returns only the playing
+  // track itself (deduped away) plus a live continuation — the drain
+  // must keep chasing until a page actually appends.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // Drain before the page lands.
+  assert((await r.session.next()).ok, 'skip past end drains');
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, null);
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'u', 'Song rU', 'Artist', 300_000)], 'c1')),
+  );
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'duplicate-only page chases the continuation',
+  );
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c2')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'fresh item appended');
+  assertEqual(snap.queue.mode, 'playing', 'playback resumes');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'resumes at the first appended item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function drainChaseIsBounded(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assert((await r.session.next()).ok);
+  await pump();
+  // Every page is a duplicate of the playing track — the chase must
+  // give up after RADIO_DRAIN_CHASE_PAGES hops, not spin forever.
+  const dupe = () =>
+    ok(page([meta('youtube-music', 'u', 'Song rU', 'Artist', 300_000)], 'cx'));
+  for (let i = 0; i < RADIO_DRAIN_CHASE_PAGES + 2; i += 1) {
+    r.ytm.settleRadio(dupe());
+    await pump();
+  }
+  assertEqual(
+    radioCalls(r).length,
+    1 + RADIO_DRAIN_CHASE_PAGES,
+    'duplicate pages stop after the chase bound',
+  );
+  assertEqual(
+    readyOf(r).queue.mode,
+    'stopped',
+    'queue stays ended once the chase gives up',
+  );
+  await r.session.dispose();
+}
+
+async function pausedSeedDrainsThenResumes(): Promise<void> {
+  // Seed while paused, then play the last item through: the armed
+  // tail earns the drain-resume — a page landing afterwards restarts
+  // playback at its first appended item. The pump lets the queued
+  // seed mint its record before resume(), so the record is truly
+  // captured in the paused queue.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'playing');
+  assert((await r.session.next()).ok, 'play through the end');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped', 'drained');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'playing', 'page resumes a played-through tail');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'resumes at the first appended item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function unroutableActiveRefBlocksSeed(): Promise<void> {
+  // The playing ref's provider cannot seed radio — no substitute is
+  // allowed even though a stored itunes ref could.
+  const noradio = new FakeProvider(
+    'noradio',
+    ALL_CAPABILITIES.filter((c) => c !== 'radio.seed'),
+  );
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('noradio', 'n1'), ref('itunes', 'i1')]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+      settings: { ...SETTINGS, playbackProvider: 'noradio' },
+    }),
+    [noradio],
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'no youtube-music seed');
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'a different provider’s version must not substitute',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1569,6 +1714,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['endedTailNeverReseeds', endedTailNeverReseeds],
   ['offlineArmRetriesOnReconnect', offlineArmRetriesOnReconnect],
   ['armWaitsForAttemptRef', armWaitsForAttemptRef],
+  ['dupePageChasesContinuation', dupePageChasesContinuation],
+  ['drainChaseIsBounded', drainChaseIsBounded],
+  ['pausedSeedDrainsThenResumes', pausedSeedDrainsThenResumes],
+  ['unroutableActiveRefBlocksSeed', unroutableActiveRefBlocksSeed],
 ] as const;
 
 export async function run(): Promise<void> {

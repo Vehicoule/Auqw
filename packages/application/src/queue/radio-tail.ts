@@ -35,6 +35,15 @@ export const RADIO_FETCH_AHEAD = 3;
 export const RADIO_PAGE_MAX_ITEMS = 128;
 
 /**
+ * Drain-chase bound: when playback runs out before an armed tail's
+ * page lands and that page appended nothing (all duplicates), the
+ * next continuation gets chased — but only this many hops. A provider
+ * answering with an endless run of duplicate-only pages is broken; the
+ * tail then sits armed and the queue stays ended.
+ */
+export const RADIO_DRAIN_CHASE_PAGES = 4;
+
+/**
  * `growing` — a continuation is armed (or a fetch is in flight) and
  * more items may append. `ended` — the provider returned
  * `continuation: null`; the queue simply finishes. `failed` — a
@@ -72,12 +81,20 @@ export type RadioTailRecord = {
   fetching: boolean;
   source: CancellationSource | null;
   /**
-   * Armed while the queue was playing: a page landing on a drained
-   * (stopped, no current) queue resumes playback at the first
+   * Playback ran out while this tail was armed: a page landing on a
+   * drained (stopped, no current) queue resumes playback at the first
    * appended item — a finite queue rolls into the mix instead of
-   * ending. A tail seeded on an idle queue appends for later.
+   * ending. Set at seed time when the queue is playing, and again on
+   * any transport drain while the tail is armed — a seed issued
+   * paused but played through earns the resume. A tail seeded on an
+   * idle queue appends for later.
    */
   resumeOnDrain: boolean;
+  /**
+   * Consecutive pages that appended nothing while chasing a drained
+   * queue — the bound for {@link RADIO_DRAIN_CHASE_PAGES}.
+   */
+  dupPages: number;
 };
 
 /** Projects the internal record into the published tail shape. */

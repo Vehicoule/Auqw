@@ -130,6 +130,7 @@ import {
   publishRadio,
   remainingAfterCurrent,
   shouldGrowRadio,
+  RADIO_DRAIN_CHASE_PAGES,
   RADIO_FETCH_AHEAD,
 } from '../queue/radio-tail.ts';
 import type { RadioTail, RadioTailRecord } from '../queue/radio-tail.ts';
@@ -1130,6 +1131,17 @@ export class Session {
     this.#maybeMapSuccessor();
     this.#maybeGrowRadio();
     this.#maybeArmRadio();
+    // A drained queue with an armed tail may be mid-chase or waiting
+    // on a reconnect — re-evaluate so offline-stranded chases resume.
+    const cur = this.#ready;
+    const rec = cur?.radio ?? null;
+    if (
+      cur !== null &&
+      rec !== null &&
+      cur.queue.snapshot().currentOccurrenceId === null
+    ) {
+      this.#resumeDrainedQueue(cur, rec, undefined);
+    }
   }
 
   // ---- sync emission ------------------------------------------------
@@ -3117,6 +3129,7 @@ export class Session {
       // A tail may only resurrect playback it was armed during — a
       // seed issued on an idle queue appends for later instead.
       resumeOnDrain: r.queue.snapshot().mode === 'playing',
+      dupPages: 0,
     };
     r.radio = record;
     this.#publish();
@@ -3151,10 +3164,13 @@ export class Session {
       record.status = 'ended';
     }
     this.#publish();
+    // Resume before deriving: a drained queue that just gained items
+    // must see the playhead move first, else the chase hook would
+    // fire another fetch it no longer needs.
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     if (staged.value.changed) {
       this.#derived();
     }
-    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     return ok(undefined);
   }
 
@@ -3184,7 +3200,10 @@ export class Session {
     this.#own(work);
   }
 
-  async #growRadio(record: RadioTailRecord): Promise<void> {
+  async #growRadio(
+    record: RadioTailRecord,
+    whileDrained = false,
+  ): Promise<void> {
     const r = this.#ready;
     if (r === null || r.radio !== record) {
       return;
@@ -3195,11 +3214,16 @@ export class Session {
     // clearing it needs a publish so the flag never reads as a
     // stuck spinner.
     const snap = r.queue.snapshot();
+    // The drained chase runs only while the queue still waits — a
+    // user landing on other content ends it.
+    const windowOpen = whileDrained
+      ? snap.currentOccurrenceId === null && record.resumeOnDrain
+      : snap.currentOccurrenceId !== null &&
+        remainingAfterCurrent(snap) < RADIO_FETCH_AHEAD;
     if (
       record.status !== 'growing' ||
       record.continuation === null ||
-      snap.currentOccurrenceId === null ||
-      remainingAfterCurrent(snap) >= RADIO_FETCH_AHEAD
+      !windowOpen
     ) {
       record.fetching = false;
       this.#publish();
@@ -3249,14 +3273,13 @@ export class Session {
       record.status = 'ended';
     }
     this.#publish();
+    // Resume before deriving — see #startRadio.
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     if (staged.value.changed) {
       // derived() re-evaluates the window: a page that still leaves
       // the tail short chains the next continuation immediately.
       this.#derived();
     }
-    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
-    // A page that appended nothing does not chain — the next real
-    // queue transition re-evaluates, so all-dupe pages cannot spin.
   }
 
   /**
@@ -3463,22 +3486,41 @@ export class Session {
 
   /**
    * Pick the seed ref for a queue occurrence: the live attempt's
-   * resolved ref first — `#pickRef` may have chosen an effective
+   * resolved ref decides — `#pickRef` may have chosen an effective
    * mapping over the stored order, and the seed must follow the
-   * version actually playing — then the pinned ref, then the
-   * recording's source refs in order. Each must route to a
-   * `radio.seed` provider; a foreign-provider or undeclaring ref
-   * can't seed.
+   * version actually playing. A non-local playing ref whose provider
+   * can't seed radio is a verdict, not a fallback: substituting a
+   * different provider's ref would mix from another version. Local
+   * playback has no provider identity, so its ref falls through to
+   * the recording's catalog identity — the pinned ref, then stored
+   * order. Each candidate must route to a `radio.seed` provider.
    */
   #radioSeedRef(
     occurrence: QueueOccurrence,
     recording: Recording,
   ): SourceRef | null {
     const active = this.#active;
+    if (
+      active !== null &&
+      active.occurrenceId === occurrence.occurrenceId &&
+      active.ref !== undefined
+    ) {
+      const playing = active.ref;
+      // Local playback has no provider identity: the recording's
+      // catalog refs remain the honest seed source.
+      if (playing.provider !== LOCAL_PROVIDER) {
+        // The resolved ref is the version playing — when its provider
+        // can't seed radio there is no faithful substitute, and a
+        // different provider's ref would mix from another version.
+        if (playing.kind !== 'track') {
+          return null;
+        }
+        return this.#router.providerForRef(playing, 'radio.seed').ok
+          ? playing
+          : null;
+      }
+    }
     const candidates: (SourceRef | null)[] = [
-      active !== null && active.occurrenceId === occurrence.occurrenceId
-        ? (active.ref ?? null)
-        : null,
       occurrence.selectedRef,
       ...recording.sourceRefs,
     ];
@@ -3508,20 +3550,48 @@ export class Session {
   ): void {
     if (
       this.#disposed ||
-      firstAppended === undefined ||
-      !record.resumeOnDrain ||
       r.radio !== record ||
       r.queue.snapshot().currentOccurrenceId !== null
     ) {
       return;
     }
-    this.#own(
-      this.playOccurrence(firstAppended).then((res) => {
-        if (!res.ok) {
-          this.#logWarn(`radio resume failed: ${res.error.kind}`);
-        }
-      }),
+    if (firstAppended !== undefined) {
+      record.dupPages = 0;
+      if (!record.resumeOnDrain) {
+        return;
+      }
+      this.#own(
+        this.playOccurrence(firstAppended).then((res) => {
+          if (!res.ok) {
+            this.#logWarn(`radio resume failed: ${res.error.kind}`);
+          }
+        }),
+      );
+      return;
+    }
+    // The page landed on a drained queue and appended nothing — the
+    // continuation may still hold fresh items, so chase it within a
+    // bound. Without this a duplicate-only page strands a playing
+    // queue's tail forever.
+    if (
+      !record.resumeOnDrain ||
+      record.status !== 'growing' ||
+      record.continuation === null ||
+      record.fetching ||
+      record.dupPages >= RADIO_DRAIN_CHASE_PAGES ||
+      !this.#isOnline()
+    ) {
+      return;
+    }
+    record.dupPages += 1;
+    record.fetching = true;
+    this.#publish();
+    const work = this.#radioTail.then(() => this.#growRadio(record, true));
+    this.#radioTail = work.then(
+      () => undefined,
+      () => undefined,
     );
+    this.#own(work);
   }
 
   // ---- transport ----------------------------------------------------
@@ -3625,6 +3695,14 @@ export class Session {
     if (after.revision === before.revision) {
       // First occurrence at position 0: a complete no-op.
       return ok(undefined);
+    }
+    if (after.currentOccurrenceId === null) {
+      // Playback consumed the queue while this tail was armed — the
+      // landed page may resume even if the seed began paused.
+      const rec = r.radio;
+      if (rec !== null && rec.status === 'growing') {
+        rec.resumeOnDrain = true;
+      }
     }
     if (
       method === 'previous' &&
@@ -4989,6 +5067,14 @@ export class Session {
     }
     marker.currentOccurrenceId = toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
+    if (toId === null) {
+      // Service-side drain with a tail armed — same authorization as
+      // the app-driven drain in #advance.
+      const rec = r.radio;
+      if (rec !== null && rec.status === 'growing') {
+        rec.resumeOnDrain = true;
+      }
+    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
