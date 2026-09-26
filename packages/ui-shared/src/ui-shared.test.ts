@@ -16,6 +16,13 @@ import {
   toSyncPanel,
 } from './index.ts';
 import type { Locale, MessageId } from './index.ts';
+import {
+  shimmerHighlight,
+  staggerProgress,
+  waveformAmplitudes,
+  waveformBarExtent,
+  waveformBarLayout,
+} from './waveform.ts';
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
 import { es } from './locales/es.ts';
@@ -287,5 +294,91 @@ assertEqual(
   'zh interpolates',
 );
 setLocale('en');
+
+// waveformAmplitudes: deterministic per seed, every bar in [0.12, 1]
+const amps = waveformAmplitudes('track-a', 60);
+assertEqual(amps.length, 60);
+assert(
+  amps.every((v) => v >= 0.12 && v <= 1),
+  'every amplitude stays inside [0.12, 1]',
+);
+assertEqual(
+  JSON.stringify(amps),
+  JSON.stringify(waveformAmplitudes('track-a', 60)),
+  'same seed and count is deterministic',
+);
+assert(
+  JSON.stringify(amps) !== JSON.stringify(waveformAmplitudes('track-b', 60)),
+  'a different seed produces a different pattern',
+);
+assertEqual(waveformAmplitudes('track-a', 0).length, 0, 'count 0 yields no bars');
+assertEqual(
+  waveformAmplitudes('track-a', -3).length,
+  0,
+  'negative count yields no bars',
+);
+assert(
+  new Set(amps).size > 10,
+  'the pattern actually varies bar to bar',
+);
+
+// waveformBarLayout: count from width, bars centered
+const layout = waveformBarLayout(200);
+assertEqual(layout.count, 36, 'n bars cost n·bar + (n−1)·gap');
+assertEqual(
+  layout.count,
+  Math.floor((200 + 2.5) / (3 + 2.5)),
+  'count follows the barWidth+gap budget',
+);
+assertEqual(waveformBarLayout(3).count, 1, 'one barWidth alone fits one bar');
+assertEqual(layout.xs.length, layout.count, 'one center per bar');
+const expectedLeftover = 200 - (layout.count * (3 + 2.5) - 2.5);
+assertEqual(
+  layout.xs[0],
+  expectedLeftover / 2 + 1.5,
+  'first bar centers in the leftover margin',
+);
+const symmetric = 200 - ((layout.xs[layout.count - 1] ?? 0) + 1.5);
+assert(
+  Math.abs(symmetric - expectedLeftover / 2) < 1e-9,
+  'bars are centered within the measured width',
+);
+assertEqual(waveformBarLayout(2).count, 0, 'width at the gap fits nothing');
+assertEqual(waveformBarLayout(0).count, 0, 'zero width fits nothing');
+
+// waveformBarExtent: eased bloom between the floor and the max
+assertEqual(waveformBarExtent(0, 20), 2.4, 'zero amplitude keeps the floor');
+assertEqual(waveformBarExtent(1, 20, 2.4, 1), 20, 'full amplitude reaches max');
+assert(
+  waveformBarExtent(0.5, 20) > 2.4 && waveformBarExtent(0.5, 20) < 20,
+  'mid amplitude lands between floor and max',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, 0),
+  2.4,
+  'zero bloom collapses to the floor',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, Number.NaN),
+  2.4,
+  'non-finite bloom falls back to the floor',
+);
+
+// staggerProgress: delayed sweep that always completes
+assertEqual(staggerProgress(1, 0, 10), 1, 'finished progress is done');
+assertEqual(staggerProgress(0, 9, 10), 0, 'the tail has not started at 0');
+assert(
+  staggerProgress(0.5, 1, 10) > staggerProgress(0.5, 8, 10),
+  'earlier bars lead the sweep',
+);
+assertEqual(staggerProgress(0, 0, 0), 1, 'empty count is complete');
+
+// shimmerHighlight: wraps around the ends of the phase cycle
+assertEqual(shimmerHighlight(0.5, 0.5), 1, 'aligned phase is fully lit');
+assertEqual(shimmerHighlight(0, 0.5), 0, 'a half cycle away is dark');
+assert(
+  shimmerHighlight(0.02, 0.98) > 0.7,
+  'the band wraps across the 1→0 boundary',
+);
 
 console.log('ui-shared tests passed');

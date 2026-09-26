@@ -30,7 +30,7 @@ One window, no titlebar band. The Stage column runs to the top edge; the World's
 Native chrome, per platform — not a shrunken desktop:
 
 - **Navbar:** Android = M3 Expressive bar (tall, wide pill indicator, bold active label, gesture handle); iOS = floating translucent capsule (liquid glass — blur is scoped to OS chrome, never an app surface). Settings is the 4th tab: `home · explore · library · settings`.
-- **Mini-player:** floating card above the navbar — artwork left, title/artist, `like + resume` right. Progress is a **squared ring hugging the artwork** (rounded-rect path, progress sweeps from top-center): wavy M3E outline on Android, thin clean arc on iOS. Swipe sideways skips; tap or swipe-up opens the Stage sheet.
+- **Mini-player:** floating card above the navbar — artwork left, title/artist, `like + resume` right. Progress is a **squared ring hugging the artwork** (rounded-rect path, progress sweeps from top-center): the same thin clean arc on every platform. Swipe sideways skips; tap or swipe-up opens the Stage sheet.
 - **Stage sheet:** full-screen, grab handle, swipe-down dismisses. Same modes as desktop. Media controls go platform-native — Android: filled-accent squircle play + tonal prev/next; iOS: translucent glass circles. **No volume control** — hardware buttons own it. Layout splits free space evenly (art → air → meta → air → controls); no filler text.
 - **Rows:** same anatomy as desktop (50 px, larger hit areas).
 

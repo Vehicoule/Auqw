@@ -41,7 +41,6 @@ export {
     LinearScrubber,
     SQUARED_RING_LENGTH,
     SQUARED_RING_PATH,
-    ringVariantFor,
     WaveformSeek,
 } from './progress.tsx';
 export type {
