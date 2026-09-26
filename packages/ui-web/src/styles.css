@@ -1682,6 +1682,11 @@
   z-index: 5;
   background: var(--fg08);
 }
+/* The queue tools row's reorder button shares the top-right corner —
+   reserve the stop button's footprint when it exists. */
+.uw-stage-col:has(> .uw-stage-col__stop) .uw-stage__queue-tools {
+  padding-right: 44px;
+}
 /* macOS traffic lights pin over the stage column's top-left — keep
    the player's top edge clear of them. */
 [data-platform='darwin'] .uw-chrome[data-stage='open'] .uw-stage-col__body {
