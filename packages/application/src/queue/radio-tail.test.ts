@@ -9,8 +9,12 @@ import type {
 } from '../domain.ts';
 import { appError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
-import type { PersistedState } from '../ports/storage.ts';
+import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { ProviderPort, RadioPage } from '../ports/provider.ts';
+import type {
+  AttemptTrace,
+  PlaybackIdentity,
+} from '../ports/player.ts';
 import type { QueueSnapshot } from './queue-engine.ts';
 import {
   isRadioPage,
@@ -18,6 +22,7 @@ import {
   publishRadio,
   remainingAfterCurrent,
   shouldGrowRadio,
+  RADIO_DRAIN_CHASE_PAGES,
   RADIO_FETCH_AHEAD,
   RADIO_PAGE_MAX_ITEMS,
 } from './radio-tail.ts';
@@ -25,6 +30,7 @@ import type { RadioTailRecord } from './radio-tail.ts';
 import { Session } from '../session/session.ts';
 import type { ReadySession, SessionState } from '../session/session.ts';
 import {
+  ALL_CAPABILITIES,
   FakeClock,
   FakeLog,
   FakePlayer,
@@ -115,6 +121,8 @@ function tail(partial: Partial<RadioTailRecord> = {}): RadioTailRecord {
     error: undefined,
     fetching: false,
     source: null,
+    resumeOnDrain: false,
+    dupPages: 0,
     ...partial,
   };
 }
@@ -170,7 +178,14 @@ type Rig = {
   states: SessionState[];
 };
 
-function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
+function rig(
+  state: PersistedState,
+  extraProviders: ProviderPort[] = [],
+  deps: {
+    isOnline?: () => boolean;
+    localPlaybackFor?: (recordingId: string) => string | null;
+  } = {},
+): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
   const itunes = new FakeProvider('itunes');
@@ -189,6 +204,10 @@ function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
     random: new SequenceRandom(),
     log,
     defaults: SETTINGS,
+    ...(deps.isOnline === undefined ? {} : { isOnline: deps.isOnline }),
+    ...(deps.localPlaybackFor === undefined
+      ? {}
+      : { localPlaybackFor: deps.localPlaybackFor }),
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -1053,6 +1072,859 @@ async function radioInvalidPage(): Promise<void> {
   await r.session.dispose();
 }
 
+// ---------- auto-arm: last playing occurrence seeds the tail ----------
+
+const PREPARE_TRACE: AttemptTrace = {
+  requestId: 'req-x',
+  steps: 1,
+  httpCalls: 0,
+  bytes: 0,
+  fuelUsed: 0,
+  elapsedMs: 5,
+  httpTrace: [],
+  guestLog: [],
+};
+
+function lastPrepareIdentity(r: Rig): PlaybackIdentity {
+  const list = r.player.calls.filter((c) => c.method === 'prepare');
+  const last = list[list.length - 1];
+  assert(last !== undefined, 'expected a prepare call');
+  return (last.input as { identity: PlaybackIdentity }).identity;
+}
+
+/** Emit prepared + resolve the in-flight prepare for `handle`. */
+async function emitPrepared(
+  r: Rig,
+  handle: string,
+): Promise<PlaybackIdentity> {
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: `req-${handle}`,
+    identity,
+    outcome: {
+      type: 'prepared',
+      stream: { handle, mime: 'audio/mp4' },
+      attempt: PREPARE_TRACE,
+    },
+  });
+  await pump();
+  assert(
+    r.player.settlePrepare(ok(`req-${handle}`)),
+    'expected pending prepare',
+  );
+  await pump();
+  return identity;
+}
+
+function serviceTransition(
+  r: Rig,
+  fields: {
+    from: string;
+    to: string | null;
+    identity?: PlaybackIdentity | null;
+    handle?: string | null;
+  },
+): void {
+  const projection = r.player.projections[r.player.projections.length - 1];
+  assert(projection !== undefined, 'expected an installed projection');
+  r.player.emit({
+    type: 'queue-transition',
+    projectionId: projection.projectionId,
+    projectedQueueRev: projection.queueRev,
+    fromOccurrenceId: fields.from,
+    toOccurrenceId: fields.to,
+    reason: 'ended',
+    positionMs: 0,
+    identity: fields.identity ?? null,
+    handle: fields.handle ?? null,
+  });
+}
+
+function endViaService(r: Rig, fromOccurrenceId: string): void {
+  serviceTransition(r, { from: fromOccurrenceId, to: null });
+}
+
+function pausedTailQueue(): PersistedState {
+  return persisted({
+    recordings: [recording('rU', [ref('youtube-music', 'u')])],
+    queue: queue({
+      revision: 1,
+      occurrences: [occurrence('u1', 'rU')],
+      currentOccurrenceId: 'u1',
+      positionMs: 0,
+      mode: 'paused',
+    }),
+  });
+}
+
+async function autoArmSeedsOnPlayingTail(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'restored-paused tail does not arm');
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'playing the last item arms the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'u') },
+    'seed taken from the playing item’s routable ref',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmSkipsMidQueue(): Promise<void> {
+  const paused = queue({
+    revision: 1,
+    occurrences: [occurrence('u1', 'rU'), occurrence('u2', 'rV')],
+    currentOccurrenceId: 'u1',
+    positionMs: 0,
+    mode: 'paused',
+  });
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('youtube-music', 'u')]),
+        recording('rV', [ref('youtube-music', 'v')]),
+      ],
+      queue: paused,
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'items remain ahead — no arm');
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmSuppressedAfterDisarm(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // Disarm while the seed is still in flight: the tail drops and
+  // the occurrence is marked so replaying it never reseeds.
+  const stopped = r.session.stopRadio();
+  assert(stopped.ok, 'stopRadio failed');
+  assertEqual(readyOf(r).radio, null, 'disarmed');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], 'cont-1')),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    1,
+    'late seed page discarded',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  const replayed = r.session.playOccurrence('u1');
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'disarm suppresses the auto-seed');
+  r.player.cancelPendingPrepares();
+  await replayed;
+  await r.session.dispose();
+}
+
+async function autoArmDrainResumesIntoTail(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed before the item ended');
+  // The item ends while the seed is still in flight — queue drains.
+  assert((await r.session.next()).ok, 'skip past end drains');
+  await pump();
+  const drained = readyOf(r);
+  assertEqual(drained.queue.currentOccurrenceId, null, 'queue drained');
+  assertEqual(drained.queue.mode, 'stopped', 'drained queue stops');
+  r.ytm.settleRadio(
+    ok(
+      page(
+        [
+          meta('youtube-music', 'v10', 'Follow', 'A', 200_000),
+          meta('youtube-music', 'v11', 'After', 'B', 200_000),
+        ],
+        'cont-1',
+      ),
+    ),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.occurrences.length,
+    3,
+    'page appended behind the drained item',
+  );
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'playback resumes at the first appended item',
+  );
+  assertEqual(snap.queue.mode, 'playing', 'playback continues');
+  const prep = r.player.calls.filter((c) => c.method === 'prepare');
+  assertEqual(prep.length, 2, 'resumed item prepares');
+  assertEqual(
+    (prep[1]?.input as { sourceRef: string }).sourceRef,
+    'v10',
+    'resumed item resolves its own ref',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function autoArmServiceDrainResumes(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  assert((await resumed).ok, 'resume failed');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'playing', 'playing u1');
+  assert(readyOf(r).playback.type !== 'idle', 'attempt in flight');
+  assertEqual(radioCalls(r).length, 1, 'armed while playing');
+  // The service reports the queue ran dry inside the installed
+  // projection (toOccurrenceId null on an 'ended' reason).
+  endViaService(r, 'u1');
+  await pump();
+  const drained = readyOf(r);
+  assertEqual(drained.queue.currentOccurrenceId, null, 'service drained');
+  assertEqual(readyOf(r).playback.type, 'idle', 'playhead idles');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v10', 'Follow', 'A', 200_000)], 'cont-1')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'the in-flight page resumes playback when it lands',
+  );
+  assertEqual(snap.queue.mode, 'playing', 'queue playing again');
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function stopDropsInFlightArm(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // A stop while the seed is in flight must leave the queue dead:
+  // the late page lands nothing and playback never resurrects.
+  const stopped = r.session.stop();
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Late', 'A', 1000)], 'x')),
+  );
+  await pump();
+  assert((await stopped).ok, 'stop failed');
+  const snap = readyOf(r);
+  assertEqual(snap.radio, null, 'stop drops the tail');
+  assertEqual(snap.queue.occurrences.length, 1, 'no page appended');
+  assertEqual(snap.queue.mode, 'stopped', 'queue stays stopped');
+  assertEqual(snap.playback.type, 'idle', 'playback stays idle');
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function seedOnStoppedQueueStaysIdle(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const started = r.session.startRadio(ref('youtube-music', 'seed-1'));
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], 'cont-1')),
+  );
+  assert((await started).ok);
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 1, 'items landed');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    null,
+    'a seed armed while idle appends for later — never resurrects',
+  );
+  assertEqual(snap.playback.type, 'idle', 'stays idle');
+  await r.session.dispose();
+}
+
+async function nativeAdvanceArmsTail(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('youtube-music', 'u')]),
+        recording('rV', [ref('youtube-music', 'v')]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU'), occurrence('u2', 'rV')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'u2 still ahead — no arm');
+  // A native-driven move lands on the last item: the arm must fire
+  // from the transition reconcile, not only session commands.
+  serviceTransition(r, {
+    from: 'u1',
+    to: 'u2',
+    identity: { attemptId: 'svc-u2', queueRev: 2 },
+    handle: 'h-u2',
+  });
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'u2');
+  assertEqual(radioCalls(r).length, 1, 'native advance onto the tail arms');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'v') },
+    'seed comes from the item the service landed on',
+  );
+  await r.session.dispose();
+}
+
+async function seedPrefersAttemptRef(): Promise<void> {
+  // Unpinned occurrence whose playback pick is NOT the first stored
+  // source ref: the seed must follow the ref actually playing.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [
+          ref('itunes', 'i1'),
+          ref('youtube-music', 'y1'),
+        ]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'the sibling provider’s ref must not seed',
+  );
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'y1') },
+    'seed follows the attempt’s resolved ref, not stored order',
+  );
+  await r.session.dispose();
+}
+
+async function endedTailNeverReseeds(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const started = r.session.startRadio(ref('youtube-music', 'seed-1'));
+  await pump();
+  // A page with no continuation is terminal — 'the queue simply
+  // finishes', it must not silently re-seed a fresh mix.
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], null)),
+  );
+  assert((await started).ok);
+  await pump();
+  assertEqual(readyOf(r).radio?.status, 'ended');
+  const last = readyOf(r).queue.occurrences.at(-1);
+  assert(last !== undefined);
+  const played = r.session.playOccurrence(last.occurrenceId);
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    1,
+    'playing the last item of an ended mix must not re-seed',
+  );
+  r.player.cancelPendingPrepares();
+  await played;
+  await r.session.dispose();
+}
+
+async function offlineArmRetriesOnReconnect(): Promise<void> {
+  // A locally-owned last track still plays offline; the arm must
+  // skip quietly (weather, not a verdict) and fire on reconnect.
+  let online = false;
+  const r = rig(pausedTailQueue(), [], {
+    isOnline: () => online,
+    localPlaybackFor: (id) => (id === 'rU' ? 'doc-u' : null),
+  });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'offline tail item must not arm');
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'reconnect re-arms the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'u') },
+    'seed falls past the local ref to the catalog source',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function armWaitsForAttemptRef(): Promise<void> {
+  // Only a foreign-provider ref is stored: playback resolves through
+  // the candidates round, so the arm is queued while `attempt.ref`
+  // is still unknown. The seed must wait for the real pick instead
+  // of grabbing a stored ref that isn't the version playing.
+  const r = rig(
+    persisted({
+      recordings: [recording('rU', [ref('itunes', 'i1')])],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    0,
+    'no seed while the attempt ref is unresolved',
+  );
+  const adopted = r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'cy', 'Song rU', 'Artist', 300_000)]),
+  );
+  assert(adopted, 'expected a pending candidates call');
+  await pump();
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'the foreign stored ref must never seed',
+  );
+  assertEqual(radioCalls(r).length, 1, 'resolved ref re-arms');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'cy') },
+    'seed is the candidate the attempt actually resolved',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function dupePageChasesContinuation(): Promise<void> {
+  // Armed while playing; the first page returns only the playing
+  // track itself (deduped away) plus a live continuation — the drain
+  // must keep chasing until a page actually appends.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed');
+  // Drain before the page lands.
+  assert((await r.session.next()).ok, 'skip past end drains');
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, null);
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'u', 'Song rU', 'Artist', 300_000)], 'c1')),
+  );
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'duplicate-only page chases the continuation',
+  );
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c2')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'fresh item appended');
+  assertEqual(snap.queue.mode, 'playing', 'playback resumes');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'resumes at the first appended item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function nativeDrainChasesContinuation(): Promise<void> {
+  // A native-driven drain bypasses #derived: when the fetch-ahead was
+  // starved (offline for the whole walk to the end), the armed tail
+  // holds a continuation with nothing in flight — the drain itself
+  // must chase it or the queue strands stopped.
+  let online = true;
+  const r = rig(pausedTailQueue(), [], { isOnline: () => online });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  r.ytm.settleRadio(
+    ok(
+      page(
+        [
+          meta('youtube-music', 'v9', 'Next', 'A', 200_000),
+          meta('youtube-music', 'v10', 'Mid', 'A', 200_000),
+          meta('youtube-music', 'v11', 'End', 'A', 200_000),
+          meta('youtube-music', 'v12', 'Last', 'A', 200_000),
+        ],
+        'c1',
+      ),
+    ),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    5,
+    'first page appended',
+  );
+  // Walk to the last item while offline — the fetch-ahead window
+  // opens along the way but every grow is skipped, so nothing is in
+  // flight when the service drains.
+  online = false;
+  for (const occ of readyOf(r).queue.occurrences.slice(1)) {
+    const proj = r.player.projections[r.player.projections.length - 1];
+    serviceTransition(r, {
+      from: readyOf(r).queue.currentOccurrenceId ?? '',
+      to: occ.occurrenceId,
+      identity: {
+        attemptId: `svc-${occ.occurrenceId}`,
+        queueRev: proj?.queueRev ?? 0,
+      },
+      handle: `h-${occ.occurrenceId}`,
+    });
+    await pump();
+    assertEqual(readyOf(r).queue.currentOccurrenceId, occ.occurrenceId);
+  }
+  assertEqual(radioCalls(r).length, 1, 'offline fetch-ahead starved');
+  // Connectivity returns and the service drains the last item — the
+  // drain itself must chase continuation c1.
+  online = true;
+  serviceTransition(r, {
+    from: readyOf(r).queue.currentOccurrenceId ?? '',
+    to: null,
+  });
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, null, 'drained');
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'a native drain chases the live continuation',
+  );
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v99', 'After', 'B', 200_000)], 'c2')),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'playing', 'chased page resumes playback');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[snap.queue.occurrences.length - 1]
+      ?.occurrenceId,
+    'resumes at the chased page’s first item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function reseedDuringDrainWriteStaysAppendOnly(): Promise<void> {
+  // The drain's persist is in flight when a fresh seed lands on the
+  // already-drained queue: the drain's authorization must not mark
+  // the replacement tail — it seeded stopped and appends for later.
+  let online = true;
+  const r = rig(pausedTailQueue(), [], { isOnline: () => online });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  // An empty page resolves the seed without appending; the offline
+  // window keeps the fetch-ahead from tying up the radio tail.
+  online = false;
+  r.ytm.settleRadio(ok(page([], 'c1')));
+  await pump();
+  assertEqual(readyOf(r).queue.occurrences.length, 1, 'nothing appended');
+  assertEqual(radioCalls(r).length, 1, 'offline fetch-ahead skipped');
+  // Native drain with the queue write held open: the service 'ended'
+  // crossed the play threshold, so the first held commit is the play
+  // record — settle it, then re-arm before the handler resumes so the
+  // queue write itself stays pending.
+  r.storage.holdNextCommit();
+  serviceTransition(r, { from: 'u1', to: null });
+  await pump();
+  assert(
+    r.storage.settleCommit(ok(undefined)),
+    'the play-record write was the held commit',
+  );
+  r.storage.holdNextCommit();
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    null,
+    'drained in memory',
+  );
+  const seeded = r.session.startRadio(ref('youtube-music', 'seed-2'));
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'replacement seed dispatched while the write is held',
+  );
+  r.storage.settleCommit(ok(undefined));
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v99', 'Fresh', 'B', 200_000)], 'c2')),
+  );
+  assert((await seeded).ok, 'seed resolves');
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.mode,
+    'stopped',
+    'a tail seeded on the drained queue appends for later',
+  );
+  assertEqual(snap.queue.currentOccurrenceId, null, 'no resume');
+  assertEqual(
+    snap.queue.occurrences.length,
+    2,
+    'the new page appended its item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function drainChaseIsBounded(): Promise<void> {
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assert((await r.session.next()).ok);
+  await pump();
+  // Every page is a duplicate of the playing track — the chase must
+  // give up after RADIO_DRAIN_CHASE_PAGES hops, not spin forever.
+  const dupe = () =>
+    ok(page([meta('youtube-music', 'u', 'Song rU', 'Artist', 300_000)], 'cx'));
+  for (let i = 0; i < RADIO_DRAIN_CHASE_PAGES + 2; i += 1) {
+    r.ytm.settleRadio(dupe());
+    await pump();
+  }
+  assertEqual(
+    radioCalls(r).length,
+    1 + RADIO_DRAIN_CHASE_PAGES,
+    'duplicate pages stop after the chase bound',
+  );
+  assertEqual(
+    readyOf(r).queue.mode,
+    'stopped',
+    'queue stays ended once the chase gives up',
+  );
+  await r.session.dispose();
+}
+
+async function pausedSeedDrainsThenResumes(): Promise<void> {
+  // Seed while paused, then play the last item through: the armed
+  // tail earns the drain-resume — a page landing afterwards restarts
+  // playback at its first appended item. The pump lets the queued
+  // seed mint its record before resume(), so the record is truly
+  // captured in the paused queue.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'playing');
+  assert((await r.session.next()).ok, 'play through the end');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped', 'drained');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'playing', 'page resumes a played-through tail');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[1]?.occurrenceId,
+    'resumes at the first appended item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function unroutableActiveRefBlocksSeed(): Promise<void> {
+  // The playing ref's provider cannot seed radio — no substitute is
+  // allowed even though a stored itunes ref could.
+  const noradio = new FakeProvider(
+    'noradio',
+    ALL_CAPABILITIES.filter((c) => c !== 'radio.seed'),
+  );
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('noradio', 'n1'), ref('itunes', 'i1')]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+      settings: { ...SETTINGS, playbackProvider: 'noradio' },
+    }),
+    [noradio],
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'no youtube-music seed');
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'a different provider’s version must not substitute',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function disarmDuringCommitDropsPage(): Promise<void> {
+  // A page commit waiting on storage outlives a synchronous
+  // stopRadio() — the disarm must drop the page, not append it.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  r.storage.holdNextCommit();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  // An edit queued behind the held commit must survive the revert —
+  // the compensating commit runs inside the same segment, before this
+  // edit's segment can stage.
+  const enqueued = r.session.enqueueRecording('rU');
+  assert(r.session.stopRadio().ok, 'disarm lands mid-commit');
+  r.storage.settleCommit(ok(undefined));
+  await pump();
+  assert((await seeded).ok, 'seed resolves — the page was dropped');
+  assert((await enqueued).ok, 'queued edit committed after the revert');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'page never entered');
+  assertEqual(snap.radio, null, 'record gone');
+  // The batch still committed durably — the in-segment compensation
+  // must have rewritten a page-free queue before the queued edit ran.
+  const queueCommits = r.storage.commits.filter(
+    (c) => c.batch.queue !== undefined,
+  );
+  const ids = (c: { batch: StorageBatch }) =>
+    c.batch.queue?.occurrences.map((o) => o.occurrenceId);
+  const pageCommit = queueCommits[queueCommits.length - 3];
+  const revertCommit = queueCommits[queueCommits.length - 2];
+  const editCommit = queueCommits[queueCommits.length - 1];
+  assertEqual(pageCommit?.batch.queue?.occurrences.length, 2, 'page wrote');
+  assertDeepEqual(
+    ids(revertCommit ?? { batch: {} }),
+    ['u1'],
+    'revert restored the pre-page queue before later segments ran',
+  );
+  assertDeepEqual(
+    ids(editCommit ?? { batch: {} }),
+    snap.queue.occurrences.map((o) => o.occurrenceId),
+    'the queued edit landed on the reverted lineage',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
+async function pausedDrainDoesNotResume(): Promise<void> {
+  // Skipping the last track while PAUSED earns no resume — the
+  // armed tail appends its page but playback stays stopped.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  assert((await r.session.next()).ok, 'paused skip drains');
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'page appends');
+  assertEqual(snap.queue.mode, 'stopped', 'no resurrection without playback');
+  await r.session.dispose();
+}
+
+async function pausedServiceDrainDoesNotResume(): Promise<void> {
+  // Same rule on the service path: a transition-to-null landing on
+  // a paused queue is stale — it never earns the drain resume.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const seeded = r.session.startRadio(ref('youtube-music', 'u'));
+  await pump();
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assert((await r.session.pause()).ok, 'paused');
+  serviceTransition(r, { from: 'u1', to: null });
+  await pump();
+  assertEqual(readyOf(r).queue.mode, 'stopped', 'stale drain applied');
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v9', 'Next', 'A', 200_000)], 'c1')),
+  );
+  await pump();
+  assert((await seeded).ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 2, 'page appends');
+  assertEqual(snap.queue.mode, 'stopped', 'no resume from a stale drain');
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1075,6 +1947,30 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['radioOccurrencePlays', radioOccurrencePlays],
   ['radioStop', radioStop],
   ['radioInvalidPage', radioInvalidPage],
+  ['autoArmSeedsOnPlayingTail', autoArmSeedsOnPlayingTail],
+  ['autoArmSkipsMidQueue', autoArmSkipsMidQueue],
+  ['autoArmSuppressedAfterDisarm', autoArmSuppressedAfterDisarm],
+  ['autoArmDrainResumesIntoTail', autoArmDrainResumesIntoTail],
+  ['autoArmServiceDrainResumes', autoArmServiceDrainResumes],
+  ['stopDropsInFlightArm', stopDropsInFlightArm],
+  ['seedOnStoppedQueueStaysIdle', seedOnStoppedQueueStaysIdle],
+  ['nativeAdvanceArmsTail', nativeAdvanceArmsTail],
+  ['seedPrefersAttemptRef', seedPrefersAttemptRef],
+  ['endedTailNeverReseeds', endedTailNeverReseeds],
+  ['offlineArmRetriesOnReconnect', offlineArmRetriesOnReconnect],
+  ['armWaitsForAttemptRef', armWaitsForAttemptRef],
+  ['dupePageChasesContinuation', dupePageChasesContinuation],
+  ['nativeDrainChasesContinuation', nativeDrainChasesContinuation],
+  [
+    'reseedDuringDrainWriteStaysAppendOnly',
+    reseedDuringDrainWriteStaysAppendOnly,
+  ],
+  ['drainChaseIsBounded', drainChaseIsBounded],
+  ['pausedSeedDrainsThenResumes', pausedSeedDrainsThenResumes],
+  ['unroutableActiveRefBlocksSeed', unroutableActiveRefBlocksSeed],
+  ['disarmDuringCommitDropsPage', disarmDuringCommitDropsPage],
+  ['pausedDrainDoesNotResume', pausedDrainDoesNotResume],
+  ['pausedServiceDrainDoesNotResume', pausedServiceDrainDoesNotResume],
 ] as const;
 
 export async function run(): Promise<void> {
