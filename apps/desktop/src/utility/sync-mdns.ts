@@ -105,6 +105,53 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
 }
 
 /**
+ * Name-keyed tracking of emitted peers for one browse — shared by the
+ * `up`/`down` handlers so a re-announcement or a late `down` can
+ * retract exactly the row that was emitted. Keyed by service NAME
+ * (unique on the LAN): `service.host` on a `down` can differ from the
+ * chosen advert address, so name|host would miss and leave a stale
+ * row behind. Exported for the tracker unit test.
+ */
+export const createPeerTracker = (
+  onFound: (peer: SyncDiscoveredPeer) => void,
+  onLost: (key: string) => void,
+): { up(service: Service): void; down(service: Service): void } => {
+  const seen = new Map<string, SyncDiscoveredPeer>();
+  return {
+    up(service) {
+      const peer = peerOf(service);
+      if (peer !== null) {
+        // A re-announcement whose resolved addresses changed can
+        // re-rank the chosen host — retract the row keyed by the
+        // old pick so the stale endpoint never stays dialable.
+        const prior = seen.get(service.name);
+        if (prior !== undefined && prior.key !== peer.key) {
+          onLost(prior.key);
+        }
+        seen.set(service.name, peer);
+        onFound(peer);
+      }
+    },
+    down(service) {
+      const peer = seen.get(service.name);
+      // A re-advertised service's down can arrive after its new
+      // up — only retract when the lost service IS the one we
+      // emitted (same host), otherwise it must not kill the
+      // fresh row.
+      if (
+        peer !== undefined &&
+        (typeof service.host !== 'string' ||
+          service.host === '' ||
+          service.host === peer.host)
+      ) {
+        seen.delete(service.name);
+        onLost(peer.key);
+      }
+    },
+  };
+};
+
+/**
  * mDNS browse — the desktop's LocalSend-style "nearby" list. Same
  * best-effort posture as advertise: a browse failure resolves to an
  * empty list, never a pairing blocker.
@@ -138,33 +185,9 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
           protocol: SERVICE_PROTOCOL,
         });
         browser = br;
-        // Keyed by service NAME (unique on the LAN): `service.host`
-        // on a `down` can differ from the chosen advert address, so
-        // name|host would miss and leave a stale row behind.
-        const seen = new Map<string, SyncDiscoveredPeer>();
-        const up = (service: Service) => {
-          const peer = peerOf(service);
-          if (peer !== null) {
-            seen.set(service.name, peer);
-            onFound(peer);
-          }
-        };
-        const down = (service: Service) => {
-          const peer = seen.get(service.name);
-          // A re-advertised service's down can arrive after its new
-          // up — only retract when the lost service IS the one we
-          // emitted (same host), otherwise it must not kill the
-          // fresh row.
-          if (
-            peer !== undefined &&
-            (typeof service.host !== 'string' ||
-              service.host === '' ||
-              service.host === peer.host)
-          ) {
-            seen.delete(service.name);
-            onLost(peer.key);
-          }
-        };
+        const tracker = createPeerTracker(onFound, onLost);
+        const up = tracker.up;
+        const down = tracker.down;
         br.on('up', up);
         br.on('down', down);
         br.start();
