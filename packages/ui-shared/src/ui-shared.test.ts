@@ -215,6 +215,11 @@ assertEqual(resolveLocale('zh-CN', 'en-US'), 'zh', 'zh-CN stays Simplified');
 // explicit Hans script beats a Traditional-leaning region
 assertEqual(resolveLocale('zh-Hans-HK', 'en-US'), 'zh', 'zh-Hans-HK pins zh');
 assertEqual(resolveLocale('zh-Hans-TW', 'en-US'), 'zh', 'zh-Hans-TW pins zh');
+assertEqual(
+  resolveLocale('zh-Hant-TW-x-hans', 'en-US'),
+  'en',
+  'private-use hans is not a script',
+);
 assertEqual(languageOptionKey('zh-Hant-TW'), 'system', 'Traditional reads as system');
 assertEqual(languageOptionKey('zh-Hans-HK'), 'zh', 'explicit Hans selects');
 

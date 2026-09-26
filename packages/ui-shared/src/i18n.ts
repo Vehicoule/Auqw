@@ -128,15 +128,14 @@ export function fromTag(tag: string | null | undefined): Locale | null {
     case 'fr':
       return primary;
     case 'zh': {
-      const rest = parts.slice(1);
-      // An explicit Hans script wins even over a Traditional-leaning
-      // region (zh-Hans-HK): the shipped catalog is what was asked for.
-      if (rest.includes('hans')) {
+      // Script is the first subtag only — a 'hans'/'hant' later in the
+      // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
+      if (parts[1] === 'hans') {
         return 'zh';
       }
-      return rest.some(
-        (p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo',
-      )
+      return parts
+        .slice(1)
+        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
         ? null
         : 'zh';
     }
