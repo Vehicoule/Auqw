@@ -140,6 +140,7 @@ function fakeApi(): Rig {
           }),
       },
       chrome: {
+        platform: 'linux',
         setScheme: () => {},
       },
       dialog: {

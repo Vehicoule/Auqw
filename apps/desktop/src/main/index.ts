@@ -283,7 +283,7 @@ async function main(): Promise<void> {
   // from the OS theme when the user picked an explicit one) so the
   // window-control overlay can re-tint itself to match the canvas.
   ipcMain.on(CHANNELS.chromeScheme, (event, scheme) => {
-    if (!isSchemeName(scheme)) {
+    if (!isSchemeName(scheme) || process.platform === 'darwin') {
       return;
     }
     const sender = BrowserWindow.fromWebContents(event.sender);
@@ -334,7 +334,7 @@ async function main(): Promise<void> {
 
 function titleBarOverlay(scheme: SchemeName): TitleBarOverlay {
   const tokens = schemes[scheme];
-  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 56 };
+  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 40 };
 }
 
 function isSchemeName(value: unknown): value is SchemeName {
@@ -343,14 +343,14 @@ function isSchemeName(value: unknown): value is SchemeName {
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   const state = stateRef.current;
+  const isMac = process.platform === 'darwin';
   const options: BrowserWindowConstructorOptions = {
     width: state.width,
     height: state.height,
     title: 'auqw',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: titleBarOverlay(
-      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
-    ),
+    // macOS draws a themed strip if a titleBarOverlay is given even under
+    // hiddenInset, so it gets the bare option instead.
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     webPreferences: {
       preload: PRELOAD,
       sandbox: true,
@@ -358,6 +358,13 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
       nodeIntegration: false,
     },
   };
+  if (isMac) {
+    options.trafficLightPosition = { x: 14, y: 12 };
+  } else {
+    options.titleBarOverlay = titleBarOverlay(
+      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    );
+  }
   if (!app.isPackaged) {
     options.icon = WINDOW_ICON;
   }
