@@ -816,6 +816,53 @@ async function staleVersionRefetches(): Promise<void> {
   await r.session.dispose();
 }
 
+// A provider whose manifest omits `version` reports null. A legacy row
+// (no providerVersion) must still refetch under it — missing provenance
+// never equals a matching null — while its own writes record null
+// provenance and stay cacheable in-memory.
+async function nullVersionProviderRefetchesLegacy(): Promise<void> {
+  const lrclib = new FakeProvider(
+    'lyrics-lrclib',
+    ['lyrics.plain', 'lyrics.synced'],
+    null,
+  );
+  const legacy: LyricsCacheEntry = {
+    recordingId: 'r1',
+    provider: 'lyrics-lrclib',
+    kind: 'plain',
+    payload: {
+      plainLyrics: 'legacy words',
+      syncedLyrics: null,
+      instrumental: false,
+    },
+    fetchedMs: 5,
+  };
+  const r = rig(
+    persisted({
+      recordings: [recording('r1')],
+      lyricsCache: [legacy],
+    }),
+    [lrclib],
+  );
+  await r.session.restore();
+  const first = r.session.getLyrics('r1');
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 1, 'legacy row refetches under null version');
+  lrclib.settleLyrics(ok({ kind: 'plain', text: 'fresh', matched: MATCHED }));
+  await first;
+  const stored = r.storage.commits
+    .find((c) => c.batch.lyricsCache !== undefined)
+    ?.batch.lyricsCache?.find((e) => e.recordingId === 'r1');
+  assert(
+    stored?.providerVersion === null,
+    'write records null provenance',
+  );
+  const again = await r.session.getLyrics('r1');
+  assert(again.ok && again.value.cached, 'written null row caches');
+  assertEqual(lyricsCalls(lrclib), 1, 'no second round trip');
+  await r.session.dispose();
+}
+
 async function failures(): Promise<void> {
   // An unrestored session is a typed unavailable.
   const unready = rig(persisted({ recordings: [recording('r1')] }));
@@ -925,6 +972,7 @@ export async function run(): Promise<void> {
   await instrumentalHonored();
   await seededCacheHit();
   await staleVersionRefetches();
+  await nullVersionProviderRefetchesLegacy();
   await failures();
   await cancellation();
 }

@@ -836,6 +836,34 @@ async function migrationV1toV2(): Promise<void> {
     conn.query('SELECT version FROM schema_version WHERE id = 1'),
   );
   assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  // The provider_version column ALTERs in during the migration: a
+  // versioned lyrics row must round-trip on a v1-origin database.
+  assert(
+    (
+      await storage.commit(
+        {
+          lyricsCache: [
+            {
+              recordingId: 'r1',
+              provider: 'lyrics-lrclib',
+              providerVersion: '0.1.3',
+              kind: 'plain',
+              payload: {
+                plainLyrics: 'migrated words',
+                syncedLyrics: null,
+                instrumental: false,
+              },
+              fetchedMs: 90,
+            },
+          ],
+        },
+        ctx().context,
+      )
+    ).ok,
+    'versioned lyrics row writable post-migration',
+  );
+  const migrated = await loadOk(storage);
+  assertEqual(migrated.lyricsCache[0]?.providerVersion, '0.1.3');
   driver.close();
 }
 
@@ -1135,6 +1163,7 @@ function ownedSections(): OwnedSections {
       {
         recordingId: 'r1',
         provider: 'lyrics-lrclib',
+        providerVersion: '0.1.3',
         kind: 'synced',
         payload: {
           plainLyrics: 'words',
@@ -1142,6 +1171,19 @@ function ownedSections(): OwnedSections {
           instrumental: false,
         },
         fetchedMs: 80,
+      },
+      // A pre-versioning row: persists as NULL provider_version and
+      // decodes back without the field, so the session sees it stale.
+      {
+        recordingId: 'r2',
+        provider: 'lyrics-lrclib',
+        kind: 'plain',
+        payload: {
+          plainLyrics: 'old words',
+          syncedLyrics: null,
+          instrumental: false,
+        },
+        fetchedMs: 81,
       },
     ],
     artworkCache: [

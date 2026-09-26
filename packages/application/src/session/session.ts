@@ -2823,13 +2823,16 @@ export class Session {
     // A cached row is fresh only while the same provider version
     // stands behind it — an upgrade re-fetches so better ranking or
     // coverage replaces the stale pick. Rows written before version
-    // tracking (no providerVersion) always re-fetch once. When no
-    // provider routes, the cache still serves whatever it holds.
+    // tracking carry no providerVersion at all; requiring the field to
+    // be present (not merely equal) keeps those legacy rows stale
+    // under a null-version provider too. When no provider routes, the
+    // cache still serves whatever it holds.
     const fresh =
       cached !== undefined &&
       (!routed.ok ||
         (cached.provider === routed.value.id &&
-          (cached.providerVersion ?? null) === routed.value.version));
+          cached.providerVersion !== undefined &&
+          cached.providerVersion === routed.value.version));
     if (cached !== undefined && fresh) {
       const accepted = lyricsFromCache(cached, {
         durationMs: recording.durationMs,

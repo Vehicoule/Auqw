@@ -688,14 +688,15 @@ export class SqliteStorage implements StoragePort {
         if (rewrite.lyricsCache) {
           for (const entry of merged.lyricsCache) {
             await conn.execute(
-              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms)
-               VALUES (?, ?, ?, ?, ?)`,
+              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms, provider_version)
+               VALUES (?, ?, ?, ?, ?, ?)`,
               [
                 entry.recordingId,
                 entry.provider,
                 entry.kind,
                 JSON.stringify(entry.payload),
                 entry.fetchedMs,
+                entry.providerVersion ?? null,
               ],
               signal,
             );
@@ -1696,12 +1697,19 @@ function decodeState(rows: TableRows): PersistedState | null {
     if (kind !== 'plain' && kind !== 'synced') {
       fail();
     }
+    // A NULL provider_version marks a pre-versioning row — decode it
+    // as an absent field so the session treats it as stale and
+    // refetches once, rather than equating it with a null-versioned
+    // provider's writes.
     return {
       recordingId,
       provider: reqNonEmpty(row['provider']),
       kind: kind as LyricsCacheEntry['kind'],
       payload: json(row['payload_json']) as LyricsCacheEntry['payload'],
       fetchedMs: reqNonNegInt(row['fetched_ms']),
+      ...(row['provider_version'] === null
+        ? {}
+        : { providerVersion: reqStr(row['provider_version']) }),
     };
   });
   const artworkUrls = new Set<string>();
