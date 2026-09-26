@@ -1,5 +1,6 @@
 package expo.modules.auqwexpo
 
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
@@ -224,9 +225,21 @@ class AuqwMediaSessionService : MediaSessionService() {
     // The session sees the player through QueuePlayer — the module
     // keeps the raw ExoPlayer, the wrapper only advertises the
     // next/previous commands the projection cursor consumes.
-    val s = MediaSession.Builder(this, QueuePlayer(p))
+    val builder = MediaSession.Builder(this, QueuePlayer(p))
       .setCallback(sessionCallback)
-      .build()
+    // Notification card tap opens the app — without a session
+    // activity the notification posts with contentIntent=null and
+    // taps are dead. getLaunchIntentForPackage resolves the app's
+    // launcher activity without hardcoding its class.
+    packageManager.getLaunchIntentForPackage(packageName)?.let {
+      builder.setSessionActivity(
+        PendingIntent.getActivity(
+          this, 0, it,
+          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+      )
+    }
+    val s = builder.build()
     session = s
     // The module's only service contact is the ACTION_LOCAL_BIND
     // binder, which bypasses the SERVICE_INTERFACE/controller-connect
