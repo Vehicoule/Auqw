@@ -15,6 +15,7 @@ import type {
   TitleBarOverlay,
   WebContents,
 } from 'electron';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { schemes } from '@auqw/design-tokens';
@@ -32,6 +33,7 @@ import { createAppliedPushService } from './sync-events.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
+  SYNC_IDENTITY_FILE,
 } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -122,6 +124,15 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   // The database lives in the utility child; its path is fork env
   // because the child owns no app.getPath('userData').
   env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
+  // A persisted sync identity marks an install that has synced — it
+  // keeps an eager listener so paired devices still find it. Fresh
+  // installs stay dormant: binding requires custody, and on macOS
+  // the safeStorage read is what fires the Keychain ACL prompt.
+  env['AUQW_SYNC_ARMED'] = existsSync(
+    join(userDataPath, 'sync-secure', SYNC_IDENTITY_FILE),
+  )
+    ? '1'
+    : '0';
   if (!app.isPackaged) {
     // Dev checkouts resolve the bindings artifact from the repo and
     // may arm the dev-gate channel; packaged runs use resourcesPath.

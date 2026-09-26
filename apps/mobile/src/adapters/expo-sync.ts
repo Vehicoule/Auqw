@@ -13,6 +13,7 @@ import {
   appError,
   createSyncClient,
   createSyncEngine,
+  DEVICE_NAME_MAX,
   ensureSyncIdentity,
   err,
   ok,
@@ -95,6 +96,17 @@ export async function createExpoSync(
       return err(custody.error);
     }
     const deviceId = custody.value.deviceId;
+    // The wire `name` is what paired devices display — the OS
+    // device name, else the install id's head as before.
+    let deviceName = `auqw ${deviceId.slice(0, 8)}`;
+    try {
+      const nativeName = deps.host.syncDeviceName?.().trim();
+      if (nativeName !== undefined && nativeName.length > 0) {
+        deviceName = nativeName.slice(0, DEVICE_NAME_MAX);
+      }
+    } catch {
+      // A native throw degrades to the derived label, never fails sync.
+    }
     const engine = await createSyncEngine({
       store: deps.logStore,
       clock: deps.clock,
@@ -134,7 +146,7 @@ export async function createExpoSync(
       clock: deps.clock,
       log: deps.log,
       deviceId,
-      name: `auqw ${deviceId.slice(0, 8)}`,
+      name: deviceName,
     });
     // Hydrate custody before the surface is exposed — the UI reads
     // status() first, and it must already show the paired desktops.

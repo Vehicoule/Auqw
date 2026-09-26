@@ -24,6 +24,14 @@ import {
  */
 
 const IDENTITY_KEY = 'auqw.sync.identity';
+/**
+ * The identity record's custody file name. Its presence marks an
+ * install that has synced before — main forks the utility with
+ * AUQW_SYNC_ARMED from it so a never-synced install stays dormant
+ * (no listener bind, no safeStorage/keychain touch) until a sync
+ * handler actually runs.
+ */
+export const SYNC_IDENTITY_FILE = `${IDENTITY_KEY}.b64`;
 const DEVICE_PREFIX = 'auqw.sync.device.';
 const SYNC_KEY_PREFIX = 'auqw.sync.';
 /**

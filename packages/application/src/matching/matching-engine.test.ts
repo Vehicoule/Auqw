@@ -533,6 +533,46 @@ function edgeTests(): void {
     ]);
     assert(out4.type === 'unavailable', 'tie: rejected beats automatic');
   }
+
+  // Collab-credit artists: a file tagged 'KREZUS & Surreal_dvd' and a
+  // catalog's plain 'KREZUS' are the same act — the best pairwise
+  // credit view matches, so the artist floor can't veto every
+  // candidate into 'no candidates'.
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Skins 2', artist: 'KREZUS & Surreal_dvd' }),
+      [
+        candidate({ title: 'Skins 2', artist: 'Portishead' }),
+        candidate({ title: 'Skins 2', artist: 'KREZUS' }),
+      ],
+    );
+    assert(out.type === 'matched', `co-artist: ${out.type}`);
+    assertEqual(out.candidate.artist, 'KREZUS');
+    assertEqual(out.evidence.artistSimilarity, 1);
+  }
+
+  // The same split applies on the candidate side: 'A feat. B'
+  // matches plain 'A', while a collab sharing no act still dies
+  // under the floor.
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Home', artist: 'Artist A', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Home',
+          artist: 'Artist C & Artist B',
+          durationMs: 200_000,
+        }),
+        candidate({
+          title: 'Home',
+          artist: 'Artist A feat. Artist C',
+          durationMs: 200_000,
+        }),
+      ],
+    );
+    assert(out.type === 'matched', `feat credit: ${out.type}`);
+    assertEqual(out.candidate.artist, 'Artist A feat. Artist C');
+  }
 }
 
 function xorshift32(seed: number): () => number {

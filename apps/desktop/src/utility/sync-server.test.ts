@@ -1967,6 +1967,56 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Dormant install: armed:false defers custody until first use ——
+  {
+    const inner = createMemoryKeys();
+    let identityReads = 0;
+    const counting: SyncKeys = {
+      ...inner,
+      async identityGet() {
+        identityReads += 1;
+        return inner.identityGet();
+      },
+    };
+    const service = createSyncService({
+      host: '127.0.0.1',
+      port: 0,
+      keys: counting,
+      engine: createEchoEngine(),
+      endpointHost: '127.0.0.1',
+      advertise: null,
+      armed: false,
+    });
+    try {
+      // Let any mistakenly-eager start settle before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assertEqual(
+        identityReads,
+        0,
+        'a dormant service never touches custody',
+      );
+      // The engine-only surface still answers while dormant — the
+      // renderer's boot-time log drain must not wake custody.
+      const mat = await invokeHandler(service, 'sync:materialized', {
+        offset: 0,
+      });
+      assert(mat.ok, 'sync:materialized serves while dormant');
+      assertEqual(identityReads, 0, 'materialized is custody-free');
+      // First real sync use starts the listener and reaches custody.
+      const statusReply = await invokeHandler(
+        service,
+        'sync:status',
+        undefined,
+      );
+      assert(statusReply.ok, 'sync:status starts a dormant service');
+      assert(identityReads > 0, 'first use reads the identity');
+      const status = await service.ready;
+      assertEqual(status.listener, 'listening', 'late start binds');
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Custody failure propagates: sync:status fails typed ——
   {
     const keys = createMemoryKeys();

@@ -317,6 +317,12 @@ export type AuqwSyncNative = {
   /** SecureRandom bytes, base64 — the sync crypto's CSPRNG source.
    * Synchronous like the noble calls that consume it. */
   syncRandomBytes(length: number): string;
+  /**
+   * The user-visible device name the sync hello announces (paired
+   * lists show it verbatim). Optional: seam builds predating it fall
+   * back to a device-id-derived label in the adapter.
+   */
+  syncDeviceName?(): string;
   addSyncSocketDataListener(
     listener: (event: AuqwSyncSocketDataEvent) => void,
   ): AuqwExpoSubscription;
