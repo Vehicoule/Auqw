@@ -532,9 +532,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     let totalLines = 0;
     let skippedLines = 0;
     let fits = true;
-    const take = (line: string): void => {
+    const take = (line: string, terminated: boolean): void => {
       totalLines += 1;
-      const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+      // The byte count is what the durable offset advances by — the
+      // newline exists on disk only for a terminated line. Charging
+      // one for the final unterminated carry would land `.off` a byte
+      // past EOF and drop the next line appended.
+      const lineBytes =
+        Buffer.byteLength(line, 'utf8') + (terminated ? 1 : 0);
       if (fits && servedBytes + lineBytes <= budgetBytes) {
         served.push(line);
         servedBytes += lineBytes;
@@ -567,7 +572,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (line.length > 0) {
-            take(line);
+            take(line, true);
           }
         }
         carry = buf;
@@ -579,7 +584,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       throw e;
     }
     if (carry.length > 0) {
-      take(carry);
+      take(carry, false);
     }
     return { served, servedBytes, totalLines, skippedLines };
   }

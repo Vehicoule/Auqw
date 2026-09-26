@@ -537,7 +537,24 @@ function Main({
   // older success still in flight.
   const usageSeq = useRef(0);
   const usageApplied = useRef(0);
+  const usageLastProbe = useRef(0);
+  const usageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshUsage = useCallback(() => {
+    // The subscribe path fires per progress chunk — a statfs probe on
+    // each one is hundreds of scans per download. Throttle to ~1 Hz
+    // with a trailing call so the settled value still lands.
+    const now = Date.now();
+    const gap = now - usageLastProbe.current;
+    if (gap < 1_000) {
+      if (usageTimer.current === null) {
+        usageTimer.current = setTimeout(() => {
+          usageTimer.current = null;
+          refreshUsage();
+        }, 1_000 - gap);
+      }
+      return;
+    }
+    usageLastProbe.current = now;
     usageSeq.current += 1;
     const seq = usageSeq.current;
     void controller.downloads
@@ -552,10 +569,17 @@ function Main({
   useEffect(() => {
     setDownloads(controller.downloads.list());
     refreshUsage();
-    return controller.downloads.subscribe(() => {
+    const unsubscribe = controller.downloads.subscribe(() => {
       setDownloads(controller.downloads.list());
       refreshUsage();
     });
+    return () => {
+      unsubscribe();
+      if (usageTimer.current !== null) {
+        clearTimeout(usageTimer.current);
+        usageTimer.current = null;
+      }
+    };
   }, [controller, refreshUsage]);
 
   const refreshLocal = useCallback(() => {
@@ -1319,8 +1343,12 @@ function Main({
           .addFolder(new CancellationSource().signal)
           .then((added) => {
             reportResult('add local folder', added);
-            if (added.ok) {
-              session.syncLocalRecordings(local.recordings());
+            // Re-read the live source — a mid-flight rehydrate swaps
+            // the instance, and committing the captured one's stale
+            // snapshot would clobber rows it never saw.
+            const source = controller.local();
+            if (added.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });
@@ -1336,8 +1364,9 @@ function Main({
           .removeSource(sourceId, new CancellationSource().signal)
           .then((removed) => {
             reportResult('remove local folder', removed);
-            if (removed.ok) {
-              session.syncLocalRecordings(local.recordings());
+            const source = controller.local();
+            if (removed.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });
@@ -1352,8 +1381,9 @@ function Main({
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
             reportResult('rescan local folders', scanned);
-            if (scanned.ok) {
-              session.syncLocalRecordings(local.recordings());
+            const source = controller.local();
+            if (scanned.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });

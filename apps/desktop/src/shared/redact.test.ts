@@ -63,6 +63,32 @@ export async function run(): Promise<void> {
     assert(masked.includes('…'), masked);
   }
 
+  // Quoted JSON keys and the newer auth schemes mask the same: a raw
+  // `{"api_key":"..."}` blob and `OAuth ...` are credentials too.
+  for (const line of [
+    'refused {"access_token":"SYNTHETIC_SECRET"}',
+    "refused {'refresh_token':'SYNTHETIC_SECRET'}",
+    'refused {"api-key":"SYNTHETIC_SECRET"}',
+    'refused Authorization: OAuth SYNTHETIC_SECRET',
+    'refused Authorization: Bearer "SYNTHETIC SECRET"',
+    'refused with private_token=SYNTHETIC_SECRET now',
+  ]) {
+    const masked = redactSensitive(line);
+    assert(!masked.includes('SYNTHETIC_SECRET'), masked);
+  }
+  {
+    const masked = redactSensitive('refused Authorization: Bearer "SYNTHETIC SECRET" tail');
+    assert(!masked.includes('SYNTHETIC SECRET'), masked);
+  }
+
+  // A base64 run that STARTS with `/` is a credential, not a path —
+  // only a multi-segment slash run keeps its path diagnosis.
+  const slashLead = 'failed with /A1b2C3d4E5f6G7h8I9j0K1l2 truncated';
+  assert(
+    !redactSensitive(slashLead).includes('/A1b2C3d4E5f6G7h8I9j0K1l2'),
+    redactSensitive(slashLead),
+  );
+
   // The bare-token case: no surrounding shape at all.
   const bare = 'startup failed with gho_51H8xYzQ3kJ9mNpR7sT2vW4xB6cD';
   assert(

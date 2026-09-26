@@ -677,6 +677,15 @@ export class Session {
    */
   #syncEmitPending: LocalWrite[] = [];
   #syncTail: Promise<void> = Promise.resolve();
+  /**
+   * Recording ids owed a matchReview tombstone emission. The review
+   * ids live only in the persisted section — a load that fails after
+   * the delete committed would otherwise drop the tombstones forever
+   * and a peer re-upserting its orphan review would wedge sync on the
+   * referential check. Retained until an emission's load succeeds;
+   * `emitUnsynced` re-kicks the drain for survivors of a ready swap.
+   */
+  #reviewTombstoneIds = new Set<string>();
   #restorePromise: Promise<Result<void>> | null = null;
 
   constructor(deps: SessionDeps) {
@@ -1502,6 +1511,11 @@ export class Session {
           synced,
         ),
       );
+      // Survivors of a ready generation swap still owe tombstones —
+      // this reconcile pass is the durable retry hook.
+      if (this.#reviewTombstoneIds.size > 0) {
+        this.#own(this.#emitMatchReviewTombstones([]));
+      }
     } finally {
       this.#opSources.delete(source);
     }
@@ -1516,7 +1530,15 @@ export class Session {
   async #emitMatchReviewTombstones(
     deleted: readonly Recording[],
   ): Promise<void> {
-    if (this.#ready === null || this.#sync === undefined) {
+    for (const rec of deleted) {
+      this.#reviewTombstoneIds.add(rec.id);
+    }
+    const r = this.#ready;
+    if (
+      r === null ||
+      this.#sync === undefined ||
+      this.#reviewTombstoneIds.size === 0
+    ) {
       return;
     }
     const source = new CancellationSource();
@@ -1531,14 +1553,33 @@ export class Session {
         deadlineMs,
         source,
       );
-      const matchReviews =
-        loaded.ok && isPersistedState(loaded.value)
-          ? loaded.value.matchReviews
-          : [];
-      const ids = new Set(deleted.map((rec) => rec.id));
+      // A ready swap between the delete and this load would read a
+      // generation's persisted view the delete wasn't staged under —
+      // keep the ids queued for the next reconcile instead.
+      if (this.#ready !== r) {
+        return;
+      }
+      if (!loaded.ok || !isPersistedState(loaded.value)) {
+        this.#logWarn(
+          'match-review tombstone load failed; ids retained for retry',
+        );
+        return;
+      }
+      const state = loaded.value;
+      // A recording re-added between delete and load is live again —
+      // its review rows belong to the live row and no longer owe a
+      // tombstone.
+      const live = new Set(state.recordings.map((rec) => rec.id));
+      const owed = new Set<string>();
+      for (const id of this.#reviewTombstoneIds) {
+        if (!live.has(id)) {
+          owed.add(id);
+        }
+      }
+      this.#reviewTombstoneIds.clear();
       this.#emitSync(
-        matchReviews
-          .filter((review) => ids.has(review.recordingId))
+        state.matchReviews
+          .filter((review) => owed.has(review.recordingId))
           .map((review) => ({
             kind: 'matchReview' as const,
             recordId: review.reviewId,

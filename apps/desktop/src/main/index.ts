@@ -21,7 +21,7 @@ import { schemes } from '@auqw/design-tokens';
 import type { SchemeName } from '@auqw/design-tokens';
 import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
-import { fromUnknown, shellError } from '../shared/errors.ts';
+import { fromUnknown, isShellError, shellError } from '../shared/errors.ts';
 import { redactSensitive } from '../shared/redact.ts';
 import { isSyncAppliedEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
@@ -150,12 +150,19 @@ function utilityEnv(userDataPath: string): Record<string, string> {
 // comment for the shape a credential can still hide behind.
 function boundedCause(thrown: unknown): string {
   let raw: string;
-  if (thrown instanceof Error) {
-    raw = `${thrown.name}: ${thrown.message}`;
-  } else if (typeof thrown === 'string') {
-    raw = thrown;
-  } else {
-    raw = 'non-error thrown';
+  // `name`/`message` are property reads — an exotic error (a Symbol
+  // name, a throwing getter) must degrade to a label, not propagate
+  // out of the failure handler and skip the exit below.
+  try {
+    if (thrown instanceof Error) {
+      raw = `${String(thrown.name)}: ${String(thrown.message)}`;
+    } else if (typeof thrown === 'string') {
+      raw = thrown;
+    } else {
+      raw = 'non-error thrown';
+    }
+  } catch {
+    raw = 'unrenderable error';
   }
   const safe = redactSensitive(raw);
   return safe.length > 512 ? `${safe.slice(0, 512)}…` : safe;
@@ -166,9 +173,10 @@ if (!gotLock) {
   app.quit();
 } else {
   main().catch((thrown: unknown) => {
-    // `fromUnknown` supplies the typed kind; `boundedCause` keeps the
-    // cause debuggable without echoing a raw value into the log.
-    const error = fromUnknown(thrown);
+    // A typed failure keeps its kind — `fromUnknown` is only for the
+    // raw throws. `boundedCause` keeps the cause debuggable without
+    // echoing a raw value into the log.
+    const error = isShellError(thrown) ? thrown : fromUnknown(thrown);
     console.error(
       `fatal startup failure: ${error.kind}: ${boundedCause(thrown)}`,
     );

@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, rename } from 'node:fs/promises';
+import { access, mkdir, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
@@ -26,6 +26,14 @@ import {
 const IDENTITY_KEY = 'auqw.sync.identity';
 const DEVICE_PREFIX = 'auqw.sync.device.';
 const SYNC_KEY_PREFIX = 'auqw.sync.';
+/**
+ * Marks a completed custody migration inside `sync-secure`. Without it
+ * the pass re-runs every boot — and a renderer-minted `auqw.sync.*`
+ * file planted through `secure:set` would be promoted into custody on
+ * the next one. Written only after a pass completes so a failed boot
+ * still retries; a missing sentinel on a dead-write just re-scans.
+ */
+const CUSTODY_MIGRATED = '.custody-migrated';
 
 /**
  * One-time custody move: builds before the `sync-secure` dir existed
@@ -40,19 +48,28 @@ export async function migrateSyncCustody(
   fromDir: string,
   toDir: string,
 ): Promise<void> {
+  // The custody dir is created lazily by the store's first set — on a
+  // first-boot-after-upgrade nothing has made it yet, and a rename
+  // into a missing dir would silently skip every eligible entry.
+  await mkdir(toDir, { recursive: true });
+  try {
+    await access(join(toDir, CUSTODY_MIGRATED));
+    return;
+  } catch (thrown) {
+    if (errorCode(thrown) !== 'ENOENT') {
+      throw shellError('io-error', 'sync key migration failed');
+    }
+  }
   let files: string[];
   try {
     files = await readdir(fromDir);
   } catch (thrown) {
     if (errorCode(thrown) === 'ENOENT') {
-      return;
+      files = [];
+    } else {
+      throw shellError('io-error', 'legacy secure dir could not be listed');
     }
-    throw shellError('io-error', 'legacy secure dir could not be listed');
   }
-  // The custody dir is created lazily by the store's first set — on a
-  // first-boot-after-upgrade nothing has made it yet, and a rename
-  // into a missing dir would silently skip every eligible entry.
-  await mkdir(toDir, { recursive: true });
   for (const file of files) {
     if (!file.startsWith(SYNC_KEY_PREFIX) || !file.endsWith('.b64')) {
       continue;
@@ -77,6 +94,11 @@ export async function migrateSyncCustody(
       }
     }
   }
+  // Mark only after the full pass — a dead write re-scans harmlessly
+  // next boot; a marked failure would strand unmigrated pairings.
+  await writeFile(join(toDir, CUSTODY_MIGRATED), '', 'utf8').catch(
+    () => undefined,
+  );
 }
 
 function deviceKey(id: string): string {
