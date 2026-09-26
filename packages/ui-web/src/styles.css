@@ -849,6 +849,9 @@
 .uw-collection {
   display: flex;
   align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+  text-align: left;
   border-radius: var(--radius-control);
   border: var(--stroke-hairline) solid var(--hairline);
   background: var(--raised);
@@ -856,23 +859,6 @@
 .uw-collection:hover:not(:disabled) {
   border-color: var(--fg40);
   background: var(--fg08);
-}
-/* The tile tints as one surface — the inner pressable and the play
-   chip don't layer their own grays over it. */
-.uw-collection .uw-collection__body:hover:not(:disabled) {
-  background: transparent;
-}
-.uw-collection .uw-icon-btn:hover:not(:disabled) {
-  background: var(--accent-soft);
-}
-.uw-collection__body {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  flex: 1;
-  min-width: 0;
-  padding: var(--spacing-lg);
-  text-align: left;
 }
 .uw-collection__icon {
   width: 44px;
@@ -887,17 +873,13 @@
 .uw-collection.uw-off .uw-collection__icon {
   background: var(--fg08);
 }
-.uw-collection__text {
+.uw-collection__label {
   flex: 1;
   min-width: 0;
 }
-.uw-collection .uw-icon-btn {
-  margin-right: var(--spacing-sm);
-  border-radius: var(--radius-pill);
-  background: var(--accent-soft);
-}
-.uw-collection .uw-icon-btn:hover:not(:disabled) {
-  box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fg25);
+.uw-collection__count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 .uw-library__controls {
   display: flex;

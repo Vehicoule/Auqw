@@ -567,7 +567,6 @@ export function GalleryScreen() {
               onToggleLike={noop}
               onContext={noop}
               onOpenCollection={noop}
-              onPlayCollection={noop}
               onOpenCard={noop}
               onOpenArtist={noop}
               onCreatePlaylist={noop}
@@ -584,7 +583,6 @@ export function GalleryScreen() {
               onToggleLike={noop}
               onContext={noop}
               onOpenCollection={noop}
-              onPlayCollection={noop}
               onOpenCard={noop}
               onOpenArtist={noop}
               onCreatePlaylist={noop}

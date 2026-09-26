@@ -2633,9 +2633,6 @@ function Main({
             onOpenCollection={(key) =>
               pushOverlay({ type: 'collection', key })
             }
-            onPlayCollection={(key) =>
-              playCollectionRows(libraryModel.collectionRows[key])
-            }
             onOpenCard={onOpenCard}
             onOpenArtist={(artist) => {
               if (artist.entityRef !== null) {
