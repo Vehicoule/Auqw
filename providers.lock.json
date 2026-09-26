@@ -1,7 +1,7 @@
 {
   "abi": "0.3.0",
-  "keyId": "e6023b53aa9bfb3c",
-  "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAf/5wVc9Z77RIV9L8sawzrgJGMKX6L/HRBB+12tqpBuQ=\n-----END PUBLIC KEY-----\n",
+  "keyId": "42d8cac606f16c04",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAod2fwRab5awpUL9V4rzEWJd0RTypNftU8pkeWzzENCA=\n-----END PUBLIC KEY-----\n",
   "plugins": [
     {
       "id": "itunes",
@@ -12,10 +12,10 @@
     },
     {
       "id": "youtube-music",
-      "version": "0.3.1",
+      "version": "0.3.3",
       "abi": "0.3.0",
-      "digest": "sha256:26fa066b5b912da7bb89154bc0c854f102ebb5794b3d53d51e7b469fdc7bd0ad",
-      "source": "release:../auqw-plugins/releases/youtube-music/0.3.1"
+      "digest": "sha256:8e30df56fc05d3dd68495192f55bad8797a589a331d4ff150e54948aa00964f9",
+      "source": "release:../auqw-plugins/releases/youtube-music/0.3.3"
     },
     {
       "id": "deezer",
