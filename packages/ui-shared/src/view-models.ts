@@ -26,7 +26,11 @@ import type {
   SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
-import { ARTWORK_CACHE_BUDGET_DEFAULT_BYTES, topPlayed } from '@auqw/application';
+import {
+  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  matchDisplayKey,
+  topPlayed,
+} from '@auqw/application';
 import { t } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
@@ -475,23 +479,40 @@ export function toCorrectionsModel(input: {
     )
     .map((review) => {
       const recording = byId.get(review.recordingId);
+      // One row per display group: parked candidates that render
+      // identically (same provider + normalized title/artist + same
+      // shown duration) collapse to their representative — the first
+      // parked member — whose stored index is what `confirm` indexes.
+      const seen = new Set<string>();
+      const candidates: ReviewCandidateModel[] = [];
+      review.candidates.forEach((candidate, index) => {
+        const key = matchDisplayKey({
+          provider: candidate.ref.provider,
+          title: candidate.metadata.title,
+          artist: candidate.metadata.artist ?? null,
+          durationMs: candidate.metadata.durationMs ?? null,
+        });
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        candidates.push({
+          index,
+          title: candidate.metadata.title,
+          subtitle:
+            `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}` +
+            (candidate.metadata.durationMs !== null
+              ? ` · ${formatClock(candidate.metadata.durationMs)}`
+              : ''),
+        });
+      });
       return {
         reviewId: review.reviewId,
         title: recording?.title ?? t('corrections.unknownRecording'),
         artist: recording?.artist ?? null,
         status: review.status,
         statusLabel: reviewStatusLabel(review),
-        candidates: review.candidates.map((candidate, index) => ({
-          index,
-          title: candidate.metadata.title,
-          // Duration disambiguates rows a provider lists under several
-          // ids with the same display title (audio vs video upload).
-          subtitle:
-            `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}` +
-            (candidate.metadata.durationMs !== null
-              ? ` · ${formatClock(candidate.metadata.durationMs)}`
-              : ''),
-        })),
+        candidates,
       };
     });
   const pending = rows.filter((row) => row.status === 'pending').length;

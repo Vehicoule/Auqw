@@ -19,7 +19,7 @@ import {
   toSettingsModel,
   toTrackRowModel,
 } from '@auqw/ui-shared';
-import type { LyricsSheet } from '@auqw/application';
+import type { LyricsSheet, SourceRef } from '@auqw/application';
 import type {
   QueueModel,
   TrackRowModel,
@@ -1020,6 +1020,54 @@ function testCorrectionsModel(): void {
   assert(
     pending.candidates.every((c) => c.subtitle.includes('·')),
     'candidate subtitle carries artist + provider',
+  );
+  // Display-identical parked members collapse to one row; the shown
+  // index stays the representative's stored index for confirmReview.
+  const collapsed = toCorrectionsModel({
+    reviews: [
+      {
+        reviewId: 'rev-dup',
+        recordingId: fixtureRecordings[0]!.id,
+        candidates: [200_000, 200_000, 300_000].map((durationMs, i) => {
+          const ref: SourceRef = {
+            provider: 'youtube-music',
+            kind: 'track',
+            id: `y${i}`,
+          };
+          return {
+            ref,
+            metadata: {
+              sourceRef: ref,
+              title: 'Song',
+              artist: 'Artist',
+              album: null,
+              durationMs,
+              releaseYear: null,
+              artwork: [],
+              explicit: null,
+              genre: null,
+              storefront: null,
+            },
+          };
+        }),
+        status: 'pending',
+        resolution: null,
+        createdMs: 1,
+        resolvedMs: null,
+      },
+    ],
+    error: null,
+    recordings: fixtureRecordings,
+    filter: 'all',
+  });
+  assertDeepEqual(
+    collapsed.rows[0]?.candidates.map((c) => c.index),
+    [0, 2],
+    'identical rows collapse; a different shown duration stays',
+  );
+  assert(
+    collapsed.rows[0]?.candidates[1]?.subtitle.includes('5:00'),
+    'distinct row shows its duration',
   );
   // Confirmed rows name their resolution provider.
   const confirmed = model.rows.find((r) => r.status === 'confirmed');

@@ -286,8 +286,9 @@ function adversarialTests(): void {
   }
 
   // 9b. The collapse precedes the margin check: two identical display
-  // rows plus a genuinely different near-tie still gate, listing one
-  // row per distinct choice.
+  // rows plus a genuinely different near-tie still gate. The review
+  // parks every member (a reject must veto hidden duplicates too);
+  // display collapsing is the view-model's job.
   {
     const rA = ref();
     const rB = ref();
@@ -316,9 +317,58 @@ function adversarialTests(): void {
       ],
     );
     assert(out.type === 'ambiguous', `9b: ${out.type}`);
-    assertEqual(out.candidates.length, 2);
+    assertEqual(out.candidates.length, 3);
     assertEqual(out.candidates[0]?.candidate.sourceRef, rA);
-    assertEqual(out.candidates[1]?.candidate.sourceRef, rC);
+    assertEqual(out.candidates[1]?.candidate.sourceRef, rB);
+    assertEqual(out.candidates[2]?.candidate.sourceRef, rC);
+  }
+
+  // 9c. Same title and artist but a different shown duration is a
+  // distinct choice, not a duplicate: the review rows stay
+  // distinguishable, so the near-tie still gates. The recording has
+  // no duration, so scoring can't separate the two on that axis.
+  {
+    const rA = ref();
+    const rB = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist' }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 300_000,
+          sourceRef: rB,
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9c: ${out.type}`);
+    assertEqual(out.candidates.length, 2);
+    // Sub-second metadata drift still renders the same clock and stays
+    // one display group.
+    const drift = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_400,
+          sourceRef: rB,
+        }),
+      ],
+    );
+    assert(drift.type === 'matched', `9c-drift: ${drift.type}`);
   }
 
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.

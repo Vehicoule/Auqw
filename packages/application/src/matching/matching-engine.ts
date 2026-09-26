@@ -221,18 +221,38 @@ function normalizeFree(text: string): string {
 }
 
 /**
- * What the review row actually shows: title + `artist · provider`.
- * A provider often lists the same song under several ids (album audio,
- * topic video, short uploads) — those candidates are one choice, not
- * two, and a tie between them is a phantom that would gate a
- * confident match on rows the user cannot tell apart.
+ * What a review row actually shows: title + `artist · provider ·
+ * duration`. A provider often lists the same song under several ids
+ * (album audio, topic video, short uploads) — those candidates are
+ * one choice, not two, and a tie between them is a phantom that would
+ * gate a confident match on rows the user cannot tell apart.
+ * Duration is bucketed to the displayed clock (whole seconds), so two
+ * listings off by sub-second metadata still render as one row while
+ * genuinely different-length tracks stay distinct choices.
  */
-function displayKey(candidate: MatchCandidate): string {
+export function matchDisplayKey(candidate: {
+  readonly provider: string;
+  readonly title: string;
+  readonly artist: string | null;
+  readonly durationMs: number | null;
+}): string {
   return [
-    candidate.sourceRef.provider,
+    candidate.provider,
     normalizeFree(candidate.title),
     normalizeFree(candidate.artist ?? ''),
+    candidate.durationMs === null || !Number.isFinite(candidate.durationMs)
+      ? ''
+      : Math.floor(candidate.durationMs / 1000).toString(),
   ].join('\u001f');
+}
+
+function displayKey(candidate: MatchCandidate): string {
+  return matchDisplayKey({
+    provider: candidate.sourceRef.provider,
+    title: candidate.title,
+    artist: candidate.artist ?? null,
+    durationMs: candidate.durationMs ?? null,
+  });
 }
 
 type Scored = {
@@ -340,10 +360,28 @@ export class MatchingEngine {
       return { type: 'matched', candidate: top.candidate, evidence: top.evidence };
     }
     if (top.evidence.score >= 65 && margin < 7) {
-      const near = distinct
-        .filter((s) => top.evidence.score - s.evidence.score < 7)
-        .slice(0, 5)
-        .map((s) => ({ candidate: s.candidate, evidence: s.evidence }));
+      // The review parks every near-tie member — not just the display
+      // representatives — because a reject vetoes each parked ref and
+      // a hidden duplicate surviving the veto would auto-match on the
+      // next attempt, silently undoing the user's verdict. The cap
+      // counts display groups, so one provider listing the same song
+      // many times can't crowd the distinct choices out of the review.
+      const near: { candidate: MatchCandidate; evidence: MatchEvidence }[] =
+        [];
+      const parkedGroups = new Set<string>();
+      for (const s of scored) {
+        if (top.evidence.score - s.evidence.score >= 7) {
+          break;
+        }
+        const key = displayKey(s.candidate);
+        if (!parkedGroups.has(key)) {
+          if (parkedGroups.size >= 5) {
+            break;
+          }
+          parkedGroups.add(key);
+        }
+        near.push({ candidate: s.candidate, evidence: s.evidence });
+      }
       return { type: 'ambiguous', candidates: near };
     }
     return { type: 'unavailable', reason: 'below threshold' };
