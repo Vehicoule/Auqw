@@ -3,7 +3,6 @@ import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import { isSafeNonNegative } from '../domain.ts';
 import type { SyncClient, SyncClientStatus } from './sync-client.ts';
-import { cursorToSince } from './sync-wire.ts';
 
 /**
  * Application-level sync scheduling (docs/specs/sync.md): the client
@@ -136,16 +135,16 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
   }
 
   /**
-   * Serialized custody cursor for a peer — the per-page watermark
-   * doubles as a progress probe: it only moves when a round actually
-   * exchanged entries. Null while the peer has no status view.
+   * Did the peer's last completed round move entries in either
+   * direction? `lastRound` records the exchange even when the round
+   * failed — the custody cursor alone can't see a phone-only upload.
    */
-  function peerCursorKey(fp: string): string | null {
+  function lastRoundMoved(fp: string): boolean {
     const view = views?.peers.find((v) => v.peer.fp === fp);
-    if (view === undefined) {
-      return null;
-    }
-    return cursorToSince(view.peer.peerCursor);
+    const round = view?.lastRound;
+    return (
+      round !== undefined && round.remoteEntries + round.sentEntries > 0
+    );
   }
 
   /**
@@ -212,7 +211,6 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     let reconnectMs: number | null = null;
     /** A page-capped round that still moved entries continues once. */
     let progressed = false;
-    const cursorBefore = peerCursorKey(fp);
     try {
       const result = await deps.client.syncNow(fp, lifecycle.signal);
       if (result.ok) {
@@ -227,12 +225,12 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
           track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         } else if (
           result.error.kind === 'budget-exceeded' &&
-          peerCursorKey(fp) !== cursorBefore
+          lastRoundMoved(fp)
         ) {
           // The page cap cut a still-moving exchange: custody persists
           // per page, so the follow-up resumes where this round left
-          // off. A stalled round moves nothing — no continuation, and
-          // the chain can never spin.
+          // off in both directions. A stalled round moved nothing —
+          // no continuation, and the chain can never spin.
           progressed = true;
         }
       }

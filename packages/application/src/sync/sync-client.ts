@@ -122,6 +122,12 @@ export type SyncPeerView = {
   readonly state: SyncPeerState;
   readonly syncing: boolean;
   readonly lastError?: AppError;
+  /**
+   * Exchange counters of the most recent completed round — present
+   * on failed rounds too, so a page-capped exchange that still
+   * moved entries is distinguishable from a stalled one.
+   */
+  readonly lastRound?: SyncRoundOutcome;
 };
 
 export type SyncClientStatus = {
@@ -266,6 +272,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   const peers = new Map<string, SyncPeer>();
   const views = new Map<string, PeerView>();
   const sessions = new Map<string, ClientSession>();
+  /** Latest completed round's counters per peer — set even on
+   *  failure, since the verdict alone can't express progress. */
+  const lastRounds = new Map<string, SyncRoundOutcome>();
   /** In-flight dials keyed by fp — concurrent syncNow shares one. */
   const connecting = new Map<
     string,
@@ -287,6 +296,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       peers: [...peers.values()].map((peer) => {
         const view = views.get(peer.fp);
         const session = sessions.get(peer.fp);
+        const lastRound = lastRounds.get(peer.fp);
         return {
           peer,
           state: view?.state ?? 'offline',
@@ -294,6 +304,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           ...(view?.lastError !== undefined
             ? { lastError: view.lastError }
             : {}),
+          ...(lastRound !== undefined ? { lastRound } : {}),
         };
       }),
     };
@@ -861,6 +872,16 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         rounds,
       });
     } finally {
+      // Recorded on success and failure alike: the scheduler reads
+      // the exchange counters to tell a capped-but-moving round
+      // (worth a continuation) from a stalled cap (terminal here).
+      lastRounds.set(peer.fp, {
+        peerFp: session.peerFp,
+        remoteEntries,
+        sentEntries,
+        divergence,
+        rounds,
+      });
       cleanup();
       emit();
     }

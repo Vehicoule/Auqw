@@ -2730,11 +2730,62 @@ async function releaseRetry(): Promise<void> {
     calls(r, 'release').filter(
       (c) => (c.input as { handle: string }).handle === 'h-oA',
     ).length;
-  assertEqual(releaseCallsA(), 1, 'first release attempted');
-  // A stale prepared event for A retries the release and succeeds.
+  assertEqual(
+    releaseCallsA(),
+    2,
+    'teardown re-offers a failed release immediately',
+  );
+  // A stale prepared event for A finds the handle already released —
+  // the coalesced release spent nothing extra on it.
   r.player.emit(preparedEvent(idA, 'h-oA'));
   await pump();
-  assertEqual(releaseCallsA(), 2, 'failed release is retried');
+  assertEqual(releaseCallsA(), 2, 'released handle stays released');
+}
+
+async function failedRetryReleaseIsNotStranded(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('oA', 'rA', ref('youtube-music', 'yA'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const idA = lastPrepareIdentity(r);
+  const releaseCallsA = () =>
+    calls(r, 'release').filter(
+      (c) => (c.input as { handle: string }).handle === 'h-oA',
+    ).length;
+  // Mid-play failure → the auto-retry detaches the dead handle
+  // (stale events must stay rejected), but its release failing
+  // mid-handoff must not strand it — the next attempt's teardown
+  // re-offers the release once.
+  r.player.setNextResult(err(appError('transient', 'release failed')));
+  r.player.emit(statusEvent(idA, 'h-oA', 'failed', 5_000));
+  await pump();
+  assertEqual(releaseCallsA(), 1, 'release attempted at handoff');
+  assertEqual(calls(r, 'prepare').length, 1, 'backoff, not re-prepare');
+  r.clock.advance(400);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'retry re-prepared');
+  assertEqual(
+    releaseCallsA(),
+    2,
+    'teardown re-offered the leaked handle',
+  );
+  // The retried attempt's fresh stream settles normally.
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-oB'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-h-oB')), 'pending retry prepare');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'buffering');
 }
 
 async function statusBoundary(): Promise<void> {
@@ -4156,6 +4207,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['retryAfterBeyondBudget', retryAfterBeyondBudget],
   ['listenedMsCarriesAcrossRetry', listenedMsCarriesAcrossRetry],
   ['releaseRetry', releaseRetry],
+  ['failedRetryReleaseIsNotStranded', failedRetryReleaseIsNotStranded],
   ['statusBoundary', statusBoundary],
   ['staleFailCannotClobber', staleFailCannotClobber],
   ['phaseLogFixed', phaseLogFixed],

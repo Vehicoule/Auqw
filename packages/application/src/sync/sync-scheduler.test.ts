@@ -36,9 +36,18 @@ function outcome(fp: string): SyncRoundOutcome {
  */
 class FakeSyncClient implements SyncClient {
   peersList: SyncPeer[] = [];
-  peerViews = new Map<string, { state: SyncPeerView['state']; lastError?: AppError }>();
+  peerViews = new Map<
+    string,
+    {
+      state: SyncPeerView['state'];
+      lastError?: AppError;
+      lastRound?: SyncRoundOutcome;
+    }
+  >();
   syncNowCalls: string[] = [];
   outcomes: Result<SyncRoundOutcome>[] = [];
+  /** Per-call `lastRound` reports, consumed in syncNow order. */
+  lastRounds: SyncRoundOutcome[] = [];
   #listeners = new Set<(status: SyncClientStatus) => void>();
 
   status(): SyncClientStatus {
@@ -50,6 +59,9 @@ class FakeSyncClient implements SyncClient {
           peer: p,
           state: view?.state ?? 'offline',
           syncing: false,
+          ...(view?.lastRound !== undefined
+            ? { lastRound: view.lastRound }
+            : {}),
         };
         return view?.lastError === undefined
           ? out
@@ -83,6 +95,12 @@ class FakeSyncClient implements SyncClient {
   syncNow(fp: string, _signal?: CancellationSignal): Promise<Result<SyncRoundOutcome>> {
     this.syncNowCalls.push(fp);
     const next = this.outcomes.shift();
+    const report = this.lastRounds.shift();
+    if (report !== undefined) {
+      const view = this.peerViews.get(fp) ?? { state: 'open' as const };
+      this.peerViews.set(fp, { ...view, lastRound: report });
+      this.emitStatus();
+    }
     return Promise.resolve(next ?? ok(outcome(fp)));
   }
 
@@ -520,23 +538,30 @@ async function pageCapProgressContinues(): Promise<void> {
   clock.advance(0);
   await pump();
   assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
-  // A capped round that moved the custody cursor books one bounded
-  // continuation — it resumes from the persisted page. The next
-  // round stalls with the cursor unmoved → terminal, no spin.
-  let capped = 0;
-  client.syncNow = (fp) => {
-    client.syncNowCalls.push(fp);
-    capped += 1;
-    if (capped === 1) {
-      client.peersList = client.peersList.map((p) =>
-        p.fp === fp ? { ...p, peerCursor: { desk: 9 } } : p,
-      );
-      client.emitStatus();
-    }
-    return Promise.resolve(
-      err(appError('budget-exceeded', 'page cap reached')),
-    );
-  };
+  // A capped round that still moved entries books one bounded
+  // continuation — here a phone-only upload, where the desktop's
+  // custody cursor never moves. The next round moves nothing →
+  // terminal, no spin.
+  client.outcomes = [
+    err(appError('budget-exceeded', 'page cap reached')),
+    err(appError('budget-exceeded', 'page cap reached')),
+  ];
+  client.lastRounds = [
+    {
+      peerFp: 'fp-a',
+      remoteEntries: 0,
+      sentEntries: 9,
+      divergence: 0,
+      rounds: 64,
+    },
+    {
+      peerFp: 'fp-a',
+      remoteEntries: 0,
+      sentEntries: 0,
+      divergence: 0,
+      rounds: 1,
+    },
+  ];
   scheduler.notifyLocalWrites();
   clock.advance(500);
   await pump();
@@ -565,12 +590,64 @@ async function pageCapProgressContinues(): Promise<void> {
   scheduler.stop();
 }
 
+async function stopStartAcrossInFlightRound(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A round still in flight across stop() → start(): the restart's
+  // launch fan-out collapses into dirty (a round is running), and
+  // the stale resolution drains under the new lifecycle — one
+  // follow-up, no duplicate wakes, no lost write.
+  let resolveRound: (r: Result<SyncRoundOutcome>) => void = () => { };
+  client.syncNow = (fp) => {
+    client.syncNowCalls.push(fp);
+    return new Promise((resolve) => {
+      resolveRound = resolve;
+    });
+  };
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'round in flight');
+  scheduler.stop();
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'restart does not double-run the in-flight peer',
+  );
+  // The stale round resolves ok under the dead lifecycle — the
+  // pending write still earns exactly one round on the new one.
+  client.syncNow = (fp) => {
+    client.syncNowCalls.push(fp);
+    return Promise.resolve(ok(outcome(fp)));
+  };
+  resolveRound(ok(outcome('fp-a')));
+  await pump();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'dirty follow-up ran once');
+  clock.advance(10_000);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 3, 'no stale wake follows');
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
   await writeBurstTrailingEdge();
   await writeStandsBehindBackoff();
   await pageCapProgressContinues();
+  await stopStartAcrossInFlightRound();
   await reconnectBackoff();
   await sessionDropReconnect();
   await connectivityEdges();

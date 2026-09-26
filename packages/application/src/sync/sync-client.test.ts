@@ -903,6 +903,49 @@ async function incompleteRoundFailsHonest(): Promise<void> {
   const view = client.status().peers[0];
   assert(view !== undefined && view.state === 'open', 'session survived');
   assertEqual(view.lastError?.kind, 'budget-exceeded');
+  // The failed round still reports its exchange counters — a stall
+  // shows zero movement, which is how the scheduler knows not to
+  // book a continuation for it.
+  assert(view.lastRound !== undefined, 'failed round reports counters');
+  assertEqual(view.lastRound.remoteEntries, 0, 'stall moved nothing in');
+  assertEqual(view.lastRound.sentEntries, 0, 'stall moved nothing out');
+  await client.close();
+}
+
+// 19b. A capped round that still moved entries reports both
+// directions on the view — a phone-only upload never moves the
+// desktop's custody cursor, so `lastRound` is the progress probe
+// the scheduler continues on.
+async function cappedRoundReportsMovedEntries(): Promise<void> {
+  const { client, clientEngine, server, keys } = await rig();
+  keys.seed({
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  server.forceDeltaMore = true;
+  assert(
+    (
+      await clientEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-phone',
+        field: 'name',
+        value: 'Phone Mix',
+      })
+    ).ok,
+    'phone write',
+  );
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(!outcome.ok && outcome.error.kind === 'budget-exceeded');
+  const view = client.status().peers[0];
+  assert(view !== undefined && view.lastRound !== undefined);
+  assert(
+    view.lastRound.sentEntries > 0,
+    'upload direction moved before the cap',
+  );
   await client.close();
 }
 
@@ -1038,6 +1081,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
   ['oversizedExportPaginates', oversizedExportPaginates],
   ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
+  ['cappedRoundReportsMovedEntries', cappedRoundReportsMovedEntries],
   ['rePairKeepsWatermark', rePairKeepsWatermark],
   ['failedRePairKeepsPeer', failedRePairKeepsPeer],
 ];

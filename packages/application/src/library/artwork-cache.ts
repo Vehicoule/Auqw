@@ -476,8 +476,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
           failures.delete(url);
           failures.set(url, {
             error: downloaded.error,
+            // retryAfterMs can only lengthen the hold — a zero or
+            // tiny server hint must not defeat negative caching.
             untilMs: Math.min(
-              now + (downloaded.error.retryAfterMs ?? FAILURE_TTL_MS),
+              now + Math.max(downloaded.error.retryAfterMs ?? 0, FAILURE_TTL_MS),
               Number.MAX_SAFE_INTEGER,
             ),
           });

@@ -274,6 +274,118 @@ async function brokenClockIsInternal(): Promise<void> {
   assert(!result.ok && result.error.kind === 'internal');
 }
 
+async function invalidOptionsFallBackSafely(): Promise<void> {
+  const { clock, source } = rig();
+  // A non-finite deadline binds nothing at all — caller misuse is
+  // internal, and the call never runs.
+  const s = scripted([ok('never')]);
+  const nanDeadline = await retryBounded({
+    deadlineMs: Number.NaN,
+    signal: source.signal,
+    clock,
+    call: s.call,
+  });
+  assert(!nanDeadline.ok && nanDeadline.error.kind === 'internal');
+  const infDeadline = await retryBounded({
+    deadlineMs: Number.POSITIVE_INFINITY,
+    signal: source.signal,
+    clock,
+    call: s.call,
+  });
+  assert(!infDeadline.ok && infDeadline.error.kind === 'internal');
+  assertEqual(s.calls.length, 0, 'a binding check precedes any call');
+
+  // A maxAttempts that cannot bound falls back to the default —
+  // NaN would otherwise mean "never reach the cap" forever.
+  const s2 = scripted([err(appError('transient', 'a')), ok('b')]);
+  const p2 = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    maxAttempts: Number.NaN,
+    call: s2.call,
+  });
+  await settle();
+  clock.advance(1_000);
+  const r2 = await p2;
+  assert(r2.ok, 'NaN maxAttempts falls back to the default');
+  assertEqual(s2.calls.length, 2);
+
+  // A fractional cap floors to an integer bound.
+  const s3 = scripted([
+    err(appError('transient', 'a')),
+    err(appError('transient', 'b')),
+    ok('c'),
+  ]);
+  const p3 = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    maxAttempts: 2.9,
+    call: s3.call,
+  });
+  await settle();
+  clock.advance(1_000);
+  const r3 = await p3;
+  assert(!r3.ok && r3.error.kind === 'transient');
+  assertEqual(s3.calls.length, 2, '2.9 floors to 2 attempts');
+
+  // A negative backoff cannot squeeze the wait to zero — the
+  // default still sleeps before the retry.
+  const s4 = scripted([err(appError('transient', 'a')), ok('d')]);
+  const p4 = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    baseBackoffMs: -50,
+    call: s4.call,
+  });
+  await settle();
+  clock.advance(299);
+  await settle();
+  assertEqual(s4.calls.length, 1, 'negative backoff still waits');
+  clock.advance(1);
+  const r4 = await p4;
+  assert(r4.ok);
+  assertEqual(s4.calls.length, 2);
+}
+
+async function nonFiniteRetryAfterStandsVerdict(): Promise<void> {
+  const { clock, source } = rig();
+  // A wait the budget cannot express is the same as one that
+  // outlives it: the provider's verdict stands rather than a retry
+  // firing on a garbage floor.
+  const s = scripted([
+    err(appError('rate-limit', 'slow', Number.NaN)),
+    ok('never'),
+  ]);
+  const result = await retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    call: s.call,
+  });
+  assert(!result.ok && result.error.kind === 'rate-limit');
+  assertEqual(s.calls.length, 1, 'non-finite hint never retries');
+
+  // A negative hint floors at zero — the backoff still applies.
+  const s2 = scripted([
+    err(appError('rate-limit', 'neg', -500)),
+    ok('b'),
+  ]);
+  const pending = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    call: s2.call,
+  });
+  await settle();
+  clock.advance(1_000);
+  const r2 = await pending;
+  assert(r2.ok, 'negative hint retries at the normal backoff');
+  assertEqual(s2.calls.length, 2);
+}
+
 export async function run(): Promise<void> {
   await succeedsFirstTry();
   await transientThenSuccess();
@@ -288,4 +400,6 @@ export async function run(): Promise<void> {
   await attemptNumberPassed();
   await timeoutVerdictAfterBudgetBurn();
   await brokenClockIsInternal();
+  await invalidOptionsFallBackSafely();
+  await nonFiniteRetryAfterStandsVerdict();
 }

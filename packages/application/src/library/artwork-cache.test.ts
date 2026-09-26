@@ -368,6 +368,35 @@ async function negativeCacheExpiry(): Promise<void> {
   assertEqual(r.fetch.calls.length, 4);
 }
 
+async function zeroRetryAfterStillNegativeCaches(): Promise<void> {
+  const r = rig(persisted());
+  // retryAfterMs: 0 is a floor, not a bypass — the verdict still
+  // negative-caches for the default TTL instead of expiring
+  // immediately and letting remounts re-hammer the dead url.
+  r.fetch.respond(() => err(appError('rate-limit', 'slow down', 0)));
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await pending;
+  assert(!failed.ok && failed.error.kind === 'rate-limit');
+  assertEqual(r.fetch.calls.length, 2, 'in-window retry ran');
+  for (let i = 0; i < 3; i += 1) {
+    const hit = await r.cache.get(A, ctx());
+    assert(!hit.ok && hit.error.kind === 'rate-limit');
+  }
+  assertEqual(
+    r.fetch.calls.length,
+    2,
+    'a zero retry hint cannot expire the verdict early',
+  );
+  // Past the default TTL the url earns a fresh try — and heals.
+  r.fetch.respondBytes(4 * MB);
+  r.clock.advance(25_000);
+  const healed = await r.cache.get(A, ctx());
+  assert(healed.ok, 'expired verdict refetches');
+  assertEqual(r.fetch.calls.length, 3);
+}
+
 async function cancelledGetIsNotNegativeCached(): Promise<void> {
   const r = rig(persisted());
   const source = new CancellationSource();
@@ -746,6 +775,7 @@ export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
   await negativeCacheExpiry();
+  await zeroRetryAfterStillNegativeCaches();
   await cancelledGetIsNotNegativeCached();
   await transientRetryRecovers();
   await invalidUrls();

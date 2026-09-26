@@ -654,6 +654,13 @@ export class Session {
   #ready: Ready | null = null;
   #active: ActiveAttempt | null = null;
   #releasedHandles = new Set<string>();
+  /**
+   * Streams whose release call failed — off the attempt's `handle`
+   * slot so their events can't reach a newer attempt, but still
+   * session-owned so teardown can re-offer the release instead of
+   * stranding a native handle for the rest of the session.
+   */
+  #leakedHandles = new Map<string, PlaybackIdentity>();
   #releaseWork = new Map<string, Promise<Result<void>>>();
   #timers = new Set<CancellationSource>();
   #opSources = new Set<CancellationSource>();
@@ -4670,6 +4677,25 @@ export class Session {
     if (attempt.handle !== undefined) {
       await this.#releaseHandle(attempt.handle, attempt.identity);
     }
+    await this.#drainLeakedHandles();
+  }
+
+  /**
+   * Handles dropped from an attempt after a failed release get a
+   * fresh coalesced re-offer — once per drain, so a dead release
+   * can't strand a native handle for the session's life.
+   */
+  async #drainLeakedHandles(): Promise<void> {
+    if (this.#leakedHandles.size === 0) {
+      return;
+    }
+    const leaked = [...this.#leakedHandles];
+    this.#leakedHandles.clear();
+    await Promise.allSettled(
+      leaked.map(([handle, identity]) =>
+        this.#releaseHandle(handle, identity),
+      ),
+    );
   }
 
   /** Supersede and tear down the current active attempt, if any. */
@@ -4704,6 +4730,10 @@ export class Session {
       this.#releaseWork.delete(handle);
       if (result.ok) {
         this.#releasedHandles.add(handle);
+        this.#leakedHandles.delete(handle);
+      } else {
+        // Ownership outlives the attempt slot: teardown re-offers.
+        this.#leakedHandles.set(handle, identity);
       }
       return result;
     })();
@@ -5714,6 +5744,8 @@ export class Session {
     this.#active = null;
     if (active !== null) {
       await this.#teardownAttempt(active);
+    } else {
+      await this.#drainLeakedHandles();
     }
     this.#playerUnsub();
     await this.#drainAll();

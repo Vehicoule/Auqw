@@ -50,6 +50,12 @@ function internalError(): AppError {
  * mint fresh request ids. When the budget is spent mid-retry the
  * last provider verdict stands; a deadline already dead on entry is
  * a timeout.
+ *
+ * Option values cross a public boundary, so they are normalized
+ * before use: a non-finite `deadlineMs` binds nothing and is an
+ * internal defect; a `maxAttempts` that is not a finite integer >= 1
+ * or a `baseBackoffMs` that is not finite and >= 0 falls back to the
+ * defaults rather than silently disabling the bounds.
  */
 export async function retryBounded<T>(
   opts: RetryOptions & {
@@ -59,8 +65,21 @@ export async function retryBounded<T>(
     ) => Promise<Result<T>>;
   },
 ): Promise<Result<T>> {
-  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const baseBackoffMs = opts.baseBackoffMs ?? DEFAULT_BACKOFF_MS;
+  if (!Number.isFinite(opts.deadlineMs)) {
+    return err(internalError());
+  }
+  const maxAttempts =
+    opts.maxAttempts !== undefined &&
+      Number.isFinite(opts.maxAttempts) &&
+      opts.maxAttempts >= 1
+      ? Math.floor(opts.maxAttempts)
+      : DEFAULT_MAX_ATTEMPTS;
+  const baseBackoffMs =
+    opts.baseBackoffMs !== undefined &&
+      Number.isFinite(opts.baseBackoffMs) &&
+      opts.baseBackoffMs >= 0
+      ? opts.baseBackoffMs
+      : DEFAULT_BACKOFF_MS;
   let lastError: AppError = timeoutError();
   for (let attempt = 1; ; attempt += 1) {
     let now: number;
@@ -98,12 +117,21 @@ export async function retryBounded<T>(
       return result;
     }
     // retryAfterMs is the server's minimum wait — a floor, never
-    // clamped down. Only the self-computed backoff gets the cap.
+    // clamped down. Only the self-computed backoff gets the cap. A
+    // non-finite hint expresses a wait no budget can hold — the
+    // verdict stands; a negative one floors at zero.
     const backoff = Math.min(
       baseBackoffMs * Math.pow(2, attempt - 1),
       MAX_BACKOFF_MS,
     );
-    const wait = Math.max(result.error.retryAfterMs ?? 0, backoff);
+    const asked = result.error.retryAfterMs;
+    const floor =
+      asked === undefined
+        ? 0
+        : !Number.isFinite(asked)
+          ? Number.POSITIVE_INFINITY
+          : Math.max(0, asked);
+    const wait = Math.max(floor, backoff);
     if (wait >= remaining) {
       // The asked-for wait outlives the budget — retrying into a
       // dead deadline can only time out.
