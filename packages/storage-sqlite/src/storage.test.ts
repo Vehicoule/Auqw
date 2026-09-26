@@ -1012,6 +1012,7 @@ function ownedSections(): OwnedSections {
   const recordings: Recording[] = [
     recording('r1', [ref('itunes', 'i1'), ref('youtube-music', 'y1')]),
     recording('r2', [ref('itunes', 'i2')]),
+    recording('r3', [ref('itunes', 'i3')]),
   ];
   return {
     recordings,
@@ -1184,6 +1185,20 @@ function ownedSections(): OwnedSections {
           instrumental: false,
         },
         fetchedMs: 81,
+      },
+      // A versionless provider's write: persists as '' and decodes
+      // back to an explicit null — cacheable, not stale.
+      {
+        recordingId: 'r3',
+        provider: 'lyrics-lrclib',
+        providerVersion: null,
+        kind: 'plain',
+        payload: {
+          plainLyrics: 'null-version words',
+          syncedLyrics: null,
+          instrumental: false,
+        },
+        fetchedMs: 82,
       },
     ],
     artworkCache: [

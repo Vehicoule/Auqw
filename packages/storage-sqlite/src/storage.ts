@@ -696,7 +696,13 @@ export class SqliteStorage implements StoragePort {
                 entry.kind,
                 JSON.stringify(entry.payload),
                 entry.fetchedMs,
-                entry.providerVersion ?? null,
+                // Three-way encoding: NULL = pre-versioning row,
+                // '' = recorded null provenance (a versionless
+                // provider's write), else the version string.
+                // Manifest versions are never empty, so '' is free.
+                entry.providerVersion === undefined
+                  ? null
+                  : (entry.providerVersion ?? ''),
               ],
               signal,
             );
@@ -1697,19 +1703,23 @@ function decodeState(rows: TableRows): PersistedState | null {
     if (kind !== 'plain' && kind !== 'synced') {
       fail();
     }
-    // A NULL provider_version marks a pre-versioning row — decode it
-    // as an absent field so the session treats it as stale and
-    // refetches once, rather than equating it with a null-versioned
-    // provider's writes.
+    // provider_version is three-way: NULL = a pre-versioning row
+    // (decodes as an absent field, so the session sees it stale and
+    // refetches once); '' = an explicitly-recorded null provenance
+    // from a versionless provider's write; else the version string.
+    const providerVersion = row['provider_version'];
     return {
       recordingId,
       provider: reqNonEmpty(row['provider']),
       kind: kind as LyricsCacheEntry['kind'],
       payload: json(row['payload_json']) as LyricsCacheEntry['payload'],
       fetchedMs: reqNonNegInt(row['fetched_ms']),
-      ...(row['provider_version'] === null
+      ...(providerVersion === null
         ? {}
-        : { providerVersion: reqStr(row['provider_version']) }),
+        : {
+            providerVersion:
+              providerVersion === '' ? null : reqStr(providerVersion),
+          }),
     };
   });
   const artworkUrls = new Set<string>();
