@@ -1,4 +1,4 @@
-import { FlatList, TextInput, View } from 'react-native';
+import { FlatList, ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -135,7 +135,12 @@ export function SearchScreen({
         )}
       </View>
       {draft && (
-        <View>
+        <ScrollView
+          style={{ flex: 1 }}
+          scrollEnabled={scrollEnabled}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
+        >
           <Text
             variant="label"
             color="secondary"
@@ -204,7 +209,7 @@ export function SearchScreen({
               </Text>
             </Pressable>
           ))}
-        </View>
+        </ScrollView>
       )}
       {!draft && state.phase === 'ready' && (
         <View
