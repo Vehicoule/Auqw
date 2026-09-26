@@ -1,0 +1,99 @@
+name: android-cache-warm
+
+# Actions caches written on a tag ref are only restorable by that tag —
+# a fresh release tag can only read caches saved on the default branch.
+# So the Gradle build cache that release.yml turns on would stay cold
+# forever without this job: on each merge to main that touches android
+# inputs it runs the same assembleRelease on the in-development line,
+# seeding ~/.gradle's build-cache + dependency cache under a ref every
+# future tag can restore. The APK it builds is throwaway (debug-signed
+# via the plugin's no-env fallback) — nothing uploads, nothing ships.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'modules/auqw-expo/**'
+      - 'packages/**'
+      - 'crates/mobile-bindings/**'
+      - 'providers.lock.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tooling/build-android-bindings.sh'
+      - 'tooling/sync-plugins.mjs'
+      - '.github/workflows/android-cache-warm.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-warm
+  # A newer merge makes an in-flight warm obsolete — the next cache
+  # save covers it; don't queue stale warm runs.
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Same sibling layout as release.yml — providers.lock.json
+      # resolves `release:../auqw-plugins/...`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: auqw
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      - run: |
+          rustup toolchain install 1.98.0 --profile minimal \
+            --target aarch64-linux-android --target x86_64-linux-android
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: auqw
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: auqw/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: auqw/pnpm-lock.yaml
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: cargo-ndk
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
+      # Mirrors release.yml's gradle tuning — the warm must write
+      # build-cache entries for the tasks the release will look up.
+      - name: gradle tuning
+        run: |
+          mkdir -p "$HOME/.gradle"
+          {
+            echo 'org.gradle.caching=true'
+            echo 'org.gradle.vfs.watch=true'
+            echo 'org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g'
+          } >> "$HOME/.gradle/gradle.properties"
+      - name: android inputs (bindings + plugins)
+        working-directory: auqw
+        env:
+          AUQW_ANDROID_ABIS: arm64-v8a
+        run: |
+          export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
+          ./tooling/build-android-bindings.sh
+          pnpm install --frozen-lockfile
+          node tooling/sync-plugins.mjs
+          pnpm --dir apps/mobile exec expo prebuild --platform android
+      - name: warm assembleRelease
+        working-directory: auqw/apps/mobile
+        # No signing env on purpose: the plugin falls back to debug
+        # signing, which is fine for a build whose artifact is
+        # discarded — and keeps keystore secrets out of a main-push job.
+        run: |
+          cd android && ./gradlew assembleRelease -Pauqw.abis=arm64-v8a -PreactNativeArchitectures=arm64-v8a
