@@ -237,9 +237,10 @@ type ProviderMethod =
   | 'entity'
   | 'artwork'
   | 'lyrics'
-  | 'radio';
+  | 'radio'
+  | 'suggest';
 
-const ALL_CAPABILITIES: readonly ProviderCapability[] = [
+export const ALL_CAPABILITIES: readonly ProviderCapability[] = [
   'catalog.search',
   'catalog.metadata',
   'catalog.artwork',
@@ -249,6 +250,7 @@ const ALL_CAPABILITIES: readonly ProviderCapability[] = [
   'lyrics.plain',
   'lyrics.synced',
   'radio.seed',
+  'catalog.suggest',
 ];
 
 function unsupportedCall(capability: ProviderCapability) {
@@ -275,6 +277,7 @@ export class FakeProvider implements ProviderPort {
     artwork: [],
     lyrics: [],
     radio: [],
+    suggest: [],
   };
 
   constructor(
@@ -497,6 +500,25 @@ export class FakeProvider implements ProviderPort {
 
   settleRadioAt(index: number, result: Result<RadioPage>): boolean {
     return this.#settle('radio', index, result);
+  }
+
+  suggest(
+    input: { input: string; limit?: number },
+    context: OperationContext,
+  ): Promise<Result<readonly string[]>> {
+    this.calls.push({ method: 'suggest', input, context });
+    if (!this.capabilities.includes('catalog.suggest')) {
+      return Promise.resolve(unsupportedCall('catalog.suggest'));
+    }
+    return this.#defer('suggest', context);
+  }
+
+  settleSuggest(result: Result<readonly string[]>): boolean {
+    return this.#settle('suggest', 0, result);
+  }
+
+  settleSuggestAt(index: number, result: Result<readonly string[]>): boolean {
+    return this.#settle('suggest', index, result);
   }
 
   settleDetails(result: Result<readonly TrackMetadata[]>): boolean {

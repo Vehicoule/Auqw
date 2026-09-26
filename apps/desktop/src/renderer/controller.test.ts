@@ -140,6 +140,7 @@ function fakeApi(): Rig {
           }),
       },
       chrome: {
+        platform: 'linux',
         setScheme: () => {},
       },
       dialog: {
@@ -271,6 +272,7 @@ function stubProvider(
     artwork: unavailable,
     getLyrics: unavailable,
     radioSeed: unavailable,
+    suggest: unavailable,
     dispose() {
       disposed?.push(id);
     },

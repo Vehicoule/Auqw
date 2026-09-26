@@ -32,6 +32,7 @@ import { createAppliedPushService } from './sync-events.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
+  syncHasPairedDevices,
 } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -122,6 +123,17 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   // The database lives in the utility child; its path is fork env
   // because the child owns no app.getPath('userData').
   env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
+  // Paired-device records mark an install that actually synced — an
+  // identity alone doesn't (the utility mints one on any sync start,
+  // including a passive settings visit). Armed installs keep an
+  // eager listener so paired devices still find it; fresh installs
+  // stay dormant — binding requires custody, and on macOS the
+  // safeStorage read is what fires the Keychain ACL prompt.
+  env['AUQW_SYNC_ARMED'] = syncHasPairedDevices(
+    join(userDataPath, 'sync-secure'),
+  )
+    ? '1'
+    : '0';
   if (!app.isPackaged) {
     // Dev checkouts resolve the bindings artifact from the repo and
     // may arm the dev-gate channel; packaged runs use resourcesPath.
@@ -283,7 +295,7 @@ async function main(): Promise<void> {
   // from the OS theme when the user picked an explicit one) so the
   // window-control overlay can re-tint itself to match the canvas.
   ipcMain.on(CHANNELS.chromeScheme, (event, scheme) => {
-    if (!isSchemeName(scheme)) {
+    if (!isSchemeName(scheme) || process.platform === 'darwin') {
       return;
     }
     const sender = BrowserWindow.fromWebContents(event.sender);
@@ -334,7 +346,7 @@ async function main(): Promise<void> {
 
 function titleBarOverlay(scheme: SchemeName): TitleBarOverlay {
   const tokens = schemes[scheme];
-  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 56 };
+  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 40 };
 }
 
 function isSchemeName(value: unknown): value is SchemeName {
@@ -343,14 +355,14 @@ function isSchemeName(value: unknown): value is SchemeName {
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   const state = stateRef.current;
+  const isMac = process.platform === 'darwin';
   const options: BrowserWindowConstructorOptions = {
     width: state.width,
     height: state.height,
     title: 'auqw',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: titleBarOverlay(
-      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
-    ),
+    // macOS draws a themed strip if a titleBarOverlay is given even under
+    // hiddenInset, so it gets the bare option instead.
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     webPreferences: {
       preload: PRELOAD,
       sandbox: true,
@@ -358,6 +370,13 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
       nodeIntegration: false,
     },
   };
+  if (isMac) {
+    options.trafficLightPosition = { x: 14, y: 12 };
+  } else {
+    options.titleBarOverlay = titleBarOverlay(
+      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    );
+  }
   if (!app.isPackaged) {
     options.icon = WINDOW_ICON;
   }

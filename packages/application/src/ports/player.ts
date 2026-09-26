@@ -67,8 +67,20 @@ function isBoundedString(value: unknown, max: number): value is string {
   );
 }
 
-/** Redacted trace URLs: scheme + host/path only, never query/fragment. */
+/**
+ * The trace entry the host writes in place of a pot-provider URL — the
+ * provider is an operator LAN address that must not reach diagnostics,
+ * even redacted. Emitted verbatim by plugin-host's `perform_call`
+ * (`collect_secrets` requests).
+ */
+export const POT_PROVIDER_TRACE_URL = '<pot-provider>';
+
+/** Redacted trace URLs: scheme + host/path only, never query/fragment.
+ * The pot-provider sentinel is allowed in place of a URL. */
 function isTraceUrl(value: unknown): value is string {
+  if (value === POT_PROVIDER_TRACE_URL) {
+    return true;
+  }
   return (
     isBoundedString(value, 2048) &&
     (value.startsWith('http://') || value.startsWith('https://')) &&

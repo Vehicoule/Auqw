@@ -472,6 +472,25 @@ function toPlainLyrics(value: unknown): LyricsResult | null {
   return null;
 }
 
+/** Wire `{suggestions: string[]}` → flat completion list. */
+function toSuggestionList(value: unknown): readonly string[] | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['suggestions'])) {
+    return null;
+  }
+  const suggestions = value['suggestions'];
+  if (!Array.isArray(suggestions)) {
+    return null;
+  }
+  const out: string[] = [];
+  for (const item of suggestions) {
+    if (typeof item !== 'string' || item.length === 0) {
+      return null;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 /** Wire `radioSeedResult` → domain `RadioPage`. */
 function toRadioPage(value: unknown): RadioPage | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items', 'continuation'])) {
@@ -554,6 +573,10 @@ function wireSourceRef(ref: SourceRef): Record<string, unknown> {
 
 function cancelledError(): AppError {
   return appError('cancelled', 'cancelled');
+}
+
+function timeoutError(): AppError {
+  return appError('timeout', 'operation deadline exceeded');
 }
 
 function invalidResult(): AppError {
@@ -647,13 +670,69 @@ export function createPluginProvider(
     if (signal.cancelled) {
       return Promise.resolve(err(cancelledError()));
     }
+    // The context deadline caps the handshake too — a stalled
+    // startRequest must not park the caller past it. Deadline timers
+    // re-arm in slices: setTimeout overflows past ~24.8 days, so a
+    // far-out deadline (e.g. a MAX_SAFE_INTEGER sentinel) re-checks
+    // instead of firing early.
+    const msLeft = context.deadlineMs - Date.now();
+    if (msLeft <= 0) {
+      return Promise.resolve(err(timeoutError()));
+    }
     return (async () => {
-      let requestId: string;
+      // Race the handshake against the deadline — a startRequest that
+      // outlives it still settles here, and its late id is cancelled.
+      let startTimer: ReturnType<typeof setTimeout> | undefined;
+      let expireStart: (() => void) | undefined;
+      const expired = new Promise<{ kind: 'expired' }>((res) => {
+        expireStart = () => res({ kind: 'expired' });
+      });
+      const armStartDeadline = (): void => {
+        startTimer = setTimeout(
+          () => {
+            if (context.deadlineMs - Date.now() <= 0) {
+              expireStart?.();
+            } else {
+              armStartDeadline();
+            }
+          },
+          Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
+        );
+      };
+      armStartDeadline();
+      let call: Promise<string>;
       try {
-        requestId = await host.startRequest(pluginId, capability, payload);
+        // A synchronous host throw is a typed failure, never a
+        // rejection; resolve() also normalizes a non-promise return.
+        call = Promise.resolve(
+          host.startRequest(pluginId, capability, payload),
+        );
       } catch (thrown) {
+        clearTimeout(startTimer);
         return err(nativeError(thrown));
       }
+      const started = call.then(
+        (id) => ({ kind: 'started' as const, id }),
+        (thrown) => ({ kind: 'threw' as const, thrown }),
+      );
+      const first = await Promise.race([started, expired]);
+      clearTimeout(startTimer);
+      if (first.kind === 'expired') {
+        void started.then((late) => {
+          if (
+            late.kind === 'started' &&
+            typeof late.id === 'string' &&
+            late.id.length > 0
+          ) {
+            host.cancel(late.id);
+          }
+        });
+        return err(timeoutError());
+      }
+      if (first.kind === 'threw') {
+        return err(nativeError(first.thrown));
+      }
+      const requestId = first.id;
       if (typeof requestId !== 'string' || requestId.length === 0) {
         return err(appError('invalid-response', 'empty request id'));
       }
@@ -667,12 +746,16 @@ export function createPluginProvider(
       }
       return new Promise<Result<T>>((resolve) => {
         let unsubscribe = (): void => { };
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         const finish = (result: Result<T>): void => {
           const entry = pending.get(requestId);
           if (entry === undefined) {
             return;
           }
           dropRequest(requestId, entry);
+          if (deadlineTimer !== undefined) {
+            clearTimeout(deadlineTimer);
+          }
           resolve(result);
         };
         const settle = (outcome: AuqwExpoRequestOutcome): void => {
@@ -710,10 +793,34 @@ export function createPluginProvider(
             return;
           }
           dropRequest(requestId, current);
+          if (deadlineTimer !== undefined) {
+            clearTimeout(deadlineTimer);
+          }
           // The request is dead to us either way; the host aborts it
           // and any late outcome is dropped.
           host.cancel(requestId);
           resolve(err(cancelledError()));
+        };
+        const timeoutInFlight = (): void => {
+          const current = pending.get(requestId);
+          if (current === undefined) {
+            return;
+          }
+          dropRequest(requestId, current);
+          host.cancel(requestId);
+          resolve(err(timeoutError()));
+        };
+        const armDeadlineTimer = (): void => {
+          deadlineTimer = setTimeout(
+            () => {
+              if (context.deadlineMs - Date.now() <= 0) {
+                timeoutInFlight();
+              } else {
+                armDeadlineTimer();
+              }
+            },
+            Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
+          );
         };
         const entry: Pending = {
           unsubscribe: () => unsubscribe(),
@@ -722,6 +829,7 @@ export function createPluginProvider(
         };
         pending.set(requestId, entry);
         unsubscribe = signal.subscribe(cancelInFlight);
+        armDeadlineTimer();
         const stashed = early.get(requestId);
         if (stashed !== undefined) {
           early.delete(requestId);
@@ -847,6 +955,18 @@ export function createPluginProvider(
           : { continuation: input.continuation },
         context,
         toRadioPage,
+      );
+    },
+    suggest(input, context) {
+      const blocked = guard('catalog.suggest');
+      if (blocked !== null) {
+        return Promise.resolve(err(blocked));
+      }
+      return request(
+        'catalog.suggest',
+        { input: input.input, limit: input.limit },
+        context,
+        toSuggestionList,
       );
     },
     dispose() {

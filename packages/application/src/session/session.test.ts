@@ -1450,6 +1450,7 @@ async function portThrows(): Promise<void> {
     artwork: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    suggest: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };
   const clock2 = new FakeClock(0);
   const r2 = new Session({
@@ -2189,7 +2190,10 @@ async function successorMapping(): Promise<void> {
       r.ytm.pendingCount('candidates') - 1,
       ok([
         meta('youtube-music', 'y1', 'Song rB', 'Artist', 300_000),
-        meta('youtube-music', 'y2', 'Song rB', 'Artist', 300_000),
+        // Display-identical rows collapse to one choice — the gate
+        // needs a genuinely different near-tie, so this candidate is
+        // a different artist spelling, not a second id for 'Artist'.
+        meta('youtube-music', 'y2', 'Song rB', 'Artist B', 300_000),
       ]),
     );
     await pump();

@@ -1,8 +1,11 @@
 export * from './view-models.ts';
 
+export * from './waveform.ts';
+
 export * as fixtures from './fixtures.ts';
 
 export {
+  fromTag,
   getLocale,
   resolveLocale,
   setLocale,

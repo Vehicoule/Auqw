@@ -9,6 +9,9 @@
  */
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
+import { es } from './locales/es.ts';
+import { fr } from './locales/fr.ts';
+import { zh } from './locales/zh.ts';
 
 /** CLDR plural categories `Intl.PluralRules` can select. */
 export type PluralCategory = 'zero' | 'one' | 'two' | 'few' | 'many' | 'other';
@@ -20,7 +23,7 @@ export type PluralCategory = 'zero' | 'one' | 'two' | 'few' | 'many' | 'other';
  */
 export type Message = string | Readonly<Record<string, string>>;
 
-export type Locale = 'en' | 'de';
+export type Locale = 'en' | 'de' | 'es' | 'fr' | 'zh';
 
 export type MessageId = keyof typeof en;
 
@@ -28,6 +31,9 @@ export type MessageId = keyof typeof en;
 const catalogs: Readonly<Record<Locale, Readonly<Record<string, Message>>>> = {
   en,
   de,
+  es,
+  fr,
+  zh,
 };
 
 const SYSTEM_LOCALE: Locale = 'en';
@@ -62,13 +68,15 @@ function rulesFor(locale: Locale): Intl.PluralRules | null {
 
 /**
  * CLDR plural category for `count`. Degrades to the `one`/`other`
- * split (correct for `en` and `de`) when `Intl.PluralRules` is absent,
- * so the app renders instead of throwing.
+ * split when `Intl.PluralRules` is absent, so the app renders instead
+ * of throwing — the split is correct for `en`, `de`, `es`, and `zh`
+ * (`zh` only ever selects `other`); French also treats zero as
+ * singular, so `fr` keeps `one` for 0 in the degraded path.
  */
 function pluralCategory(locale: Locale, count: number): PluralCategory {
   const rules = rulesFor(locale);
   return rules === null
-    ? count === 1
+    ? count === 1 || (locale === 'fr' && count === 0)
       ? 'one'
       : 'other'
     : rules.select(count);
@@ -100,14 +108,40 @@ export function getLocale(): Locale {
 
 /**
  * Map a BCP-47 tag to a supported `Locale` by primary-language subtag
- * ('de-DE' → 'de'), or `null` when the language is not supported.
+ * ('de-DE' → 'de', 'zh-Hans-CN' → 'zh'), or `null` when the language
+ * is not supported. The shipped `zh` catalog is Simplified only, so
+ * Traditional-script or Traditional-region tags (zh-Hant, zh-TW,
+ * zh-HK, zh-MO) do not map — they fall back to the system default
+ * rather than render the wrong script. An explicit `Hans` script
+ * subtag always maps (zh-Hans-HK → zh).
  */
-function fromTag(tag: string | null | undefined): Locale | null {
+export function fromTag(tag: string | null | undefined): Locale | null {
   if (tag === undefined || tag === null || tag === '') {
     return null;
   }
-  const primary = tag.trim().toLowerCase().split('-')[0];
-  return primary === 'en' || primary === 'de' ? primary : null;
+  const parts = tag.trim().toLowerCase().split('-');
+  const primary = parts[0];
+  switch (primary) {
+    case 'en':
+    case 'de':
+    case 'es':
+    case 'fr':
+      return primary;
+    case 'zh': {
+      // Script is the first subtag only — a 'hans'/'hant' later in the
+      // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
+      if (parts[1] === 'hans') {
+        return 'zh';
+      }
+      return parts
+        .slice(1)
+        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
+        ? null
+        : 'zh';
+    }
+    default:
+      return null;
+  }
 }
 
 /**

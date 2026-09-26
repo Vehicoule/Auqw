@@ -26,8 +26,12 @@ import type {
   SyncClientStatus,
   TrackMetadata,
 } from '@auqw/application';
-import { ARTWORK_CACHE_BUDGET_DEFAULT_BYTES, topPlayed } from '@auqw/application';
-import { t } from './i18n.ts';
+import {
+  ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  matchDisplayKey,
+  topPlayed,
+} from '@auqw/application';
+import { fromTag, t } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -475,17 +479,40 @@ export function toCorrectionsModel(input: {
     )
     .map((review) => {
       const recording = byId.get(review.recordingId);
+      // One row per display group: parked candidates that render
+      // identically (same provider + normalized title/artist + same
+      // shown duration) collapse to their representative — the first
+      // parked member — whose stored index is what `confirm` indexes.
+      const seen = new Set<string>();
+      const candidates: ReviewCandidateModel[] = [];
+      review.candidates.forEach((candidate, index) => {
+        const key = matchDisplayKey({
+          provider: candidate.ref.provider,
+          title: candidate.metadata.title,
+          artist: candidate.metadata.artist ?? null,
+          durationMs: candidate.metadata.durationMs ?? null,
+        });
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        candidates.push({
+          index,
+          title: candidate.metadata.title,
+          subtitle:
+            `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}` +
+            (candidate.metadata.durationMs !== null
+              ? ` · ${formatClock(candidate.metadata.durationMs)}`
+              : ''),
+        });
+      });
       return {
         reviewId: review.reviewId,
         title: recording?.title ?? t('corrections.unknownRecording'),
         artist: recording?.artist ?? null,
         status: review.status,
         statusLabel: reviewStatusLabel(review),
-        candidates: review.candidates.map((candidate, index) => ({
-          index,
-          title: candidate.metadata.title,
-          subtitle: `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}`,
-        })),
+        candidates,
       };
     });
   const pending = rows.filter((row) => row.status === 'pending').length;
@@ -1423,23 +1450,21 @@ export function languageOptions(): readonly LanguageOption[] {
     { key: 'system', label: t('settings.languageValue.system') },
     { key: 'en', label: t('settings.languageValue.en') },
     { key: 'de', label: t('settings.languageValue.de') },
+    { key: 'es', label: t('settings.languageValue.es') },
+    { key: 'fr', label: t('settings.languageValue.fr') },
+    { key: 'zh', label: t('settings.languageValue.zh') },
   ];
 }
 
 /**
  * Reduce a stored `Settings.language` to a `languageOptions()` key —
- * a persisted value may be a full BCP-47 tag ('de-DE'), so match on
- * the primary language subtag. Absent and unsupported values read as
- * 'system', mirroring how resolveLocale treats them.
+ * a persisted value may be a full BCP-47 tag ('de-DE'). Reuses the same
+ * tag mapping as `resolveLocale` so the displayed key always matches
+ * what activation selects: absent and unsupported values (including
+ * Traditional Chinese, which has no shipped catalog) read as 'system'.
  */
 export function languageOptionKey(setting: string | null | undefined): string {
-  const primary =
-    setting === undefined || setting === null
-      ? 'system'
-      : (setting.trim().toLowerCase().split('-').shift() ?? '');
-  return languageOptions().some((option) => option.key === primary)
-    ? primary
-    : 'system';
+  return fromTag(setting) ?? 'system';
 }
 
 /** Display name for a `Settings.language` value; unknown reads system. */
@@ -1658,7 +1683,12 @@ export function toSettingsModel(
 /* ------------------------------------------------------------------ */
 
 export type SyncStatusInput = {
-  readonly listener: 'starting' | 'listening' | 'unavailable' | 'disabled';
+  readonly listener:
+    | 'starting'
+    | 'listening'
+    | 'unavailable'
+    | 'dormant'
+    | 'disabled';
   /** `ip:port` a peer dials, or null when nothing is up. */
   readonly endpoint: string | null;
   readonly boundPort: number | null;

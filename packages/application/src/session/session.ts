@@ -9,6 +9,7 @@ import type {
   EntityKind,
   EntityRef,
   Like,
+  QueueOccurrence,
   Recording,
   Settings,
   SourceMapping,
@@ -130,6 +131,7 @@ import {
   publishRadio,
   remainingAfterCurrent,
   shouldGrowRadio,
+  RADIO_DRAIN_CHASE_PAGES,
   RADIO_FETCH_AHEAD,
 } from '../queue/radio-tail.ts';
 import type { RadioTail, RadioTailRecord } from '../queue/radio-tail.ts';
@@ -676,6 +678,21 @@ export class Session {
   #disposed = false;
   #projection: ProjectionMarker | null = null;
   #mappingSource: CancellationSource | null = null;
+  /**
+   * One auto-seed attempt per tail occurrence — set when the lazy
+   * radio arms itself on the queue's last item (and when the user
+   * disarms while it plays), so repeated #derived ticks on that
+   * item never reseed in a loop. The suppression clears implicitly:
+   * the next current occurrence carries a different id.
+   */
+  #radioAutoSeedOccurrence: string | null = null;
+  /**
+   * Bumped whenever an armed tail is cleared. An auto-seed queued
+   * behind #radioTail aborts on a stale epoch — a user's disarm or
+   * a replacement seed must never be undone by an arm scheduled
+   * before it.
+   */
+  #radioArmEpoch = 0;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
@@ -1124,6 +1141,18 @@ export class Session {
     this.#own(this.#projectQueue());
     this.#maybeMapSuccessor();
     this.#maybeGrowRadio();
+    this.#maybeArmRadio();
+    // A drained queue with an armed tail may be mid-chase or waiting
+    // on a reconnect — re-evaluate so offline-stranded chases resume.
+    const cur = this.#ready;
+    const rec = cur?.radio ?? null;
+    if (
+      cur !== null &&
+      rec !== null &&
+      cur.queue.snapshot().currentOccurrenceId === null
+    ) {
+      this.#resumeDrainedQueue(cur, rec, undefined);
+    }
   }
 
   // ---- sync emission ------------------------------------------------
@@ -3070,7 +3099,12 @@ export class Session {
     if (!ready.ok) {
       return ready;
     }
-    this.#clearRadio(ready.value);
+    const r = ready.value;
+    this.#clearRadio(r);
+    // The disarm also counts as the auto-seed verdict for the item
+    // it landed on — the tail must not silently reseed under it.
+    this.#radioAutoSeedOccurrence =
+      r.queue.snapshot().currentOccurrenceId;
     this.#publish();
     return ok(undefined);
   }
@@ -3081,6 +3115,10 @@ export class Session {
    * applied.
    */
   #clearRadio(r: Ready): void {
+    // The epoch bumps even with no record: an auto-arm queued on
+    // #radioTail behind another op must still die when a stop or
+    // disarm lands before it starts.
+    this.#radioArmEpoch += 1;
     const record = r.radio;
     if (record === null) {
       return;
@@ -3117,6 +3155,10 @@ export class Session {
       error: undefined,
       fetching: true,
       source: null,
+      // A tail may only resurrect playback it was armed during — a
+      // seed issued on an idle queue appends for later instead.
+      resumeOnDrain: r.queue.snapshot().mode === 'playing',
+      dupPages: 0,
     };
     r.radio = record;
     this.#publish();
@@ -3126,7 +3168,7 @@ export class Session {
       record,
     );
     record.fetching = false;
-    if (r.radio !== record) {
+    if (r.radio !== record || this.#disposed) {
       // Superseded or cleared while the seed was in flight — same
       // honesty rule as superseded playback attempts.
       return err(appError('superseded', 'radio seed superseded'));
@@ -3138,9 +3180,7 @@ export class Session {
       this.#publish();
       return err(seeded.error);
     }
-    const staged = await this.#commitStaged((cur) =>
-      this.#stageRadioPage(cur, seeded.value),
-    );
+    const staged = await this.#commitRadioPage(record, seeded.value);
     if (!staged.ok) {
       r.radio = null;
       this.#publish();
@@ -3151,6 +3191,10 @@ export class Session {
       record.status = 'ended';
     }
     this.#publish();
+    // Resume before deriving: a drained queue that just gained items
+    // must see the playhead move first, else the chase hook would
+    // fire another fetch it no longer needs.
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     if (staged.value.changed) {
       this.#derived();
     }
@@ -3183,7 +3227,10 @@ export class Session {
     this.#own(work);
   }
 
-  async #growRadio(record: RadioTailRecord): Promise<void> {
+  async #growRadio(
+    record: RadioTailRecord,
+    whileDrained = false,
+  ): Promise<void> {
     const r = this.#ready;
     if (r === null || r.radio !== record) {
       return;
@@ -3194,14 +3241,26 @@ export class Session {
     // clearing it needs a publish so the flag never reads as a
     // stuck spinner.
     const snap = r.queue.snapshot();
+    // The drained chase runs only while the queue still waits — a
+    // user landing on other content ends it.
+    const windowOpen = whileDrained
+      ? snap.currentOccurrenceId === null && record.resumeOnDrain
+      : snap.currentOccurrenceId !== null &&
+      remainingAfterCurrent(snap) < RADIO_FETCH_AHEAD;
     if (
       record.status !== 'growing' ||
       record.continuation === null ||
-      snap.currentOccurrenceId === null ||
-      remainingAfterCurrent(snap) >= RADIO_FETCH_AHEAD
+      !windowOpen
     ) {
       record.fetching = false;
       this.#publish();
+      // A fetch-ahead queued before a drain aborts here: the window
+      // closed because the queue is now empty, not because the tail
+      // finished. Hand back to the drained-queue chase or the armed
+      // continuation strands with nothing in flight.
+      if (snap.currentOccurrenceId === null) {
+        this.#resumeDrainedQueue(r, record, undefined);
+      }
       return;
     }
     // The continuation token's issuer is the only honest target —
@@ -3234,9 +3293,7 @@ export class Session {
       this.#publish();
       return;
     }
-    const staged = await this.#commitStaged((cur) =>
-      this.#stageRadioPage(cur, result.value),
-    );
+    const staged = await this.#commitRadioPage(record, result.value);
     if (!staged.ok) {
       record.status = 'failed';
       record.error = staged.error;
@@ -3248,13 +3305,13 @@ export class Session {
       record.status = 'ended';
     }
     this.#publish();
+    // Resume before deriving — see #startRadio.
+    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
     if (staged.value.changed) {
       // derived() re-evaluates the window: a page that still leaves
       // the tail short chains the next continuation immediately.
       this.#derived();
     }
-    // A page that appended nothing does not chain — the next real
-    // queue transition re-evaluates, so all-dupe pages cannot spin.
   }
 
   /**
@@ -3296,7 +3353,9 @@ export class Session {
   #stageRadioPage(
     r: Ready,
     page: RadioPage,
-  ): Result<CommitStage<{ changed: boolean }>> {
+  ): Result<
+    CommitStage<{ changed: boolean; firstAppended: string | undefined }>
+  > {
     if (!isRadioPage(page)) {
       return err(
         appError('invalid-response', 'radio page failed validation'),
@@ -3323,8 +3382,11 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    const firstAppended = plan.occurrences[0]?.occurrenceId;
     if (!recordingsChanged && plan.occurrences.length === 0) {
-      return ok({ apply: () => ({ changed: false }) });
+      return ok({
+        apply: () => ({ changed: false, firstAppended: undefined }),
+      });
     }
     const recordings = plan.recordings;
     const queue = draft.snapshot();
@@ -3333,9 +3395,346 @@ export class Session {
       apply: (rr) => {
         rr.recordings = [...recordings];
         rr.queue = draft;
-        return { changed: true };
+        return { changed: true, firstAppended };
       },
     });
+  }
+
+  /**
+   * Auto-arm: reaching the queue's LAST occurrence seeds the lazy
+   * tail from the playing track, so a finite queue rolls into a
+   * radio mix instead of ending (playing a single track arms it
+   * immediately). Any existing tail — growing, ended, or failed —
+   * blocks it: a terminal tail stays terminal until an explicit seed
+   * replaces it, and auto-arm must never resurrect a failed mix.
+   * One attempt per occurrence; a disarm or a superseding seed
+   * invalidates a queued attempt via the arm epoch. Failures stay
+   * logged — an auto-seed is speculative, never user-visible.
+   */
+  #maybeArmRadio(): void {
+    const r = this.#ready;
+    if (r === null || this.#disposed) {
+      return;
+    }
+    const snap = r.queue.snapshot();
+    if (
+      snap.mode !== 'playing' ||
+      snap.currentOccurrenceId === null ||
+      remainingAfterCurrent(snap) !== 0 ||
+      this.#radioAutoSeedOccurrence === snap.currentOccurrenceId ||
+      r.radio !== null
+    ) {
+      return;
+    }
+    if (!this.#isOnline()) {
+      // Offline is weather — connectivityChanged() re-derives.
+      return;
+    }
+    // One attempt per tail position — the marker holds even when the
+    // queued work finds nothing seedable: that verdict is sticky, not
+    // weather.
+    this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
+    const armedFor = snap.currentOccurrenceId;
+    const epoch = this.#radioArmEpoch;
+    const work = this.#radioTail.then(async () => {
+      const cur = this.#ready;
+      if (
+        cur === null ||
+        this.#disposed ||
+        this.#radioArmEpoch !== epoch ||
+        cur.radio !== null
+      ) {
+        // Cleared or reseeded while queued — the later decision wins.
+        return ok(undefined);
+      }
+      // Re-evaluate at run time: the tail may have moved while this
+      // arm was queued (a stop is caught by the epoch; a cursor move
+      // reseeds from the item actually on the tail).
+      const live = cur.queue.snapshot();
+      if (
+        live.mode !== 'playing' ||
+        live.currentOccurrenceId === null ||
+        remainingAfterCurrent(live) !== 0
+      ) {
+        // The cursor left the tail before this arm ran — the
+        // occurrence was never judged, so a later return to it may
+        // still arm.
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
+        return ok(undefined);
+      }
+      const liveOccurrence = live.occurrences.find(
+        (o) => o.occurrenceId === live.currentOccurrenceId,
+      );
+      const liveRecording = cur.recordings.find(
+        (rec) => rec.id === liveOccurrence?.recordingId,
+      );
+      if (liveOccurrence === undefined || liveRecording === undefined) {
+        return ok(undefined);
+      }
+      // An attempt for the tail item that hasn't resolved its ref
+      // yet is weather: stored-order fallback would seed a different
+      // version than the one playing. #startAttempt re-fires the
+      // arm when `attempt.ref` lands.
+      const liveAttempt = this.#active;
+      if (
+        liveAttempt !== null &&
+        liveAttempt.occurrenceId === live.currentOccurrenceId &&
+        liveAttempt.ref === undefined
+      ) {
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
+        return ok(undefined);
+      }
+      const ref = this.#radioSeedRef(liveOccurrence, liveRecording);
+      if (ref === null) {
+        // Judged: nothing seedable — the verdict sticks.
+        this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
+        return ok(undefined);
+      }
+      if (!this.#isOnline()) {
+        // Connectivity dropped between trigger and run — release the
+        // marker so the reconnect #derived re-arms this occurrence.
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
+        return ok(undefined);
+      }
+      this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
+      const seeded = await this.#startRadio(ref);
+      if (!seeded.ok) {
+        this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
+      }
+      return seeded;
+    });
+    this.#radioTail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#own(work);
+  }
+
+  /**
+   * Pick the seed ref for a queue occurrence: the live attempt's
+   * resolved ref decides — `#pickRef` may have chosen an effective
+   * mapping over the stored order, and the seed must follow the
+   * version actually playing. A non-local playing ref whose provider
+   * can't seed radio is a verdict, not a fallback: substituting a
+   * different provider's ref would mix from another version. Local
+   * playback has no provider identity, so its ref falls through to
+   * the recording's catalog identity — the pinned ref, then stored
+   * order. Each candidate must route to a `radio.seed` provider.
+   */
+  #radioSeedRef(
+    occurrence: QueueOccurrence,
+    recording: Recording,
+  ): SourceRef | null {
+    const active = this.#active;
+    if (
+      active !== null &&
+      active.occurrenceId === occurrence.occurrenceId &&
+      active.ref !== undefined
+    ) {
+      const playing = active.ref;
+      // Local playback has no provider identity: the recording's
+      // catalog refs remain the honest seed source.
+      if (playing.provider !== LOCAL_PROVIDER) {
+        // The resolved ref is the version playing — when its provider
+        // can't seed radio there is no faithful substitute, and a
+        // different provider's ref would mix from another version.
+        if (playing.kind !== 'track') {
+          return null;
+        }
+        return this.#router.providerForRef(playing, 'radio.seed').ok
+          ? playing
+          : null;
+      }
+    }
+    const candidates: (SourceRef | null)[] = [
+      occurrence.selectedRef,
+      ...recording.sourceRefs,
+    ];
+    for (const candidate of candidates) {
+      if (candidate === null || candidate.kind !== 'track') {
+        continue;
+      }
+      if (this.#router.providerForRef(candidate, 'radio.seed').ok) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A disarm landing while a page's commit waits on storage must
+   * never let the page reach the queue — or the durable doc. The
+   * record check runs inside the segment before staging (a disarm
+   * queued ahead drops the commit entirely) and again after the
+   * commit await: a rejected page skips the sync emission and the
+   * in-memory apply, then the SAME segment — which still owns the
+   * storage tail, so nothing can have committed in between — issues
+   * a compensating commit that rewrites the live, page-free queue
+   * and recordings at a fresh queue revision. Writing the freshest
+   * mirror keeps mutations queued during the await durable (their
+   * own segments later no-op on the revision check), and bumping
+   * `queueCommittedRev` onto that new lineage keeps the next queue
+   * write from being skipped.
+   */
+  async #commitRadioPage(
+    record: RadioTailRecord,
+    page: RadioPage,
+  ): Promise<
+    Result<{ changed: boolean; firstAppended: string | undefined }>
+  > {
+    const generation = this.#ready;
+    const source = new CancellationSource();
+    this.#opSources.add(source);
+    try {
+      return await this.#enqueueStorage(async () => {
+        const r = this.#ready;
+        if (generation === null || r !== generation) {
+          return err(
+            appError('superseded', 'session state was replaced'),
+          );
+        }
+        if (r.radio !== record) {
+          return ok({ changed: false, firstAppended: undefined });
+        }
+        const staged = this.#stageRadioPage(r, page);
+        if (!staged.ok) {
+          return err(staged.error);
+        }
+        const inner = staged.value;
+        if (inner.batch === undefined) {
+          const outcome = inner.apply(r);
+          this.#publish();
+          return ok(outcome);
+        }
+        const batch = inner.batch;
+        const deadlineMs = this.#deadline();
+        const context = this.#newContext('persist', deadlineMs, source.signal);
+        const committed = await this.#withDeadline(
+          () => this.#storage.commit(batch, context),
+          deadlineMs,
+          source,
+        );
+        if (!committed.ok) {
+          r.persistenceError = committed.error;
+          this.#publish();
+          return err(committed.error);
+        }
+        if (batch.queue !== undefined) {
+          r.queueCommittedRev = Math.max(
+            r.queueCommittedRev,
+            batch.queue.revision,
+          );
+        }
+        r.persistenceError = undefined;
+        if (r.radio === record) {
+          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
+          const outcome = inner.apply(r);
+          this.#publish();
+          return ok(outcome);
+        }
+        // The page committed but the disarm already ran — the mirror
+        // never applied it, so live sections are the inverse image.
+        const revertedQueue: QueueSnapshot = {
+          ...r.queue.snapshot(),
+          revision: r.queueCommittedRev + 1,
+        };
+        const revertBatch: StorageBatch = {
+          queue: revertedQueue,
+          recordings: [...r.recordings],
+        };
+        const revertDeadlineMs = this.#deadline();
+        const revertContext = this.#newContext(
+          'persist',
+          revertDeadlineMs,
+          source.signal,
+        );
+        const reverted = await this.#withDeadline(
+          () => this.#storage.commit(revertBatch, revertContext),
+          revertDeadlineMs,
+          source,
+        );
+        if (!reverted.ok) {
+          r.persistenceError = reverted.error;
+          this.#publish();
+          return err(reverted.error);
+        }
+        r.queueCommittedRev = revertedQueue.revision;
+        // Peers never saw the page — emit only the revert delta.
+        this.#emitSync(emissionWrites(syncEmitInput(r), revertBatch));
+        // The mirror keeps its live content and adopts the fresh
+        // revision so queued commands stay on the durable lineage.
+        r.queue = new QueueEngine(revertedQueue);
+        this.#publish();
+        return ok({ changed: false, firstAppended: undefined });
+      });
+    } finally {
+      this.#opSources.delete(source);
+    }
+  }
+
+  /**
+   * A page landing on a drained queue: the tail was armed while
+   * playing (`resumeOnDrain`) and playback ran out of occurrences
+   * before the fetch landed — resume at the first appended item.
+   * The record-identity check keeps a disarm sticky: `stop()` and
+   * `stopRadio()` drop the record, so a stopped queue never
+   * resurrects when an in-flight page lands.
+   */
+  #resumeDrainedQueue(
+    r: Ready,
+    record: RadioTailRecord,
+    firstAppended: string | undefined,
+  ): void {
+    if (
+      this.#disposed ||
+      r.radio !== record ||
+      r.queue.snapshot().currentOccurrenceId !== null
+    ) {
+      return;
+    }
+    if (firstAppended !== undefined) {
+      record.dupPages = 0;
+      if (!record.resumeOnDrain) {
+        return;
+      }
+      this.#own(
+        this.playOccurrence(firstAppended).then((res) => {
+          if (!res.ok) {
+            this.#logWarn(`radio resume failed: ${res.error.kind}`);
+          }
+        }),
+      );
+      return;
+    }
+    // The page landed on a drained queue and appended nothing — the
+    // continuation may still hold fresh items, so chase it within a
+    // bound. Without this a duplicate-only page strands a playing
+    // queue's tail forever.
+    if (
+      !record.resumeOnDrain ||
+      record.status !== 'growing' ||
+      record.continuation === null ||
+      record.fetching ||
+      record.dupPages >= RADIO_DRAIN_CHASE_PAGES ||
+      !this.#isOnline()
+    ) {
+      return;
+    }
+    record.dupPages += 1;
+    record.fetching = true;
+    this.#publish();
+    const work = this.#radioTail.then(() => this.#growRadio(record, true));
+    this.#radioTail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#own(work);
   }
 
   // ---- transport ----------------------------------------------------
@@ -3403,6 +3802,9 @@ export class Session {
     if (!persisted.ok) {
       return persisted;
     }
+    // Stop means stop: an armed tail drops with it — an in-flight
+    // page must never append-and-resume past a user's stop.
+    this.#clearRadio(r);
     await this.#supersede();
     const ready2 = this.#ready;
     if (ready2 !== null) {
@@ -3420,6 +3822,10 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    // The drain authorization belongs to the tail armed when the move
+    // started — a reseed during the persist swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioBefore = r.radio;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -3492,6 +3898,23 @@ export class Session {
         this.#own(this.#startAttempt(durable.currentOccurrenceId));
       }
       return moved;
+    }
+    {
+      // Playback consuming the queue while this tail was armed
+      // authorizes the landed page to resume; any other move revokes
+      // it — a paused skip-to-end never earns it, and a rolled-back
+      // skip drains nothing. The flag marks only once the drain is
+      // durable (moved.ok was checked above), so a failed persist
+      // cannot authorize a later paused drain to resume.
+      const rec = r.radio;
+      if (
+        rec !== null &&
+        rec === radioBefore &&
+        rec.status === 'growing'
+      ) {
+        rec.resumeOnDrain =
+          after.currentOccurrenceId === null && before.mode === 'playing';
+      }
     }
     this.#derived();
     // Transport ops are not serialized — a concurrent next/previous
@@ -3941,6 +4364,9 @@ export class Session {
       r2.playback = { ...r2.playback, ref };
       this.#publish();
     }
+    // The playing ref is now known — an auto-arm queued while this
+    // attempt was still resolving can seed the real version.
+    this.#maybeArmRadio();
     if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
@@ -4926,6 +5352,7 @@ export class Session {
       }
     }
     const toId = event.toOccurrenceId;
+    const wasPlaying = r.queue.snapshot().mode === 'playing';
     try {
       // A null target means the cursor ran off the end: stopped.
       r.queue.reconcileNativeCurrent(
@@ -4939,6 +5366,10 @@ export class Session {
     }
     marker.currentOccurrenceId = toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
+    // The drain authorization belongs to the tail armed at reconcile
+    // time — a reseed during the write below swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioAtTransition = r.radio;
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -5034,15 +5465,35 @@ export class Session {
         );
       }
     }
-    await queueWrite;
+    const queueWritten = await queueWrite;
+    {
+      // Service-side drain with a tail armed — same authorization as
+      // the app-driven drain in #advance: a committed drain while
+      // playing earns the resume; a stale transition landing on an
+      // already-paused queue, a non-drain, or a failed write revokes
+      // it. The flag marks only when the drain committed — a failed
+      // write must not authorize a later paused drain to resume.
+      const rec = radioAtTransition;
+      if (rec !== null && r.radio === rec && rec.status === 'growing') {
+        rec.resumeOnDrain =
+          toId === null && wasPlaying && queueWritten.ok;
+      }
+      // A native drain bypasses #derived: chase the armed tail's
+      // continuation here too, or a drained queue strands forever.
+      if (toId === null && wasPlaying && rec !== null && r.radio === rec) {
+        this.#resumeDrainedQueue(r, rec, undefined);
+      }
+    }
     // Native may already be several moves ahead. Re-projecting this
     // intermediate cursor would stop its live stream and reject queued moves.
     this.#mappingSource?.cancel();
     this.#mappingSource = null;
     this.#maybeMapSuccessor();
     // The cursor moved inside the projection — the radio tail's
-    // fetch-ahead window may have opened.
+    // fetch-ahead window may have opened, and landing on the last
+    // item arms it.
     this.#maybeGrowRadio();
+    this.#maybeArmRadio();
   }
 
   // ---- successor mapping ----------------------------------------------

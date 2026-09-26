@@ -85,7 +85,7 @@ function nativeMessage(thrown: unknown): string {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  catalogProvider: 'itunes',
+  catalogProvider: 'deezer',
   playbackProvider: 'youtube-music',
   storefront: null,
   qualityKbps: 128,

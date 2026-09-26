@@ -89,6 +89,7 @@ the contract; the table is orientation only.
 | `catalog.metadata` | `catalogMetadataPayload` | `catalogMetadataResult` |
 | `catalog.artwork` | `catalogArtworkPayload` | `catalogArtworkResult` |
 | `catalog.entity` | `catalogEntityPayload` | `catalogEntityResult` |
+| `catalog.suggest` | `catalogSuggestPayload` | `catalogSuggestResult` |
 | `playback.candidates` | `playbackCandidatesPayload` | `playbackCandidatesResult` |
 | `playback.resolve` | `playbackResolvePayload` | `playbackResolveResult` |
 | `lyrics.plain` | `lyricsPlainPayload` | `lyricsPlainResult` |
@@ -118,6 +119,13 @@ application decides whether a match is honest, not the plugin.
 `radio.seed` takes either `{source_ref}` (first page of a track-seeded
 mix) or `{continuation}` (the next page); `continuation: null` in the
 result is the honest end-of-continuation signal.
+
+`catalog.suggest` answers keystroke-time query completions: `{input}`
+(1–256 chars, `limit` optional) → `{suggestions: string[]}` — flat
+text completions in upstream order, not result pages. It carries no
+`access_token` (not a session-trust capability) and no settings slot —
+the application routes it over declaring providers automatically so
+the typing surface is independent of the configured catalog provider.
 
 ## ErrorKind
 
@@ -155,7 +163,7 @@ guest running under a `0.1.0` manifest that emits the 0.2-only
 `invalid-message`. `0.2.0` accepts `catalog.search`,
 `catalog.metadata`, `catalog.artwork`, `playback.resolve`, and
 `playback.candidates`. `0.3.0` accepts the full 0.2 set plus
-`catalog.entity`, `lyrics.plain`, `lyrics.synced`, and `radio.seed`,
+`catalog.entity`, `catalog.suggest`, `lyrics.plain`, `lyrics.synced`, and `radio.seed`,
 and unlocks the `resume` host-request kind — emitting `resume` under a
 pre-0.3.0 manifest fails `invalid-message`, the same rule as the
 0.1→0.2 service kinds.

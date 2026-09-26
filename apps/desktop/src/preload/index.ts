@@ -208,6 +208,7 @@ const api: AuqwApi = {
       invoke(CHANNELS.appMeta, undefined, isAppMeta),
   },
   chrome: {
+    platform: process.platform,
     setScheme: (scheme): void => {
       ipcRenderer.send(CHANNELS.chromeScheme, scheme);
     },

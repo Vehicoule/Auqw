@@ -15,10 +15,10 @@ Omarchy rules, non-negotiable: depth comes from the background ramp only (no sha
 
 ## Shell contract — desktop (Electron)
 
-One window, no titlebar band. The Stage column runs to the top edge; the World's first row is its toolbar. A single 56 px line carries all chrome:
+One window, no titlebar band. The Stage column runs to the top edge; the World's first row is its toolbar. A single 40 px line carries all chrome:
 
-- **Stage strip:** macOS traffic lights pin left, the output-device pill centers, the sidebar-collapse button pins right.
-- **World toolbar:** expanding search icon (left, at the panel seam) · centered `home | explore | library` tabs · menu · caption buttons (Windows/Linux overlay the strip's right edge; close hover → `#e81123`). Electron: `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme.
+- **Stage strip:** macOS traffic lights pin left (inset into the sidebar's top edge), the output-device pill centers, the sidebar-collapse button pins right.
+- **World toolbar:** expanding search icon (left, at the panel seam) · centered `home | explore | library` tabs · menu · caption buttons (Windows/Linux overlay the strip's right edge; close hover → `#e81123`). Electron: `titleBarStyle: 'hiddenInset'` + `trafficLightPosition` on macOS (no drawn strip); `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme on Windows and Linux.
 - **Search (GTK pattern):** a compact icon that expands on hover/focus; when open it takes the toolbar's width and the nav tabs step aside — overlap is impossible by construction.
 - **Stage player mode:** artwork → meta (title/artist/album + download/add) → waveform-style seek → centered transport `like · prev · play · next · repeat` → volume → mode segment (pinned at the bottom edge). Play is a solid fg-bright block; liked is pink.
 - **Stage lyrics mode:** title + honest sync state (`estimated timing` when unsynced) + scrollable lines; active line in accent; pin control; thin scrollbar. No transport controls inside lyrics.
@@ -30,7 +30,7 @@ One window, no titlebar band. The Stage column runs to the top edge; the World's
 Native chrome, per platform — not a shrunken desktop:
 
 - **Navbar:** Android = M3 Expressive bar (tall, wide pill indicator, bold active label, gesture handle); iOS = floating translucent capsule (liquid glass — blur is scoped to OS chrome, never an app surface). Settings is the 4th tab: `home · explore · library · settings`.
-- **Mini-player:** floating card above the navbar — artwork left, title/artist, `like + resume` right. Progress is a **squared ring hugging the artwork** (rounded-rect path, progress sweeps from top-center): wavy M3E outline on Android, thin clean arc on iOS. Swipe sideways skips; tap or swipe-up opens the Stage sheet.
+- **Mini-player:** floating card above the navbar — artwork left, title/artist, `like + resume` right. Progress is a **squared ring hugging the artwork** (rounded-rect path, progress sweeps from top-center): the same thin clean arc on every platform. Swipe sideways skips; tap or swipe-up opens the Stage sheet.
 - **Stage sheet:** full-screen, grab handle, swipe-down dismisses. Same modes as desktop. Media controls go platform-native — Android: filled-accent squircle play + tonal prev/next; iOS: translucent glass circles. **No volume control** — hardware buttons own it. Layout splits free space evenly (art → air → meta → air → controls); no filler text.
 - **Rows:** same anatomy as desktop (50 px, larger hit areas).
 

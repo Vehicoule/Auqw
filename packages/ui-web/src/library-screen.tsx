@@ -69,11 +69,13 @@ function CollectionTile({
         ariaLabel={t('library.tileA11y', { label: tile.label, count: tile.count })}
         className="uw-collection__body"
       >
-        <Icon
-          name={COLLECTION_ICONS[tile.key]}
-          size={15}
-          color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
-        />
+        <span className="uw-collection__icon">
+          <Icon
+            name={COLLECTION_ICONS[tile.key]}
+            size={15}
+            color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
+          />
+        </span>
         <span className="uw-collection__text">
           <Text variant="body" color={enabled ? 'bright' : 'primary'}>
             {tile.label}
@@ -88,7 +90,7 @@ function CollectionTile({
           icon="play"
           size={30}
           iconSize={13}
-          color="var(--text-bright)"
+          color="var(--accent)"
           ariaLabel={t('library.tilePlayA11y', { label: tile.label })}
           onPress={tile.count === 0 ? undefined : onPlay}
         />
@@ -135,7 +137,7 @@ function NewPlaylistCard({
         className="uw-newpl uw-newpl--row"
       >
         <span className="uw-newpl__art">
-          <Icon name="list-plus" size={15} color="var(--text-secondary)" />
+          <Icon name="list-plus" size={15} />
         </span>
         <Text variant="body" color="secondary">
           {t('common.newPlaylist')}
@@ -149,7 +151,7 @@ function NewPlaylistCard({
       ariaLabel={t('common.newPlaylist')}
       className="uw-newpl uw-newpl--grid"
     >
-      <Icon name="list-plus" size={16} color="var(--text-secondary)" />
+      <Icon name="list-plus" size={16} />
       <Text variant="metadata" color="secondary" className="uw-newpl__label">
         {t('common.newPlaylist')}
       </Text>

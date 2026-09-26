@@ -1,5 +1,6 @@
-import { ImageSourcePropType, Platform, View } from 'react-native';
-import TabView from 'react-native-bottom-tabs';
+import { useEffect, useRef, useState } from 'react';
+import { ImageSourcePropType, Keyboard, Platform, View } from 'react-native';
+import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
@@ -63,6 +64,24 @@ function routeFor(item: NavItemModel): Route {
   };
 }
 
+/**
+ * The library's BottomTabBarHeightContext only reaches descendants of
+ * TabView — this probe ferries the measured height up to PlatformTabs
+ * so the Android dock (a sibling overlay, not a per-scene child) can
+ * anchor to the bar's top edge. Renders nothing.
+ */
+function TabBarHeightProbe({
+  onHeight,
+}: {
+  readonly onHeight: (height: number) => void;
+}) {
+  const height = useBottomTabBarHeight();
+  useEffect(() => {
+    onHeight(height);
+  }, [height, onHeight]);
+  return null;
+}
+
 export function PlatformTabs({
   items,
   activeKey,
@@ -76,48 +95,105 @@ export function PlatformTabs({
     items.findIndex((item) => item.key === activeKey),
   );
   const androidDock = accessory != null && Platform.OS === 'android';
+
+  // Android: adjustResize lands the tab bar flush on top of the IME.
+  // Platform convention drops it while the keyboard is open; on iOS the
+  // keyboard is a separate window covering the bar, no hiding needed.
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return undefined;
+    }
+    const show = Keyboard.addListener('keyboardDidShow', () =>
+      setKeyboardOpen(true),
+    );
+    const hide = Keyboard.addListener('keyboardDidHide', () =>
+      setKeyboardOpen(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
+  // navItems() hands a fresh array each render; rebuilt Route objects
+  // would recompute icons/items and push a redundant updateItems to the
+  // native bar on every render (including every playback tick). Rebuild
+  // only when the (key, label) signature actually changes.
+  const signature = items
+    .map((item) => `${item.key}\n${item.label}`)
+    .join('\n');
+  const routesRef = useRef<{ signature: string; routes: Route[] } | null>(
+    null,
+  );
+  if (routesRef.current === null || routesRef.current.signature !== signature) {
+    routesRef.current = { signature, routes: items.map(routeFor) };
+  }
+  const routes = routesRef.current.routes;
+
+  // One dock instance for the whole tab host — rendered inside a scene it
+  // would unmount/remount on every tab switch (the remount flash), and the
+  // reserve padding would flip mid cross-fade. Anchored to the tab bar's
+  // top edge instead; the reported height drops to 0 when the bar hides
+  // for the keyboard, keeping the dock just above the IME.
+  const [tabBarHeight, setTabBarHeight] = useState<number | null>(null);
   return (
-    <TabView
-      navigationState={{ index, routes: items.map(routeFor) }}
-      renderScene={({ route }) => (
-        <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-          {renderTab(route.key)}
-          {androidDock && route.key === activeKey ? (
-            <View
-              style={{ position: 'absolute', left: 0, right: 0, bottom: 0 }}
-              pointerEvents="box-none"
-            >
-              {accessory}
-            </View>
-          ) : null}
+    <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+      <TabView
+        navigationState={{ index, routes }}
+        renderScene={({ route }) => (
+          <View
+            style={{
+              flex: 1,
+              backgroundColor: theme.colors.canvas,
+              paddingBottom: androidDock ? ACCESSORY_RESERVE : 0,
+            }}
+          >
+            {renderTab(route.key)}
+            <TabBarHeightProbe onHeight={setTabBarHeight} />
+          </View>
+        )}
+        onIndexChange={(next) => {
+          const item = items[next];
+          if (item !== undefined && item.key !== activeKey) {
+            onSelect(item.key);
+          }
+        }}
+        tabBarActiveTintColor={theme.colors.accent}
+        tabBarInactiveTintColor={theme.colors.textSecondary}
+        tabBarStyle={{ backgroundColor: theme.colors.raised }}
+        tabLabelStyle={{ fontFamily: theme.fontFamilies.medium }}
+        activeIndicatorColor={theme.colors.accentSoft}
+        labeled
+        hapticFeedbackEnabled
+        minimizeBehavior="onScrollDown"
+        scrollEdgeAppearance="transparent"
+        {...(Platform.OS === 'android'
+          ? { tabBarHidden: keyboardOpen }
+          : {})}
+        {...(accessory != null && Platform.OS === 'ios'
+          ? {
+              renderBottomAccessoryView: () => (
+                <View style={{ paddingHorizontal: 4 }}>{accessory}</View>
+              ),
+            }
+          : {})}
+      />
+      {androidDock && (
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: tabBarHeight ?? 0,
+            // unmeasured (null) would overlay the bar for a frame
+            opacity: tabBarHeight === null ? 0 : 1,
+          }}
+          pointerEvents="box-none"
+        >
+          {accessory}
         </View>
       )}
-      onIndexChange={(next) => {
-        const item = items[next];
-        if (item !== undefined && item.key !== activeKey) {
-          onSelect(item.key);
-        }
-      }}
-      tabBarActiveTintColor={theme.colors.accent}
-      tabBarInactiveTintColor={theme.colors.textSecondary}
-      tabBarStyle={{ backgroundColor: theme.colors.raised }}
-      tabLabelStyle={{ fontFamily: theme.fontFamilies.medium }}
-      activeIndicatorColor={theme.colors.accentSoft}
-      labeled
-      hapticFeedbackEnabled
-      minimizeBehavior="onScrollDown"
-      scrollEdgeAppearance="transparent"
-      getSceneStyle={({ route }) => ({
-        paddingBottom:
-          androidDock && route.key === activeKey ? ACCESSORY_RESERVE : 0,
-      })}
-      {...(accessory != null && Platform.OS === 'ios'
-        ? {
-            renderBottomAccessoryView: () => (
-              <View style={{ paddingHorizontal: 4 }}>{accessory}</View>
-            ),
-          }
-        : {})}
-    />
+    </View>
   );
 }

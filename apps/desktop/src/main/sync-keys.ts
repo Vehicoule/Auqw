@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { access, mkdir, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errorCode } from '../shared/check.ts';
@@ -25,6 +26,24 @@ import {
 
 const IDENTITY_KEY = 'auqw.sync.identity';
 const DEVICE_PREFIX = 'auqw.sync.device.';
+/**
+ * Paired-device records mark an install that actually synced — a
+ * generated identity alone does not (the utility mints one the first
+ * time sync starts, so it can't distinguish "paired" from "looked at
+ * settings once"). main forks the utility with AUQW_SYNC_ARMED from
+ * this so a never-paired install stays dormant — no listener bind,
+ * no safeStorage/keychain touch — until an explicit sync action.
+ */
+export function syncHasPairedDevices(dir: string): boolean {
+  try {
+    return readdirSync(dir).some(
+      (file) => file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64'),
+    );
+  } catch {
+    // Missing/unreadable dir means nothing to migrate or arm.
+    return false;
+  }
+}
 const SYNC_KEY_PREFIX = 'auqw.sync.';
 /**
  * Marks a completed custody migration inside `sync-secure`. Without it

@@ -222,6 +222,11 @@ if (port === null) {
         }
       : {}),
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
+    // Armed = a persisted identity already exists (set by main from
+    // the custody dir). A fresh install stays dormant — no listener
+    // bind and no safeStorage/keychain read — until a sync handler
+    // runs; unset env keeps the eager default for standalone runs.
+    armed: process.env['AUQW_SYNC_ARMED'] !== '0',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),
     keys: createServiceKeys(serviceClient.request),
     ...(enginePromise === null

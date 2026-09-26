@@ -220,6 +220,92 @@ function normalizeFree(text: string): string {
   return tokenize(text).join(' ');
 }
 
+/**
+ * Featuring/collab credit separators in an artist field. Splitting
+ * happens on the raw string — normalizeFree would already have
+ * folded the punctuation away. 'and'/'with' are deliberately absent:
+ * they live inside canonical act names ('Florence and the Machine'),
+ * so splitting on them would promote a fragment to full-artist
+ * certainty. Punctuation-based separators ('Earth, Wind & Fire')
+ * remain ambiguous — an inherent limit of string-level matching —
+ * but at least the act's own canonical name can't be confused with
+ * collab syntax.
+ */
+const ARTIST_SPLIT =
+  /[&,+]|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bvs\.?\b|\bx\b/iu;
+
+/**
+ * The whole normalized name plus each credited act it splits into.
+ * Catalogs differ on collab credits — a file tagged 'A & B' and a
+ * provider's plain 'A' name the same act, so the best pairwise view
+ * wins rather than requiring the whole lists to match.
+ */
+function artistViews(text: string): readonly string[] {
+  const views = [normalizeFree(text)];
+  for (const part of text.split(ARTIST_SPLIT)) {
+    const normalized = normalizeFree(part);
+    if (normalized.length > 0 && normalized !== views[0]) {
+      views.push(normalized);
+    }
+  }
+  return views;
+}
+
+function artistSimilarityBetween(a: string, b: string): number {
+  return (dice(a, b) + tokenDice(a, b)) / 2;
+}
+
+function bestArtistSimilarity(a: string, b: string): number {
+  let best = 0;
+  for (const left of artistViews(a)) {
+    for (const right of artistViews(b)) {
+      const score = artistSimilarityBetween(left, right);
+      if (score > best) {
+        best = score;
+        if (best === 1) {
+          return 1;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * What a review row actually shows: title + `artist · provider ·
+ * duration`. A provider often lists the same song under several ids
+ * (album audio, topic video, short uploads) — those candidates are
+ * one choice, not two, and a tie between them is a phantom that would
+ * gate a confident match on rows the user cannot tell apart.
+ * Duration is bucketed to the displayed clock (whole seconds), so two
+ * listings off by sub-second metadata still render as one row while
+ * genuinely different-length tracks stay distinct choices.
+ */
+export function matchDisplayKey(candidate: {
+  readonly provider: string;
+  readonly title: string;
+  readonly artist: string | null;
+  readonly durationMs: number | null;
+}): string {
+  return [
+    candidate.provider,
+    normalizeFree(candidate.title),
+    normalizeFree(candidate.artist ?? ''),
+    candidate.durationMs === null || !Number.isFinite(candidate.durationMs)
+      ? ''
+      : Math.floor(candidate.durationMs / 1000).toString(),
+  ].join('\u001f');
+}
+
+function displayKey(candidate: MatchCandidate): string {
+  return matchDisplayKey({
+    provider: candidate.sourceRef.provider,
+    title: candidate.title,
+    artist: candidate.artist ?? null,
+    durationMs: candidate.durationMs ?? null,
+  });
+}
+
 type Scored = {
   readonly candidate: MatchCandidate;
   readonly evidence: MatchEvidence;
@@ -297,11 +383,23 @@ export class MatchingEngine {
     }
     scored.sort((a, b) => b.evidence.score - a.evidence.score || a.index - b.index);
 
-    const top = scored[0];
+    // Sorted, so the first member of each display group is its best.
+    const distinct: Scored[] = [];
+    const seenDisplay = new Set<string>();
+    for (const s of scored) {
+      const key = displayKey(s.candidate);
+      if (seenDisplay.has(key)) {
+        continue;
+      }
+      seenDisplay.add(key);
+      distinct.push(s);
+    }
+
+    const top = distinct[0];
     if (top === undefined) {
       return { type: 'unavailable', reason: 'no candidates' };
     }
-    const second = scored[1];
+    const second = distinct[1];
     const margin =
       second === undefined
         ? Number.POSITIVE_INFINITY
@@ -313,10 +411,34 @@ export class MatchingEngine {
       return { type: 'matched', candidate: top.candidate, evidence: top.evidence };
     }
     if (top.evidence.score >= 65 && margin < 7) {
-      const near = scored
-        .filter((s) => top.evidence.score - s.evidence.score < 7)
-        .slice(0, 5)
-        .map((s) => ({ candidate: s.candidate, evidence: s.evidence }));
+      // The review parks every near-tie member — not just the display
+      // representatives — because a reject vetoes each parked ref and
+      // a hidden duplicate surviving the veto would auto-match on the
+      // next attempt, silently undoing the user's verdict. At most
+      // five distinct display groups park — same-song listings from
+      // one provider can't crowd the real choices out — but once a
+      // group is admitted, every later member of it parks too, or the
+      // veto would leave a live duplicate behind. The 64-candidate
+      // persistence limit caps the total.
+      const near: { candidate: MatchCandidate; evidence: MatchEvidence }[] =
+        [];
+      const parkedGroups = new Set<string>();
+      for (const s of scored) {
+        if (top.evidence.score - s.evidence.score >= 7) {
+          break;
+        }
+        if (near.length >= 64) {
+          break;
+        }
+        const key = displayKey(s.candidate);
+        if (!parkedGroups.has(key)) {
+          if (parkedGroups.size >= 5) {
+            continue;
+          }
+          parkedGroups.add(key);
+        }
+        near.push({ candidate: s.candidate, evidence: s.evidence });
+      }
       return { type: 'ambiguous', candidates: near };
     }
     return { type: 'unavailable', reason: 'below threshold' };
@@ -405,20 +527,13 @@ export class MatchingEngine {
 
     const candidateBase = analyzeTitle(candidate.title).base;
     const titleSimilarity = dice(intended.base, candidateBase);
-    // Artist similarity blends code-point and token Dice: near-equal
-    // names like 'Artist A'/'Artist B' separate cleanly while
-    // reorderings and dropped articles stay close.
+    // Artist similarity blends code-point and token Dice over the
+    // best pairwise credit view: near-equal names like 'Artist A'/
+    // 'Artist B' separate cleanly while collab-credit variants
+    // ('A & B' vs 'A') and reorderings stay close.
     const artistSimilarity =
       recording.artist !== null && candidate.artist !== null
-        ? (dice(
-          normalizeFree(recording.artist),
-          normalizeFree(candidate.artist),
-        ) +
-          tokenDice(
-            normalizeFree(recording.artist),
-            normalizeFree(candidate.artist),
-          )) /
-        2
+        ? bestArtistSimilarity(recording.artist, candidate.artist)
         : null;
 
     const candidateIsrc = candidate.isrc ?? null;

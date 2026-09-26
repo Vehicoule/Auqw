@@ -26,19 +26,22 @@ jobs:
   # ci.yml's real check surface by calling it as a reusable workflow
   # instead of copying its steps here, so CI and the release gate
   # can't drift apart and a new CI check gates the next tag for free.
+  # Build jobs don't need the gate: the publish job requires all three
+  # (`needs: [gate, desktop, android]`), so an untested tag still can't
+  # publish — the legs just run concurrently instead of waiting ~2m.
   gate:
     uses: ./.github/workflows/ci.yml
 
   desktop:
-    needs: [gate]
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-      # All-or-nothing publish: `needs: [desktop, android]` gates the
-      # release job on the whole matrix, so one failed platform blocks
-      # the release until fixed — a partial asset set is never a
-      # release. fail-fast stays default: the first failure cancels
-      # the other legs rather than paying for dead builds.
+      # All-or-nothing publish: `needs: [gate, desktop, android]` gates
+      # the release job on the whole matrix, so one failed platform (or
+      # a failed gate) blocks the release until fixed — a partial asset
+      # set is never a release. fail-fast stays default: the first
+      # failure cancels the other legs rather than paying for dead
+      # builds.
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -169,7 +172,6 @@ jobs:
             !auqw/apps/desktop/dist-packages/*.blockmap
 
   android:
-    needs: [gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -201,6 +203,21 @@ jobs:
           tool: cargo-ndk
       # Caches gradle deps + wrapper downloads between runs.
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
+      # android/ is gitignored — prebuild regenerates its
+      # gradle.properties each run, so release-only tuning can't live
+      # there. GRADLE_USER_HOME/gradle.properties outranks the project
+      # file for org.gradle.* properties.
+      - name: gradle tuning
+        run: |
+          mkdir -p "$HOME/.gradle"
+          {
+            # task-level build cache: module/prefab outputs identical to
+            # a previous run skip recompiling instead of being rebuilt.
+            echo 'org.gradle.caching=true'
+            echo 'org.gradle.vfs.watch=true'
+            # R8 + hermesc on the template's -Xmx2048m is tight.
+            echo 'org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g'
+          } >> "$HOME/.gradle/gradle.properties"
       # Alpha signing key lives in repo secrets — decoded to a runner
       # temp file, never committed. A release must never silently ship
       # debug-signed: missing secrets fail the job (the plugin's no-env
@@ -223,6 +240,10 @@ jobs:
           echo "AUQW_ALPHA_KEYSTORE_FILE=$RUNNER_TEMP/alpha.keystore" >> "$GITHUB_ENV"
       - name: android inputs (bindings + plugins)
         working-directory: auqw
+        env:
+          # The release ships arm64-only APKs — compiling the x86_64
+          # .so (~half of cargo-ndk) produces a lib no artifact carries.
+          AUQW_ANDROID_ABIS: arm64-v8a
         run: |
           # ubuntu-latest ships several NDKs under the SDK — the
           # bindings script defaults to a macOS path, so point it at
@@ -244,7 +265,12 @@ jobs:
           AUQW_ALPHA_STORE_PASSWORD: ${{ secrets.AUQW_ALPHA_STORE_PASSWORD }}
           AUQW_ALPHA_KEY_PASSWORD: ${{ secrets.AUQW_ALPHA_KEY_PASSWORD }}
         run: |
-          cd android && ./gradlew assembleRelease -Pauqw.abis=arm64-v8a
+          # reactNativeArchitectures must follow auqw.abis, not just the
+          # splits include: the prebuild-emitted gradle.properties keeps
+          # x86_64 (for emulator debug), and RN/Expo module CMake/prefab
+          # builds are per-arch — without the override every module
+          # compiles a second ABI the APK split then throws away.
+          cd android && ./gradlew assembleRelease -Pauqw.abis=arm64-v8a -PreactNativeArchitectures=arm64-v8a
           cd .. && for apk in android/app/build/outputs/apk/release/app-*-release.apk; do
             name=$(basename "$apk")
             abi=${name#app-}; abi=${abi%-release.apk}
@@ -277,7 +303,7 @@ jobs:
             auqw/apps/mobile/SHA256SUMS*
 
   release:
-    needs: [desktop, android]
+    needs: [gate, desktop, android]
     # the only job that mutates anything — gh writes the release and
     # its assets with this token, so it alone scopes up to write.
     permissions:

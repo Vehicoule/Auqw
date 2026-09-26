@@ -111,6 +111,9 @@ export const en = {
   'search.failed': 'search failed',
   'search.unavailableTitle': 'search unavailable',
   'search.resultsA11y': 'search results',
+  'search.suggestions': 'suggestions',
+  'search.commitQuery': 'search for “{query}”',
+  'search.a11y.suggestion': 'search for {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'your library',
@@ -311,6 +314,7 @@ export const en = {
   'sync.listener.starting': 'starting',
   'sync.listener.listening': 'listening',
   'sync.listener.unavailable': 'unavailable',
+  'sync.listener.dormant': 'off',
   'sync.listener.disabled': 'disabled',
   'sync.engine.ready': 'ready',
   'sync.engine.absent': 'absent',
@@ -360,6 +364,9 @@ export const en = {
   'settings.languageValue.system': 'system',
   'settings.languageValue.en': 'english',
   'settings.languageValue.de': 'deutsch',
+  'settings.languageValue.es': 'español',
+  'settings.languageValue.fr': 'français',
+  'settings.languageValue.zh': '中文',
   'settings.heading.settings': 'settings',
   'settings.heading.diagnostics': 'diagnostics',
   'settings.heading.sync': 'sync',
