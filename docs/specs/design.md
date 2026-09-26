@@ -15,11 +15,12 @@ Omarchy rules, non-negotiable: depth comes from the background ramp only (no sha
 
 ## Shell contract — desktop (Electron)
 
-One window, no titlebar band. The Stage column runs to the top edge; the World's first row is its toolbar. A single 40 px line carries all chrome:
+One window, no titlebar band. The Stage column runs to the top edge at the golden-ratio split — `38.2%` clamped to 280–480 px, collapsible from its own head strip or the world's toggle; under ~860 px window width it stops shrinking and overlays the world instead (GTK breakpoint behavior). A single 40 px line carries all chrome on each column:
 
-- **Stage strip:** macOS traffic lights pin left (inset into the sidebar's top edge), the output-device pill centers, the sidebar-collapse button pins right.
-- **World toolbar:** expanding search icon (left, at the panel seam) · centered `home | explore | library` tabs · menu · caption buttons (Windows/Linux overlay the strip's right edge; close hover → `#e81123`). Electron: `titleBarStyle: 'hiddenInset'` + `trafficLightPosition` on macOS (no drawn strip); `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme on Windows and Linux.
-- **Search (GTK pattern):** a compact icon that expands on hover/focus; when open it takes the toolbar's width and the nav tabs step aside — overlap is impossible by construction.
+- **Stage strip:** macOS traffic lights pin left (inset over the strip's top edge), the collapse button pins right.
+- **World toolbar:** stage toggle + search icon at the seam · centered `home | explore | library` pills · primary menu (settings) at the end · caption buttons (Windows/Linux overlay the strip's right edge — the renderer measures `windowControlsOverlay` into `--uw-caption-w` so controls keep clear). Electron: `titleBarStyle: 'hiddenInset'` + `trafficLightPosition` on macOS (no drawn strip); `titleBarStyle: 'hidden'` + `titleBarOverlay` themed per scheme on Windows and Linux.
+- **Search:** the toolbar icon routes to the explore tab and focuses its field (same target as `/`). The GTK expanding-field variant stays deferred — the toolbar is too thin to host an inline field honestly.
+- **Stage column:** the full player lives here — same modes and blocks as the sheet below. When nothing is loaded the column shows an empty state instead of dead controls. No mini-player on desktop.
 - **Stage player mode:** artwork → meta (title/artist/album + download/add) → waveform-style seek → centered transport `like · prev · play · next · repeat` → volume → mode segment (pinned at the bottom edge). Play is a solid fg-bright block; liked is pink.
 - **Stage lyrics mode:** title + honest sync state (`estimated timing` when unsynced) + scrollable lines; active line in accent; pin control; thin scrollbar. No transport controls inside lyrics.
 - **Row anatomy (shared, both platforms):** thumb (animated eq overlay when playing) · title + version · duration · state (like/download/warn) · add-to-playlist.

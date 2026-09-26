@@ -50,11 +50,11 @@ export {
 } from './states.tsx';
 export type { StateViewProps } from './states.tsx';
 
-export { DesktopChrome, DesktopHeader, DesktopSidebar } from './chrome.tsx';
+export { DesktopChrome, WorldMenu, WorldTabs } from './chrome.tsx';
 export type {
     DesktopChromeProps,
-    DesktopHeaderProps,
-    DesktopSidebarProps,
+    WorldMenuProps,
+    WorldTabsProps,
 } from './chrome.tsx';
 
 export {

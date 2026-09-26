@@ -41,12 +41,13 @@ import {
   CollectionScreen,
   CorrectionsScreen,
   DesktopChrome,
+  EmptyState,
   EntityScreen,
   ErrorState,
   HomeScreen,
   LibraryScreen,
   LoadingState,
-  MiniPlayer,
+  NowPlayingScreen,
   PairingSheet,
   PlaylistScreen,
   ProviderPickerSheet,
@@ -56,7 +57,6 @@ import {
   SettingsScreen,
   SheetScreen,
   StackItem,
-  StageSheet,
   Text,
   ThemeProvider,
   TransferScreen,
@@ -294,12 +294,29 @@ function Shell({ controller }: { readonly controller: SessionController }) {
 
 /** Chrome integration: pushes the resolved scheme to main so the
     titlebar overlay matches the canvas even when the user picked an
-    explicit scheme, and stamps the platform so CSS can clear the
-    macOS traffic lights. */
+    explicit scheme, stamps the platform so CSS can clear the macOS
+    traffic lights, and measures the caption-button zone so toolbar
+    controls keep clear of it on win32/linux. */
 function ChromeSchemeReporter(): null {
   const { scheme } = useTheme();
   useEffect(() => {
-    document.documentElement.dataset.platform = window.auqw.chrome.platform;
+    const root = document.documentElement;
+    root.dataset.platform = window.auqw.chrome.platform;
+    // getTitlebarAreaRect covers the free title area — the caption
+    // buttons occupy what's left of the window's top-right.
+    const wco = (
+      navigator as Navigator & {
+        windowControlsOverlay?: {
+          readonly visible: boolean;
+          getTitlebarAreaRect(): DOMRect;
+        };
+      }
+    ).windowControlsOverlay;
+    const captionW =
+      wco !== undefined && wco.visible
+        ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
+        : 0;
+    root.style.setProperty('--uw-caption-w', `${captionW}px`);
     window.auqw.chrome.setScheme(scheme);
   }, [scheme]);
   return null;
@@ -527,7 +544,10 @@ function Main({
 }) {
   const { session } = controller;
   const [tab, setTab] = useState('home');
-  const [expanded, setExpanded] = useState(false);
+  // Desktop keeps the player in the Stage column — always mounted,
+  // collapsible from the world toolbar. Replaces the sheet's expanded
+  // flag (the sheet is mobile-only now).
+  const [stageOpen, setStageOpen] = useState(true);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
@@ -1690,7 +1710,7 @@ function Main({
   // actually showing — and refetch whenever the track under it
   // changes. Leaving lyrics mode keeps the last sheet cached.
   useEffect(() => {
-    if (!expanded || stageMode !== 'lyrics' || currentRecordingId === null) {
+    if (!stageOpen || stageMode !== 'lyrics' || currentRecordingId === null) {
       return;
     }
     if (lyricsFetch?.recordingId === currentRecordingId) {
@@ -1698,7 +1718,7 @@ function Main({
     }
     fetchLyrics(currentRecordingId);
   }, [
-    expanded,
+    stageOpen,
     stageMode,
     currentRecordingId,
     lyricsFetch,
@@ -2748,73 +2768,72 @@ function Main({
       <AppStack>
         <StackItem stackKey="root">
           <DesktopChrome
-            items={navItems()}
+            tabs={navItems().filter((item) => item.key !== 'settings')}
             activeKey={tab}
             onSelect={(key) => {
               setTab(key);
+              clearOverlays();
+            }}
+            onOpenSettings={() => {
+              setTab('settings');
               clearOverlays();
             }}
             onFocusSearch={() => {
               setTab('explore');
               setSearchFocusTick((n) => n + 1);
             }}
-            miniPlayer={
-              player !== null && !expanded ? (
-                <MiniPlayer
+            stageOpen={stageOpen}
+            onStageOpenChange={setStageOpen}
+            stage={
+              player !== null ? (
+                <NowPlayingScreen
                   player={player}
-                  onPress={() => setExpanded(true)}
+                  mode={stageMode}
+                  onModeChange={setStageMode}
+                  queue={queueModel}
+                  queueReordering={reordering}
+                  lyrics={lyricsModel}
+                  radio={radioModel}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
                   onToggleLike={onToggleLike}
-                  onDismiss={() => void session.stop()}
+                  download={
+                    currentRecordingId !== null &&
+                    (controller.downloads.recordFor(currentRecordingId) !==
+                      null ||
+                      downloadRefFor(currentRecordingId) !== null)
+                      ? (downloadChipFor(currentRecordingId) ?? 'idle')
+                      : null
+                  }
+                  onDownload={
+                    currentRecordingId !== null
+                      ? () => onDownloadAction(currentRecordingId)
+                      : undefined
+                  }
+                  onSeek={(ms) => void session.seekTo(ms)}
+                  onRetryLyrics={onRetryLyrics}
+                  onStartRadio={
+                    radioSeedable(radioSeedRef) ? onStartRadio : undefined
+                  }
+                  onStopRadio={onStopRadio}
+                  onPressQueueItem={playQueueOccurrence}
+                  onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+                  onToggleQueueReorder={() => setReordering((v) => !v)}
+                  onMoveQueueItem={onMoveQueueItem}
+                  onMoveQueueItemTo={onMoveQueueItemTo}
                 />
-              ) : undefined
+              ) : (
+                <EmptyState
+                  title={t('stage.empty')}
+                  hint={t('stage.emptyHint')}
+                  icon="note"
+                />
+              )
             }
           >
             {renderTabScreen(tab)}
           </DesktopChrome>
-          {player !== null ? (
-            <StageSheet
-              player={player}
-              expanded={expanded}
-              onExpandChange={setExpanded}
-              mode={stageMode}
-              onModeChange={setStageMode}
-              queue={queueModel}
-              queueReordering={reordering}
-              lyrics={lyricsModel}
-              radio={radioModel}
-              onPlayPause={onPlayPause}
-              onNext={() => advance('next')}
-              onPrevious={() => advance('previous')}
-              onToggleLike={onToggleLike}
-              download={
-                currentRecordingId !== null &&
-                (controller.downloads.recordFor(currentRecordingId) !==
-                  null ||
-                  downloadRefFor(currentRecordingId) !== null)
-                  ? (downloadChipFor(currentRecordingId) ?? 'idle')
-                  : null
-              }
-              onDownload={
-                currentRecordingId !== null
-                  ? () => onDownloadAction(currentRecordingId)
-                  : undefined
-              }
-              onSeek={(ms) => void session.seekTo(ms)}
-              onRetryLyrics={onRetryLyrics}
-              onStartRadio={
-                radioSeedable(radioSeedRef) ? onStartRadio : undefined
-              }
-              onStopRadio={onStopRadio}
-              onPressQueueItem={playQueueOccurrence}
-              onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
-              onToggleQueueReorder={() => setReordering((v) => !v)}
-              onMoveQueueItem={onMoveQueueItem}
-              onMoveQueueItemTo={onMoveQueueItemTo}
-            />
-          ) : null}
           {online === false && (
             <div
               style={{

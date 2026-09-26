@@ -281,7 +281,8 @@ export type IconName =
   | 'radio'
   | 'check'
   | 'menu'
-  | 'monitor';
+  | 'monitor'
+  | 'sidebar';
 
 type GlyphShape =
   | { readonly kind: 'path'; readonly d: string }
@@ -444,6 +445,10 @@ const GLYPHS: Record<IconName, Glyph> = {
   monitor: {
     filled: false,
     shapes: [rr(3, 5, 18, 12, 1.5), p('M9 21h6m-3-4v4')],
+  },
+  sidebar: {
+    filled: false,
+    shapes: [rr(3, 5, 18, 14, 1.5), p('M10 5v14')],
   },
 };
 
