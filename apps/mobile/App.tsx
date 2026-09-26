@@ -47,6 +47,7 @@ import type {
   Result,
   SearchState,
   SessionState,
+  Settings,
   SourceRef,
   SyncClientStatus,
   TrackMetadata,
@@ -683,20 +684,28 @@ function Main({
     },
     [],
   );
-  // Settings writes are serialized so picks land in submission order,
-  // and each write MERGES ITS OWN FIELD onto the newest known settings
-  // at execution time. `updateSettings` persists a complete snapshot,
-  // so replaying one captured at selection time would revert whatever
-  // landed in between (a direct prefetch/toggle write, say).
+  // Every settings write goes through this one chain so writes land
+  // in submission order, and each MERGES ITS PATCH onto the session's
+  // latest committed settings at execution time. `updateSettings`
+  // persists a complete snapshot, so replaying one captured at call
+  // time would revert whatever landed in between. snapshot() — not
+  // React state — is the merge base, so writes that never entered
+  // the chain (the boot repair, a sync-applied change) are covered.
   const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
   const latestSettingsRef = useRef(state.settings);
   useEffect(() => {
     latestSettingsRef.current = state.settings;
   }, [state.settings]);
   const queueSettingsWrite = useCallback(
-    (patch: Partial<Parameters<typeof session.updateSettings>[0]>) => {
+    (patch: Partial<Settings>) => {
       const run = settingsWriteChain.current.then(() => {
-        const next = { ...latestSettingsRef.current, ...patch };
+        const snap = session.snapshot();
+        const next = {
+          ...(snap.type === 'ready'
+            ? snap.settings
+            : latestSettingsRef.current),
+          ...patch,
+        };
         return session.updateSettings(next).then((result) => {
           if (result.ok) {
             latestSettingsRef.current = next;
@@ -1802,29 +1811,23 @@ function Main({
   const onSettingsToggle = useCallback(
     (key: string) => {
       if (key === 'prefetch') {
-        void session.updateSettings({
-          ...state.settings,
-          prefetch: !state.settings.prefetch,
-        });
+        void queueSettingsWrite({ prefetch: !state.settings.prefetch });
       }
       if (key === 'downloadMetered') {
         const next = state.settings.downloadMetered !== true;
-        void session
-          .updateSettings({
-            ...state.settings,
-            downloadMetered: next,
-          })
-          .then((updated) => {
+        void queueSettingsWrite({ downloadMetered: next }).then(
+          (updated) => {
             // Re-derive only after the setting commits — toggling ON
             // unblocks waiting rows, toggling OFF pauses an active
             // cellular transfer; kick() can't demote mid-flight work.
             if (updated.ok) {
               void controller.downloads.reevaluateEligibility();
             }
-          });
+          },
+        );
       }
     },
-    [session, state.settings, controller],
+    [queueSettingsWrite, state.settings, controller],
   );
 
   // ---- slice-4 LAN sync ------------------------------------------------
@@ -2288,15 +2291,15 @@ function Main({
       if (slot === null) {
         return;
       }
-      const next = { ...state.settings };
+      const patch: Partial<Settings> = {};
       if (slot === 'lyricsProvider' || slot === 'radioProvider') {
-        next[slot] = key === 'auto' ? null : key;
+        patch[slot] = key === 'auto' ? null : key;
       } else {
-        next[slot] = key;
+        patch[slot] = key;
       }
-      void session.updateSettings(next);
+      void queueSettingsWrite(patch);
     },
-    [providerSlot, session, state.settings],
+    [providerSlot, queueSettingsWrite],
   );
 
   // ---- library world: entity fetch ----------------------------------
@@ -2727,6 +2730,7 @@ function Main({
     controller,
     downloadRefFor,
     reportPlay,
+    queueSettingsWrite,
   });
   journeyDeps.current = {
     session,
@@ -2735,6 +2739,7 @@ function Main({
     controller,
     downloadRefFor,
     reportPlay,
+    queueSettingsWrite,
   };
   useEffect(() => {
     if (!__DEV__) {
@@ -2768,6 +2773,7 @@ function Main({
         controller: ctl,
         downloadRefFor: refFor,
         reportPlay,
+        queueSettingsWrite: queueWrite,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
@@ -2900,26 +2906,26 @@ function Main({
           if (st.type !== 'ready') {
             break;
           }
-          const next = { ...st.settings };
+          const patch: Partial<Settings> = {};
           const catalog = params.get('catalog');
           const playbackP = params.get('playback');
           const lyricsP = params.get('lyrics');
           const radioP = params.get('radio');
           if (catalog !== null) {
-            next.catalogProvider = catalog;
+            patch.catalogProvider = catalog;
           }
           if (playbackP !== null) {
-            next.playbackProvider = playbackP;
+            patch.playbackProvider = playbackP;
           }
           if (lyricsP !== null) {
-            next.lyricsProvider = lyricsP === 'auto' ? null : lyricsP;
+            patch.lyricsProvider = lyricsP === 'auto' ? null : lyricsP;
           }
           if (radioP !== null) {
-            next.radioProvider = radioP === 'auto' ? null : radioP;
+            patch.radioProvider = radioP === 'auto' ? null : radioP;
           }
-          void s
-            .updateSettings(next)
-            .then((r) => reportResult('action.provider', r));
+          void queueWrite(patch).then((r) =>
+            reportResult('action.provider', r),
+          );
           break;
         }
         case 'corrections':
@@ -3869,25 +3875,25 @@ function Main({
                 // Dismiss only on commit — a failed save shows the
                 // toast, not a closed sheet over an unchanged row.
                 const opening = storefrontEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, storefront: code })
-                  .then((saved) => {
+                void queueSettingsWrite({ storefront: code }).then(
+                  (saved) => {
                     reportResult('action.saveStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
-                  });
+                  },
+                );
               }}
               onClear={() => {
                 const opening = storefrontEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, storefront: null })
-                  .then((saved) => {
+                void queueSettingsWrite({ storefront: null }).then(
+                  (saved) => {
                     reportResult('action.clearStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
-                  });
+                  },
+                );
               }}
               onDismiss={() => setStorefrontSheetOpen(false)}
             />
@@ -3908,14 +3914,12 @@ function Main({
                   return;
                 }
                 const opening = qualityEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, qualityKbps })
-                  .then((saved) => {
-                    reportResult('action.saveQuality', saved);
-                    if (saved.ok && opening === qualityEpoch.current) {
-                      setQualityPickerOpen(false);
-                    }
-                  });
+                void queueSettingsWrite({ qualityKbps }).then((saved) => {
+                  reportResult('action.saveQuality', saved);
+                  if (saved.ok && opening === qualityEpoch.current) {
+                    setQualityPickerOpen(false);
+                  }
+                });
               }}
               onDismiss={() => setQualityPickerOpen(false)}
             />
@@ -3945,9 +3949,8 @@ function Main({
                   artworkCacheBytes <
                   (state.settings.artworkCacheBytes ??
                     ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
-                void session
-                  .updateSettings({ ...state.settings, artworkCacheBytes })
-                  .then((updated) => {
+                void queueSettingsWrite({ artworkCacheBytes }).then(
+                  (updated) => {
                     // A shrunken cap takes effect only once rows over
                     // it are evicted — sweep after the commit lands.
                     if (updated.ok && shrinking) {
@@ -3957,7 +3960,8 @@ function Main({
                         signal: new CancellationSource().signal,
                       });
                     }
-                  });
+                  },
+                );
               }}
               onDismiss={() => setArtworkCachePickerOpen(false)}
             />

@@ -30,6 +30,7 @@ import type {
   Result,
   SearchState,
   SessionState,
+  Settings,
   SourceRef,
   SyncDelta,
   TrackMetadata,
@@ -542,20 +543,28 @@ function Main({
     },
     [],
   );
-  // Settings writes are serialized so picks land in submission order,
-  // and each write MERGES ITS OWN FIELD onto the newest known settings
-  // at execution time. `updateSettings` persists a complete snapshot,
-  // so replaying one captured at selection time would revert whatever
-  // landed in between (a direct prefetch/toggle write, say).
+  // Every settings write goes through this one chain so writes land
+  // in submission order, and each MERGES ITS PATCH onto the session's
+  // latest committed settings at execution time. `updateSettings`
+  // persists a complete snapshot, so replaying one captured at call
+  // time would revert whatever landed in between. snapshot() — not
+  // React state — is the merge base, so writes that never entered
+  // the chain (the boot repair, a sync-applied change) are covered.
   const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
   const latestSettingsRef = useRef(state.settings);
   useEffect(() => {
     latestSettingsRef.current = state.settings;
   }, [state.settings]);
   const queueSettingsWrite = useCallback(
-    (patch: Partial<Parameters<typeof session.updateSettings>[0]>) => {
+    (patch: Partial<Settings>) => {
       const run = settingsWriteChain.current.then(() => {
-        const next = { ...latestSettingsRef.current, ...patch };
+        const snap = session.snapshot();
+        const next = {
+          ...(snap.type === 'ready'
+            ? snap.settings
+            : latestSettingsRef.current),
+          ...patch,
+        };
         return session.updateSettings(next).then((result) => {
           if (result.ok) {
             latestSettingsRef.current = next;
@@ -1504,29 +1513,23 @@ function Main({
   const onSettingsToggle = useCallback(
     (key: string) => {
       if (key === 'prefetch') {
-        void session.updateSettings({
-          ...state.settings,
-          prefetch: !state.settings.prefetch,
-        });
+        void queueSettingsWrite({ prefetch: !state.settings.prefetch });
       }
       if (key === 'downloadMetered') {
         const next = state.settings.downloadMetered !== true;
-        void session
-          .updateSettings({
-            ...state.settings,
-            downloadMetered: next,
-          })
-          .then((updated) => {
+        void queueSettingsWrite({ downloadMetered: next }).then(
+          (updated) => {
             // Re-derive only after the setting commits — toggling ON
             // unblocks waiting rows, toggling OFF pauses an active
             // cellular transfer; kick() can't demote mid-flight work.
             if (updated.ok) {
               void controller.downloads.reevaluateEligibility();
             }
-          });
+          },
+        );
       }
     },
-    [session, state.settings, controller],
+    [queueSettingsWrite, state.settings, controller],
   );
 
   const playback = state.playback;
@@ -2003,15 +2006,15 @@ function Main({
       if (slot === null) {
         return;
       }
-      const next = { ...state.settings };
+      const patch: Partial<Settings> = {};
       if (slot === 'lyricsProvider' || slot === 'radioProvider') {
-        next[slot] = key === 'auto' ? null : key;
+        patch[slot] = key === 'auto' ? null : key;
       } else {
-        next[slot] = key;
+        patch[slot] = key;
       }
-      void session.updateSettings(next);
+      void queueSettingsWrite(patch);
     },
-    [providerSlot, session, state.settings],
+    [providerSlot, queueSettingsWrite],
   );
 
   // ---- library world: overlay routes + entity fetch --------------
@@ -2928,25 +2931,25 @@ function Main({
                 // Dismiss only on commit — a failed save shows the
                 // toast, not a closed sheet over an unchanged row.
                 const opening = storefrontEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, storefront: code })
-                  .then((saved) => {
+                void queueSettingsWrite({ storefront: code }).then(
+                  (saved) => {
                     reportResult('action.saveStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
-                  });
+                  },
+                );
               }}
               onClear={() => {
                 const opening = storefrontEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, storefront: null })
-                  .then((saved) => {
+                void queueSettingsWrite({ storefront: null }).then(
+                  (saved) => {
                     reportResult('action.clearStorefront', saved);
                     if (saved.ok && opening === storefrontEpoch.current) {
                       setStorefrontSheetOpen(false);
                     }
-                  });
+                  },
+                );
               }}
               onDismiss={() => setStorefrontSheetOpen(false)}
             />
@@ -2967,14 +2970,12 @@ function Main({
                   return;
                 }
                 const opening = qualityEpoch.current;
-                void session
-                  .updateSettings({ ...state.settings, qualityKbps })
-                  .then((saved) => {
-                    reportResult('action.saveQuality', saved);
-                    if (saved.ok && opening === qualityEpoch.current) {
-                      setQualityPickerOpen(false);
-                    }
-                  });
+                void queueSettingsWrite({ qualityKbps }).then((saved) => {
+                  reportResult('action.saveQuality', saved);
+                  if (saved.ok && opening === qualityEpoch.current) {
+                    setQualityPickerOpen(false);
+                  }
+                });
               }}
               onDismiss={() => setQualityPickerOpen(false)}
             />
