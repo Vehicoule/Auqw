@@ -1714,9 +1714,12 @@
   flex: none;
   height: var(--uw-titlebar-h);
   /* 3 tracks, equal outer columns: the tabs sit at the bar's true
-     midpoint and can never overlap the side clusters. */
+     midpoint and can never overlap the side clusters. The outer
+     minimum matches the larger cluster (toggle+search ≈ 68px) so a
+     squeezed track clamps instead of letting its buttons slide under
+     the pills. */
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(68px, 1fr) minmax(0, max-content) minmax(68px, 1fr);
   align-items: center;
   gap: var(--spacing-xxs);
   padding: 0 var(--spacing-sm);
@@ -1755,6 +1758,9 @@
 }
 .uw-tabs {
   min-width: 0;
+  /* last resort for narrow windows + long translations: clip pills
+     rather than overlap the clusters */
+  overflow: hidden;
   display: flex;
   gap: var(--spacing-xxs);
 }
