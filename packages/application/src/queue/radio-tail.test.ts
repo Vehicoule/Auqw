@@ -175,7 +175,14 @@ type Rig = {
   states: SessionState[];
 };
 
-function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
+function rig(
+  state: PersistedState,
+  extraProviders: ProviderPort[] = [],
+  deps: {
+    isOnline?: () => boolean;
+    localPlaybackFor?: (recordingId: string) => string | null;
+  } = {},
+): Rig {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
   const itunes = new FakeProvider('itunes');
@@ -194,6 +201,10 @@ function rig(state: PersistedState, extraProviders: ProviderPort[] = []): Rig {
     random: new SequenceRandom(),
     log,
     defaults: SETTINGS,
+    ...(deps.isOnline === undefined ? {} : { isOnline: deps.isOnline }),
+    ...(deps.localPlaybackFor === undefined
+      ? {}
+      : { localPlaybackFor: deps.localPlaybackFor }),
   });
   const states: SessionState[] = [];
   session.subscribe((s) => states.push(s));
@@ -1425,6 +1436,105 @@ async function seedPrefersAttemptRef(): Promise<void> {
   await r.session.dispose();
 }
 
+async function endedTailNeverReseeds(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const started = r.session.startRadio(ref('youtube-music', 'seed-1'));
+  await pump();
+  // A page with no continuation is terminal — 'the queue simply
+  // finishes', it must not silently re-seed a fresh mix.
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], null)),
+  );
+  assert((await started).ok);
+  await pump();
+  assertEqual(readyOf(r).radio?.status, 'ended');
+  const last = readyOf(r).queue.occurrences.at(-1);
+  assert(last !== undefined);
+  const played = r.session.playOccurrence(last.occurrenceId);
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    1,
+    'playing the last item of an ended mix must not re-seed',
+  );
+  r.player.cancelPendingPrepares();
+  await played;
+  await r.session.dispose();
+}
+
+async function offlineArmRetriesOnReconnect(): Promise<void> {
+  // A locally-owned last track still plays offline; the arm must
+  // skip quietly (weather, not a verdict) and fire on reconnect.
+  let online = false;
+  const r = rig(pausedTailQueue(), [], {
+    isOnline: () => online,
+    localPlaybackFor: (id) => (id === 'rU' ? 'doc-u' : null),
+  });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 0, 'offline tail item must not arm');
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'reconnect re-arms the tail');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'u') },
+    'seed falls past the local ref to the catalog source',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
+async function armWaitsForAttemptRef(): Promise<void> {
+  // Only a foreign-provider ref is stored: playback resolves through
+  // the candidates round, so the arm is queued while `attempt.ref`
+  // is still unknown. The seed must wait for the real pick instead
+  // of grabbing a stored ref that isn't the version playing.
+  const r = rig(
+    persisted({
+      recordings: [recording('rU', [ref('itunes', 'i1')])],
+      queue: queue({
+        revision: 1,
+        occurrences: [occurrence('u1', 'rU')],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+  );
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    0,
+    'no seed while the attempt ref is unresolved',
+  );
+  const adopted = r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'cy', 'Song rU', 'Artist', 300_000)]),
+  );
+  assert(adopted, 'expected a pending candidates call');
+  await pump();
+  assertEqual(
+    radioCalls(r, r.itunes).length,
+    0,
+    'the foreign stored ref must never seed',
+  );
+  assertEqual(radioCalls(r).length, 1, 'resolved ref re-arms');
+  assertDeepEqual(
+    radioCalls(r)[0]?.input,
+    { sourceRef: ref('youtube-music', 'cy') },
+    'seed is the candidate the attempt actually resolved',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
+  await r.session.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureRemaining', pureRemaining],
   ['pureIsRadioPage', pureIsRadioPage],
@@ -1456,6 +1566,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['seedOnStoppedQueueStaysIdle', seedOnStoppedQueueStaysIdle],
   ['nativeAdvanceArmsTail', nativeAdvanceArmsTail],
   ['seedPrefersAttemptRef', seedPrefersAttemptRef],
+  ['endedTailNeverReseeds', endedTailNeverReseeds],
+  ['offlineArmRetriesOnReconnect', offlineArmRetriesOnReconnect],
+  ['armWaitsForAttemptRef', armWaitsForAttemptRef],
 ] as const;
 
 export async function run(): Promise<void> {

@@ -3349,10 +3349,12 @@ export class Session {
    * Auto-arm: reaching the queue's LAST occurrence seeds the lazy
    * tail from the playing track, so a finite queue rolls into a
    * radio mix instead of ending (playing a single track arms it
-   * immediately). One attempt per occurrence; a disarm or a
-   * superseding seed invalidates a queued attempt via the arm
-   * epoch. Failures stay logged — an auto-seed is speculative,
-   * never user-visible.
+   * immediately). Any existing tail — growing, ended, or failed —
+   * blocks it: a terminal tail stays terminal until an explicit seed
+   * replaces it, and auto-arm must never resurrect a failed mix.
+   * One attempt per occurrence; a disarm or a superseding seed
+   * invalidates a queued attempt via the arm epoch. Failures stay
+   * logged — an auto-seed is speculative, never user-visible.
    */
   #maybeArmRadio(): void {
     const r = this.#ready;
@@ -3365,8 +3367,12 @@ export class Session {
       snap.currentOccurrenceId === null ||
       remainingAfterCurrent(snap) !== 0 ||
       this.#radioAutoSeedOccurrence === snap.currentOccurrenceId ||
-      (r.radio !== null && r.radio.status === 'growing')
+      r.radio !== null
     ) {
+      return;
+    }
+    if (!this.#isOnline()) {
+      // Offline is weather — connectivityChanged() re-derives.
       return;
     }
     // One attempt per tail position — the marker holds even when the
@@ -3381,7 +3387,7 @@ export class Session {
         cur === null ||
         this.#disposed ||
         this.#radioArmEpoch !== epoch ||
-        (cur.radio !== null && cur.radio.status === 'growing')
+        cur.radio !== null
       ) {
         // Cleared or reseeded while queued — the later decision wins.
         return ok(undefined);
@@ -3412,13 +3418,36 @@ export class Session {
       if (liveOccurrence === undefined || liveRecording === undefined) {
         return ok(undefined);
       }
-      // The verdict binds to the occurrence actually judged — the
-      // cursor may have moved since the trigger fired.
-      this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
-      const ref = this.#radioSeedRef(liveOccurrence, liveRecording);
-      if (ref === null || !this.#isOnline()) {
+      // An attempt for the tail item that hasn't resolved its ref
+      // yet is weather: stored-order fallback would seed a different
+      // version than the one playing. #startAttempt re-fires the
+      // arm when `attempt.ref` lands.
+      const liveAttempt = this.#active;
+      if (
+        liveAttempt !== null &&
+        liveAttempt.occurrenceId === live.currentOccurrenceId &&
+        liveAttempt.ref === undefined
+      ) {
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
         return ok(undefined);
       }
+      const ref = this.#radioSeedRef(liveOccurrence, liveRecording);
+      if (ref === null) {
+        // Judged: nothing seedable — the verdict sticks.
+        this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
+        return ok(undefined);
+      }
+      if (!this.#isOnline()) {
+        // Connectivity dropped between trigger and run — release the
+        // marker so the reconnect #derived re-arms this occurrence.
+        if (this.#radioAutoSeedOccurrence === armedFor) {
+          this.#radioAutoSeedOccurrence = null;
+        }
+        return ok(undefined);
+      }
+      this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
       const seeded = await this.#startRadio(ref);
       if (!seeded.ok) {
         this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
@@ -4089,6 +4118,9 @@ export class Session {
       r2.playback = { ...r2.playback, ref };
       this.#publish();
     }
+    // The playing ref is now known — an auto-arm queued while this
+    // attempt was still resolving can seed the real version.
+    this.#maybeArmRadio();
     if (this.#isStale(attempt)) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
