@@ -502,6 +502,53 @@ const IDLE_TRANSFER: TransferModel = {
  */
 let toastSink: ((text: string) => void) | null = null;
 
+/**
+ * Lyrics-highlight position clock: engine ticks arrive ~1Hz (mobile)
+ * to ~4Hz (desktop), so between ticks the raw snapshot position sits
+ * stale and the active line lands visibly late. While `active`, the
+ * last engine position is extrapolated forward at a fixed cadence —
+ * each fresh engine position re-anchors the clock. `generation`
+ * re-anchors without a position change: a seek landing on the last
+ * reported tick would otherwise keep extrapolating from the pre-seek
+ * anchor. The anchor clock is `performance.now()` — `Date.now()`
+ * follows system-clock adjustments, which would jump the highlight.
+ * Anchoring is keyed to position/generation/transport: a fresh
+ * position or a seek re-anchors, and a `playing` transition re-anchors
+ * too — the anchor's clock must freeze with the pause, otherwise
+ * resume would count the paused wall-time as elapsed playback.
+ * Re-entering the pane (`visible` flipping) must NOT re-anchor: the
+ * anchor keeps the tick's real arrival time, so the elapsed fraction
+ * since the last engine event is preserved instead of discarded.
+ * Ticking only while the lyrics pane is live keeps the periodic
+ * re-render off the idle path.
+ */
+function useSmoothedPosition(
+  positionMs: number,
+  playing: boolean,
+  visible: boolean,
+  generation: number,
+): number {
+  const anchor = useRef({ ms: positionMs, at: performance.now() });
+  const [smoothMs, setSmoothMs] = useState(positionMs);
+  useEffect(() => {
+    anchor.current = { ms: positionMs, at: performance.now() };
+    setSmoothMs(positionMs);
+  }, [positionMs, generation, playing]);
+  useEffect(() => {
+    if (!playing || !visible) {
+      return undefined;
+    }
+    const tick = () => {
+      const a = anchor.current;
+      setSmoothMs(a.ms + (performance.now() - a.at));
+    };
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [playing, visible]);
+  return smoothMs;
+}
+
 function reportResult(action: MessageId, result: Result<unknown>): void {
   if (!result.ok) {
     console.warn(
@@ -1757,6 +1804,23 @@ function Main({
     fetchLyrics,
   ]);
 
+  // Lyrics highlight rides a smoothed clock so the active line tracks
+  // playback between the engine's sparse position ticks; it only ticks
+  // while the lyrics pane is actually on screen.
+  const [seekGeneration, bumpSeekGeneration] = useState(0);
+  const seekToPosition = useCallback(
+    (ms: number): Promise<Result<void>> => {
+      bumpSeekGeneration((n) => n + 1);
+      return session.seekTo(ms);
+    },
+    [session],
+  );
+  const lyricsPositionMs = useSmoothedPosition(
+    player?.positionMs ?? 0,
+    playing,
+    expanded && stageMode === 'lyrics',
+    seekGeneration,
+  );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
       return undefined;
@@ -1769,9 +1833,9 @@ function Main({
       sheet: fetch?.sheet ?? null,
       error: fetch?.error ?? null,
       loading: fetch === null ? true : fetch.loading,
-      positionMs: player?.positionMs ?? 0,
+      positionMs: lyricsPositionMs,
     });
-  }, [lyricsFetch, currentRecordingId, player, localeTick]);
+  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {
@@ -2861,7 +2925,7 @@ function Main({
                   ? () => onDownloadAction(currentRecordingId)
                   : undefined
               }
-              onSeek={(ms) => void session.seekTo(ms)}
+              onSeek={seekToPosition}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={
                 radioSeedable(radioSeedRef) ? onStartRadio : undefined

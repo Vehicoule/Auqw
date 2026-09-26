@@ -299,9 +299,9 @@ export type LyricsModel = {
 /**
  * Maps the session's `LyricsSheet` (plus the fetch lifecycle the
  * caller tracks) to the Stage lyrics model. `activeIndex` is the
- * last timed line at or before `positionMs` — null before the first
- * line — and provenance rides the sync label as
- * `<state> · <provider>[ · cached]`.
+ * last timed line at or before `positionMs` — line 0 during the
+ * intro, before the first timestamp — and provenance rides the sync
+ * label as `<state> · <provider>[ · cached]`.
  */
 export function toLyricsModel(input: {
   readonly sheet: LyricsSheet | null;
@@ -334,6 +334,11 @@ export function toLyricsModel(input: {
           activeIndex = index;
         }
       });
+      // Before the first timestamp the intro still owns a highlighted
+      // line — holding line 0 beats showing no highlight at all.
+      if (activeIndex === null && sheet.lines.length > 0) {
+        activeIndex = 0;
+      }
       return {
         state: 'synced',
         lines: sheet.lines.map((line) => line.text),
