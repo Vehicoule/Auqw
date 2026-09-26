@@ -338,7 +338,7 @@ export function LibraryScreen({
       }}
     >
       <Text variant="display" color="bright">
-        library
+        {t('nav.library')}
       </Text>
 
       {/* collections 2×2 — liked · downloads · top 50 · history */}
