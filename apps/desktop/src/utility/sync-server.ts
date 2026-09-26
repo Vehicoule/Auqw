@@ -527,9 +527,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   let fingerprint: string | null = null;
   let ownDeviceId: string | null = null;
   let browseSession: SyncDiscoverySession | null = null;
-  // A stop that lands while browse() is still pending must not leave
-  // the late session running — generation-bump marks "stop wanted".
-  let browseGeneration = 0;
+  let browsePending: Promise<
+    Result<SyncDiscoverySession>
+  > | null = null;
+  // Every nearbyStart owns one share of the browse — a window closing
+  // its sheet stops discovery only when the last owner lets go, and a
+  // stop while browse() is pending makes the late session self-close.
+  let browseOwners = 0;
   let dialerInstance: SyncDialer | null = null;
   let lastSyncAt: number | null = null;
   let closing = false;
@@ -1773,14 +1777,17 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
      * keychain prompt — so it doesn't need ensureStarted().
      */
     'sync:nearbyStart': async () => {
-      if (browseSession !== null) {
+      browseOwners += 1;
+      // One shared browse: a second window joins the live session or
+      // the pending start rather than opening a parallel browse.
+      if (browseSession !== null || browsePending !== null) {
         return undefined;
       }
       if (deps.discovery === undefined || deps.discovery === null) {
+        browseOwners -= 1;
         throw shellError('unavailable', 'sync: discovery not installed');
       }
-      const generation = ++browseGeneration;
-      const opened = await deps.discovery.browse({
+      const pending = deps.discovery.browse({
         onFound: (peer) => {
           try {
             deps.notifyNearby?.({ type: 'found', peer });
@@ -1796,12 +1803,16 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           }
         },
       });
+      browsePending = pending;
+      const opened = await pending;
+      browsePending = null;
       if (!opened.ok) {
+        browseOwners -= 1;
         throw engineError(opened.error);
       }
-      if (browseGeneration !== generation) {
-        // nearbyStop ran while browse() was pending — drop the late
-        // session rather than browse without a subscriber.
+      if (browseOwners === 0) {
+        // Every owner stopped while browse() was pending — drop the
+        // late session rather than browse without a subscriber.
         try {
           opened.value.close();
         } catch {
@@ -1814,9 +1825,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
 
     'sync:nearbyStop': async () => {
-      browseGeneration += 1;
-      browseSession?.close();
-      browseSession = null;
+      browseOwners = Math.max(0, browseOwners - 1);
+      if (browseOwners === 0) {
+        browseSession?.close();
+        browseSession = null;
+      }
       return undefined;
     },
 
@@ -2179,7 +2192,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         () => undefined,
         () => undefined,
       );
-      browseGeneration += 1;
+      browseOwners = 0;
       browseSession?.close();
       browseSession = null;
       pairing.expire();

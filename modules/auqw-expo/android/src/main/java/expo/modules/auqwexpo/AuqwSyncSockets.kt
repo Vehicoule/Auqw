@@ -46,6 +46,11 @@ class AuqwSyncSockets(
   private var listener: ServerSocket? = null
   private var acceptThread: Thread? = null
   private var nextSocketSeq = 0
+  // Pairing-only accepts get no auth before a reader thread starts —
+  // cap live accept-* sockets so idle LAN connects can't exhaust
+  // threads/fds. The pair host kills sessions itself; this bounds the
+  // pre-handshake surface.
+  private val maxAccepted = 16
 
   /**
    * Bind a wildcard listener on an ephemeral port. Accepted sockets
@@ -76,6 +81,12 @@ class AuqwSyncSockets(
               }
             socket.tcpNoDelay = true
             socket.keepAlive = true
+            val liveAccepts =
+              entries.keys.count { it.startsWith("accept-") }
+            if (liveAccepts >= maxAccepted) {
+              runCatching { socket.close() }
+              continue
+            }
             val socketId = "accept-${++nextSocketSeq}"
             val entry = Entry(socket)
             entries[socketId] = entry

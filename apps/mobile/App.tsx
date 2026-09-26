@@ -2051,31 +2051,19 @@ function Main({
     void discovery
       .browse({
         onFound: (peer) => {
+          // Service name is the identity — a re-advertised peer on a
+          // new address replaces its old row, never duplicates.
           const key = `${peer.name}|${peer.host}:${peer.port}`;
-          setNearbyPeers((prev) =>
-            prev.some((p) => p.key === key)
-              ? prev.map((p) =>
-                  p.key === key
-                    ? {
-                        key,
-                        name: peer.name,
-                        host: peer.host,
-                        port: peer.port,
-                        fp: peer.fp,
-                      }
-                    : p,
-                )
-              : [
-                  ...prev,
-                  {
-                    key,
-                    name: peer.name,
-                    host: peer.host,
-                    port: peer.port,
-                    fp: peer.fp,
-                  },
-                ],
-          );
+          setNearbyPeers((prev) => [
+            ...prev.filter((p) => p.name !== peer.name),
+            {
+              key,
+              name: peer.name,
+              host: peer.host,
+              port: peer.port,
+              fp: peer.fp,
+            },
+          ]);
         },
         onLost: (name) => {
           setNearbyPeers((prev) =>

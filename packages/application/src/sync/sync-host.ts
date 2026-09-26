@@ -283,7 +283,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
   const maxTotalCodeAttempts =
     deps.maxTotalCodeAttempts ?? maxCodeAttempts * 3;
 
-  const pairing = createPairingMint({
+  let pairing = createPairingMint({
     nowMs,
     ttlMs: deps.codeTtlMs ?? 120_000,
     mintCode: deps.mintCode,
@@ -305,12 +305,20 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     return next;
   }
 
-  const sessions = new Set<HostSession>();
+  // `sessions` is swapped wholesale on stop — a socket accepted by a
+  // post-stop generation never lands in the set a pending teardown is
+  // killing.
+  let sessions = new Set<HostSession>();
   let serviceCancel = new CancellationSource();
   let listener: SyncSocketListener | null = null;
   let advertiser: { close(): void } | null = null;
   let startPromise: Promise<Result<{ port: number }>> | null = null;
   let closed = false;
+  // Lifecycle generations: stop() bumps the counter, and a bind
+  // resolving under a stale generation refuses to install — teardown
+  // then only touches artifacts older than its own bump.
+  let generation = 0;
+  let listenerGen = -1;
 
   const log = deps.log ?? (() => undefined);
 
@@ -703,13 +711,18 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         // Initialized to null so the async body's `!== attempt`
         // reads a declared variable — the real value lands before
         // the body's first await completes.
+        const gen = generation;
         let attempt: Promise<Result<{ port: number }>> | null = null;
         attempt = (async () => {
           const bound = await deps.acceptor.listen({ onSocket });
           if (!bound.ok) {
             return bound;
           }
-          if (closed || startPromise !== attempt) {
+          if (
+            closed ||
+            startPromise !== attempt ||
+            gen !== generation
+          ) {
             // A stop/close raced the bind — the listener we just
             // got belongs to a dead generation, drop it.
             bound.value.close();
@@ -721,6 +734,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
             );
           }
           listener = bound.value;
+          listenerGen = gen;
           try {
             advertiser =
               deps.advertise?.({
@@ -748,30 +762,41 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       if (closed) {
         return;
       }
-      // A start still in flight can't be unbound — let it settle,
-      // then tear down whatever it produced.
+      // Bump the generation BEFORE awaiting — a bind resolving during
+      // the await sees itself as stale and self-closes, and teardown
+      // below only touches artifacts older than this stop.
+      const gen = ++generation;
       const starting = startPromise;
       startPromise = null;
+      const doomed = sessions;
+      sessions = new Set();
+      const mint = pairing;
+      pairing = createPairingMint({
+        nowMs,
+        ttlMs: deps.codeTtlMs ?? 120_000,
+        mintCode: deps.mintCode,
+      });
       await starting;
       serviceCancel.cancel();
       serviceCancel = new CancellationSource();
-      pairing.expire();
-      for (const session of sessions) {
+      mint.expire();
+      for (const session of doomed) {
         killSession(session);
       }
-      sessions.clear();
-      const bound = listener;
-      listener = null;
-      try {
-        advertiser?.close();
-      } catch {
-        // best effort
-      }
-      advertiser = null;
-      try {
-        bound?.close();
-      } catch {
-        // best effort
+      if (listenerGen < gen) {
+        const bound = listener;
+        listener = null;
+        try {
+          advertiser?.close();
+        } catch {
+          // best effort
+        }
+        advertiser = null;
+        try {
+          bound?.close();
+        } catch {
+          // best effort
+        }
       }
     },
     mintOffer() {

@@ -979,8 +979,10 @@ function Main({
         if (event.type === 'lost') {
           return prev.filter((peer) => peer.name !== event.name);
         }
+        // Service name is the identity — a re-advertised peer that
+        // moved address/port replaces its old row, never duplicates.
         const key = `${event.peer.name}|${event.peer.host}:${event.peer.port}`;
-        const next = prev.filter((peer) => peer.key !== key);
+        const next = prev.filter((peer) => peer.name !== event.peer.name);
         return [...next, { ...event.peer, key }];
       });
     });

@@ -32,7 +32,11 @@ export function createExpoSyncAcceptor(
   let closedSub: AuqwExpoSubscription | null = null;
   let listening: {
     onSocket: (socket: SyncSocket) => void;
+    /** The bind generation this handler belongs to — accepted events
+        emitted for a superseded bind never reach a new host. */
+    gen: number;
   } | null = null;
+  let listenGeneration = 0;
 
   const ensureWatch = (): void => {
     if (acceptSub !== null) {
@@ -55,7 +59,15 @@ export function createExpoSyncAcceptor(
         remoteAddress: event.remoteAddress,
       });
       live.set(event.socketId, socket);
-      listening?.onSocket(socket);
+      // An accept that predates this generation's handler install (or
+      // lands after close) has no owner — destroy it rather than let
+      // a caller's handshake hang on a pump nobody is reading.
+      if (listening === null || listening.gen !== listenGeneration) {
+        live.delete(event.socketId);
+        socket.destroy();
+        return;
+      }
+      listening.onSocket(socket);
     }) ?? null;
   };
 
@@ -80,13 +92,20 @@ export function createExpoSyncAcceptor(
       if (listening !== null) {
         return err(appError('unavailable', 'sync: already listening'));
       }
+      // Install the accept handler BEFORE the bind resolves — the
+      // native listener accepts on another thread and an early peer
+      // must not arrive to a null handler.
+      const gen = ++listenGeneration;
+      listening = { onSocket, gen };
       try {
         const { port } = await native.syncListen();
-        listening = { onSocket };
         const handle: SyncSocketListener = {
           port,
           close() {
-            listening = null;
+            if (listening !== null && listening.gen === gen) {
+              listening = null;
+            }
+            listenGeneration += 1;
             for (const socket of live.values()) {
               socket.destroy();
             }
@@ -100,6 +119,9 @@ export function createExpoSyncAcceptor(
         };
         return ok(handle);
       } catch (thrown) {
+        if (listening !== null && listening.gen === gen) {
+          listening = null;
+        }
         return err(
           nativeError(thrown) ?? appError('unavailable', 'sync: listen failed'),
         );

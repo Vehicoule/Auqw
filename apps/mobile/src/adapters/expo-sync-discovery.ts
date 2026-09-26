@@ -36,8 +36,10 @@ export function createExpoSyncDiscovery(
 
   // Native stop is fire-and-forget on the call site (close() is sync)
   // — chain it so a reopen can't start a browse that a late stop then
-  // kills from under it.
+  // kills from under it. Same for advertise: a rapid share toggle can
+  // land an old advertiseStop on top of a fresh registration.
   let stopChain: Promise<void> = Promise.resolve();
+  let advertChain: Promise<void> = Promise.resolve();
 
   return {
     async browse({ onFound, onLost }) {
@@ -60,7 +62,19 @@ export function createExpoSyncDiscovery(
       const emitted = new Set<string>();
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
-          if (event.host !== undefined && event.port !== undefined) {
+          // Shape-check before it becomes a dial target — an advert
+          // with a junk port or an unbounded name never reaches the
+          // nearby list.
+          if (
+            event.host !== undefined &&
+            event.host.length > 0 &&
+            event.host.length <= 255 &&
+            Number.isSafeInteger(event.port) &&
+            (event.port ?? 0) >= 1 &&
+            (event.port ?? 0) <= 65_535 &&
+            event.name.length > 0 &&
+            event.name.length <= 128
+          ) {
             // The TXT fp is a pin, not a payload — a malformed advert
             // downgrades to unpinned rather than poisoning the dial.
             const fp =
@@ -71,7 +85,7 @@ export function createExpoSyncDiscovery(
             browsing?.onFound({
               name: event.name,
               host: event.host,
-              port: event.port,
+              port: event.port as number,
               fp,
             });
             emitted.add(event.name);
@@ -115,10 +129,22 @@ export function createExpoSyncDiscovery(
       if (native.syncAdvertise === undefined) {
         return { close() {} };
       }
-      void native.syncAdvertise(name, port, fp).catch(() => undefined);
+      advertChain = advertChain.then(
+        () =>
+          (native.syncAdvertise?.(name, port, fp) ?? Promise.resolve()).catch(
+            () => undefined,
+          ),
+        () => undefined,
+      );
       return {
         close() {
-          void native.syncAdvertiseStop?.().catch(() => undefined);
+          advertChain = advertChain.then(
+            () =>
+              (native.syncAdvertiseStop?.() ?? Promise.resolve()).catch(
+                () => undefined,
+              ),
+            () => undefined,
+          );
         },
       };
     },

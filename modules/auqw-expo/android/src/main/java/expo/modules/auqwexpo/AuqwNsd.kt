@@ -115,6 +115,12 @@ class AuqwNsd(
         override fun onDiscoveryStopped(serviceType: String) {}
 
         override fun onStartDiscoveryFailed(serviceType: String, code: Int) {
+          // A stale listener's failure must not tear down the current
+          // browse — only act when this listener still owns the
+          // generation.
+          if (gen != browseGeneration || discovery !== this) {
+            return
+          }
           Log.w(TAG, "nsd discovery failed: $code")
           // NSD reports async — 'discoverServices' already returned, so
           // the JS browse() resolved 'ok'. Tear down lock + executor
