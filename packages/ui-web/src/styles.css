@@ -1005,15 +1005,14 @@
   text-align: center;
 }
 .uw-artist .uw-artwork {
-  box-shadow: inset 0 0 0 var(--stroke-hairline) var(--hairline);
+  /* Outset, not inset — a loaded image covers the container's inner shadow. */
+  box-shadow: 0 0 0 var(--stroke-hairline) var(--hairline);
 }
 .uw-artist__name {
   margin-top: var(--spacing-xs);
 }
 .uw-artist:hover:not(:disabled) .uw-artwork {
-  box-shadow:
-    inset 0 0 0 var(--stroke-hairline) var(--hairline),
-    0 0 0 var(--stroke-progress) var(--fg18);
+  box-shadow: 0 0 0 var(--stroke-progress) var(--fg18);
 }
 .uw-artist:hover:not(:disabled) .uw-artist__name {
   color: var(--text-primary);
