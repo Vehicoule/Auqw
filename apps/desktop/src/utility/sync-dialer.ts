@@ -65,10 +65,87 @@ class NodeSyncSocket implements SyncSocket {
   }
 }
 
+/**
+ * Dotted-decimal IPv4 parse — returns null on anything that isn't a
+ * strict `a.b.c.d` literal with each octet in range.
+ */
+function parseIpv4(host: string): [number, number, number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m === null) {
+    return null;
+  }
+  const octets = m.slice(1).map(Number);
+  return octets.every((o) => o <= 255)
+    ? [octets[0]!, octets[1]!, octets[2]!, octets[3]!]
+    : null;
+}
+
+/**
+ * Pairing targets are LAN-scoped: the IPC caller (renderer) may be
+ * compromised, so `host` must be an address a LAN pairing protocol
+ * legitimately dials — a private/loopback/link-local/CGNAT/ULA
+ * literal, or an mDNS-style `.local`/`.lan` name. Public literals and
+ * arbitrary DNS names are refused before `netConnect` runs.
+ */
+export function isPairableLanHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  const bare =
+    lower.startsWith('[') && lower.endsWith(']')
+      ? lower.slice(1, -1)
+      : lower;
+  if (
+    bare === 'localhost' ||
+    bare.endsWith('.local') ||
+    bare.endsWith('.lan')
+  ) {
+    return true;
+  }
+  // IPv4, including the `::ffff:`/long-form mapped notation.
+  const mapped = /^::ffff:(.+)$/.exec(bare)?.[1] ?? /^0:0:0:0:ffff:(.+)$/.exec(bare)?.[1];
+  const v4 = parseIpv4(bare) ?? (mapped !== undefined ? parseIpv4(mapped) : null);
+  if (v4 !== null) {
+    const [a, b] = v4;
+    return (
+      a === 10 || // RFC1918
+      a === 127 || // loopback
+      (a === 169 && b === 254) || // link-local
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) // CGNAT (overlay VPNs)
+    );
+  }
+  if (bare === '::1') {
+    return true;
+  }
+  if (!bare.includes(':')) {
+    return false; // neither a v4 literal nor a scoped hostname
+  }
+  const first = Number.parseInt(bare.split(':')[0] ?? '', 16);
+  if (Number.isNaN(first)) {
+    return false;
+  }
+  return (
+    (first & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+    (first & 0xfe00) === 0xfc00 // fc00::/7 ULA
+  );
+}
+
 export function createNodeSyncSockets(): SyncSocketPort {
   const live = new Set<Socket>();
   return {
     connect({ host, port, timeoutMs, signal }) {
+      if (!isPairableLanHost(host)) {
+        // A pairing dial that isn't LAN-scoped is refused outright —
+        // the renderer's typed host:port and QR endpoints alike.
+        return Promise.resolve(
+          err(
+            appError(
+              'permission-denied',
+              'sync: dial target is not a LAN address',
+            ),
+          ),
+        );
+      }
       return new Promise<Result<SyncSocket>>((resolve) => {
         let settled = false;
         const socket = netConnect({ host, port });

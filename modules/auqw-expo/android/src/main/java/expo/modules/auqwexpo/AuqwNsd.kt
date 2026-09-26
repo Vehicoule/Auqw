@@ -104,7 +104,12 @@ class AuqwNsd(
         override fun onDiscoveryStarted(serviceType: String) {}
 
         override fun onServiceFound(info: NsdServiceInfo) {
-          executor.execute { resolve(info, gen) }
+          // NSD can deliver a pending callback after stopBrowse() —
+          // drop stale-generation events and never submit to a
+          // shut-down executor (its rejection would crash this
+          // callback thread).
+          if (gen != browseGeneration) return
+          runCatching { executor.execute { resolve(info, gen) } }
         }
 
         override fun onServiceLost(info: NsdServiceInfo) {

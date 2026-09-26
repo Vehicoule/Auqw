@@ -309,6 +309,26 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
   // post-stop generation never lands in the set a pending teardown is
   // killing.
   let sessions = new Set<HostSession>();
+  // Custody writes a stop/close must wait out — a pair whose code was
+  // consumed inside the window is allowed to finish writing, but
+  // stop() doesn't return until it has (no post-window registration).
+  const pendingWrites = new Set<Promise<void>>();
+
+  function trackWrite<T>(write: Promise<T>): Promise<T> {
+    const tracked = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingWrites.add(tracked);
+    void tracked.finally(() => pendingWrites.delete(tracked));
+    return write;
+  }
+
+  async function drainWrites(): Promise<void> {
+    while (pendingWrites.size > 0) {
+      await Promise.allSettled([...pendingWrites]);
+    }
+  }
   let serviceCancel = new CancellationSource();
   let listener: SyncSocketListener | null = null;
   let advertiser: { close(): void } | null = null;
@@ -511,7 +531,15 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
           lastSeenAt: now,
           endpoints: endpoint !== null ? [endpoint] : [],
         };
-        const put = await deps.registry.put(record, serviceCancel.signal);
+        // A stop() swapped the sessions set — a session not in the
+        // live set belongs to a dead generation; its custody write
+        // must not start outside the window.
+        if (!sessions.has(session)) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const put = await trackWrite(
+          deps.registry.put(record, serviceCancel.signal),
+        );
         if (!put.ok) {
           pairing.restore(taken);
           return { ok: false, reason: put.error.kind };
@@ -521,6 +549,11 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       });
       if (!outcome.ok) {
         reject(outcome.reason);
+        return;
+      }
+      if (!sessions.has(session)) {
+        // The write settled inside the stop window but the socket is
+        // already dead — custody has the peer; nothing more to emit.
         return;
       }
       sendWelcome(session, outcome.record);
@@ -549,12 +582,18 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         lastSeenAt: now,
         endpoints: endpoint !== null ? [endpoint] : [],
       };
-      const touched = await deps.registry.touch(
-        record,
-        serviceCancel.signal,
+      if (!sessions.has(session)) {
+        reject('unpaired');
+        return;
+      }
+      const touched = await trackWrite(
+        deps.registry.touch(record, serviceCancel.signal),
       );
       if (!touched.ok || !touched.value) {
         reject('unpaired');
+        return;
+      }
+      if (!sessions.has(session)) {
         return;
       }
       sendWelcome(session, record);
@@ -796,6 +835,11 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         for (const session of doomed) {
           killSession(session);
         }
+        // In-flight custody writes belong to the window this stop is
+        // closing — wait them out so registration can't land after
+        // stop() returns. New writes are blocked by the sessions-set
+        // swap (the pair/resume paths gate on membership).
+        await drainWrites();
         if (listenerGen < gen) {
           const bound = listener;
           listener = null;
@@ -839,6 +883,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         killSession(session);
       }
       sessions.clear();
+      await drainWrites();
       const bound = listener;
       listener = null;
       try {

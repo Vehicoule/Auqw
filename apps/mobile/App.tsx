@@ -1098,6 +1098,10 @@ function Main({
     readonly expiresAt: number | null;
   }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
   const shareHostRef = useRef(false);
+  // Last-mint-wins: overlapping remints (expiry + inbound pair) apply
+  // only their newest result — a stale mint finishing last must not
+  // display a code the host no longer honors.
+  const shareMintRef = useRef(0);
   const [nearbyPeers, setNearbyPeers] = useState<
     readonly {
       key: string;
@@ -2117,10 +2121,15 @@ function Main({
     if (host === undefined || host === null || !shareHostRef.current) {
       return;
     }
+    const attempt = ++shareMintRef.current;
     void host
       .mintOffer()
       .then((offer) => {
-        if (!offer.ok || !shareHostRef.current) {
+        if (
+          !offer.ok ||
+          !shareHostRef.current ||
+          attempt !== shareMintRef.current
+        ) {
           return;
         }
         setShare((prev) =>
