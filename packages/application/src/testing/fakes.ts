@@ -266,6 +266,7 @@ function unsupportedCall(capability: ProviderCapability) {
 export class FakeProvider implements ProviderPort {
   readonly id: string;
   readonly capabilities: readonly ProviderCapability[];
+  readonly version: string | null;
   readonly calls: RecordedCall[] = [];
   readonly cancelledSignals: CancellationSignal[] = [];
   #queues: Record<ProviderMethod, Deferred<Result<unknown>>[]> = {
@@ -283,9 +284,11 @@ export class FakeProvider implements ProviderPort {
   constructor(
     id = 'fake-provider',
     capabilities: readonly ProviderCapability[] = ALL_CAPABILITIES,
+    version: string | null = '0.0.0-fake',
   ) {
     this.id = id;
     this.capabilities = capabilities;
+    this.version = version;
   }
 
   #defer<T>(

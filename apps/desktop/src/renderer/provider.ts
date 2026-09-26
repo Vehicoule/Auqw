@@ -648,6 +648,7 @@ export function createPluginProvider(
   pluginId: string,
   providerId: string,
   capabilities: readonly ProviderCapability[],
+  version: string | null = null,
 ): PluginProvider {
   const ids = createIds();
   /** requestId → abort: in-flight calls a dispose() must settle. */
@@ -798,6 +799,7 @@ export function createPluginProvider(
   return {
     id: providerId,
     capabilities,
+    version,
     search(input, context) {
       const blocked = guard('catalog.search');
       if (blocked !== null) {

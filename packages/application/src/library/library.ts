@@ -1,6 +1,7 @@
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import {
   hasExactKeys,
+  hasKeys,
   isArtworkRef,
   isEntityRef,
   isLike,
@@ -122,6 +123,12 @@ export type LyricsPayload = {
 export type LyricsCacheEntry = {
   recordingId: string;
   provider: string;
+  /**
+   * Version of the provider that produced the entry — absent on rows
+   * written before version tracking; a provider upgrade re-fetches
+   * rather than serving a stale pick.
+   */
+  providerVersion?: string | null;
   kind: 'plain' | 'synced';
   payload: LyricsPayload;
   fetchedMs: number;
@@ -420,15 +427,18 @@ export function isLyricsCacheEntry(
   }
   const { recordingId, provider, kind, payload, fetchedMs } = value;
   return (
-    hasExactKeys(value, [
-      'recordingId',
-      'provider',
-      'kind',
-      'payload',
-      'fetchedMs',
-    ]) &&
+    hasKeys(
+      value,
+      ['recordingId', 'provider', 'kind', 'payload', 'fetchedMs'],
+      ['providerVersion'],
+    ) &&
     isString(recordingId, 64) &&
     isString(provider, 64) &&
+    // Rows written before version tracking carry no key; a versioned
+    // row must hold a real version string (or explicit null).
+    (value['providerVersion'] === undefined ||
+      value['providerVersion'] === null ||
+      isString(value['providerVersion'], 64)) &&
     (kind === 'plain' || kind === 'synced') &&
     isLyricsPayload(payload) &&
     // A 'synced' entry must actually carry timed lines; plain never

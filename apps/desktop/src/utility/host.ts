@@ -166,6 +166,8 @@ export type LoadedPlugin = {
   readonly pluginId: string;
   readonly providerId: string;
   readonly capabilities: readonly string[];
+  /** Manifest `version`; null when the manifest omits it. */
+  readonly version: string | null;
 };
 
 /** Manifest `id` + `capabilities` extraction — bounded-shape read, no
@@ -176,15 +178,19 @@ export type LoadedPlugin = {
 function manifestFields(
   manifestJson: string,
   stem: string,
-): { providerId: string; capabilities: readonly string[] } {
+): {
+  providerId: string;
+  capabilities: readonly string[];
+  version: string | null;
+} {
   let raw: unknown;
   try {
     raw = JSON.parse(manifestJson);
   } catch {
-    return { providerId: stem, capabilities: [] };
+    return { providerId: stem, capabilities: [], version: null };
   }
   if (typeof raw !== 'object' || raw === null) {
-    return { providerId: stem, capabilities: [] };
+    return { providerId: stem, capabilities: [], version: null };
   }
   const record = raw as Record<string, unknown>;
   const providerId =
@@ -198,7 +204,13 @@ function manifestFields(
         (c): c is string => typeof c === 'string' && c.length <= 64,
       )
     : [];
-  return { providerId, capabilities };
+  const version =
+    typeof record['version'] === 'string' &&
+    record['version'].length > 0 &&
+    record['version'].length <= 64
+      ? record['version']
+      : null;
+  return { providerId, capabilities, version };
 }
 
 export function createHostRuntime(opts: {
@@ -336,6 +348,7 @@ export function createHostRuntime(opts: {
           pluginId,
           providerId: fields.providerId,
           capabilities: fields.capabilities,
+          version: fields.version,
         });
       } catch {
         // A malformed pair is skipped, not fatal — other pairs still load.
@@ -376,6 +389,7 @@ export function createHostRuntime(opts: {
           pluginId: p.pluginId,
           providerId: p.providerId,
           capabilities: p.capabilities,
+          version: p.version,
         }));
         return {
           bindings: 'loaded',

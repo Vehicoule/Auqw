@@ -288,7 +288,7 @@ function lrcParsing(): void {
 function cacheMapping(): void {
   const acceptedSynced = applyAcceptance(syncedResult(GOOD), DURATION);
   assert(acceptedSynced.kind === 'synced');
-  const entry = lyricsCacheEntry('r1', 'lyrics-lrclib', acceptedSynced, 42);
+  const entry = lyricsCacheEntry('r1', 'lyrics-lrclib', '0.1.3', acceptedSynced, 42);
   assert(entry !== null && entry.kind === 'synced');
   assert(entry !== null && isLyricsCacheEntry(entry), 'entry persists');
   assertEqual(entry?.provider, 'lyrics-lrclib');
@@ -305,6 +305,7 @@ function cacheMapping(): void {
   const plainEntry = lyricsCacheEntry(
     'r1',
     'lyrics-lrclib',
+    '0.1.3',
     { kind: 'plain', text: 'words', matched: MATCHED },
     43,
   );
@@ -319,6 +320,7 @@ function cacheMapping(): void {
   const instrumentalEntry = lyricsCacheEntry(
     'r1',
     'lyrics-lrclib',
+    '0.1.3',
     { kind: 'instrumental', matched: MATCHED },
     44,
   );
@@ -339,6 +341,7 @@ function cacheMapping(): void {
     lyricsCacheEntry(
       'r1',
       'lyrics-lrclib',
+      '0.1.3',
       { kind: 'unavailable', matched: null },
       45,
     ),
@@ -709,6 +712,7 @@ async function seededCacheHit(): Promise<void> {
   const seeded: LyricsCacheEntry = {
     recordingId: 'r1',
     provider: 'lyrics-lrclib',
+    providerVersion: '0.0.0-fake',
     kind: 'plain',
     payload: {
       plainLyrics: 'cached words',
@@ -730,6 +734,85 @@ async function seededCacheHit(): Promise<void> {
     sheet.value.provider === 'lyrics-lrclib',
   );
   assertEqual(lyricsCalls(lrclib), 0, 'a cache hit never calls out');
+  await r.session.dispose();
+}
+
+// An entry written under a different provider version — or before
+// version tracking — is stale: the upgraded provider re-fetches, and
+// the replacement row records the serving version.
+async function staleVersionRefetches(): Promise<void> {
+  const lrclib = new FakeProvider(
+    'lyrics-lrclib',
+    ['lyrics.plain', 'lyrics.synced'],
+    '0.1.3',
+  );
+  const staleRows: LyricsCacheEntry[] = [
+    {
+      recordingId: 'r1',
+      provider: 'lyrics-lrclib',
+      providerVersion: '0.1.0',
+      kind: 'plain',
+      payload: {
+        plainLyrics: 'old words',
+        syncedLyrics: null,
+        instrumental: false,
+      },
+      fetchedMs: 5,
+    },
+    {
+      recordingId: 'r2',
+      provider: 'lyrics-lrclib',
+      kind: 'plain',
+      payload: {
+        plainLyrics: 'legacy words',
+        syncedLyrics: null,
+        instrumental: false,
+      },
+      fetchedMs: 6,
+    },
+  ];
+  const r = rig(
+    persisted({
+      recordings: [recording('r1'), recording('r2')],
+      lyricsCache: staleRows,
+    }),
+    [lrclib],
+  );
+  await r.session.restore();
+
+  const first = r.session.getLyrics('r1');
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 1, 'stale version refetches');
+  lrclib.settleLyrics(
+    ok({ kind: 'synced', lines: lines(GOOD), matched: MATCHED }),
+  );
+  const sheet = await first;
+  assert(
+    sheet.ok && sheet.value.kind === 'synced' && !sheet.value.cached,
+    'upgraded provider serves fresh lyrics',
+  );
+  const stored = r.storage.commits
+    .find((c) => c.batch.lyricsCache !== undefined)
+    ?.batch.lyricsCache?.find((e) => e.recordingId === 'r1');
+  assertEqual(stored?.providerVersion, '0.1.3', 'write carries version');
+
+  // The versioned replacement is a cache hit; the versionless legacy
+  // row refetches once on its own open.
+  const again = await r.session.getLyrics('r1');
+  assert(again.ok && again.value.cached);
+  assertEqual(lyricsCalls(lrclib), 1, 'versioned row caches');
+  const legacy = r.session.getLyrics('r2');
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 2, 'versionless row refetches once');
+  lrclib.settleLyrics(
+    ok({ kind: 'plain', text: 'still plain', matched: MATCHED }),
+  );
+  const second = await legacy;
+  assert(second.ok && second.value.kind === 'plain');
+  const r2 = r.session.getLyrics('r2');
+  const legacyHit = await r2;
+  assert(legacyHit.ok && legacyHit.value.cached);
+  assertEqual(lyricsCalls(lrclib), 2, 're-cached row stays cached');
   await r.session.dispose();
 }
 
@@ -841,6 +924,7 @@ export async function run(): Promise<void> {
   await rejections();
   await instrumentalHonored();
   await seededCacheHit();
+  await staleVersionRefetches();
   await failures();
   await cancellation();
 }
