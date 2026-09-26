@@ -1623,6 +1623,18 @@
   flex: 0 0 var(--uw-titlebar-h);
   -webkit-app-region: drag;
 }
+/* macOS uses hiddenInset — no overlay strip to host, so the spacer would
+   be a dead band. The header itself doubles as the drag grip, with its
+   interactive children exempted. */
+[data-platform='darwin'] .uw-chrome__main::before {
+  display: none;
+}
+[data-platform='darwin'] .uw-header {
+  -webkit-app-region: drag;
+}
+[data-platform='darwin'] .uw-header * {
+  -webkit-app-region: no-drag;
+}
 .uw-chrome__content {
   flex: 1;
   min-height: 0;

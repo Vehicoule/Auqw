@@ -283,7 +283,7 @@ async function main(): Promise<void> {
   // from the OS theme when the user picked an explicit one) so the
   // window-control overlay can re-tint itself to match the canvas.
   ipcMain.on(CHANNELS.chromeScheme, (event, scheme) => {
-    if (!isSchemeName(scheme)) {
+    if (!isSchemeName(scheme) || process.platform === 'darwin') {
       return;
     }
     const sender = BrowserWindow.fromWebContents(event.sender);
