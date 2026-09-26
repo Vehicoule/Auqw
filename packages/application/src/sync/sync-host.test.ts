@@ -233,6 +233,13 @@ function fakeKeys(): SyncClientKeys & { peers: Map<string, SyncPeer> } {
     identityGet: () => Promise.resolve(ok(null)),
     identitySet: () => Promise.resolve(ok(undefined)),
     peerList: () => Promise.resolve(ok([...peers.values()])),
+    peerTouch: (peer) => {
+      if (!peers.has(peer.fp)) {
+        return Promise.resolve(ok(false));
+      }
+      peers.set(peer.fp, peer);
+      return Promise.resolve(ok(true));
+    },
     peerPut: (peer) => {
       peers.set(peer.fp, peer);
       return Promise.resolve(ok(undefined));

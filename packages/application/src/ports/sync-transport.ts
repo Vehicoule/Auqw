@@ -243,5 +243,15 @@ export interface SyncClientKeys {
     peer: SyncPeer,
     signal?: CancellationSignal,
   ): Promise<Result<void>>;
+  /**
+   * Check-and-write: update the fp's record only while it still
+   * exists — `false` when custody no longer carries it. Implementers
+   * serialize the existence check with the write so a concurrent
+   * peerDelete can't be resurrected by an in-flight touch.
+   */
+  peerTouch(
+    peer: SyncPeer,
+    signal?: CancellationSignal,
+  ): Promise<Result<boolean>>;
   peerDelete(fp: string, signal?: CancellationSignal): Promise<Result<void>>;
 }

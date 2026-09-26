@@ -518,6 +518,8 @@ function NearbyRow({
  * Below it the accept half — nearby pair hosts discovered over mDNS
  * (tap → type the code that device is showing) and a raw-payload
  * paste fallback. `expiresLabel` counts down to the offer's expiry.
+ * `pairing` is null while the offer mints or after it failed — the
+ * accept half must work either way, so it renders unconditionally.
  */
 export function PairingSheet({
   pairing,
@@ -529,7 +531,7 @@ export function PairingSheet({
   dialing = false,
   dialError = null,
 }: {
-  readonly pairing: PairingModel;
+  readonly pairing: PairingModel | null;
   readonly onCopyPayload?: (() => void) | undefined;
   readonly onDismiss?: (() => void) | undefined;
   readonly nearbyPeers?: readonly NearbyPeerModel[] | undefined;
@@ -542,42 +544,50 @@ export function PairingSheet({
   return (
     <SheetScaffold title={t('sync.pairDevice')} onDismiss={onDismiss}>
       <div className="uw-pairing">
-        <div className="uw-pairing__qr">
-          <QrCode data={pairing.payload} />
-        </div>
-        <Text variant="metadata" color="secondary">
-          {t('pairing.scanHint')}
-        </Text>
-        <Text
-          variant="title"
-          color="bright"
-          numeric
-          className="uw-pairing__code"
-        >
-          {pairing.code}
-        </Text>
-        <Text variant="metadata" color="secondary">
-          {t('pairing.typeHint')}{' '}
-          <Text
-            variant="metadata"
-            color="primary"
-            className="uw-pairing__endpoint"
-          >
-            {pairing.endpointLabel}
-          </Text>{' '}
-          · {pairing.expiresLabel}
-        </Text>
-        <Pressable
-          onPress={onCopyPayload}
-          disabled={onCopyPayload === undefined}
-          ariaLabel={t('pairing.copyPayloadA11y')}
-          className="uw-diag-row uw-diag-row--action"
-        >
-          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            {t('pairing.copyPayload')}
-          </Text>
-          <Icon name="check" size={12} color="var(--text-secondary)" />
-        </Pressable>
+        {pairing !== null && (
+          <>
+            <div className="uw-pairing__qr">
+              <QrCode data={pairing.payload} />
+            </div>
+            <Text variant="metadata" color="secondary">
+              {t('pairing.scanHint')}
+            </Text>
+            <Text
+              variant="title"
+              color="bright"
+              numeric
+              className="uw-pairing__code"
+            >
+              {pairing.code}
+            </Text>
+            <Text variant="metadata" color="secondary">
+              {t('pairing.typeHint')}{' '}
+              <Text
+                variant="metadata"
+                color="primary"
+                className="uw-pairing__endpoint"
+              >
+                {pairing.endpointLabel}
+              </Text>{' '}
+              · {pairing.expiresLabel}
+            </Text>
+            <Pressable
+              onPress={onCopyPayload}
+              disabled={onCopyPayload === undefined}
+              ariaLabel={t('pairing.copyPayloadA11y')}
+              className="uw-diag-row uw-diag-row--action"
+            >
+              <Text
+                variant="metadata"
+                color="secondary"
+                className="uw-diag-row__k"
+              >
+                {t('pairing.copyPayload')}
+              </Text>
+              <Icon name="check" size={12} color="var(--text-secondary)" />
+            </Pressable>
+          </>
+        )}
         {nearbyPeers !== undefined && onPairNearby !== undefined && (
           <div className="uw-nearby">
             <Text variant="metadata" color="secondary">

@@ -99,6 +99,19 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
  */
 export const createBonjourBrowse = (): SyncDiscoveryPort => {
   let bonjour: Bonjour | null = null;
+  let sessions = 0;
+  const release = () => {
+    sessions -= 1;
+    if (sessions === 0) {
+      const instance = bonjour;
+      bonjour = null;
+      try {
+        instance?.destroy();
+      } catch {
+        // best effort
+      }
+    }
+  };
   return {
     async browse({ onFound, onLost }) {
       try {
@@ -131,6 +144,7 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
         browser.on('up', up);
         browser.on('down', down);
         browser.start();
+        sessions += 1;
         const session: SyncDiscoverySession = {
           close() {
             browser.off('up', up);
@@ -140,6 +154,7 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
             } catch {
               // best effort
             }
+            release();
           },
         };
         return ok(session);

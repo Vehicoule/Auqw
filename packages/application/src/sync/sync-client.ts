@@ -357,12 +357,33 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     if (!listed.ok) {
       return listed;
     }
-    // Merge, don't replace: custody rows arriving via the pair host
-    // are additive; rows already tracked keep their cursors + live
-    // session views.
+    // Reconcile, not just merge: custody is authoritative for the
+    // peer set — the pair host can write (pair) or remove (remote
+    // unpair... nothing today, but the seam shouldn't assume) rows
+    // outside this client's ops.
+    const seen = new Set(listed.value.map((peer) => peer.fp));
     for (const peer of listed.value) {
-      if (!peers.has(peer.fp)) {
+      const existing = peers.get(peer.fp);
+      if (existing === undefined) {
         peers.set(peer.fp, peer);
+        continue;
+      }
+      // Refresh host-side edits (name/endpoints/lastSeenAt, custody
+      // id+pub, pot) while keeping the fields sync rounds own —
+      // the cursor watermark and lastSyncAt.
+      peers.set(peer.fp, {
+        ...peer,
+        peerCursor: existing.peerCursor,
+        ...(existing.lastSyncAt === undefined
+          ? {}
+          : { lastSyncAt: existing.lastSyncAt }),
+      });
+    }
+    for (const fp of [...peers.keys()]) {
+      // A peer mid-pair has a session but may not have committed
+      // custody yet — never evict a live session's row.
+      if (!seen.has(fp) && !sessions.has(fp)) {
+        peers.delete(fp);
       }
     }
     peersLoaded = true;

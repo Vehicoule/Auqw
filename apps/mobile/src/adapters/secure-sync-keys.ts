@@ -120,6 +120,37 @@ export function createSecureSyncKeys(): SyncClientKeys {
     );
     return next;
   };
+  const peerPutLocked = (
+    peer: SyncPeer,
+    requirePresent: boolean,
+  ): Promise<Result<boolean>> =>
+    withIndexLock(async () => {
+      // Record + index inside one lock: a racing peerDelete between
+      // the two writes would remove the freshly indexed record and
+      // leave the pairing half-visible. `requirePresent` makes the
+      // existence check part of that lock so a touch can't resurrect
+      // a peer an interleaved delete already revoked.
+      const indexRead = await readJsonStore(PEER_INDEX_KEY);
+      if (!indexRead.ok) {
+        return indexRead;
+      }
+      const fps = isFpList(indexRead.value) ? indexRead.value : [];
+      if (requirePresent && !fps.includes(peer.fp)) {
+        return ok(false);
+      }
+      const wrote = await writeJsonStore(peerKey(peer.fp), peer);
+      if (!wrote.ok) {
+        return wrote;
+      }
+      if (fps.includes(peer.fp)) {
+        return ok(true);
+      }
+      const indexed = await writeJsonStore(PEER_INDEX_KEY, [
+        ...fps,
+        peer.fp,
+      ]);
+      return indexed.ok ? ok(true) : indexed;
+    });
   return {
     async identityGet(signal) {
       const hit = cancelled(signal);
@@ -198,24 +229,20 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      // Record + index inside one lock: a racing peerDelete between
-      // the two writes would remove the freshly indexed record and
-      // leave the pairing half-visible.
-      return withIndexLock(async () => {
-        const wrote = await writeJsonStore(peerKey(peer.fp), peer);
-        if (!wrote.ok) {
-          return wrote;
-        }
-        const indexRead = await readJsonStore(PEER_INDEX_KEY);
-        if (!indexRead.ok) {
-          return indexRead;
-        }
-        const fps = isFpList(indexRead.value) ? indexRead.value : [];
-        if (fps.includes(peer.fp)) {
-          return ok(undefined);
-        }
-        return writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
-      });
+      const wrote = await peerPutLocked(peer, false);
+      return wrote.ok ? ok(undefined) : wrote;
+    },
+
+    async peerTouch(peer, signal) {
+      const hit = cancelled(signal);
+      if (hit !== null) {
+        return hit;
+      }
+      const wrote = await peerPutLocked(peer, true);
+      if (!wrote.ok) {
+        return wrote;
+      }
+      return ok(wrote.value);
     },
 
     async peerDelete(fp, signal) {

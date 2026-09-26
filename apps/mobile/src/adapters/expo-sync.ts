@@ -106,7 +106,10 @@ export type ExpoPairHostSurface = {
   readonly port: number | null;
   /** LAN IPv4:port list this host advertises — empty pre-start. */
   localEndpoints(): Promise<readonly string[]>;
+  /** Unbind + deadvertise; a later start() binds a fresh port. */
   stop(): Promise<void>;
+  /** Terminal teardown — session dispose. */
+  close(): Promise<void>;
 };
 
 function nativeRandom(host: AuqwSyncNative): (n: number) => Uint8Array {
@@ -331,6 +334,7 @@ function buildPairHost(opts: {
       return pairHost.port;
     },
     localEndpoints,
-    stop: () => pairHost.close(),
+    stop: () => pairHost.stop(),
+    close: () => pairHost.close(),
   };
 }

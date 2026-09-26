@@ -953,6 +953,9 @@ function Main({
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
+  // The sheet opens on the user's tap, not on a successful mint — a
+  // failed listener mint must still show the nearby/paste half.
+  const [pairSheetOpen, setPairSheetOpen] = useState(false);
   // The accept half of symmetric pairing: mDNS-found pair hosts the
   // sheet can dial into (tap → type the code that device shows), plus
   // the payload-paste fallback. Browse lives only while the sheet is
@@ -963,7 +966,7 @@ function Main({
   const [dialing, setDialing] = useState(false);
   const [dialError, setDialError] = useState<string | null>(null);
   useEffect(() => {
-    if (pairing === null) {
+    if (!pairSheetOpen) {
       setNearbyPeers([]);
       setDialing(false);
       setDialError(null);
@@ -984,8 +987,9 @@ function Main({
       unsubscribe();
       void window.auqw.sync.nearbyStop().catch(() => undefined);
     };
-  }, [pairing]);
+  }, [pairSheetOpen]);
   const onPairDevice = useCallback(() => {
+    setPairSheetOpen(true);
     void window.auqw.sync
       .pairing()
       .then((offer) => {
@@ -1043,6 +1047,7 @@ function Main({
         .then(() => {
           setDialing(false);
           setPairing(null);
+          setPairSheetOpen(false);
           syncRefresh();
         })
         .catch((thrown: unknown) => {
@@ -1070,6 +1075,7 @@ function Main({
         .then(() => {
           setDialing(false);
           setPairing(null);
+          setPairSheetOpen(false);
           syncRefresh();
         })
         .catch((thrown: unknown) => {
@@ -3274,10 +3280,13 @@ function Main({
             />
           </SheetScreen>
         )}
-        {pairing !== null && syncModel.pairing !== null && (
+        {pairSheetOpen && (
           <SheetScreen
             stackKey="sheet-pairing"
-            onDismissed={() => setPairing(null)}
+            onDismissed={() => {
+              setPairing(null);
+              setPairSheetOpen(false);
+            }}
           >
             <PairingSheet
               pairing={syncModel.pairing}
@@ -3290,11 +3299,18 @@ function Main({
               onPairNearby={onDialNearby}
               onPastePayload={onPastePayload}
               dialing={dialing}
-              dialError={dialError}
-              onCopyPayload={() => {
-                void navigator.clipboard.writeText(pairing.payload);
+              dialError={dialError ?? pairingError}
+              onCopyPayload={
+                pairing === null
+                  ? undefined
+                  : () => {
+                      void navigator.clipboard.writeText(pairing.payload);
+                    }
+              }
+              onDismiss={() => {
+                setPairing(null);
+                setPairSheetOpen(false);
               }}
-              onDismiss={() => setPairing(null)}
             />
           </SheetScreen>
         )}

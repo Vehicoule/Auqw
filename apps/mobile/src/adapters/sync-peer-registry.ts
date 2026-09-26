@@ -38,9 +38,13 @@ export function createSyncPeerRegistry(
     },
     async put(peer) {
       const listed = await keys.peerList();
-      const existing = listed.ok
-        ? listed.value.find((p) => p.fp === peer.fp)
-        : undefined;
+      if (!listed.ok) {
+        // A failed read must NOT degrade to "new peer" — writing over
+        // an unseen record would wipe its cursor and resend the whole
+        // acknowledged log on the next round.
+        return err(listed.error);
+      }
+      const existing = listed.value.find((p) => p.fp === peer.fp);
       const record: SyncPeer = {
         fp: peer.fp,
         name: peer.name,
@@ -48,6 +52,9 @@ export function createSyncPeerRegistry(
         pairedAt: existing?.pairedAt ?? peer.pairedAt,
         lastSeenAt: peer.lastSeenAt,
         peerCursor: existing?.peerCursor ?? {},
+        ...(existing?.lastSyncAt === undefined
+          ? {}
+          : { lastSyncAt: existing.lastSyncAt }),
         ...(peer.id === '' ? {} : { deviceId: peer.id }),
         ...(peer.pub === '' ? {} : { pub: peer.pub }),
         ...(existing?.pot === undefined ? {} : { pot: existing.pot }),
@@ -74,11 +81,13 @@ export function createSyncPeerRegistry(
           : { deviceId: peer.id }),
         ...(peer.pub === '' ? {} : { pub: peer.pub }),
       };
-      const written = await keys.peerPut(record);
+      // Atomic check-and-write — an unpair racing this touch must
+      // not see its deleted record resurrected by a stale write.
+      const written = await keys.peerTouch(record);
       if (!written.ok) {
         return err(written.error);
       }
-      return ok(true);
+      return ok(written.value);
     },
   };
 }

@@ -70,6 +70,13 @@ function memoryClientKeys(): SyncClientKeys {
     async peerList() {
       return ok([...state.map.values()]);
     },
+    async peerTouch(peer) {
+      if (!state.map.has(peer.fp)) {
+        return ok(false);
+      }
+      state.map.set(peer.fp, peer);
+      return ok(true);
+    },
     async peerPut(peer) {
       state.map.set(peer.fp, peer);
       return ok(undefined);

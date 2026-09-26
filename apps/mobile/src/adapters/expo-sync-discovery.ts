@@ -34,6 +34,11 @@ export function createExpoSyncDiscovery(
     onLost: (name: string) => void;
   } | null = null;
 
+  // Native stop is fire-and-forget on the call site (close() is sync)
+  // — chain it so a reopen can't start a browse that a late stop then
+  // kills from under it.
+  let stopChain: Promise<void> = Promise.resolve();
+
   return {
     async browse({ onFound, onLost }) {
       if (
@@ -47,15 +52,23 @@ export function createExpoSyncDiscovery(
       if (browseSub !== null) {
         return err(appError('unavailable', 'sync: already browsing'));
       }
+      await stopChain;
       browsing = { onFound, onLost };
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
           if (event.host !== undefined && event.port !== undefined) {
+            // The TXT fp is a pin, not a payload — a malformed advert
+            // downgrades to unpinned rather than poisoning the dial.
+            const fp =
+              typeof event.fp === 'string' &&
+              /^[0-9a-f]{64}$/.test(event.fp)
+                ? event.fp
+                : null;
             browsing?.onFound({
               name: event.name,
               host: event.host,
               port: event.port,
-              fp: event.fp ?? null,
+              fp,
             });
           }
         } else if (event.type === 'lost') {
@@ -78,7 +91,11 @@ export function createExpoSyncDiscovery(
           browseSub?.remove();
           browseSub = null;
           browsing = null;
-          void native.syncBrowseStop?.().catch(() => undefined);
+          const stop = native.syncBrowseStop?.() ?? Promise.resolve();
+          stopChain = stopChain.then(
+            () => stop.catch(() => undefined),
+            () => undefined,
+          );
         },
       };
       return ok(session);

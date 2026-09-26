@@ -2140,9 +2140,18 @@ function Main({
       return;
     }
     setShare((prev) => ({ ...prev, busy: true }));
+    // Mark wanted BEFORE the async work: the screen-close cleanup reads
+    // shareHostRef to decide whether a stop is owed — a start() that
+    // lands after dismissal would otherwise leave a live listener.
+    shareHostRef.current = true;
     void (async () => {
       const started = await host.start();
+      if (!shareHostRef.current) {
+        return; // cleanup already stopped the host
+      }
       if (!started.ok) {
+        shareHostRef.current = false;
+        await host.stop();
         setShare({
           active: false,
           busy: false,
@@ -2154,7 +2163,11 @@ function Main({
         return;
       }
       const offer = await host.mintOffer();
+      if (!shareHostRef.current) {
+        return;
+      }
       if (!offer.ok) {
+        shareHostRef.current = false;
         await host.stop();
         setShare({
           active: false,
@@ -2166,7 +2179,6 @@ function Main({
         setPairError(offer.error.message);
         return;
       }
-      shareHostRef.current = true;
       setShare({
         active: true,
         busy: false,
@@ -2176,6 +2188,8 @@ function Main({
       });
       setPairError(null);
     })().catch(() => {
+      shareHostRef.current = false;
+      void host.stop();
       setShare({
         active: false,
         busy: false,

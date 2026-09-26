@@ -797,6 +797,11 @@ export async function createSessionController(
       // Sync goes down next — bye frames flush while the sockets
       // still answer; a live session must never outlive its client.
       if (syncSurface !== null) {
+        // A live share (listener + advert) dies with the session —
+        // close is terminal; the UI-level stop is the reversible one.
+        if (syncSurface.host !== null) {
+          await syncSurface.host.close();
+        }
         await syncSurface.client.close();
         syncSurface = null;
       }

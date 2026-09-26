@@ -18,6 +18,8 @@ import type {
   SyncDeltasArgs,
   SyncImportDeltaArgs,
   SyncLocalChangesArgs,
+  SyncDialArgs,
+  SyncDialPayloadArgs,
   SyncUnpairArgs,
   UtilityPingArgs,
 } from '../shared/contract.ts';
@@ -48,6 +50,8 @@ import {
   isSyncImportDeltaArgs,
   isSyncLocalChangesArgs,
   isSyncMaterializedArgs,
+  isSyncDialArgs,
+  isSyncDialPayloadArgs,
   isSyncUnpairArgs,
   isTagreadBatchArgs,
   isTagreadEnumerateArgs,
@@ -454,6 +458,33 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.syncAckApplied,
     channel(noArgs, (_args, deps) =>
       deps.utility.request(CHANNELS.syncAckApplied, undefined),
+    ),
+  ],
+  // Symmetric pairing: outbound dial + mDNS browse of other pair
+  // hosts. `nearby` browse needs no custody — it must not wake
+  // safeStorage just to show the list.
+  [
+    CHANNELS.syncNearbyStart,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncNearbyStart, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncNearbyStop,
+    channel(noArgs, (_args, deps) =>
+      deps.utility.request(CHANNELS.syncNearbyStop, undefined),
+    ),
+  ],
+  [
+    CHANNELS.syncDial,
+    channel(isSyncDialArgs, (args: SyncDialArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDial, args),
+    ),
+  ],
+  [
+    CHANNELS.syncDialPayload,
+    channel(isSyncDialPayloadArgs, (args: SyncDialPayloadArgs, deps) =>
+      deps.utility.request(CHANNELS.syncDialPayload, args),
     ),
   ],
   [

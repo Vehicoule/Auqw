@@ -79,16 +79,20 @@ class AuqwSyncSockets(
             val socketId = "accept-${++nextSocketSeq}"
             val entry = Entry(socket)
             entries[socketId] = entry
+            // Emit acceptance BEFORE the reader starts: bridge events
+            // keep post order, so the JS acceptor registers the socket
+            // id before any of its data can arrive. A prompt peer's
+            // hello must never outrun the accept event.
+            emitAccepted(
+              socketId,
+              socket.inetAddress?.hostAddress ?: "unknown",
+            )
             val reader =
               Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
                 isDaemon = true
                 start()
               }
             entry.reader = reader
-            emitAccepted(
-              socketId,
-              socket.inetAddress?.hostAddress ?: "unknown",
-            )
           }
         },
         "auqw-sync-accept",

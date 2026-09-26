@@ -238,6 +238,35 @@ export function createDesktopSyncDialerKeys(deps: {
         return err(toError(thrown));
       }
     },
+    async peerTouch(peer, signal) {
+      if (signal?.cancelled === true) {
+        return err(appError('cancelled', 'sync: cancelled'));
+      }
+      if (peer.deviceId === undefined || peer.pub === undefined) {
+        return err(
+          appError(
+            'invalid-message',
+            'sync: peer never disclosed its device key — cannot custody',
+          ),
+        );
+      }
+      try {
+        // device-touch serializes the existence check + write in the
+        // service — an unpair racing this update can't be undone by
+        // a stale put landing after the delete.
+        const updated = await deps.keys.deviceTouch({
+          id: peer.deviceId,
+          name: peer.name,
+          pub: peer.pub,
+          fp: peer.fp,
+          pairedAt: peer.pairedAt,
+          lastSeenAt: peer.lastSeenAt,
+        });
+        return ok(updated);
+      } catch (thrown) {
+        return err(toError(thrown));
+      }
+    },
     async peerDelete(fp, signal) {
       if (signal?.cancelled === true) {
         return err(appError('cancelled', 'sync: cancelled'));

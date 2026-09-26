@@ -202,15 +202,23 @@ export type SyncPairHostDeps = {
 };
 
 export interface SyncPairHost {
-  /** Bind the acceptor; resolves the bound port. Idempotent. */
+  /** Bind the acceptor; resolves the bound port. Idempotent —
+   * retries a failed bind, shares an in-flight one. */
   start(signal?: CancellationSignal): Promise<Result<{ port: number }>>;
   /** Mint a fresh pairing offer — requires start() first. */
   mintOffer(): Result<{ code: string; expiresAt: number }>;
   readonly deviceId: string;
   readonly name: string;
   readonly fp: string;
-  /** Bound port — null until start resolves. */
+  /** Bound port — null until start resolves, null again after stop. */
   readonly port: number | null;
+  /**
+   * Unbind + deadvertise without closing the host: sessions die,
+   * minted codes expire, and a later start() binds a fresh port.
+   * The pair sheet's "stop sharing" path — a sheet reopen must be
+   * able to share again.
+   */
+  stop(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -298,7 +306,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
   }
 
   const sessions = new Set<HostSession>();
-  const serviceCancel = new CancellationSource();
+  let serviceCancel = new CancellationSource();
   let listener: SyncSocketListener | null = null;
   let advertiser: { close(): void } | null = null;
   let startPromise: Promise<Result<{ port: number }>> | null = null;
@@ -415,15 +423,11 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     session.name = accepted.peer.name;
     session.callerPort = msg.port ?? null;
     session.registered = prior !== null;
-    // A custody row written by a phone-dialed pair (deviceId never
-    // disclosed) still counts as registered — the claimed id fills in,
-    // with the fp match carrying the actual authorization.
-    session.registeredId =
-      prior === null
-        ? null
-        : prior.id !== ''
-          ? prior.id
-          : session.deviceId;
+    // The registry — never the wire — names a resumed device. Rows
+    // from before deviceId custody stay id-less (''), paired by fp
+    // alone; claiming a different id under an old key fills nothing
+    // (touch only writes a non-empty id).
+    session.registeredId = prior === null ? null : prior.id;
     session.pairedAtMs = prior?.pairedAt ?? null;
     session.codec = accepted.codec;
     session.pump.upgrade(sessionCap);
@@ -694,31 +698,81 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         return err(appError('cancelled', 'sync host: start cancelled'));
       }
       // One bind in flight — concurrent starts share the promise.
-      startPromise ??= (async () => {
-        const bound = await deps.acceptor.listen({ onSocket });
-        if (!bound.ok) {
-          return bound;
+      // A failed bind clears the cache so the next tap retries.
+      if (startPromise === null) {
+        // Initialized to null so the async body's `!== attempt`
+        // reads a declared variable — the real value lands before
+        // the body's first await completes.
+        let attempt: Promise<Result<{ port: number }>> | null = null;
+        attempt = (async () => {
+          const bound = await deps.acceptor.listen({ onSocket });
+          if (!bound.ok) {
+            return bound;
+          }
+          if (closed || startPromise !== attempt) {
+            // A stop/close raced the bind — the listener we just
+            // got belongs to a dead generation, drop it.
+            bound.value.close();
+            return err(
+              appError(
+                closed ? 'released' : 'cancelled',
+                'sync host: start superseded',
+              ),
+            );
+          }
+          listener = bound.value;
+          try {
+            advertiser =
+              deps.advertise?.({
+                port: bound.value.port,
+                name: deps.name,
+                fp: deps.fp,
+              }) ?? null;
+          } catch {
+            // mDNS is best-effort — pairing still works via QR/code.
+            advertiser = null;
+          }
+          log(`sync host listening on :${bound.value.port}`);
+          return ok({ port: bound.value.port });
+        })();
+        startPromise = attempt;
+        const settled = await attempt;
+        if (!settled.ok && startPromise === attempt) {
+          startPromise = null;
         }
-        if (closed) {
-          bound.value.close();
-          return err(appError('released', 'sync host: closed'));
-        }
-        listener = bound.value;
-        try {
-          advertiser =
-            deps.advertise?.({
-              port: bound.value.port,
-              name: deps.name,
-              fp: deps.fp,
-            }) ?? null;
-        } catch {
-          // mDNS is best-effort — pairing still works via QR/code.
-          advertiser = null;
-        }
-        log(`sync host listening on :${bound.value.port}`);
-        return ok({ port: bound.value.port });
-      })();
+        return settled;
+      }
       return startPromise;
+    },
+    async stop() {
+      if (closed) {
+        return;
+      }
+      // A start still in flight can't be unbound — let it settle,
+      // then tear down whatever it produced.
+      const starting = startPromise;
+      startPromise = null;
+      await starting;
+      serviceCancel.cancel();
+      serviceCancel = new CancellationSource();
+      pairing.expire();
+      for (const session of sessions) {
+        killSession(session);
+      }
+      sessions.clear();
+      const bound = listener;
+      listener = null;
+      try {
+        advertiser?.close();
+      } catch {
+        // best effort
+      }
+      advertiser = null;
+      try {
+        bound?.close();
+      } catch {
+        // best effort
+      }
     },
     mintOffer() {
       if (closed || listener === null) {

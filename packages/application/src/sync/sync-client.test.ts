@@ -218,6 +218,13 @@ function fakeKeys(): SyncClientKeys & {
       index.add(peer.fp);
       return Promise.resolve(ok(undefined));
     },
+    peerTouch: (peer: SyncPeer) => {
+      if (!index.has(peer.fp)) {
+        return Promise.resolve(ok(false));
+      }
+      peers.set(peer.fp, peer);
+      return Promise.resolve(ok(true));
+    },
     peerDelete: (fp: string) => {
       index.delete(fp);
       peers.delete(fp);
