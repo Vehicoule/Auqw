@@ -1102,6 +1102,9 @@ function Main({
   // dismissed share must not resolve into — or tear down — a NEWER
   // share's listener. Nonzero means "a share attempt owns the host".
   const shareGenRef = useRef(0);
+  // Bounded remint retries — a failed mint clears the dead offer and
+  // retries a few times rather than leaving an expired code on screen.
+  const shareRetryRef = useRef(0);
   // Last-mint-wins: overlapping remints (expiry + inbound pair) apply
   // only their newest result — a stale mint finishing last must not
   // display a code the host no longer honors.
@@ -2059,13 +2062,13 @@ function Main({
     void discovery
       .browse({
         onFound: (peer) => {
-          // Service name is the identity — a re-advertised peer on a
-          // new address replaces its old row, never duplicates.
-          const key = `${peer.name}|${peer.host}:${peer.port}`;
+          // Service identity (name|host) is the row key — a
+          // re-advertised peer on a new port replaces its row, a
+          // same-named neighbor keeps its own.
           setNearbyPeers((prev) => [
-            ...prev.filter((p) => p.name !== peer.name),
+            ...prev.filter((p) => p.key !== peer.key),
             {
-              key,
+              key: peer.key,
               name: peer.name,
               host: peer.host,
               port: peer.port,
@@ -2073,9 +2076,9 @@ function Main({
             },
           ]);
         },
-        onLost: (name) => {
+        onLost: (key) => {
           setNearbyPeers((prev) =>
-            prev.filter((p) => p.name !== name),
+            prev.filter((p) => p.key !== key),
           );
         },
       })
@@ -2106,6 +2109,7 @@ function Main({
     }
     if (shareGenRef.current !== 0) {
       shareGenRef.current = 0;
+      shareRetryRef.current = 0;
       void syncSurface?.host?.stop();
     }
     setShare({
@@ -2126,16 +2130,38 @@ function Main({
       return;
     }
     const attempt = ++shareMintRef.current;
+    // A failed mint while sharing stays on: the host has nothing left
+    // to honor, so the dead offer must come OFF screen — then a
+    // bounded retry tries to get a live code back.
+    const mintFailed = () => {
+      if (shareGenRef.current === 0 || attempt !== shareMintRef.current) {
+        return;
+      }
+      setShare((prev) =>
+        prev.active
+          ? { ...prev, code: null, payload: null, expiresAt: null }
+          : prev,
+      );
+      shareRetryRef.current += 1;
+      if (shareRetryRef.current <= 3) {
+        setTimeout(remintShareOffer, 10_000);
+      }
+    };
     void host
       .mintOffer()
       .then((offer) => {
         if (
-          !offer.ok ||
           shareGenRef.current === 0 ||
           attempt !== shareMintRef.current
         ) {
           return;
         }
+        if (!offer.ok) {
+          setPairError(offer.error.message);
+          mintFailed();
+          return;
+        }
+        shareRetryRef.current = 0;
         setShare((prev) =>
           prev.active
             ? {
@@ -2147,7 +2173,7 @@ function Main({
             : prev,
         );
       })
-      .catch(() => undefined);
+      .catch(mintFailed);
     // syncSurface is stable per controller.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
@@ -2212,6 +2238,7 @@ function Main({
     // generation also distinguishes THIS share from any newer one, so a
     // stale start() resolution can't stop a successor's listener.
     const gen = ++shareGenRef.current;
+    shareRetryRef.current = 0;
     void (async () => {
       const started = await host.start();
       if (shareGenRef.current !== gen) {

@@ -61,6 +61,7 @@ import {
   type SyncWirePump,
   type WelcomeMsg,
 } from './sync-wire.ts';
+import { isPairableLanHost } from './lan.ts';
 
 /**
  * The phone half of LAN sync (docs/specs/sync.md, slice 4): dials a
@@ -622,11 +623,16 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     endpoints: readonly SyncEndpoint[],
     signal?: CancellationSignal,
   ): Promise<Result<{ socket: SyncSocket; endpoint: SyncEndpoint }>> {
+    // Pairing targets are LAN-scoped: a compromised caller (renderer
+    // IPC, a hostile QR payload, a spoofed advert) must never be able
+    // to aim this socket at a routable host. Checked here so every
+    // path — pair, resume, syncNow — inherits the gate.
+    const targets = endpoints.filter((ep) => isPairableLanHost(ep.host));
     let lastError: AppError = appError(
-      'unavailable',
-      'sync: no usable endpoints',
+      'permission-denied',
+      'sync: no LAN-scoped endpoint to dial',
     );
-    for (const ep of endpoints) {
+    for (const ep of targets) {
       if (signal?.cancelled || closing) {
         return err(appError('cancelled', 'cancelled'));
       }

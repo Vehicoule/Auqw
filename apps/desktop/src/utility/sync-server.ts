@@ -1812,9 +1812,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             // A dead push channel must not kill the browse.
           }
         },
-        onLost: (name) => {
+        onLost: (key) => {
           try {
-            deps.notifyNearby?.({ type: 'lost', name });
+            deps.notifyNearby?.({ type: 'lost', key });
           } catch {
             // best effort
           }

@@ -88,7 +88,7 @@ export type ExpoSyncSurface = {
   readonly discovery: {
     browse(opts: {
       onFound(peer: SyncDiscoveredPeer): void;
-      onLost(name: string): void;
+      onLost(key: string): void;
     }): Promise<Result<SyncDiscoverySession>>;
   } | null;
 };

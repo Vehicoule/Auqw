@@ -945,6 +945,8 @@ export function isSyncPairingResult(
  * advertised `fp` only pins it.
  */
 export type SyncNearbyPeer = {
+  /** Stable per-service identity — rows key on it, `lost` carries it. */
+  readonly key: string;
   readonly name: string;
   readonly host: string;
   readonly port: number;
@@ -954,7 +956,7 @@ export type SyncNearbyPeer = {
 
 export type SyncNearbyEvent =
   | { readonly type: 'found'; readonly peer: SyncNearbyPeer }
-  | { readonly type: 'lost'; readonly name: string }
+  | { readonly type: 'lost'; readonly key: string }
   // A caller just consumed our minted offer — the sheet remints so
   // it never displays a dead code.
   | { readonly type: 'paired' };
@@ -962,7 +964,8 @@ export type SyncNearbyEvent =
 function isSyncNearbyPeer(value: unknown): value is SyncNearbyPeer {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['name', 'host', 'port', 'fp']) &&
+    hasOnlyKeys(value, ['key', 'name', 'host', 'port', 'fp']) &&
+    isBoundedString(value['key'], 320) &&
     isBoundedString(value['name'], 128) &&
     isBoundedString(value['host'], 64) &&
     isSafeNonNegativeInt(value['port']) &&
@@ -984,9 +987,9 @@ export function isSyncNearbyEvent(
   }
   if (
     value['type'] === 'lost' &&
-    hasOnlyKeys(value, ['type', 'name'])
+    hasOnlyKeys(value, ['type', 'key'])
   ) {
-    return isBoundedString(value['name'], 128);
+    return isBoundedString(value['key'], 320);
   }
   return (
     value['type'] === 'paired' && hasOnlyKeys(value, ['type'])

@@ -1,11 +1,12 @@
 import type {
   Result,
   SyncAdvertiseOpts,
+  SyncDiscoveredPeer,
   SyncAdvertiser,
   SyncDiscoveryPort,
   SyncDiscoverySession,
 } from '@auqw/application';
-import { appError, err, ok } from '@auqw/application';
+import { appError, err, isPairableLanHost, ok } from '@auqw/application';
 import {
   nativeError,
   type AuqwExpoSubscription,
@@ -26,13 +27,8 @@ export function createExpoSyncDiscovery(
   let browseSub: AuqwExpoSubscription | null = null;
   let browsing: {
     gen: number;
-    onFound: (peer: {
-      name: string;
-      host: string;
-      port: number;
-      fp: string | null;
-    }) => void;
-    onLost: (name: string) => void;
+    onFound: (peer: SyncDiscoveredPeer) => void;
+    onLost: (key: string) => void;
   } | null = null;
   // Browse occupancy is claimed SYNCHRONOUSLY (before any await) — a
   // second caller waiting on a pending stop can't slip through the
@@ -68,10 +64,10 @@ export function createExpoSyncDiscovery(
         // browse slot, so don't install a listener we'd leak.
         return err(appError('cancelled', 'sync: browse superseded'));
       }
-      // Names we've emitted `found` for — a native 'stopped' (async NSD
-      // start failure) must retract each so the UI list doesn't hold
-      // ghosts.
-      const emitted = new Set<string>();
+      // serviceName → emitted key — a native 'lost' carries only the
+      // service name, and a native 'stopped' (async NSD failure) must
+      // retract each emitted peer so the UI holds no ghosts.
+      const emitted = new Map<string, string>();
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
           // Shape-check before it becomes a dial target — an advert
@@ -81,6 +77,7 @@ export function createExpoSyncDiscovery(
             event.host !== undefined &&
             event.host.length > 0 &&
             event.host.length <= 255 &&
+            isPairableLanHost(event.host) &&
             Number.isSafeInteger(event.port) &&
             (event.port ?? 0) >= 1 &&
             (event.port ?? 0) <= 65_535 &&
@@ -97,20 +94,25 @@ export function createExpoSyncDiscovery(
             ) {
               return;
             }
+            const key = `${event.name}|${event.host}`;
             browsing?.onFound({
+              key,
               name: event.name,
               host: event.host,
               port: event.port as number,
               fp: event.fp ?? null,
             });
-            emitted.add(event.name);
+            emitted.set(event.name, key);
           }
         } else if (event.type === 'lost') {
+          const key = emitted.get(event.name);
           emitted.delete(event.name);
-          browsing?.onLost(event.name);
+          if (key !== undefined) {
+            browsing?.onLost(key);
+          }
         } else if (event.type === 'stopped') {
-          for (const name of emitted) {
-            browsing?.onLost(name);
+          for (const key of emitted.values()) {
+            browsing?.onLost(key);
           }
           emitted.clear();
         }
@@ -123,6 +125,14 @@ export function createExpoSyncDiscovery(
           browseSub = null;
           browsing = null;
         }
+        // The native side may have taken the multicast lock and spawned
+        // its executor before failing — a rejected start still owes a
+        // stop, best-effort and serialized with any real stop.
+        const stop = native.syncBrowseStop?.() ?? Promise.resolve();
+        stopChain = stopChain.then(
+          () => stop.catch(() => undefined),
+          () => undefined,
+        );
         return err(
           nativeError(thrown) ??
             appError('unavailable', 'sync: browse failed'),

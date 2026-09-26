@@ -992,13 +992,13 @@ function Main({
       }
       setNearbyPeers((prev) => {
         if (event.type === 'lost') {
-          return prev.filter((peer) => peer.name !== event.name);
+          return prev.filter((peer) => peer.key !== event.key);
         }
-        // Service name is the identity — a re-advertised peer that
-        // moved address/port replaces its old row, never duplicates.
-        const key = `${event.peer.name}|${event.peer.host}:${event.peer.port}`;
-        const next = prev.filter((peer) => peer.name !== event.peer.name);
-        return [...next, { ...event.peer, key }];
+        // Service identity (name|host) is the row key — a re-advertised
+        // peer on a new port replaces its row, a same-named neighbor
+        // keeps its own.
+        const next = prev.filter((peer) => peer.key !== event.peer.key);
+        return [...next, event.peer];
       });
     });
     void window.auqw.sync.nearbyStart().catch(() => undefined);

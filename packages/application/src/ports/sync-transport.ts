@@ -162,6 +162,12 @@ export interface SyncAcceptorPort {
  * as-is; `fp` is the advertised identity fp for pre-dial pinning.
  */
 export interface SyncDiscoveredPeer {
+  /**
+   * Stable per-service identity (`name|host`) — the adapter mints it
+   * and both `found` and `lost` carry it, so two adverts sharing a
+   * display name stay distinct rows.
+   */
+  readonly key: string;
   readonly name: string;
   readonly host: string;
   readonly port: number;
@@ -181,7 +187,8 @@ export interface SyncDiscoverySession {
 export interface SyncDiscoveryPort {
   browse(opts: {
     onFound(peer: SyncDiscoveredPeer): void;
-    onLost(name: string): void;
+    /** `key` = the lost service's identity, as minted on `found`. */
+    onLost(key: string): void;
   }): Promise<Result<SyncDiscoverySession>>;
 }
 

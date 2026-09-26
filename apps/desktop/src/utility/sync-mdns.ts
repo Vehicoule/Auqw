@@ -2,6 +2,7 @@ import { Bonjour, type Service } from 'bonjour-service';
 import {
   appError,
   err,
+  isPairableLanHost,
   ok,
   type SyncDiscoveredPeer,
   type SyncDiscoveryPort,
@@ -79,8 +80,10 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
   if (
     typeof service.name !== 'string' ||
     host === undefined ||
-    typeof service.port !== 'number'
+    typeof service.port !== 'number' ||
+    !isPairableLanHost(host)
   ) {
+    // A non-LAN advert is undialable — never a nearby row.
     return null;
   }
   const txt = service.txt;
@@ -98,6 +101,7 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
     return null;
   }
   return {
+    key: `${service.name}|${host}`,
     name: service.name,
     host,
     port: service.port,
@@ -153,15 +157,23 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
           const peer = seen.get(key(service));
           if (peer !== undefined) {
             seen.delete(key(service));
-            onLost(peer.name);
+            onLost(peer.key);
           }
         };
         br.on('up', up);
         br.on('down', down);
         br.start();
         sessions += 1;
+        let closed = false;
         const session: SyncDiscoverySession = {
           close() {
+            // Idempotent — a double close must not decrement the
+            // shared session count twice and destroy the bonjour
+            // instance out from under live sessions.
+            if (closed) {
+              return;
+            }
+            closed = true;
             br.off('up', up);
             br.off('down', down);
             try {

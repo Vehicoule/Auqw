@@ -158,9 +158,13 @@ class AuqwNsd(
       resolveQueue.clear()
       resolveInFlight = false
     }
-    val listener = discovery ?: return
+    // No early return: a start that failed after taking the lock but
+    // before registering `discovery` still owes the release.
+    val listener = discovery
     discovery = null
-    runCatching { manager.stopServiceDiscovery(listener) }
+    if (listener != null) {
+      runCatching { manager.stopServiceDiscovery(listener) }
+    }
     resolveExecutor?.shutdown()
     resolveExecutor = null
     multicastLock?.let { lock ->
@@ -203,9 +207,6 @@ class AuqwNsd(
         resolveInFlight = true
         dequeued
       }
-    if (resolveInFlight) return
-    val next = resolveQueue.removeFirstOrNull() ?: return
-    resolveInFlight = true
     val (info, attempts) = next
     val resolveListener =
       object : NsdManager.ResolveListener {
