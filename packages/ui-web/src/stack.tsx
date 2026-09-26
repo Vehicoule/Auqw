@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { sheetKeyAction } from './keyboard.ts';
+import { t } from '@auqw/ui-shared';
 
 /**
  * The stack hosts for DOM: pushes are full-bleed overlays, sheets the
@@ -160,7 +161,7 @@ export function SheetScreen({ stackKey, onDismissed, children }: SheetScreenProp
       <button
         type="button"
         className="uw-scrim"
-        aria-label="close sheet"
+        aria-label={t('sheets.closeA11y')}
         tabIndex={-1}
         onClick={onDismissed}
       />

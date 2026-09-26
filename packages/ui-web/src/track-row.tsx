@@ -8,7 +8,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 import type { TrackRowModel } from '@auqw/ui-shared';
 import { reconcileFocusIndex, rowKeyAction } from './keyboard.ts';
 
@@ -63,7 +63,7 @@ export function TrackRow({
             <button
               type="button"
               className="uw-track-row__grip"
-              aria-label="drag to reorder"
+              aria-label={t('track.a11y.drag')}
               onMouseDown={onDragStart}
             >
               <Icon name="drag-handle" size={14} color="var(--text-secondary)" />
@@ -74,14 +74,14 @@ export function TrackRow({
                 icon="chevron-up"
                 size={20}
                 iconSize={10}
-                ariaLabel="move up"
+                ariaLabel={t('track.a11y.moveUp')}
                 onPress={onMoveUp}
               />
               <IconButton
                 icon="chevron-down"
                 size={20}
                 iconSize={10}
-                ariaLabel="move down"
+                ariaLabel={t('track.a11y.moveDown')}
                 onPress={onMoveDown}
               />
             </div>
@@ -91,7 +91,7 @@ export function TrackRow({
       <Pressable
         onPress={onPress}
         onContextMenu={onContext === undefined ? undefined : () => onContext()}
-        ariaLabel={`${row.title}${row.artist === null ? '' : `, ${row.artist}`}${unavailable ? ', unavailable' : ''}${row.playing ? ', playing' : ''}${row.liked ? ', liked' : ''}${row.download === null ? '' : `, download ${row.download === 'stored' ? 'complete' : row.download}`}`}
+        ariaLabel={`${row.title}${row.artist === null ? '' : t('track.a11y.artistSuffix', { artist: row.artist })}${unavailable ? t('track.a11y.unavailableSuffix') : ''}${row.playing ? t('track.a11y.playingSuffix') : ''}${row.liked ? t('track.a11y.likedSuffix') : ''}${row.download === null ? '' : t('track.a11y.downloadSuffix', { state: row.download === 'stored' ? t('track.download.complete') : t(`track.download.${row.download}`) })}`}
         ariaSelected={row.playing}
         className="uw-track-row__main"
         tabIndex={tabIndex}
@@ -129,7 +129,7 @@ export function TrackRow({
           <span
             className="uw-track-row__chip"
             data-chip={row.download}
-            title={row.download === 'stored' ? 'downloaded' : `download ${row.download}`}
+            title={row.download === 'stored' ? t('playlist.downloaded') : t('track.download.tooltip', { state: t(`track.download.${row.download}`) })}
           >
             <Icon
               name={
@@ -156,7 +156,7 @@ export function TrackRow({
           </span>
         )}
         {row.liked && onToggleLike === undefined && (
-          <span className="uw-track-row__chip" title="liked">
+          <span className="uw-track-row__chip" title={t('collection.liked')}>
             <Icon name="heart-filled" size={14} color="var(--liked)" />
           </span>
         )}
@@ -165,7 +165,7 @@ export function TrackRow({
             icon="menu"
             size={30}
             iconSize={14}
-            ariaLabel="row actions"
+            ariaLabel={t('track.a11y.rowActions')}
             onPress={onContext}
             className="uw-track-row__menu"
           />
@@ -176,7 +176,7 @@ export function TrackRow({
             size={30}
             iconSize={14}
             color={row.liked ? 'var(--liked)' : undefined}
-            ariaLabel={row.liked ? 'unlike' : 'like'}
+            ariaLabel={row.liked ? t('common.unlike') : t('common.like')}
             onPress={onToggleLike}
           />
         )}
@@ -185,7 +185,7 @@ export function TrackRow({
             icon="close"
             size={30}
             iconSize={14}
-            ariaLabel="remove from queue"
+            ariaLabel={t('track.a11y.remove')}
             onPress={onRemove}
           />
         )}

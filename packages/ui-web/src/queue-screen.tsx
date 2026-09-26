@@ -1,7 +1,7 @@
 import { Artwork, EqBars, IconButton, Text } from './primitives.tsx';
 import { QueueList } from './queue-list.tsx';
 import type { PlayerModel, QueueModel } from '@auqw/ui-shared';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 
 export type QueueScreenProps = {
   readonly queue: QueueModel;
@@ -37,10 +37,10 @@ export function QueueScreen({
     >
       <div className="uw-queue__head">
         <Text variant="heading" color="bright">
-          queue
+          {t('queue.title')}
         </Text>
         <Text variant="metadata" color="secondary" className="uw-queue__count">
-          {queue.items.length} tracks
+          {t('queue.count', { count: queue.items.length })}
         </Text>
         {onToggleReorder !== undefined && (
           <IconButton
@@ -48,7 +48,7 @@ export function QueueScreen({
             size={32}
             iconSize={14}
             color={reordering ? 'var(--accent)' : 'var(--text-secondary)'}
-            ariaLabel={reordering ? 'done reordering' : 'reorder queue'}
+            ariaLabel={reordering ? t('queue.reorderDone') : t('queue.reorder')}
             active={reordering}
             onPress={onToggleReorder}
           />

@@ -1846,6 +1846,78 @@ async function recordingsMergeCommit(): Promise<void> {
   driver.close();
 }
 
+// 25. Settings.language round-trips: an explicit BCP-47 tag persists
+// and reads back, while a NULL column leaves the property absent.
+async function languageRoundtrip(): Promise<void> {
+  const { driver, storage } = rig();
+  const pinned: Settings = { ...SETTINGS, language: 'de' };
+  assert(
+    (await storage.commit({ settings: pinned }, ctx().context)).ok,
+    'language commit resolves',
+  );
+  const afterPin = await loadOk(storage);
+  assertEqual(afterPin.settings.language, 'de', 'pinned language persists');
+  const cleared: Settings = { ...SETTINGS, language: null };
+  assert(
+    (await storage.commit({ settings: cleared }, ctx().context)).ok,
+    'language clear resolves',
+  );
+  const afterClear = await loadOk(storage);
+  assertEqual(
+    afterClear.settings.language,
+    undefined,
+    'NULL column leaves language unset',
+  );
+  assert(!('language' in afterClear.settings), 'language stays absent');
+  driver.close();
+}
+
+// 26. v5 -> v6: settings gains language; an existing pre-migration
+// row without the column still round-trips, language absent.
+async function migrationV5toV6(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  driver.execScript(`${MIGRATIONS[0]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[1]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[2]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[3]?.join(';\n') ?? ''};`);
+  driver.execScript(`${MIGRATIONS[4]?.join(';\n') ?? ''};`);
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 5);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1, 'lrclib', NULL, 33554432, 1);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v5 -> v6 runs');
+  const state = await loadOk(storage);
+  assertEqual(
+    state.settings.language,
+    undefined,
+    'pre-v6 rows carry no language',
+  );
+  assertDeepEqual(
+    state.settings,
+    {
+      catalogProvider: 'itunes',
+      playbackProvider: 'youtube-music',
+      storefront: 'US',
+      qualityKbps: 256,
+      theme: 'system',
+      prefetch: true,
+      lyricsProvider: 'lrclib',
+      artworkCacheBytes: 33554432,
+      downloadMetered: true,
+    },
+    'pre-migration settings row round-trips',
+  );
+  const versions = await driver.transaction(async (conn) =>
+    conn.query('SELECT version FROM schema_version WHERE id = 1'),
+  );
+  assertEqual(versions[0]?.['version'], CURRENT_SCHEMA_VERSION);
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -1881,6 +1953,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['foreignNewestTablesRejected', foreignNewestTablesRejected],
   ['foreignSchemaObjectsRejected', foreignSchemaObjectsRejected],
   ['unrelatedTablesTolerated', unrelatedTablesTolerated],
+  ['languageRoundtrip', languageRoundtrip],
+  ['migrationV5toV6', migrationV5toV6],
 ];
 
 for (const [name, fn] of TESTS) {

@@ -25,12 +25,14 @@ import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   LyricsModel,
+  MessageId,
   PlatformVariant,
   PlayerModel,
   QueueModel,
   RadioModel,
   StageMode,
 } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
@@ -123,7 +125,7 @@ export function TransportControls({
         size={32}
         iconSize={14}
         color={liked ? theme.colors.liked : theme.colors.textSecondary}
-        accessibilityLabel={liked ? 'unlike' : 'like'}
+        accessibilityLabel={liked ? t('common.unlike') : t('common.like')}
         active={liked}
         onPress={onToggleLike}
         style={v.side}
@@ -133,7 +135,7 @@ export function TransportControls({
         size={36}
         iconSize={15}
         color={theme.colors.textPrimary}
-        accessibilityLabel="previous"
+        accessibilityLabel={t('common.previous')}
         disabled={!canPrevious}
         onPress={onPrevious}
         style={v.main}
@@ -141,7 +143,9 @@ export function TransportControls({
       <Pressable
         compact
         onPress={onPlayPause}
-        accessibilityLabel={playing ? 'pause' : 'play'}
+        accessibilityLabel={
+          playing ? t('common.pause') : t('common.play')
+        }
         accessibilityState={{ selected: playing }}
         style={[
           {
@@ -168,7 +172,7 @@ export function TransportControls({
         size={36}
         iconSize={15}
         color={theme.colors.textPrimary}
-        accessibilityLabel="next"
+        accessibilityLabel={t('common.next')}
         disabled={!canNext}
         onPress={onNext}
         style={v.main}
@@ -193,12 +197,12 @@ export function TransportControls({
           }
           accessibilityLabel={
             download === 'stored'
-              ? 'downloaded — remove'
+              ? t('stage.download.storedA11y')
               : download === 'failed'
-                ? 'download failed — retry'
+                ? t('stage.download.failedA11y')
                 : download === 'queued' || download === 'downloading'
-                  ? 'downloading — cancel'
-                  : 'download'
+                  ? t('stage.download.busyA11y')
+                  : t('stage.download.idleA11y')
           }
           active={download === 'stored'}
           onPress={onDownload}
@@ -209,10 +213,14 @@ export function TransportControls({
   );
 }
 
-const MODES: readonly { key: StageMode; label: string; icon: IconName }[] = [
-  { key: 'player', label: 'player', icon: 'note' },
-  { key: 'lyrics', label: 'lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'queue', icon: 'queue' },
+const MODES: readonly {
+  key: StageMode;
+  label: MessageId;
+  icon: IconName;
+}[] = [
+  { key: 'player', label: 'stage.mode.player', icon: 'note' },
+  { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
+  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
 ];
 
 export function ModeSegment({
@@ -247,7 +255,7 @@ export function ModeSegment({
             compact
             onPress={onSelect === undefined ? undefined : () => onSelect(m.key)}
             accessibilityRole="tab"
-            accessibilityLabel={m.label}
+            accessibilityLabel={t(m.label)}
             accessibilityState={{ selected: active }}
             style={{
               flex: 1,
@@ -272,7 +280,7 @@ export function ModeSegment({
                 active && { fontFamily: theme.fontFamilies.bold },
               ]}
             >
-              {m.label}
+              {t(m.label)}
             </Text>
           </Pressable>
         );
@@ -572,17 +580,17 @@ export function StageSheet({
                     color={radio.status === 'failed' ? 'warn' : 'secondary'}
                   >
                     {radio.label}
-                    {radio.fetching ? ' · fetching' : ''}
+                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
                     {radio.detail === null ? '' : ` · ${radio.detail}`}
                   </Text>
                   <Pressable
                     compact
                     onPress={onStopRadio}
-                    accessibilityLabel="stop radio"
+                    accessibilityLabel={t('stage.radio.stopA11y')}
                     style={{ paddingHorizontal: theme.spacing.xs }}
                   >
                     <Text variant="metadata" color="primary">
-                      stop
+                      {t('stage.radio.stop')}
                     </Text>
                   </Pressable>
                 </>
@@ -590,11 +598,11 @@ export function StageSheet({
                 <Pressable
                   compact
                   onPress={onStartRadio}
-                  accessibilityLabel="start radio"
+                  accessibilityLabel={t('stage.radio.start')}
                   style={{ paddingHorizontal: theme.spacing.xs }}
                 >
                   <Text variant="metadata" color="secondary">
-                    start radio
+                    {t('stage.radio.start')}
                   </Text>
                 </Pressable>
               )}
@@ -625,29 +633,29 @@ export function StageSheet({
            * loading is bounded by the session's own op deadline.
            */}
           {lyrics === undefined ? (
-            <EmptyState title="no lyrics" icon="lyrics" />
+            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : lyrics.state === 'loading' ? (
-            <LoadingState title="loading lyrics" />
+            <LoadingState title={t('lyrics.loading')} />
           ) : lyrics.state === 'error' ? (
             <ErrorState
-              title="couldn't load lyrics"
+              title={t('lyrics.errorTitle')}
               hint={lyrics.message}
               onRetry={onRetryLyrics}
             />
           ) : lyrics.state === 'instrumental' ? (
             <EmptyState
-              title="instrumental"
+              title={t('lyrics.instrumental')}
               hint={lyrics.message}
               icon="lyrics"
             />
           ) : lyrics.state === 'unavailable' ? (
             <EmptyState
-              title="no lyrics"
+              title={t('lyrics.empty')}
               hint={lyrics.message}
               icon="lyrics"
             />
           ) : lyrics.lines.length === 0 ? (
-            <EmptyState title="no lyrics" icon="lyrics" />
+            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : (
             <ScrollView style={{ flex: 1, marginTop: theme.spacing.sm }}>
               {lyrics.lines.map((line, i) => (
@@ -682,7 +690,7 @@ export function StageSheet({
       {activeMode === 'queue' && (
         <View style={{ flex: 1, marginTop: theme.spacing.md }}>
           {queue === undefined ? (
-            <EmptyState title="queue is empty" icon="queue" />
+            <EmptyState title={t('queue.empty')} icon="queue" />
           ) : (
             <>
               {onToggleQueueReorder !== undefined && (
@@ -704,7 +712,7 @@ export function StageSheet({
                         : theme.colors.textSecondary
                     }
                     accessibilityLabel={
-                      queueReordering ? 'done reordering' : 'reorder queue'
+                      queueReordering ? t('queue.reorderDone') : t('queue.reorder')
                     }
                     active={queueReordering}
                     onPress={onToggleQueueReorder}

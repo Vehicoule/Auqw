@@ -1,4 +1,4 @@
-import { formatClock, formatRemaining } from '@auqw/ui-shared';
+import { formatClock, formatRemaining, t } from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
 import { progressPathState } from './motion.ts';
 import { seekStepMs } from './keyboard.ts';
@@ -146,8 +146,11 @@ export function LinearScrubber({
     <input
       type="range"
       className={`uw-scrubber${enabled ? '' : ' uw-off'}${className ? ` ${className}` : ''}`}
-      aria-label="seek"
-      aria-valuetext={`${formatClock(positionMs)} of ${formatClock(durationMs)}`}
+      aria-label={t('progress.a11y.seek')}
+      aria-valuetext={t('progress.a11y.value', {
+        position: formatClock(positionMs),
+        duration: formatClock(durationMs),
+      })}
       min={0}
       max={Math.max(1, durationMs ?? 0)}
       step="any"
@@ -212,8 +215,11 @@ export function WaveformSeek({
       <input
         type="range"
         className={`uw-scrubber uw-wave__input${enabled ? '' : ' uw-off'}`}
-        aria-label="seek"
-        aria-valuetext={`${formatClock(positionMs)} of ${formatClock(durationMs)}`}
+        aria-label={t('progress.a11y.seek')}
+        aria-valuetext={t('progress.a11y.value', {
+          position: formatClock(positionMs),
+          duration: formatClock(durationMs),
+        })}
         min={0}
         max={Math.max(1, durationMs ?? 0)}
         step="any"

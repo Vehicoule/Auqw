@@ -11,7 +11,9 @@ import type {
   CollectionKey,
   LibraryCardModel,
   LibraryModel,
+  MessageId,
 } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type LibraryScreenProps = {
   readonly model: LibraryModel;
@@ -40,11 +42,11 @@ const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
 
 const KIND_FILTERS: readonly {
   readonly key: 'playlist' | 'album' | 'artist';
-  readonly label: string;
+  readonly label: MessageId;
 }[] = [
-    { key: 'playlist', label: 'playlists' },
-    { key: 'album', label: 'albums' },
-    { key: 'artist', label: 'artists' },
+    { key: 'playlist', label: 'library.filter.playlists' },
+    { key: 'album', label: 'library.filter.albums' },
+    { key: 'artist', label: 'library.filter.artists' },
   ];
 
 function CollectionTile({
@@ -62,7 +64,10 @@ function CollectionTile({
     <Pressable
       compact
       onPress={enabled ? onOpen : undefined}
-      accessibilityLabel={`${tile.label}, ${tile.count} tracks`}
+      accessibilityLabel={t('library.tileA11y', {
+        label: tile.label,
+        count: tile.count,
+      })}
       accessibilityState={{ disabled: !enabled }}
       disabled={!enabled}
       style={{
@@ -90,8 +95,7 @@ function CollectionTile({
           {tile.label}
         </Text>
         <Text variant="metadata" color="secondary" numberOfLines={2}>
-          {tile.note ??
-            `${tile.count} ${tile.count === 1 ? 'track' : 'tracks'}`}
+          {tile.note ?? t('common.trackCount', { count: tile.count })}
         </Text>
       </View>
       {/*
@@ -105,7 +109,7 @@ function CollectionTile({
           size={30}
           iconSize={13}
           color={theme.colors.textBright}
-          accessibilityLabel={`play ${tile.label}`}
+          accessibilityLabel={t('library.tilePlayA11y', { label: tile.label })}
           onPress={tile.count === 0 ? undefined : onPlay}
         />
       )}
@@ -157,7 +161,7 @@ function NewPlaylistCard({
       <Pressable
         compact
         onPress={onPress}
-        accessibilityLabel="new playlist"
+        accessibilityLabel={t('common.newPlaylist')}
         style={{
           flexDirection: 'row',
           alignItems: 'center',
@@ -181,7 +185,7 @@ function NewPlaylistCard({
           <Icon name="list-plus" size={15} color={theme.colors.textSecondary} />
         </View>
         <Text variant="body" color="secondary">
-          new playlist
+          {t('common.newPlaylist')}
         </Text>
       </Pressable>
     );
@@ -190,7 +194,7 @@ function NewPlaylistCard({
     <Pressable
       compact
       onPress={onPress}
-      accessibilityLabel="new playlist"
+      accessibilityLabel={t('common.newPlaylist')}
       style={{
         width: 104,
         minHeight: 140,
@@ -209,7 +213,7 @@ function NewPlaylistCard({
         color="secondary"
         style={{ textAlign: 'center' }}
       >
-        new playlist
+        {t('common.newPlaylist')}
       </Text>
     </Pressable>
   );
@@ -228,7 +232,10 @@ function LibraryCard({
   const openable =
     card.playlistId !== null || card.entityRef !== null;
   const press = openable ? onPress : undefined;
-  const label = `${card.title}, ${card.subtitle}`;
+  const label = t('common.cardA11y', {
+    title: card.title,
+    subtitle: card.subtitle,
+  });
   if (view === 'list') {
     return (
       <Pressable
@@ -331,7 +338,7 @@ export function LibraryScreen({
       }}
     >
       <Text variant="display" color="bright">
-        library
+        {t('nav.library')}
       </Text>
 
       {/* collections 2×2 — liked · downloads · top 50 · history */}
@@ -374,16 +381,16 @@ export function LibraryScreen({
           }}
         >
           <Text variant="heading" color="bright">
-            your library
+            {t('library.heading')}
           </Text>
           <View style={{ flex: 1 }} />
           <ToggleChip
-            label={sort}
+            label={t(`library.sort.${sort}`)}
             active={false}
             onPress={() => setSort(sort === 'recent' ? 'title' : 'recent')}
           />
           <ToggleChip
-            label={view}
+            label={t(`library.view.${view}`)}
             active={false}
             onPress={() => setView(view === 'grid' ? 'list' : 'grid')}
           />
@@ -396,14 +403,14 @@ export function LibraryScreen({
           }}
         >
           <ToggleChip
-            label="all"
+            label={t('library.filter.all')}
             active={filter === 'all'}
             onPress={() => setFilter('all')}
           />
           {kindsPresent.map((f) => (
             <ToggleChip
               key={f.key}
-              label={f.label}
+              label={t(f.label)}
               active={filter === f.key}
               onPress={() => setFilter(f.key)}
             />
@@ -414,7 +421,7 @@ export function LibraryScreen({
       {creating && (
         <NameField
           value={draft}
-          placeholder="new playlist name"
+          placeholder={t('common.newPlaylistName')}
           autoFocus
           onChange={setDraft}
           onSubmit={
@@ -436,8 +443,8 @@ export function LibraryScreen({
       {cards.length === 0 && !creating ? (
         <View style={{ gap: theme.spacing.lg }}>
           <EmptyState
-            title="nothing here yet"
-            hint="playlists and liked albums land here"
+            title={t('library.emptyTitle')}
+            hint={t('library.emptyHint')}
             icon="list-plus"
           />
           <View style={{ alignItems: 'center' }}>
@@ -508,7 +515,7 @@ export function LibraryScreen({
       {model.artists.length > 0 && (
         <View style={{ gap: theme.spacing.sm }}>
           <Text variant="heading" color="bright">
-            artists
+            {t('library.artistsHeading')}
           </Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <View style={{ flexDirection: 'row', gap: theme.spacing.lg }}>
@@ -552,7 +559,7 @@ export function LibraryScreen({
       {model.recentlyAdded.length > 0 && (
         <View style={{ gap: theme.spacing.sm }}>
           <Text variant="heading" color="bright">
-            recently liked
+            {t('library.recentlyLiked')}
           </Text>
           <View style={{ marginHorizontal: -theme.spacing.sm }}>
             {model.recentlyAdded.map((item) => (

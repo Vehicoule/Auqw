@@ -1,4 +1,5 @@
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { t } from '@auqw/ui-shared';
 import type {
   SettingsModel,
   SettingsRowModel,
@@ -129,7 +130,7 @@ export function SettingsScreen({
         uppercase
         className="uw-section-label"
       >
-        settings
+        {t('settings.heading.settings')}
       </Text>
       <div className="uw-card">
         {model.rows.map((row, i) => (
@@ -149,38 +150,38 @@ export function SettingsScreen({
         uppercase
         className="uw-section-label uw-section-label--block"
       >
-        diagnostics
+        {t('settings.heading.diagnostics')}
       </Text>
       <div className="uw-card uw-card--padded">
         <div className="uw-diag-row">
           <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            providers
+            {t('settings.diag.providers')}
           </Text>
           <Text variant="metadata" color="primary">
             {diagnostics.providerIds.length === 0
-              ? 'none'
+              ? t('settings.diag.none')
               : diagnostics.providerIds.join(', ')}
           </Text>
         </div>
         <Hairline />
         <div className="uw-diag-row">
           <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            attempt trace
+            {t('settings.diag.attemptTrace')}
           </Text>
           <Text variant="metadata" color="primary" numeric>
-            {diagnostics.attemptCount} attempts
+            {t('settings.diag.attempts', { count: diagnostics.attemptCount })}
             {diagnostics.lastAttemptLabel === null
               ? ''
-              : ` · last: ${diagnostics.lastAttemptLabel}`}
+              : ` · ${t('settings.diag.last', { value: diagnostics.lastAttemptLabel })}`}
           </Text>
         </div>
         <Hairline />
         <div className="uw-diag-row">
           <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            persistence
+            {t('settings.diag.persistence')}
           </Text>
           <Text variant="metadata" color={persistenceColor}>
-            {diagnostics.persistence}
+            {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}
             {diagnostics.persistenceDetail === null
               ? ''
               : ` · ${diagnostics.persistenceDetail}`}
@@ -195,15 +196,15 @@ export function SettingsScreen({
         <Pressable
           onPress={onOpenCorrections}
           disabled={onOpenCorrections === undefined}
-          ariaLabel="match reviews"
+          ariaLabel={t('settings.diag.matchReviews')}
           className="uw-diag-row uw-diag-row--action"
         >
           <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            match reviews
+            {t('settings.diag.matchReviews')}
           </Text>
           {diagnostics.pendingReviews !== null && (
             <Text variant="metadata" color="primary" numeric>
-              {diagnostics.pendingReviews} pending
+              {t('settings.diag.pending', { count: diagnostics.pendingReviews })}
             </Text>
           )}
           <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
@@ -217,7 +218,7 @@ export function SettingsScreen({
             uppercase
             className="uw-section-label uw-section-label--block"
           >
-            sync
+            {t('settings.heading.sync')}
           </Text>
           <div className="uw-card uw-card--padded">
             {sync.status === null ? (
@@ -232,10 +233,10 @@ export function SettingsScreen({
                     size={12}
                     color="var(--text-secondary)"
                   />{' '}
-                  listener
+                  {t('sync.panel.listener')}
                 </Text>
                 <Text variant="metadata" color="secondary">
-                  unavailable
+                  {t('common.unavailable')}
                 </Text>
               </div>
             ) : (
@@ -251,11 +252,11 @@ export function SettingsScreen({
                       size={12}
                       color="var(--text-secondary)"
                     />{' '}
-                    listener
+                    {t('sync.panel.listener')}
                   </Text>
                   <Text variant="metadata" color="primary">
                     {sync.status.listenerLabel}
-                    {` · engine ${sync.status.engineLabel}`}
+                    {t('sync.engineSuffix', { label: sync.status.engineLabel })}
                   </Text>
                 </div>
                 <Hairline />
@@ -265,7 +266,7 @@ export function SettingsScreen({
                     color="secondary"
                     className="uw-diag-row__k"
                   >
-                    this device
+                    {t('sync.panel.thisDevice')}
                   </Text>
                   <Text variant="metadata" color="primary">
                     {sync.status.nameLabel}
@@ -281,11 +282,11 @@ export function SettingsScreen({
                     color="secondary"
                     className="uw-diag-row__k"
                   >
-                    advertise
+                    {t('sync.panel.advertise')}
                   </Text>
                   <Text variant="metadata" color="primary">
                     {sync.status.advertiseLabel}
-                    {` · sessions ${sync.status.sessionsLabel}`}
+                    {t('sync.sessionsSuffix', { label: sync.status.sessionsLabel })}
                   </Text>
                 </div>
                 <Hairline />
@@ -295,7 +296,7 @@ export function SettingsScreen({
                     color="secondary"
                     className="uw-diag-row__k"
                   >
-                    last sync
+                    {t('sync.panel.lastSync')}
                   </Text>
                   <Text variant="metadata" color="primary">
                     {sync.status.lastSyncLabel}
@@ -310,7 +311,7 @@ export function SettingsScreen({
                         color="secondary"
                         className="uw-diag-row__k"
                       >
-                        fingerprint
+                        {t('sync.panel.fingerprint')}
                       </Text>
                       <Text variant="metadata" color="primary" numeric>
                         {sync.status.fingerprintLabel}
@@ -324,7 +325,7 @@ export function SettingsScreen({
             <Pressable
               onPress={onPairDevice}
               disabled={onPairDevice === undefined}
-              ariaLabel="pair a device"
+              ariaLabel={t('sync.pairDevice')}
               className="uw-diag-row uw-diag-row--action"
             >
               <Text
@@ -332,7 +333,7 @@ export function SettingsScreen({
                 color="secondary"
                 className="uw-diag-row__k"
               >
-                pair a device
+                {t('sync.pairDevice')}
               </Text>
               <Icon
                 name="chevron-right"
@@ -355,7 +356,7 @@ export function SettingsScreen({
             <Pressable
               onPress={onSyncNow}
               disabled={onSyncNow === undefined}
-              ariaLabel="sync now"
+              ariaLabel={t('sync.syncNow')}
               className="uw-diag-row uw-diag-row--action"
             >
               <Text
@@ -363,7 +364,7 @@ export function SettingsScreen({
                 color="secondary"
                 className="uw-diag-row__k"
               >
-                sync now
+                {t('sync.syncNow')}
               </Text>
               <Icon
                 name="chevron-right"
@@ -378,11 +379,11 @@ export function SettingsScreen({
                 color="secondary"
                 className="uw-diag-row__k"
               >
-                paired devices
+                {t('sync.panel.pairedDevices')}
               </Text>
               <Text variant="metadata" color="primary">
                 {sync.devices.length === 0
-                  ? 'none'
+                  ? t('settings.diag.none')
                   : `${sync.devices.length}`}
               </Text>
             </div>
@@ -407,11 +408,11 @@ export function SettingsScreen({
                         : () => onUnpairDevice(device.id)
                     }
                     disabled={onUnpairDevice === undefined}
-                    ariaLabel={`unpair ${device.name}`}
+                    ariaLabel={t('sync.unpairA11y', { name: device.name })}
                     className="uw-diag-row--action"
                   >
                     <Text variant="metadata" color="warn">
-                      unpair
+                      {t('sync.unpair')}
                     </Text>
                   </Pressable>
                 </div>
@@ -427,27 +428,27 @@ export function SettingsScreen({
                     color="secondary"
                     className="uw-diag-row__k"
                   >
-                    delta exchange
+                    {t('sync.panel.deltaExchange')}
                   </Text>
                   {onExportDelta !== undefined && (
                     <Pressable
                       onPress={onExportDelta}
-                      ariaLabel="copy delta"
+                      ariaLabel={t('sync.panel.copyDelta')}
                       className="uw-diag-row--action"
                     >
                       <Text variant="metadata" color="primary">
-                        copy delta
+                        {t('sync.panel.copyDelta')}
                       </Text>
                     </Pressable>
                   )}
                   {onImportDelta !== undefined && (
                     <Pressable
                       onPress={onImportDelta}
-                      ariaLabel="paste delta"
+                      ariaLabel={t('sync.panel.pasteDelta')}
                       className="uw-diag-row--action"
                     >
                       <Text variant="metadata" color="primary">
-                        paste delta
+                        {t('sync.panel.pasteDelta')}
                       </Text>
                     </Pressable>
                   )}

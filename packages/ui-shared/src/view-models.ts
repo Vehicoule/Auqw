@@ -27,6 +27,7 @@ import type {
   TrackMetadata,
 } from '@auqw/application';
 import { ARTWORK_CACHE_BUDGET_DEFAULT_BYTES, topPlayed } from '@auqw/application';
+import { t } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -320,7 +321,7 @@ export function toLyricsModel(input: {
       message: error?.message ?? null,
     };
   }
-  const provenance = `${sheet.provider}${sheet.cached ? ' · cached' : ''}`;
+  const provenance = `${sheet.provider}${sheet.cached ? t('lyrics.cachedSuffix') : ''}`;
   switch (sheet.kind) {
     case 'synced': {
       let activeIndex: number | null = null;
@@ -333,7 +334,7 @@ export function toLyricsModel(input: {
         state: 'synced',
         lines: sheet.lines.map((line) => line.text),
         activeIndex,
-        syncLabel: `synced · ${provenance}`,
+        syncLabel: t('lyrics.synced', { provenance }),
         message: null,
       };
     }
@@ -342,20 +343,20 @@ export function toLyricsModel(input: {
         state: 'plain',
         lines: sheet.text.split('\n'),
         activeIndex: null,
-        syncLabel: `unsynced · ${provenance}`,
+        syncLabel: t('lyrics.unsynced', { provenance }),
         message: null,
       };
     case 'instrumental':
       return {
         ...empty,
         state: 'instrumental',
-        message: 'this track is instrumental',
+        message: t('lyrics.instrumentalMessage'),
       };
     case 'unavailable':
       return {
         ...empty,
         state: 'unavailable',
-        message: 'no lyrics matched this recording',
+        message: t('lyrics.noMatch'),
       };
   }
 }
@@ -387,10 +388,10 @@ export function toRadioModel(radio: RadioTail | null): RadioModel {
     armed: true,
     status: radio.status,
     fetching: radio.fetching,
-    label: `radio · ${radio.status}`,
+    label: t('radio.label', { status: t(`radio.status.${radio.status}`) }),
     detail:
       radio.status === 'failed'
-        ? (radio.error?.message ?? 'continuation failed')
+        ? (radio.error?.message ?? t('radio.continuationFailed'))
         : radio.providerId,
   };
 }
@@ -430,13 +431,15 @@ function reviewStatusLabel(review: MatchReview): string {
     case 'confirmed': {
       const ref = review.resolution?.ref;
       return ref === null || ref === undefined
-        ? 'confirmed'
-        : `confirmed · ${ref.provider}`;
+        ? t('corrections.status.confirmed')
+        : t('corrections.status.confirmedProvider', { provider: ref.provider });
     }
     case 'rejected':
-      return 'all candidates rejected';
-    default:
-      return review.status;
+      return t('corrections.status.rejected');
+    case 'pending':
+      return t('corrections.status.pending');
+    case 'dismissed':
+      return t('corrections.status.dismissed');
   }
 }
 
@@ -474,7 +477,7 @@ export function toCorrectionsModel(input: {
       const recording = byId.get(review.recordingId);
       return {
         reviewId: review.reviewId,
-        title: recording?.title ?? 'unknown recording',
+        title: recording?.title ?? t('corrections.unknownRecording'),
         artist: recording?.artist ?? null,
         status: review.status,
         statusLabel: reviewStatusLabel(review),
@@ -546,17 +549,17 @@ export function toSyncModel(input: {
       name: view.peer.name,
       state: view.state,
       stateLabel: view.syncing
-        ? 'syncing'
+        ? t('sync.state.syncing')
         : view.state === 'open'
-          ? 'connected'
+          ? t('sync.state.connected')
           : view.state === 'connecting'
-            ? 'connecting'
-            : 'offline',
+            ? t('sync.state.connecting')
+            : t('sync.state.offline'),
       syncing: view.syncing,
       lastSyncLabel:
         view.peer.lastSyncAt === undefined
           ? null
-          : `last sync ${fmt(view.peer.lastSyncAt) ?? '—'}`,
+          : t('sync.lastSync', { date: fmt(view.peer.lastSyncAt) ?? '—' }),
       endpointLabel: view.peer.endpoints[0] ?? null,
       lastError: view.lastError?.message ?? null,
       fpShort: view.peer.fp.slice(0, 12),
@@ -569,12 +572,12 @@ export function toSyncModel(input: {
     peers,
     statusLabel:
       input.status === null
-        ? 'unavailable'
+        ? t('sync.status.unavailable')
         : peers.length === 0
-          ? 'not paired'
+          ? t('sync.status.notPaired')
           : open > 0
-            ? `${open} connected`
-            : `${peers.length} paired`,
+            ? t('sync.status.connectedCount', { count: open })
+            : t('sync.status.pairedCount', { count: peers.length }),
   };
 }
 
@@ -612,23 +615,31 @@ export function toImportPreviewModel(
     sourceLabel,
     exportedLabel: formatExportDate(preview.exportedAtMs),
     rows: [
-      { key: 'recordings', label: 'tracks', count: counts.recordings },
-      { key: 'likes', label: 'likes', count: counts.likes },
-      { key: 'playlists', label: 'playlists', count: counts.playlists },
+      { key: 'recordings', label: t('import.tracks'), count: counts.recordings },
+      { key: 'likes', label: t('import.likes'), count: counts.likes },
+      { key: 'playlists', label: t('import.playlists'), count: counts.playlists },
       {
         key: 'playlistEntries',
-        label: 'playlist entries',
+        label: t('import.playlistEntries'),
         count: counts.playlistEntries,
       },
-      { key: 'entities', label: 'albums & artists', count: counts.entities },
-      { key: 'playEvents', label: 'play history', count: counts.playEvents },
-      { key: 'playCounts', label: 'play counts', count: counts.playCounts },
+      { key: 'entities', label: t('import.entities'), count: counts.entities },
+      {
+        key: 'playEvents',
+        label: t('import.playHistory'),
+        count: counts.playEvents,
+      },
+      {
+        key: 'playCounts',
+        label: t('import.playCounts'),
+        count: counts.playCounts,
+      },
       {
         key: 'matchReviews',
-        label: 'match reviews',
+        label: t('import.matchReviews'),
         count: counts.matchReviews,
       },
-      { key: 'mappings', label: 'match mappings', count: counts.mappings },
+      { key: 'mappings', label: t('import.matchMappings'), count: counts.mappings },
     ],
   };
 }
@@ -821,7 +832,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
       return {
         ...base,
         status: 'preparing',
-        title: recording?.title ?? 'preparing',
+        title: recording?.title ?? t('player.title.preparing'),
         positionMs: 0,
         durationMs: recording?.durationMs ?? null,
         errorMessage: null,
@@ -832,7 +843,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
       return {
         ...base,
         status: playback.type,
-        title: recording?.title ?? 'unknown track',
+        title: recording?.title ?? t('player.title.unknown'),
         positionMs: playback.positionMs,
         durationMs: playback.durationMs ?? recording?.durationMs ?? null,
         errorMessage: null,
@@ -841,7 +852,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
       return {
         ...base,
         status: 'failed',
-        title: recording?.title ?? 'playback failed',
+        title: recording?.title ?? t('player.title.failed'),
         positionMs: 0,
         durationMs: recording?.durationMs ?? null,
         errorMessage: playback.error.message,
@@ -873,7 +884,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       recording === undefined
         ? {
           key: occurrence.occurrenceId,
-          title: 'unknown track',
+          title: t('track.unknown'),
           versionLabel: null,
           artist: null,
           durationMs: null,
@@ -881,7 +892,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
           liked: false,
           playing: current && queue.mode === 'playing',
           state: 'unavailable',
-          note: 'unavailable',
+          note: t('common.unavailable'),
           download: null,
         }
         : {
@@ -897,7 +908,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
           liked: liked.has(recording.id),
           playing: current && queue.mode === 'playing',
           state: unavailable.has(recording.id) ? 'unavailable' : 'available',
-          note: unavailable.has(recording.id) ? 'unavailable' : null,
+          note: unavailable.has(recording.id) ? t('common.unavailable') : null,
           download: null,
         };
     return {
@@ -990,7 +1001,7 @@ export function toLibraryModel(input: {
   ).map((entry, index) => ({
     key: `top50-${entry.recording.id}-${index}`,
     recordingId: entry.recording.id,
-    badge: `${entry.count} ${entry.count === 1 ? 'play' : 'plays'}`,
+    badge: t('collection.plays', { count: entry.count }),
     row: toTrackRowModel(entry.recording, {
       key: `top50-${entry.recording.id}-${index}`,
       liked: liked.has(entry.recording.id),
@@ -1041,7 +1052,7 @@ export function toLibraryModel(input: {
       key: `playlist-${playlist.playlistId}`,
       kind: 'playlist',
       title: playlist.name,
-      subtitle: `user playlist · ${entries.length} ${entries.length === 1 ? 'track' : 'tracks'}`,
+      subtitle: t('playlist.meta', { count: entries.length }),
       count: entries.length,
       artworkUrl:
         artworkRecording === undefined
@@ -1063,8 +1074,8 @@ export function toLibraryModel(input: {
       title: entity.title,
       subtitle:
         entity.kind === 'album'
-          ? `album · ${entity.artistName ?? '—'}`
-          : 'artist',
+          ? t('library.card.album', { artist: entity.artistName ?? '—' })
+          : t('library.card.artist'),
       count: null,
       artworkUrl: pickArtworkUrl(entity.artwork),
       sortMs: entity.createdMs,
@@ -1110,14 +1121,14 @@ export function toLibraryModel(input: {
     collections: [
       {
         key: 'liked',
-        label: 'liked',
+        label: t('collection.liked'),
         count: items.length,
         enabled: true,
         note: null,
       },
       {
         key: 'downloads',
-        label: 'downloads',
+        label: t('collection.downloads'),
         count: (input.downloads ?? []).filter(
           (d) => d.state === 'available',
         ).length,
@@ -1126,14 +1137,14 @@ export function toLibraryModel(input: {
       },
       {
         key: 'top50',
-        label: 'top 50',
+        label: t('collection.top50'),
         count: top50.length,
         enabled: true,
         note: null,
       },
       {
         key: 'history',
-        label: 'history',
+        label: t('collection.history'),
         count: history.length,
         enabled: true,
         note: null,
@@ -1181,13 +1192,7 @@ export function toCollectionModel(
   model: LibraryModel,
   key: 'liked' | 'top50' | 'history' | 'downloads',
 ): CollectionModel {
-  const titles = {
-    liked: 'liked',
-    top50: 'top 50',
-    history: 'history',
-    downloads: 'downloads',
-  } as const;
-  return { key, title: titles[key], rows: model.collectionRows[key] };
+  return { key, title: t(`collection.${key}`), rows: model.collectionRows[key] };
 }
 
 function downloadChip(state: DownloadProgress['state']): DownloadChip {
@@ -1217,9 +1222,11 @@ function downloadBadge(d: DownloadProgress): string {
     d.totalBytes !== null &&
     d.totalBytes > 0
   ) {
-    return `${Math.min(99, Math.round((d.transferredBytes / d.totalBytes) * 100))}%`;
+    return t('collection.badge.percent', {
+      value: Math.min(99, Math.round((d.transferredBytes / d.totalBytes) * 100)),
+    });
   }
-  return downloadChip(d.state);
+  return t(`track.download.${downloadChip(d.state)}`);
 }
 
 export function toPlaylistModel(input: {
@@ -1255,7 +1262,7 @@ export function toPlaylistModel(input: {
       recording === undefined
         ? {
           key: entry.entryId,
-          title: 'unknown track',
+          title: t('track.unknown'),
           versionLabel: null,
           artist: null,
           durationMs: null,
@@ -1263,7 +1270,7 @@ export function toPlaylistModel(input: {
           liked: false,
           playing: false,
           state: 'unavailable',
-          note: 'unavailable',
+          note: t('common.unavailable'),
           download: null,
         }
         : toTrackRowModel(recording, {
@@ -1401,6 +1408,49 @@ export function toHomeModel(input: {
   };
 }
 
+export type LanguageOption = {
+  readonly key: string;
+  readonly label: string;
+};
+
+/**
+ * The language picker's choices — 'system' plus every shipped
+ * locale. Labels are endonyms (each language named in its own
+ * language), so they are intentionally identical across catalogs.
+ */
+export function languageOptions(): readonly LanguageOption[] {
+  return [
+    { key: 'system', label: t('settings.languageValue.system') },
+    { key: 'en', label: t('settings.languageValue.en') },
+    { key: 'de', label: t('settings.languageValue.de') },
+  ];
+}
+
+/**
+ * Reduce a stored `Settings.language` to a `languageOptions()` key —
+ * a persisted value may be a full BCP-47 tag ('de-DE'), so match on
+ * the primary language subtag. Absent and unsupported values read as
+ * 'system', mirroring how resolveLocale treats them.
+ */
+export function languageOptionKey(setting: string | null | undefined): string {
+  const primary =
+    setting === undefined || setting === null
+      ? 'system'
+      : (setting.trim().toLowerCase().split('-').shift() ?? '');
+  return languageOptions().some((option) => option.key === primary)
+    ? primary
+    : 'system';
+}
+
+/** Display name for a `Settings.language` value; unknown reads system. */
+function languageLabel(setting: string | null | undefined): string {
+  return (
+    languageOptions().find(
+      (option) => option.key === languageOptionKey(setting),
+    )?.label ?? t('settings.languageValue.system')
+  );
+}
+
 export function toSettingsModel(
   settings: Settings,
   diagnostics: DiagnosticsModel,
@@ -1431,70 +1481,84 @@ export function toSettingsModel(
     rows: [
       {
         key: 'theme',
-        label: 'theme',
-        value: settings.theme,
+        label: t('settings.theme'),
+        value: t(`settings.themeValue.${settings.theme}`),
+        kind: 'navigation',
+        enabled: true,
+      },
+      {
+        // Display preference, same shape as theme: a navigation row
+        // whose value is the current choice; the host opens the
+        // picker (LanguagePickerSheet) on select.
+        key: 'language',
+        label: t('settings.language'),
+        value: languageLabel(settings.language),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'catalogProvider',
-        label: 'catalog provider',
+        label: t('settings.catalogProvider'),
         value: settings.catalogProvider,
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'playbackProvider',
-        label: 'playback provider',
+        label: t('settings.playbackProvider'),
         value: settings.playbackProvider,
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'lyricsProvider',
-        label: 'lyrics provider',
-        value: settings.lyricsProvider ?? 'auto',
+        label: t('settings.lyricsProvider'),
+        value: settings.lyricsProvider ?? t('settings.value.auto'),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'radioProvider',
-        label: 'radio provider',
-        value: settings.radioProvider ?? 'auto',
+        label: t('settings.radioProvider'),
+        value: settings.radioProvider ?? t('settings.value.auto'),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'storefront',
-        label: 'storefront',
-        value: settings.storefront ?? 'not set',
+        label: t('settings.storefront'),
+        value: settings.storefront ?? t('settings.value.notSet'),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'qualityKbps',
-        label: 'quality',
-        value: `${settings.qualityKbps} kbps`,
+        label: t('settings.quality'),
+        value: t('settings.qualityUnit', { value: settings.qualityKbps }),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'prefetch',
-        label: 'prefetch',
-        value: settings.prefetch ? 'on' : 'off',
+        label: t('settings.prefetch'),
+        value: settings.prefetch
+          ? t('settings.value.on')
+          : t('settings.value.off'),
         kind: 'toggle',
         enabled: settings.prefetch,
       },
       {
         key: 'downloadMetered',
-        label: 'downloads on cellular',
-        value: settings.downloadMetered ? 'on' : 'off',
+        label: t('settings.downloadMetered'),
+        value: settings.downloadMetered
+          ? t('settings.value.on')
+          : t('settings.value.off'),
         kind: 'toggle',
         enabled: settings.downloadMetered === true,
       },
       {
         key: 'downloadStorage',
-        label: 'download storage',
+        label: t('settings.downloadStorage'),
         value: media.storageText ?? '—',
         kind: 'value',
         enabled: true,
@@ -1503,17 +1567,19 @@ export function toSettingsModel(
         // Bounded LRU on disk (data.md ~200 MB) — the value is the
         // configured cap; picking a new one commits it and sweeps.
         key: 'artworkCacheBytes',
-        label: 'artwork cache',
-        value: `${Math.round(
-          (settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
-            (1024 * 1024),
-        )} mb`,
+        label: t('settings.artworkCache'),
+        value: t('settings.cacheUnit', {
+          value: Math.round(
+            (settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
+              (1024 * 1024),
+          ),
+        }),
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'removeAllDownloads',
-        label: 'remove all downloads',
+        label: t('settings.removeAllDownloads'),
         value:
           media.downloadCount === undefined
             ? null
@@ -1523,10 +1589,10 @@ export function toSettingsModel(
       },
       {
         key: 'localSources',
-        label: 'local folders',
+        label: t('settings.localFolders'),
         value:
           media.localSupported === false
-            ? 'unsupported'
+            ? t('settings.value.unsupported')
             : media.localFolderCount === undefined
               ? '—'
               : `${media.localFolderCount}`,
@@ -1537,45 +1603,45 @@ export function toSettingsModel(
       // "remove" affordance without a picker surface.
       ...(media.localSources ?? []).map((source) => ({
         key: `localSourceRemove:${source.sourceId}`,
-        label: `remove “${source.label}”`,
+        label: t('settings.removeSource', { label: source.label }),
         value: null,
         kind: 'navigation' as const,
         enabled: media.localSupported !== false,
       })),
       {
         key: 'addLocalFolder',
-        label: 'add local folder',
+        label: t('settings.addLocalFolder'),
         value: null,
         kind: 'navigation',
         enabled: media.localSupported !== false,
       },
       {
         key: 'rescanLocal',
-        label: 'rescan local folders',
+        label: t('settings.rescanLocal'),
         value: null,
         kind: 'navigation',
         enabled: media.localSupported !== false,
       },
       {
         key: 'sync',
-        label: 'desktop sync',
+        label: t('settings.sync'),
         value:
           media.syncSupported === false
-            ? 'unavailable'
-            : (media.syncLabel ?? 'not paired'),
+            ? t('sync.status.unavailable')
+            : (media.syncLabel ?? t('sync.status.notPaired')),
         kind: 'navigation',
         enabled: media.syncSupported !== false,
       },
       {
         key: 'exportLibrary',
-        label: 'export library',
+        label: t('settings.exportLibrary'),
         value: null,
         kind: 'navigation',
         enabled: true,
       },
       {
         key: 'importLibrary',
-        label: 'import library',
+        label: t('settings.importLibrary'),
         value: null,
         kind: 'navigation',
         enabled: true,
@@ -1672,32 +1738,32 @@ export function formatAgo(ms: number, nowMs: number): string {
     return '—';
   }
   if (delta < 60_000) {
-    return 'just now';
+    return t('ago.justNow');
   }
   const minutes = Math.floor(delta / 60_000);
   if (minutes < 60) {
-    return `${minutes}m ago`;
+    return t('ago.minutes', { count: minutes });
   }
   const hours = Math.floor(minutes / 60);
   if (hours < 24) {
-    return `${hours}h ago`;
+    return t('ago.hours', { count: hours });
   }
   const days = Math.floor(hours / 24);
   if (days < 7) {
-    return `${days}d ago`;
+    return t('ago.days', { count: days });
   }
   return formatExportDate(ms) ?? '—';
 }
 
 function formatExpiry(expiresAt: number, nowMs: number): string {
   if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
-    return 'expired';
+    return t('sync.expires.expired');
   }
   const left = Math.ceil((expiresAt - nowMs) / 60_000);
   if (left >= 60) {
-    return `expires in ${Math.floor(left / 60)}h`;
+    return t('sync.expires.hours', { hours: Math.floor(left / 60) });
   }
-  return `expires in ${Math.max(1, left)}m`;
+  return t('sync.expires.minutes', { minutes: Math.max(1, left) });
 }
 
 export function toSyncPanel(
@@ -1713,26 +1779,30 @@ export function toSyncPanel(
       status === null
         ? null
         : {
-            listenerLabel: status.listener,
-            engineLabel: status.engine,
+            listenerLabel: t(`sync.listener.${status.listener}`),
+            engineLabel: t(`sync.engine.${status.engine}`),
             nameLabel: status.name,
             addressLabel: status.endpoint,
-            advertiseLabel: status.advertise,
+            advertiseLabel: t(`sync.advertise.${status.advertise}`),
             sessionsLabel:
               status.sessions === 0
-                ? 'none'
-                : `${status.sessions} live`,
+                ? t('sync.sessions.none')
+                : t('sync.sessions.live', { count: status.sessions }),
             lastSyncLabel:
               status.lastSyncAt === null
-                ? 'never'
+                ? t('sync.never')
                 : formatAgo(status.lastSyncAt, nowMs),
             fingerprintLabel: status.fingerprint,
           },
     devices: devices.map((device) => ({
       id: device.id,
       name: device.name,
-      pairedLabel: `paired ${formatAgo(device.pairedAt, nowMs)}`,
-      lastSeenLabel: `seen ${formatAgo(device.lastSeenAt, nowMs)}`,
+      pairedLabel: t('sync.device.paired', {
+        when: formatAgo(device.pairedAt, nowMs),
+      }),
+      lastSeenLabel: t('sync.device.seen', {
+        when: formatAgo(device.lastSeenAt, nowMs),
+      }),
     })),
     pairing:
       pairing === null

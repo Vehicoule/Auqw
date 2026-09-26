@@ -3,6 +3,7 @@ import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { t } from '@auqw/ui-shared';
 
 export type StateViewProps = {
   readonly title: string;
@@ -32,7 +33,7 @@ function StateShell({
 }
 
 export function LoadingState({
-  title = 'loading',
+  title = t('state.loading'),
   hint = null,
   onCancel,
 }: {
@@ -55,7 +56,7 @@ export function LoadingState({
       {onCancel !== undefined && (
         <Pressable
           onPress={onCancel}
-          accessibilityLabel="cancel"
+          accessibilityLabel={t('common.cancel')}
           style={{
             paddingHorizontal: theme.spacing.lg,
             borderRadius: theme.radius.control,
@@ -66,7 +67,7 @@ export function LoadingState({
           }}
         >
           <Text variant="metadata" color="primary">
-            cancel
+            {t('common.cancel')}
           </Text>
         </Pressable>
       )}
@@ -92,10 +93,10 @@ export function EmptyState({ title, hint = null, icon = 'note' }: StateViewProps
 }
 
 export function ErrorState({
-  title = 'something went wrong',
+  title = t('state.errorTitle'),
   hint = null,
   onRetry,
-  retryLabel = 'retry',
+  retryLabel = t('state.retry'),
 }: {
   readonly title?: string | undefined;
   readonly hint?: string | null | undefined;
@@ -137,7 +138,7 @@ export function ErrorState({
 }
 
 export function UnavailableState({
-  title = 'unavailable',
+  title = t('common.unavailable'),
   hint = null,
 }: {
   readonly title?: string | undefined;

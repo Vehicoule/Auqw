@@ -12,6 +12,7 @@ import { TrackRow } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import type { PlaylistEntryModel, PlaylistModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type PlaylistScreenProps = {
   /**
@@ -102,12 +103,12 @@ export function PlaylistScreen({
         }}
       >
         <UnavailableState
-          title="playlist not found"
-          hint="it may have been deleted"
+          title={t('playlist.notFound')}
+          hint={t('playlist.notFoundHint')}
         />
         {onBack !== undefined && (
           <View style={{ alignItems: 'center', paddingBottom: theme.spacing.xl }}>
-            <HeaderButton label="back" onPress={onBack} />
+            <HeaderButton label={t('common.back')} onPress={onBack} />
           </View>
         )}
       </View>
@@ -132,7 +133,7 @@ export function PlaylistScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel="back"
+          accessibilityLabel={t('common.back')}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -147,8 +148,7 @@ export function PlaylistScreen({
             {model.name}
           </Text>
           <Text variant="metadata" color="secondary">
-            user playlist · {model.count}{' '}
-            {model.count === 1 ? 'track' : 'tracks'}
+            {t('playlist.meta', { count: model.count })}
           </Text>
         </View>
         <IconButton
@@ -156,7 +156,7 @@ export function PlaylistScreen({
           size={34}
           iconSize={14}
           color={theme.colors.textBright}
-          accessibilityLabel={`play ${model.name}`}
+          accessibilityLabel={t('playlist.playA11y', { name: model.name })}
           onPress={model.count === 0 ? undefined : onPlayAll}
         />
       </View>
@@ -174,10 +174,10 @@ export function PlaylistScreen({
           <HeaderButton
             label={
               downloadAllState === 'all'
-                ? 'downloaded'
+                ? t('playlist.downloaded')
                 : downloadAllState === 'partial'
-                  ? 'download missing'
-                  : 'download all'
+                  ? t('playlist.downloadMissing')
+                  : t('playlist.downloadAll')
             }
             onPress={
               model.count === 0 || downloadAllState === 'all'
@@ -187,7 +187,7 @@ export function PlaylistScreen({
           />
         )}
         <HeaderButton
-          label="rename"
+          label={t('common.rename')}
           onPress={
             onRename === undefined
               ? undefined
@@ -202,7 +202,7 @@ export function PlaylistScreen({
         {confirming ? (
           <>
             <HeaderButton
-              label="confirm delete"
+              label={t('playlist.confirmDelete')}
               warn
               onPress={
                 onDelete === undefined
@@ -214,13 +214,13 @@ export function PlaylistScreen({
               }
             />
             <HeaderButton
-              label="cancel"
+              label={t('common.cancel')}
               onPress={() => setConfirming(false)}
             />
           </>
         ) : (
           <HeaderButton
-            label="delete"
+            label={t('common.delete')}
             warn
             onPress={
               onDelete === undefined ? undefined : () => setConfirming(true)
@@ -238,8 +238,8 @@ export function PlaylistScreen({
         >
           <NameField
             value={draft}
-            placeholder="playlist name"
-            submitLabel="save"
+            placeholder={t('playlist.namePlaceholder')}
+            submitLabel={t('common.save')}
             autoFocus
             onChange={setDraft}
             onSubmit={
@@ -257,8 +257,8 @@ export function PlaylistScreen({
 
       {model.entries.length === 0 ? (
         <EmptyState
-          title="empty playlist"
-          hint="add tracks from any row's add-to-playlist action"
+          title={t('playlist.empty')}
+          hint={t('playlist.emptyHint')}
           icon="list-plus"
         />
       ) : (
@@ -274,7 +274,7 @@ export function PlaylistScreen({
           renderItem={({ item, index }) => (
             <TrackRow
               row={item.row}
-              badge={item.duplicate ? 'repeat' : null}
+              badge={item.duplicate ? t('queue.badge.repeat') : null}
               reorderControls="buttons"
               onMoveUp={
                 index > 0 && onMoveEntry !== undefined

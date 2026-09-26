@@ -1,6 +1,6 @@
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
 export type HomeScreenProps = {
@@ -25,13 +25,16 @@ function ResumeCard({
   return (
     <Pressable
       onPress={onResume}
-      ariaLabel={`resume ${resume.card.title}, paused at ${formatClock(resume.positionMs)}`}
+      ariaLabel={t('home.resumeA11y', {
+        title: resume.card.title,
+        position: formatClock(resume.positionMs),
+      })}
       className="uw-resume"
     >
       <Artwork url={resume.card.artworkUrl} size={44} />
       <span className="uw-resume__body">
         <Text variant="label" color="accent" uppercase>
-          paused · continue
+          {t('home.resumeLabel')}
         </Text>
         <Text variant="body" color="primary" numberOfLines={1}>
           {resume.card.title}
@@ -77,17 +80,17 @@ function Rail({
         {onPressSeeAll !== undefined && (
           <Pressable
             onPress={() => onPressSeeAll(section)}
-            ariaLabel={`see all ${title}`}
+            ariaLabel={t('home.seeAllA11y', { title })}
             className="uw-rail__see-all"
           >
             <Text variant="metadata" color="secondary">
-              see all
+              {t('home.seeAll')}
             </Text>
           </Pressable>
         )}
       </div>
       {cards.length === 0 ? (
-        <EmptyState title="nothing here yet" icon="note" />
+        <EmptyState title={t('home.empty')} icon="note" />
       ) : (
         <div className="uw-rail__cards" role="list">
           {cards.map((card) => (
@@ -96,7 +99,11 @@ function Rail({
               onPress={
                 onPressCard === undefined ? undefined : () => onPressCard(card)
               }
-              ariaLabel={`${card.title}${card.subtitle === null ? '' : `, ${card.subtitle}`}`}
+              ariaLabel={
+              card.subtitle === null
+                ? card.title
+                : t('common.cardA11y', { title: card.title, subtitle: card.subtitle })
+            }
               className="uw-rail__card"
             >
               <Artwork url={card.artworkUrl} size={136} />
@@ -138,16 +145,16 @@ export function HomeScreen({
         <ResumeCard resume={model.resume} onResume={onResume} />
       )}
       <Rail
-        title="jump back in"
-        subtitle="pick up where you left off"
+        title={t('home.recents.title')}
+        subtitle={t('home.recents.subtitle')}
         section="recents"
         cards={model.recents}
         onPressCard={onPressCard}
         onPressSeeAll={onPressSeeAll}
       />
       <Rail
-        title="suggested for you"
-        subtitle="from your providers"
+        title={t('home.suggestions.title')}
+        subtitle={t('home.suggestions.subtitle')}
         section="suggestions"
         cards={model.suggestions}
         onPressCard={onPressCard}

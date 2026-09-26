@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { PairingModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
@@ -40,7 +41,7 @@ export function SheetScaffold({
         </Text>
         <Pressable
           onPress={onDismiss}
-          ariaLabel="close"
+          ariaLabel={t('common.close')}
           className="uw-sheet-panel__close"
         >
           <Icon name="close" size={14} color="var(--text-secondary)" />
@@ -93,7 +94,7 @@ function SheetDialog({
       <button
         type="button"
         className="uw-scrim"
-        aria-label="close sheet"
+        aria-label={t('sheets.closeA11y')}
         tabIndex={-1}
         onClick={onDismiss}
       />
@@ -118,7 +119,7 @@ function SheetDialog({
 export function NameField({
   value,
   placeholder,
-  submitLabel = 'create',
+  submitLabel = t('common.create'),
   autoFocus = false,
   onChange,
   onSubmit,
@@ -179,11 +180,11 @@ export function NameField({
       {onCancel !== undefined && (
         <Pressable
           onPress={onCancel}
-          ariaLabel="cancel"
+          ariaLabel={t('common.cancel')}
           className="uw-namefield__action"
         >
           <Text variant="metadata" color="secondary">
-            cancel
+            {t('common.cancel')}
           </Text>
         </Pressable>
       )}
@@ -201,7 +202,7 @@ export function ValueFieldSheet({
   title,
   initial = '',
   placeholder,
-  submitLabel = 'save',
+  submitLabel = t('common.save'),
   clearLabel,
   onSubmit,
   onClear,
@@ -302,7 +303,7 @@ export type ProviderPickerOption = {
  * the selected option reads accent + check, never a fake default.
  */
 export function ProviderPickerSheet({
-  title = 'provider',
+  title = t('sheets.providerTitle'),
   options,
   selectedKey,
   onPick,
@@ -320,7 +321,7 @@ export function ProviderPickerSheet({
         <div className="uw-sheet-row" data-state="unavailable">
           <Icon name="warn" size={15} color="var(--warn)" />
           <Text variant="body" color="secondary">
-            no provider declares this capability
+            {t('sheets.noProvider')}
           </Text>
         </div>
       ) : (
@@ -369,7 +370,7 @@ export type PlaylistPickerItem = {
 };
 
 export function AddToPlaylistSheet({
-  title = 'add to playlist',
+  title = t('sheets.addToPlaylist'),
   playlists,
   onPick,
   onCreate,
@@ -393,7 +394,7 @@ export function AddToPlaylistSheet({
               ? undefined
               : () => onPick(playlist.playlistId)
           }
-          ariaLabel={`${playlist.name}, ${playlist.count} tracks`}
+          ariaLabel={t('sheets.itemA11y', { name: playlist.name, count: playlist.count })}
           className="uw-sheet-row"
         >
           <Artwork url={playlist.artworkUrl} size={40} />
@@ -402,7 +403,7 @@ export function AddToPlaylistSheet({
               {playlist.name}
             </Text>
             <Text variant="metadata" color="secondary">
-              {playlist.count} {playlist.count === 1 ? 'track' : 'tracks'}
+              {t('common.trackCount', { count: playlist.count })}
             </Text>
           </span>
         </Pressable>
@@ -410,7 +411,7 @@ export function AddToPlaylistSheet({
       {creating ? (
         <NameField
           value={draft}
-          placeholder="new playlist name"
+          placeholder={t('common.newPlaylistName')}
           autoFocus
           onChange={setDraft}
           onSubmit={
@@ -430,12 +431,12 @@ export function AddToPlaylistSheet({
       ) : (
         <Pressable
           onPress={onCreate === undefined ? undefined : () => setCreating(true)}
-          ariaLabel="new playlist"
+          ariaLabel={t('common.newPlaylist')}
           className="uw-sheet-row uw-sheet-row--dashed"
         >
           <Icon name="list-plus" size={15} color="var(--text-secondary)" />
           <Text variant="body" color="secondary">
-            new playlist
+            {t('common.newPlaylist')}
           </Text>
         </Pressable>
       )}
@@ -459,13 +460,13 @@ export function PairingSheet({
   readonly onDismiss?: (() => void) | undefined;
 }) {
   return (
-    <SheetScaffold title="pair a device" onDismiss={onDismiss}>
+    <SheetScaffold title={t('sync.pairDevice')} onDismiss={onDismiss}>
       <div className="uw-pairing">
         <div className="uw-pairing__qr">
           <QrCode data={pairing.payload} />
         </div>
         <Text variant="metadata" color="secondary">
-          scan with the app on the other device
+          {t('pairing.scanHint')}
         </Text>
         <Text
           variant="title"
@@ -476,7 +477,7 @@ export function PairingSheet({
           {pairing.code}
         </Text>
         <Text variant="metadata" color="secondary">
-          …or type the code and address{' '}
+          {t('pairing.typeHint')}{' '}
           <Text
             variant="metadata"
             color="primary"
@@ -489,11 +490,11 @@ export function PairingSheet({
         <Pressable
           onPress={onCopyPayload}
           disabled={onCopyPayload === undefined}
-          ariaLabel="copy pairing payload"
+          ariaLabel={t('pairing.copyPayloadA11y')}
           className="uw-diag-row uw-diag-row--action"
         >
           <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            copy payload
+            {t('pairing.copyPayload')}
           </Text>
           <Icon name="check" size={12} color="var(--text-secondary)" />
         </Pressable>

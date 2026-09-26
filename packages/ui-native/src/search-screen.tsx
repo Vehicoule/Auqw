@@ -9,6 +9,7 @@ import {
   UnavailableState,
 } from './states.tsx';
 import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 
 export type SearchScreenProps = {
   readonly state: SearchStateModel;
@@ -78,12 +79,12 @@ export function SearchScreen({
           value={query ?? state.query}
           onChangeText={onQueryChange}
           onSubmitEditing={onSubmit}
-          placeholder="search"
+          placeholder={t('search.fieldLabel')}
           placeholderTextColor={theme.colors.textSecondary}
           autoCapitalize="none"
           autoCorrect={false}
           returnKeyType="search"
-          accessibilityLabel="search"
+          accessibilityLabel={t('search.fieldLabel')}
           style={[
             theme.typography.body,
             {
@@ -100,11 +101,11 @@ export function SearchScreen({
               <Pressable
                 compact
                 onPress={onCancel}
-                accessibilityLabel="cancel search"
+                accessibilityLabel={t('search.a11y.cancel')}
                 style={{ paddingHorizontal: theme.spacing.xs }}
               >
                 <Text variant="metadata" color="accent">
-                  cancel
+                  {t('common.cancel')}
                 </Text>
               </Pressable>
             )}
@@ -114,7 +115,7 @@ export function SearchScreen({
           <Pressable
             compact
             onPress={() => onQueryChange('')}
-            accessibilityLabel="clear search"
+            accessibilityLabel={t('search.a11y.clear')}
             style={{ padding: theme.spacing.xs }}
           >
             <Icon name="close" size={12} color={theme.colors.textSecondary} />
@@ -131,14 +132,17 @@ export function SearchScreen({
           }}
         >
           <Text variant="heading" color="bright">
-            results
+            {t('search.results')}
           </Text>
           <Text
             variant="metadata"
             color="secondary"
             style={{ marginLeft: 10 }}
           >
-            {state.providerId ?? 'catalog'} · {state.results.length} matches
+            {t('search.resultsMeta', {
+              provider: state.providerId ?? t('search.providerFallback'),
+              count: state.results.length,
+            })}
           </Text>
         </View>
       )}
@@ -154,7 +158,7 @@ export function SearchScreen({
                 marginBottom: theme.spacing.xs,
               }}
             >
-              recent searches
+              {t('search.recent')}
             </Text>
             {recents.map((recent) => (
               <Pressable
@@ -165,7 +169,7 @@ export function SearchScreen({
                     ? undefined
                     : () => onRecentPress(recent)
                 }
-                accessibilityLabel={`search again for ${recent}`}
+                accessibilityLabel={t('search.a11y.again', { query: recent })}
                 style={({ pressed }) => [
                   {
                     flexDirection: 'row',
@@ -191,31 +195,31 @@ export function SearchScreen({
           </View>
         ) : (
           <EmptyState
-            title="search the catalog"
-            hint="results show up here"
+            title={t('search.emptyTitle')}
+            hint={t('search.emptyHint')}
             icon="search"
           />
         ))}
       {state.phase === 'loading' && state.results.length === 0 && (
-        <LoadingState title="searching" hint={state.query} />
+        <LoadingState title={t('search.loading')} hint={state.query} />
       )}
       {state.phase === 'empty' && (
         <EmptyState
-          title={`no results for “${state.query}”`}
-          hint="try a different search"
+          title={t('search.noResults', { query: state.query })}
+          hint={t('search.noResultsHint')}
           icon="search"
         />
       )}
       {state.phase === 'error' && (
         <ErrorState
-          title="search failed"
+          title={t('search.failed')}
           hint={state.message}
           onRetry={state.retryable ? onRetry : undefined}
         />
       )}
       {state.phase === 'unavailable' && (
         <UnavailableState
-          title="search unavailable"
+          title={t('search.unavailableTitle')}
           hint={state.message}
         />
       )}

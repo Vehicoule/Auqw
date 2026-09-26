@@ -11,7 +11,7 @@ import type {
   PlayerModel,
   QueueModel,
 } from '@auqw/ui-shared';
-import { formatClock } from '@auqw/ui-shared';
+import { formatClock, t } from '@auqw/ui-shared';
 
 export type QueueScreenProps = {
   readonly queue: QueueModel;
@@ -61,10 +61,10 @@ export function QueueScreen({
         }}
       >
         <Text variant="heading" color="bright">
-          queue
+          {t('queue.title')}
         </Text>
         <Text variant="metadata" color="secondary" style={{ marginLeft: 10 }}>
-          {queue.items.length} tracks
+          {t('queue.count', { count: queue.items.length })}
         </Text>
         <View style={{ flex: 1 }} />
         {onToggleReorder !== undefined && (
@@ -75,7 +75,9 @@ export function QueueScreen({
             color={
               reordering ? theme.colors.accent : theme.colors.textSecondary
             }
-            accessibilityLabel={reordering ? 'done reordering' : 'reorder queue'}
+            accessibilityLabel={
+              reordering ? t('queue.reorderDone') : t('queue.reorder')
+            }
             active={reordering}
             onPress={onToggleReorder}
           />

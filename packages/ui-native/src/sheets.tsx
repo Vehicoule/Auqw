@@ -4,6 +4,8 @@ import { TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { t } from '@auqw/ui-shared';
+import type { LanguageOption } from '@auqw/ui-shared';
 
 /**
  * Sheet building blocks: the content frame (title row + actions) plus
@@ -54,7 +56,7 @@ function SheetScaffold({
         <Pressable
           compact
           onPress={onDismiss}
-          accessibilityLabel="close"
+          accessibilityLabel={t('common.close')}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon name="close" size={14} color={theme.colors.textSecondary} />
@@ -72,7 +74,7 @@ function SheetScaffold({
 export function NameField({
   value,
   placeholder,
-  submitLabel = 'create',
+  submitLabel = t('common.create'),
   autoFocus = false,
   onChange,
   onSubmit,
@@ -144,11 +146,11 @@ export function NameField({
         <Pressable
           compact
           onPress={onCancel}
-          accessibilityLabel="cancel"
+          accessibilityLabel={t('common.cancel')}
           style={{ paddingHorizontal: theme.spacing.xs }}
         >
           <Text variant="metadata" color="secondary">
-            cancel
+            {t('common.cancel')}
           </Text>
         </Pressable>
       )}
@@ -166,7 +168,7 @@ export function ValueFieldSheet({
   title,
   initial = '',
   placeholder,
-  submitLabel = 'save',
+  submitLabel = t('common.save'),
   clearLabel,
   onSubmit,
   onClear,
@@ -290,7 +292,7 @@ export type ProviderPickerOption = {
  * the selected option reads accent + check, never a fake default.
  */
 export function ProviderPickerSheet({
-  title = 'provider',
+  title = t('sheets.providerTitle'),
   options,
   selectedKey,
   onPick,
@@ -317,7 +319,7 @@ export function ProviderPickerSheet({
         >
           <Icon name="warn" size={15} color={theme.colors.warn} />
           <Text variant="body" color="secondary">
-            no provider declares this capability
+            {t('sheets.noProvider')}
           </Text>
         </View>
       ) : (
@@ -368,6 +370,69 @@ export function ProviderPickerSheet({
   );
 }
 
+/**
+ * UI-language choices — 'system' (follow the platform locale) plus
+ * every shipped locale. Mirrors `ProviderPickerSheet`: the selected
+ * row reads accent + check, never a fake default, and the sheet owns
+ * no state — every pick delegates to the host.
+ */
+export function LanguagePickerSheet({
+  title = t('sheets.languageTitle'),
+  options,
+  selectedKey,
+  onPick,
+  onDismiss,
+}: {
+  readonly title?: string | undefined;
+  readonly options: readonly LanguageOption[];
+  readonly selectedKey: string | null;
+  readonly onPick?: ((key: string) => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <SheetScaffold title={title} onDismiss={onDismiss}>
+      {options.map((option) => {
+        const selected = option.key === selectedKey;
+        return (
+          <Pressable
+            key={option.key}
+            onPress={
+              onPick === undefined ? undefined : () => onPick(option.key)
+            }
+            accessibilityLabel={option.label}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            style={({ pressed }) => [
+              {
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: theme.spacing.md,
+                minHeight: theme.sizes.touch,
+                paddingHorizontal: theme.spacing.sm,
+                borderRadius: theme.radius.control,
+              },
+              pressed && { backgroundColor: theme.colors.fg08 },
+            ]}
+          >
+            <Text
+              variant="body"
+              color={selected ? 'accent' : 'primary'}
+              style={{ flex: 1 }}
+              numberOfLines={1}
+            >
+              {option.label}
+            </Text>
+            {selected && (
+              <Icon name="check" size={14} color={theme.colors.accent} />
+            )}
+          </Pressable>
+        );
+      })}
+    </SheetScaffold>
+  );
+}
+
 export type PlaylistPickerItem = {
   readonly playlistId: string;
   readonly name: string;
@@ -376,7 +441,7 @@ export type PlaylistPickerItem = {
 };
 
 export function AddToPlaylistSheet({
-  title = 'add to playlist',
+  title = t('sheets.addToPlaylist'),
   playlists,
   onPick,
   onCreate,
@@ -401,7 +466,10 @@ export function AddToPlaylistSheet({
               ? undefined
               : () => onPick(playlist.playlistId)
           }
-          accessibilityLabel={`${playlist.name}, ${playlist.count} tracks`}
+          accessibilityLabel={t('sheets.itemA11y', {
+            name: playlist.name,
+            count: playlist.count,
+          })}
           style={({ pressed }) => [
             {
               flexDirection: 'row',
@@ -420,7 +488,7 @@ export function AddToPlaylistSheet({
               {playlist.name}
             </Text>
             <Text variant="metadata" color="secondary">
-              {playlist.count} {playlist.count === 1 ? 'track' : 'tracks'}
+              {t('common.trackCount', { count: playlist.count })}
             </Text>
           </View>
         </Pressable>
@@ -428,7 +496,7 @@ export function AddToPlaylistSheet({
       {creating ? (
         <NameField
           value={draft}
-          placeholder="new playlist name"
+          placeholder={t('common.newPlaylistName')}
           autoFocus
           onChange={setDraft}
           onSubmit={
@@ -448,7 +516,7 @@ export function AddToPlaylistSheet({
       ) : (
         <Pressable
           onPress={onCreate === undefined ? undefined : () => setCreating(true)}
-          accessibilityLabel="new playlist"
+          accessibilityLabel={t('common.newPlaylist')}
           style={({ pressed }) => [
             {
               flexDirection: 'row',
@@ -466,7 +534,7 @@ export function AddToPlaylistSheet({
         >
           <Icon name="list-plus" size={15} color={theme.colors.textSecondary} />
           <Text variant="body" color="secondary">
-            new playlist
+            {t('common.newPlaylist')}
           </Text>
         </Pressable>
       )}

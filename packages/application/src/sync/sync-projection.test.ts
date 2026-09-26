@@ -1549,6 +1549,7 @@ function testUnsyncedWrites(): void {
     settingWrites.map((w) => ('field' in w ? w.field : '?')).sort(),
     [
       'catalogProvider',
+      'language',
       'lyricsProvider',
       'playbackProvider',
       'prefetch',

@@ -9,6 +9,7 @@ import {
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
+import { t } from '@auqw/ui-shared';
 import type { PlaylistEntryModel, PlaylistModel } from '@auqw/ui-shared';
 
 export type PlaylistScreenProps = {
@@ -105,12 +106,12 @@ export function PlaylistScreen({
     return (
       <div className="uw-screen uw-playlist">
         <UnavailableState
-          title="playlist not found"
-          hint="it may have been deleted"
+          title={t('playlist.notFound')}
+          hint={t('playlist.notFoundHint')}
         />
         {onBack !== undefined && (
           <div className="uw-playlist__back">
-            <HeaderButton label="back" onPress={onBack} />
+            <HeaderButton label={t('common.back')} onPress={onBack} />
           </div>
         )}
       </div>
@@ -122,7 +123,7 @@ export function PlaylistScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-playlist__head">
-        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Artwork url={model.artworkUrl} size={56} />
@@ -131,8 +132,7 @@ export function PlaylistScreen({
             {model.name}
           </Text>
           <Text variant="metadata" color="secondary">
-            user playlist · {model.count}{' '}
-            {model.count === 1 ? 'track' : 'tracks'}
+            {t('playlist.meta', { count: model.count })}
           </Text>
         </div>
         <IconButton
@@ -140,7 +140,7 @@ export function PlaylistScreen({
           size={34}
           iconSize={14}
           color="var(--text-bright)"
-          ariaLabel={`play ${model.name}`}
+          ariaLabel={t('playlist.playA11y', { name: model.name })}
           onPress={model.count === 0 ? undefined : onPlayAll}
         />
       </div>
@@ -150,10 +150,10 @@ export function PlaylistScreen({
           <HeaderButton
             label={
               downloadAllState === 'all'
-                ? 'downloaded'
+                ? t('playlist.downloaded')
                 : downloadAllState === 'partial'
-                  ? 'download missing'
-                  : 'download all'
+                  ? t('playlist.downloadMissing')
+                  : t('playlist.downloadAll')
             }
             onPress={
               model.count === 0 || downloadAllState === 'all'
@@ -163,7 +163,7 @@ export function PlaylistScreen({
           />
         )}
         <HeaderButton
-          label="rename"
+          label={t('common.rename')}
           onPress={
             onRename === undefined
               ? undefined
@@ -178,7 +178,7 @@ export function PlaylistScreen({
         {confirming ? (
           <>
             <HeaderButton
-              label="confirm delete"
+              label={t('playlist.confirmDelete')}
               warn
               onPress={
                 onDelete === undefined
@@ -190,13 +190,13 @@ export function PlaylistScreen({
               }
             />
             <HeaderButton
-              label="cancel"
+              label={t('common.cancel')}
               onPress={() => setConfirming(false)}
             />
           </>
         ) : (
           <HeaderButton
-            label="delete"
+            label={t('common.delete')}
             warn
             onPress={
               onDelete === undefined ? undefined : () => setConfirming(true)
@@ -209,8 +209,8 @@ export function PlaylistScreen({
         <div className="uw-playlist__rename">
           <NameField
             value={draft}
-            placeholder="playlist name"
-            submitLabel="save"
+            placeholder={t('playlist.namePlaceholder')}
+            submitLabel={t('common.save')}
             autoFocus
             onChange={setDraft}
             onSubmit={
@@ -228,8 +228,8 @@ export function PlaylistScreen({
 
       {model.entries.length === 0 ? (
         <EmptyState
-          title="empty playlist"
-          hint="add tracks from any row's add-to-playlist action"
+          title={t('playlist.empty')}
+          hint={t('playlist.emptyHint')}
           icon="list-plus"
         />
       ) : (
@@ -243,7 +243,7 @@ export function PlaylistScreen({
             <TrackRow
               key={entry.entryId}
               row={entry.row}
-              badge={entry.duplicate ? 'repeat' : null}
+              badge={entry.duplicate ? t('queue.badge.repeat') : null}
               reorderControls="buttons"
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}

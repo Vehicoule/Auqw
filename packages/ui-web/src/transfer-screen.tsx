@@ -1,5 +1,6 @@
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
 
 export type TransferScreenProps = {
@@ -38,11 +39,11 @@ export function TransferScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-collection__head">
-        <Pressable onPress={onBack} ariaLabel="back" className="uw-back">
+        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Text variant="display" color="bright" className="uw-collection__title">
-          library transfer
+          {t('transfer.title')}
         </Text>
       </div>
       <div className="uw-transfer__sections">
@@ -53,10 +54,10 @@ export function TransferScreen({
             uppercase
             className="uw-section-label"
           >
-            export
+            {t('transfer.exportSection')}
           </Text>
           <TransferRow
-            label={exportBusy ? 'exporting…' : 'export library'}
+            label={exportBusy ? t('transfer.exporting') : t('transfer.export')}
             detail={
               model.exportPhase === 'done' || model.exportPhase === 'error'
                 ? model.exportDetail
@@ -74,10 +75,10 @@ export function TransferScreen({
             uppercase
             className="uw-section-label"
           >
-            import
+            {t('transfer.importSection')}
           </Text>
           <TransferRow
-            label={importBusy ? 'working…' : 'choose file…'}
+            label={importBusy ? t('transfer.working') : t('transfer.import')}
             detail={model.importPhase === 'error' ? model.importDetail : null}
             detailTone="warn"
             disabled={importBusy || onPickImportFile === undefined}
@@ -146,14 +147,14 @@ function ImportBody({
   return (
     <div className="uw-import-preview" data-phase={model.importPhase}>
       <Text variant="body" color="bright">
-        import preview
+        {t('transfer.previewTitle')}
       </Text>
       <Text variant="metadata" color="secondary" className="uw-import-preview__meta">
-        format v{preview.formatVersion}
+        {t('transfer.format', { version: preview.formatVersion })}
         {preview.exportedLabel === null
           ? ''
-          : ` · exported ${preview.exportedLabel}`}
-        {` · ${preview.sourceLabel}`}
+          : t('transfer.exportedSuffix', { date: preview.exportedLabel })}
+        {t('transfer.sourceSuffix', { source: preview.sourceLabel })}
       </Text>
       <div className="uw-import-preview__rows">
         {preview.rows.map((row) => (
@@ -171,28 +172,28 @@ function ImportBody({
         <div className="uw-import-preview__done">
           <Icon name="check" size={14} color="var(--accent)" />
           <Text variant="metadata" color="accent" className="uw-diag-row__k">
-            {model.importDetail ?? 'import applied'}
+            {model.importDetail ?? t('transfer.applied')}
           </Text>
           <Pressable
             onPress={onResetImport}
-            ariaLabel="reset import"
+            ariaLabel={t('transfer.resetA11y')}
             className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
-              done
+              {t('common.done')}
             </Text>
           </Pressable>
         </div>
       ) : model.importPhase === 'error' ? (
         <div className="uw-import-preview__error">
-          <ErrorState title="import failed" hint={model.importDetail} />
+          <ErrorState title={t('transfer.failed')} hint={model.importDetail} />
           <Pressable
             onPress={onResetImport}
-            ariaLabel="reset import"
+            ariaLabel={t('transfer.resetA11y')}
             className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
-              start over
+              {t('transfer.startOver')}
             </Text>
           </Pressable>
         </div>
@@ -201,20 +202,20 @@ function ImportBody({
           <Pressable
             onPress={onApplyImport}
             disabled={model.importPhase === 'applying'}
-            ariaLabel="apply import"
+            ariaLabel={t('transfer.apply')}
             className="uw-cta"
           >
             <Text variant="metadata" color="canvas">
-              {model.importPhase === 'applying' ? 'applying…' : 'apply import'}
+              {model.importPhase === 'applying' ? t('transfer.applying') : t('transfer.apply')}
             </Text>
           </Pressable>
           <Pressable
             onPress={onResetImport}
-            ariaLabel="cancel import"
+            ariaLabel={t('transfer.cancelA11y')}
             className="uw-headbtn"
           >
             <Text variant="metadata" color="secondary">
-              cancel
+              {t('common.cancel')}
             </Text>
           </Pressable>
         </div>
