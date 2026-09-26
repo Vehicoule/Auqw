@@ -846,6 +846,13 @@
   gap: var(--spacing-md);
   margin-bottom: var(--spacing-lg);
 }
+.uw-collections__cell {
+  display: flex;
+}
+.uw-collections__cell > .uw-collection {
+  /* Buttons shrink to content — the tile must fill its cell. */
+  flex: 1;
+}
 .uw-collection {
   display: flex;
   align-items: center;
