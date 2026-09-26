@@ -15,7 +15,14 @@ on:
       - 'apps/mobile/**'
       - 'modules/auqw-expo/**'
       - 'packages/**'
-      - 'crates/mobile-bindings/**'
+      # The bindings compile the whole Rust workspace, not just the
+      # bindings crate — a host-surface or Cargo.lock change shifts the
+      # jniLibs input hash, so every crates/ source + the manifests
+      # that select dep versions stay in the filter.
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
       - 'providers.lock.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -29,13 +36,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-warm
-  # A newer merge makes an in-flight warm obsolete — the next cache
-  # save covers it; don't queue stale warm runs.
+  # Per-ref group: a dispatch on a feature branch must not cancel a
+  # main warm (its cache save is branch-scoped and tags can't read
+  # it). Merges to main cancel each other — the newest warm covers all.
+  group: android-warm-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   warm:
+    # Only main's cache is restorable by release tags — a dispatch on
+    # any other ref skips instantly instead of burning a full build on
+    # a cache nobody downstream can read.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     defaults:
       run:
