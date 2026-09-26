@@ -484,7 +484,13 @@ export function toCorrectionsModel(input: {
         candidates: review.candidates.map((candidate, index) => ({
           index,
           title: candidate.metadata.title,
-          subtitle: `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}`,
+          // Duration disambiguates rows a provider lists under several
+          // ids with the same display title (audio vs video upload).
+          subtitle:
+            `${candidate.metadata.artist ?? '—'} · ${candidate.ref.provider}` +
+            (candidate.metadata.durationMs !== null
+              ? ` · ${formatClock(candidate.metadata.durationMs)}`
+              : ''),
         })),
       };
     });

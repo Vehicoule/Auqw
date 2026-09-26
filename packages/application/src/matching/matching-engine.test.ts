@@ -257,7 +257,10 @@ function adversarialTests(): void {
     assertEqual(out.evidence.durationDeltaMs, null);
   }
 
-  // 9. Two identical candidates -> ambiguous, upstream order kept.
+  // 9. Display-identical candidates are one choice: the review row
+  // shows title + `artist · provider`, so a provider listing the same
+  // song under two ids is a phantom tie — the best-scored member wins
+  // (equal scores keep upstream order).
   {
     const rA = ref();
     const rB = ref();
@@ -278,10 +281,44 @@ function adversarialTests(): void {
         }),
       ],
     );
-    assert(out.type === 'ambiguous', `9: ${out.type}`);
+    assert(out.type === 'matched', `9: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rA);
+  }
+
+  // 9b. The collapse precedes the margin check: two identical display
+  // rows plus a genuinely different near-tie still gate, listing one
+  // row per distinct choice.
+  {
+    const rA = ref();
+    const rB = ref();
+    const rC = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rA,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rB,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist B',
+          durationMs: 200_000,
+          sourceRef: rC,
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9b: ${out.type}`);
     assertEqual(out.candidates.length, 2);
     assertEqual(out.candidates[0]?.candidate.sourceRef, rA);
-    assertEqual(out.candidates[1]?.candidate.sourceRef, rB);
+    assertEqual(out.candidates[1]?.candidate.sourceRef, rC);
   }
 
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.

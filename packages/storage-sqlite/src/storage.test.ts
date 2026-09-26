@@ -589,6 +589,24 @@ async function attemptTraces(): Promise<void> {
   assert(capped.ok && capped.value.length === 500);
   assertEqual(capped.value[0]?.requestId, 'b509');
   assertEqual(capped.value[499]?.requestId, 'b10');
+  // The pot-provider sentinel commits: the host writes it in place of
+  // the provider's LAN address, which must never reach diagnostics.
+  const sentinel: AttemptTrace = {
+    ...trace('pot'),
+    httpTrace: [
+      {
+        method: 'POST',
+        url: '<pot-provider>',
+        status: 200,
+        bytes: 208,
+        elapsedMs: 1,
+      },
+    ],
+  };
+  assert(
+    (await storage.commit({ attempts: [sentinel] }, ctx().context)).ok,
+    'pot-provider sentinel trace commits',
+  );
   // A URL carrying a signed query/fragment is rejected before write.
   const signed: AttemptTrace = {
     ...trace('signed'),

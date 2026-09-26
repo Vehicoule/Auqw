@@ -220,6 +220,21 @@ function normalizeFree(text: string): string {
   return tokenize(text).join(' ');
 }
 
+/**
+ * What the review row actually shows: title + `artist · provider`.
+ * A provider often lists the same song under several ids (album audio,
+ * topic video, short uploads) — those candidates are one choice, not
+ * two, and a tie between them is a phantom that would gate a
+ * confident match on rows the user cannot tell apart.
+ */
+function displayKey(candidate: MatchCandidate): string {
+  return [
+    candidate.sourceRef.provider,
+    normalizeFree(candidate.title),
+    normalizeFree(candidate.artist ?? ''),
+  ].join('\u001f');
+}
+
 type Scored = {
   readonly candidate: MatchCandidate;
   readonly evidence: MatchEvidence;
@@ -297,11 +312,23 @@ export class MatchingEngine {
     }
     scored.sort((a, b) => b.evidence.score - a.evidence.score || a.index - b.index);
 
-    const top = scored[0];
+    // Sorted, so the first member of each display group is its best.
+    const distinct: Scored[] = [];
+    const seenDisplay = new Set<string>();
+    for (const s of scored) {
+      const key = displayKey(s.candidate);
+      if (seenDisplay.has(key)) {
+        continue;
+      }
+      seenDisplay.add(key);
+      distinct.push(s);
+    }
+
+    const top = distinct[0];
     if (top === undefined) {
       return { type: 'unavailable', reason: 'no candidates' };
     }
-    const second = scored[1];
+    const second = distinct[1];
     const margin =
       second === undefined
         ? Number.POSITIVE_INFINITY
@@ -313,7 +340,7 @@ export class MatchingEngine {
       return { type: 'matched', candidate: top.candidate, evidence: top.evidence };
     }
     if (top.evidence.score >= 65 && margin < 7) {
-      const near = scored
+      const near = distinct
         .filter((s) => top.evidence.score - s.evidence.score < 7)
         .slice(0, 5)
         .map((s) => ({ candidate: s.candidate, evidence: s.evidence }));
