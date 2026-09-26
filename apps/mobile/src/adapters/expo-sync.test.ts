@@ -81,6 +81,24 @@ function memoryClientKeys(): SyncClientKeys {
       state.map.set(peer.fp, peer);
       return ok(undefined);
     },
+    async peerMerge(peer) {
+      const existing = state.map.get(peer.fp);
+      state.map.set(
+        peer.fp,
+        existing === undefined
+          ? peer
+          : {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            },
+      );
+      return ok(undefined);
+    },
     async peerDelete(fp) {
       state.map.delete(fp);
       return ok(undefined);

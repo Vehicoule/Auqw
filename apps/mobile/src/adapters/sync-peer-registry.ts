@@ -37,29 +37,20 @@ export function createSyncPeerRegistry(
       return ok(found === undefined ? null : toHostPeer(found));
     },
     async put(peer) {
-      const listed = await keys.peerList();
-      if (!listed.ok) {
-        // A failed read must NOT degrade to "new peer" — writing over
-        // an unseen record would wipe its cursor and resend the whole
-        // acknowledged log on the next round.
-        return err(listed.error);
-      }
-      const existing = listed.value.find((p) => p.fp === peer.fp);
-      const record: SyncPeer = {
+      // Atomic read-merge-write on the keys port: custody keeps the
+      // stored cursor/lastSyncAt/pairedAt/pot while the host's fresh
+      // name/endpoints/id/pub land — a concurrent syncRound's cursor
+      // write can't be lost between a read and a write here.
+      return keys.peerMerge({
         fp: peer.fp,
         name: peer.name,
         endpoints: peer.endpoints,
-        pairedAt: existing?.pairedAt ?? peer.pairedAt,
+        pairedAt: peer.pairedAt,
         lastSeenAt: peer.lastSeenAt,
-        peerCursor: existing?.peerCursor ?? {},
-        ...(existing?.lastSyncAt === undefined
-          ? {}
-          : { lastSyncAt: existing.lastSyncAt }),
+        peerCursor: {},
         ...(peer.id === '' ? {} : { deviceId: peer.id }),
         ...(peer.pub === '' ? {} : { pub: peer.pub }),
-        ...(existing?.pot === undefined ? {} : { pot: existing.pot }),
-      };
-      return keys.peerPut(record);
+      });
     },
     async touch(peer) {
       const listed = await keys.peerList();

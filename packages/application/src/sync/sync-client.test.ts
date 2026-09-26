@@ -225,6 +225,25 @@ function fakeKeys(): SyncClientKeys & {
       peers.set(peer.fp, peer);
       return Promise.resolve(ok(true));
     },
+    peerMerge: (peer: SyncPeer) => {
+      const existing = index.has(peer.fp) ? peers.get(peer.fp) : undefined;
+      peers.set(
+        peer.fp,
+        existing === undefined
+          ? peer
+          : {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            },
+      );
+      index.add(peer.fp);
+      return Promise.resolve(ok(undefined));
+    },
     peerDelete: (fp: string) => {
       index.delete(fp);
       peers.delete(fp);

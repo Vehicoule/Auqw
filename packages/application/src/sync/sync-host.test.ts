@@ -244,6 +244,24 @@ function fakeKeys(): SyncClientKeys & { peers: Map<string, SyncPeer> } {
       peers.set(peer.fp, peer);
       return Promise.resolve(ok(undefined));
     },
+    peerMerge: (peer) => {
+      const existing = peers.get(peer.fp);
+      peers.set(
+        peer.fp,
+        existing === undefined
+          ? peer
+          : {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            },
+      );
+      return Promise.resolve(ok(undefined));
+    },
     peerDelete: (fp) => {
       peers.delete(fp);
       return Promise.resolve(ok(undefined));

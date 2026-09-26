@@ -245,6 +245,56 @@ export function createSecureSyncKeys(): SyncClientKeys {
       return ok(wrote.value);
     },
 
+    async peerMerge(peer, signal) {
+      const hit = cancelled(signal);
+      if (hit !== null) {
+        return hit;
+      }
+      // Merge inside the index lock so a concurrent syncRound's cursor
+      // write can't land between a host-side read and write.
+      return withIndexLock(async () => {
+        const indexRead = await readJsonStore(PEER_INDEX_KEY);
+        if (!indexRead.ok) {
+          return indexRead;
+        }
+        const fps = isFpList(indexRead.value) ? indexRead.value : [];
+        let merged = peer;
+        if (fps.includes(peer.fp)) {
+          const existingRead = await readJsonStore(peerKey(peer.fp));
+          if (!existingRead.ok) {
+            return existingRead;
+          }
+          if (
+            existingRead.value !== null &&
+            isSyncPeerRecord(existingRead.value)
+          ) {
+            const existing = existingRead.value;
+            merged = {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            };
+          }
+        }
+        const wrote = await writeJsonStore(peerKey(peer.fp), merged);
+        if (!wrote.ok) {
+          return wrote;
+        }
+        if (fps.includes(peer.fp)) {
+          return ok(undefined);
+        }
+        const indexed = await writeJsonStore(PEER_INDEX_KEY, [
+          ...fps,
+          peer.fp,
+        ]);
+        return indexed.ok ? ok(undefined) : indexed;
+      });
+    },
+
     async peerDelete(fp, signal) {
       const hit = cancelled(signal);
       if (hit !== null) {

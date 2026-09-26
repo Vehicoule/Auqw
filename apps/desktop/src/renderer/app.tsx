@@ -972,7 +972,8 @@ function Main({
       setDialError(null);
       return;
     }
-    void window.auqw.sync.nearbyStart().catch(() => undefined);
+    // Subscribe BEFORE starting the browse — early `found` events for
+    // already-advertised peers would otherwise fire with no receiver.
     const unsubscribe = window.auqw.sync.onNearby((event) => {
       setNearbyPeers((prev) => {
         if (event.type === 'lost') {
@@ -983,9 +984,10 @@ function Main({
         return [...next, { ...event.peer, key }];
       });
     });
+    void window.auqw.sync.nearbyStart().catch(() => undefined);
     return () => {
-      unsubscribe();
       void window.auqw.sync.nearbyStop().catch(() => undefined);
+      unsubscribe();
     };
   }, [pairSheetOpen]);
   const onPairDevice = useCallback(() => {
@@ -1105,6 +1107,18 @@ function Main({
     );
     return () => window.clearInterval(timer);
   }, [pairing]);
+  // Offers die at expiresAt — remint quietly while the sheet stays
+  // open so a displayed QR never outlives what the host accepts.
+  useEffect(() => {
+    if (pairing === null || Date.now() < pairing.expiresAt) {
+      return;
+    }
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => setPairing(offer))
+      .catch(() => setPairing(null));
+    // pairingTick drives the re-check; pairing.expiresAt is the gate.
+  }, [pairing, pairingTick]);
   useEffect(() => {
     if (tab !== 'settings') {
       return;

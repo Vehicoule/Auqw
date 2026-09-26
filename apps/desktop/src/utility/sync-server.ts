@@ -527,6 +527,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   let fingerprint: string | null = null;
   let ownDeviceId: string | null = null;
   let browseSession: SyncDiscoverySession | null = null;
+  // A stop that lands while browse() is still pending must not leave
+  // the late session running — generation-bump marks "stop wanted".
+  let browseGeneration = 0;
   let dialerInstance: SyncDialer | null = null;
   let lastSyncAt: number | null = null;
   let closing = false;
@@ -1776,6 +1779,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (deps.discovery === undefined || deps.discovery === null) {
         throw shellError('unavailable', 'sync: discovery not installed');
       }
+      const generation = ++browseGeneration;
       const opened = await deps.discovery.browse({
         onFound: (peer) => {
           try {
@@ -1795,11 +1799,22 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       if (!opened.ok) {
         throw engineError(opened.error);
       }
+      if (browseGeneration !== generation) {
+        // nearbyStop ran while browse() was pending — drop the late
+        // session rather than browse without a subscriber.
+        try {
+          opened.value.close();
+        } catch {
+          // best effort
+        }
+        return undefined;
+      }
       browseSession = opened.value;
       return undefined;
     },
 
     'sync:nearbyStop': async () => {
+      browseGeneration += 1;
       browseSession?.close();
       browseSession = null;
       return undefined;
@@ -2164,6 +2179,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         () => undefined,
         () => undefined,
       );
+      browseGeneration += 1;
       browseSession?.close();
       browseSession = null;
       pairing.expire();

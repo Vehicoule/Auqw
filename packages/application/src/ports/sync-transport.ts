@@ -254,4 +254,18 @@ export interface SyncClientKeys {
     signal?: CancellationSignal,
   ): Promise<Result<boolean>>;
   peerDelete(fp: string, signal?: CancellationSignal): Promise<Result<void>>;
+  /**
+   * Atomic read-merge-write for host-side custody updates (re-pair):
+   * under the same serialization as peerPut/peerDelete, merge the
+   * incoming row over the stored one — the stored `peerCursor`,
+   * `lastSyncAt`, `pairedAt`, and `pot` survive; the incoming `name`,
+   * `endpoints`, `deviceId`, `pub`, and `lastSeenAt` replace. The
+   * alternative (peerList + peerPut) leaves a window where a sync
+   * round's cursor write lands between the read and the write and is
+   * lost.
+   */
+  peerMerge(
+    peer: SyncPeer,
+    signal?: CancellationSignal,
+  ): Promise<Result<void>>;
 }

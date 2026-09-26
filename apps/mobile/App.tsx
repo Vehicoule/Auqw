@@ -2122,6 +2122,37 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
 
+  // Offers expire after ~2m — remint while sharing stays on so the
+  // displayed code/QR never outlives what the host will accept.
+  useEffect(() => {
+    const host = syncSurface?.host;
+    if (!share.active || share.expiresAt === null || host == null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void host
+        .mintOffer()
+        .then((offer) => {
+          if (!offer.ok || !shareHostRef.current) {
+            return;
+          }
+          setShare((prev) =>
+            prev.active
+              ? {
+                  ...prev,
+                  code: offer.value.code,
+                  payload: offer.value.payload,
+                  expiresAt: offer.value.expiresAt,
+                }
+              : prev,
+          );
+        })
+        .catch(() => undefined);
+    }, Math.max(0, share.expiresAt - Date.now()));
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [share.active, share.expiresAt, controller]);
+
   const onShareToggle = useCallback(() => {
     const host = syncSurface?.host;
     if (host === undefined || host === null || share.busy) {

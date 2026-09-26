@@ -59,6 +59,11 @@ export function createExpoSyncAcceptor(
     }) ?? null;
   };
 
+  // The handle's close() is synchronous but the native stop is async —
+  // a stop that lands AFTER a fresh syncListen() would kill the new
+  // bind. Chain every stop so a listen can never precede a pending one.
+  let nativeChain: Promise<void> = Promise.resolve();
+
   return {
     async listen({ onSocket }) {
       if (native.syncListen === undefined) {
@@ -66,22 +71,31 @@ export function createExpoSyncAcceptor(
           appError('unavailable', 'sync: native listener seam absent'),
         );
       }
+      ensureWatch();
+      try {
+        await nativeChain;
+      } catch {
+        // a dead pending stop must not block a fresh bind
+      }
       if (listening !== null) {
         return err(appError('unavailable', 'sync: already listening'));
       }
-      ensureWatch();
       try {
         const { port } = await native.syncListen();
         listening = { onSocket };
         const handle: SyncSocketListener = {
           port,
           close() {
-            void native.syncListenStop?.().catch(() => undefined);
             listening = null;
             for (const socket of live.values()) {
               socket.destroy();
             }
             live.clear();
+            const stop = native.syncListenStop?.() ?? Promise.resolve();
+            nativeChain = nativeChain.then(
+              () => stop.catch(() => undefined),
+              () => undefined,
+            );
           },
         };
         return ok(handle);

@@ -238,6 +238,13 @@ export function createDesktopSyncDialerKeys(deps: {
         return err(toError(thrown));
       }
     },
+    async peerMerge(peer, signal) {
+      // Desktop custody carries no sync cursors — `peerCursor`/`pot`
+      // live in the sync-log DB, not the device record — so the merge
+      // contract's preserved fields don't exist here and a put IS the
+      // merge (devicePut keeps the original pairedAt internally).
+      return this.peerPut(peer, signal);
+    },
     async peerTouch(peer, signal) {
       if (signal?.cancelled === true) {
         return err(appError('cancelled', 'sync: cancelled'));

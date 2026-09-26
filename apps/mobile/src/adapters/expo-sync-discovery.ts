@@ -54,6 +54,10 @@ export function createExpoSyncDiscovery(
       }
       await stopChain;
       browsing = { onFound, onLost };
+      // Names we've emitted `found` for — a native 'stopped' (async NSD
+      // start failure) must retract each so the UI list doesn't hold
+      // ghosts.
+      const emitted = new Set<string>();
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
           if (event.host !== undefined && event.port !== undefined) {
@@ -70,9 +74,16 @@ export function createExpoSyncDiscovery(
               port: event.port,
               fp,
             });
+            emitted.add(event.name);
           }
         } else if (event.type === 'lost') {
+          emitted.delete(event.name);
           browsing?.onLost(event.name);
+        } else if (event.type === 'stopped') {
+          for (const name of emitted) {
+            browsing?.onLost(name);
+          }
+          emitted.clear();
         }
       });
       try {

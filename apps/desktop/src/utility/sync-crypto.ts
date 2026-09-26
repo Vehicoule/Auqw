@@ -186,6 +186,10 @@ export type ClientHello = {
   readonly eph: string;
   /** Client long-lived device X25519 SPKI, base64. */
   readonly dev: string;
+  /** Caller's own listener port — desktop custody stores no endpoints
+      (dial-back rides mDNS/fresh args), so the field is informational
+      here; validated shape, never trusted. */
+  readonly port?: number;
 };
 
 /**
@@ -214,14 +218,26 @@ export function isX25519PubKeyB64(value: unknown): value is string {
 export function isClientHello(value: unknown): value is ClientHello {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['v', 'kind', 'deviceId', 'name', 'eph', 'dev']) &&
+    hasOnlyKeys(value, [
+      'v',
+      'kind',
+      'deviceId',
+      'name',
+      'eph',
+      'dev',
+      'port',
+    ]) &&
     value['v'] === WIRE_VERSION &&
     value['kind'] === 'hello' &&
     // deviceId feeds the secure-file name — the pattern is the wall.
     /^[a-z0-9][a-z0-9._-]{7,63}$/.test(String(value['deviceId'])) &&
     isBoundedString(value['name'], 128) &&
     isX25519PubKeyB64(value['eph']) &&
-    isX25519PubKeyB64(value['dev'])
+    isX25519PubKeyB64(value['dev']) &&
+    (value['port'] === undefined ||
+      (Number.isSafeInteger(value['port']) &&
+        (value['port'] as number) >= 1 &&
+        (value['port'] as number) <= 65_535))
   );
 }
 

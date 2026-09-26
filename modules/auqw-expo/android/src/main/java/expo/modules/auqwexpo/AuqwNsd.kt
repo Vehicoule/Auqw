@@ -37,6 +37,9 @@ class AuqwNsd(
   private var discovery: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
   private var resolveExecutor: ExecutorService? = null
+  // Bump per browse run — NSD resolve callbacks can land after a stop,
+  // and a stale 'found' must not populate a later session's list.
+  private var browseGeneration = 0
 
   /** Advertise `_auqw._tcp` on the listener's bound port. Re-advertise
    * replaces the previous registration silently. */
@@ -94,22 +97,32 @@ class AuqwNsd(
       }
     val executor = Executors.newSingleThreadExecutor()
     resolveExecutor = executor
+    val gen = ++browseGeneration
     val listener =
       object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) {}
 
         override fun onServiceFound(info: NsdServiceInfo) {
-          executor.execute { resolve(info) }
+          executor.execute { resolve(info, gen) }
         }
 
         override fun onServiceLost(info: NsdServiceInfo) {
-          emitDiscovery(mapOf("type" to "lost", "name" to info.serviceName))
+          if (gen == browseGeneration) {
+            emitDiscovery(mapOf("type" to "lost", "name" to info.serviceName))
+          }
         }
 
         override fun onDiscoveryStopped(serviceType: String) {}
 
         override fun onStartDiscoveryFailed(serviceType: String, code: Int) {
           Log.w(TAG, "nsd discovery failed: $code")
+          // NSD reports async — 'discoverServices' already returned, so
+          // the JS browse() resolved 'ok'. Tear down lock + executor
+          // ourselves and tell JS the session is dead ('stopped' clears
+          // the nearby list) instead of holding multicast until the
+          // user leaves the screen.
+          stopBrowse()
+          emitDiscovery(mapOf("type" to "stopped"))
         }
 
         override fun onStopDiscoveryFailed(serviceType: String, code: Int) {}
@@ -125,6 +138,7 @@ class AuqwNsd(
   }
 
   fun stopBrowse() {
+    browseGeneration += 1
     val listener = discovery ?: return
     discovery = null
     runCatching { manager.stopServiceDiscovery(listener) }
@@ -142,7 +156,7 @@ class AuqwNsd(
     multicastLock = null
   }
 
-  private fun resolve(info: NsdServiceInfo) {
+  private fun resolve(info: NsdServiceInfo, gen: Int) {
     val resolveListener =
       object : NsdManager.ResolveListener {
         override fun onResolveFailed(info: NsdServiceInfo, code: Int) {
@@ -150,6 +164,7 @@ class AuqwNsd(
         }
 
         override fun onServiceResolved(resolved: NsdServiceInfo) {
+          if (gen != browseGeneration) return
           val host =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
               resolved.hostAddresses.firstOrNull()?.hostAddress
@@ -171,7 +186,9 @@ class AuqwNsd(
           }
         }
       }
-    runCatching { manager.resolveService(info, resolveListener) }
+    if (gen == browseGeneration) {
+      runCatching { manager.resolveService(info, resolveListener) }
+    }
   }
 
   fun shutdown() {
