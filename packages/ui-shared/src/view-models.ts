@@ -1436,7 +1436,7 @@ export function languageOptionKey(setting: string | null | undefined): string {
   const primary =
     setting === undefined || setting === null
       ? 'system'
-      : (setting.toLowerCase().split('-').shift() ?? '');
+      : (setting.trim().toLowerCase().split('-').shift() ?? '');
   return languageOptions().some((option) => option.key === primary)
     ? primary
     : 'system';

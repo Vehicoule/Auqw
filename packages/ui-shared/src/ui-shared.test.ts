@@ -6,6 +6,7 @@
 import {
   formatAgo,
   getLocale,
+  languageOptionKey,
   resolveLocale,
   setLocale,
   t,
@@ -199,6 +200,13 @@ assertEqual(resolveLocale('de-DE', 'en-US'), 'de', 'BCP-47 pins by primary subta
 assertEqual(resolveLocale('fr', 'en-US'), 'en', 'unsupported tag falls back to en');
 assertEqual(resolveLocale('fr', 'de-DE'), 'de', 'unsupported setting follows the system');
 assertEqual(resolveLocale('system', 'fr-FR'), 'en', 'unsupported system defaults to en');
+
+// languageOptionKey: the picker's displayed key must agree with what
+// resolveLocale activates — a padded stored tag pins 'de', not 'system'
+assertEqual(languageOptionKey(undefined), 'system');
+assertEqual(languageOptionKey('de-DE'), 'de', 'BCP-47 reduces to primary subtag');
+assertEqual(languageOptionKey(' de '), 'de', 'padding still selects the pinned locale');
+assertEqual(languageOptionKey('fr'), 'system', 'unsupported reads as system');
 
 // completeness guard: en and de carry the same message ids
 const enIds = Object.keys(en);
