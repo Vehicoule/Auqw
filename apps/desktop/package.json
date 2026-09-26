@@ -16,11 +16,11 @@
   "devDependencies": {
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
-    "@types/node": "26.6.1",
+    "@types/node": "26.6.2",
     "@types/react": "~19.2.2",
     "@types/react-dom": "~19.2.3",
     "bonjour-service": "1.4.4",
-    "electron": "44.4.2",
+    "electron": "44.4.3",
     "electron-builder": "26.16.1",
     "esbuild": "0.28.2",
     "music-metadata": "11.15.0",
