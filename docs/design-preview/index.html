@@ -9,47 +9,47 @@
 <style>
   /* ===== omarchy tokens — three schemes ===== */
   .t-dark{
-    --bg:#1a1b26; --bg-stage:#13141c; --bg-deep:#0e0e14; --bg-raise:#24283b;
-    --fg:#a9b1d6; --fg-bright:#c0caf5; --fg-muted:#828ab3;
-    --divider:#414868; --hair:rgba(169,177,214,.12);
-    --accent:#7aa2f7; --accent-soft:rgba(122,162,247,.15);
-    --sel:#292e42; --warn:#e0af68; --pink:#f7768e;
-    --fg08:rgba(169,177,214,.07); --fg18:rgba(169,177,214,.16);
-    --fg25:rgba(169,177,214,.25); --fg40:rgba(169,177,214,.40);
-    --glass:rgba(20,21,29,.55);
+    --bg:#161512; --bg-stage:#100e0c; --bg-deep:#0b0a09; --bg-raise:#232019;
+    --fg:#e6e1d8; --fg-bright:#f5f1e9; --fg-muted:#a8a094;
+    --divider:#3a352d; --hair:rgba(230,225,216,.14);
+    --accent:#ff8a3d; --accent-soft:rgba(255,138,61,.16);
+    --sel:#2b251d; --warn:#ff8787; --pink:#f97b9b;
+    --fg08:rgba(230,225,216,.08); --fg18:rgba(230,225,216,.16);
+    --fg25:rgba(230,225,216,.26); --fg40:rgba(230,225,216,.42);
+    --glass:rgba(15,14,12,.55);
   }
   .t-light{
-    --bg:#f5f6fa; --bg-stage:#eceef4; --bg-deep:#dfe2ec; --bg-raise:#ffffff;
-    --fg:#343a52; --fg-bright:#222840; --fg-muted:#575d85;
-    --divider:#c4c8d8; --hair:rgba(52,58,82,.12);
-    --accent:#1a5ac8; --accent-soft:rgba(26,90,200,.14);
-    --sel:#d3d9f0; --warn:#8a6524; --pink:#b24a60;
-    --fg08:rgba(52,58,82,.05); --fg18:rgba(52,58,82,.12);
-    --fg25:rgba(52,58,82,.24); --fg40:rgba(52,58,82,.40);
-    --glass:rgba(255,255,255,.55);
+    --bg:#faf8f3; --bg-stage:#f1ede5; --bg-deep:#e7e1d4; --bg-raise:#ffffff;
+    --fg:#2a251f; --fg-bright:#171310; --fg-muted:#6f6659;
+    --divider:#d8d1c2; --hair:rgba(42,37,31,.15);
+    --accent:#c2410c; --accent-soft:rgba(194,65,12,.11);
+    --sel:#e8e1d2; --warn:#a61e1e; --pink:#b0214f;
+    --fg08:rgba(42,37,31,.06); --fg18:rgba(42,37,31,.13);
+    --fg25:rgba(42,37,31,.26); --fg40:rgba(42,37,31,.42);
+    --glass:rgba(255,255,255,.60);
   }
   .t-oled{
-    --bg:#000000; --bg-stage:#06060a; --bg-deep:#000000; --bg-raise:#12131a;
-    --fg:#a9b1d6; --fg-bright:#c0caf5; --fg-muted:#828ab3;
-    --divider:#23253a; --hair:rgba(169,177,214,.11);
-    --accent:#7aa2f7; --accent-soft:rgba(122,162,247,.15);
-    --sel:#1c1f31; --warn:#e0af68; --pink:#f7768e;
-    --fg08:rgba(169,177,214,.07); --fg18:rgba(169,177,214,.16);
-    --fg25:rgba(169,177,214,.25); --fg40:rgba(169,177,214,.40);
-    --glass:rgba(14,15,22,.6);
+    --bg:#000000; --bg-stage:#070605; --bg-deep:#000000; --bg-raise:#16140f;
+    --fg:#e6e1d8; --fg-bright:#f5f1e9; --fg-muted:#a8a094;
+    --divider:#29241e; --hair:rgba(230,225,216,.13);
+    --accent:#ff8a3d; --accent-soft:rgba(255,138,61,.18);
+    --sel:#1b1712; --warn:#ff8787; --pink:#f97b9b;
+    --fg08:rgba(230,225,216,.08); --fg18:rgba(230,225,216,.16);
+    --fg25:rgba(230,225,216,.26); --fg40:rgba(230,225,216,.42);
+    --glass:rgba(4,4,3,.6);
   }
 
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--r-ctl:6px;--r-float:12px;--r-thumb:5px}
-  body{background:#08090f;color:#a9b1d6;font-family:'JetBrains Mono',ui-monospace,monospace;
+  body{background:#0a0908;color:#e6e1d8;font-family:'JetBrains Mono',ui-monospace,monospace;
        font-size:12px;padding:48px 36px 96px;-webkit-font-smoothing:antialiased}
   header,.rowset,.cap,.foot{max-width:1180px;margin:0 auto}
-  h1{font-weight:700;font-size:19px;color:#c0caf5;letter-spacing:-.01em}
-  h1 span{color:#565f89}
-  .sub{color:#565f89;margin-top:8px;font-size:11.5px;line-height:1.75;max-width:920px}
-  .sub b{color:#a9b1d6;font-weight:500}
-  .label{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#565f89;margin:0 0 10px}
-  .label em{color:#7aa2f7;font-style:normal;text-transform:none;letter-spacing:.02em}
+  h1{font-weight:700;font-size:19px;color:#f5f1e9;letter-spacing:-.01em}
+  h1 span{color:#6b6257}
+  .sub{color:#6b6257;margin-top:8px;font-size:11.5px;line-height:1.75;max-width:920px}
+  .sub b{color:#e6e1d8;font-weight:500}
+  .label{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#6b6257;margin:0 0 10px}
+  .label em{color:#ff8a3d;font-style:normal;text-transform:none;letter-spacing:.02em}
   .rowset{margin-top:48px}
 
   svg.ic{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.6;
@@ -59,7 +59,7 @@
   /* ===== window — no titlebar band; stage runs to the top edge ===== */
   .win{width:1040px;border:1px solid var(--divider);background:var(--bg);
        display:flex;margin-bottom:52px;overflow:hidden}
-  .win.t-oled{border-color:#33364f}
+  .win.t-oled{border-color:#29241e}
   .chrome-mac{border-radius:10px}
   .chrome-win{border-radius:8px}
   .chrome-linux{border-radius:8px}
@@ -401,12 +401,12 @@
                            border:1px solid var(--hair);color:var(--fg-bright);
                            width:56px;height:56px;border-radius:50%}
 
-  .arrow{display:flex;align-items:center;color:#565f89;font-size:9px;letter-spacing:.14em;
+  .arrow{display:flex;align-items:center;color:#6b6257;font-size:9px;letter-spacing:.14em;
          writing-mode:vertical-rl;align-self:center;text-transform:uppercase}
-  .cap{margin-top:12px;color:#565f89;font-size:10.5px;line-height:1.75}
-  .cap b{color:#a9b1d6;font-weight:500}
-  .foot{margin-top:48px;border-top:1px solid #414868;padding-top:16px;
-        color:#565f89;font-size:10px;line-height:1.8}
+  .cap{margin-top:12px;color:#6b6257;font-size:10.5px;line-height:1.75}
+  .cap b{color:#e6e1d8;font-weight:500}
+  .foot{margin-top:48px;border-top:1px solid #3a352d;padding-top:16px;
+        color:#6b6257;font-size:10px;line-height:1.8}
 </style>
 </head>
 <body>
@@ -921,7 +921,7 @@
   <br><br>
   icons — custom-rendered, motion by contract: eq bars on the playing thumb (live here), heart
   fill-in, play⇄pause morph, rotate (sync), bounce (like). Radius ladder: frames 0–8 (per OS) ·
-  controls 6 · floating 12 · thumbs 5 · OS pills full. Accent #7aa2f7 = active/progress only;
+  controls 6 · floating 12 · thumbs 5 · OS pills full. Accent #ff8a3d = active/progress only;
   play = solid fg-bright on desktop; liked = pink.
 </div>
 

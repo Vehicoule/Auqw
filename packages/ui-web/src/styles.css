@@ -1080,7 +1080,6 @@
   height: 17px;
   border-radius: var(--radius-pill);
   background: var(--thumb);
-  box-shadow: 0 1px 3px var(--scrim);
 }
 .uw-toggle--on .uw-toggle__thumb {
   transform: translateX(17px);
