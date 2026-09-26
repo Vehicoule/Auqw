@@ -115,6 +115,9 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'search.failed': 'la búsqueda falló',
   'search.unavailableTitle': 'búsqueda no disponible',
   'search.resultsA11y': 'resultados de búsqueda',
+  'search.suggestions': 'sugerencias',
+  'search.commitQuery': 'buscar “{query}”',
+  'search.a11y.suggestion': 'buscar {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'tu biblioteca',
