@@ -181,7 +181,7 @@ export function SettingsScreen({
             {t('settings.diag.persistence')}
           </Text>
           <Text variant="metadata" color={persistenceColor}>
-            {diagnostics.persistence}
+            {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}
             {diagnostics.persistenceDetail === null
               ? ''
               : ` · ${diagnostics.persistenceDetail}`}

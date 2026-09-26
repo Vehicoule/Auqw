@@ -550,20 +550,23 @@ function Main({
   // time would revert whatever landed in between. snapshot() — not
   // React state — is the merge base, so writes that never entered
   // the chain (the boot repair, a sync-applied change) are covered.
+  // A function patch reads the committed base at execution time —
+  // the only safe shape for read-modify-write toggles: two quick
+  // taps must flip twice, not write the same inverse twice.
   const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
   const latestSettingsRef = useRef(state.settings);
   useEffect(() => {
     latestSettingsRef.current = state.settings;
   }, [state.settings]);
   const queueSettingsWrite = useCallback(
-    (patch: Partial<Settings>) => {
+    (patch: Partial<Settings> | ((latest: Settings) => Partial<Settings>)) => {
       const run = settingsWriteChain.current.then(() => {
         const snap = session.snapshot();
+        const base =
+          snap.type === 'ready' ? snap.settings : latestSettingsRef.current;
         const next = {
-          ...(snap.type === 'ready'
-            ? snap.settings
-            : latestSettingsRef.current),
-          ...patch,
+          ...base,
+          ...(typeof patch === 'function' ? patch(base) : patch),
         };
         return session.updateSettings(next).then((result) => {
           if (result.ok) {
@@ -816,14 +819,42 @@ function Main({
     preview: ImportPreview;
     sourceLabel: string;
   } | null>(null);
+  // The applied-import summary and the saved-export notice are also
+  // localized strings frozen into transfer state — keep their raw
+  // pieces beside the preview so the localeTick effect can re-derive
+  // them. Only read while the matching phase is 'done'; error details
+  // carry typed messages, which are not localized.
+  const importSummaryCounts = useRef<{
+    tracks: number;
+    likes: number;
+    playlists: number;
+  } | null>(null);
+  const exportDoneName = useRef<string | null>(null);
   useEffect(() => {
     const raw = importPreviewRaw.current;
-    if (raw === null) {
+    const counts = importSummaryCounts.current;
+    const exportName = exportDoneName.current;
+    if (raw === null && counts === null && exportName === null) {
       return;
     }
     setTransfer((prev) => ({
       ...prev,
-      preview: toImportPreviewModel(raw.preview, raw.sourceLabel),
+      exportDetail:
+        prev.exportPhase === 'done' && exportName !== null
+          ? t('transfer.savedToDownloads', { name: exportName })
+          : prev.exportDetail,
+      importDetail:
+        prev.importPhase === 'done' && counts !== null
+          ? t('transfer.importSummary', {
+              tracks: counts.tracks,
+              likes: counts.likes,
+              playlists: counts.playlists,
+            })
+          : prev.importDetail,
+      preview:
+        raw === null
+          ? prev.preview
+          : toImportPreviewModel(raw.preview, raw.sourceLabel),
     }));
   }, [localeTick]);
   const importInput = useRef<HTMLInputElement | null>(null);
@@ -1512,24 +1543,27 @@ function Main({
 
   const onSettingsToggle = useCallback(
     (key: string) => {
+      // Function patches: the flip reads the committed value at
+      // execution time, so rapid successive clicks toggle per click.
       if (key === 'prefetch') {
-        void queueSettingsWrite({ prefetch: !state.settings.prefetch });
+        void queueSettingsWrite((latest) => ({
+          prefetch: !latest.prefetch,
+        }));
       }
       if (key === 'downloadMetered') {
-        const next = state.settings.downloadMetered !== true;
-        void queueSettingsWrite({ downloadMetered: next }).then(
-          (updated) => {
-            // Re-derive only after the setting commits — toggling ON
-            // unblocks waiting rows, toggling OFF pauses an active
-            // cellular transfer; kick() can't demote mid-flight work.
-            if (updated.ok) {
-              void controller.downloads.reevaluateEligibility();
-            }
-          },
-        );
+        void queueSettingsWrite((latest) => ({
+          downloadMetered: latest.downloadMetered !== true,
+        })).then((updated) => {
+          // Re-derive only after the setting commits — toggling ON
+          // unblocks waiting rows, toggling OFF pauses an active
+          // cellular transfer; kick() can't demote mid-flight work.
+          if (updated.ok) {
+            void controller.downloads.reevaluateEligibility();
+          }
+        });
       }
     },
-    [queueSettingsWrite, state.settings, controller],
+    [queueSettingsWrite, controller],
   );
 
   const playback = state.playback;
@@ -1790,6 +1824,7 @@ function Main({
         anchor.download = name;
         anchor.click();
         URL.revokeObjectURL(url);
+        exportDoneName.current = name;
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'done',
@@ -1941,6 +1976,11 @@ function Main({
         }
         importText.current = null;
         const counts = result.value.counts;
+        importSummaryCounts.current = {
+          tracks: counts.recordings,
+          likes: counts.likes,
+          playlists: counts.playlists,
+        };
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'done',

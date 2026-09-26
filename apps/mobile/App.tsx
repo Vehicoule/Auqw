@@ -691,20 +691,23 @@ function Main({
   // time would revert whatever landed in between. snapshot() — not
   // React state — is the merge base, so writes that never entered
   // the chain (the boot repair, a sync-applied change) are covered.
+  // A function patch reads the committed base at execution time —
+  // the only safe shape for read-modify-write toggles: two quick
+  // taps must flip twice, not write the same inverse twice.
   const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
   const latestSettingsRef = useRef(state.settings);
   useEffect(() => {
     latestSettingsRef.current = state.settings;
   }, [state.settings]);
   const queueSettingsWrite = useCallback(
-    (patch: Partial<Settings>) => {
+    (patch: Partial<Settings> | ((latest: Settings) => Partial<Settings>)) => {
       const run = settingsWriteChain.current.then(() => {
         const snap = session.snapshot();
+        const base =
+          snap.type === 'ready' ? snap.settings : latestSettingsRef.current;
         const next = {
-          ...(snap.type === 'ready'
-            ? snap.settings
-            : latestSettingsRef.current),
-          ...patch,
+          ...base,
+          ...(typeof patch === 'function' ? patch(base) : patch),
         };
         return session.updateSettings(next).then((result) => {
           if (result.ok) {
@@ -986,14 +989,36 @@ function Main({
     preview: ImportPreview;
     sourceLabel: string;
   } | null>(null);
+  // The applied-import summary is also a localized string frozen into
+  // transfer state — keep its counts beside the preview so the
+  // localeTick effect can re-derive it too. Only read while
+  // importPhase is 'done'; error details carry typed messages, which
+  // are not localized.
+  const importSummaryCounts = useRef<{
+    tracks: number;
+    likes: number;
+    playlists: number;
+  } | null>(null);
   useEffect(() => {
     const raw = importPreviewRaw.current;
-    if (raw === null) {
+    const counts = importSummaryCounts.current;
+    if (raw === null && counts === null) {
       return;
     }
     setTransfer((prev) => ({
       ...prev,
-      preview: toImportPreviewModel(raw.preview, raw.sourceLabel),
+      preview:
+        raw === null
+          ? prev.preview
+          : toImportPreviewModel(raw.preview, raw.sourceLabel),
+      importDetail:
+        prev.importPhase === 'done' && counts !== null
+          ? t('transfer.importSummary', {
+              tracks: counts.tracks,
+              likes: counts.likes,
+              playlists: counts.playlists,
+            })
+          : prev.importDetail,
     }));
   }, [localeTick]);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
@@ -1810,24 +1835,27 @@ function Main({
 
   const onSettingsToggle = useCallback(
     (key: string) => {
+      // Function patches: the flip reads the committed value at
+      // execution time, so rapid successive taps toggle per tap.
       if (key === 'prefetch') {
-        void queueSettingsWrite({ prefetch: !state.settings.prefetch });
+        void queueSettingsWrite((latest) => ({
+          prefetch: !latest.prefetch,
+        }));
       }
       if (key === 'downloadMetered') {
-        const next = state.settings.downloadMetered !== true;
-        void queueSettingsWrite({ downloadMetered: next }).then(
-          (updated) => {
-            // Re-derive only after the setting commits — toggling ON
-            // unblocks waiting rows, toggling OFF pauses an active
-            // cellular transfer; kick() can't demote mid-flight work.
-            if (updated.ok) {
-              void controller.downloads.reevaluateEligibility();
-            }
-          },
-        );
+        void queueSettingsWrite((latest) => ({
+          downloadMetered: latest.downloadMetered !== true,
+        })).then((updated) => {
+          // Re-derive only after the setting commits — toggling ON
+          // unblocks waiting rows, toggling OFF pauses an active
+          // cellular transfer; kick() can't demote mid-flight work.
+          if (updated.ok) {
+            void controller.downloads.reevaluateEligibility();
+          }
+        });
       }
     },
-    [queueSettingsWrite, state.settings, controller],
+    [queueSettingsWrite, controller],
   );
 
   // ---- slice-4 LAN sync ------------------------------------------------
@@ -2226,6 +2254,11 @@ function Main({
         }
         importText.current = null;
         const counts = result.value.counts;
+        importSummaryCounts.current = {
+          tracks: counts.recordings,
+          likes: counts.likes,
+          playlists: counts.playlists,
+        };
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'done',
