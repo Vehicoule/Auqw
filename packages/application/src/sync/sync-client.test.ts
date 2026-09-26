@@ -130,6 +130,7 @@ function fakeCrypto(opts: { identity?: SyncIdentity } = {}): SyncClientCrypto {
     name: 'fake-v1',
     identity,
     createIdentity: () => ({ pub: 'new-pub', priv: 'new-priv' }),
+    fingerprintOf: fpOf,
     begin: ({ deviceId, name }): SyncClientHandshake => ({
       hello: () => ({
         v: 1,
@@ -215,6 +216,46 @@ function fakeKeys(): SyncClientKeys & {
         );
       }
       peers.set(peer.fp, peer);
+      index.add(peer.fp);
+      return Promise.resolve(ok(undefined));
+    },
+    peerTouch: (peer: SyncPeer) => {
+      const existing = index.has(peer.fp)
+        ? peers.get(peer.fp)
+        : undefined;
+      if (existing === undefined) {
+        return Promise.resolve(ok(false));
+      }
+      peers.set(peer.fp, {
+        ...existing,
+        name: peer.name,
+        lastSeenAt: peer.lastSeenAt,
+        ...(peer.endpoints.length > 0 ? { endpoints: peer.endpoints } : {}),
+        ...(peer.deviceId === undefined || peer.deviceId === ''
+          ? {}
+          : { deviceId: peer.deviceId }),
+        ...(peer.pub === undefined || peer.pub === ''
+          ? {}
+          : { pub: peer.pub }),
+      });
+      return Promise.resolve(ok(true));
+    },
+    peerMerge: (peer: SyncPeer) => {
+      const existing = index.has(peer.fp) ? peers.get(peer.fp) : undefined;
+      peers.set(
+        peer.fp,
+        existing === undefined
+          ? peer
+          : {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            },
+      );
       index.add(peer.fp);
       return Promise.resolve(ok(undefined));
     },

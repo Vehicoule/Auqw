@@ -9,6 +9,17 @@ import {
   hkdfSync,
   randomBytes,
 } from 'node:crypto';
+import {
+  appError,
+  err,
+  isServerChallenge,
+  ok,
+  parseEndpoint,
+  type Result,
+  type SyncClientCrypto,
+  type SyncClientHandshake,
+  type SyncFrameCodec,
+} from '@auqw/application';
 import { hasOnlyKeys, isBoundedString, isRecord } from '../shared/check.ts';
 
 /**
@@ -176,6 +187,10 @@ export type ClientHello = {
   readonly eph: string;
   /** Client long-lived device X25519 SPKI, base64. */
   readonly dev: string;
+  /** Caller's own listener port — desktop custody stores no endpoints
+      (dial-back rides mDNS/fresh args), so the field is informational
+      here; validated shape, never trusted. */
+  readonly port?: number;
 };
 
 /**
@@ -204,14 +219,38 @@ export function isX25519PubKeyB64(value: unknown): value is string {
 export function isClientHello(value: unknown): value is ClientHello {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['v', 'kind', 'deviceId', 'name', 'eph', 'dev']) &&
+    hasOnlyKeys(value, [
+      'v',
+      'kind',
+      'deviceId',
+      'name',
+      'eph',
+      'dev',
+      'port',
+      'endpoints',
+    ]) &&
     value['v'] === WIRE_VERSION &&
     value['kind'] === 'hello' &&
     // deviceId feeds the secure-file name — the pattern is the wall.
     /^[a-z0-9][a-z0-9._-]{7,63}$/.test(String(value['deviceId'])) &&
     isBoundedString(value['name'], 128) &&
     isX25519PubKeyB64(value['eph']) &&
-    isX25519PubKeyB64(value['dev'])
+    isX25519PubKeyB64(value['dev']) &&
+    (value['port'] === undefined ||
+      (Number.isSafeInteger(value['port']) &&
+        (value['port'] as number) >= 1 &&
+        (value['port'] as number) <= 65_535)) &&
+    // Caller's advertised listener endpoints — same wire bound as the
+    // shared isClientHello (≤16, each a parseable `host:port`).
+    (value['endpoints'] === undefined ||
+      (Array.isArray(value['endpoints']) &&
+        (value['endpoints'] as unknown[]).length <= 16 &&
+        (value['endpoints'] as unknown[]).every(
+          (ep) =>
+            typeof ep === 'string' &&
+            ep.length <= 320 &&
+            parseEndpoint(ep) !== null,
+        )))
   );
 }
 
@@ -388,6 +427,108 @@ export function createTestPeer(opts: {
           recvKey: keys.subarray(32, 64),
         }),
         registered: challengeJson['registered'] === true,
+      };
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Client half — the desktop dials a phone-hosted pair offer when the  */
+/* user initiates pairing from the desktop's nearby list (symmetric    */
+/* pairing, docs/specs/sync.md). Byte-for-byte the same construction   */
+/* as the responder above; only the key halves swap.                    */
+/* ------------------------------------------------------------------ */
+
+function b64Priv(key: { export(o: { format: 'der'; type: 'pkcs8' }): Buffer }): string {
+  return key.export({ format: 'der', type: 'pkcs8' }).toString('base64');
+}
+
+function b64Pub(key: { export(o: { format: 'der'; type: 'spki' }): Buffer }): string {
+  return key.export({ format: 'der', type: 'spki' }).toString('base64');
+}
+
+export function createNoiseV1ClientCrypto(
+  identity: SyncIdentity,
+): SyncClientCrypto {
+  return {
+    name: 'noise-v1',
+    identity,
+    fingerprintOf,
+    createIdentity: generateIdentity,
+    begin({ deviceId, name }): SyncClientHandshake {
+      const eph = generateKeyPairSync('x25519');
+      const ephPub = b64Pub(eph.publicKey);
+      const ephPriv = b64Priv(eph.privateKey);
+      return {
+        hello: () => ({
+          v: WIRE_VERSION,
+          kind: 'hello',
+          deviceId,
+          name,
+          eph: ephPub,
+          dev: identity.pub,
+        }),
+        complete(challengeJson, { pinnedFp }) {
+          if (!isServerChallenge(challengeJson)) {
+            return err(
+              appError('invalid-response', 'sync: malformed challenge'),
+            );
+          }
+          // Shape alone isn't enough — `fingerprintOf` and the DHs
+          // throw raw on a key that doesn't load, so gate first.
+          if (
+            !isX25519PubKeyB64(challengeJson.spub) ||
+            !isX25519PubKeyB64(challengeJson.eph)
+          ) {
+            return err(
+              appError(
+                'invalid-response',
+                'sync: challenge carries unusable key material',
+              ),
+            );
+          }
+          const serverFp = fingerprintOf(challengeJson.spub);
+          if (pinnedFp !== undefined && pinnedFp !== serverFp) {
+            return err(
+              appError(
+                'permission-denied',
+                'sync: server fingerprint mismatch',
+              ),
+            );
+          }
+          try {
+            const salt = Buffer.from(challengeJson.salt, 'base64');
+            const dh1 = x25519(ephPriv, challengeJson.eph);
+            const dh2 = x25519(identity.priv, challengeJson.eph);
+            const dh3 = x25519(ephPriv, challengeJson.spub);
+            const keys = Buffer.from(
+              hkdfSync(
+                'sha256',
+                Buffer.concat([dh1, dh2, dh3]),
+                salt,
+                'auqw-sync-v1',
+                64,
+              ),
+            );
+            const codec: SyncFrameCodec = createCodec({
+              sendKey: keys.subarray(0, 32),
+              recvKey: keys.subarray(32, 64),
+            });
+            return ok({
+              codec,
+              registered: challengeJson.registered === true,
+              serverPub: challengeJson.spub,
+              serverFp,
+            });
+          } catch {
+            return err(
+              appError(
+                'invalid-response',
+                'sync: handshake derivation failed',
+              ),
+            );
+          }
+        },
       };
     },
   };

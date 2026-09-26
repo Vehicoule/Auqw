@@ -14,7 +14,8 @@
     "@auqw/application": "workspace:*",
     "@auqw/design-tokens": "workspace:*",
     "@auqw/ui-shared": "workspace:*",
-    "react-native-draggable-flatlist": "4.0.3"
+    "react-native-draggable-flatlist": "4.0.3",
+    "uqr": "0.1.3"
   },
   "peerDependencies": {
     "expo-blur": "*",

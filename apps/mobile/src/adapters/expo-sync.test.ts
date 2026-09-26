@@ -70,8 +70,45 @@ function memoryClientKeys(): SyncClientKeys {
     async peerList() {
       return ok([...state.map.values()]);
     },
+    async peerTouch(peer) {
+      const existing = state.map.get(peer.fp);
+      if (existing === undefined) {
+        return ok(false);
+      }
+      state.map.set(peer.fp, {
+        ...existing,
+        name: peer.name,
+        lastSeenAt: peer.lastSeenAt,
+        ...(peer.endpoints.length > 0 ? { endpoints: peer.endpoints } : {}),
+        ...(peer.deviceId === undefined || peer.deviceId === ''
+          ? {}
+          : { deviceId: peer.deviceId }),
+        ...(peer.pub === undefined || peer.pub === ''
+          ? {}
+          : { pub: peer.pub }),
+      });
+      return ok(true);
+    },
     async peerPut(peer) {
       state.map.set(peer.fp, peer);
+      return ok(undefined);
+    },
+    async peerMerge(peer) {
+      const existing = state.map.get(peer.fp);
+      state.map.set(
+        peer.fp,
+        existing === undefined
+          ? peer
+          : {
+              ...peer,
+              pairedAt: existing.pairedAt,
+              peerCursor: existing.peerCursor,
+              ...(existing.lastSyncAt === undefined
+                ? {}
+                : { lastSyncAt: existing.lastSyncAt }),
+              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
+            },
+      );
       return ok(undefined);
     },
     async peerDelete(fp) {

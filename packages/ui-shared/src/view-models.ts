@@ -1847,7 +1847,7 @@ export function formatAgo(ms: number, nowMs: number): string {
   return formatExportDate(ms) ?? '—';
 }
 
-function formatExpiry(expiresAt: number, nowMs: number): string {
+export function formatExpiry(expiresAt: number, nowMs: number): string {
   if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
     return t('sync.expires.expired');
   }

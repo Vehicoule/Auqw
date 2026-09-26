@@ -17,7 +17,10 @@ import {
   type AppError,
   type CancellationSignal,
   type Result,
+  type SyncDiscoveryPort,
+  type SyncDiscoverySession,
   type SyncEnginePort,
+  type SyncPeer,
 } from '@auqw/application';
 import {
   hasOnlyKeys,
@@ -43,8 +46,14 @@ import {
   isSyncStatusResult,
   isSyncTriggerResult,
   isSyncUnpairArgs,
+  isSyncDialArgs,
+  isSyncDialPayloadArgs,
+  isSyncDialResult,
+  type SyncDialResult,
+  type SyncNearbyEvent,
   type SyncStatusResult,
 } from '../shared/contract.ts';
+import type { SyncDialer } from './sync-dialer.ts';
 import {
   isShellError,
   shellError,
@@ -108,6 +117,8 @@ export interface SyncAdvertiser {
 export type SyncAdvertise = (opts: {
   port: number;
   name: string;
+  /** Identity fingerprint — TXT `dev`, lets browsers pin pre-dial. */
+  fp: string;
   /** Async announce failure — flips status to 'unavailable', no throw. */
   onError?: () => void;
 }) => SyncAdvertiser;
@@ -159,6 +170,27 @@ export type SyncServiceDeps = {
   readonly cipher?: SyncCipher;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
   readonly deviceName?: string;
+  /**
+   * This device's own sync id (the sync-log header id), resolved at
+   * start — the welcome's `host.id` the caller echoes into custody.
+   * Engine-absent hosts still pair: absent id → no `host` field.
+   */
+  readonly ownDeviceId?: Promise<string | null>;
+  /**
+   * Caller half — pair TO a phone-hosted offer (nearby tap or scanned
+   * QR). The factory gets the resolved device name + the listener's
+   * bound-port getter so the client's hello can carry a dialable
+   * endpoint back to the phone.
+   */
+  readonly dialer?: (opts: {
+    listenPort: () => number | null;
+    listenEndpoints: () => readonly string[];
+    deviceName: string;
+  }) => SyncDialer;
+  /** `_auqw._tcp` browse — powers the renderer's nearby list. */
+  readonly discovery?: SyncDiscoveryPort | null;
+  /** Push seam — found/lost events for the renderer's nearby list. */
+  readonly notifyNearby?: (event: SyncNearbyEvent) => unknown;
   /**
    * `false` defers the listener and custody (the safeStorage read is
    * what fires the macOS Keychain ACL prompt on ad-hoc builds) until
@@ -494,6 +526,16 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   let advertiseState: SyncStatusResult['advertise'] = 'off';
   let boundPort: number | null = null;
   let fingerprint: string | null = null;
+  let ownDeviceId: string | null = null;
+  let browseSession: SyncDiscoverySession | null = null;
+  let browsePending: Promise<
+    Result<SyncDiscoverySession>
+  > | null = null;
+  // Every nearbyStart owns one share of the browse — a window closing
+  // its sheet stops discovery only when the last owner lets go, and a
+  // stop while browse() is pending makes the late session self-close.
+  let browseOwners = 0;
+  let dialerInstance: SyncDialer | null = null;
   let lastSyncAt: number | null = null;
   let closing = false;
   let resolveReady!: (status: SyncStatusResult) => void;
@@ -1225,10 +1267,26 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         t: 'welcome',
         device: outcome.record,
         name: deviceName,
+        ...(ownDeviceId === null
+          ? {}
+          : {
+              host: {
+                id: ownDeviceId,
+                name: deviceName,
+                pub: syncCipher.identity.pub,
+              },
+            }),
         // The minter advertisement rides the welcome too — a guest
         // that paired by typed code (no QR payload) learns it here.
         ...(pairPot !== null ? { pot: pairPot } : {}),
       });
+      // The shown code is dead the moment it's consumed — poke any
+      // open pairing sheet to remint before its expiry timer would.
+      try {
+        deps.notifyNearby?.({ type: 'paired' });
+      } catch {
+        // push is best-effort
+      }
       await enterOpen(session);
       return;
     }
@@ -1267,6 +1325,15 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         t: 'welcome',
         device: record,
         name: deviceName,
+        ...(ownDeviceId === null
+          ? {}
+          : {
+              host: {
+                id: ownDeviceId,
+                name: deviceName,
+                pub: syncCipher.identity.pub,
+              },
+            }),
         // Refreshed every resume: a rebound ephemeral minter port
         // heals the stored peer record on the next sync connect.
         ...(resumePot !== null ? { pot: resumePot } : {}),
@@ -1558,6 +1625,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     syncCipher = deps.cipher ?? createNoiseV1Cipher(identity);
     fingerprint = fingerprintOf(identity.pub);
+    ownDeviceId = deps.ownDeviceId === undefined
+      ? null
+      : await deps.ownDeviceId.catch(() => null);
     server = createServer((socket) => onConnection(socket));
     const bound = await new Promise<number | null>((resolve) => {
       const srv = server;
@@ -1590,6 +1660,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         advertiser = deps.advertise({
           port: bound,
           name: deviceName,
+          fp: fingerprint,
           onError: () => {
             // An async mdns failure after startup degrades the
             // advertise state — the listener itself is unaffected.
@@ -1663,7 +1734,157 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     };
   };
 
+  /**
+   * Shared dial path — ensureStarted first so identity custody + the
+   * bound port exist (the keychain prompt rightly fires here: pairing
+   * IS the sync use). A failed listener still pairs — hello just
+   * omits `port`, the phone can't dial back until a later run.
+   */
+  async function dialPair(
+    run: (
+      dialer: SyncDialer,
+      signal: CancellationSignal,
+    ) => Promise<Result<SyncPeer>>,
+  ): Promise<SyncDialResult> {
+    if (deps.dialer === undefined) {
+      throw shellError('unavailable', 'sync: caller not installed');
+    }
+    await ensureStarted();
+    dialerInstance ??= deps.dialer({
+      listenPort: () => boundPort,
+      listenEndpoints: endpoints,
+      deviceName,
+    });
+    const result = await run(dialerInstance, serviceCancel.signal);
+    if (!result.ok) {
+      throw engineError(result.error);
+    }
+    const peer = result.value;
+    if (peer.deviceId === undefined) {
+      // The custody adapter refuses peers without deviceId, so an ok
+      // here without one means a custody write was silently dropped —
+      // surface it rather than return a row the device list won't show.
+      throw shellError(
+        'invalid-response',
+        'sync: paired peer disclosed no device id',
+      );
+    }
+    return checked(isSyncDialResult, 'sync:dial')({
+      device: {
+        id: peer.deviceId,
+        name: peer.name,
+        pairedAt: peer.pairedAt,
+        lastSeenAt: peer.lastSeenAt,
+      },
+    });
+  }
+
   const handlers: Record<string, UtilityHandler> = {
+    /**
+     * LocalSend-style discovery: browse `_auqw._tcp` while the
+     * renderer's nearby list is open. mDNS only — no custody read, no
+     * keychain prompt — so it doesn't need ensureStarted().
+     */
+    'sync:nearbyStart': async () => {
+      browseOwners += 1;
+      if (browseSession !== null) {
+        return undefined;
+      }
+      // A joiner awaits the shared pending start — on failure it rolls
+      // back its own owner count, on success the session is shared.
+      if (browsePending !== null) {
+        const shared = await browsePending;
+        if (!shared.ok) {
+          browseOwners -= 1;
+          throw engineError(shared.error);
+        }
+        return undefined;
+      }
+      if (deps.discovery === undefined || deps.discovery === null) {
+        browseOwners -= 1;
+        throw shellError('unavailable', 'sync: discovery not installed');
+      }
+      const pending = deps.discovery.browse({
+        onFound: (peer) => {
+          try {
+            deps.notifyNearby?.({ type: 'found', peer });
+          } catch {
+            // A dead push channel must not kill the browse.
+          }
+        },
+        onLost: (key) => {
+          try {
+            deps.notifyNearby?.({ type: 'lost', key });
+          } catch {
+            // best effort
+          }
+        },
+      });
+      browsePending = pending;
+      const opened = await pending;
+      browsePending = null;
+      if (!opened.ok) {
+        browseOwners -= 1;
+        throw engineError(opened.error);
+      }
+      if (browseOwners === 0) {
+        // Every owner stopped while browse() was pending — drop the
+        // late session rather than browse without a subscriber.
+        try {
+          opened.value.close();
+        } catch {
+          // best effort
+        }
+        return undefined;
+      }
+      browseSession = opened.value;
+      return undefined;
+    },
+
+    'sync:nearbyStop': async () => {
+      browseOwners = Math.max(0, browseOwners - 1);
+      if (browseOwners === 0) {
+        browseSession?.close();
+        browseSession = null;
+      }
+      return undefined;
+    },
+
+    /**
+     * Pair TO a phone-hosted offer — the desktop is the caller. The
+     * peer's pair-host is pairing-only; the phone dials back (hello
+     * carries our bound port) for real rounds.
+     */
+    'sync:dial': async (args) => {
+      if (!isSyncDialArgs(args)) {
+        throw shellError(
+          'invalid-request',
+          'sync:dial expects {host,port,code,fp?}',
+        );
+      }
+      return dialPair(async (dialer, signal) =>
+        dialer.pairTo({
+          host: args.host,
+          port: args.port,
+          code: args.code,
+          ...(args.fp !== undefined ? { fp: args.fp } : {}),
+          signal,
+        }),
+      );
+    },
+
+    'sync:dialPayload': async (args) => {
+      if (!isSyncDialPayloadArgs(args)) {
+        throw shellError(
+          'invalid-request',
+          'sync:dialPayload expects {payload}',
+        );
+      }
+      return dialPair(async (dialer, signal) =>
+        dialer.pairPayload(args.payload, signal),
+      );
+    },
+
     'sync:status': async () => {
       // Observational read: the settings panel polls this on every
       // settings visit. Starting sync here would mint an identity and
@@ -1988,6 +2209,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         () => undefined,
         () => undefined,
       );
+      browseOwners = 0;
+      browseSession?.close();
+      browseSession = null;
       pairing.expire();
       if (advertiser !== null) {
         try {

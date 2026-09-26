@@ -99,7 +99,110 @@ export interface SyncClientCrypto {
   readonly name: string;
   readonly identity: SyncIdentity;
   createIdentity(): SyncIdentity;
+  /** sha256(SPKI DER) hex — verify a claimed pub against a session's
+      verified serverFp before custody accepts it. */
+  fingerprintOf(pub: string): string;
   begin(opts: { deviceId: string; name: string }): SyncClientHandshake;
+}
+
+/**
+ * The responder half of one handshake — the server role either side
+ * can take under symmetric pairing (docs/specs/sync.md). `accept`
+ * validates the hello's key material cryptographically, mints the
+ * challenge, and returns the sealed session codec plus the caller's
+ * identity claims. Throws on malformed keys — callers treat a throw
+ * as connection death, not a typed reply.
+ */
+export interface SyncResponderCrypto {
+  readonly name: string;
+  readonly identity: SyncIdentity;
+  accept(
+    hello: ClientHello,
+    opts: { registered: boolean },
+  ): {
+    readonly challenge: Uint8Array;
+    readonly codec: SyncFrameCodec;
+    readonly peer: {
+      readonly deviceId: string;
+      readonly name: string;
+      readonly devPub: string;
+      readonly devFp: string;
+    };
+  };
+}
+
+/** A bound inbound listener — desktop node:net or the auqw-expo socket. */
+export interface SyncSocketListener {
+  readonly port: number;
+  close(): void;
+}
+
+/**
+ * The inbound-socket seam — the pair host's transport. Production:
+ * `node:net` on the desktop, the auqw-expo `syncListen` bridge on the
+ * phone; tests inject a loopback. `onSocket` fires per accepted
+ * connection; `onError` reports async listen failures post-bind.
+ */
+export interface SyncAcceptorPort {
+  listen(opts: {
+    onSocket(socket: SyncSocket): void;
+    onError?(error: { readonly message: string }): void;
+  }): Promise<Result<SyncSocketListener>>;
+  /**
+   * Terminal teardown — drops the acceptor's own resources (native
+   * event subscriptions, accept threads). `listen()` stays valid for
+   * reuse via `SyncSocketListener.close()`; `close()` is for when the
+   * whole acceptor is being disposed.
+   */
+  close?(): void;
+}
+
+/**
+ * A `_auqw._tcp` service found on the LAN — `host`/`port` are dialable
+ * as-is; `fp` is the advertised identity fp for pre-dial pinning.
+ */
+export interface SyncDiscoveredPeer {
+  /**
+   * Stable per-service identity (`name|host`) — the adapter mints it
+   * and both `found` and `lost` carry it, so two adverts sharing a
+   * display name stay distinct rows.
+   */
+  readonly key: string;
+  readonly name: string;
+  readonly host: string;
+  readonly port: number;
+  readonly fp: string | null;
+}
+
+export interface SyncDiscoverySession {
+  close(): void;
+}
+
+/**
+ * mDNS browse seam — platform glue (bonjour on desktop, NsdManager on
+ * Android). Browse is best-effort: pairing never depends on it (QR +
+ * code carry the endpoint), so a missing seam degrades to "no nearby
+ * list", never a failure.
+ */
+export interface SyncDiscoveryPort {
+  browse(opts: {
+    onFound(peer: SyncDiscoveredPeer): void;
+    /** `key` = the lost service's identity, as minted on `found`. */
+    onLost(key: string): void;
+  }): Promise<Result<SyncDiscoverySession>>;
+}
+
+/** `_auqw._tcp` advertise options — name is the human label, fp the
+ * identity fingerprint (TXT `dev`). */
+export interface SyncAdvertiseOpts {
+  readonly port: number;
+  readonly name: string;
+  readonly fp: string;
+  readonly onError?: () => void;
+}
+
+export interface SyncAdvertiser {
+  close(): void;
 }
 
 /**
@@ -116,6 +219,14 @@ export type SyncPeer = {
   readonly lastSeenAt: number;
   readonly peerCursor: SyncCursor;
   readonly lastSyncAt?: number;
+  /**
+   * The peer's deviceId — captured when the peer hosted the pairing
+   * (its welcome discloses the responder identity); absent on records
+   * from a responder that never shared it.
+   */
+  readonly deviceId?: string;
+  /** The peer's device public key (SPKI b64) — welcome host field. */
+  readonly pub?: string;
   /**
    * The peer's bundled POT service as `host:port`, learned from the
    * pairing payload — shares `endpoints`' freshness horizon (a
@@ -149,5 +260,33 @@ export interface SyncClientKeys {
     peer: SyncPeer,
     signal?: CancellationSignal,
   ): Promise<Result<void>>;
+  /**
+   * Atomic existence-gated merge: under the same serialization as
+   * peerPut/peerDelete, read the stored row and overlay resume-owned
+   * fields — the stored `peerCursor`, `lastSyncAt`, `pairedAt`, and
+   * `pot` survive; `name` and `lastSeenAt` replace; `endpoints`,
+   * `deviceId`, and `pub` replace only when the incoming value is
+   * non-empty. `false` when custody no longer carries the fp, so a
+   * concurrent peerDelete can't be resurrected — and a sync round's
+   * cursor write can't be lost between a caller-side read and write.
+   */
+  peerTouch(
+    peer: SyncPeer,
+    signal?: CancellationSignal,
+  ): Promise<Result<boolean>>;
   peerDelete(fp: string, signal?: CancellationSignal): Promise<Result<void>>;
+  /**
+   * Atomic read-merge-write for host-side custody updates (re-pair):
+   * under the same serialization as peerPut/peerDelete, merge the
+   * incoming row over the stored one — the stored `peerCursor`,
+   * `lastSyncAt`, `pairedAt`, and `pot` survive; the incoming `name`,
+   * `endpoints`, `deviceId`, `pub`, and `lastSeenAt` replace. The
+   * alternative (peerList + peerPut) leaves a window where a sync
+   * round's cursor write lands between the read and the write and is
+   * lost.
+   */
+  peerMerge(
+    peer: SyncPeer,
+    signal?: CancellationSignal,
+  ): Promise<Result<void>>;
 }
