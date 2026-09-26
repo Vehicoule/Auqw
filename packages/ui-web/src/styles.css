@@ -634,6 +634,7 @@
   }
 }
 .uw-wave__shimmer {
+  transform-box: fill-box;
   animation: uw-wave-shimmer 1600ms linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
