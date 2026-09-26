@@ -159,3 +159,42 @@ export function isPairableLanHost(host: string): boolean {
     (first & 0xfe00) === 0xfc00 // fc00::/7 ULA
   );
 }
+
+/**
+ * One dialable address out of a resolved advert's list — the LAN gate
+ * decides what MAY be dialed, this picks which SHOULD be dialed first.
+ * Ranked: IPv4 > any other v6 > bare `fe80::` — a link-local literal
+ * without a zone has no egress interface and always fails to connect,
+ * so it's strictly the last resort even though the gate accepts it.
+ * Null when no pairable address exists (e.g. only public v4s).
+ */
+export function pickDialableHost(
+  addresses: readonly string[],
+): string | null {
+  let best: string | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const address of addresses) {
+    if (typeof address !== 'string' || !isPairableLanHost(address)) {
+      continue;
+    }
+    const bare =
+      address.startsWith('[') && address.endsWith(']')
+        ? address.slice(1, -1)
+        : address;
+    const v6 = parseIpv4(bare) === null ? parseIpv6(bare) : null;
+    const first = v6?.groups[0];
+    const rank =
+      v6 === null
+        ? 0 // IPv4
+        : v6.zone === null &&
+            first !== undefined &&
+            (first & 0xffc0) === 0xfe80
+          ? 2 // bare fe80:: — undialable
+          : 1;
+    if (rank < bestRank) {
+      bestRank = rank;
+      best = address;
+    }
+  }
+  return best;
+}

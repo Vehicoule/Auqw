@@ -6,7 +6,7 @@ import type {
   SyncDiscoveryPort,
   SyncDiscoverySession,
 } from '@auqw/application';
-import { appError, err, isPairableLanHost, ok } from '@auqw/application';
+import { appError, err, ok, pickDialableHost } from '@auqw/application';
 import {
   nativeError,
   type AuqwExpoSubscription,
@@ -70,14 +70,18 @@ export function createExpoSyncDiscovery(
       const emitted = new Map<string, string>();
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
+          // `hosts` carries every resolved address — pick the dialable
+          // one (a public v4 or bare fe80:: literal must not shadow a
+          // pairable address behind it). Older module revisions emit
+          // only `host`, which stays the single-candidate fallback.
+          const host = pickDialableHost(
+            event.hosts ?? (event.host !== undefined ? [event.host] : []),
+          );
           // Shape-check before it becomes a dial target — an advert
           // with a junk port or an unbounded name never reaches the
           // nearby list.
           if (
-            event.host !== undefined &&
-            event.host.length > 0 &&
-            event.host.length <= 255 &&
-            isPairableLanHost(event.host) &&
+            host !== null &&
             Number.isSafeInteger(event.port) &&
             (event.port ?? 0) >= 1 &&
             (event.port ?? 0) <= 65_535 &&
@@ -94,7 +98,7 @@ export function createExpoSyncDiscovery(
             ) {
               return;
             }
-            const key = `${event.name}|${event.host}`;
+            const key = `${event.name}|${host}`;
             // Re-advertise on a new address: retract the old key's row
             // first — the 'lost' event (name-only) would only clear
             // the NEW key, leaving the stale endpoint dialable.
@@ -105,7 +109,7 @@ export function createExpoSyncDiscovery(
             browsing?.onFound({
               key,
               name: event.name,
-              host: event.host,
+              host,
               port: event.port as number,
               fp: event.fp ?? null,
             });

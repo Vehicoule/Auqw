@@ -355,6 +355,10 @@ export type AuqwSyncNative = {
       type: string;
       name: string;
       host?: string;
+      /** Every resolved advert address — the JS side picks the
+       * dialable one (LAN gate + ranking live in `@auqw/application`,
+       * not in Kotlin). Absent on older native builds. */
+      hosts?: string[];
       port?: number;
       fp?: string | null;
     }) => void,
