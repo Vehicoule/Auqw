@@ -30,6 +30,13 @@ export type SearchScreenProps = {
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
   readonly onRecentPress?: ((query: string) => void) | undefined;
+  /**
+   * Keystroke completions for the live text — rendered whenever the
+   * box's text differs from the committed `state.query`, so results
+   * from an older search never impersonate matches for the draft.
+   */
+  readonly suggestions?: readonly string[] | undefined;
+  readonly onSuggestionPress?: ((query: string) => void) | undefined;
   /** Focus the input on mount — the '/' global shortcut lands here. */
   readonly autoFocus?: boolean | undefined;
 };
@@ -47,10 +54,15 @@ export function SearchScreen({
   onContext,
   recents = [],
   onRecentPress,
+  suggestions = [],
+  onSuggestionPress,
   autoFocus = false,
 }: SearchScreenProps) {
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
+  // Draft mode: the box carries text that was never committed as the
+  // shown query — completions own the pane until submit.
+  const draft = editing.trim() !== '' && editing.trim() !== state.query;
   const inputRef = useRef<HTMLInputElement | null>(null);
   const list = useTrackList({
     count: state.results.length,
@@ -128,7 +140,46 @@ export function SearchScreen({
           </Pressable>
         )}
       </div>
-      {state.phase === 'ready' && (
+      {draft && (
+        <div role="list" aria-label={t('search.suggestions')}>
+          <Text
+            variant="label"
+            color="secondary"
+            uppercase
+            className="uw-search__recents-label"
+          >
+            {t('search.suggestions')}
+          </Text>
+          <Pressable
+            onPress={onSubmit}
+            ariaLabel={t('search.a11y.suggestion', { query: editing.trim() })}
+            className="uw-search__recent"
+          >
+            <Icon name="search" size={14} color="var(--text-secondary)" />
+            <Text variant="body" color="primary" numberOfLines={1}>
+              {t('search.commitQuery', { query: editing.trim() })}
+            </Text>
+          </Pressable>
+          {suggestions.map((suggestion) => (
+            <Pressable
+              key={suggestion}
+              onPress={
+                onSuggestionPress === undefined
+                  ? undefined
+                  : () => onSuggestionPress(suggestion)
+              }
+              ariaLabel={t('search.a11y.suggestion', { query: suggestion })}
+              className="uw-search__recent"
+            >
+              <Icon name="clock" size={14} color="var(--text-secondary)" />
+              <Text variant="body" color="primary" numberOfLines={1}>
+                {suggestion}
+              </Text>
+            </Pressable>
+          ))}
+        </div>
+      )}
+      {!draft && state.phase === 'ready' && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
             {t('search.results')}
@@ -141,7 +192,7 @@ export function SearchScreen({
           </Text>
         </div>
       )}
-      {state.phase === 'idle' &&
+      {!draft && state.phase === 'idle' &&
         (recents.length > 0 ? (
           <div>
             <Text
@@ -177,30 +228,31 @@ export function SearchScreen({
             icon="search"
           />
         ))}
-      {state.phase === 'loading' && state.results.length === 0 && (
+      {!draft && state.phase === 'loading' && state.results.length === 0 && (
         <LoadingState title={t('search.loading')} hint={state.query} />
       )}
-      {state.phase === 'empty' && (
+      {!draft && state.phase === 'empty' && (
         <EmptyState
           title={t('search.noResults', { query: state.query })}
           hint={t('search.noResultsHint')}
           icon="search"
         />
       )}
-      {state.phase === 'error' && (
+      {!draft && state.phase === 'error' && (
         <ErrorState
           title={t('search.failed')}
           hint={state.message}
           onRetry={state.retryable ? onRetry : undefined}
         />
       )}
-      {state.phase === 'unavailable' && (
+      {!draft && state.phase === 'unavailable' && (
         <UnavailableState
           title={t('search.unavailableTitle')}
           hint={state.message}
         />
       )}
-      {(state.phase === 'ready' || state.phase === 'loading') &&
+      {!draft &&
+        (state.phase === 'ready' || state.phase === 'loading') &&
         state.results.length > 0 && (
           <div
             role="list"

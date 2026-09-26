@@ -150,6 +150,7 @@ const ALL_CAPS: readonly ProviderCapability[] = [
   'catalog.metadata',
   'catalog.artwork',
   'catalog.entity',
+  'catalog.suggest',
   'playback.candidates',
   'playback.resolve',
   'lyrics.plain',
@@ -707,6 +708,50 @@ async function lyricsOps(): Promise<void> {
   assert(degradedResult.ok && degradedResult.value.kind === 'plain');
 }
 
+// 15. catalog.suggest carries {input, limit} verbatim and decodes the
+// suggestion list strictly — extra keys or empty entries fail closed,
+// an undeclared capability never reaches the host.
+async function suggestOps(): Promise<void> {
+  const host = new FakeHost();
+  const p = provider(host);
+  const call = p.suggest({ input: 'awa', limit: 7 }, ctx().context);
+  await flush();
+  assertDeepEqual(host.requests[0], {
+    pluginId: 'plugin-x',
+    capability: 'catalog.suggest',
+    payloadJson: JSON.stringify({ input: 'awa', limit: 7 }),
+    requestId: host.requests[0]?.requestId,
+  });
+  host.succeed(host.requests[0]!.requestId, {
+    suggestions: ['awa lacrim', 'awa 2 lacrim'],
+  });
+  const result = await call;
+  assert(result.ok);
+  assertDeepEqual(result.value, ['awa lacrim', 'awa 2 lacrim']);
+
+  // An empty suggestion string fails the whole list closed.
+  const emptyEntry = p.suggest({ input: 'x' }, ctx().context);
+  await flush();
+  host.succeed(host.requests[1]!.requestId, { suggestions: ['ok', ''] });
+  const r2 = await emptyEntry;
+  assert(!r2.ok && r2.error.kind === 'invalid-response');
+
+  // So does an unexpected extra key alongside `suggestions`.
+  const extraKey = p.suggest({ input: 'x' }, ctx().context);
+  await flush();
+  host.succeed(host.requests[2]!.requestId, {
+    suggestions: ['ok'],
+    continuation: 'c',
+  });
+  const r3 = await extraKey;
+  assert(!r3.ok && r3.error.kind === 'invalid-response');
+
+  const capped = provider(host, ['catalog.search']);
+  const denied = await capped.suggest({ input: 'x' }, ctx().context);
+  assert(!denied.ok && denied.error.kind === 'unsupported');
+  assertEqual(host.requests.length, 3, 'no host request started');
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['payloadShapes', payloadShapes],
   ['concurrentCorrelation', concurrentCorrelation],
@@ -722,6 +767,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['undeclaredCapability', undeclaredCapability],
   ['radioOps', radioOps],
   ['lyricsOps', lyricsOps],
+  ['suggestOps', suggestOps],
 ];
 
 export async function run(): Promise<void> {

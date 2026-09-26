@@ -114,6 +114,9 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'search.failed': 'échec de la recherche',
   'search.unavailableTitle': 'recherche indisponible',
   'search.resultsA11y': 'résultats de recherche',
+  'search.suggestions': 'suggestions',
+  'search.commitQuery': 'rechercher “{query}”',
+  'search.a11y.suggestion': 'rechercher {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'ta bibliothèque',

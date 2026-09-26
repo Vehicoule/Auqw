@@ -354,8 +354,33 @@ async function fakeSettleRoundTrip(): Promise<void> {
   assert((await radio).ok);
 }
 
+async function suggestRouting(): Promise<void> {
+  const itunes = new FakeProvider('itunes', ['catalog.search']);
+  const ytm = new FakeProvider('youtube-music', [
+    'playback.resolve',
+    'catalog.suggest',
+  ]);
+  const router = new ProviderRouter([itunes, ytm]);
+
+  // catalog.suggest has no settings slot — the declarer serves even
+  // though itunes holds the catalog pick.
+  const call = router.suggest(SELECTION, { input: 'awa' }, ctx());
+  assertEqual(ytm.pendingCount('suggest'), 1);
+  assertEqual(itunes.pendingCount('suggest'), 0);
+  ytm.settleSuggest(ok(['awa lacrim']));
+  const result = await call;
+  assert(result.ok && result.value[0] === 'awa lacrim');
+
+  // Nothing declaring it → unsupported without a port call.
+  const bare = new ProviderRouter([itunes]);
+  const none = await bare.suggest(SELECTION, { input: 'x' }, ctx());
+  assert(!none.ok && none.error.kind === 'unsupported');
+  assertEqual(itunes.pendingCount('suggest'), 0);
+}
+
 export async function run(): Promise<void> {
   await slotRouting();
+  await suggestRouting();
   await autoSelection();
   await explicitSelection();
   await refScopedRouting();

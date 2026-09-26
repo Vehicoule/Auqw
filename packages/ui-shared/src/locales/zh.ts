@@ -112,6 +112,9 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'search.failed': '搜索失败',
   'search.unavailableTitle': '搜索不可用',
   'search.resultsA11y': '搜索结果',
+  'search.suggestions': '搜索建议',
+  'search.commitQuery': '搜索 “{query}”',
+  'search.a11y.suggestion': '搜索 {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': '你的曲库',

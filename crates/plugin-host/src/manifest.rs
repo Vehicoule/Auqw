@@ -96,6 +96,7 @@ impl Manifest {
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",
+            "catalog.suggest",
             "playback.resolve",
             "playback.candidates",
             "lyrics.plain",

@@ -1450,6 +1450,7 @@ async function portThrows(): Promise<void> {
     artwork: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     getLyrics: () => Promise.resolve(err(appError('unsupported', 'unused'))),
     radioSeed: () => Promise.resolve(err(appError('unsupported', 'unused'))),
+    suggest: () => Promise.resolve(err(appError('unsupported', 'unused'))),
   };
   const r2 = new Session({
     storage: new FakeStorage(persisted()),
