@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Artwork, Icon, IconButton, Pressable, Text } from './primitives.tsx';
+import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
@@ -83,13 +83,26 @@ function CollectionTile({
         opacity: enabled ? 1 : 0.58,
       }}
     >
-      <Icon
-        name={COLLECTION_ICONS[tile.key]}
-        size={15}
-        color={
-          enabled ? theme.colors.accent : theme.colors.textSecondary
-        }
-      />
+      <View
+        style={{
+          width: 30,
+          height: 30,
+          borderRadius: theme.radius.control,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: enabled
+            ? theme.colors.accentSoft
+            : theme.colors.fg08,
+        }}
+      >
+        <Icon
+          name={COLLECTION_ICONS[tile.key]}
+          size={15}
+          color={
+            enabled ? theme.colors.accent : theme.colors.textSecondary
+          }
+        />
+      </View>
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="body" color={enabled ? 'bright' : 'primary'}>
           {tile.label}
@@ -104,14 +117,24 @@ function CollectionTile({
        * Empty collections disable honestly.
        */}
       {enabled && (
-        <IconButton
-          icon="play"
-          size={30}
-          iconSize={13}
-          color={theme.colors.textBright}
-          accessibilityLabel={t('library.tilePlayA11y', { label: tile.label })}
+        <Pressable
+          compact
           onPress={tile.count === 0 ? undefined : onPlay}
-        />
+          accessibilityLabel={t('library.tilePlayA11y', { label: tile.label })}
+          style={({ pressed }) => [
+            {
+              width: 30,
+              height: 30,
+              borderRadius: theme.radius.pill,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: theme.colors.accentSoft,
+            },
+            pressed && { backgroundColor: theme.colors.fg18 },
+          ]}
+        >
+          <Icon name="play" size={13} color={theme.colors.accent} />
+        </Pressable>
       )}
     </Pressable>
   );
@@ -138,7 +161,9 @@ function ToggleChip({
         justifyContent: 'center',
         paddingHorizontal: theme.spacing.md,
         borderRadius: theme.radius.pill,
-        backgroundColor: active ? theme.colors.accentSoft : theme.colors.fg08,
+        borderWidth: theme.strokes.hairline,
+        borderColor: active ? theme.colors.accent : theme.colors.hairline,
+        backgroundColor: active ? theme.colors.accentSoft : 'transparent',
       }}
     >
       <Text variant="metadata" color={active ? 'accent' : 'secondary'}>
@@ -202,7 +227,7 @@ function NewPlaylistCard({
         justifyContent: 'center',
         gap: theme.spacing.sm,
         borderRadius: theme.radius.thumb,
-        borderWidth: theme.strokes.progress,
+        borderWidth: theme.strokes.hairline,
         borderStyle: 'dashed',
         borderColor: theme.colors.fg25,
       }}
@@ -275,15 +300,21 @@ function LibraryCard({
       compact
       onPress={press}
       accessibilityLabel={label}
-      style={{ width: 104 }}
+      style={{
+        width: 104,
+        gap: theme.spacing.xs,
+        borderRadius: theme.radius.control,
+      }}
     >
       <Artwork url={card.artworkUrl} size={104} dimmed={!openable} />
-      <Text variant="body" color="primary" numberOfLines={1}>
-        {card.title}
-      </Text>
-      <Text variant="metadata" color="secondary" numberOfLines={1}>
-        {card.subtitle}
-      </Text>
+      <View style={{ gap: theme.spacing.xxs }}>
+        <Text variant="body" color="primary" numberOfLines={1}>
+          {card.title}
+        </Text>
+        <Text variant="metadata" color="secondary" numberOfLines={1}>
+          {card.subtitle}
+        </Text>
+      </View>
     </Pressable>
   );
 }
@@ -346,7 +377,7 @@ export function LibraryScreen({
         style={{
           flexDirection: 'row',
           flexWrap: 'wrap',
-          rowGap: theme.spacing.sm,
+          rowGap: theme.spacing.md,
           justifyContent: 'space-between',
         }}
       >
@@ -536,6 +567,10 @@ export function LibraryScreen({
                       url={artist.artworkUrl}
                       size={76}
                       cornerRadius={38}
+                      style={{
+                        borderWidth: theme.strokes.hairline,
+                        borderColor: theme.colors.hairline,
+                      }}
                     />
                     <Text
                       variant="metadata"
