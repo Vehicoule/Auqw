@@ -1054,8 +1054,9 @@
   display: flex;
   flex-direction: column;
 }
-/* Row separators stop at the label edge instead of running full-bleed. */
-.uw-settings__group .uw-card .uw-hairline {
+/* Row separators stop at the label edge instead of running full-bleed;
+   padded cards (diagnostics, sync) keep their full-width dividers. */
+.uw-settings__group .uw-card:not(.uw-card--padded) .uw-hairline {
   margin-left: var(--spacing-md);
 }
 
