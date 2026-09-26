@@ -240,7 +240,7 @@ type ProviderMethod =
   | 'radio'
   | 'suggest';
 
-const ALL_CAPABILITIES: readonly ProviderCapability[] = [
+export const ALL_CAPABILITIES: readonly ProviderCapability[] = [
   'catalog.search',
   'catalog.metadata',
   'catalog.artwork',

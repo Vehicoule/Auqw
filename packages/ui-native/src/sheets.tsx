@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { TextInput, View } from 'react-native';
+import { ScrollView, TextInput, useWindowDimensions, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
@@ -390,45 +390,51 @@ export function LanguagePickerSheet({
   readonly onDismiss?: (() => void) | undefined;
 }) {
   const theme = useTheme();
+  // The row list outgrows short (e.g. landscape) viewports; bound the
+  // list to the viewport and scroll rather than let the sheet spill
+  // past the top edge — both hosts render ScrollView natively.
+  const listMaxHeight = Math.round(useWindowDimensions().height * 0.6);
   return (
     <SheetScaffold title={title} onDismiss={onDismiss}>
-      {options.map((option) => {
-        const selected = option.key === selectedKey;
-        return (
-          <Pressable
-            key={option.key}
-            onPress={
-              onPick === undefined ? undefined : () => onPick(option.key)
-            }
-            accessibilityLabel={option.label}
-            accessibilityRole="button"
-            accessibilityState={{ selected }}
-            style={({ pressed }) => [
-              {
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: theme.spacing.md,
-                minHeight: theme.sizes.touch,
-                paddingHorizontal: theme.spacing.sm,
-                borderRadius: theme.radius.control,
-              },
-              pressed && { backgroundColor: theme.colors.fg08 },
-            ]}
-          >
-            <Text
-              variant="body"
-              color={selected ? 'accent' : 'primary'}
-              style={{ flex: 1 }}
-              numberOfLines={1}
+      <ScrollView style={{ maxHeight: listMaxHeight }}>
+        {options.map((option) => {
+          const selected = option.key === selectedKey;
+          return (
+            <Pressable
+              key={option.key}
+              onPress={
+                onPick === undefined ? undefined : () => onPick(option.key)
+              }
+              accessibilityLabel={option.label}
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              style={({ pressed }) => [
+                {
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: theme.spacing.md,
+                  minHeight: theme.sizes.touch,
+                  paddingHorizontal: theme.spacing.sm,
+                  borderRadius: theme.radius.control,
+                },
+                pressed && { backgroundColor: theme.colors.fg08 },
+              ]}
             >
-              {option.label}
-            </Text>
-            {selected && (
-              <Icon name="check" size={14} color={theme.colors.accent} />
-            )}
-          </Pressable>
-        );
-      })}
+              <Text
+                variant="body"
+                color={selected ? 'accent' : 'primary'}
+                style={{ flex: 1 }}
+                numberOfLines={1}
+              >
+                {option.label}
+              </Text>
+              {selected && (
+                <Icon name="check" size={14} color={theme.colors.accent} />
+              )}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
     </SheetScaffold>
   );
 }

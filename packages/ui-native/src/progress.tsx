@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, View } from 'react-native';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { View } from 'react-native';
 import type {
   AccessibilityActionEvent,
   LayoutChangeEvent,
@@ -8,20 +8,29 @@ import type {
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  cancelAnimation,
+  Easing,
   useAnimatedProps,
   useDerivedValue,
   useSharedValue,
+  withRepeat,
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { ClipPath, Defs, G, Path, Rect } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import { Artwork, Text } from './primitives.tsx';
-import { formatClock, formatRemaining, t } from '@auqw/ui-shared';
-import type { PlatformVariant } from '@auqw/ui-shared';
+import {
+  formatClock,
+  formatRemaining,
+  t,
+  waveformAmplitudes,
+  waveformBarLayout,
+} from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnimatedRect = Animated.createAnimatedComponent(Rect);
 
 type Pt = { readonly x: number; readonly y: number };
 
@@ -89,46 +98,64 @@ function sampleRing(
   return { points, length: total };
 }
 
-const RING = sampleRing(160);
+const RING = sampleRing(200);
 
 export const SQUARED_RING_PATH =
   'M26 3 L38 3 Q49 3 49 14 L49 38 Q49 49 38 49 L14 49 Q3 49 3 38 L3 14 Q3 3 14 3 Z';
 export const SQUARED_RING_LENGTH = RING.length;
 
-function buildWavyPath(
-  points: readonly Pt[],
-  amp: number,
-  waves: number,
-): { readonly d: string; readonly length: number } {
-  const n = points.length;
-  let d = '';
-  let length = 0;
-  let prev: Pt | null = null;
-  const fallback = points[0] ?? pt(0, 0);
-  for (let i = 0; i <= n; i += 1) {
-    const cur = points[i % n] ?? fallback;
-    const ahead = points[(i + 1) % n] ?? fallback;
-    const behind = points[(i - 1 + n) % n] ?? fallback;
-    let tx = ahead.x - behind.x;
-    let ty = ahead.y - behind.y;
-    const m = Math.hypot(tx, ty) || 1;
-    tx /= m;
-    ty /= m;
-    const off = amp * Math.sin((i / n) * 2 * Math.PI * waves);
-    const q = pt(cur.x - ty * off, cur.y + tx * off);
-    d += `${i === 0 ? 'M' : 'L'}${q.x.toFixed(2)} ${q.y.toFixed(2)}`;
-    if (prev !== null) {
-      length += Math.hypot(q.x - prev.x, q.y - prev.y);
-    }
-    prev = q;
+// Worklet twins of the ui-shared helpers — reanimated can't workletize
+// functions imported from another package, so the math is duplicated
+// here in miniature.
+function staggerW(progress: number, index: number, count: number): number {
+  'worklet';
+  if (count <= 0) {
+    return 1;
   }
-  return { d: `${d}Z`, length };
+  const delay = (index / count) * 0.55;
+  return Math.min(1, Math.max(0, (progress - delay) / (1 - delay)));
 }
 
-const WAVY = buildWavyPath(RING.points, 1.2, 10);
+function barExtentW(
+  amplitude: number,
+  maxExtent: number,
+  minExtent: number,
+  bloom: number,
+): number {
+  'worklet';
+  const t = Number.isFinite(bloom) ? Math.min(1, Math.max(0, bloom)) : 0;
+  const eased = 1 - (1 - t) ** 3;
+  return minExtent + (maxExtent - minExtent) * amplitude * eased;
+}
 
-export function ringVariantFor(platform: PlatformVariant): 'wavy' | 'arc' {
-  return platform === 'android' ? 'wavy' : 'arc';
+function barsPathD(
+  xs: readonly number[],
+  amps: readonly number[],
+  idx: readonly number[],
+  count: number,
+  mid: number,
+  maxExtent: number,
+  bloom: number,
+  maxX = Infinity,
+): string {
+  'worklet';
+  let d = '';
+  for (let i = 0; i < xs.length; i += 1) {
+    const x = xs[i] ?? 0;
+    if (x > maxX) {
+      continue;
+    }
+    const extent = barExtentW(
+      amps[i] ?? 0,
+      maxExtent,
+      2.4,
+      staggerW(bloom, idx[i] ?? i, count),
+    );
+    d += `M${x.toFixed(2)} ${(mid - extent).toFixed(2)} L${x.toFixed(2)} ${(
+      mid + extent
+    ).toFixed(2)}`;
+  }
+  return d;
 }
 
 export type ArtworkRingProps = {
@@ -136,7 +163,6 @@ export type ArtworkRingProps = {
   readonly progress: number;
   readonly size?: number | undefined;
   readonly artworkSize?: number | undefined;
-  readonly platform?: PlatformVariant | undefined;
   readonly dimmed?: boolean | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
@@ -146,21 +172,12 @@ export function ArtworkRing({
   progress,
   size,
   artworkSize = 38,
-  platform = Platform.OS === 'ios' ? 'ios' : 'android',
   dimmed = false,
   style,
 }: ArtworkRingProps) {
   const theme = useTheme();
   const box = size ?? theme.sizes.artworkRing;
-  const variant = ringVariantFor(platform);
   const clamped = Math.min(1, Math.max(0, progress));
-  const wavy = variant === 'wavy';
-  const stroke = wavy ? theme.strokes.progressAndroid : theme.strokes.progress;
-  const trackStroke = wavy
-    ? theme.strokes.progressAndroid
-    : theme.strokes.hairline;
-  const pathLength = wavy ? WAVY.length : SQUARED_RING_LENGTH;
-  const path = wavy ? WAVY.d : SQUARED_RING_PATH;
   const animatedProgress = useSharedValue(clamped);
   const previousProgress = useRef(clamped);
   useEffect(() => {
@@ -178,7 +195,7 @@ export function ArtworkRing({
     theme.reducedMotion,
   ]);
   const ringState = useDerivedValue(() =>
-    progressPathState(animatedProgress.value, pathLength),
+    progressPathState(animatedProgress.value, SQUARED_RING_LENGTH),
   );
   const progressProps = useAnimatedProps(() => ({
     strokeDasharray: `${ringState.value.dashLength} ${ringState.value.dashLength}`,
@@ -207,13 +224,13 @@ export function ArtworkRing({
           d={SQUARED_RING_PATH}
           fill="none"
           stroke={theme.colors.fg18}
-          strokeWidth={trackStroke}
+          strokeWidth={theme.strokes.hairline}
         />
         <AnimatedPath
-          d={path}
+          d={SQUARED_RING_PATH}
           fill="none"
           stroke={theme.colors.accent}
-          strokeWidth={stroke}
+          strokeWidth={theme.strokes.progress}
           strokeLinecap="round"
           animatedProps={progressProps}
         />
@@ -370,16 +387,51 @@ export function LinearScrubber({
   );
 }
 
-const PATTERN = [
-  14, 24, 38, 52, 34, 62, 44, 28, 42, 68, 52, 36, 26, 40, 58, 72, 54, 40,
-  30, 44, 62, 50, 36, 24, 38, 56, 64, 44, 30, 18,
-] as const;
+const WAVE_HEIGHT = 48;
+const WAVE_MID = 24;
+const WAVE_MAX_EXTENT = 20;
+const WAVE_BAR_WIDTH = 3;
+const WAVE_BAR_GAP = 2.5;
+
+type BarGroup = {
+  readonly xs: readonly number[];
+  readonly amps: readonly number[];
+  readonly idx: readonly number[];
+};
+
+// Three amplitude terciles → three stroke opacities, so the quieter
+// bars read quieter without one animated component per bar.
+function partitionBars(
+  xs: readonly number[],
+  amps: readonly number[],
+): readonly [BarGroup, BarGroup, BarGroup] {
+  const sorted = [...amps].sort((a, b) => a - b);
+  const t1 = sorted[Math.floor(sorted.length / 3)] ?? Infinity;
+  const t2 = sorted[Math.floor((sorted.length * 2) / 3)] ?? Infinity;
+  const groups: [BarGroup, BarGroup, BarGroup] = [
+    { xs: [], amps: [], idx: [] },
+    { xs: [], amps: [], idx: [] },
+    { xs: [], amps: [], idx: [] },
+  ];
+  for (let i = 0; i < xs.length; i += 1) {
+    const amp = amps[i] ?? 0;
+    const g = amp <= t1 ? 0 : amp <= t2 ? 1 : 2;
+    const group = groups[g];
+    (group.xs as number[]).push(xs[i] ?? 0);
+    (group.amps as number[]).push(amp);
+    (group.idx as number[]).push(i);
+  }
+  return groups;
+}
 
 export type WaveformSeekProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly seed?: string | undefined;
+  readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
+  readonly visible?: boolean | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -387,13 +439,238 @@ export function WaveformSeek({
   positionMs,
   durationMs,
   onSeek,
+  seed = 'auqw',
+  loading = false,
   labels = true,
+  visible = true,
   style,
 }: WaveformSeekProps) {
   const theme = useTheme();
-  const { gesture, onLayout } = useSeekGesture(durationMs, onSeek);
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const [width, setWidth] = useState(0);
+  const onLayout = useCallback((e: LayoutChangeEvent) => {
+    const w = e.nativeEvent.layout.width;
+    if (w > 0) {
+      setWidth(w);
+    }
+  }, []);
   const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
-  const p = progressOf(positionMs, durationMs);
+
+  const isLoading = loading || durationMs === null;
+  const progress = progressOf(positionMs, durationMs);
+  const layout = useMemo(
+    () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
+    [width],
+  );
+  const amps = useMemo(
+    () => waveformAmplitudes(seed, layout.count),
+    [seed, layout.count],
+  );
+  const groups = useMemo(() => partitionBars(layout.xs, amps), [layout, amps]);
+  const allBars = useMemo<BarGroup>(
+    () => ({
+      xs: layout.xs,
+      amps,
+      idx: layout.xs.map((_, i) => i),
+    }),
+    [layout, amps],
+  );
+
+  const fill = useSharedValue(progress);
+  const bloom = useSharedValue(theme.reducedMotion ? 1 : 0);
+  const shimmer = useSharedValue(0);
+  const scrubbing = useSharedValue(0);
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const scrubActive = useRef(false);
+  const scrubSec = useRef(-1);
+  const previousProgress = useRef(progress);
+  const latestProgress = useRef(progress);
+  latestProgress.current = progress;
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const delta = Math.abs(progress - previousProgress.current);
+    previousProgress.current = progress;
+    if (delta > 0 && settleTimer.current !== null) {
+      clearTimeout(settleTimer.current);
+      settleTimer.current = null;
+    }
+    if (scrubActive.current) {
+      return;
+    }
+    const duration = delta > 0.05 ? theme.motion.state : 900;
+    fill.value = theme.reducedMotion
+      ? progress
+      : withTiming(progress, { duration });
+  }, [fill, progress, theme.motion.state, theme.reducedMotion]);
+  useEffect(
+    () => () => {
+      if (settleTimer.current !== null) {
+        clearTimeout(settleTimer.current);
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    bloom.value = 0;
+    bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
+  }, [bloom, seed, theme.reducedMotion]);
+  useEffect(() => {
+    if (isLoading && visible && !theme.reducedMotion) {
+      shimmer.value = 0;
+      shimmer.value = withRepeat(
+        withTiming(1, { duration: 1600, easing: Easing.linear }),
+        -1,
+        false,
+      );
+    } else {
+      cancelAnimation(shimmer);
+      shimmer.value = 0;
+    }
+  }, [isLoading, shimmer, theme.reducedMotion, visible]);
+
+  const preview = useCallback(
+    (fraction: number) => {
+      // JS-side scrub flag so the position ticker doesn't fight the finger.
+      scrubActive.current = true;
+      if (durationMs === null) {
+        return;
+      }
+      const ms = Math.round(fraction * durationMs);
+      const sec = Math.round(ms / 1000);
+      if (sec !== scrubSec.current) {
+        scrubSec.current = sec;
+        setScrubMs(ms);
+      }
+    },
+    [durationMs],
+  );
+  const commit = useCallback(
+    (fraction: number) => {
+      scrubActive.current = false;
+      scrubSec.current = -1;
+      setScrubMs(null);
+      if (durationMs !== null && durationMs > 0) {
+        onSeek?.(Math.round(fraction * durationMs));
+      }
+      // Optimistic fill: when no position tick confirms the seek
+      // (paused playback, noop onSeek) fall back to the real
+      // progress instead of disagreeing with the labels forever.
+      if (settleTimer.current !== null) {
+        clearTimeout(settleTimer.current);
+      }
+      settleTimer.current = setTimeout(() => {
+        settleTimer.current = null;
+        if (scrubActive.current) {
+          return;
+        }
+        fill.value = theme.reducedMotion
+          ? latestProgress.current
+          : withTiming(latestProgress.current, {
+              duration: theme.motion.state,
+            });
+      }, 400);
+    },
+    [durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
+  );
+  // A cancelled pan clears the preview and restores the real fill —
+  // only a finished gesture may move playback.
+  const cancelScrub = useCallback(() => {
+    scrubActive.current = false;
+    scrubSec.current = -1;
+    setScrubMs(null);
+    fill.value = theme.reducedMotion
+      ? latestProgress.current
+      : withTiming(latestProgress.current, {
+          duration: theme.motion.state,
+        });
+  }, [fill, theme.motion.state, theme.reducedMotion]);
+  const enabled =
+    durationMs !== null && durationMs > 0 && onSeek !== undefined;
+  // Stable gesture object — a fresh Pan() per render would cancel a
+  // scrub in progress when the position tick re-renders the control.
+  const gesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .minDistance(0)
+        .enabled(enabled)
+        .onBegin((e) => {
+          'worklet';
+          const f = Math.min(1, Math.max(0, e.x / width));
+          fill.value = f;
+          scrubbing.value = 1;
+          scheduleOnRN(preview, f);
+        })
+        .onUpdate((e) => {
+          'worklet';
+          const f = Math.min(1, Math.max(0, e.x / width));
+          fill.value = f;
+          scheduleOnRN(preview, f);
+        })
+        .onFinalize((e, success) => {
+          'worklet';
+          const f = Math.min(1, Math.max(0, e.x / width));
+          scrubbing.value = 0;
+          scheduleOnRN(success ? commit : cancelScrub, f);
+        }),
+    [cancelScrub, commit, enabled, fill, preview, scrubbing, width],
+  );
+  const dLow = useDerivedValue(() =>
+    barsPathD(
+      groups[0].xs,
+      groups[0].amps,
+      groups[0].idx,
+      layout.count,
+      WAVE_MID,
+      WAVE_MAX_EXTENT,
+      bloom.value,
+    ),
+  );
+  const dMid = useDerivedValue(() =>
+    barsPathD(
+      groups[1].xs,
+      groups[1].amps,
+      groups[1].idx,
+      layout.count,
+      WAVE_MID,
+      WAVE_MAX_EXTENT,
+      bloom.value,
+    ),
+  );
+  const dHigh = useDerivedValue(() =>
+    barsPathD(
+      groups[2].xs,
+      groups[2].amps,
+      groups[2].idx,
+      layout.count,
+      WAVE_MID,
+      WAVE_MAX_EXTENT,
+      bloom.value,
+    ),
+  );
+  // No clip-path here: react-native-svg drops animated prop updates
+  // inside <ClipPath>, so the played layer is rebuilt each frame as
+  // the subset of bars whose center sits left of the fill edge.
+  const dAll = useDerivedValue(() =>
+    barsPathD(
+      allBars.xs,
+      allBars.amps,
+      allBars.idx,
+      layout.count,
+      WAVE_MID,
+      WAVE_MAX_EXTENT,
+      bloom.value,
+      fill.value * width,
+    ),
+  );
+  const lowProps = useAnimatedProps(() => ({ d: dLow.value }));
+  const midProps = useAnimatedProps(() => ({ d: dMid.value }));
+  const highProps = useAnimatedProps(() => ({ d: dHigh.value }));
+  const playedProps = useAnimatedProps(() => ({ d: dAll.value }));
+  const shimmerProps = useAnimatedProps(() => ({
+    x: shimmer.value * (width + width * 0.16) - width * 0.16,
+  }));
+
+  const shownMs = scrubMs ?? positionMs;
   return (
     <View style={style}>
       <GestureDetector gesture={gesture}>
@@ -404,11 +681,11 @@ export function WaveformSeek({
           accessibilityValue={{
             min: 0,
             max: durationMs ?? 0,
-            now: Math.round(positionMs),
+            now: Math.round(shownMs),
             text: t('progress.a11y.value', {
-            position: formatClock(positionMs),
-            duration: formatClock(durationMs),
-          }),
+              position: formatClock(shownMs),
+              duration: formatClock(durationMs),
+            }),
           }}
           accessibilityActions={[
             { name: 'increment' },
@@ -416,27 +693,91 @@ export function WaveformSeek({
           ]}
           onAccessibilityAction={onAccessibilityAction}
           style={{
-            height: 46,
             minHeight: theme.sizes.touch,
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'space-between',
+            justifyContent: 'center',
           }}
         >
-          {PATTERN.map((h, i) => (
-            <View
-              key={i}
-              style={{
-                width: 3,
-                height: `${h}%`,
-                borderRadius: 1.5,
-                backgroundColor:
-                  i / PATTERN.length < p
-                    ? theme.colors.accent
-                    : theme.colors.fg18,
-              }}
-            />
-          ))}
+          {width > 0 && (
+            <Svg width={width} height={WAVE_HEIGHT}>
+              {isLoading ? (
+                <>
+                  {layout.xs.map((x, i) => (
+                    <Rect
+                      key={i}
+                      x={x - WAVE_BAR_WIDTH / 2}
+                      y={WAVE_MID - 2.4}
+                      width={WAVE_BAR_WIDTH}
+                      height={4.8}
+                      rx={1.5}
+                      fill={theme.colors.fg18}
+                    />
+                  ))}
+                  {!theme.reducedMotion && (
+                    <>
+                      <Defs>
+                        <ClipPath id={`bars-${uid}`}>
+                          {layout.xs.map((x, i) => (
+                            <Rect
+                              key={i}
+                              x={x - WAVE_BAR_WIDTH / 2}
+                              y={WAVE_MID - 2.4}
+                              width={WAVE_BAR_WIDTH}
+                              height={4.8}
+                              rx={1.5}
+                            />
+                          ))}
+                        </ClipPath>
+                      </Defs>
+                      <G clipPath={`url(#bars-${uid})`}>
+                        <AnimatedRect
+                          y={0}
+                          width={width * 0.16}
+                          height={WAVE_HEIGHT}
+                          fill={theme.colors.accent}
+                          opacity={0.55}
+                          animatedProps={shimmerProps}
+                        />
+                      </G>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <AnimatedPath
+                    fill="none"
+                    stroke={theme.colors.fg18}
+                    strokeWidth={WAVE_BAR_WIDTH}
+                    strokeLinecap="round"
+                    opacity={0.6}
+                    animatedProps={lowProps}
+                  />
+                  <AnimatedPath
+                    fill="none"
+                    stroke={theme.colors.fg18}
+                    strokeWidth={WAVE_BAR_WIDTH}
+                    strokeLinecap="round"
+                    opacity={0.8}
+                    animatedProps={midProps}
+                  />
+                  <AnimatedPath
+                    fill="none"
+                    stroke={theme.colors.fg18}
+                    strokeWidth={WAVE_BAR_WIDTH}
+                    strokeLinecap="round"
+                    opacity={1}
+                    animatedProps={highProps}
+                  />
+                  <AnimatedPath
+                    fill="none"
+                    stroke={theme.colors.accent}
+                    strokeWidth={WAVE_BAR_WIDTH}
+                    strokeLinecap="round"
+                    animatedProps={playedProps}
+                  />
+                </>
+              )}
+            </Svg>
+          )}
         </View>
       </GestureDetector>
       {labels && (
@@ -448,10 +789,10 @@ export function WaveformSeek({
           }}
         >
           <Text variant="metadata" color="secondary" numeric>
-            {formatClock(positionMs)}
+            {formatClock(shownMs)}
           </Text>
           <Text variant="metadata" color="secondary" numeric>
-            {formatRemaining(positionMs, durationMs)}
+            {formatRemaining(shownMs, durationMs)}
           </Text>
         </View>
       )}

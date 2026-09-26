@@ -132,7 +132,6 @@ export function MiniPlayer({
             <ArtworkRing
               artworkUrl={player.artworkUrl}
               progress={progress}
-              platform={platform}
             />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text

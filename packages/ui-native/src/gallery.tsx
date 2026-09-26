@@ -420,24 +420,26 @@ function GalleryBody({
           <ArtworkRing
             artworkUrl={fixturePlayerPlaying.artworkUrl}
             progress={0.54}
-            platform="android"
-          />
-          <ArtworkRing
-            artworkUrl={fixturePlayerPlaying.artworkUrl}
-            progress={0.54}
-            platform="ios"
           />
           <ArtworkRing
             artworkUrl={null}
             progress={0.2}
-            platform="android"
           />
           <EqBars size={14} />
           <Spinner size={16} />
           <Artwork url={null} size={40} monogram="TC" />
         </View>
         <LinearScrubber positionMs={61_000} durationMs={180_000} onSeek={noop} />
-        <WaveformSeek positionMs={90_000} durationMs={180_000} onSeek={noop} />
+        <WaveformSeek
+          positionMs={90_000}
+          durationMs={180_000}
+          onSeek={noop}
+          seed="Self Aware|Temper City"
+        />
+        <Text variant="metadata" color="secondary">
+          loading · shimmer baseline
+        </Text>
+        <WaveformSeek positionMs={0} durationMs={null} loading onSeek={noop} />
       </Section>
 
       <Section title="states" note="loading · empty · error · unavailable">
@@ -457,7 +459,7 @@ function GalleryBody({
         </View>
       </Section>
 
-      <Section title="mini player" note="android wavy ring · ios glass">
+      <Section title="mini player" note="arc ring · ios glass">
         {(['android', 'ios'] as const).map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.md }}>
             <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>

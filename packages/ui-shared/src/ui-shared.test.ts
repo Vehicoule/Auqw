@@ -16,8 +16,18 @@ import {
   toSyncPanel,
 } from './index.ts';
 import type { Locale, MessageId } from './index.ts';
+import {
+  shimmerHighlight,
+  staggerProgress,
+  waveformAmplitudes,
+  waveformBarExtent,
+  waveformBarLayout,
+} from './waveform.ts';
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
+import { es } from './locales/es.ts';
+import { fr } from './locales/fr.ts';
+import { zh } from './locales/zh.ts';
 import {
   fixtureDiagnostics,
   fixtureHomeModel,
@@ -176,8 +186,8 @@ assertEqual(t('collection.plays', { count: 2 }), '2 wiedergaben');
 assertEqual(t('state.loading'), 'wird geladen');
 
 // fallback to en for a missing catalog / unknown id — never `undefined`
-setLocale('fr' as unknown as Locale);
-assertEqual(getLocale(), 'fr' as unknown as Locale);
+setLocale('ja' as unknown as Locale);
+assertEqual(getLocale(), 'ja' as unknown as Locale);
 assertEqual(
   t('state.loading'),
   'loading',
@@ -197,31 +207,178 @@ assertEqual(resolveLocale(null, 'en-US'), 'en');
 assertEqual(resolveLocale('system', 'de-DE'), 'de', "'system' follows the system");
 assertEqual(resolveLocale('de', 'en-US'), 'de', 'a supported tag pins the UI');
 assertEqual(resolveLocale('de-DE', 'en-US'), 'de', 'BCP-47 pins by primary subtag');
-assertEqual(resolveLocale('fr', 'en-US'), 'en', 'unsupported tag falls back to en');
-assertEqual(resolveLocale('fr', 'de-DE'), 'de', 'unsupported setting follows the system');
-assertEqual(resolveLocale('system', 'fr-FR'), 'en', 'unsupported system defaults to en');
+assertEqual(resolveLocale('ja', 'en-US'), 'en', 'unsupported tag falls back to en');
+assertEqual(resolveLocale('ja', 'de-DE'), 'de', 'unsupported setting follows the system');
+assertEqual(resolveLocale('system', 'ja-JP'), 'en', 'unsupported system defaults to en');
+assertEqual(resolveLocale('fr-FR', 'en-US'), 'fr', 'supported non-base tag pins the UI');
+assertEqual(resolveLocale('es-419', 'en-US'), 'es', 'es region tag pins');
+assertEqual(resolveLocale('zh-Hans-CN', 'en-US'), 'zh', 'zh primary subtag pins');
+// only Simplified ships — Traditional-script/region tags fall back to the default
+assertEqual(resolveLocale('zh-Hant-TW', 'en-US'), 'en', 'zh-Hant falls back');
+assertEqual(resolveLocale('zh-TW', 'en-US'), 'en', 'zh-TW falls back');
+assertEqual(resolveLocale('zh-HK', 'en-US'), 'en', 'zh-HK falls back');
+assertEqual(resolveLocale('zh-MO', 'en-US'), 'en', 'zh-MO falls back');
+assertEqual(resolveLocale('zh-CN', 'en-US'), 'zh', 'zh-CN stays Simplified');
+// explicit Hans script beats a Traditional-leaning region
+assertEqual(resolveLocale('zh-Hans-HK', 'en-US'), 'zh', 'zh-Hans-HK pins zh');
+assertEqual(resolveLocale('zh-Hans-TW', 'en-US'), 'zh', 'zh-Hans-TW pins zh');
+assertEqual(
+  resolveLocale('zh-Hant-TW-x-hans', 'en-US'),
+  'en',
+  'private-use hans is not a script',
+);
+assertEqual(languageOptionKey('zh-Hant-TW'), 'system', 'Traditional reads as system');
+assertEqual(languageOptionKey('zh-Hans-HK'), 'zh', 'explicit Hans selects');
 
 // languageOptionKey: the picker's displayed key must agree with what
 // resolveLocale activates — a padded stored tag pins 'de', not 'system'
 assertEqual(languageOptionKey(undefined), 'system');
 assertEqual(languageOptionKey('de-DE'), 'de', 'BCP-47 reduces to primary subtag');
 assertEqual(languageOptionKey(' de '), 'de', 'padding still selects the pinned locale');
-assertEqual(languageOptionKey('fr'), 'system', 'unsupported reads as system');
+assertEqual(languageOptionKey('fr'), 'fr', 'supported primary subtag selects');
+assertEqual(languageOptionKey('ja'), 'system', 'unsupported reads as system');
 
-// completeness guard: en and de carry the same message ids
+// completeness guard: every shipped catalog carries the same message ids as en
 const enIds = Object.keys(en);
-const deIds = new Set(Object.keys(de));
-for (const id of enIds) {
-  assert(deIds.has(id), `de is missing the message id ${id}`);
-  assert(
-    de[id as MessageId] !== undefined,
-    `de has no message for ${id}`,
+for (const [tag, catalog] of Object.entries({ de, es, fr, zh })) {
+  const ids = new Set(Object.keys(catalog));
+  for (const id of enIds) {
+    assert(ids.has(id), `${tag} is missing the message id ${id}`);
+    assert(
+      catalog[id as MessageId] !== undefined,
+      `${tag} has no message for ${id}`,
+    );
+  }
+  assertEqual(
+    ids.size,
+    enIds.length,
+    `${tag} must not carry ids en does not know`,
   );
 }
+
+// per-locale behavior: plurals route through CLDR categories and
+// placeholders interpolate — a spot-check per shipped catalog
+setLocale('es');
+assertEqual(t('common.trackCount', { count: 1 }), '1 pista', 'es one');
+assertEqual(t('common.trackCount', { count: 3 }), '3 pistas', 'es other');
 assertEqual(
-  deIds.size,
-  enIds.length,
-  'de must not carry ids en does not know',
+  t('sync.status.connectedCount', { count: 1 }),
+  '1 conectado',
+  'es sync count agrees in number',
+);
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a, b',
+  'es interpolates',
+);
+setLocale('fr');
+assertEqual(t('common.trackCount', { count: 0 }), '0 titre', 'fr zero is one');
+assertEqual(t('common.trackCount', { count: 1 }), '1 titre', 'fr one');
+assertEqual(t('common.trackCount', { count: 2 }), '2 titres', 'fr other');
+assertEqual(
+  t('sync.status.pairedCount', { count: 1 }),
+  '1 appairé',
+  'fr sync count agrees in number',
+);
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a, b',
+  'fr interpolates',
+);
+setLocale('zh');
+assertEqual(t('common.trackCount', { count: 1 }), '1 首', 'zh ignores number');
+assertEqual(t('common.trackCount', { count: 5 }), '5 首', 'zh other');
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a，b',
+  'zh interpolates',
+);
+setLocale('en');
+
+// waveformAmplitudes: deterministic per seed, every bar in [0.12, 1]
+const amps = waveformAmplitudes('track-a', 60);
+assertEqual(amps.length, 60);
+assert(
+  amps.every((v) => v >= 0.12 && v <= 1),
+  'every amplitude stays inside [0.12, 1]',
+);
+assertEqual(
+  JSON.stringify(amps),
+  JSON.stringify(waveformAmplitudes('track-a', 60)),
+  'same seed and count is deterministic',
+);
+assert(
+  JSON.stringify(amps) !== JSON.stringify(waveformAmplitudes('track-b', 60)),
+  'a different seed produces a different pattern',
+);
+assertEqual(waveformAmplitudes('track-a', 0).length, 0, 'count 0 yields no bars');
+assertEqual(
+  waveformAmplitudes('track-a', -3).length,
+  0,
+  'negative count yields no bars',
+);
+assert(
+  new Set(amps).size > 10,
+  'the pattern actually varies bar to bar',
+);
+
+// waveformBarLayout: count from width, bars centered
+const layout = waveformBarLayout(200);
+assertEqual(layout.count, 36, 'n bars cost n·bar + (n−1)·gap');
+assertEqual(
+  layout.count,
+  Math.floor((200 + 2.5) / (3 + 2.5)),
+  'count follows the barWidth+gap budget',
+);
+assertEqual(waveformBarLayout(3).count, 1, 'one barWidth alone fits one bar');
+assertEqual(layout.xs.length, layout.count, 'one center per bar');
+const expectedLeftover = 200 - (layout.count * (3 + 2.5) - 2.5);
+assertEqual(
+  layout.xs[0],
+  expectedLeftover / 2 + 1.5,
+  'first bar centers in the leftover margin',
+);
+const symmetric = 200 - ((layout.xs[layout.count - 1] ?? 0) + 1.5);
+assert(
+  Math.abs(symmetric - expectedLeftover / 2) < 1e-9,
+  'bars are centered within the measured width',
+);
+assertEqual(waveformBarLayout(2).count, 0, 'width at the gap fits nothing');
+assertEqual(waveformBarLayout(0).count, 0, 'zero width fits nothing');
+
+// waveformBarExtent: eased bloom between the floor and the max
+assertEqual(waveformBarExtent(0, 20), 2.4, 'zero amplitude keeps the floor');
+assertEqual(waveformBarExtent(1, 20, 2.4, 1), 20, 'full amplitude reaches max');
+assert(
+  waveformBarExtent(0.5, 20) > 2.4 && waveformBarExtent(0.5, 20) < 20,
+  'mid amplitude lands between floor and max',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, 0),
+  2.4,
+  'zero bloom collapses to the floor',
+);
+assertEqual(
+  waveformBarExtent(1, 20, 2.4, Number.NaN),
+  2.4,
+  'non-finite bloom falls back to the floor',
+);
+
+// staggerProgress: delayed sweep that always completes
+assertEqual(staggerProgress(1, 0, 10), 1, 'finished progress is done');
+assertEqual(staggerProgress(0, 9, 10), 0, 'the tail has not started at 0');
+assert(
+  staggerProgress(0.5, 1, 10) > staggerProgress(0.5, 8, 10),
+  'earlier bars lead the sweep',
+);
+assertEqual(staggerProgress(0, 0, 0), 1, 'empty count is complete');
+
+// shimmerHighlight: wraps around the ends of the phase cycle
+assertEqual(shimmerHighlight(0.5, 0.5), 1, 'aligned phase is fully lit');
+assertEqual(shimmerHighlight(0, 0.5), 0, 'a half cycle away is dark');
+assert(
+  shimmerHighlight(0.02, 0.98) > 0.7,
+  'the band wraps across the 1→0 boundary',
 );
 
 console.log('ui-shared tests passed');
