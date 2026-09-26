@@ -995,6 +995,25 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       return err(opened.error);
     }
     const { session, welcome, endpoint } = opened.value;
+    // The welcome's claimed host key MUST hash to the fp the
+    // handshake just verified — a responder asserting a different
+    // identity pub in-band would get its row custody-mislabeled.
+    if (
+      welcome.host !== undefined &&
+      welcome.host.pub !== undefined &&
+      deps.crypto.fingerprintOf(welcome.host.pub) !== session.peerFp
+    ) {
+      killSession(
+        session,
+        appError('permission-denied', 'sync: host key mismatch'),
+      );
+      return err(
+        appError(
+          'permission-denied',
+          'sync: welcome host key mismatches the verified identity',
+        ),
+      );
+    }
     // The welcome's `pot` is the answering server's own
     // advertisement — authoritative over the QR payload's copy and
     // the only channel a typed-code pairing learns it through.

@@ -138,6 +138,7 @@ function fakeClientCrypto(callerPort?: number): SyncClientCrypto {
     name: 'fake-v1',
     identity,
     createIdentity: () => ({ pub: 'new-pub', priv: 'new-priv' }),
+    fingerprintOf: fakeFp,
     begin: ({ deviceId, name }): SyncClientHandshake => ({
       hello: () => ({
         v: 1,

@@ -2110,36 +2110,58 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
 
+  // Mint + apply a fresh offer — gated on the share host still being
+  // ours (shareHostRef) and share still active inside the set.
+  const remintShareOffer = useCallback(() => {
+    const host = syncSurface?.host;
+    if (host === undefined || host === null || !shareHostRef.current) {
+      return;
+    }
+    void host
+      .mintOffer()
+      .then((offer) => {
+        if (!offer.ok || !shareHostRef.current) {
+          return;
+        }
+        setShare((prev) =>
+          prev.active
+            ? {
+                ...prev,
+                code: offer.value.code,
+                payload: offer.value.payload,
+                expiresAt: offer.value.expiresAt,
+              }
+            : prev,
+        );
+      })
+      .catch(() => undefined);
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+
   // Offers expire after ~2m — remint while sharing stays on so the
   // displayed code/QR never outlives what the host will accept.
   useEffect(() => {
-    const host = syncSurface?.host;
-    if (!share.active || share.expiresAt === null || host == null) {
+    if (!share.active || share.expiresAt === null) {
       return;
     }
-    const timer = setTimeout(() => {
-      void host
-        .mintOffer()
-        .then((offer) => {
-          if (!offer.ok || !shareHostRef.current) {
-            return;
-          }
-          setShare((prev) =>
-            prev.active
-              ? {
-                  ...prev,
-                  code: offer.value.code,
-                  payload: offer.value.payload,
-                  expiresAt: offer.value.expiresAt,
-                }
-              : prev,
-          );
-        })
-        .catch(() => undefined);
-    }, Math.max(0, share.expiresAt - Date.now()));
+    const timer = setTimeout(
+      remintShareOffer,
+      Math.max(0, share.expiresAt - Date.now()),
+    );
     return () => clearTimeout(timer);
+  }, [share.active, share.expiresAt, remintShareOffer]);
+
+  // An accepted inbound pair CONSUMES the displayed code — remint so
+  // the UI never shows a dead offer the next caller can't redeem.
+  useEffect(() => {
+    const host = syncSurface?.host;
+    if (!share.active || host === undefined || host === null) {
+      return;
+    }
+    return host.onPaired(remintShareOffer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [share.active, share.expiresAt, controller]);
+  }, [share.active, controller, remintShareOffer]);
 
   // The 'expires in Nm' label is a render-time read — tick while an
   // offer is live so the countdown doesn't freeze between mints.

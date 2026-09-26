@@ -149,6 +149,10 @@ class AuqwNsd(
 
   fun stopBrowse() {
     browseGeneration += 1
+    synchronized(resolveLock) {
+      resolveQueue.clear()
+      resolveInFlight = false
+    }
     val listener = discovery ?: return
     discovery = null
     runCatching { manager.stopServiceDiscovery(listener) }
@@ -166,39 +170,90 @@ class AuqwNsd(
     multicastLock = null
   }
 
+  // Some Android builds reject a second resolveService while one is
+  // outstanding — serialize them through a queue instead of trusting
+  // the executor's submission order. Transient failures get one retry
+  // while their browse generation is still live. Resolve callbacks
+  // fire on NSD's binder thread while enqueue happens on the
+  // executor — the queue is guarded by `resolveLock`.
+  private val resolveQueue = ArrayDeque<Pair<NsdServiceInfo, Int>>()
+  private var resolveInFlight = false
+  private val resolveLock = Any()
+
   private fun resolve(info: NsdServiceInfo, gen: Int) {
+    if (gen != browseGeneration) return
+    synchronized(resolveLock) {
+      resolveQueue.addLast(info to 0)
+    }
+    drainResolves(gen)
+  }
+
+  private fun drainResolves(gen: Int) {
+    val next =
+      synchronized(resolveLock) {
+        if (resolveInFlight) {
+          return
+        }
+        val dequeued = resolveQueue.removeFirstOrNull() ?: return
+        resolveInFlight = true
+        dequeued
+      }
+    if (resolveInFlight) return
+    val next = resolveQueue.removeFirstOrNull() ?: return
+    resolveInFlight = true
+    val (info, attempts) = next
     val resolveListener =
       object : NsdManager.ResolveListener {
-        override fun onResolveFailed(info: NsdServiceInfo, code: Int) {
-          Log.w(TAG, "nsd resolve failed for ${info.serviceName}: $code")
+        override fun onResolveFailed(failed: NsdServiceInfo, code: Int) {
+          Log.w(TAG, "nsd resolve failed for ${failed.serviceName}: $code")
+          synchronized(resolveLock) {
+            resolveInFlight = false
+            // One retry for transient failures — then the service is
+            // simply absent until its next advert cycle.
+            if (attempts < 1 && gen == browseGeneration) {
+              resolveQueue.addLast(failed to attempts + 1)
+            }
+          }
+          drainResolves(gen)
         }
 
         override fun onServiceResolved(resolved: NsdServiceInfo) {
-          if (gen != browseGeneration) return
-          val host =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-              resolved.hostAddresses.firstOrNull()?.hostAddress
-            } else {
-              @Suppress("DEPRECATION")
-              resolved.host?.hostAddress
-            }
-          val fp = resolved.attributes["dev"]?.let { String(it) }
-          if (host != null) {
-            emitDiscovery(
-              mapOf(
-                "type" to "found",
-                "name" to resolved.serviceName,
-                "host" to host,
-                "port" to resolved.port,
-                "fp" to fp,
-              ),
-            )
+          synchronized(resolveLock) {
+            resolveInFlight = false
           }
+          if (gen == browseGeneration) {
+            val host =
+              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                resolved.hostAddresses.firstOrNull()?.hostAddress
+              } else {
+                @Suppress("DEPRECATION")
+                resolved.host?.hostAddress
+              }
+            val fp = resolved.attributes["dev"]?.let { String(it) }
+            if (host != null) {
+              emitDiscovery(
+                mapOf(
+                  "type" to "found",
+                  "name" to resolved.serviceName,
+                  "host" to host,
+                  "port" to resolved.port,
+                  "fp" to fp,
+                ),
+              )
+            }
+          }
+          drainResolves(gen)
         }
       }
-    if (gen == browseGeneration) {
-      runCatching { manager.resolveService(info, resolveListener) }
-    }
+    runCatching { manager.resolveService(info, resolveListener) }
+      .onFailure {
+        // A synchronous reject (service already stopping) still frees
+        // the queue slot.
+        synchronized(resolveLock) {
+          resolveInFlight = false
+        }
+        drainResolves(gen)
+      }
   }
 
   fun shutdown() {

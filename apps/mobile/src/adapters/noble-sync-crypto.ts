@@ -243,6 +243,7 @@ export function createNobleSyncCrypto(opts: {
     get identity() {
       return opts.identity;
     },
+    fingerprintOf: nobleFingerprintOf,
     createIdentity(): SyncIdentity {
       return createNobleIdentity(opts.randomBytes);
     },

@@ -87,18 +87,22 @@ export function createExpoSyncDiscovery(
             event.name.length > 0 &&
             event.name.length <= 128
           ) {
-            // The TXT fp is a pin, not a payload — a malformed advert
-            // downgrades to unpinned rather than poisoning the dial.
-            const fp =
-              typeof event.fp === 'string' &&
-              /^[0-9a-f]{64}$/.test(event.fp)
-                ? event.fp
-                : null;
+            // A PRESENT-but-malformed `fp` poisons the pin the pair
+            // would dial with — drop the advert rather than serve an
+            // unpinned tap-target. A missing `fp` stays a valid
+            // unpinned candidate (typed-code path).
+            if (
+              event.fp !== undefined &&
+              (typeof event.fp !== 'string' ||
+                !/^[0-9a-f]{64}$/.test(event.fp))
+            ) {
+              return;
+            }
             browsing?.onFound({
               name: event.name,
               host: event.host,
               port: event.port as number,
-              fp,
+              fp: event.fp ?? null,
             });
             emitted.add(event.name);
           }

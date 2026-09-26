@@ -127,5 +127,25 @@ export function createExpoSyncAcceptor(
         );
       }
     },
+    /**
+     * Terminal teardown — drops the three native event subscriptions
+     * ensureWatch installed. The pair host's close() calls this; a
+     * reversible listener.close() leaves them in place for the next
+     * bind.
+     */
+    close() {
+      acceptSub?.remove();
+      dataSub?.remove();
+      closedSub?.remove();
+      acceptSub = null;
+      dataSub = null;
+      closedSub = null;
+      listening = null;
+      listenGeneration += 1;
+      for (const socket of live.values()) {
+        socket.destroy();
+      }
+      live.clear();
+    },
   };
 }

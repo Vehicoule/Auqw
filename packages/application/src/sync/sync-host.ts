@@ -319,6 +319,10 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
   // then only touches artifacts older than its own bump.
   let generation = 0;
   let listenerGen = -1;
+  // Teardowns enqueue here and binds chain behind them — a restart
+  // can't collide on the still-bound acceptor while an old stop is
+  // mid-flight, and teardown never reorders ahead of a bind.
+  let lifecycle: Promise<void> = Promise.resolve();
 
   const log = deps.log ?? (() => undefined);
 
@@ -714,6 +718,10 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         const gen = generation;
         let attempt: Promise<Result<{ port: number }>> | null = null;
         attempt = (async () => {
+          // Wait out an in-flight teardown first — the acceptor binds
+          // a single native listener, so a fresh bind must not race a
+          // pending unbind.
+          await lifecycle;
           const bound = await deps.acceptor.listen({ onSocket });
           if (!bound.ok) {
             return bound;
@@ -776,28 +784,40 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         ttlMs: deps.codeTtlMs ?? 120_000,
         mintCode: deps.mintCode,
       });
-      await starting;
-      serviceCancel.cancel();
-      serviceCancel = new CancellationSource();
-      mint.expire();
-      for (const session of doomed) {
-        killSession(session);
-      }
-      if (listenerGen < gen) {
-        const bound = listener;
-        listener = null;
-        try {
-          advertiser?.close();
-        } catch {
-          // best effort
+      // Enqueue teardown AFTER any in-flight work — a start() that
+      // begins during our await still binds behind this teardown via
+      // the shared lifecycle chain, so it can't collide on the
+      // acceptor's single native listener.
+      const teardown = async (): Promise<void> => {
+        await starting;
+        serviceCancel.cancel();
+        serviceCancel = new CancellationSource();
+        mint.expire();
+        for (const session of doomed) {
+          killSession(session);
         }
-        advertiser = null;
-        try {
-          bound?.close();
-        } catch {
-          // best effort
+        if (listenerGen < gen) {
+          const bound = listener;
+          listener = null;
+          try {
+            advertiser?.close();
+          } catch {
+            // best effort
+          }
+          advertiser = null;
+          try {
+            bound?.close();
+          } catch {
+            // best effort
+          }
         }
-      }
+      };
+      const ran = lifecycle.then(teardown, teardown);
+      lifecycle = ran.then(
+        () => undefined,
+        () => undefined,
+      );
+      await ran;
     },
     mintOffer() {
       if (closed || listener === null) {
@@ -835,6 +855,13 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       const started = startPromise;
       startPromise = null;
       await started?.catch(() => undefined);
+      // Terminal — the acceptor's own subscriptions (native event
+      // listeners, accept threads) die with the host.
+      try {
+        deps.acceptor.close?.();
+      } catch {
+        // best effort
+      }
     },
   };
 }

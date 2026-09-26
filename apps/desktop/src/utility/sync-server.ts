@@ -1279,6 +1279,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         // that paired by typed code (no QR payload) learns it here.
         ...(pairPot !== null ? { pot: pairPot } : {}),
       });
+      // The shown code is dead the moment it's consumed — poke any
+      // open pairing sheet to remint before its expiry timer would.
+      try {
+        deps.notifyNearby?.({ type: 'paired' });
+      } catch {
+        // push is best-effort
+      }
       await enterOpen(session);
       return;
     }
@@ -1778,9 +1785,17 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
      */
     'sync:nearbyStart': async () => {
       browseOwners += 1;
-      // One shared browse: a second window joins the live session or
-      // the pending start rather than opening a parallel browse.
-      if (browseSession !== null || browsePending !== null) {
+      if (browseSession !== null) {
+        return undefined;
+      }
+      // A joiner awaits the shared pending start — on failure it rolls
+      // back its own owner count, on success the session is shared.
+      if (browsePending !== null) {
+        const shared = await browsePending;
+        if (!shared.ok) {
+          browseOwners -= 1;
+          throw engineError(shared.error);
+        }
         return undefined;
       }
       if (deps.discovery === undefined || deps.discovery === null) {

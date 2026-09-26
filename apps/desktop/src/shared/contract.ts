@@ -954,7 +954,10 @@ export type SyncNearbyPeer = {
 
 export type SyncNearbyEvent =
   | { readonly type: 'found'; readonly peer: SyncNearbyPeer }
-  | { readonly type: 'lost'; readonly name: string };
+  | { readonly type: 'lost'; readonly name: string }
+  // A caller just consumed our minted offer — the sheet remints so
+  // it never displays a dead code.
+  | { readonly type: 'paired' };
 
 function isSyncNearbyPeer(value: unknown): value is SyncNearbyPeer {
   return (
@@ -985,7 +988,9 @@ export function isSyncNearbyEvent(
   ) {
     return isBoundedString(value['name'], 128);
   }
-  return false;
+  return (
+    value['type'] === 'paired' && hasOnlyKeys(value, ['type'])
+  );
 }
 
 /**

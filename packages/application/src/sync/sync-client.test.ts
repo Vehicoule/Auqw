@@ -130,6 +130,7 @@ function fakeCrypto(opts: { identity?: SyncIdentity } = {}): SyncClientCrypto {
     name: 'fake-v1',
     identity,
     createIdentity: () => ({ pub: 'new-pub', priv: 'new-priv' }),
+    fingerprintOf: fpOf,
     begin: ({ deviceId, name }): SyncClientHandshake => ({
       hello: () => ({
         v: 1,

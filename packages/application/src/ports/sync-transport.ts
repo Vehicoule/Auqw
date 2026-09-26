@@ -99,6 +99,9 @@ export interface SyncClientCrypto {
   readonly name: string;
   readonly identity: SyncIdentity;
   createIdentity(): SyncIdentity;
+  /** sha256(SPKI DER) hex — verify a claimed pub against a session's
+      verified serverFp before custody accepts it. */
+  fingerprintOf(pub: string): string;
   begin(opts: { deviceId: string; name: string }): SyncClientHandshake;
 }
 
@@ -145,6 +148,13 @@ export interface SyncAcceptorPort {
     onSocket(socket: SyncSocket): void;
     onError?(error: { readonly message: string }): void;
   }): Promise<Result<SyncSocketListener>>;
+  /**
+   * Terminal teardown — drops the acceptor's own resources (native
+   * event subscriptions, accept threads). `listen()` stays valid for
+   * reuse via `SyncSocketListener.close()`; `close()` is for when the
+   * whole acceptor is being disposed.
+   */
+  close?(): void;
 }
 
 /**

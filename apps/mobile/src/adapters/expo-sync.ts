@@ -110,6 +110,12 @@ export type ExpoPairHostSurface = {
   stop(): Promise<void>;
   /** Terminal teardown — session dispose. */
   close(): Promise<void>;
+  /**
+   * Subscribe to inbound pairs — the shown offer's code is consumed
+   * the moment one lands, so the share UI remints immediately rather
+   * than display a dead code until expiry.
+   */
+  onPaired(cb: () => void): () => void;
 };
 
 function nativeRandom(host: AuqwSyncNative): (n: number) => Uint8Array {
@@ -219,11 +225,16 @@ export async function createExpoSync(
       // map BEFORE the sync round, or syncNow dials the stale port.
       kickResume: (fp) =>
         void client.refreshPeers().then(() => client.syncNow(fp)),
-      onPair: () => {
-        // The pair host wrote custody through the registry — the
-        // client's in-memory map only sees it after a reload, then
-        // the status subscription refreshes the UI.
-        void client.refreshPeers().then(() => deps.onPaired?.());
+      onPair: (peer) => {
+        // The pair host wrote custody through the registry — reload
+        // into the client's map, kick a sync round at the fresh
+        // endpoint (the pair connection is pairing-only and dies on
+        // close), then let the UI remint its consumed offer.
+        void client
+          .refreshPeers()
+          .then(() => client.syncNow(peer.fp))
+          .then(() => deps.onPaired?.())
+          .catch(() => deps.onPaired?.());
       },
     });
     const discovery =
@@ -262,13 +273,14 @@ function buildPairHost(opts: {
   name: string;
   clock: ClockPort;
   kickResume: (fp: string) => void;
-  onPair: () => void;
+  onPair: (peer: { readonly fp: string }) => void;
 }): ExpoPairHostSurface | null {
   if (opts.native.syncListen === undefined) {
     return null;
   }
   const discovery = createExpoSyncDiscovery(opts.native);
   const fp = nobleFingerprintOf(opts.identity.pub);
+  const pairedSubs = new Set<() => void>();
   const pairHost = createSyncPairHost({
     acceptor: createExpoSyncAcceptor(opts.native),
     crypto: createNobleSyncResponder({
@@ -293,7 +305,16 @@ function buildPairHost(opts: {
     },
     clock: opts.clock,
     onResume: (peer) => opts.kickResume(peer.fp),
-    onPair: () => opts.onPair(),
+    onPair: (peer) => {
+      for (const cb of pairedSubs) {
+        try {
+          cb();
+        } catch {
+          // a dead UI subscriber must not kill the pair path
+        }
+      }
+      opts.onPair(peer);
+    },
   });
   const localEndpoints = async (): Promise<readonly string[]> => {
     if (
@@ -338,6 +359,10 @@ function buildPairHost(opts: {
       return pairHost.port;
     },
     localEndpoints,
+    onPaired(cb) {
+      pairedSubs.add(cb);
+      return () => pairedSubs.delete(cb);
+    },
     stop: () => pairHost.stop(),
     close: () => pairHost.close(),
   };

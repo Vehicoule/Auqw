@@ -975,6 +975,21 @@ function Main({
     // Subscribe BEFORE starting the browse — early `found` events for
     // already-advertised peers would otherwise fire with no receiver.
     const unsubscribe = window.auqw.sync.onNearby((event) => {
+      if (event.type === 'paired') {
+        // Our minted offer was just consumed — remint immediately so
+        // the sheet never displays a dead code (gen-gated like every
+        // other mint path).
+        const gen = pairSheetGen.current;
+        void window.auqw.sync
+          .pairing()
+          .then((offer) => {
+            if (gen === pairSheetGen.current) {
+              setPairing(offer);
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
       setNearbyPeers((prev) => {
         if (event.type === 'lost') {
           return prev.filter((peer) => peer.name !== event.name);

@@ -440,6 +440,7 @@ export function createNoiseV1ClientCrypto(
   return {
     name: 'noise-v1',
     identity,
+    fingerprintOf,
     createIdentity: generateIdentity,
     begin({ deviceId, name }): SyncClientHandshake {
       const eph = generateKeyPairSync('x25519');

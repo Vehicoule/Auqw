@@ -159,14 +159,9 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
         };
         return ok(session);
       } catch (thrown) {
-        return err(
-          appError(
-            'unavailable',
-            `sync: mdns browse failed — ${
-              thrown instanceof Error ? thrown.message : 'unknown'
-            }`,
-          ),
-        );
+        // bonjour failure text can embed the service query — keep the
+        // typed reason only.
+        return err(appError('unavailable', 'sync: mdns browse failed'));
       }
     },
   };
