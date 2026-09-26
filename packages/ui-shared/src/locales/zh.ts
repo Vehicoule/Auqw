@@ -312,6 +312,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'sync.listener.starting': '启动中',
   'sync.listener.listening': '监听中',
   'sync.listener.unavailable': '不可用',
+  'sync.listener.dormant': '已关闭',
   'sync.listener.disabled': '已禁用',
   'sync.engine.ready': '就绪',
   'sync.engine.absent': '缺失',
