@@ -436,26 +436,22 @@ function botGuardSandbox(
         XMLHttpRequest: { prototype: { open: unknown } };
       }
     ).XMLHttpRequest.prototype as {
-      open: (
-        this: unknown,
-        method: unknown,
-        url: unknown,
-        asynchronous?: unknown,
-        ...rest: unknown[]
-      ) => unknown;
+      open: (this: unknown, ...args: unknown[]) => unknown;
     };
     const innerOpen = xhrProto.open;
     xhrProto.open = function (
       this: unknown,
-      method: unknown,
-      url: unknown,
-      asynchronous?: unknown,
-      ...rest: unknown[]
+      ...args: unknown[]
     ): unknown {
-      if (asynchronous !== undefined && !asynchronous) {
+      // jsdom's IDL wrapper converts a present-but-falsy third argument
+      // (including explicit `undefined`) to `false`, i.e. synchronous —
+      // and sync requests replay in the ungated worker. Forward the
+      // caller's real argument list, refusing anything that would go
+      // synchronous.
+      if (args.length >= 3 && !args[2]) {
         throw new TypeError('pot: synchronous XHR is not available');
       }
-      return innerOpen.call(this, method, url, asynchronous, ...rest);
+      return innerOpen.apply(this, args);
     };
   }
   // The interpreter's network surface is capped to exact hosts (its
