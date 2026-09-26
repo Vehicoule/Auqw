@@ -66,7 +66,8 @@ class AuqwSyncSockets(
       try {
         ServerSocket(0)
       } catch (e: Exception) {
-        throw CodedException("unavailable", "syncListen failed: ${e.message}", e)
+        Log.w(TAG, "syncListen failed", e)
+        throw CodedException("unavailable", "syncListen failed", e)
       }
     listener = server
     val thread =
@@ -157,7 +158,8 @@ class AuqwSyncSockets(
     } catch (e: Exception) {
       entries.remove(socketId)
       runCatching { socket.close() }
-      throw CodedException("unavailable", "syncConnect failed: ${e.message}", e)
+      Log.w(TAG, "syncConnect failed", e)
+      throw CodedException("unavailable", "syncConnect failed", e)
     }
     val reader =
       Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
@@ -184,7 +186,8 @@ class AuqwSyncSockets(
         entry.socket.getOutputStream().flush()
       } catch (e: Exception) {
         reportClosed(socketId, entry, "error")
-        throw CodedException("unavailable", "syncSend failed: ${e.message}", e)
+        Log.w(TAG, "syncSend failed", e)
+        throw CodedException("unavailable", "syncSend failed", e)
       }
     }
   }

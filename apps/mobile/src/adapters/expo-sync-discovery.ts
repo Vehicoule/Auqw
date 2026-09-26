@@ -25,6 +25,7 @@ export function createExpoSyncDiscovery(
 } {
   let browseSub: AuqwExpoSubscription | null = null;
   let browsing: {
+    gen: number;
     onFound: (peer: {
       name: string;
       host: string;
@@ -33,6 +34,11 @@ export function createExpoSyncDiscovery(
     }) => void;
     onLost: (name: string) => void;
   } | null = null;
+  // Browse occupancy is claimed SYNCHRONOUSLY (before any await) — a
+  // second caller waiting on a pending stop can't slip through the
+  // guard and two starts can't co-own the shared listener. `gen`
+  // scopes close() to the generation that installed it.
+  let browseGen = 0;
 
   // Native stop is fire-and-forget on the call site (close() is sync)
   // — chain it so a reopen can't start a browse that a late stop then
@@ -51,11 +57,17 @@ export function createExpoSyncDiscovery(
           appError('unavailable', 'sync: discovery seam absent'),
         );
       }
-      if (browseSub !== null) {
+      if (browsing !== null) {
         return err(appError('unavailable', 'sync: already browsing'));
       }
+      const gen = ++browseGen;
+      browsing = { gen, onFound, onLost };
       await stopChain;
-      browsing = { onFound, onLost };
+      if (browsing?.gen !== gen) {
+        // Superseded while the stop settled — we no longer own the
+        // browse slot, so don't install a listener we'd leak.
+        return err(appError('cancelled', 'sync: browse superseded'));
+      }
       // Names we've emitted `found` for — a native 'stopped' (async NSD
       // start failure) must retract each so the UI list doesn't hold
       // ghosts.
@@ -103,9 +115,11 @@ export function createExpoSyncDiscovery(
       try {
         await native.syncBrowse();
       } catch (thrown) {
-        browseSub?.remove();
-        browseSub = null;
-        browsing = null;
+        if (browsing?.gen === gen) {
+          browseSub?.remove();
+          browseSub = null;
+          browsing = null;
+        }
         return err(
           nativeError(thrown) ??
             appError('unavailable', 'sync: browse failed'),
@@ -113,6 +127,11 @@ export function createExpoSyncDiscovery(
       }
       const session: SyncDiscoverySession = {
         close() {
+          // Scoped to our generation — a stale handle can't remove a
+          // newer browse's subscription or null its callbacks.
+          if (browsing?.gen !== gen) {
+            return;
+          }
           browseSub?.remove();
           browseSub = null;
           browsing = null;

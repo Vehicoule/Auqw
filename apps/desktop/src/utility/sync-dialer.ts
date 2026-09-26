@@ -101,13 +101,16 @@ export function createNodeSyncSockets(): SyncSocketPort {
         });
         socket.once('error', (thrown) => {
           live.delete(socket);
+          // The errno code is safe to surface (ECONNREFUSED etc.) — the
+          // full message embeds the peer's host:port, and this error
+          // crosses IPC into the renderer.
+          const raw = (thrown as { code?: unknown }).code;
+          const code =
+            typeof raw === 'string' && /^[A-Z_]{2,20}$/.test(raw)
+              ? ` (${raw})`
+              : '';
           finish(
-            err(
-              appError(
-                'unavailable',
-                `sync: dial failed — ${thrown.message}`,
-              ),
-            ),
+            err(appError('unavailable', `sync: dial failed${code}`)),
           );
         });
         socket.once('close', () => {

@@ -2141,6 +2141,18 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [share.active, share.expiresAt, controller]);
 
+  // The 'expires in Nm' label is a render-time read — tick while an
+  // offer is live so the countdown doesn't freeze between mints.
+  const [shareTick, setShareTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!share.active || share.expiresAt === null) {
+      return;
+    }
+    setShareTick(Date.now());
+    const timer = setInterval(() => setShareTick(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [share.active, share.expiresAt]);
+
   const onShareToggle = useCallback(() => {
     const host = syncSurface?.host;
     if (host === undefined || host === null || share.busy) {
@@ -3875,7 +3887,7 @@ function Main({
                     expiresLabel:
                       share.expiresAt === null
                         ? null
-                        : formatExpiry(share.expiresAt, Date.now()),
+                        : formatExpiry(share.expiresAt, shareTick),
                   }
             }
             onShareToggle={

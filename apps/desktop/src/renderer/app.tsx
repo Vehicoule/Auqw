@@ -992,17 +992,27 @@ function Main({
       unsubscribe();
     };
   }, [pairSheetOpen]);
+  // Sheet-open generation — a mint resolving after dismissal must not
+  // resurrect an offer the remint effect would keep refreshing forever.
+  const pairSheetGen = useRef(0);
   const onPairDevice = useCallback(() => {
     setPairSheetOpen(true);
+    const gen = ++pairSheetGen.current;
     void window.auqw.sync
       .pairing()
       .then((offer) => {
+        if (gen !== pairSheetGen.current) {
+          return;
+        }
         setPairing(offer);
         setPairingError(null);
       })
       // A mint failure (listener down, no LAN address) must surface —
       // a silent reject leaves the row looking dead-clicked.
       .catch((thrown: unknown) => {
+        if (gen !== pairSheetGen.current) {
+          return;
+        }
         setPairing(null);
         setPairingError(
           isShellError(thrown)
@@ -1112,15 +1122,24 @@ function Main({
   // Offers die at expiresAt — remint quietly while the sheet stays
   // open so a displayed QR never outlives what the host accepts.
   useEffect(() => {
-    if (pairing === null || Date.now() < pairing.expiresAt) {
+    if (!pairSheetOpen || pairing === null || Date.now() < pairing.expiresAt) {
       return;
     }
+    const gen = pairSheetGen.current;
     void window.auqw.sync
       .pairing()
-      .then((offer) => setPairing(offer))
-      .catch(() => setPairing(null));
+      .then((offer) => {
+        if (gen === pairSheetGen.current) {
+          setPairing(offer);
+        }
+      })
+      .catch(() => {
+        if (gen === pairSheetGen.current) {
+          setPairing(null);
+        }
+      });
     // pairingTick drives the re-check; pairing.expiresAt is the gate.
-  }, [pairing, pairingTick]);
+  }, [pairSheetOpen, pairing, pairingTick]);
   useEffect(() => {
     if (tab !== 'settings') {
       return;
@@ -3300,6 +3319,7 @@ function Main({
           <SheetScreen
             stackKey="sheet-pairing"
             onDismissed={() => {
+              pairSheetGen.current += 1;
               setPairing(null);
               setPairSheetOpen(false);
             }}
@@ -3324,6 +3344,7 @@ function Main({
                     }
               }
               onDismiss={() => {
+                pairSheetGen.current += 1;
                 setPairing(null);
                 setPairSheetOpen(false);
               }}

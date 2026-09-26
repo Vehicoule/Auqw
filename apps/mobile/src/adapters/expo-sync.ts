@@ -214,7 +214,11 @@ export async function createExpoSync(
       deviceId,
       name: deviceName,
       clock: deps.clock,
-      kickResume: (fp) => void client.syncNow(fp),
+      // The resumed peer may have announced a fresh endpoint (its
+      // listener port is ephemeral) — reload custody into the client
+      // map BEFORE the sync round, or syncNow dials the stale port.
+      kickResume: (fp) =>
+        void client.refreshPeers().then(() => client.syncNow(fp)),
       onPair: () => {
         // The pair host wrote custody through the registry — the
         // client's in-memory map only sees it after a reload, then

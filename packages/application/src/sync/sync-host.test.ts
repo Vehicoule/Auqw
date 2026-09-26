@@ -234,10 +234,22 @@ function fakeKeys(): SyncClientKeys & { peers: Map<string, SyncPeer> } {
     identitySet: () => Promise.resolve(ok(undefined)),
     peerList: () => Promise.resolve(ok([...peers.values()])),
     peerTouch: (peer) => {
-      if (!peers.has(peer.fp)) {
+      const existing = peers.get(peer.fp);
+      if (existing === undefined) {
         return Promise.resolve(ok(false));
       }
-      peers.set(peer.fp, peer);
+      peers.set(peer.fp, {
+        ...existing,
+        name: peer.name,
+        lastSeenAt: peer.lastSeenAt,
+        ...(peer.endpoints.length > 0 ? { endpoints: peer.endpoints } : {}),
+        ...(peer.deviceId === undefined || peer.deviceId === ''
+          ? {}
+          : { deviceId: peer.deviceId }),
+        ...(peer.pub === undefined || peer.pub === ''
+          ? {}
+          : { pub: peer.pub }),
+      });
       return Promise.resolve(ok(true));
     },
     peerPut: (peer) => {

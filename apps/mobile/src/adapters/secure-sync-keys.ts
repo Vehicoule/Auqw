@@ -120,36 +120,28 @@ export function createSecureSyncKeys(): SyncClientKeys {
     );
     return next;
   };
-  const peerPutLocked = (
-    peer: SyncPeer,
-    requirePresent: boolean,
-  ): Promise<Result<boolean>> =>
+  const peerPutLocked = (peer: SyncPeer): Promise<Result<void>> =>
     withIndexLock(async () => {
       // Record + index inside one lock: a racing peerDelete between
       // the two writes would remove the freshly indexed record and
-      // leave the pairing half-visible. `requirePresent` makes the
-      // existence check part of that lock so a touch can't resurrect
-      // a peer an interleaved delete already revoked.
+      // leave the pairing half-visible.
       const indexRead = await readJsonStore(PEER_INDEX_KEY);
       if (!indexRead.ok) {
         return indexRead;
       }
       const fps = isFpList(indexRead.value) ? indexRead.value : [];
-      if (requirePresent && !fps.includes(peer.fp)) {
-        return ok(false);
-      }
       const wrote = await writeJsonStore(peerKey(peer.fp), peer);
       if (!wrote.ok) {
         return wrote;
       }
       if (fps.includes(peer.fp)) {
-        return ok(true);
+        return ok(undefined);
       }
       const indexed = await writeJsonStore(PEER_INDEX_KEY, [
         ...fps,
         peer.fp,
       ]);
-      return indexed.ok ? ok(true) : indexed;
+      return indexed.ok ? ok(undefined) : indexed;
     });
   return {
     async identityGet(signal) {
@@ -229,8 +221,7 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      const wrote = await peerPutLocked(peer, false);
-      return wrote.ok ? ok(undefined) : wrote;
+      return peerPutLocked(peer);
     },
 
     async peerTouch(peer, signal) {
@@ -238,11 +229,50 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (hit !== null) {
         return hit;
       }
-      const wrote = await peerPutLocked(peer, true);
-      if (!wrote.ok) {
-        return wrote;
-      }
-      return ok(wrote.value);
+      // Read-merge-write inside the index lock: existence-gated (a
+      // deleted peer can't be resurrected) AND cursor-preserving (a
+      // concurrent syncRound's peerPut can't be clobbered by a stale
+      // caller-side read).
+      return withIndexLock(async () => {
+        const indexRead = await readJsonStore(PEER_INDEX_KEY);
+        if (!indexRead.ok) {
+          return indexRead;
+        }
+        const fps = isFpList(indexRead.value) ? indexRead.value : [];
+        if (!fps.includes(peer.fp)) {
+          return ok(false);
+        }
+        const existingRead = await readJsonStore(peerKey(peer.fp));
+        if (!existingRead.ok) {
+          return existingRead;
+        }
+        if (
+          existingRead.value === null ||
+          !isSyncPeerRecord(existingRead.value)
+        ) {
+          return ok(false);
+        }
+        const existing = existingRead.value;
+        const merged: SyncPeer = {
+          ...existing,
+          name: peer.name,
+          lastSeenAt: peer.lastSeenAt,
+          ...(peer.endpoints.length > 0
+            ? { endpoints: peer.endpoints }
+            : {}),
+          ...(peer.deviceId === undefined || peer.deviceId === ''
+            ? {}
+            : { deviceId: peer.deviceId }),
+          ...(peer.pub === undefined || peer.pub === ''
+            ? {}
+            : { pub: peer.pub }),
+        };
+        const wrote = await writeJsonStore(peerKey(peer.fp), merged);
+        if (!wrote.ok) {
+          return wrote;
+        }
+        return ok(true);
+      });
     },
 
     async peerMerge(peer, signal) {

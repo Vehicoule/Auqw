@@ -53,32 +53,24 @@ export function createSyncPeerRegistry(
       });
     },
     async touch(peer) {
-      const listed = await keys.peerList();
-      if (!listed.ok) {
-        return err(listed.error);
-      }
-      const existing = listed.value.find((p) => p.fp === peer.fp);
-      if (existing === undefined) {
-        return ok(false);
-      }
-      const record: SyncPeer = {
-        ...existing,
+      // One atomic existence-gated merge — the port itself preserves
+      // the stored cursor/lastSyncAt/pairedAt/pot and skips empty
+      // endpoint/id/pub overlays, so no caller-side read races a
+      // concurrent syncRound's cursor write (or an unpair).
+      const touched = await keys.peerTouch({
+        fp: peer.fp,
         name: peer.name,
+        endpoints: peer.endpoints,
+        pairedAt: peer.pairedAt,
         lastSeenAt: peer.lastSeenAt,
-        endpoints:
-          peer.endpoints.length > 0 ? peer.endpoints : existing.endpoints,
-        ...(peer.id === ''
-          ? {}
-          : { deviceId: peer.id }),
+        peerCursor: {},
+        ...(peer.id === '' ? {} : { deviceId: peer.id }),
         ...(peer.pub === '' ? {} : { pub: peer.pub }),
-      };
-      // Atomic check-and-write — an unpair racing this touch must
-      // not see its deleted record resurrected by a stale write.
-      const written = await keys.peerTouch(record);
-      if (!written.ok) {
-        return err(written.error);
+      });
+      if (!touched.ok) {
+        return err(touched.error);
       }
-      return ok(written.value);
+      return ok(touched.value);
     },
   };
 }

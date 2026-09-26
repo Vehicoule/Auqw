@@ -219,10 +219,24 @@ function fakeKeys(): SyncClientKeys & {
       return Promise.resolve(ok(undefined));
     },
     peerTouch: (peer: SyncPeer) => {
-      if (!index.has(peer.fp)) {
+      const existing = index.has(peer.fp)
+        ? peers.get(peer.fp)
+        : undefined;
+      if (existing === undefined) {
         return Promise.resolve(ok(false));
       }
-      peers.set(peer.fp, peer);
+      peers.set(peer.fp, {
+        ...existing,
+        name: peer.name,
+        lastSeenAt: peer.lastSeenAt,
+        ...(peer.endpoints.length > 0 ? { endpoints: peer.endpoints } : {}),
+        ...(peer.deviceId === undefined || peer.deviceId === ''
+          ? {}
+          : { deviceId: peer.deviceId }),
+        ...(peer.pub === undefined || peer.pub === ''
+          ? {}
+          : { pub: peer.pub }),
+      });
       return Promise.resolve(ok(true));
     },
     peerMerge: (peer: SyncPeer) => {

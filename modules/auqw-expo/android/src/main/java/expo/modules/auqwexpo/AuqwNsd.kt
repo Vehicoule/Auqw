@@ -69,7 +69,8 @@ class AuqwNsd(
       manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
     } catch (e: Exception) {
       registration = null
-      throw CodedException("unavailable", "syncAdvertise failed: ${e.message}", e)
+      Log.w(TAG, "syncAdvertise failed", e)
+      throw CodedException("unavailable", "syncAdvertise failed", e)
     }
   }
 
@@ -139,7 +140,10 @@ class AuqwNsd(
     } catch (e: Exception) {
       discovery = null
       releaseLock(executor)
-      throw CodedException("unavailable", "syncBrowse failed: ${e.message}", e)
+      // Raw native messages can carry device/network details — the
+      // cause stays in logcat, the JS-facing message stays generic.
+      Log.w(TAG, "syncBrowse failed", e)
+      throw CodedException("unavailable", "syncBrowse failed", e)
     }
   }
 

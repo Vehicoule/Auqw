@@ -244,10 +244,14 @@ export interface SyncClientKeys {
     signal?: CancellationSignal,
   ): Promise<Result<void>>;
   /**
-   * Check-and-write: update the fp's record only while it still
-   * exists — `false` when custody no longer carries it. Implementers
-   * serialize the existence check with the write so a concurrent
-   * peerDelete can't be resurrected by an in-flight touch.
+   * Atomic existence-gated merge: under the same serialization as
+   * peerPut/peerDelete, read the stored row and overlay resume-owned
+   * fields — the stored `peerCursor`, `lastSyncAt`, `pairedAt`, and
+   * `pot` survive; `name` and `lastSeenAt` replace; `endpoints`,
+   * `deviceId`, and `pub` replace only when the incoming value is
+   * non-empty. `false` when custody no longer carries the fp, so a
+   * concurrent peerDelete can't be resurrected — and a sync round's
+   * cursor write can't be lost between a caller-side read and write.
    */
   peerTouch(
     peer: SyncPeer,
