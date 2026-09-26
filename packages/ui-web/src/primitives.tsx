@@ -259,6 +259,7 @@ export type IconName =
   | 'heart'
   | 'heart-filled'
   | 'queue'
+  | 'podium'
   | 'settings'
   | 'close'
   | 'drag-handle'
@@ -281,7 +282,8 @@ export type IconName =
   | 'radio'
   | 'check'
   | 'menu'
-  | 'monitor';
+  | 'monitor'
+  | 'sidebar';
 
 type GlyphShape =
   | { readonly kind: 'path'; readonly d: string }
@@ -364,6 +366,10 @@ const GLYPHS: Record<IconName, Glyph> = {
       p('M17 14v6m0 0-2-2m2 2 2-2'),
     ],
   },
+  podium: {
+    filled: false,
+    shapes: [rr(4, 10, 4, 9, 1), rr(10, 5, 4, 14, 1), rr(16, 13, 4, 6, 1)],
+  },
   settings: {
     filled: false,
     shapes: [
@@ -444,6 +450,10 @@ const GLYPHS: Record<IconName, Glyph> = {
   monitor: {
     filled: false,
     shapes: [rr(3, 5, 18, 12, 1.5), p('M9 21h6m-3-4v4')],
+  },
+  sidebar: {
+    filled: false,
+    shapes: [rr(3, 5, 18, 14, 1.5), p('M10 5v14')],
   },
 };
 

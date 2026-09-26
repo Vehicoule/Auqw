@@ -32,7 +32,7 @@ const {
   Artwork,
   CollectionScreen,
   CorrectionsScreen,
-  DesktopSidebar,
+  DesktopChrome,
   EntityScreen,
   HomeScreen,
   Icon,
@@ -504,16 +504,27 @@ function render(node: ReactNode): string {
 
 {
   const markup = render(
-    h(DesktopSidebar, {
-      items: fixtureNavItems,
+    h(DesktopChrome, {
+      tabs: fixtureNavItems,
       activeKey: 'home',
       onSelect: () => {},
+      onFocusSearch: () => {},
+      onOpenSettings: () => {},
+      stage: h(NowPlayingScreen, { player: fixturePlayerPlaying }),
+      onStopPlayback: () => {},
+      children: h('div'),
     }),
   );
-  check('sidebar is a nav landmark', markup.includes('<nav'));
-  check('sidebar marks the active item', markup.includes('aria-selected="true"'));
+  check('chrome tabs are a nav landmark', markup.includes('<nav'));
+  check('chrome marks the active tab', markup.includes('aria-selected="true"'));
+  check('chrome renders the stage column', markup.includes('uw-stage-col'));
+  check('chrome renders the world toolbar', markup.includes('uw-world-bar'));
+  check(
+    'chrome offers a stage stop control',
+    markup.includes('aria-label="stop and dismiss"'),
+  );
   for (const item of fixtureNavItems) {
-    assertIncludes('sidebar renders item', markup, item.label);
+    assertIncludes('chrome renders tab', markup, item.label);
   }
 }
 {

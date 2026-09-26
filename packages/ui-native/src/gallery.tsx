@@ -216,6 +216,7 @@ const ICON_SET: readonly IconName[] = [
   'radio',
   'check',
   'menu',
+  'podium',
 ];
 
 export function GalleryScreen() {

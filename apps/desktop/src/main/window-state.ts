@@ -23,14 +23,28 @@ export type WindowState = {
   readonly maximized: boolean;
 };
 
+export const MIN_WINDOW_WIDTH = 640;
+export const MIN_WINDOW_HEIGHT = 480;
+
 export function defaultWindowState(): WindowState {
   return { width: 1280, height: 800, maximized: false };
 }
 
+// Legacy floor: states saved before the window minimums existed are
+// still valid input; undersized dimensions are clamped on load rather
+// than discarding the placement and maximized flag with them.
+const SAVED_MIN_DIMENSION = 200;
+
 function isDimension(value: unknown): value is number {
   return (
-    isSafeNonNegativeInt(value) && value >= 200 && value <= 16_384
+    isSafeNonNegativeInt(value) &&
+    value >= SAVED_MIN_DIMENSION &&
+    value <= 16_384
   );
+}
+
+function clampDimension(value: number, minimum: number): number {
+  return value < minimum ? minimum : value;
 }
 
 function isCoordinate(value: unknown): value is number {
@@ -57,11 +71,16 @@ export function parseWindowState(value: unknown): WindowState | null {
   ) {
     return null;
   }
+  const clamped = {
+    width: clampDimension(width, MIN_WINDOW_WIDTH),
+    height: clampDimension(height, MIN_WINDOW_HEIGHT),
+    maximized,
+  };
   if (x === undefined && y === undefined) {
-    return { width, height, maximized };
+    return clamped;
   }
   if (isCoordinate(x) && isCoordinate(y)) {
-    return { width, height, x, y, maximized };
+    return { ...clamped, x, y };
   }
   return null;
 }

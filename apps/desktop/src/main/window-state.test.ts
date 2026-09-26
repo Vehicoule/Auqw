@@ -78,6 +78,23 @@ export async function run(): Promise<void> {
     assertDeepEqual(restored.state, good);
     assertEqual(restored.error, null);
 
+    // Legacy sub-minimum size clamps to the window minimums but keeps
+    // the saved position and maximized flag.
+    writeFileSync(
+      path,
+      JSON.stringify({ width: 600, height: 450, x: 100, y: 80, maximized: true }),
+      'utf8',
+    );
+    const legacy = await loadWindowState(path);
+    assertDeepEqual(legacy.state, {
+      width: 640,
+      height: 480,
+      x: 100,
+      y: 80,
+      maximized: true,
+    });
+    assertEqual(legacy.error, null);
+
     // Save → load round-trips; save also creates missing directories.
     const nested = join(dir, 'deeper', 'state.json');
     const state = { width: 900, height: 640, maximized: false };

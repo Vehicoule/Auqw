@@ -21,7 +21,7 @@ import {
   UnavailableState,
 } from './states.tsx';
 import { MiniPlayer } from './mini-player.tsx';
-import { DesktopChrome, DesktopSidebar } from './chrome.tsx';
+import { DesktopChrome } from './chrome.tsx';
 import { NowPlayingScreen, StageSheet, TransportControls } from './now-playing-screen.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import { SearchScreen } from './search-screen.tsx';
@@ -189,6 +189,8 @@ const ICON_SET: readonly IconName[] = [
   'check',
   'menu',
   'monitor',
+  'sidebar',
+  'podium',
 ];
 
 export function GalleryScreen() {
@@ -361,18 +363,20 @@ export function GalleryScreen() {
           ))}
         </Section>
 
-        <Section title="desktop chrome" note="sidebar · header · mini player">
+        <Section title="desktop chrome" note="stage column · world toolbar">
           <Frame height={420}>
             <DesktopChrome
-              items={fixtureNavItems}
+              tabs={fixtureNavItems.filter((item) => item.key !== 'settings')}
               activeKey={nav}
               onSelect={setNav}
-              miniPlayer={
-                <MiniPlayer
+              onFocusSearch={noop}
+              onOpenSettings={() => setNav('settings')}
+              stage={
+                <NowPlayingScreen
                   player={fixturePlayerPlaying}
-                  onPress={noop}
                   onPlayPause={noop}
                   onNext={noop}
+                  onPrevious={noop}
                   onToggleLike={noop}
                 />
               }
@@ -563,7 +567,6 @@ export function GalleryScreen() {
               onToggleLike={noop}
               onContext={noop}
               onOpenCollection={noop}
-              onPlayCollection={noop}
               onOpenCard={noop}
               onOpenArtist={noop}
               onCreatePlaylist={noop}
@@ -580,7 +583,6 @@ export function GalleryScreen() {
               onToggleLike={noop}
               onContext={noop}
               onOpenCollection={noop}
-              onPlayCollection={noop}
               onOpenCard={noop}
               onOpenArtist={noop}
               onCreatePlaylist={noop}

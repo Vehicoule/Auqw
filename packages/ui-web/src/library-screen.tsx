@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Artwork, Icon, IconButton, Pressable, Text } from './primitives.tsx';
+import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
@@ -22,9 +22,6 @@ export type LibraryScreenProps = {
   readonly onOpenCollection?:
     | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
     | undefined;
-  readonly onPlayCollection?:
-    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-    | undefined;
   readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
   readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;
   readonly onCreatePlaylist?: ((name: string) => void) | undefined;
@@ -33,7 +30,7 @@ export type LibraryScreenProps = {
 const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
   liked: 'heart',
   downloads: 'download',
-  top50: 'queue',
+  top50: 'podium',
   history: 'clock',
 };
 
@@ -51,51 +48,43 @@ const KIND_FILTERS: readonly {
 function CollectionTile({
   tile,
   onOpen,
-  onPlay,
 }: {
   readonly tile: LibraryModel['collections'][number];
   readonly onOpen?: (() => void) | undefined;
-  readonly onPlay?: (() => void) | undefined;
 }) {
   const enabled = tile.enabled;
   return (
-    <div
+    <Pressable
+      onPress={enabled ? onOpen : undefined}
+      disabled={!enabled}
+      ariaLabel={t('library.tileA11y', { label: tile.label, count: tile.count })}
       className={`uw-collection${enabled ? '' : ' uw-off'}`}
       data-enabled={enabled ? 'true' : 'false'}
     >
-      <Pressable
-        onPress={enabled ? onOpen : undefined}
-        disabled={!enabled}
-        ariaLabel={t('library.tileA11y', { label: tile.label, count: tile.count })}
-        className="uw-collection__body"
-      >
-        <span className="uw-collection__icon">
-          <Icon
-            name={COLLECTION_ICONS[tile.key]}
-            size={15}
-            color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
-          />
-        </span>
-        <span className="uw-collection__text">
-          <Text variant="body" color={enabled ? 'bright' : 'primary'}>
-            {tile.label}
-          </Text>
-          <Text variant="metadata" color="secondary" numberOfLines={2}>
-            {tile.note ?? t('common.trackCount', { count: tile.count })}
-          </Text>
-        </span>
-      </Pressable>
-      {enabled && (
-        <IconButton
-          icon="play"
-          size={30}
-          iconSize={13}
-          color="var(--accent)"
-          ariaLabel={t('library.tilePlayA11y', { label: tile.label })}
-          onPress={tile.count === 0 ? undefined : onPlay}
+      <span className="uw-collection__icon">
+        <Icon
+          name={COLLECTION_ICONS[tile.key]}
+          size={20}
+          color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
         />
-      )}
-    </div>
+      </span>
+      <Text
+        variant="title"
+        color={enabled ? 'bright' : 'primary'}
+        numberOfLines={1}
+        className="uw-collection__label"
+      >
+        {tile.label}
+      </Text>
+      <Text
+        variant="body"
+        color="secondary"
+        numberOfLines={1}
+        className="uw-collection__count"
+      >
+        {tile.note ?? t('common.trackCount', { count: tile.count })}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -217,7 +206,6 @@ export function LibraryScreen({
   onToggleLike,
   onContext,
   onOpenCollection,
-  onPlayCollection,
   onOpenCard,
   onOpenArtist,
   onCreatePlaylist,
@@ -288,11 +276,6 @@ export function LibraryScreen({
                   key === null || onOpenCollection === undefined
                     ? undefined
                     : () => onOpenCollection(key)
-                }
-                onPlay={
-                  key === null || onPlayCollection === undefined
-                    ? undefined
-                    : () => onPlayCollection(key)
                 }
               />
             </div>

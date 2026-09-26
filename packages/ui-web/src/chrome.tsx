@@ -1,48 +1,31 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Icon, Pressable, Text } from './primitives.tsx';
-import type { IconName } from './primitives.tsx';
+import { Icon, IconButton, Pressable, Text } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
+import { useOverlayDismiss } from './stack.tsx';
 import { t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
 
-const NAV_ICONS: Record<string, IconName> = {
-  home: 'home',
-  explore: 'compass',
-  search: 'search',
-  library: 'library',
-  queue: 'queue',
-  settings: 'settings',
-};
+/**
+ * The world's top toolbar — the GTK header bar's form. Start: stage
+ * toggle + search. Center: the page switcher. End: the primary menu.
+ * The strip is also the frameless drag surface; window caption buttons
+ * overlay its far right on win32/linux (see `--uw-caption-w` in
+ * styles.css) and the traffic lights sit over the stage column on
+ * macOS.
+ */
 
-function iconFor(key: string): IconName {
-  return NAV_ICONS[key] ?? 'note';
-}
-
-export type DesktopSidebarProps = {
-  readonly items: readonly NavItemModel[];
+export type WorldTabsProps = {
+  readonly tabs: readonly NavItemModel[];
   readonly activeKey: string;
   readonly onSelect: (key: string) => void;
 };
 
-/**
- * The navbar's desktop form: a left rail with icon + label rows,
- * active row reads the accent pill — same model, same vocabulary.
- */
-export function DesktopSidebar({
-  items,
-  activeKey,
-  onSelect,
-}: DesktopSidebarProps) {
+/** Centered page switcher — text pills, active one reads accent. */
+export function WorldTabs({ tabs, activeKey, onSelect }: WorldTabsProps) {
   return (
-    <nav className="uw-sidebar" aria-label={t('nav.primaryA11y')}>
-      <div className="uw-sidebar__brand">
-        <Icon name="note" size={15} color="var(--accent)" />
-        <Text variant="label" color="bright" uppercase>
-          auqw
-        </Text>
-      </div>
-      {items.map((item) => {
+    <nav className="uw-tabs" aria-label={t('nav.primaryA11y')}>
+      {tabs.map((item) => {
         const active = item.key === activeKey;
         return (
           <Pressable
@@ -50,13 +33,8 @@ export function DesktopSidebar({
             onPress={() => onSelect(item.key)}
             ariaLabel={item.label}
             ariaSelected={active}
-            className={`uw-sidebar__item${active ? ' uw-sidebar__item--on' : ''}`}
+            className={`uw-tabs__item${active ? ' uw-tabs__item--on' : ''}`}
           >
-            <Icon
-              name={iconFor(item.key)}
-              size={14}
-              color={active ? 'var(--accent)' : 'var(--text-secondary)'}
-            />
             <Text
               variant="metadata"
               color={active ? 'accent' : 'secondary'}
@@ -72,64 +50,104 @@ export function DesktopSidebar({
   );
 }
 
-export type DesktopHeaderProps = {
-  readonly title?: string | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly children?: ReactNode | undefined;
+export type WorldMenuProps = {
+  readonly onOpenSettings: () => void;
 };
 
-/**
- * The thin top strip — optional back chevron + screen title on the
- * left, caller-owned controls (search field slot, transport
- * shortcuts) on the right.
- */
-export function DesktopHeader({
-  title,
-  onBack,
-  children,
-}: DesktopHeaderProps) {
+/** The primary menu — today it only carries settings, GTK-parity. */
+export function WorldMenu({ onOpenSettings }: WorldMenuProps) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  useOverlayDismiss(open ? close : undefined);
   return (
-    <header className="uw-header">
-      {onBack !== undefined && (
-        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
-          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
-        </Pressable>
+    <div className="uw-menu">
+      <IconButton
+        icon="menu"
+        size={32}
+        iconSize={14}
+        color="var(--text-secondary)"
+        ariaLabel={t('chrome.menu')}
+        active={open}
+        onPress={() => setOpen((v) => !v)}
+      />
+      {open && (
+        <>
+          <button
+            type="button"
+            className="uw-menu-backdrop"
+            aria-label={t('common.dismiss')}
+            onClick={close}
+            tabIndex={-1}
+          />
+          <div className="uw-menu-pop" role="menu">
+            <Pressable
+              onPress={() => {
+                setOpen(false);
+                onOpenSettings();
+              }}
+              ariaLabel={t('nav.settings')}
+              className="uw-menu-row"
+            >
+              <Icon name="settings" size={13} color="var(--text-secondary)" />
+              <Text variant="metadata" color="primary">
+                {t('nav.settings')}
+              </Text>
+            </Pressable>
+          </div>
+        </>
       )}
-      {title !== undefined && title !== '' && (
-        <Text variant="heading" color="bright" numberOfLines={1}>
-          {title}
-        </Text>
-      )}
-      <div className="uw-header__slot">{children}</div>
-    </header>
+    </div>
   );
 }
 
 export type DesktopChromeProps = {
-  readonly items: readonly NavItemModel[];
+  /** Page-switcher items shown centered in the world toolbar. */
+  readonly tabs: readonly NavItemModel[];
   readonly activeKey: string;
   readonly onSelect: (key: string) => void;
-  readonly header?: ReactNode | undefined;
-  readonly miniPlayer?: ReactNode | undefined;
+  /**
+   * The stage column's body — the app passes NowPlayingScreen (or an
+   * empty state while nothing is loaded); the chrome owns the column's
+   * golden-ratio geometry and collapse, never its content.
+   */
+  readonly stage: ReactNode;
+  readonly stageOpen?: boolean | undefined;
+  readonly onStageOpenChange?: ((open: boolean) => void) | undefined;
+  /**
+   * Stops playback and clears the stage's track (the queue keeps its
+   * items — the old mini-player's dismiss). Omitted when nothing is
+   * loaded, so no dead button shows over the empty state.
+   */
+  readonly onStopPlayback?: (() => void) | undefined;
   /**
    * '/' targets the search field app-wide — the chrome owns the global
    * keydown so screens never duplicate it. Editable elements keep
    * their keys (isEditableTarget guards inside globalKeyAction).
    */
   readonly onFocusSearch?: (() => void) | undefined;
+  readonly onOpenSettings?: (() => void) | undefined;
   readonly children: ReactNode;
 };
 
-/** Sidebar + content column + bottom mini-player region. */
+/** Split view: golden-ratio stage column + world column with toolbar. */
 export function DesktopChrome({
-  items,
+  tabs,
   activeKey,
   onSelect,
-  header,
-  miniPlayer,
+  stage,
+  stageOpen,
+  onStageOpenChange,
+  onStopPlayback,
   onFocusSearch,
+  onOpenSettings,
   children,
 }: DesktopChromeProps) {
+  const [internalOpen, setInternalOpen] = useState(true);
+  const open = stageOpen ?? internalOpen;
+  const setOpen = (value: boolean) => {
+    setInternalOpen(value);
+    onStageOpenChange?.(value);
+  };
   useEffect(() => {
     if (onFocusSearch === undefined) {
       return;
@@ -144,12 +162,62 @@ export function DesktopChrome({
     return () => document.removeEventListener('keydown', onKey);
   }, [onFocusSearch]);
   return (
-    <div className="uw-chrome">
-      <DesktopSidebar items={items} activeKey={activeKey} onSelect={onSelect} />
-      <div className="uw-chrome__main">
-        {header}
-        <main className="uw-chrome__content">{children}</main>
-        {miniPlayer}
+    <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
+      <aside className="uw-stage-col">
+        <div className="uw-stage-col__body">{stage}</div>
+        {onStopPlayback !== undefined && (
+          <IconButton
+            icon="close"
+            size={32}
+            iconSize={14}
+            color="var(--text-secondary)"
+            ariaLabel={t('player.a11y.stopDismiss')}
+            onPress={onStopPlayback}
+            className="uw-stage-col__stop"
+          />
+        )}
+      </aside>
+      {/* Only visible under the 860px overlay breakpoint — tap-outside
+          dismissal for the floating column. */}
+      {open && (
+        <button
+          type="button"
+          className="uw-stage-scrim"
+          aria-label={t('chrome.stage.hide')}
+          onClick={() => setOpen(false)}
+        />
+      )}
+      <div className="uw-world">
+        <header className="uw-world-bar">
+          <div className="uw-world-bar__start">
+            <IconButton
+              icon="sidebar"
+              size={32}
+              iconSize={14}
+              color="var(--text-secondary)"
+              ariaLabel={t(open ? 'chrome.stage.hide' : 'chrome.stage.show')}
+              active={open}
+              onPress={() => setOpen(!open)}
+            />
+            {onFocusSearch !== undefined && (
+              <IconButton
+                icon="search"
+                size={32}
+                iconSize={14}
+                color="var(--text-secondary)"
+                ariaLabel={t('search.fieldLabel')}
+                onPress={onFocusSearch}
+              />
+            )}
+          </div>
+          <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
+          <div className="uw-world-bar__end">
+            {onOpenSettings !== undefined && (
+              <WorldMenu onOpenSettings={onOpenSettings} />
+            )}
+          </div>
+        </header>
+        <main className="uw-world__content">{children}</main>
       </div>
     </div>
   );
