@@ -157,14 +157,19 @@ export function createExpoSyncDiscovery(
       };
       return ok(session);
     },
-    advertise({ port, name, fp }) {
+    advertise({ port, name, fp, onError }) {
       if (native.syncAdvertise === undefined) {
         return { close() {} };
       }
       advertChain = advertChain.then(
         () =>
           (native.syncAdvertise?.(name, port, fp) ?? Promise.resolve()).catch(
-            () => undefined,
+            () => {
+              // A rejected announce means the offer pairs by code but
+              // is NOT discoverable nearby — surface it, don't leave a
+              // live-looking dead advert.
+              onError?.();
+            },
           ),
         () => undefined,
       );

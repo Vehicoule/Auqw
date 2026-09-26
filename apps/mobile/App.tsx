@@ -2198,7 +2198,18 @@ function Main({
     if (!share.active || host === undefined || host === null) {
       return;
     }
-    return host.onPaired(remintShareOffer);
+    const unPair = host.onPaired(remintShareOffer);
+    // A dead advert leaves the offer code-valid but undiscoverable —
+    // tell the user rather than imply nearby visibility.
+    const unAdvert = host.onAdvertiseError(() =>
+      setPairError(
+        'nearby discovery unavailable — share the code instead',
+      ),
+    );
+    return () => {
+      unPair();
+      unAdvert();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [share.active, controller, remintShareOffer]);
 
@@ -2283,10 +2294,13 @@ function Main({
       });
       setPairError(null);
     })().catch(() => {
-      if (shareGenRef.current === gen) {
-        shareGenRef.current = 0;
-        void host.stop();
+      // Gate the whole unwind on our generation — a stale start's
+      // rejection must not clear a NEWER share's code or stop control.
+      if (shareGenRef.current !== gen) {
+        return;
       }
+      shareGenRef.current = 0;
+      void host.stop();
       setShare({
         active: false,
         busy: false,

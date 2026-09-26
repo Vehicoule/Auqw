@@ -122,6 +122,14 @@ export function createExpoSyncAcceptor(
         if (listening !== null && listening.gen === gen) {
           listening = null;
         }
+        // The native side may have bound partially (accept thread +
+        // sockets live) before the promise rejected — a failed start
+        // still owes a stop, serialized with any real one.
+        const stop = native.syncListenStop?.() ?? Promise.resolve();
+        nativeChain = nativeChain.then(
+          () => stop.catch(() => undefined),
+          () => undefined,
+        );
         return err(
           nativeError(thrown) ?? appError('unavailable', 'sync: listen failed'),
         );

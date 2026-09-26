@@ -143,20 +143,30 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
           protocol: SERVICE_PROTOCOL,
         });
         browser = br;
+        // Keyed by service NAME (unique on the LAN): `service.host`
+        // on a `down` can differ from the chosen advert address, so
+        // name|host would miss and leave a stale row behind.
         const seen = new Map<string, SyncDiscoveredPeer>();
-        const key = (service: Service): string =>
-          `${service.name}|${service.host}`;
         const up = (service: Service) => {
           const peer = peerOf(service);
           if (peer !== null) {
-            seen.set(key(service), peer);
+            seen.set(service.name, peer);
             onFound(peer);
           }
         };
         const down = (service: Service) => {
-          const peer = seen.get(key(service));
-          if (peer !== undefined) {
-            seen.delete(key(service));
+          const peer = seen.get(service.name);
+          // A re-advertised service's down can arrive after its new
+          // up — only retract when the lost service IS the one we
+          // emitted (same host), otherwise it must not kill the
+          // fresh row.
+          if (
+            peer !== undefined &&
+            (typeof service.host !== 'string' ||
+              service.host === '' ||
+              service.host === peer.host)
+          ) {
+            seen.delete(service.name);
             onLost(peer.key);
           }
         };

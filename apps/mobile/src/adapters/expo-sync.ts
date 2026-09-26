@@ -120,6 +120,8 @@ export type ExpoPairHostSurface = {
    * than display a dead code until expiry.
    */
   onPaired(cb: () => void): () => void;
+  /** The mDNS advert died — offer still pairs by code, not nearby. */
+  onAdvertiseError(cb: () => void): () => void;
 };
 
 function nativeRandom(host: AuqwSyncNative): (n: number) => Uint8Array {
@@ -291,6 +293,7 @@ function buildPairHost(opts: {
   const discovery = createExpoSyncDiscovery(opts.native);
   const fp = nobleFingerprintOf(opts.identity.pub);
   const pairedSubs = new Set<() => void>();
+  const advertErrorSubs = new Set<() => void>();
   const pairHost = createSyncPairHost({
     acceptor: createExpoSyncAcceptor(opts.native),
     crypto: createNobleSyncResponder({
@@ -315,6 +318,11 @@ function buildPairHost(opts: {
     },
     clock: opts.clock,
     onResume: (peer) => opts.kickResume(peer.fp),
+    onAdvertiseError: () => {
+      for (const cb of advertErrorSubs) {
+        cb();
+      }
+    },
     onPair: (peer) => {
       for (const cb of pairedSubs) {
         try {
@@ -384,6 +392,10 @@ function buildPairHost(opts: {
     onPaired(cb) {
       pairedSubs.add(cb);
       return () => pairedSubs.delete(cb);
+    },
+    onAdvertiseError(cb) {
+      advertErrorSubs.add(cb);
+      return () => advertErrorSubs.delete(cb);
     },
     stop: () => pairHost.stop(),
     close: () => pairHost.close(),

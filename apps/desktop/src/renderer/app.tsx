@@ -980,10 +980,14 @@ function Main({
         // the sheet never displays a dead code (gen-gated like every
         // other mint path).
         const gen = pairSheetGen.current;
+        const attempt = ++pairMintRef.current;
         void window.auqw.sync
           .pairing()
           .then((offer) => {
-            if (gen === pairSheetGen.current) {
+            if (
+              gen === pairSheetGen.current &&
+              attempt === pairMintRef.current
+            ) {
               setPairing(offer);
             }
           })
@@ -1010,13 +1014,22 @@ function Main({
   // Sheet-open generation — a mint resolving after dismissal must not
   // resurrect an offer the remint effect would keep refreshing forever.
   const pairSheetGen = useRef(0);
+  // Last-mint-wins + in-flight serialization: pairing() isn't instant,
+  // and a slow mint must not let an EARLIER reply overwrite a newer
+  // offer or stack concurrent mints behind the tick.
+  const pairMintRef = useRef(0);
+  const pairMintInFlight = useRef(false);
   const onPairDevice = useCallback(() => {
     setPairSheetOpen(true);
     const gen = ++pairSheetGen.current;
+    const attempt = ++pairMintRef.current;
     void window.auqw.sync
       .pairing()
       .then((offer) => {
-        if (gen !== pairSheetGen.current) {
+        if (
+          gen !== pairSheetGen.current ||
+          attempt !== pairMintRef.current
+        ) {
           return;
         }
         setPairing(offer);
@@ -1137,19 +1150,34 @@ function Main({
   // Offers die at expiresAt — remint quietly while the sheet stays
   // open so a displayed QR never outlives what the host accepts.
   useEffect(() => {
-    if (!pairSheetOpen || pairing === null || Date.now() < pairing.expiresAt) {
+    if (
+      !pairSheetOpen ||
+      pairing === null ||
+      Date.now() < pairing.expiresAt ||
+      pairMintInFlight.current
+    ) {
       return;
     }
     const gen = pairSheetGen.current;
+    const attempt = ++pairMintRef.current;
+    pairMintInFlight.current = true;
     void window.auqw.sync
       .pairing()
       .then((offer) => {
-        if (gen === pairSheetGen.current) {
+        pairMintInFlight.current = false;
+        if (
+          gen === pairSheetGen.current &&
+          attempt === pairMintRef.current
+        ) {
           setPairing(offer);
         }
       })
       .catch(() => {
-        if (gen === pairSheetGen.current) {
+        pairMintInFlight.current = false;
+        if (
+          gen === pairSheetGen.current &&
+          attempt === pairMintRef.current
+        ) {
           setPairing(null);
         }
       });

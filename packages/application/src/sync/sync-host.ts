@@ -191,6 +191,13 @@ export type SyncPairHostDeps = {
   readonly advertise?: (
     opts: SyncAdvertiseOpts,
   ) => SyncAdvertiser;
+  /**
+   * The announce died after bind — the offer stays valid via code
+   * (mDNS was only ever best-effort) but is NOT discoverable nearby,
+   * so the UI should tell the user rather than imply LocalSend-style
+   * visibility.
+   */
+  readonly onAdvertiseError?: () => void;
   /** Wall clock + cancellable sleep — the client's same seam. */
   readonly clock: ClockPort;
   readonly codeTtlMs?: number;
@@ -819,6 +826,10 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
                 port: bound.value.port,
                 name: deps.name,
                 fp: deps.fp,
+                onError: () => {
+                  advertiser = null;
+                  deps.onAdvertiseError?.();
+                },
               }) ?? null;
           } catch {
             // mDNS is best-effort — pairing still works via QR/code.

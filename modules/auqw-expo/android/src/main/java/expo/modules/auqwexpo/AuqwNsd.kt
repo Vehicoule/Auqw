@@ -114,6 +114,10 @@ class AuqwNsd(
 
         override fun onServiceLost(info: NsdServiceInfo) {
           if (gen == browseGeneration) {
+            synchronized(resolveLock) {
+              lostNames.add(info.serviceName)
+              resolveQueue.removeAll { it.first.serviceName == info.serviceName }
+            }
             emitDiscovery(mapOf("type" to "lost", "name" to info.serviceName))
           }
         }
@@ -157,6 +161,7 @@ class AuqwNsd(
     synchronized(resolveLock) {
       resolveQueue.clear()
       resolveInFlight = false
+      lostNames.clear()
     }
     // No early return: a start that failed after taking the lock but
     // before registering `discovery` still owes the release.
@@ -188,10 +193,16 @@ class AuqwNsd(
   private val resolveQueue = ArrayDeque<Pair<NsdServiceInfo, Int>>()
   private var resolveInFlight = false
   private val resolveLock = Any()
+  // Services that went down while resolution was pending — a queued or
+  // in-flight resolve must not emit a zombie 'found' afterwards. A
+  // fresh onServiceFound for the name clears the mark.
+  private val lostNames = mutableSetOf<String>()
 
   private fun resolve(info: NsdServiceInfo, gen: Int) {
     if (gen != browseGeneration) return
     synchronized(resolveLock) {
+      // A re-advertise clears the lost mark before queueing.
+      lostNames.remove(info.serviceName)
       resolveQueue.addLast(info to 0)
     }
     drainResolves(gen)
@@ -203,7 +214,11 @@ class AuqwNsd(
         if (resolveInFlight) {
           return
         }
-        val dequeued = resolveQueue.removeFirstOrNull() ?: return
+        var dequeued = resolveQueue.removeFirstOrNull()
+        while (dequeued != null && lostNames.contains(dequeued.first.serviceName)) {
+          dequeued = resolveQueue.removeFirstOrNull()
+        }
+        dequeued ?: return
         resolveInFlight = true
         dequeued
       }
@@ -224,10 +239,14 @@ class AuqwNsd(
         }
 
         override fun onServiceResolved(resolved: NsdServiceInfo) {
-          synchronized(resolveLock) {
-            resolveInFlight = false
-          }
-          if (gen == browseGeneration) {
+          val lost =
+            synchronized(resolveLock) {
+              resolveInFlight = false
+              // Lost after the resolve was issued — the 'lost' event
+              // already went out; a 'found' now would resurrect it.
+              lostNames.contains(resolved.serviceName)
+            }
+          if (gen == browseGeneration && !lost) {
             val host =
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 resolved.hostAddresses.firstOrNull()?.hostAddress

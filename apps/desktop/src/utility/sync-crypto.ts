@@ -14,6 +14,7 @@ import {
   err,
   isServerChallenge,
   ok,
+  parseEndpoint,
   type Result,
   type SyncClientCrypto,
   type SyncClientHandshake,
@@ -226,6 +227,7 @@ export function isClientHello(value: unknown): value is ClientHello {
       'eph',
       'dev',
       'port',
+      'endpoints',
     ]) &&
     value['v'] === WIRE_VERSION &&
     value['kind'] === 'hello' &&
@@ -237,7 +239,18 @@ export function isClientHello(value: unknown): value is ClientHello {
     (value['port'] === undefined ||
       (Number.isSafeInteger(value['port']) &&
         (value['port'] as number) >= 1 &&
-        (value['port'] as number) <= 65_535))
+        (value['port'] as number) <= 65_535)) &&
+    // Caller's advertised listener endpoints — same wire bound as the
+    // shared isClientHello (≤16, each a parseable `host:port`).
+    (value['endpoints'] === undefined ||
+      (Array.isArray(value['endpoints']) &&
+        (value['endpoints'] as unknown[]).length <= 16 &&
+        (value['endpoints'] as unknown[]).every(
+          (ep) =>
+            typeof ep === 'string' &&
+            ep.length <= 320 &&
+            parseEndpoint(ep) !== null,
+        )))
   );
 }
 
