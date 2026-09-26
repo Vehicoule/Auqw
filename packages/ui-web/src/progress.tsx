@@ -288,6 +288,9 @@ export function WaveformSeek({
   const preview = hover ?? p;
   const bandStart = Math.min(p, preview);
   const bandEnd = Math.max(p, preview);
+  // Forward preview tints unplayed bars with accent; backward preview
+  // dims the played span that would be given back.
+  const bandBackward = preview < p;
   return (
     <div className={`uw-wave${className ? ` ${className}` : ''}`} ref={rootRef}>
       <svg
@@ -391,11 +394,11 @@ export function WaveformSeek({
               <g clipPath={`url(#hover-${uid})`}>
                 <path
                   d={dAll}
-                  stroke="var(--accent)"
+                  stroke={bandBackward ? 'var(--bg)' : 'var(--accent)'}
                   strokeWidth={WAVE_BAR_WIDTH}
                   strokeLinecap="round"
                   fill="none"
-                  opacity={0.55}
+                  opacity={bandBackward ? 0.45 : 0.55}
                 />
               </g>
             )}
