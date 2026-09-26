@@ -17,10 +17,8 @@ import {
 } from './index.ts';
 import type { Locale, MessageId } from './index.ts';
 import {
-  ringTrackDash,
   shimmerHighlight,
   staggerProgress,
-  waveAmplitudeFor,
   waveformAmplitudes,
   waveformBarExtent,
   waveformBarLayout,
@@ -318,31 +316,5 @@ assert(
   shimmerHighlight(0.02, 0.98) > 0.7,
   'the band wraps across the 1→0 boundary',
 );
-
-// ringTrackDash: the unplayed track starts after the indicator head
-const gapDash = ringTrackDash(0.5, 200, 4);
-assertEqual(gapDash.dashArray, '92 200', 'track runs head+gap to end-gap');
-assertEqual(gapDash.dashOffset, -104, 'dash start sits past the wave head');
-assert(gapDash.visible, 'mid progress leaves visible track');
-const startDash = ringTrackDash(0, 200, 4);
-assertEqual(startDash.dashOffset, -4, 'progress 0 still leaves the head gap');
-assertEqual(startDash.dashArray, '192 200');
-const endDash = ringTrackDash(1, 200, 4);
-assertEqual(endDash.visible, false, 'no track remains past full progress');
-assertEqual(endDash.dashOffset, -204, 'offset still reports the head+gap start');
-
-// waveAmplitudeFor: blooms while playing, flat paused, eased at the ends
-assertEqual(waveAmplitudeFor(0.5, false), 0, 'paused is flat');
-assertEqual(waveAmplitudeFor(0.5, true), 1, 'mid-track playing is full bloom');
-assert(
-  Math.abs(waveAmplitudeFor(0.07, true) - 0.5) < 1e-9,
-  'entry ramp midpoint',
-);
-assertEqual(waveAmplitudeFor(0.04, true), 0, 'ramp starts flat');
-assert(
-  Math.abs(waveAmplitudeFor(0.95, true) - 0.5) < 1e-9,
-  'exit ramp midpoint',
-);
-assertEqual(waveAmplitudeFor(0.98, true), 0, 'ramp ends flat');
 
 console.log('ui-shared tests passed');

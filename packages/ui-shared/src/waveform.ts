@@ -124,30 +124,3 @@ export function shimmerHighlight(
   const wrapped = Math.min(d, 1 - d);
   return clamp01(1 - wrapped / band);
 }
-
-export function ringTrackDash(
-  progress: number,
-  pathLength: number,
-  gapLength: number,
-): { readonly dashArray: string; readonly dashOffset: number; readonly visible: boolean } {
-  const start = clamp01(progress) * pathLength + gapLength;
-  const end = pathLength - gapLength;
-  const len = Math.max(0, end - start);
-  return {
-    dashArray: `${len} ${pathLength}`,
-    dashOffset: -start,
-    visible: len > 0.5,
-  };
-}
-
-export function waveAmplitudeFor(
-  progress: number,
-  playing: boolean,
-): number {
-  if (!playing) {
-    return 0;
-  }
-  const enter = clamp01((progress - 0.04) / (0.1 - 0.04));
-  const exit = clamp01((0.98 - progress) / (0.98 - 0.92));
-  return clamp01(Math.min(enter, exit));
-}

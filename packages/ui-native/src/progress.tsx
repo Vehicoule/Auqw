@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Platform, View } from 'react-native';
+import { View } from 'react-native';
 import type {
   AccessibilityActionEvent,
   LayoutChangeEvent,
@@ -24,11 +24,9 @@ import {
   formatClock,
   formatRemaining,
   t,
-  waveAmplitudeFor,
   waveformAmplitudes,
   waveformBarLayout,
 } from '@auqw/ui-shared';
-import type { PlatformVariant } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -102,32 +100,6 @@ function sampleRing(
 
 const RING = sampleRing(200);
 
-// Flat arrays for the worklets — a worklet can't carry Pt objects or
-// module functions, so positions and outward normals are precomputed.
-const RING_N = RING.points.length;
-const RING_XS: number[] = [];
-const RING_YS: number[] = [];
-const RING_NX: number[] = [];
-const RING_NY: number[] = [];
-for (let i = 0; i < RING_N; i += 1) {
-  const cur = RING.points[i] ?? pt(0, 0);
-  const ahead = RING.points[(i + 1) % RING_N] ?? cur;
-  const behind = RING.points[(i - 1 + RING_N) % RING_N] ?? cur;
-  let tx = ahead.x - behind.x;
-  let ty = ahead.y - behind.y;
-  const m = Math.hypot(tx, ty) || 1;
-  tx /= m;
-  ty /= m;
-  RING_XS.push(cur.x);
-  RING_YS.push(cur.y);
-  RING_NX.push(-ty);
-  RING_NY.push(tx);
-}
-
-const TAU = Math.PI * 2;
-const RING_WAVES = 9;
-const RING_WAVE_AMP = 1.35;
-
 export const SQUARED_RING_PATH =
   'M26 3 L38 3 Q49 3 49 14 L49 38 Q49 49 38 49 L14 49 Q3 49 3 38 L3 14 Q3 3 14 3 Z';
 export const SQUARED_RING_LENGTH = RING.length;
@@ -135,22 +107,6 @@ export const SQUARED_RING_LENGTH = RING.length;
 // Worklet twins of the ui-shared helpers — reanimated can't workletize
 // functions imported from another package, so the math is duplicated
 // here in miniature.
-function ringTrackDashW(
-  progress: number,
-  pathLength: number,
-  gapLength: number,
-): { dashArray: string; dashOffset: number; visible: boolean } {
-  'worklet';
-  const start = Math.min(1, Math.max(0, progress)) * pathLength + gapLength;
-  const end = pathLength - gapLength;
-  const len = Math.max(0, end - start);
-  return {
-    dashArray: `${len} ${pathLength}`,
-    dashOffset: -start,
-    visible: len > 0.5,
-  };
-}
-
 function staggerW(progress: number, index: number, count: number): number {
   'worklet';
   if (count <= 0) {
@@ -202,18 +158,12 @@ function barsPathD(
   return d;
 }
 
-export function ringVariantFor(platform: PlatformVariant): 'wavy' | 'arc' {
-  return platform === 'android' ? 'wavy' : 'arc';
-}
-
 export type ArtworkRingProps = {
   readonly artworkUrl: string | null;
   readonly progress: number;
   readonly size?: number | undefined;
   readonly artworkSize?: number | undefined;
-  readonly platform?: PlatformVariant | undefined;
   readonly dimmed?: boolean | undefined;
-  readonly playing?: boolean | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -222,21 +172,13 @@ export function ArtworkRing({
   progress,
   size,
   artworkSize = 38,
-  platform = Platform.OS === 'ios' ? 'ios' : 'android',
   dimmed = false,
-  playing = false,
   style,
 }: ArtworkRingProps) {
   const theme = useTheme();
   const box = size ?? theme.sizes.artworkRing;
-  const variant = ringVariantFor(platform);
   const clamped = Math.min(1, Math.max(0, progress));
-  const wavy = variant === 'wavy';
-  const stroke = wavy ? theme.strokes.progressAndroid : theme.strokes.progress;
-  const trackGap = theme.strokes.progressAndroid * 1.6;
   const animatedProgress = useSharedValue(clamped);
-  const phase = useSharedValue(0);
-  const amp = useSharedValue(0);
   const previousProgress = useRef(clamped);
   useEffect(() => {
     const delta = Math.abs(clamped - previousProgress.current);
@@ -252,27 +194,6 @@ export function ArtworkRing({
     theme.motion.state,
     theme.reducedMotion,
   ]);
-  useEffect(() => {
-    if (playing && !theme.reducedMotion) {
-      phase.value = withRepeat(
-        withTiming(phase.value + TAU, {
-          duration: 1400,
-          easing: Easing.linear,
-        }),
-        -1,
-        false,
-      );
-    } else {
-      cancelAnimation(phase);
-    }
-  }, [phase, playing, theme.reducedMotion]);
-  useEffect(() => {
-    const target =
-      waveAmplitudeFor(clamped, playing) *
-      (theme.reducedMotion ? 0 : 1) *
-      RING_WAVE_AMP;
-    amp.value = withTiming(target, { duration: theme.motion.sheet });
-  }, [amp, clamped, playing, theme.motion.sheet, theme.reducedMotion]);
   const ringState = useDerivedValue(() =>
     progressPathState(animatedProgress.value, SQUARED_RING_LENGTH),
   );
@@ -281,46 +202,6 @@ export function ArtworkRing({
     strokeDashoffset: ringState.value.dashOffset,
     opacity: ringState.value.opacity,
   }));
-  const wavyProps = useAnimatedProps(() => {
-    'worklet';
-    let d = '';
-    let length = 0;
-    let px = 0;
-    let py = 0;
-    for (let i = 0; i <= RING_N; i += 1) {
-      const j = i % RING_N;
-      const off =
-        amp.value * Math.sin((i / RING_N) * TAU * RING_WAVES + phase.value);
-      const qx = (RING_XS[j] ?? 0) + (RING_NX[j] ?? 0) * off;
-      const qy = (RING_YS[j] ?? 0) + (RING_NY[j] ?? 0) * off;
-      d += `${i === 0 ? 'M' : 'L'}${qx.toFixed(2)} ${qy.toFixed(2)}`;
-      if (i > 0) {
-        length += Math.hypot(qx - px, qy - py);
-      }
-      px = qx;
-      py = qy;
-    }
-    const state = progressPathState(animatedProgress.value, length);
-    return {
-      d: `${d}Z`,
-      strokeDasharray: `${state.dashLength} ${state.dashLength}`,
-      strokeDashoffset: state.dashOffset,
-      opacity: state.opacity,
-    };
-  });
-  const trackProps = useAnimatedProps(() => {
-    'worklet';
-    const dash = ringTrackDashW(
-      animatedProgress.value,
-      SQUARED_RING_LENGTH,
-      trackGap,
-    );
-    return {
-      strokeDasharray: dash.dashArray,
-      strokeDashoffset: dash.dashOffset,
-      opacity: dash.visible ? 1 : 0,
-    };
-  });
   return (
     <View
       style={[{ width: box, height: box }, style]}
@@ -339,29 +220,19 @@ export function ArtworkRing({
         viewBox="0 0 52 52"
         style={{ position: 'absolute', top: 0, left: 0 }}
       >
-        {wavy ? (
-          <AnimatedPath
-            d={SQUARED_RING_PATH}
-            fill="none"
-            stroke={theme.colors.fg18}
-            strokeWidth={theme.strokes.progress}
-            animatedProps={trackProps}
-          />
-        ) : (
-          <Path
-            d={SQUARED_RING_PATH}
-            fill="none"
-            stroke={theme.colors.fg18}
-            strokeWidth={theme.strokes.hairline}
-          />
-        )}
+        <Path
+          d={SQUARED_RING_PATH}
+          fill="none"
+          stroke={theme.colors.fg18}
+          strokeWidth={theme.strokes.hairline}
+        />
         <AnimatedPath
           d={SQUARED_RING_PATH}
           fill="none"
           stroke={theme.colors.accent}
-          strokeWidth={stroke}
+          strokeWidth={theme.strokes.progress}
           strokeLinecap="round"
-          animatedProps={wavy ? wavyProps : progressProps}
+          animatedProps={progressProps}
         />
       </Svg>
     </View>

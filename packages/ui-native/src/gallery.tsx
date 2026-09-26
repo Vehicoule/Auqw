@@ -420,18 +420,10 @@ function GalleryBody({
           <ArtworkRing
             artworkUrl={fixturePlayerPlaying.artworkUrl}
             progress={0.54}
-            platform="android"
-            playing
-          />
-          <ArtworkRing
-            artworkUrl={fixturePlayerPlaying.artworkUrl}
-            progress={0.54}
-            platform="ios"
           />
           <ArtworkRing
             artworkUrl={null}
             progress={0.2}
-            platform="android"
           />
           <EqBars size={14} />
           <Spinner size={16} />
@@ -467,7 +459,7 @@ function GalleryBody({
         </View>
       </Section>
 
-      <Section title="mini player" note="android wavy ring · ios glass">
+      <Section title="mini player" note="arc ring · ios glass">
         {(['android', 'ios'] as const).map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.md }}>
             <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
