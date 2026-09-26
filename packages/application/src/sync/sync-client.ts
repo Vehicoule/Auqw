@@ -48,6 +48,7 @@ import {
   DEVICE_ID_PATTERN,
   HANDSHAKE_CAP,
   MAX_SYNC_DOC_BYTES,
+  FINGERPRINT_PATTERN,
   PAIR_CODE_PATTERN,
   SEAL_OVERHEAD,
   SESSION_CAP,
@@ -130,6 +131,13 @@ export interface SyncClient {
   refreshPeers(
     signal?: CancellationSignal,
   ): Promise<Result<void>>;
+  /**
+   * Drop a peer's live session without touching custody — after a
+   * re-pair refreshed the record's endpoints, the next connect must
+   * dial the NEW address, not reuse a socket to the old one (or to a
+   * pairing-only listener).
+   */
+  dropSession(fp: string): void;
   close(): Promise<void>;
 }
 
@@ -1147,6 +1155,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           appError('invalid-message', 'sync: pairing code must be 6 digits'),
         );
       }
+      if (
+        opts.fp !== undefined &&
+        !FINGERPRINT_PATTERN.test(opts.fp)
+      ) {
+        return err(
+          appError('invalid-message', 'sync: malformed device fingerprint'),
+        );
+      }
       return pairOp(opts.endpoints, opts.code, opts.fp, undefined, signal);
     },
 
@@ -1330,6 +1346,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           reply.value.devices.find((d) => d.id === deps.deviceId) ?? null,
         );
       });
+    },
+
+    dropSession(fp) {
+      const session = sessions.get(fp);
+      if (session !== undefined && !session.closed) {
+        sendSealed(session, { t: 'bye' });
+        killSession(session, null);
+      }
     },
 
     async unpair(fp, signal) {

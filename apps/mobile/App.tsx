@@ -2062,6 +2062,11 @@ function Main({
     void discovery
       .browse({
         onFound: (peer) => {
+          // A late event after close must not repopulate the list the
+          // cleanup just cleared — the new browse owns the next open.
+          if (gone) {
+            return;
+          }
           // Service identity (name|host) is the row key — a
           // re-advertised peer on a new port replaces its row, a
           // same-named neighbor keeps its own.
@@ -2077,6 +2082,9 @@ function Main({
           ]);
         },
         onLost: (key) => {
+          if (gone) {
+            return;
+          }
           setNearbyPeers((prev) =>
             prev.filter((p) => p.key !== key),
           );

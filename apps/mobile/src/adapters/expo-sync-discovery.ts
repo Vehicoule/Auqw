@@ -95,6 +95,13 @@ export function createExpoSyncDiscovery(
               return;
             }
             const key = `${event.name}|${event.host}`;
+            // Re-advertise on a new address: retract the old key's row
+            // first — the 'lost' event (name-only) would only clear
+            // the NEW key, leaving the stale endpoint dialable.
+            const prior = emitted.get(event.name);
+            if (prior !== undefined && prior !== key) {
+              browsing?.onLost(prior);
+            }
             browsing?.onFound({
               key,
               name: event.name,
@@ -120,19 +127,25 @@ export function createExpoSyncDiscovery(
       try {
         await native.syncBrowse();
       } catch (thrown) {
-        if (browsing?.gen === gen) {
+        // Failure cleanup is scoped to OUR generation: if a newer
+        // browse took the slot meanwhile, its native session owns the
+        // multicast lock — stopping here would kill the newer browse.
+        const ours = browsing?.gen === gen;
+        if (ours) {
           browseSub?.remove();
           browseSub = null;
           browsing = null;
         }
         // The native side may have taken the multicast lock and spawned
         // its executor before failing — a rejected start still owes a
-        // stop, best-effort and serialized with any real stop.
-        const stop = native.syncBrowseStop?.() ?? Promise.resolve();
-        stopChain = stopChain.then(
-          () => stop.catch(() => undefined),
-          () => undefined,
-        );
+        // stop, but only while we still own the slot.
+        if (ours) {
+          const stop = native.syncBrowseStop?.() ?? Promise.resolve();
+          stopChain = stopChain.then(
+            () => stop.catch(() => undefined),
+            () => undefined,
+          );
+        }
         return err(
           nativeError(thrown) ??
             appError('unavailable', 'sync: browse failed'),

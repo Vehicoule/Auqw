@@ -243,6 +243,11 @@ export async function createExpoSync(
         // independently: reload custody into the client's map first
         // so syncNow dials the fresh endpoint.
         deps.onPaired?.();
+        // A re-pair rewrote this peer's endpoints — a still-open
+        // session would have syncNow reuse the socket to the stale
+        // listener (or the pairing-only port). Drop it first so the
+        // round dials the fresh custody record.
+        client.dropSession(peer.fp);
         void client
           .refreshPeers()
           .then(() => client.syncNow(peer.fp))

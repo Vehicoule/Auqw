@@ -620,13 +620,21 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         endpoints,
       };
       if (!sessions.has(session)) {
-        reject('unpaired');
+        // Stop-window rejections must not masquerade as 'unpaired' —
+        // the caller would delete custody we still hold.
+        reject('unavailable');
         return;
       }
       const touched = await trackWrite(
         deps.registry.touch(record, serviceCancel.signal),
       );
-      if (!touched.ok || !touched.value) {
+      if (!touched.ok) {
+        // A custody read/write hiccup isn't a verdict: 'unpaired'
+        // would have the caller erase a record we may still hold.
+        reject('unavailable');
+        return;
+      }
+      if (!touched.value) {
         reject('unpaired');
         return;
       }

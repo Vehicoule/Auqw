@@ -991,7 +991,16 @@ function Main({
               setPairing(offer);
             }
           })
-          .catch(() => undefined);
+          .catch(() => {
+            // The code we displayed was just consumed — a failed
+            // remint must not leave the dead QR on screen.
+            if (
+              gen === pairSheetGen.current &&
+              attempt === pairMintRef.current
+            ) {
+              setPairing(null);
+            }
+          });
         return;
       }
       setNearbyPeers((prev) => {

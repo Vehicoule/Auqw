@@ -69,19 +69,22 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
 
 /** One discovered service → the port's peer shape, or null when unusable. */
 function peerOf(service: Service): SyncDiscoveredPeer | null {
-  // Prefer an unscoped address; keep a scoped (zone-suffixed) one —
-  // link-local v6 is only dialable WITH its zone, and the LAN gate
-  // validates the zone id.
-  const host = service.addresses?.find(
-    (a) => typeof a === 'string' && !a.includes('%'),
-  ) ?? service.addresses?.find(
-    (a) => typeof a === 'string' && a.includes('%'),
+  // Only LAN-pairable addresses are candidates — a public v6 listed
+  // first must not shadow a reachable private v4 behind it. Prefer an
+  // unscoped address among the survivors; keep a scoped (zone-suffixed)
+  // one — link-local v6 is only dialable WITH its zone, and the LAN
+  // gate validates the zone id.
+  const pairable = (service.addresses ?? []).filter(
+    (a): a is string =>
+      typeof a === 'string' && isPairableLanHost(a),
   );
+  const host =
+    pairable.find((a) => !a.includes('%')) ??
+    pairable.find((a) => a.includes('%'));
   if (
     typeof service.name !== 'string' ||
     host === undefined ||
-    typeof service.port !== 'number' ||
-    !isPairableLanHost(host)
+    typeof service.port !== 'number'
   ) {
     // A non-LAN advert is undialable — never a nearby row.
     return null;

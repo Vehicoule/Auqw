@@ -385,6 +385,7 @@ export function createSyncDialer(deps: {
       deviceId,
       name: deps.deviceName,
       listenPort: deps.listenPort,
+      listenEndpoints: deps.listenEndpoints,
     });
     try {
       return await run(client);
