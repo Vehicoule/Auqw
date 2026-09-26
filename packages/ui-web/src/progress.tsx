@@ -264,7 +264,6 @@ export function WaveformSeek({
   const enabled = durationMs !== null && durationMs > 0 && onSeek !== undefined;
   const isLoading = loading || durationMs === null;
   const p = progressOf(positionMs, durationMs);
-  const fill = hover ?? p;
   const layout = useMemo(
     () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
     [width],
@@ -286,8 +285,9 @@ export function WaveformSeek({
       onSeek?.(stepped);
     }
   };
-  const bandStart = Math.min(p, fill);
-  const bandEnd = Math.max(p, fill);
+  const preview = hover ?? p;
+  const bandStart = Math.min(p, preview);
+  const bandEnd = Math.max(p, preview);
   return (
     <div className={`uw-wave${className ? ` ${className}` : ''}`} ref={rootRef}>
       <svg
@@ -341,7 +341,7 @@ export function WaveformSeek({
                 x={0}
                 y={0}
                 height={WAVE_HEIGHT}
-                width={fill * width}
+                width={p * width}
               />
             </clipPath>
             {hover !== null && (
@@ -428,7 +428,7 @@ export function WaveformSeek({
           }
         }}
         onPointerLeave={() => setHover(null)}
-        style={{ '--uw-fill': `${fill * 100}%` } as React.CSSProperties}
+        style={{ '--uw-fill': `${p * 100}%` } as React.CSSProperties}
       />
       {labels && (
         <div className="uw-wave__labels">

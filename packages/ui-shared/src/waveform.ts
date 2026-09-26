@@ -74,7 +74,8 @@ export function waveformBarLayout(
   gap = 2.5,
 ): WaveformBarLayout {
   const step = barWidth + gap;
-  const count = Math.max(0, Math.floor((width - gap) / step));
+  // n bars need n·barWidth + (n−1)·gap ≤ width.
+  const count = Math.max(0, Math.floor((width + gap) / step));
   if (count <= 0) {
     return { count: 0, step, barWidth, xs: [] };
   }

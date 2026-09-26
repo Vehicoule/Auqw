@@ -645,6 +645,12 @@
     transition: none;
   }
 }
+.ui-web[data-reduced-motion='true'] .uw-wave__shimmer {
+  animation: none;
+}
+.ui-web[data-reduced-motion='true'] .uw-wave__fill {
+  transition: none;
+}
 .uw-wave__labels {
   display: flex;
   justify-content: space-between;

@@ -262,12 +262,13 @@ assert(
 
 // waveformBarLayout: count from width, bars centered
 const layout = waveformBarLayout(200);
-assert(layout.count > 0, 'a real width fits bars');
+assertEqual(layout.count, 36, 'n bars cost n·bar + (n−1)·gap');
 assertEqual(
   layout.count,
-  Math.floor((200 - 2.5) / (3 + 2.5)),
+  Math.floor((200 + 2.5) / (3 + 2.5)),
   'count follows the barWidth+gap budget',
 );
+assertEqual(waveformBarLayout(3).count, 1, 'one barWidth alone fits one bar');
 assertEqual(layout.xs.length, layout.count, 'one center per bar');
 const expectedLeftover = 200 - (layout.count * (3 + 2.5) - 2.5);
 assertEqual(
