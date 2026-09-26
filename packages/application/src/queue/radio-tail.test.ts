@@ -1659,6 +1659,73 @@ async function nativeDrainChasesContinuation(): Promise<void> {
   await r.session.dispose();
 }
 
+async function reseedDuringDrainWriteStaysAppendOnly(): Promise<void> {
+  // The drain's persist is in flight when a fresh seed lands on the
+  // already-drained queue: the drain's authorization must not mark
+  // the replacement tail — it seeded stopped and appends for later.
+  let online = true;
+  const r = rig(pausedTailQueue(), [], { isOnline: () => online });
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  await resumed;
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'armed on the tail');
+  // An empty page resolves the seed without appending; the offline
+  // window keeps the fetch-ahead from tying up the radio tail.
+  online = false;
+  r.ytm.settleRadio(ok(page([], 'c1')));
+  await pump();
+  assertEqual(readyOf(r).queue.occurrences.length, 1, 'nothing appended');
+  assertEqual(radioCalls(r).length, 1, 'offline fetch-ahead skipped');
+  // Native drain with the queue write held open: the service 'ended'
+  // crossed the play threshold, so the first held commit is the play
+  // record — settle it, then re-arm before the handler resumes so the
+  // queue write itself stays pending.
+  r.storage.holdNextCommit();
+  serviceTransition(r, { from: 'u1', to: null });
+  await pump();
+  assert(
+    r.storage.settleCommit(ok(undefined)),
+    'the play-record write was the held commit',
+  );
+  r.storage.holdNextCommit();
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    null,
+    'drained in memory',
+  );
+  const seeded = r.session.startRadio(ref('youtube-music', 'seed-2'));
+  await pump();
+  assertEqual(
+    radioCalls(r).length,
+    2,
+    'replacement seed dispatched while the write is held',
+  );
+  r.storage.settleCommit(ok(undefined));
+  await pump();
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v99', 'Fresh', 'B', 200_000)], 'c2')),
+  );
+  assert((await seeded).ok, 'seed resolves');
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.mode,
+    'stopped',
+    'a tail seeded on the drained queue appends for later',
+  );
+  assertEqual(snap.queue.currentOccurrenceId, null, 'no resume');
+  assertEqual(
+    snap.queue.occurrences.length,
+    2,
+    'the new page appended its item',
+  );
+  r.player.cancelPendingPrepares();
+  await r.session.dispose();
+}
+
 async function drainChaseIsBounded(): Promise<void> {
   const r = rig(pausedTailQueue());
   await restoreOk(r);
@@ -1894,6 +1961,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['armWaitsForAttemptRef', armWaitsForAttemptRef],
   ['dupePageChasesContinuation', dupePageChasesContinuation],
   ['nativeDrainChasesContinuation', nativeDrainChasesContinuation],
+  [
+    'reseedDuringDrainWriteStaysAppendOnly',
+    reseedDuringDrainWriteStaysAppendOnly,
+  ],
   ['drainChaseIsBounded', drainChaseIsBounded],
   ['pausedSeedDrainsThenResumes', pausedSeedDrainsThenResumes],
   ['unroutableActiveRefBlocksSeed', unroutableActiveRefBlocksSeed],

@@ -3793,6 +3793,10 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    // The drain authorization belongs to the tail armed when the move
+    // started — a reseed during the persist swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioBefore = r.radio;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -3874,7 +3878,11 @@ export class Session {
       // durable (moved.ok was checked above), so a failed persist
       // cannot authorize a later paused drain to resume.
       const rec = r.radio;
-      if (rec !== null && rec.status === 'growing') {
+      if (
+        rec !== null &&
+        rec === radioBefore &&
+        rec.status === 'growing'
+      ) {
         rec.resumeOnDrain =
           after.currentOccurrenceId === null && before.mode === 'playing';
       }
@@ -5187,6 +5195,10 @@ export class Session {
     }
     marker.currentOccurrenceId = toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
+    // The drain authorization belongs to the tail armed at reconcile
+    // time — a reseed during the write below swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioAtTransition = r.radio;
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -5290,14 +5302,14 @@ export class Session {
       // already-paused queue, a non-drain, or a failed write revokes
       // it. The flag marks only when the drain committed — a failed
       // write must not authorize a later paused drain to resume.
-      const rec = r.radio;
-      if (rec !== null && rec.status === 'growing') {
+      const rec = radioAtTransition;
+      if (rec !== null && r.radio === rec && rec.status === 'growing') {
         rec.resumeOnDrain =
           toId === null && wasPlaying && queueWritten.ok;
       }
       // A native drain bypasses #derived: chase the armed tail's
       // continuation here too, or a drained queue strands forever.
-      if (toId === null && wasPlaying && rec !== null) {
+      if (toId === null && wasPlaying && rec !== null && r.radio === rec) {
         this.#resumeDrainedQueue(r, rec, undefined);
       }
     }
