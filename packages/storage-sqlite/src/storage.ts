@@ -688,14 +688,21 @@ export class SqliteStorage implements StoragePort {
         if (rewrite.lyricsCache) {
           for (const entry of merged.lyricsCache) {
             await conn.execute(
-              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms)
-               VALUES (?, ?, ?, ?, ?)`,
+              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms, provider_version)
+               VALUES (?, ?, ?, ?, ?, ?)`,
               [
                 entry.recordingId,
                 entry.provider,
                 entry.kind,
                 JSON.stringify(entry.payload),
                 entry.fetchedMs,
+                // Three-way encoding: NULL = pre-versioning row,
+                // '' = recorded null provenance (a versionless
+                // provider's write), else the version string.
+                // Manifest versions are never empty, so '' is free.
+                entry.providerVersion === undefined
+                  ? null
+                  : (entry.providerVersion ?? ''),
               ],
               signal,
             );
@@ -1696,12 +1703,23 @@ function decodeState(rows: TableRows): PersistedState | null {
     if (kind !== 'plain' && kind !== 'synced') {
       fail();
     }
+    // provider_version is three-way: NULL = a pre-versioning row
+    // (decodes as an absent field, so the session sees it stale and
+    // refetches once); '' = an explicitly-recorded null provenance
+    // from a versionless provider's write; else the version string.
+    const providerVersion = row['provider_version'];
     return {
       recordingId,
       provider: reqNonEmpty(row['provider']),
       kind: kind as LyricsCacheEntry['kind'],
       payload: json(row['payload_json']) as LyricsCacheEntry['payload'],
       fetchedMs: reqNonNegInt(row['fetched_ms']),
+      ...(providerVersion === null
+        ? {}
+        : {
+            providerVersion:
+              providerVersion === '' ? null : reqStr(providerVersion),
+          }),
     };
   });
   const artworkUrls = new Set<string>();

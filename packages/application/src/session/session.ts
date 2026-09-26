@@ -2813,7 +2813,27 @@ export class Session {
       return err(appError('not-found', 'unknown recording'));
     }
     const cached = r.lyricsCache.find((e) => e.recordingId === recordingId);
-    if (cached !== undefined) {
+    // Synced is always preferred: the sheet renders timed lines
+    // whenever a provider can honestly produce them; the router
+    // degrades to a lyrics.plain declarer otherwise.
+    const routed = this.#router.lyricsProviderFor(
+      selectionFromSettings(r.settings),
+      'synced',
+    );
+    // A cached row is fresh only while the same provider version
+    // stands behind it — an upgrade re-fetches so better ranking or
+    // coverage replaces the stale pick. Rows written before version
+    // tracking carry no providerVersion at all; requiring the field to
+    // be present (not merely equal) keeps those legacy rows stale
+    // under a null-version provider too. When no provider routes, the
+    // cache still serves whatever it holds.
+    const fresh =
+      cached !== undefined &&
+      (!routed.ok ||
+        (cached.provider === routed.value.id &&
+          cached.providerVersion !== undefined &&
+          cached.providerVersion === routed.value.version));
+    if (cached !== undefined && fresh) {
       const accepted = lyricsFromCache(cached, {
         durationMs: recording.durationMs,
       });
@@ -2825,13 +2845,6 @@ export class Session {
         }),
       );
     }
-    // Synced is always preferred: the sheet renders timed lines
-    // whenever a provider can honestly produce them; the router
-    // degrades to a lyrics.plain declarer otherwise.
-    const routed = this.#router.lyricsProviderFor(
-      selectionFromSettings(r.settings),
-      'synced',
-    );
     if (!routed.ok) {
       return err(routed.error);
     }
@@ -2870,7 +2883,13 @@ export class Session {
       const entry =
         fetchedMs === null
           ? null
-          : lyricsCacheEntry(recording.id, provider.id, accepted, fetchedMs);
+          : lyricsCacheEntry(
+              recording.id,
+              provider.id,
+              provider.version,
+              accepted,
+              fetchedMs,
+            );
       if (entry !== null) {
         const next = [
           ...r.lyricsCache.filter((e) => e.recordingId !== recording.id),

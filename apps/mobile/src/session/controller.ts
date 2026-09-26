@@ -37,6 +37,7 @@ import type { PluginProvider } from '../adapters/plugin-provider.ts';
 import {
   createPluginProvider,
   manifestCapabilities,
+  manifestVersion,
 } from '../adapters/plugin-provider.ts';
 import {
   createExpoConnectivity,
@@ -228,24 +229,28 @@ export async function createSessionController(
       itunesPluginId,
       'itunes',
       manifestCapabilities(ITUNES_MANIFEST),
+      manifestVersion(ITUNES_MANIFEST),
     ),
     createPluginProvider(
       host,
       youtubeMusicPluginId,
       'youtube-music',
       manifestCapabilities(YOUTUBE_MUSIC_MANIFEST),
+      manifestVersion(YOUTUBE_MUSIC_MANIFEST),
     ),
     createPluginProvider(
       host,
       deezerPluginId,
       'deezer',
       manifestCapabilities(DEEZER_MANIFEST),
+      manifestVersion(DEEZER_MANIFEST),
     ),
     createPluginProvider(
       host,
       lyricsLrclibPluginId,
       'lyrics-lrclib',
       manifestCapabilities(LYRICS_LRCLIB_MANIFEST),
+      manifestVersion(LYRICS_LRCLIB_MANIFEST),
     ),
   ];
   const sqliteDriver = await createExpoSqliteDriver(options.databasePath);

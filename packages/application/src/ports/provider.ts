@@ -182,6 +182,12 @@ export interface ProviderPort {
    * without reaching the guest.
    */
   readonly capabilities: readonly ProviderCapability[];
+  /**
+   * The plugin version behind this provider (manifest), or null when
+   * unknown. The lyrics cache keys accepted results on it: an upgrade
+   * must re-fetch rather than serve a stale pick.
+   */
+  readonly version: string | null;
   search(
     input: { query: string; limit: number; storefront: string | null },
     context: OperationContext,

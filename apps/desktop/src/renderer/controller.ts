@@ -292,6 +292,7 @@ export async function createSessionController(
               manifest.pluginId,
               manifest.providerId,
               manifestCapabilities(manifest),
+              manifest.version,
             ),
           )
         : [];

@@ -168,6 +168,8 @@ export type PluginManifestPayload = {
   readonly pluginId: string;
   readonly providerId: string;
   readonly capabilities: readonly string[];
+  /** Manifest `version`; null when the manifest omits it. */
+  readonly version: string | null;
 };
 
 export function isPluginManifestPayload(
@@ -175,11 +177,12 @@ export function isPluginManifestPayload(
 ): value is PluginManifestPayload {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['pluginId', 'providerId', 'capabilities']) &&
+    hasOnlyKeys(value, ['pluginId', 'providerId', 'capabilities', 'version']) &&
     isBoundedString(value['pluginId'], 128) &&
     isBoundedString(value['providerId'], 128) &&
     Array.isArray(value['capabilities']) &&
-    value['capabilities'].every((c) => isBoundedString(c, 64))
+    value['capabilities'].every((c) => isBoundedString(c, 64)) &&
+    (value['version'] === null || isBoundedString(value['version'], 64))
   );
 }
 
