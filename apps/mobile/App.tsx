@@ -3978,23 +3978,24 @@ function Main({
                   return;
                 }
                 const artworkCacheBytes = mib * 1024 * 1024;
-                const shrinking =
-                  artworkCacheBytes <
-                  (state.settings.artworkCacheBytes ??
-                    ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
-                void queueSettingsWrite({ artworkCacheBytes }).then(
-                  (updated) => {
-                    // A shrunken cap takes effect only once rows over
-                    // it are evicted — sweep after the commit lands.
-                    if (updated.ok && shrinking) {
-                      void controller.artworkCache.sweep({
-                        requestId: createIds().next('artwork-sweep'),
-                        deadlineMs: createClock().nowMs() + 60_000,
-                        signal: new CancellationSource().signal,
-                      });
-                    }
-                  },
-                );
+                let shrinking = false;
+                void queueSettingsWrite((latest) => {
+                  shrinking =
+                    artworkCacheBytes <
+                    (latest.artworkCacheBytes ??
+                      ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
+                  return { artworkCacheBytes };
+                }).then((updated) => {
+                  // A shrunken cap takes effect only once rows over
+                  // it are evicted — sweep after the commit lands.
+                  if (updated.ok && shrinking) {
+                    void controller.artworkCache.sweep({
+                      requestId: createIds().next('artwork-sweep'),
+                      deadlineMs: createClock().nowMs() + 60_000,
+                      signal: new CancellationSource().signal,
+                    });
+                  }
+                });
               }}
               onDismiss={() => setArtworkCachePickerOpen(false)}
             />
