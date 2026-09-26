@@ -980,6 +980,7 @@ function Main({
       // pane closes and in-flight completions are dropped.
       suggestSource.current?.cancel();
       suggestSource.current = null;
+      suggestSeq.current += 1;
       setSuggestions([]);
       if (trimmed === '') {
         search?.cancel();
@@ -1010,18 +1011,28 @@ function Main({
   // ever could. Only a commit (Enter or a row tap) runs catalog.search.
   useEffect(() => {
     const trimmed = query.trim();
+    // An edit invalidates the prior burst at once — a completion that
+    // lands mid-debounce belongs to old text and must never paint.
+    suggestSource.current?.cancel();
+    suggestSource.current = null;
+    suggestSeq.current += 1;
     if (trimmed === '') {
-      suggestSource.current?.cancel();
-      suggestSource.current = null;
       setSuggestions([]);
       search?.cancel();
       return undefined;
     }
+    const committed =
+      searchState.type === 'idle' ? '' : searchState.query;
+    // Committed text is no draft, and inputs past the payload cap
+    // (256) can't be served — neither earns a fetch.
+    if (trimmed === committed || trimmed.length > 256) {
+      setSuggestions([]);
+      return undefined;
+    }
     const timer = setTimeout(() => {
-      suggestSource.current?.cancel();
       const source = new CancellationSource();
       suggestSource.current = source;
-      const seq = ++suggestSeq.current;
+      const seq = suggestSeq.current;
       const context: OperationContext = {
         requestId: createIds().next('suggest'),
         deadlineMs: Date.now() + 10_000,
@@ -1036,7 +1047,7 @@ function Main({
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [query, search, providerRouter, state.settings]);
+  }, [query, searchState, search, providerRouter, state.settings]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
