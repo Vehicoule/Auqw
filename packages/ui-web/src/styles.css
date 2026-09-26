@@ -836,7 +836,8 @@
 }
 .uw-collections {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  /* GTK quick-access dashboard: always the four tiles, 2x2. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--spacing-md);
   margin-bottom: var(--spacing-lg);
 }
@@ -1659,6 +1660,7 @@
 /* Golden-ratio stage column — the GTK sidebar's split fraction
    (0.382) inside its 280/480 clamps. */
 .uw-stage-col {
+  position: relative;
   flex: 0 0 38.2%;
   min-width: 280px;
   max-width: 480px;
@@ -1671,26 +1673,19 @@
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
 }
-.uw-stage-head {
-  flex: none;
-  height: var(--uw-titlebar-h);
-  display: flex;
-  align-items: center;
-  padding: 0 var(--spacing-sm);
-  /* frameless: the strip doubles as the column's drag grip */
-  -webkit-app-region: drag;
+/* No header strip on the stage column — the GTK sidebar player ran
+   edge to edge; the only control is the floating stop/dismiss. */
+.uw-stage-col__stop {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: var(--spacing-sm);
+  z-index: 5;
+  background: var(--fg08);
 }
-.uw-stage-head__fill {
-  flex: 1;
-}
-/* Children of a drag strip drag by default — only the collapse
-   button opts out; the fill stays the grip. */
-.uw-stage-head > .uw-icon-btn {
-  -webkit-app-region: no-drag;
-}
-/* macOS traffic lights pin over the stage column's top-left. */
-[data-platform='darwin'] .uw-stage-head {
-  padding-left: 96px;
+/* macOS traffic lights pin over the stage column's top-left — keep
+   the player's top edge clear of them. */
+[data-platform='darwin'] .uw-chrome[data-stage='open'] .uw-stage-col__body {
+  padding-top: var(--uw-titlebar-h);
 }
 .uw-stage-col__body {
   flex: 1;

@@ -164,28 +164,18 @@ export function DesktopChrome({
   return (
     <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
       <aside className="uw-stage-col">
-        <div className="uw-stage-head">
-          <span className="uw-stage-head__fill" />
-          {onStopPlayback !== undefined && (
-            <IconButton
-              icon="close"
-              size={32}
-              iconSize={14}
-              color="var(--text-secondary)"
-              ariaLabel={t('player.a11y.stopDismiss')}
-              onPress={onStopPlayback}
-            />
-          )}
+        <div className="uw-stage-col__body">{stage}</div>
+        {onStopPlayback !== undefined && (
           <IconButton
-            icon="chevron-left"
+            icon="close"
             size={32}
             iconSize={14}
             color="var(--text-secondary)"
-            ariaLabel={t('chrome.stage.hide')}
-            onPress={() => setOpen(false)}
+            ariaLabel={t('player.a11y.stopDismiss')}
+            onPress={onStopPlayback}
+            className="uw-stage-col__stop"
           />
-        </div>
-        <div className="uw-stage-col__body">{stage}</div>
+        )}
       </aside>
       {/* Only visible under the 860px overlay breakpoint — tap-outside
           dismissal for the floating column. */}
@@ -205,7 +195,7 @@ export function DesktopChrome({
               size={32}
               iconSize={14}
               color="var(--text-secondary)"
-              ariaLabel={t('chrome.stage.show')}
+              ariaLabel={t(open ? 'chrome.stage.hide' : 'chrome.stage.show')}
               active={open}
               onPress={() => setOpen(!open)}
             />
