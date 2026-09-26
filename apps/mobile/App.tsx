@@ -643,25 +643,33 @@ let toastSink: ((text: string) => void) | null = null;
  * to ~4Hz (desktop), so between ticks the raw snapshot position sits
  * stale and the active line lands visibly late. While `active`, the
  * last engine position is extrapolated forward at a fixed cadence —
- * each fresh engine position re-anchors the clock. Ticking only while
- * `active` (lyrics pane open AND playing) keeps the periodic
- * re-render off the idle path.
+ * each fresh engine position re-anchors the clock. `generation`
+ * re-anchors without a position change: a seek landing on the last
+ * reported tick would otherwise keep extrapolating from the pre-seek
+ * anchor. The anchor clock is `performance.now()` — `Date.now()`
+ * follows system-clock adjustments, which would jump the highlight.
+ * Ticking only while `active` (lyrics pane open AND playing) keeps
+ * the periodic re-render off the idle path.
  */
-function useSmoothedPosition(positionMs: number, active: boolean): number {
-  const anchor = useRef({ ms: positionMs, at: Date.now() });
+function useSmoothedPosition(
+  positionMs: number,
+  active: boolean,
+  generation: number,
+): number {
+  const anchor = useRef({ ms: positionMs, at: performance.now() });
   const [smoothMs, setSmoothMs] = useState(positionMs);
   useEffect(() => {
-    anchor.current = { ms: positionMs, at: Date.now() };
+    anchor.current = { ms: positionMs, at: performance.now() };
     setSmoothMs(positionMs);
     if (!active) {
       return undefined;
     }
     const id = setInterval(() => {
       const a = anchor.current;
-      setSmoothMs(a.ms + (Date.now() - a.at));
+      setSmoothMs(a.ms + (performance.now() - a.at));
     }, 200);
     return () => clearInterval(id);
-  }, [active, positionMs]);
+  }, [active, positionMs, generation]);
   return smoothMs;
 }
 
@@ -2072,9 +2080,18 @@ function Main({
   // Lyrics highlight rides a smoothed clock so the active line tracks
   // playback between the engine's sparse position ticks; it only ticks
   // while the lyrics pane is actually on screen.
+  const [seekGeneration, bumpSeekGeneration] = useState(0);
+  const seekToPosition = useCallback(
+    (ms: number): Promise<Result<void>> => {
+      bumpSeekGeneration((n) => n + 1);
+      return session.seekTo(ms);
+    },
+    [session],
+  );
   const lyricsPositionMs = useSmoothedPosition(
     player?.positionMs ?? 0,
     playing && expanded && stageMode === 'lyrics',
+    seekGeneration,
   );
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
@@ -2802,6 +2819,7 @@ function Main({
     downloadRefFor,
     reportPlay,
     queueSettingsWrite,
+    seekToPosition,
   });
   journeyDeps.current = {
     session,
@@ -2811,6 +2829,7 @@ function Main({
     downloadRefFor,
     reportPlay,
     queueSettingsWrite,
+    seekToPosition,
   };
   useEffect(() => {
     if (!__DEV__) {
@@ -2845,6 +2864,7 @@ function Main({
         downloadRefFor: refFor,
         reportPlay,
         queueSettingsWrite: queueWrite,
+        seekToPosition: seekTo,
       } = journeyDeps.current;
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
@@ -2945,7 +2965,7 @@ function Main({
         case 'seek': {
           const ms = Number(params.get('ms') ?? '0');
           if (Number.isSafeInteger(ms) && ms >= 0) {
-            void s.seekTo(ms).then((r) => reportResult('action.seek', r));
+            void seekTo(ms).then((r) => reportResult('action.seek', r));
           }
           break;
         }
@@ -3637,7 +3657,7 @@ function Main({
                   ? () => onDownloadAction(currentRecordingId)
                   : undefined
               }
-              onSeek={(ms) => void session.seekTo(ms)}
+              onSeek={seekToPosition}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={radioCapable ? onStartRadio : undefined}
               onStopRadio={onStopRadio}
