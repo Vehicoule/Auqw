@@ -224,9 +224,17 @@ class AuqwMediaSessionService : MediaSessionService() {
     // The session sees the player through QueuePlayer — the module
     // keeps the raw ExoPlayer, the wrapper only advertises the
     // next/previous commands the projection cursor consumes.
-    session = MediaSession.Builder(this, QueuePlayer(p))
+    val s = MediaSession.Builder(this, QueuePlayer(p))
       .setCallback(sessionCallback)
       .build()
+    session = s
+    // The module's only service contact is the ACTION_LOCAL_BIND
+    // binder, which bypasses the SERVICE_INTERFACE/controller-connect
+    // path where MediaSessionService.addSession normally runs — and
+    // only added sessions feed MediaNotificationManager. Without this,
+    // the media notification is never posted and the service never
+    // promotes to foreground.
+    addSession(s)
   }
 
   override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
