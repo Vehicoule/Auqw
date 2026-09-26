@@ -319,6 +319,9 @@ importers:
       react-native-draggable-flatlist:
         specifier: 4.0.3
         version: 4.0.3(64a13cddc1bc5436aee821a0d6985438)
+      uqr:
+        specifier: 0.1.3
+        version: 0.1.3
     devDependencies:
       '@types/react':
         specifier: ~19.2.2

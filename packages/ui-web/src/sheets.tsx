@@ -444,21 +444,101 @@ export function AddToPlaylistSheet({
   );
 }
 
+export type NearbyPeerModel = {
+  readonly key: string;
+  readonly name: string;
+  readonly address: string;
+  /** fp pinned via TXT — the dial verifies it during handshake. */
+  readonly pinned: boolean;
+};
+
+function NearbyRow({
+  peer,
+  disabled,
+  onPair,
+}: {
+  readonly peer: NearbyPeerModel;
+  readonly disabled: boolean;
+  readonly onPair: ((key: string, code: string) => void) | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const ready = /^[0-9]{6}$/.test(code);
+  return (
+    <div className="uw-nearby__row">
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        disabled={onPair === undefined}
+        ariaLabel={t('sync.nearby.codeFor', { name: peer.name })}
+        className="uw-diag-row uw-diag-row--action"
+      >
+        <Text variant="metadata" color="primary" className="uw-diag-row__k">
+          {peer.name}
+        </Text>
+        <Text variant="metadata" color="secondary">
+          {peer.address}
+        </Text>
+      </Pressable>
+      {open && (
+        <div className="uw-nearby__dial">
+          <input
+            className="uw-namefield__input"
+            aria-label={t('sync.form.codeA11y')}
+            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
+            autoComplete="off"
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={(event) =>
+              setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
+            }
+          />
+          <Pressable
+            onPress={
+              !ready || onPair === undefined
+                ? undefined
+                : () => onPair(peer.key, code)
+            }
+            disabled={!ready || onPair === undefined || disabled}
+            ariaLabel={t('sync.nearby.connect')}
+            className="uw-pill uw-pill--accent"
+          >
+            <Text variant="metadata" color="bright">
+              {t('sync.nearby.connect')}
+            </Text>
+          </Pressable>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
- * The pairing offer: the QR the phone scans, and below it the typed
- * path — the 6-digit code plus this device's `address:port`. The raw
- * payload stays one copy away for non-camera flows. `expiresLabel`
- * counts down to the offer's expiry.
+ * The pairing offer: the QR another device scans, plus the code.
+ * Below it the accept half — nearby pair hosts discovered over mDNS
+ * (tap → type the code that device is showing) and a raw-payload
+ * paste fallback. `expiresLabel` counts down to the offer's expiry.
  */
 export function PairingSheet({
   pairing,
   onCopyPayload,
   onDismiss,
+  nearbyPeers,
+  onPairNearby,
+  onPastePayload,
+  dialing = false,
+  dialError = null,
 }: {
   readonly pairing: PairingModel;
   readonly onCopyPayload?: (() => void) | undefined;
   readonly onDismiss?: (() => void) | undefined;
+  readonly nearbyPeers?: readonly NearbyPeerModel[] | undefined;
+  readonly onPairNearby?: ((key: string, code: string) => void) | undefined;
+  readonly onPastePayload?: ((payload: string) => void) | undefined;
+  readonly dialing?: boolean | undefined;
+  readonly dialError?: string | null | undefined;
 }) {
+  const [payloadDraft, setPayloadDraft] = useState('');
   return (
     <SheetScaffold title={t('sync.pairDevice')} onDismiss={onDismiss}>
       <div className="uw-pairing">
@@ -498,6 +578,55 @@ export function PairingSheet({
           </Text>
           <Icon name="check" size={12} color="var(--text-secondary)" />
         </Pressable>
+        {nearbyPeers !== undefined && onPairNearby !== undefined && (
+          <div className="uw-nearby">
+            <Text variant="metadata" color="secondary">
+              {nearbyPeers.length === 0
+                ? t('sync.nearby.none')
+                : t('sync.nearby.tap')}
+            </Text>
+            {nearbyPeers.map((peer) => (
+              <NearbyRow
+                key={peer.key}
+                peer={peer}
+                disabled={dialing}
+                onPair={onPairNearby}
+              />
+            ))}
+          </div>
+        )}
+        {onPastePayload !== undefined && (
+          <div className="uw-nearby__dial">
+            <input
+              className="uw-namefield__input"
+              aria-label={t('sync.form.payloadA11y')}
+              placeholder={t('sync.form.payload')}
+              autoComplete="off"
+              spellCheck={false}
+              value={payloadDraft}
+              onChange={(event) => setPayloadDraft(event.currentTarget.value)}
+            />
+            <Pressable
+              onPress={
+                payloadDraft.trim() === ''
+                  ? undefined
+                  : () => onPastePayload(payloadDraft.trim())
+              }
+              disabled={payloadDraft.trim() === '' || dialing}
+              ariaLabel={t('sync.form.usePayload')}
+              className="uw-pill uw-pill--accent"
+            >
+              <Text variant="metadata" color="bright">
+                {t('sync.form.usePayload')}
+              </Text>
+            </Pressable>
+          </div>
+        )}
+        {dialError !== null && (
+          <Text variant="metadata" color="warn">
+            {dialError}
+          </Text>
+        )}
       </div>
     </SheetScaffold>
   );

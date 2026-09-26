@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Hairline, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { QrCode } from './qr-code.tsx';
 import type { SyncModel, SyncPeerModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 
@@ -28,6 +29,38 @@ export type SyncScreenProps = {
   readonly pairing?: boolean | undefined;
   /** Last pair failure's typed message — rendered under the form. */
   readonly pairError?: string | null | undefined;
+  /**
+   * Symmetric pairing — this device hosting an offer (QR + code the
+   * other side scans/types). `active` means the listener + mDNS
+   * advertise are live; the offer stays minted while shown.
+   */
+  readonly share?:
+    | {
+        readonly supported: boolean;
+        readonly active: boolean;
+        readonly busy: boolean;
+        readonly code: string | null;
+        readonly payload: string | null;
+        readonly expiresLabel: string | null;
+      }
+    | undefined;
+  readonly onShareToggle?: (() => void) | undefined;
+  /**
+   * mDNS-discovered pair hosts — tap a row, then type the code that
+   * device is showing. `key` is stable for the session.
+   */
+  readonly nearbyPeers?:
+    | readonly {
+        readonly key: string;
+        readonly name: string;
+        readonly address: string;
+        /** fp pinned via TXT — true means the dial can verify it. */
+        readonly pinned: boolean;
+      }[]
+    | undefined;
+  readonly onPairNearby?:
+    | ((key: string, code: string) => void)
+    | undefined;
   /**
    * The host app's QR scanner — a mounted CameraView is passed down
    * because expo-camera is a mobile-dep, not a ui-native one. Absent
@@ -263,6 +296,178 @@ function PairForm({
   );
 }
 
+function ShareSection({
+  share,
+  onToggle,
+}: {
+  readonly share: NonNullable<SyncScreenProps['share']>;
+  readonly onToggle?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <View style={{ padding: 14, gap: theme.spacing.sm }}>
+      <Text variant="metadata" color="secondary">
+        {t('sync.shareHint')}
+      </Text>
+      {share.active && share.payload !== null && share.code !== null ? (
+        <>
+          <QrCode data={share.payload} />
+          <Text
+            variant="title"
+            color="bright"
+            style={{ textAlign: 'center', letterSpacing: 6 }}
+          >
+            {share.code}
+          </Text>
+          {share.expiresLabel !== null && (
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ textAlign: 'center' }}
+            >
+              {share.expiresLabel}
+            </Text>
+          )}
+        </>
+      ) : null}
+      <Pressable
+        onPress={onToggle}
+        disabled={onToggle === undefined || share.busy}
+        accessibilityLabel={
+          share.active ? t('sync.shareStop') : t('sync.shareStart')
+        }
+        accessibilityRole="button"
+        style={({ pressed }) => [
+          {
+            alignSelf: 'flex-start',
+            paddingHorizontal: 18,
+            paddingVertical: 8,
+            borderRadius: theme.radius.control,
+            backgroundColor: share.active
+              ? theme.colors.hairline
+              : theme.colors.accent,
+          },
+          (share.busy || pressed) && { opacity: 0.5 },
+        ]}
+      >
+        <Text
+          variant="metadata"
+          color={share.active ? 'primary' : 'bright'}
+        >
+          {share.busy
+            ? t('sync.form.pairing')
+            : share.active
+              ? t('sync.shareStop')
+              : t('sync.shareStart')}
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function NearbyRow({
+  peer,
+  disabled,
+  onPair,
+}: {
+  readonly peer: NonNullable<SyncScreenProps['nearbyPeers']>[number];
+  readonly disabled: boolean;
+  readonly onPair?: ((key: string, code: string) => void) | undefined;
+}) {
+  const theme = useTheme();
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const ready = /^[0-9]{6}$/.test(code);
+  return (
+    <View style={{ padding: 14, gap: theme.spacing.xs }}>
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        disabled={onPair === undefined}
+        accessibilityLabel={t('sync.nearby.codeFor', { name: peer.name })}
+        accessibilityRole="button"
+        style={({ pressed }) => [pressed && { opacity: 0.6 }]}
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.sm,
+          }}
+        >
+          <Icon
+            name="radio"
+            size={14}
+            color={theme.colors.textPrimary}
+          />
+          <Text
+            variant="body"
+            color="primary"
+            style={{ flex: 1 }}
+            numberOfLines={1}
+          >
+            {peer.name}
+          </Text>
+          <Text variant="metadata" color="secondary">
+            {peer.address}
+          </Text>
+        </View>
+      </Pressable>
+      {open && (
+        <View
+          style={{ flexDirection: 'row', gap: theme.spacing.sm }}
+        >
+          <TextInput
+            value={code}
+            onChangeText={(next) =>
+              setCode(next.replace(/[^0-9]/g, '').slice(0, 6))
+            }
+            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
+            placeholderTextColor={theme.colors.textSecondary}
+            keyboardType="number-pad"
+            maxLength={6}
+            accessibilityLabel={t('sync.form.codeA11y')}
+            style={[
+              theme.typography.body,
+              {
+                flex: 1,
+                color: theme.colors.textPrimary,
+                paddingVertical: theme.spacing.sm,
+                paddingHorizontal: theme.spacing.screen,
+                borderRadius: theme.radius.control,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
+              },
+            ]}
+          />
+          <Pressable
+            onPress={
+              !ready || onPair === undefined
+                ? undefined
+                : () => onPair(peer.key, code)
+            }
+            disabled={!ready || onPair === undefined || disabled}
+            accessibilityLabel={t('sync.nearby.connect')}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              {
+                paddingHorizontal: 18,
+                justifyContent: 'center',
+                borderRadius: theme.radius.control,
+                backgroundColor: theme.colors.accent,
+              },
+              (!ready || disabled || pressed) && { opacity: 0.5 },
+            ]}
+          >
+            <Text variant="metadata" color="bright">
+              {t('sync.nearby.connect')}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export function SyncScreen({
   model,
   topInset = 0,
@@ -273,6 +478,10 @@ export function SyncScreen({
   onUnpair,
   pairing = false,
   pairError = null,
+  share,
+  onShareToggle,
+  nearbyPeers,
+  onPairNearby,
   renderScanner,
 }: SyncScreenProps) {
   const theme = useTheme();
@@ -342,6 +551,34 @@ export function SyncScreen({
                 : t('sync.deviceIdSuffix', { id: model.deviceId })}
             </Text>
           </View>
+
+          {share?.supported === true && (
+            <Section title={t('sync.share')}>
+              <ShareSection share={share} onToggle={onShareToggle} />
+            </Section>
+          )}
+
+          {nearbyPeers !== undefined && onPairNearby !== undefined && (
+            <Section title={t('sync.nearby')}>
+              <View style={{ padding: 14 }}>
+                <Text variant="metadata" color="secondary">
+                  {nearbyPeers.length === 0
+                    ? t('sync.nearby.none')
+                    : t('sync.nearby.tap')}
+                </Text>
+              </View>
+              {nearbyPeers.map((peer, i) => (
+                <View key={peer.key}>
+                  <Hairline />
+                  <NearbyRow
+                    peer={peer}
+                    disabled={pairing}
+                    onPair={onPairNearby}
+                  />
+                </View>
+              ))}
+            </Section>
+          )}
 
           {model.peers.length > 0 && (
             <Section title={t('sync.section.devices')}>

@@ -111,6 +111,11 @@ export interface ChannelDeps {
     readonly attach: (sender: NetSender) => void;
     readonly detach: (sender: NetSender) => void;
   };
+  /** `sync:nearby` push registry — same refcounted sender pattern. */
+  readonly syncNearby: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
   readonly pickFolder: (
     args: PickFolderArgs,
     sender: NetSender,
@@ -721,5 +726,12 @@ export function registerChannels(
   });
   ipcMain.on(CHANNELS.syncAppliedUnsubscribe, (event) => {
     deps.syncApplied.detach(event.sender);
+  });
+
+  ipcMain.on(CHANNELS.syncNearbySubscribe, (event) => {
+    deps.syncNearby.attach(event.sender);
+  });
+  ipcMain.on(CHANNELS.syncNearbyUnsubscribe, (event) => {
+    deps.syncNearby.detach(event.sender);
   });
 }

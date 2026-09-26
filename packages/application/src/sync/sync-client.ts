@@ -93,6 +93,13 @@ export interface SyncClient {
       | {
           readonly code: string;
           readonly endpoints: readonly string[];
+          /**
+           * mDNS TXT `dev` pin — a discovered device's fingerprint.
+           * Without it the typed-code path learns fp TOFU (the code is
+           * the auth secret); discovery adds an out-of-band pin so a
+           * same-LAN responder can't substitute its key.
+           */
+          readonly fp?: string;
         },
     signal?: CancellationSignal,
   ): Promise<Result<SyncPeer>>;
@@ -112,6 +119,16 @@ export interface SyncClient {
    * owns its side.
    */
   unpair(fp: string, signal?: CancellationSignal): Promise<Result<void>>;
+  /**
+   * Re-read peer custody — symmetric pairing writes through the
+   * registry seam, not this client, so a phone-hosted pair lands in
+   * storage invisible to the in-memory map until reloaded. New rows
+   * merge in as 'offline' views; existing rows (already tracked, with
+   * cursors) stay authoritative.
+   */
+  refreshPeers(
+    signal?: CancellationSignal,
+  ): Promise<Result<void>>;
   close(): Promise<void>;
 }
 
@@ -156,6 +173,13 @@ export type SyncClientDeps = {
   readonly requestMs?: number;
   /** Keepalive cadence — under the server's 120s idle kill. */
   readonly pingMs?: number;
+  /**
+   * The caller's own sync listener port, when it runs one — carried
+   * in the hello so the responder can learn a dialable endpoint for
+   * this device (symmetric pairing: the answering peer may host
+   * future pair offers). Absent or null → hello omits `port`.
+   */
+  readonly listenPort?: () => number | null;
 };
 
 type SessionPhase = 'challenge' | 'auth' | 'open';
@@ -323,12 +347,23 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     if (peersLoaded) {
       return ok(undefined);
     }
+    return refreshPeers(signal);
+  }
+
+  async function refreshPeers(
+    signal?: CancellationSignal,
+  ): Promise<Result<void>> {
     const listed = await deps.keys.peerList(signal);
     if (!listed.ok) {
       return listed;
     }
+    // Merge, don't replace: custody rows arriving via the pair host
+    // are additive; rows already tracked keep their cursors + live
+    // session views.
     for (const peer of listed.value) {
-      peers.set(peer.fp, peer);
+      if (!peers.has(peer.fp)) {
+        peers.set(peer.fp, peer);
+      }
     }
     peersLoaded = true;
     // Custody hydration changes what status() reports — subscribers
@@ -643,9 +678,12 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       kickQueued: false,
       activeOps: 0,
     };
+    const ownPort = deps.listenPort?.() ?? null;
     const challenged = await sessionRequest(
       session,
-      handshake.hello(),
+      ownPort === null
+        ? handshake.hello()
+        : { ...handshake.hello(), port: ownPort },
       isServerChallenge,
       handshakeMs,
       opts.signal,
@@ -954,6 +992,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       ...(existing?.lastSyncAt !== undefined
         ? { lastSyncAt: existing.lastSyncAt }
         : {}),
+      ...(welcome.host === undefined
+        ? {}
+        : {
+            deviceId: welcome.host.id,
+            ...(welcome.host.pub === undefined
+              ? {}
+              : { pub: welcome.host.pub }),
+          }),
       ...(storedPot !== undefined ? { pot: storedPot } : {}),
     };
     const prior = sessions.get(stored.fp);
@@ -1045,8 +1091,10 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           appError('invalid-message', 'sync: pairing code must be 6 digits'),
         );
       }
-      return pairOp(opts.endpoints, opts.code, undefined, undefined, signal);
+      return pairOp(opts.endpoints, opts.code, opts.fp, undefined, signal);
     },
+
+    refreshPeers,
 
     async syncNow(fp, signal) {
       if (closing) {

@@ -23,12 +23,18 @@ import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { fromUnknown, isShellError, shellError } from '../shared/errors.ts';
 import { redactSensitive } from '../shared/redact.ts';
-import { isSyncAppliedEvent } from '../shared/contract.ts';
+import {
+  isSyncAppliedEvent,
+  isSyncNearbyEvent,
+} from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
-import { createAppliedPushService } from './sync-events.ts';
+import {
+  createAppliedPushService,
+  createNearbyPushService,
+} from './sync-events.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
@@ -220,6 +226,7 @@ async function main(): Promise<void> {
     readOnline: () => net.isOnline(),
   });
   const appliedPush = createAppliedPushService();
+  const nearbyPush = createNearbyPushService();
   const supervisor = createSupervisor({
     fork: () =>
       utilityProcess.fork(UTILITY, [], {
@@ -246,6 +253,18 @@ async function main(): Promise<void> {
           );
         }
         appliedPush.notify(args);
+        return undefined;
+      },
+      // mDNS browse found/lost — the utility's discovery leg posts
+      // here; subscribed renderers see the nearby list update.
+      'sync:nearby': async (args) => {
+        if (!isSyncNearbyEvent(args)) {
+          throw shellError(
+            'invalid-request',
+            'sync:nearby expects a discovery event',
+          );
+        }
+        nearbyPush.notify(args);
         return undefined;
       },
     },
@@ -284,6 +303,7 @@ async function main(): Promise<void> {
     },
     net: netService,
     syncApplied: appliedPush,
+    syncNearby: nearbyPush,
     secure,
     utility: supervisor,
     // Brokers the stream pump channel — the utility child gets one end
@@ -340,6 +360,7 @@ async function main(): Promise<void> {
   app.on('will-quit', () => {
     netService.stop();
     appliedPush.stop();
+    nearbyPush.stop();
     supervisor.shutdown();
   });
 }

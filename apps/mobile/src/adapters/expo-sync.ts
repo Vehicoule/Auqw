@@ -1,5 +1,8 @@
 import type {
+  SyncDiscoveredPeer,
+  SyncDiscoverySession,
   ApplyResult,
+  CancellationSignal,
   ClockPort,
   IdPort,
   LogPort,
@@ -7,12 +10,14 @@ import type {
   SyncClient,
   SyncClientKeys,
   SyncEngine,
+  SyncIdentity,
   SyncLogStore,
 } from '@auqw/application';
 import {
   appError,
   createSyncClient,
   createSyncEngine,
+  createSyncPairHost,
   DEVICE_NAME_MAX,
   ensureSyncIdentity,
   err,
@@ -22,8 +27,13 @@ import {
   base64Decode,
   createNobleIdentity,
   createNobleSyncCrypto,
+  createNobleSyncResponder,
+  nobleFingerprintOf,
 } from './noble-sync-crypto.ts';
+import { createExpoSyncAcceptor } from './expo-sync-listener.ts';
+import { createExpoSyncDiscovery } from './expo-sync-discovery.ts';
 import { createExpoSyncSockets } from './expo-sync-socket.ts';
+import { createSyncPeerRegistry } from './sync-peer-registry.ts';
 import { nativeError, type AuqwSyncNative } from './auqw-expo-surface.ts';
 
 /**
@@ -56,12 +66,47 @@ export type ExpoSyncDeps = {
    * .applyDelta`) notifies, not just the round driver.
    */
   readonly onApplied?: (applied: ApplyResult) => void;
+  /** A peer paired through OUR listener — the UI refreshes custody. */
+  readonly onPaired?: () => Promise<unknown> | void;
 };
 
 export type ExpoSyncSurface = {
   readonly client: SyncClient;
   readonly engine: SyncEngine;
   readonly deviceId: string;
+  /**
+   * The pair-host half (symmetric pairing): this device listens and
+   * accepts the other side's hello — QR + code flow in reverse.
+   * Null when the build lacks the native listener seam.
+   */
+  readonly host: ExpoPairHostSurface | null;
+  /**
+   * `_auqw._tcp` browse — the pair sheet's nearby list. Best-effort:
+   * a browse failure resolves to an empty list, never a blocker.
+   */
+  readonly discovery: {
+    browse(opts: {
+      onFound(peer: SyncDiscoveredPeer): void;
+      onLost(name: string): void;
+    }): Promise<Result<SyncDiscoverySession>>;
+  } | null;
+};
+
+export type ExpoPairHostSurface = {
+  /** Bind the listener + advertise — resolves the bound port. */
+  start(signal?: CancellationSignal): Promise<Result<{ port: number }>>;
+  /**
+   * Mint the pair offer: the 6-digit code the other side proves AND
+   * the QR payload ({v, endpoint, endpoints, code, fp}) it scans —
+   * one live offer at a time. Endpoints resolve LAN IPv4 first.
+   */
+  mintOffer(): Promise<
+    Result<{ code: string; payload: string; expiresAt: number }>
+  >;
+  readonly port: number | null;
+  /** LAN IPv4:port list this host advertises — empty pre-start. */
+  localEndpoints(): Promise<readonly string[]>;
+  stop(): Promise<void>;
 };
 
 function nativeRandom(host: AuqwSyncNative): (n: number) => Uint8Array {
@@ -155,7 +200,36 @@ export async function createExpoSync(
       await client.close();
       return err(hydrated.error);
     }
-    return ok({ client, engine: wrappedEngine, deviceId });
+    // The pair-host half — the phone as the QR-side. The native
+    // listener seam decides availability; without it the surface is
+    // honest-null and the pair sheet hides the show-code affordance.
+    const host = buildPairHost({
+      native: deps.host,
+      identity: custody.value.identity,
+      random,
+      keys,
+      deviceId,
+      name: deviceName,
+      clock: deps.clock,
+      kickResume: (fp) => void client.syncNow(fp),
+      onPair: () => {
+        // The pair host wrote custody through the registry — the
+        // client's in-memory map only sees it after a reload, then
+        // the status subscription refreshes the UI.
+        void client.refreshPeers().then(() => deps.onPaired?.());
+      },
+    });
+    const discovery =
+      deps.host.syncBrowse === undefined
+        ? null
+        : createExpoSyncDiscovery(deps.host);
+    return ok({
+      client,
+      engine: wrappedEngine,
+      deviceId,
+      host,
+      discovery,
+    });
   } catch (thrown) {
     // Native exception text can carry paths, URLs, or stack detail and
     // the log sink performs no redaction — neither the typed error nor
@@ -168,4 +242,95 @@ export async function createExpoSync(
     });
     return err(appError(mapped.kind, 'sync initialization failed'));
   }
+}
+
+/** The phone-side responder + listener composition — null when the
+ * build lacks the native listener (`syncListen`). */
+function buildPairHost(opts: {
+  native: AuqwSyncNative;
+  identity: SyncIdentity;
+  random: (n: number) => Uint8Array;
+  keys: SyncClientKeys;
+  deviceId: string;
+  name: string;
+  clock: ClockPort;
+  kickResume: (fp: string) => void;
+  onPair: () => void;
+}): ExpoPairHostSurface | null {
+  if (opts.native.syncListen === undefined) {
+    return null;
+  }
+  const discovery = createExpoSyncDiscovery(opts.native);
+  const fp = nobleFingerprintOf(opts.identity.pub);
+  const pairHost = createSyncPairHost({
+    acceptor: createExpoSyncAcceptor(opts.native),
+    crypto: createNobleSyncResponder({
+      identity: opts.identity,
+      randomBytes: opts.random,
+    }),
+    registry: createSyncPeerRegistry(opts.keys),
+    deviceId: opts.deviceId,
+    name: opts.name,
+    fp,
+    fingerprintOf: nobleFingerprintOf,
+    advertise: discovery.advertise,
+    mintCode: () => {
+      const bytes = opts.random(4);
+      const value =
+        (((bytes[0] ?? 0) << 24) |
+          ((bytes[1] ?? 0) << 16) |
+          ((bytes[2] ?? 0) << 8) |
+          (bytes[3] ?? 0)) >>>
+        0;
+      return (value % 1_000_000).toString().padStart(6, '0');
+    },
+    clock: opts.clock,
+    onResume: (peer) => opts.kickResume(peer.fp),
+    onPair: () => opts.onPair(),
+  });
+  const localEndpoints = async (): Promise<readonly string[]> => {
+    if (
+      opts.native.syncLocalHosts === undefined ||
+      pairHost.port === null
+    ) {
+      return [];
+    }
+    const { hosts } = await opts.native.syncLocalHosts();
+    return hosts.map((h) => `${h}:${pairHost.port}`);
+  };
+  return {
+    start: (signal) => pairHost.start(signal),
+    async mintOffer() {
+      const minted = pairHost.mintOffer();
+      if (!minted.ok) {
+        return minted;
+      }
+      const endpoints = await localEndpoints();
+      const primary = endpoints[0];
+      if (primary === undefined) {
+        // No LAN IPv4 → nothing for a QR to point at. The minted
+        // code just expires unused — report honestly.
+        return err(
+          appError('unavailable', 'sync: no LAN address to advertise'),
+        );
+      }
+      const payload = JSON.stringify({
+        v: 1,
+        endpoint: primary,
+        endpoints,
+        code: minted.value.code,
+        fp,
+      });
+      return ok({
+        code: minted.value.code,
+        payload,
+        expiresAt: minted.value.expiresAt,
+      });
+    },
+    get port() {
+      return pairHost.port;
+    },
+    localEndpoints,
+    stop: () => pairHost.close(),
+  };
 }

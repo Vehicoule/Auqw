@@ -106,6 +106,7 @@ import {
   toRadioModel,
   toSearchRowModel,
   toSettingsModel,
+  formatExpiry,
   toSyncModel,
   toTrackRowModel,
   useTheme,
@@ -1085,6 +1086,27 @@ function Main({
   );
   const [pairing, setPairing] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
+  // Symmetric pairing: `share` = this device hosting a QR/code offer;
+  // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
+  // live only while the sync screen is open — the listener is
+  // pairing-only (rounds still dial out via the client).
+  const [share, setShare] = useState<{
+    readonly active: boolean;
+    readonly busy: boolean;
+    readonly code: string | null;
+    readonly payload: string | null;
+    readonly expiresAt: number | null;
+  }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
+  const shareHostRef = useRef(false);
+  const [nearbyPeers, setNearbyPeers] = useState<
+    readonly {
+      key: string;
+      name: string;
+      host: string;
+      port: number;
+      fp: string | null;
+    }[]
+  >([]);
   useEffect(() => {
     if (syncSurface === null) {
       return;
@@ -1968,7 +1990,11 @@ function Main({
     (
       request:
         | { readonly payload: string }
-        | { readonly code: string; readonly endpoints: readonly string[] },
+        | {
+            readonly code: string;
+            readonly endpoints: readonly string[];
+            readonly fp?: string;
+          },
     ) => {
       const client = syncSurface?.client;
       if (client === undefined || pairing) {
@@ -2012,6 +2038,171 @@ function Main({
     },
     [runPair],
   );
+  // Browse for nearby pair hosts while the sync screen is open —
+  // discovery is advisory (a dead browse just yields an empty list).
+  const syncOpen = overlay?.type === 'sync';
+  useEffect(() => {
+    const discovery = syncSurface?.discovery;
+    if (!syncOpen || discovery === undefined || discovery === null) {
+      return;
+    }
+    let session: { close(): void } | null = null;
+    let gone = false;
+    void discovery
+      .browse({
+        onFound: (peer) => {
+          const key = `${peer.name}|${peer.host}:${peer.port}`;
+          setNearbyPeers((prev) =>
+            prev.some((p) => p.key === key)
+              ? prev.map((p) =>
+                  p.key === key
+                    ? {
+                        key,
+                        name: peer.name,
+                        host: peer.host,
+                        port: peer.port,
+                        fp: peer.fp,
+                      }
+                    : p,
+                )
+              : [
+                  ...prev,
+                  {
+                    key,
+                    name: peer.name,
+                    host: peer.host,
+                    port: peer.port,
+                    fp: peer.fp,
+                  },
+                ],
+          );
+        },
+        onLost: (name) => {
+          setNearbyPeers((prev) =>
+            prev.filter((p) => p.name !== name),
+          );
+        },
+      })
+      .then((opened) => {
+        if (gone) {
+          opened.ok && opened.value.close();
+          return;
+        }
+        if (opened.ok) {
+          session = opened.value;
+        }
+      });
+    return () => {
+      gone = true;
+      session?.close();
+      setNearbyPeers([]);
+    };
+    // syncSurface is stable per controller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOpen, controller]);
+
+  // Share (this device as the pair host): stop whenever the sync
+  // screen isn't open — the listener is pairing-only and its minted
+  // code dies with the sheet.
+  useEffect(() => {
+    if (syncOpen) {
+      return;
+    }
+    if (shareHostRef.current) {
+      shareHostRef.current = false;
+      void syncSurface?.host?.stop();
+    }
+    setShare({
+      active: false,
+      busy: false,
+      code: null,
+      payload: null,
+      expiresAt: null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOpen]);
+
+  const onShareToggle = useCallback(() => {
+    const host = syncSurface?.host;
+    if (host === undefined || host === null || share.busy) {
+      return;
+    }
+    if (share.active) {
+      shareHostRef.current = false;
+      void host.stop();
+      setShare({
+        active: false,
+        busy: false,
+        code: null,
+        payload: null,
+        expiresAt: null,
+      });
+      return;
+    }
+    setShare((prev) => ({ ...prev, busy: true }));
+    void (async () => {
+      const started = await host.start();
+      if (!started.ok) {
+        setShare({
+          active: false,
+          busy: false,
+          code: null,
+          payload: null,
+          expiresAt: null,
+        });
+        setPairError(started.error.message);
+        return;
+      }
+      const offer = await host.mintOffer();
+      if (!offer.ok) {
+        await host.stop();
+        setShare({
+          active: false,
+          busy: false,
+          code: null,
+          payload: null,
+          expiresAt: null,
+        });
+        setPairError(offer.error.message);
+        return;
+      }
+      shareHostRef.current = true;
+      setShare({
+        active: true,
+        busy: false,
+        code: offer.value.code,
+        payload: offer.value.payload,
+        expiresAt: offer.value.expiresAt,
+      });
+      setPairError(null);
+    })().catch(() => {
+      setShare({
+        active: false,
+        busy: false,
+        code: null,
+        payload: null,
+        expiresAt: null,
+      });
+      setPairError('pairing failed');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, share.active, share.busy]);
+
+  const onPairNearby = useCallback(
+    (key: string, code: string) => {
+      const peer = nearbyPeers.find((p) => p.key === key);
+      if (peer === undefined) {
+        return;
+      }
+      runPair({
+        code,
+        endpoints: [`${peer.host}:${peer.port}`],
+        ...(peer.fp !== null ? { fp: peer.fp } : {}),
+      });
+    },
+    [nearbyPeers, runPair],
+  );
+
   const onSyncNow = useCallback(
     (fp: string) => {
       const client = syncSurface?.client;
@@ -3639,6 +3830,43 @@ function Main({
             onUnpair={onUnpair}
             pairing={pairing}
             pairError={pairError}
+            share={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : {
+                    supported: true,
+                    active: share.active,
+                    busy: share.busy,
+                    code: share.code,
+                    payload: share.payload,
+                    expiresLabel:
+                      share.expiresAt === null
+                        ? null
+                        : formatExpiry(share.expiresAt, Date.now()),
+                  }
+            }
+            onShareToggle={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : onShareToggle
+            }
+            nearbyPeers={
+              syncSurface?.discovery === undefined ||
+              syncSurface?.discovery === null
+                ? undefined
+                : nearbyPeers.map((peer) => ({
+                    key: peer.key,
+                    name: peer.name,
+                    address: `${peer.host}:${peer.port}`,
+                    pinned: peer.fp !== null,
+                  }))
+            }
+            onPairNearby={
+              syncSurface?.discovery === undefined ||
+              syncSurface?.discovery === null
+                ? undefined
+                : onPairNearby
+            }
             renderScanner={
               Platform.OS === 'android'
                 ? (onScan) => <SyncScanner onScan={onScan} />

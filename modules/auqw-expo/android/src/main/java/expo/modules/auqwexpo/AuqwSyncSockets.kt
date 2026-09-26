@@ -3,7 +3,10 @@ package expo.modules.auqwexpo
 import android.util.Base64
 import android.util.Log
 import expo.modules.kotlin.exception.CodedException
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
@@ -36,6 +39,93 @@ class AuqwSyncSockets(
 
   private val entries = ConcurrentHashMap<String, Entry>()
   private val secureRandom = SecureRandom()
+
+  /** At most one pairing listener — the host UI mints one offer at a
+   * time; the accept loop hands each inbound socket a registry entry
+   * (same reader path as dialed sockets) and emits it upstream. */
+  private var listener: ServerSocket? = null
+  private var acceptThread: Thread? = null
+  private var nextSocketSeq = 0
+
+  /**
+   * Bind a wildcard listener on an ephemeral port. Accepted sockets
+   * join the same registry as dialed ones — syncSend/syncClose/
+   * syncDestroy and the data/closed events all apply — under
+   * JS-addressable ids `accept-<n>`.
+   */
+  fun listen(emitAccepted: (socketId: String, remoteAddress: String) -> Unit): Int {
+    if (listener != null) {
+      throw CodedException("unavailable", "syncListen: already listening", null)
+    }
+    val server =
+      try {
+        ServerSocket(0)
+      } catch (e: Exception) {
+        throw CodedException("unavailable", "syncListen failed: ${e.message}", e)
+      }
+    listener = server
+    val thread =
+      Thread(
+        {
+          while (true) {
+            val socket =
+              try {
+                server.accept()
+              } catch (_: Exception) {
+                return@Thread
+              }
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+            val socketId = "accept-${++nextSocketSeq}"
+            val entry = Entry(socket)
+            entries[socketId] = entry
+            val reader =
+              Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
+                isDaemon = true
+                start()
+              }
+            entry.reader = reader
+            emitAccepted(
+              socketId,
+              socket.inetAddress?.hostAddress ?: "unknown",
+            )
+          }
+        },
+        "auqw-sync-accept",
+      ).apply {
+        isDaemon = true
+        start()
+      }
+    acceptThread = thread
+    return server.localPort
+  }
+
+  fun stopListening() {
+    val server = listener ?: return
+    listener = null
+    acceptThread = null
+    runCatching { server.close() }
+  }
+
+  /** IPv4 addresses the listener is reachable on — the QR payload
+   * carries these as fallback endpoints alongside the mDNS name. */
+  fun localHosts(): List<String> {
+    val out = LinkedHashSet<String>()
+    try {
+      val ifs = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+      for (iface in ifs) {
+        if (!iface.isUp || iface.isLoopback) continue
+        for (addr in iface.inetAddresses) {
+          if (addr is Inet4Address && !addr.isLoopbackAddress) {
+            out.add(addr.hostAddress ?: continue)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "localHosts failed: ${e.message}")
+    }
+    return out.toList()
+  }
 
   /**
    * Blocking connect on the caller's coroutine — Expo AsyncFunction
@@ -112,6 +202,7 @@ class AuqwSyncSockets(
   }
 
   fun destroyAll() {
+    stopListening()
     for (id in entries.keys.toList()) {
       destroy(id)
     }

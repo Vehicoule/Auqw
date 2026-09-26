@@ -103,6 +103,7 @@ import type {
 } from '@auqw/ui-web';
 import type {
   SyncDeviceInfo,
+  SyncNearbyPeer,
   SyncPairingResult,
   SyncStatusResult,
 } from '../shared/contract.ts';
@@ -952,6 +953,138 @@ function Main({
   >([]);
   const [pairing, setPairing] = useState<SyncPairingResult | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
+  // The accept half of symmetric pairing: mDNS-found pair hosts the
+  // sheet can dial into (tap → type the code that device shows), plus
+  // the payload-paste fallback. Browse lives only while the sheet is
+  // open — it needs no custody, so it starts immediately.
+  const [nearbyPeers, setNearbyPeers] = useState<
+    readonly (SyncNearbyPeer & { readonly key: string })[]
+  >([]);
+  const [dialing, setDialing] = useState(false);
+  const [dialError, setDialError] = useState<string | null>(null);
+  useEffect(() => {
+    if (pairing === null) {
+      setNearbyPeers([]);
+      setDialing(false);
+      setDialError(null);
+      return;
+    }
+    void window.auqw.sync.nearbyStart().catch(() => undefined);
+    const unsubscribe = window.auqw.sync.onNearby((event) => {
+      setNearbyPeers((prev) => {
+        if (event.type === 'lost') {
+          return prev.filter((peer) => peer.name !== event.name);
+        }
+        const key = `${event.peer.name}|${event.peer.host}:${event.peer.port}`;
+        const next = prev.filter((peer) => peer.key !== key);
+        return [...next, { ...event.peer, key }];
+      });
+    });
+    return () => {
+      unsubscribe();
+      void window.auqw.sync.nearbyStop().catch(() => undefined);
+    };
+  }, [pairing]);
+  const onPairDevice = useCallback(() => {
+    void window.auqw.sync
+      .pairing()
+      .then((offer) => {
+        setPairing(offer);
+        setPairingError(null);
+      })
+      // A mint failure (listener down, no LAN address) must surface —
+      // a silent reject leaves the row looking dead-clicked.
+      .catch((thrown: unknown) => {
+        setPairing(null);
+        setPairingError(
+          isShellError(thrown)
+            ? thrown.message
+            : thrown instanceof Error
+              ? thrown.message
+              : 'could not mint a pairing offer',
+        );
+      });
+  }, []);
+  const syncRefresh = useCallback(() => {
+    const { sync } = window.auqw;
+    void sync
+      .status()
+      .then((status) => setSyncStatus(status))
+      .catch(() => setSyncStatus(null));
+    void sync
+      .devices()
+      .then((result) => setSyncDevices(result.devices))
+      .catch(() => setSyncDevices([]));
+  }, []);
+  const onUnpairDevice = useCallback(
+    (deviceId: string) => {
+      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
+    },
+    [syncRefresh],
+  );
+  const onSyncNow = useCallback(() => {
+    void window.auqw.sync.trigger().then(syncRefresh);
+  }, [syncRefresh]);
+  const onDialNearby = useCallback(
+    (key: string, code: string) => {
+      const peer = nearbyPeers.find((entry) => entry.key === key);
+      if (peer === undefined || dialing) {
+        return;
+      }
+      setDialing(true);
+      setDialError(null);
+      void window.auqw.sync
+        .dial({
+          host: peer.host,
+          port: peer.port,
+          code,
+          ...(peer.fp !== null ? { fp: peer.fp } : {}),
+        })
+        .then(() => {
+          setDialing(false);
+          setPairing(null);
+          syncRefresh();
+        })
+        .catch((thrown: unknown) => {
+          setDialing(false);
+          setDialError(
+            isShellError(thrown)
+              ? thrown.message
+              : thrown instanceof Error
+                ? thrown.message
+                : 'pairing failed',
+          );
+        });
+    },
+    [nearbyPeers, dialing, syncRefresh],
+  );
+  const onPastePayload = useCallback(
+    (payload: string) => {
+      if (dialing) {
+        return;
+      }
+      setDialing(true);
+      setDialError(null);
+      void window.auqw.sync
+        .dialPayload({ payload })
+        .then(() => {
+          setDialing(false);
+          setPairing(null);
+          syncRefresh();
+        })
+        .catch((thrown: unknown) => {
+          setDialing(false);
+          setDialError(
+            isShellError(thrown)
+              ? thrown.message
+              : thrown instanceof Error
+                ? thrown.message
+                : 'pairing failed',
+          );
+        });
+    },
+    [dialing, syncRefresh],
+  );
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
   // sync polls.
@@ -966,17 +1099,6 @@ function Main({
     );
     return () => window.clearInterval(timer);
   }, [pairing]);
-  const syncRefresh = useCallback(() => {
-    const { sync } = window.auqw;
-    void sync
-      .status()
-      .then((status) => setSyncStatus(status))
-      .catch(() => setSyncStatus(null));
-    void sync
-      .devices()
-      .then((result) => setSyncDevices(result.devices))
-      .catch(() => setSyncDevices([]));
-  }, []);
   useEffect(() => {
     if (tab !== 'settings') {
       return;
@@ -1387,35 +1509,6 @@ function Main({
     [syncStatus, syncDevices, pairing, pairingTick, pairingError, localeTick],
   );
 
-  const onPairDevice = useCallback(() => {
-    void window.auqw.sync
-      .pairing()
-      .then((offer) => {
-        setPairing(offer);
-        setPairingError(null);
-      })
-      // A mint failure (listener down, no LAN address) must surface —
-      // a silent reject leaves the row looking dead-clicked.
-      .catch((thrown: unknown) => {
-        setPairing(null);
-        setPairingError(
-          isShellError(thrown)
-            ? thrown.message
-            : thrown instanceof Error
-              ? thrown.message
-              : 'could not mint a pairing offer',
-        );
-      });
-  }, []);
-  const onUnpairDevice = useCallback(
-    (deviceId: string) => {
-      void window.auqw.sync.unpair({ id: deviceId }).then(syncRefresh);
-    },
-    [syncRefresh],
-  );
-  const onSyncNow = useCallback(() => {
-    void window.auqw.sync.trigger().then(syncRefresh);
-  }, [syncRefresh]);
   const onExportDelta = useCallback(() => {
     void (async () => {
       // Large logs page over the wire — `more` means follow up with a
@@ -3188,6 +3281,16 @@ function Main({
           >
             <PairingSheet
               pairing={syncModel.pairing}
+              nearbyPeers={nearbyPeers.map((peer) => ({
+                key: peer.key,
+                name: peer.name,
+                address: `${peer.host}:${peer.port}`,
+                pinned: peer.fp !== null,
+              }))}
+              onPairNearby={onDialNearby}
+              onPastePayload={onPastePayload}
+              dialing={dialing}
+              dialError={dialError}
               onCopyPayload={() => {
                 void navigator.clipboard.writeText(pairing.payload);
               }}

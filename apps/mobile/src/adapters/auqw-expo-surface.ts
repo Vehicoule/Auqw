@@ -323,11 +323,41 @@ export type AuqwSyncNative = {
    * back to a device-id-derived label in the adapter.
    */
   syncDeviceName?(): string;
+  /**
+   * Pairing listener (symmetric pairing): bind an ephemeral TCP port;
+   * accepted sockets mint `accept-<n>` ids that the send/close/destroy
+   * calls and data/closed events all apply to. Resolves with the port.
+   */
+  syncListen?(): Promise<{ port: number }>;
+  syncListenStop?(): Promise<void>;
+  /** IPv4 addresses the listener is reachable on (QR fallbacks). */
+  syncLocalHosts?(): Promise<{ hosts: string[] }>;
+  /** mDNS advertise `_auqw._tcp` — TXT `dev` carries the identity fp. */
+  syncAdvertise?(name: string, port: number, fp: string): Promise<void>;
+  syncAdvertiseStop?(): Promise<void>;
+  /** mDNS browse `_auqw._tcp` — `{type,name,host?,port?,fp?}` events. */
+  syncBrowse?(): Promise<void>;
+  syncBrowseStop?(): Promise<void>;
   addSyncSocketDataListener(
     listener: (event: AuqwSyncSocketDataEvent) => void,
   ): AuqwExpoSubscription;
   addSyncSocketClosedListener(
     listener: (event: AuqwSyncSocketClosedEvent) => void,
+  ): AuqwExpoSubscription;
+  addSyncSocketAcceptedListener?(
+    listener: (event: {
+      socketId: string;
+      remoteAddress: string;
+    }) => void,
+  ): AuqwExpoSubscription;
+  addSyncDiscoveryListener?(
+    listener: (event: {
+      type: string;
+      name: string;
+      host?: string;
+      port?: number;
+      fp?: string | null;
+    }) => void,
   ): AuqwExpoSubscription;
 };
 

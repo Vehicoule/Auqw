@@ -937,6 +937,106 @@ export function isSyncPairingResult(
   );
 }
 
+/**
+ * `sync:nearby*` — the LocalSend-style discovery surface: the utility
+ * browses `_auqw._tcp` while a nearby list is open and pushes
+ * `sync:nearby` events through main. Discovery is advisory — pairing
+ * still authorizes by the 6-digit code (or a scanned payload); the
+ * advertised `fp` only pins it.
+ */
+export type SyncNearbyPeer = {
+  readonly name: string;
+  readonly host: string;
+  readonly port: number;
+  /** Advertised identity fingerprint (TXT `dev`) — null when absent. */
+  readonly fp: string | null;
+};
+
+export type SyncNearbyEvent =
+  | { readonly type: 'found'; readonly peer: SyncNearbyPeer }
+  | { readonly type: 'lost'; readonly name: string };
+
+function isSyncNearbyPeer(value: unknown): value is SyncNearbyPeer {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['name', 'host', 'port', 'fp']) &&
+    isBoundedString(value['name'], 128) &&
+    isBoundedString(value['host'], 64) &&
+    isSafeNonNegativeInt(value['port']) &&
+    (value['fp'] === null || isBoundedString(value['fp'], 128))
+  );
+}
+
+export function isSyncNearbyEvent(
+  value: unknown,
+): value is SyncNearbyEvent {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value['type'] === 'found' &&
+    hasOnlyKeys(value, ['type', 'peer'])
+  ) {
+    return isSyncNearbyPeer(value['peer']);
+  }
+  if (
+    value['type'] === 'lost' &&
+    hasOnlyKeys(value, ['type', 'name'])
+  ) {
+    return isBoundedString(value['name'], 128);
+  }
+  return false;
+}
+
+/**
+ * `sync:dial` — pair TO a phone-hosted offer: the desktop is the
+ * caller, the typed/scanned code is the auth secret. `fp` pins the
+ * responder when mDNS/QR disclosed it.
+ */
+export type SyncDialArgs = {
+  readonly host: string;
+  readonly port: number;
+  readonly code: string;
+  readonly fp?: string;
+};
+
+export function isSyncDialArgs(value: unknown): value is SyncDialArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['host', 'port', 'code', 'fp']) &&
+    isBoundedString(value['host'], 64) &&
+    isSafeNonNegativeInt(value['port']) &&
+    typeof value['code'] === 'string' &&
+    /^[0-9]{6}$/.test(value['code']) &&
+    (value['fp'] === undefined || isBoundedString(value['fp'], 128))
+  );
+}
+
+/** `sync:dialPayload` — pair TO a phone's QR payload verbatim. */
+export type SyncDialPayloadArgs = { readonly payload: string };
+
+export function isSyncDialPayloadArgs(
+  value: unknown,
+): value is SyncDialPayloadArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['payload']) &&
+    isBoundedString(value['payload'], 1_024)
+  );
+}
+
+export type SyncDialResult = { readonly device: SyncDeviceInfo };
+
+export function isSyncDialResult(
+  value: unknown,
+): value is SyncDialResult {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['device']) &&
+    isSyncDeviceInfo(value['device'])
+  );
+}
+
 export type SyncDeviceInfo = {
   readonly id: string;
   readonly name: string;
@@ -1437,6 +1537,25 @@ export type AuqwSync = {
   readonly onApplied: (
     listener: (event: SyncAppliedEvent) => void,
   ) => () => void;
+  /**
+   * LocalSend-style discovery: start the `_auqw._tcp` browse while a
+   * nearby list is on screen; peers arrive via `onNearby` pushes.
+   * Best-effort — a failure to browse reports 'unavailable' at start.
+   */
+  readonly nearbyStart: () => Promise<void>;
+  readonly nearbyStop: () => Promise<void>;
+  readonly onNearby: (
+    listener: (event: SyncNearbyEvent) => void,
+  ) => () => void;
+  /**
+   * Caller half of symmetric pairing: pair TO a phone-hosted offer by
+   * endpoint + displayed code, or verbatim QR payload. The peer's
+   * pair-host is pairing-only — rounds still run phone→desktop.
+   */
+  readonly dial: (args: SyncDialArgs) => Promise<SyncDialResult>;
+  readonly dialPayload: (
+    args: SyncDialPayloadArgs,
+  ) => Promise<SyncDialResult>;
 };
 
 /* ------------------------------------------------------------------ */

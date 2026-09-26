@@ -103,6 +103,92 @@ export interface SyncClientCrypto {
 }
 
 /**
+ * The responder half of one handshake — the server role either side
+ * can take under symmetric pairing (docs/specs/sync.md). `accept`
+ * validates the hello's key material cryptographically, mints the
+ * challenge, and returns the sealed session codec plus the caller's
+ * identity claims. Throws on malformed keys — callers treat a throw
+ * as connection death, not a typed reply.
+ */
+export interface SyncResponderCrypto {
+  readonly name: string;
+  readonly identity: SyncIdentity;
+  accept(
+    hello: ClientHello,
+    opts: { registered: boolean },
+  ): {
+    readonly challenge: Uint8Array;
+    readonly codec: SyncFrameCodec;
+    readonly peer: {
+      readonly deviceId: string;
+      readonly name: string;
+      readonly devPub: string;
+      readonly devFp: string;
+    };
+  };
+}
+
+/** A bound inbound listener — desktop node:net or the auqw-expo socket. */
+export interface SyncSocketListener {
+  readonly port: number;
+  close(): void;
+}
+
+/**
+ * The inbound-socket seam — the pair host's transport. Production:
+ * `node:net` on the desktop, the auqw-expo `syncListen` bridge on the
+ * phone; tests inject a loopback. `onSocket` fires per accepted
+ * connection; `onError` reports async listen failures post-bind.
+ */
+export interface SyncAcceptorPort {
+  listen(opts: {
+    onSocket(socket: SyncSocket): void;
+    onError?(error: { readonly message: string }): void;
+  }): Promise<Result<SyncSocketListener>>;
+}
+
+/**
+ * A `_auqw._tcp` service found on the LAN — `host`/`port` are dialable
+ * as-is; `fp` is the advertised identity fp for pre-dial pinning.
+ */
+export interface SyncDiscoveredPeer {
+  readonly name: string;
+  readonly host: string;
+  readonly port: number;
+  readonly fp: string | null;
+}
+
+export interface SyncDiscoverySession {
+  close(): void;
+}
+
+/**
+ * mDNS browse seam — platform glue (bonjour on desktop, NsdManager on
+ * Android). Browse is best-effort: pairing never depends on it (QR +
+ * code carry the endpoint), so a missing seam degrades to "no nearby
+ * list", never a failure.
+ */
+export interface SyncDiscoveryPort {
+  browse(opts: {
+    onFound(peer: SyncDiscoveredPeer): void;
+    onLost(name: string): void;
+  }): Promise<Result<SyncDiscoverySession>>;
+}
+
+/** `_auqw._tcp` advertise options — name is the human label, fp the
+ * identity fingerprint (TXT `dev`). */
+export interface SyncAdvertiseOpts {
+  readonly port: number;
+  readonly name: string;
+  readonly fp: string;
+  readonly onError?: () => void;
+}
+
+export interface SyncAdvertiser {
+  close(): void;
+}
+
+/**
  * A desktop we have paired with. `fp` pins the server identity on
  * every later dial; `peerCursor` is the desktop's watermark map
  * learned from its last delta — the `since` filter for the phone's
@@ -116,6 +202,14 @@ export type SyncPeer = {
   readonly lastSeenAt: number;
   readonly peerCursor: SyncCursor;
   readonly lastSyncAt?: number;
+  /**
+   * The peer's deviceId — captured when the peer hosted the pairing
+   * (its welcome discloses the responder identity); absent on records
+   * from a responder that never shared it.
+   */
+  readonly deviceId?: string;
+  /** The peer's device public key (SPKI b64) — welcome host field. */
+  readonly pub?: string;
   /**
    * The peer's bundled POT service as `host:port`, learned from the
    * pairing payload — shares `endpoints`' freshness horizon (a

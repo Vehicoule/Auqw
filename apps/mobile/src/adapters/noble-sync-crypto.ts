@@ -4,12 +4,14 @@ import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import type {
   AppError,
+  ClientHello,
   ErrorKind,
   Result,
   SyncClientCrypto,
   SyncClientHandshake,
   SyncFrameCodec,
   SyncIdentity,
+  SyncResponderCrypto,
 } from '@auqw/application';
 import { appError, err, isServerChallenge, ok } from '@auqw/application';
 
@@ -335,4 +337,84 @@ function utf8(text: string): Uint8Array {
     out[i] = text.charCodeAt(i);
   }
   return out;
+}
+
+/* ---------------------------- responder ----------------------------- */
+
+/**
+ * sha256(SPKI DER) hex — the wire `fp` derivation. Same formula as the
+ * desktop's fingerprintOf; custody records key on it.
+ */
+export function nobleFingerprintOf(spkiB64: string): string {
+  const der = base64Decode(spkiB64);
+  if (der === null) {
+    return '';
+  }
+  return sha256Hex(der);
+}
+
+/**
+ * The noise-v1 responder half — byte-for-byte the desktop's accept():
+ * fresh ephemeral, 32-byte salt, dh1 = eph·hello.eph, dh2 =
+ * eph·hello.dev, dh3 = static·hello.eph, keys = HKDF-64(dh1‖dh2‖dh3,
+ * salt, 'auqw-sync-v1'), responder sends with keys[32:64] / receives on
+ * keys[0:32] (the client mirrors). A malformed hello's key material
+ * throws — the caller treats that as connection death, never a typed
+ * reply.
+ */
+export function createNobleSyncResponder(opts: {
+  identity: SyncIdentity;
+  randomBytes: (n: number) => Uint8Array;
+}): SyncResponderCrypto {
+  return {
+    name: 'noise-v1',
+    get identity() {
+      return opts.identity;
+    },
+    accept(hello: ClientHello, { registered }) {
+      const ephPriv = opts.randomBytes(X25519_KEY_BYTES);
+      const ephPub = x25519.getPublicKey(ephPriv);
+      const ephPubRaw = rawPublic(hello.eph);
+      const devPubRaw = rawPublic(hello.dev);
+      const devPrivRaw = rawPrivate(opts.identity.priv);
+      if (ephPubRaw === null || devPubRaw === null || devPrivRaw === null) {
+        throw new Error('sync: hello carries unusable key material');
+      }
+      const salt = opts.randomBytes(32);
+      const dh1 = x25519.getSharedSecret(ephPriv, ephPubRaw);
+      const dh2 = x25519.getSharedSecret(ephPriv, devPubRaw);
+      const dh3 = x25519.getSharedSecret(devPrivRaw, ephPubRaw);
+      const keys = hkdf(
+        sha256,
+        concatBytes(dh1, dh2, dh3),
+        salt,
+        utf8('auqw-sync-v1'),
+        64,
+      );
+      const codec = createCodec(
+        keys.subarray(32, 64),
+        keys.subarray(0, 32),
+      );
+      const challenge = utf8(
+        JSON.stringify({
+          v: 1,
+          kind: 'challenge',
+          eph: spkiOf(ephPub),
+          salt: base64Encode(salt),
+          spub: opts.identity.pub,
+          registered,
+        }),
+      );
+      return {
+        challenge,
+        codec,
+        peer: {
+          deviceId: hello.deviceId,
+          name: hello.name,
+          devPub: hello.dev,
+          devFp: nobleFingerprintOf(hello.dev),
+        },
+      };
+    },
+  };
 }

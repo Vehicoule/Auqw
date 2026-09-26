@@ -24,6 +24,8 @@ import {
   isStringOrNull,
   isSyncAppliedEvent,
   isSyncDeltasResult,
+  isSyncDialResult,
+  isSyncNearbyEvent,
   isSyncDevicesResult,
   isSyncDrainAppliedResult,
   isSyncImportDeltaResult,
@@ -56,6 +58,10 @@ import type {
   StorageQueryResult,
   StreamPortLike,
   SyncAppliedEvent,
+  SyncDialArgs,
+  SyncDialPayloadArgs,
+  SyncDialResult,
+  SyncNearbyEvent,
   SyncDeltasArgs,
   SyncDeltasResult,
   SyncDevicesResult,
@@ -356,6 +362,34 @@ const api: AuqwApi = {
         ipcRenderer.send(CHANNELS.syncAppliedUnsubscribe);
       };
     },
+    nearbyStart: (): Promise<void> =>
+      invoke(CHANNELS.syncNearbyStart, undefined, isUndefinedResult),
+    nearbyStop: (): Promise<void> =>
+      invoke(CHANNELS.syncNearbyStop, undefined, isUndefinedResult),
+    onNearby: (
+      listener: (event: SyncNearbyEvent) => void,
+    ): (() => void) => {
+      const wrapped = (
+        _event: IpcRendererEvent,
+        payload: unknown,
+      ): void => {
+        if (isSyncNearbyEvent(payload)) {
+          listener(payload);
+        }
+      };
+      ipcRenderer.on(CHANNELS.syncNearby, wrapped);
+      ipcRenderer.send(CHANNELS.syncNearbySubscribe);
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.syncNearby, wrapped);
+        ipcRenderer.send(CHANNELS.syncNearbyUnsubscribe);
+      };
+    },
+    dial: (args: SyncDialArgs): Promise<SyncDialResult> =>
+      invoke(CHANNELS.syncDial, args, isSyncDialResult),
+    dialPayload: (
+      args: SyncDialPayloadArgs,
+    ): Promise<SyncDialResult> =>
+      invoke(CHANNELS.syncDialPayload, args, isSyncDialResult),
   },
   utility: {
     ping: (message: string): Promise<UtilityPingResult> =>

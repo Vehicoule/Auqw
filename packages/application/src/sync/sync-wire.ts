@@ -55,6 +55,13 @@ export type ClientHello = {
   readonly eph: string;
   /** Client long-lived device X25519 SPKI, base64. */
   readonly dev: string;
+  /**
+   * The caller's own sync listener port, when it runs one — the
+   * responder combines it with the socket's remote address to learn a
+   * dialable endpoint for the caller (symmetric pairing: the dialing
+   * desktop carries its sync port so the phone can reach it later).
+   */
+  readonly port?: number;
 };
 
 export type ServerChallenge = {
@@ -83,6 +90,18 @@ export type WelcomeMsg = {
   readonly device: SyncDeviceRecord;
   /** The server's display name. */
   readonly name: string;
+  /**
+   * The answering host's own identity — the dialer learns the
+   * responder's deviceId + name here (client hello carries only the
+   * caller's). Optional so pre-symmetric servers keep validating.
+   */
+  readonly host?: {
+    readonly id: string;
+    readonly name: string;
+    /** The responder's device pub (SPKI b64) — custody records need
+     * pub, not just its fp derivative. */
+    readonly pub?: string;
+  };
   /**
    * The server's bundled POT provider (`host:port`), sent on the
    * connection that actually answered — the authoritative
@@ -155,6 +174,34 @@ function isFp(value: unknown): value is string {
   return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
 }
 
+/**
+ * Shape-only hello guard — the responder's accept() proves the key
+ * material cryptographically (DH throws on junk), so this layer only
+ * bounds fields. The desktop keeps its own stricter check that loads
+ * the SPKI keys via node:crypto; this one runs where it can't.
+ */
+export function isClientHello(value: unknown): value is ClientHello {
+  return (
+    isRecord(value) &&
+    hasKeys(
+      value,
+      ['v', 'kind', 'deviceId', 'name', 'eph', 'dev'],
+      ['port'],
+    ) &&
+    value['v'] === WIRE_VERSION &&
+    value['kind'] === 'hello' &&
+    isString(value['deviceId'], 64) &&
+    DEVICE_ID_PATTERN.test(value['deviceId']) &&
+    isString(value['name'], DEVICE_NAME_MAX) &&
+    isString(value['eph'], B64_SPKI_MAX) &&
+    isString(value['dev'], B64_SPKI_MAX) &&
+    (value['port'] === undefined ||
+      (Number.isSafeInteger(value['port']) &&
+        (value['port'] as number) >= 1 &&
+        (value['port'] as number) <= 65_535))
+  );
+}
+
 export function isServerChallenge(
   value: unknown,
 ): value is ServerChallenge {
@@ -194,14 +241,22 @@ export function isSyncDeviceRecord(
 }
 
 export function isWelcomeMsg(value: unknown): value is WelcomeMsg {
+  const host = isRecord(value) ? value['host'] : undefined;
   return (
     isRecord(value) &&
-    hasKeys(value, ['t', 'device', 'name'], ['pot']) &&
+    hasKeys(value, ['t', 'device', 'name'], ['pot', 'host']) &&
     value['t'] === 'welcome' &&
     isSyncDeviceRecord(value['device']) &&
     isString(value['name'], DEVICE_NAME_MAX) &&
     (value['pot'] === undefined ||
-      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
+      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null)) &&
+    (host === undefined ||
+      (isRecord(host) &&
+        hasKeys(host, ['id', 'name'], ['pub']) &&
+        isString(host['id'], 64) &&
+        DEVICE_ID_PATTERN.test(host['id']) &&
+        isString(host['name'], DEVICE_NAME_MAX) &&
+        (host['pub'] === undefined || isString(host['pub'], 128))))
   );
 }
 
@@ -529,6 +584,11 @@ export function wireErrorCode(code: string): AppError {
       return appError(
         'unavailable',
         'sync: peer has no merge engine wired',
+      );
+    case 'pair-only':
+      return appError(
+        'unavailable',
+        'sync: peer hosts pairing only — dial its desktop for rounds',
       );
     case 'too-large':
       return appError('budget-exceeded', 'sync: document exceeds the wire cap');

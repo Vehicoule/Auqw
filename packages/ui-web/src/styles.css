@@ -1871,3 +1871,19 @@
   word-break: break-all;
   opacity: 0.6;
 }
+.uw-nearby {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+  text-align: left;
+}
+.uw-nearby__dial {
+  display: flex;
+  gap: var(--spacing-sm);
+  width: 100%;
+  margin-top: var(--spacing-xs);
+}
+.uw-nearby__dial .uw-namefield__input {
+  flex: 1;
+}

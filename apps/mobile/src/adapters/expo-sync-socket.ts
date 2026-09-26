@@ -35,7 +35,7 @@ type SocketListeners = {
   end: (() => void)[];
 };
 
-class ExpoSyncSocket implements SyncSocket {
+export class ExpoSyncSocket implements SyncSocket {
   readonly remoteAddress: string | undefined;
 
   #listeners: SocketListeners = { data: [], close: [], error: [], end: [] };

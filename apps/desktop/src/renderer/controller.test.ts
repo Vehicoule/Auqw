@@ -188,6 +188,12 @@ function fakeApi(): Rig {
         materialized: () =>
           Promise.reject(new Error('seam: inject sync')),
         onApplied: () => () => {},
+        nearbyStart: () => Promise.reject(new Error('seam: inject sync')),
+        nearbyStop: () => Promise.reject(new Error('seam: inject sync')),
+        onNearby: () => () => {},
+        dial: () => Promise.reject(new Error('seam: inject sync')),
+        dialPayload: () =>
+          Promise.reject(new Error('seam: inject sync')),
       },
       utility: {
         ping: () => Promise.reject(new Error('unused')),

@@ -46,6 +46,16 @@ export const CHANNELS = {
   syncDrainApplied: 'sync:drainApplied',
   syncAckApplied: 'sync:ackApplied',
   syncMaterialized: 'sync:materialized',
+  /** Pair TO a phone-hosted offer (desktop as caller). */
+  syncDial: 'sync:dial',
+  syncDialPayload: 'sync:dialPayload',
+  /** Start/stop the `_auqw._tcp` browse for nearby pair hosts. */
+  syncNearbyStart: 'sync:nearbyStart',
+  syncNearbyStop: 'sync:nearbyStop',
+  /** Main→renderer push: a nearby pair host appeared/disappeared. */
+  syncNearby: 'sync:nearby',
+  syncNearbySubscribe: 'sync:nearbySubscribe',
+  syncNearbyUnsubscribe: 'sync:nearbyUnsubscribe',
   /** Main→renderer push: applied sync outcomes are queued for drain. */
   syncApplied: 'sync:applied',
   syncAppliedSubscribe: 'sync:appliedSubscribe',
