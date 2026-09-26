@@ -87,22 +87,83 @@ function parseIpv4(host: string): [number, number, number, number] | null {
  * literal, or an mDNS-style `.local`/`.lan` name. Public literals and
  * arbitrary DNS names are refused before `netConnect` runs.
  */
-export function isPairableLanHost(host: string): boolean {
-  const lower = host.toLowerCase();
-  const bare =
-    lower.startsWith('[') && lower.endsWith(']')
-      ? lower.slice(1, -1)
-      : lower;
-  if (
-    bare === 'localhost' ||
-    bare.endsWith('.local') ||
-    bare.endsWith('.lan')
-  ) {
-    return true;
+/**
+ * Whole-literal IPv6 parse → eight 16-bit groups, or null. Handles
+ * `::` compression, a `%zone` scope suffix, and a trailing embedded
+ * dotted-quad — and rejects every byte that isn't part of a valid
+ * literal, so nothing here can smuggle a DNS name through.
+ */
+function parseIpv6(addr: string): number[] | null {
+  const zoneless = addr.split('%', 1)[0] ?? '';
+  if (zoneless === '') {
+    return null;
   }
-  // IPv4, including the `::ffff:`/long-form mapped notation.
-  const mapped = /^::ffff:(.+)$/.exec(bare)?.[1] ?? /^0:0:0:0:ffff:(.+)$/.exec(bare)?.[1];
-  const v4 = parseIpv4(bare) ?? (mapped !== undefined ? parseIpv4(mapped) : null);
+  const halves = zoneless.split('::');
+  if (halves.length > 2) {
+    return null;
+  }
+  const group = (g: string): number | null =>
+    /^[0-9a-f]{1,4}$/i.test(g) ? Number.parseInt(g, 16) : null;
+  const leftRaw = halves[0] === '' ? [] : (halves[0] ?? '').split(':');
+  const rightRaw =
+    halves[1] === undefined ? null : halves[1] === '' ? [] : halves[1].split(':');
+  // An embedded IPv4 tail contributes the last two groups.
+  const tailList = rightRaw ?? leftRaw;
+  const tail = tailList[tailList.length - 1];
+  let v4Groups: number[] = [];
+  if (tail !== undefined && tail.includes('.')) {
+    const v4 = parseIpv4(tail);
+    if (v4 === null) {
+      return null;
+    }
+    tailList.pop();
+    v4Groups = [(v4[0]! << 8) | v4[1]!, (v4[2]! << 8) | v4[3]!];
+  }
+  const left = leftRaw.map(group);
+  const right = (rightRaw ?? []).map(group);
+  if (left.includes(null) || right.includes(null)) {
+    return null;
+  }
+  const leftN = left as number[];
+  const rightN = right as number[];
+  const total = leftN.length + rightN.length + v4Groups.length;
+  if (rightRaw === null) {
+    // No `::` — the literal must carry all eight groups exactly.
+    return total === 8 ? [...leftN, ...v4Groups] : null;
+  }
+  if (total > 7) {
+    return null;
+  }
+  const pad = Array<number>(8 - total).fill(0);
+  return [...leftN, ...pad, ...rightN, ...v4Groups];
+}
+
+/**
+ * Pairing targets are LAN-scoped: the IPC caller (renderer) may be
+ * compromised, so `host` must be an IP literal a LAN pairing protocol
+ * legitimately dials — private/loopback/link-local/CGNAT/ULA —
+ * never a DNS name, which could resolve anywhere.
+ */
+export function isPairableLanHost(host: string): boolean {
+  const bare =
+    host.startsWith('[') && host.endsWith(']')
+      ? host.slice(1, -1)
+      : host;
+  const v4direct = parseIpv4(bare);
+  const groups = v4direct === null ? parseIpv6(bare) : null;
+  const v4 =
+    v4direct ??
+    // IPv4-mapped form: ::ffff:a.b.c.d → groups [0,0,0,0,0,ffff,…].
+    (groups !== null &&
+    groups.slice(0, 5).every((g) => g === 0) &&
+    groups[5] === 0xffff
+      ? [
+          (groups[6]! >> 8) & 0xff,
+          groups[6]! & 0xff,
+          (groups[7]! >> 8) & 0xff,
+          groups[7]! & 0xff,
+        ]
+      : null);
   if (v4 !== null) {
     const [a, b] = v4;
     return (
@@ -114,16 +175,16 @@ export function isPairableLanHost(host: string): boolean {
       (a === 100 && b >= 64 && b <= 127) // CGNAT (overlay VPNs)
     );
   }
-  if (bare === '::1') {
-    return true;
-  }
-  if (!bare.includes(':')) {
-    return false; // neither a v4 literal nor a scoped hostname
-  }
-  const first = Number.parseInt(bare.split(':')[0] ?? '', 16);
-  if (Number.isNaN(first)) {
+  if (groups === null) {
     return false;
   }
+  if (groups.every((g) => g === 0)) {
+    return false; // :: — unspecified
+  }
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) {
+    return true; // ::1 loopback
+  }
+  const first = groups[0]!;
   return (
     (first & 0xffc0) === 0xfe80 || // fe80::/10 link-local
     (first & 0xfe00) === 0xfc00 // fc00::/7 ULA
