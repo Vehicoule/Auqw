@@ -406,9 +406,6 @@
   padding: 0 var(--spacing-sm);
   margin-bottom: var(--spacing-sm);
 }
-.uw-section-label--block {
-  margin-top: var(--spacing-xl);
-}
 .uw-card {
   border: var(--stroke-hairline) solid var(--hairline);
   border-radius: var(--radius-float);
@@ -1047,6 +1044,20 @@
 }
 
 /* ---- settings ------------------------------------------------------------ */
+
+/* Grouped cards breathe like iOS settings — wider rhythm between groups
+   than the screen's default child gap. */
+.uw-settings {
+  gap: var(--spacing-xl);
+}
+.uw-settings__group {
+  display: flex;
+  flex-direction: column;
+}
+/* Row separators stop at the label edge instead of running full-bleed. */
+.uw-settings__group .uw-card .uw-hairline {
+  margin-left: var(--spacing-md);
+}
 
 .uw-settings-row {
   display: flex;

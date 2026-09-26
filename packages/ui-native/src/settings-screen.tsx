@@ -1,7 +1,7 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
-import { t } from '@auqw/ui-shared';
+import { settingsGroups, t } from '@auqw/ui-shared';
 import type { SettingsModel, SettingsRowModel } from '@auqw/ui-shared';
 
 export type SettingsScreenProps = {
@@ -86,7 +86,11 @@ function SettingsRow({
         gap: theme.spacing.md,
       }}
     >
-      <Text variant="body" color="primary" style={{ flex: 1 }}>
+      <Text
+        variant="body"
+        color={row.destructive === true ? 'warn' : 'primary'}
+        style={{ flex: 1 }}
+      >
         {row.label}
       </Text>
       {row.kind === 'toggle' ? (
@@ -130,33 +134,52 @@ export function SettingsScreen({
       contentContainerStyle={{ paddingTop: topInset, paddingBottom: theme.spacing.xxl }}
     >
       <Text
-        variant="label"
-        color="secondary"
-        uppercase
-        style={{ paddingHorizontal: theme.spacing.screen, marginTop: theme.spacing.sm, marginBottom: theme.spacing.sm }}
-      >
-        {t('settings.heading.settings')}
-      </Text>
-      <View
+        variant="display"
+        color="bright"
         style={{
-          marginHorizontal: theme.spacing.screen,
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          overflow: 'hidden',
+          paddingHorizontal: theme.spacing.screen,
+          marginTop: theme.spacing.sm,
         }}
       >
-        {model.rows.map((row, i) => (
-          <View key={row.key}>
-            {i > 0 && <Hairline style={{ marginLeft: 14 }} />}
-            <SettingsRow
-              row={row}
-              onSelectRow={onSelectRow}
-              onToggleRow={onToggleRow}
-            />
+        {t('nav.settings')}
+      </Text>
+      {settingsGroups(model.rows).map((group) => (
+        <View key={group.key}>
+          <Text
+            variant="label"
+            color="secondary"
+            uppercase
+            style={{
+              paddingHorizontal: theme.spacing.screen,
+              marginTop: theme.spacing.lg,
+              marginBottom: theme.spacing.sm,
+            }}
+          >
+            {group.label}
+          </Text>
+          <View
+            style={{
+              marginHorizontal: theme.spacing.screen,
+              borderRadius: theme.radius.control,
+              borderWidth: theme.strokes.hairline,
+              borderColor: theme.colors.hairline,
+              backgroundColor: theme.colors.raised,
+              overflow: 'hidden',
+            }}
+          >
+            {group.rows.map((row, i) => (
+              <View key={row.key}>
+                {i > 0 && <Hairline style={{ marginLeft: 14 }} />}
+                <SettingsRow
+                  row={row}
+                  onSelectRow={onSelectRow}
+                  onToggleRow={onToggleRow}
+                />
+              </View>
+            ))}
           </View>
-        ))}
-      </View>
+        </View>
+      ))}
       <Text
         variant="label"
         color="secondary"
@@ -175,6 +198,7 @@ export function SettingsScreen({
           borderRadius: theme.radius.control,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
+          backgroundColor: theme.colors.raised,
           padding: 14,
           gap: theme.spacing.sm,
         }}
