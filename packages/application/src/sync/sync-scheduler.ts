@@ -3,6 +3,7 @@ import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import { isSafeNonNegative } from '../domain.ts';
 import type { SyncClient, SyncClientStatus } from './sync-client.ts';
+import { cursorToSince } from './sync-wire.ts';
 
 /**
  * Application-level sync scheduling (docs/specs/sync.md): the client
@@ -53,6 +54,12 @@ const DEFAULT_RECONNECT_MAX_MS = 60_000;
 type PeerTrack = {
   /** Pending scheduled round — cancelled when rescheduled or stopped. */
   timer: CancellationSource | null;
+  /**
+   * The pending wake is a write-debounce: a later write re-arms it
+   * (trailing edge). Reconnect and one-shot wakes stand — a write
+   * must not pull a backoff round earlier than the ladder set it.
+   */
+  debouncing: boolean;
   /** A nudge arrived while a round was in flight. */
   dirty: boolean;
   /** Current reconnect delay; doubles on each failed round. */
@@ -118,6 +125,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     if (track === undefined) {
       track = {
         timer: null,
+        debouncing: false,
         dirty: false,
         backoffMs: reconnectBaseMs,
         running: false,
@@ -128,14 +136,33 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
   }
 
   /**
-   * Arms the peer's next round at `delayMs` — the only timer-placing
-   * path. `replace` cancels a pending timer (backoff moves the wake);
-   * without it a pending timer stands, since it fires soon and a
-   * round exports everything pending at fire time — a write burst
-   * schedules once, not per write. Nudges during an in-flight round
-   * or while offline mark dirty so a follow-up still runs.
+   * Serialized custody cursor for a peer — the per-page watermark
+   * doubles as a progress probe: it only moves when a round actually
+   * exchanged entries. Null while the peer has no status view.
    */
-  function schedule(fp: string, delayMs: number, replace: boolean): void {
+  function peerCursorKey(fp: string): string | null {
+    const view = views?.peers.find((v) => v.peer.fp === fp);
+    if (view === undefined) {
+      return null;
+    }
+    return cursorToSince(view.peer.peerCursor);
+  }
+
+  /**
+   * Arms the peer's next round at `delayMs` — the only timer-placing
+   * path. 'stand' keeps a pending wake (it fires soon and a round
+   * exports everything pending at fire time); 'replace' cancels it
+   * (backoff and recovery move the wake); 'debounce' is the
+   * trailing-edge write wake — it re-arms a pending debounce so a
+   * write burst fires once when it goes quiet, but stands behind a
+   * reconnect or one-shot wake. Nudges during an in-flight round or
+   * while offline mark dirty so a follow-up still runs.
+   */
+  function schedule(
+    fp: string,
+    delayMs: number,
+    mode: 'stand' | 'replace' | 'debounce',
+  ): void {
     if (!running || lifecycle.signal.cancelled) {
       return;
     }
@@ -145,20 +172,26 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       return;
     }
     if (track.timer !== null) {
-      if (!replace) {
+      const rearm =
+        mode === 'replace' ||
+        (mode === 'debounce' && track.debouncing);
+      if (!rearm) {
         return;
       }
       track.timer.cancel();
       track.timer = null;
+      track.debouncing = false;
     }
     const timer = new CancellationSource();
     track.timer = timer;
+    track.debouncing = mode === 'debounce';
     const work = (async () => {
       const slept = await deps.clock.sleep(delayMs, timer.signal);
       // Only OUR sleep clears the slot — a replacement armed while
       // this one was in flight must stay cancelable.
       if (track.timer === timer) {
         track.timer = null;
+        track.debouncing = false;
       }
       if (!slept.ok || lifecycle.signal.cancelled) {
         return;
@@ -177,6 +210,9 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     track.running = true;
     /** Reconnect delay when the round failed retryably. */
     let reconnectMs: number | null = null;
+    /** A page-capped round that still moved entries continues once. */
+    let progressed = false;
+    const cursorBefore = peerCursorKey(fp);
     try {
       const result = await deps.client.syncNow(fp, lifecycle.signal);
       if (result.ok) {
@@ -189,6 +225,15 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
           // Reconnect backoff: double per consecutive failure, capped.
           reconnectMs = track.backoffMs;
           track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+        } else if (
+          result.error.kind === 'budget-exceeded' &&
+          peerCursorKey(fp) !== cursorBefore
+        ) {
+          // The page cap cut a still-moving exchange: custody persists
+          // per page, so the follow-up resumes where this round left
+          // off. A stalled round moves nothing — no continuation, and
+          // the chain can never spin.
+          progressed = true;
         }
       }
     } finally {
@@ -197,12 +242,19 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     if (reconnectMs !== null) {
       // The reconnect round exports whatever accumulated, so pending
       // writes are covered by it rather than a second debounced wake.
-      schedule(fp, reconnectMs, true);
+      schedule(fp, reconnectMs, 'replace');
+      return;
+    }
+    if (progressed) {
+      // The continuation drains the rest of the backlog AND whatever
+      // landed mid-round — consume the flag so no third wake books.
+      track.dirty = false;
+      schedule(fp, debounceMs, 'replace');
       return;
     }
     if (track.dirty) {
       track.dirty = false;
-      schedule(fp, debounceMs, true);
+      schedule(fp, debounceMs, 'replace');
     }
   }
 
@@ -217,7 +269,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       const isNew = !tracks.has(view.peer.fp);
       const track = trackFor(view.peer.fp);
       if (isNew) {
-        schedule(view.peer.fp, debounceMs, false);
+        schedule(view.peer.fp, debounceMs, 'stand');
       }
       if (view.state === 'open') {
         // 'open' during a scheduler-owned round is that round's
@@ -230,7 +282,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         }
         if (track.dirty && !track.running) {
           track.dirty = false;
-          schedule(view.peer.fp, debounceMs, true);
+          schedule(view.peer.fp, debounceMs, 'replace');
         }
       } else if (
         view.state === 'offline' &&
@@ -245,7 +297,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // change instead of hammering a dead route.
         const wait = track.backoffMs;
         track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
-        schedule(view.peer.fp, wait, false);
+        schedule(view.peer.fp, wait, 'stand');
       }
     }
     // An unpaired peer drops its track — pending timers die with it.
@@ -281,7 +333,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
               return;
             }
             for (const peer of peers.value) {
-              schedule(peer.fp, 0, false);
+              schedule(peer.fp, 0, 'stand');
             }
           })
           .then(
@@ -296,7 +348,9 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         return;
       }
       for (const view of views.peers) {
-        schedule(view.peer.fp, debounceMs, false);
+        // Trailing edge: each write re-arms the wake — a burst
+        // converges in one round once it goes quiet.
+        schedule(view.peer.fp, debounceMs, 'debounce');
       }
     },
 
@@ -314,7 +368,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             // redundant second pass. schedule() re-marks dirty if
             // the online read races back down.
             track.dirty = false;
-            schedule(fp, 0, true);
+            schedule(fp, 0, 'replace');
           } else {
             track.dirty = true;
           }
@@ -328,6 +382,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         if (track.timer !== null) {
           track.timer.cancel();
           track.timer = null;
+          track.debouncing = false;
           track.dirty = true;
         }
       }
@@ -341,6 +396,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       for (const track of tracks.values()) {
         track.timer?.cancel();
         track.timer = null;
+        track.debouncing = false;
       }
     },
   };

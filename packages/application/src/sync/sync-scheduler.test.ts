@@ -442,9 +442,135 @@ async function replacedTimerStaysCancelable(): Promise<void> {
   scheduler.stop();
 }
 
+async function writeBurstTrailingEdge(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // Trailing edge: a write mid-window re-arms the wake — the burst
+  // converges ~500ms after the LAST write, not the first.
+  scheduler.notifyLocalWrites();
+  clock.advance(400);
+  scheduler.notifyLocalWrites();
+  clock.advance(400);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'late write re-armed the wake',
+  );
+  clock.advance(200);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'one round once the burst went quiet',
+  );
+  scheduler.stop();
+}
+
+async function writeStandsBehindBackoff(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 2_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A failed round books a backoff wake at +2s. A write inside that
+  // window must not re-arm it to the debounce edge — the failing
+  // route keeps its ladder.
+  client.outcomes = [err(appError('transient', 'socket died'))];
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'debounced round failed');
+  scheduler.notifyLocalWrites();
+  clock.advance(1_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'write cannot shortcut the backoff',
+  );
+  clock.advance(1_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    3,
+    'backoff wake fires at its own edge',
+  );
+  scheduler.stop();
+}
+
+async function pageCapProgressContinues(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A capped round that moved the custody cursor books one bounded
+  // continuation — it resumes from the persisted page. The next
+  // round stalls with the cursor unmoved → terminal, no spin.
+  let capped = 0;
+  client.syncNow = (fp) => {
+    client.syncNowCalls.push(fp);
+    capped += 1;
+    if (capped === 1) {
+      client.peersList = client.peersList.map((p) =>
+        p.fp === fp ? { ...p, peerCursor: { desk: 9 } } : p,
+      );
+      client.emitStatus();
+    }
+    return Promise.resolve(
+      err(appError('budget-exceeded', 'page cap reached')),
+    );
+  };
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'capped round ran');
+  clock.advance(499);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'continuation holds to the debounce',
+  );
+  clock.advance(1);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    3,
+    'progressed cap booked a follow-up',
+  );
+  clock.advance(10_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    3,
+    'stalled cap stays terminal',
+  );
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
+  await writeBurstTrailingEdge();
+  await writeStandsBehindBackoff();
+  await pageCapProgressContinues();
   await reconnectBackoff();
   await sessionDropReconnect();
   await connectivityEdges();

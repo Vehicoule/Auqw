@@ -156,6 +156,11 @@ export type SyncServiceDeps = {
   readonly appliedSpillPath?: string;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
+  /**
+   * Wire-pump factory seam — defaults to the framed socket pump.
+   * Tests wrap it to fault-inject send failures on live sessions.
+   */
+  readonly pump?: typeof attachWirePump;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
   readonly deviceName?: string;
   /** mDNS announce factory — null skips advertising entirely. */
@@ -415,6 +420,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const handshakeMs = deps.handshakeMs ?? 15_000;
   const idleMs = deps.idleMs ?? 120_000;
   const deviceName = deps.deviceName ?? 'auqw-desktop';
+  const attachPump = deps.pump ?? attachWirePump;
   const pairing = createPairing({
     nowMs,
     ttlMs: deps.codeTtlMs ?? 90_000,
@@ -1441,7 +1447,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return;
     }
     const session: Session = {
-      pump: attachWirePump({
+      pump: attachPump({
         socket,
         maxPayload: handshakeCap,
         onFrame: (payload) => {
@@ -1613,18 +1619,31 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     } catch (thrown) {
       registryError = thrown;
     }
-    let sent = false;
+    const delivered = new Set<string>();
+    const refused = new Set<string>();
     for (const session of sessions) {
       if (session.phase === 'open' && session.deviceId !== null) {
-        // The mark clears only when the kick is accepted — a socket
-        // dying mid-trigger must leave the device pending so its next
-        // connection still gets the sync-request.
         if (sendSealed(session, { t: 'sync-request' })) {
-          sent = true;
-          pendingSync.delete(session.deviceId);
+          delivered.add(session.deviceId);
+        } else {
+          refused.add(session.deviceId);
         }
       }
     }
+    // The mark clears only when a kick is accepted — a socket that
+    // refuses the frame (dying mid-trigger, wedged writer) leaves the
+    // device pending so its next connection still gets the
+    // sync-request. One accepted sibling session is enough — refused
+    // marks apply only when no live session took the kick.
+    for (const id of delivered) {
+      pendingSync.delete(id);
+    }
+    for (const id of refused) {
+      if (!delivered.has(id)) {
+        pendingSync.add(id);
+      }
+    }
+    const sent = delivered.size > 0;
     // A dead registry is NOT an empty one — after the live kick the
     // custody error still surfaces typed, never a false `pending`.
     if (registryError !== undefined) {
