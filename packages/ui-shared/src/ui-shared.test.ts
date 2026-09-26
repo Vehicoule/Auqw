@@ -204,7 +204,15 @@ assertEqual(resolveLocale('ja', 'en-US'), 'en', 'unsupported tag falls back to e
 assertEqual(resolveLocale('ja', 'de-DE'), 'de', 'unsupported setting follows the system');
 assertEqual(resolveLocale('system', 'ja-JP'), 'en', 'unsupported system defaults to en');
 assertEqual(resolveLocale('fr-FR', 'en-US'), 'fr', 'supported non-base tag pins the UI');
+assertEqual(resolveLocale('es-419', 'en-US'), 'es', 'es region tag pins');
 assertEqual(resolveLocale('zh-Hans-CN', 'en-US'), 'zh', 'zh primary subtag pins');
+// only Simplified ships — Traditional-script/region tags fall back to the default
+assertEqual(resolveLocale('zh-Hant-TW', 'en-US'), 'en', 'zh-Hant falls back');
+assertEqual(resolveLocale('zh-TW', 'en-US'), 'en', 'zh-TW falls back');
+assertEqual(resolveLocale('zh-HK', 'en-US'), 'en', 'zh-HK falls back');
+assertEqual(resolveLocale('zh-MO', 'en-US'), 'en', 'zh-MO falls back');
+assertEqual(resolveLocale('zh-CN', 'en-US'), 'zh', 'zh-CN stays Simplified');
+assertEqual(languageOptionKey('zh-Hant-TW'), 'system', 'Traditional reads as system');
 
 // languageOptionKey: the picker's displayed key must agree with what
 // resolveLocale activates — a padded stored tag pins 'de', not 'system'
@@ -231,5 +239,34 @@ for (const [tag, catalog] of Object.entries({ de, es, fr, zh })) {
     `${tag} must not carry ids en does not know`,
   );
 }
+
+// per-locale behavior: plurals route through CLDR categories and
+// placeholders interpolate — a spot-check per shipped catalog
+setLocale('es');
+assertEqual(t('common.trackCount', { count: 1 }), '1 pista', 'es one');
+assertEqual(t('common.trackCount', { count: 3 }), '3 pistas', 'es other');
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a, b',
+  'es interpolates',
+);
+setLocale('fr');
+assertEqual(t('common.trackCount', { count: 0 }), '0 titre', 'fr zero is one');
+assertEqual(t('common.trackCount', { count: 1 }), '1 titre', 'fr one');
+assertEqual(t('common.trackCount', { count: 2 }), '2 titres', 'fr other');
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a, b',
+  'fr interpolates',
+);
+setLocale('zh');
+assertEqual(t('common.trackCount', { count: 1 }), '1 首', 'zh ignores number');
+assertEqual(t('common.trackCount', { count: 5 }), '5 首', 'zh other');
+assertEqual(
+  t('common.cardA11y', { title: 'a', subtitle: 'b' }),
+  'a，b',
+  'zh interpolates',
+);
+setLocale('en');
 
 console.log('ui-shared tests passed');

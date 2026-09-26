@@ -31,7 +31,7 @@ import {
   matchDisplayKey,
   topPlayed,
 } from '@auqw/application';
-import { t } from './i18n.ts';
+import { fromTag, t } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -1458,18 +1458,13 @@ export function languageOptions(): readonly LanguageOption[] {
 
 /**
  * Reduce a stored `Settings.language` to a `languageOptions()` key —
- * a persisted value may be a full BCP-47 tag ('de-DE'), so match on
- * the primary language subtag. Absent and unsupported values read as
- * 'system', mirroring how resolveLocale treats them.
+ * a persisted value may be a full BCP-47 tag ('de-DE'). Reuses the same
+ * tag mapping as `resolveLocale` so the displayed key always matches
+ * what activation selects: absent and unsupported values (including
+ * Traditional Chinese, which has no shipped catalog) read as 'system'.
  */
 export function languageOptionKey(setting: string | null | undefined): string {
-  const primary =
-    setting === undefined || setting === null
-      ? 'system'
-      : (setting.trim().toLowerCase().split('-').shift() ?? '');
-  return languageOptions().some((option) => option.key === primary)
-    ? primary
-    : 'system';
+  return fromTag(setting) ?? 'system';
 }
 
 /** Display name for a `Settings.language` value; unknown reads system. */

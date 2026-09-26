@@ -68,14 +68,15 @@ function rulesFor(locale: Locale): Intl.PluralRules | null {
 
 /**
  * CLDR plural category for `count`. Degrades to the `one`/`other`
- * split (correct for `en`, `de`, `es`, `fr`; `zh` only ever selects
- * `other` anyway) when `Intl.PluralRules` is absent, so the app
- * renders instead of throwing.
+ * split when `Intl.PluralRules` is absent, so the app renders instead
+ * of throwing — the split is correct for `en`, `de`, `es`, and `zh`
+ * (`zh` only ever selects `other`); French also treats zero as
+ * singular, so `fr` keeps `one` for 0 in the degraded path.
  */
 function pluralCategory(locale: Locale, count: number): PluralCategory {
   const rules = rulesFor(locale);
   return rules === null
-    ? count === 1
+    ? count === 1 || (locale === 'fr' && count === 0)
       ? 'one'
       : 'other'
     : rules.select(count);
@@ -108,20 +109,29 @@ export function getLocale(): Locale {
 /**
  * Map a BCP-47 tag to a supported `Locale` by primary-language subtag
  * ('de-DE' → 'de', 'zh-Hans-CN' → 'zh'), or `null` when the language
- * is not supported.
+ * is not supported. The shipped `zh` catalog is Simplified only, so
+ * Traditional-script or Traditional-region tags (zh-Hant, zh-TW,
+ * zh-HK, zh-MO) do not map — they fall back to the system default
+ * rather than render the wrong script.
  */
-function fromTag(tag: string | null | undefined): Locale | null {
+export function fromTag(tag: string | null | undefined): Locale | null {
   if (tag === undefined || tag === null || tag === '') {
     return null;
   }
-  const primary = tag.trim().toLowerCase().split('-')[0];
+  const parts = tag.trim().toLowerCase().split('-');
+  const primary = parts[0];
   switch (primary) {
     case 'en':
     case 'de':
     case 'es':
     case 'fr':
-    case 'zh':
       return primary;
+    case 'zh':
+      return parts
+        .slice(1)
+        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
+        ? null
+        : 'zh';
     default:
       return null;
   }
