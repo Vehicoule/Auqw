@@ -189,29 +189,33 @@ export function DesktopChrome({
       </aside>
       <div className="uw-world">
         <header className="uw-world-bar">
-          <IconButton
-            icon="sidebar"
-            size={32}
-            iconSize={14}
-            color="var(--text-secondary)"
-            ariaLabel={t('chrome.stage.show')}
-            active={open}
-            onPress={() => setOpen(!open)}
-          />
-          {onFocusSearch !== undefined && (
+          <div className="uw-world-bar__start">
             <IconButton
-              icon="search"
+              icon="sidebar"
               size={32}
               iconSize={14}
               color="var(--text-secondary)"
-              ariaLabel={t('search.fieldLabel')}
-              onPress={onFocusSearch}
+              ariaLabel={t('chrome.stage.show')}
+              active={open}
+              onPress={() => setOpen(!open)}
             />
-          )}
+            {onFocusSearch !== undefined && (
+              <IconButton
+                icon="search"
+                size={32}
+                iconSize={14}
+                color="var(--text-secondary)"
+                ariaLabel={t('search.fieldLabel')}
+                onPress={onFocusSearch}
+              />
+            )}
+          </div>
           <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
-          {onOpenSettings !== undefined && (
-            <WorldMenu onOpenSettings={onOpenSettings} />
-          )}
+          <div className="uw-world-bar__end">
+            {onOpenSettings !== undefined && (
+              <WorldMenu onOpenSettings={onOpenSettings} />
+            )}
+          </div>
         </header>
         <main className="uw-world__content">{children}</main>
       </div>
