@@ -52,6 +52,11 @@ function configuredId(
     case 'catalog.artwork':
     case 'catalog.entity':
       return selection.catalogProvider;
+    case 'catalog.suggest':
+      // Suggestions have no settings slot: they resolve over
+      // declaring providers, so the typing experience is independent
+      // of the catalog provider choice.
+      return null;
     case 'playback.candidates':
     case 'playback.resolve':
       return selection.playbackProvider;
@@ -233,5 +238,22 @@ export class ProviderRouter {
       return Promise.resolve(err(resolved.error));
     }
     return resolved.value.radioSeed(input, context);
+  }
+
+  /**
+   * `catalog.suggest` routes automatically over declaring providers
+   * (no settings slot) — the typing surface stays consistent whatever
+   * catalog provider is configured.
+   */
+  suggest(
+    selection: ProviderSelection,
+    input: { input: string; limit?: number },
+    context: OperationContext,
+  ): Promise<Result<readonly string[]>> {
+    const resolved = this.providerFor('catalog.suggest', selection);
+    if (!resolved.ok) {
+      return Promise.resolve(err(resolved.error));
+    }
+    return resolved.value.suggest(input, context);
   }
 }

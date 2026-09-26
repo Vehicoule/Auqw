@@ -32,6 +32,7 @@ import { createAppliedPushService } from './sync-events.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
+  syncHasPairedDevices,
 } from './sync-keys.ts';
 import type { WindowState } from './window-state.ts';
 import {
@@ -122,6 +123,17 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   // The database lives in the utility child; its path is fork env
   // because the child owns no app.getPath('userData').
   env['AUQW_DB_PATH'] ??= join(userDataPath, 'auqw.db');
+  // Paired-device records mark an install that actually synced — an
+  // identity alone doesn't (the utility mints one on any sync start,
+  // including a passive settings visit). Armed installs keep an
+  // eager listener so paired devices still find it; fresh installs
+  // stay dormant — binding requires custody, and on macOS the
+  // safeStorage read is what fires the Keychain ACL prompt.
+  env['AUQW_SYNC_ARMED'] = syncHasPairedDevices(
+    join(userDataPath, 'sync-secure'),
+  )
+    ? '1'
+    : '0';
   if (!app.isPackaged) {
     // Dev checkouts resolve the bindings artifact from the repo and
     // may arm the dev-gate channel; packaged runs use resourcesPath.

@@ -118,6 +118,9 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'search.failed': 'suche fehlgeschlagen',
   'search.unavailableTitle': 'suche nicht verfügbar',
   'search.resultsA11y': 'suchergebnisse',
+  'search.suggestions': 'vorschläge',
+  'search.commitQuery': 'nach „{query}“ suchen',
+  'search.a11y.suggestion': 'nach {query} suchen',
 
   // ---- library ------------------------------------------------------------
   'library.heading': 'deine bibliothek',
@@ -334,6 +337,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'sync.listener.starting': 'startet',
   'sync.listener.listening': 'hört',
   'sync.listener.unavailable': 'nicht verfügbar',
+  'sync.listener.dormant': 'aus',
   'sync.listener.disabled': 'deaktiviert',
   'sync.engine.ready': 'bereit',
   'sync.engine.absent': 'fehlt',

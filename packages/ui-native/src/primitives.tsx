@@ -286,6 +286,88 @@ export function IconButton({
   );
 }
 
+export type PillTone = 'accent' | 'soft' | 'outline' | 'warn';
+
+export type PillButtonProps = {
+  readonly label: string;
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel?: string | undefined;
+  readonly accessibilityState?: AccessibilityState | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly icon?: IconName | undefined;
+  readonly tone?: PillTone | undefined;
+  readonly minHeight?: number | undefined;
+  readonly style?: StyleProp<ViewStyle> | undefined;
+};
+
+/**
+ * The one small labeled button — every row/header pill routes through
+ * the same four tones so accent (filled CTA), soft (tonal), outline
+ * (default) and warn (destructive) read identically across screens.
+ */
+export function PillButton({
+  label,
+  onPress,
+  accessibilityLabel,
+  accessibilityState,
+  disabled = false,
+  icon,
+  tone = 'outline',
+  minHeight = 30,
+  style,
+}: PillButtonProps) {
+  const theme = useTheme();
+  const fg: Record<PillTone, TextColor> = {
+    accent: 'canvas',
+    soft: 'accent',
+    outline: 'primary',
+    warn: 'warn',
+  };
+  const bg: Record<PillTone, string> = {
+    accent: theme.colors.accent,
+    soft: theme.colors.accentSoft,
+    outline: 'transparent',
+    warn: 'transparent',
+  };
+  const bordered = tone === 'outline' || tone === 'warn';
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={accessibilityState}
+      style={({ pressed }) => [
+        {
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: theme.spacing.sm,
+          paddingHorizontal: theme.spacing.md,
+          minHeight,
+          borderRadius: theme.radius.pill,
+          backgroundColor: bg[tone],
+          borderWidth: bordered ? theme.strokes.hairline : 0,
+          borderColor: theme.colors.hairline,
+        },
+        pressed && {
+          borderColor: bordered ? theme.colors.fg25 : theme.colors.hairline,
+          backgroundColor: bordered ? theme.colors.fg08 : bg[tone],
+          ...(bordered ? {} : { opacity: 0.85 }),
+        },
+        style,
+      ]}
+    >
+      {icon !== undefined && (
+        <Icon name={icon} size={13} color={textColor(theme, fg[tone])} />
+      )}
+      <Text variant="metadata" color={fg[tone]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 export type ArtworkProps = {
   readonly url: string | null;
   readonly size?: number | undefined;

@@ -115,6 +115,9 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'search.failed': '搜索失败',
   'search.unavailableTitle': '搜索不可用',
   'search.resultsA11y': '搜索结果',
+  'search.suggestions': '搜索建议',
+  'search.commitQuery': '搜索 “{query}”',
+  'search.a11y.suggestion': '搜索 {query}',
 
   // ---- library ------------------------------------------------------------
   'library.heading': '你的曲库',
@@ -314,6 +317,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'sync.listener.starting': '启动中',
   'sync.listener.listening': '监听中',
   'sync.listener.unavailable': '不可用',
+  'sync.listener.dormant': '关闭',
   'sync.listener.disabled': '已禁用',
   'sync.engine.ready': '就绪',
   'sync.engine.absent': '缺失',

@@ -37,24 +37,25 @@ Native chrome, per platform — not a shrunken desktop:
 
 ## Tokens
 
-Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes share one geometry — `dark` (Tokyo-Night-based), `light`, `oled` (true black). Measured WCAG 2.2 contrast below (re-measure any value that changes).
+Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes share one geometry — `dark` (warm charcoal), `light` (warm paper), `oled` (true black). Measured WCAG 2.2 contrast below (re-measure any value that changes).
 
 | Role | Dark | Light | OLED | Ratio (d / l / o) |
 |---|---|---|---|---|
-| surface.canvas | `#1a1b26` | `#f5f6fa` | `#000000` | — |
-| surface.stage | `#13141c` | `#eceef4` | `#06060a` | — |
-| surface.deep | `#0e0e14` | `#dfe2ec` | `#000000` | — |
-| surface.raised | `#24283b` | `#ffffff` | `#12131a` | — |
-| text.primary | `#a9b1d6` | `#343a52` | `#a9b1d6` | on canvas: 8.1 / 10.4 / 9.9 |
-| text.bright | `#c0caf5` | `#222840` | `#c0caf5` | on canvas: 10.6 / 13.5 / 13.0 |
-| text.secondary | `#828ab3` | `#575d85` | `#828ab3` | on canvas: 5.1 / 5.9 / ~6.5 |
-| accent.active | `#7aa2f7` | `#1a5ac8` | `#7aa2f7` | on canvas: 6.8 / 5.8 / 8.3 |
-| accent.soft | `rgba(122,162,247,.15)` | `rgba(26,90,200,.14)` | `rgba(122,162,247,.15)` | fill for selected/active only |
-| status.warn | `#e0af68` | `#8a6524` | `#e0af68` | on canvas: 8.5 / 4.9 / ~10 |
-| status.liked | `#f7768e` | `#b24a60` | `#f7768e` | on canvas: 6.5 / 4.8 / ~8 |
-| divider | `#414868` | `#c4c8d8` | `#23253a` | seams only |
-| hairline | `fg @ 11–12%` | `fg @ 12%` | `fg @ 11%` | furniture borders |
-| alpha.fg08/18/25/40 | `fg @ 7/16/25/40%` | `fg @ 5/12/24/40%` | same as dark | hover/selected fills, disabled |
+| surface.canvas | `#161512` | `#faf8f3` | `#000000` | — |
+| surface.stage | `#100e0c` | `#f1ede5` | `#070605` | — |
+| surface.deep | `#0b0a09` | `#e7e1d4` | `#000000` | — |
+| surface.raised | `#232019` | `#ffffff` | `#16140f` | — |
+| text.primary | `#e6e1d8` | `#2a251f` | `#e6e1d8` | on canvas: 14.0 / 14.3 / 16.1 |
+| text.bright | `#f5f1e9` | `#171310` | `#f5f1e9` | on canvas: 16.2 / 17.4 / 18.6 |
+| text.secondary | `#a8a094` | `#6f6659` | `#a8a094` | on canvas: 7.1 / 5.3 / 8.1 |
+| accent.active | `#ff8a3d` | `#c2410c` | `#ff8a3d` | on canvas: 7.8 / 4.9 / 9.0 |
+| accent.soft | `rgba(255,138,61,.16)` | `rgba(194,65,12,.11)` | `rgba(255,138,61,.18)` | fill for selected/active only |
+| status.warn | `#ff8787` | `#a61e1e` | `#ff8787` | on canvas: 7.9 / 7.0 / 9.1 |
+| status.liked | `#f97b9b` | `#b0214f` | `#f97b9b` | on canvas: 7.3 / 6.2 / 8.3 |
+| divider | `#3a352d` | `#d8d1c2` | `#29241e` | seams only |
+| switch.thumb | `#ffffff` | `#ffffff` | `#ffffff` | thumb is constant white |
+| hairline | `fg @ 14%` | `fg @ 15%` | `fg @ 13%` | furniture borders |
+| alpha.fg08/18/25/40 | `fg @ 8/16/26/42%` | `fg @ 6/13/26/42%` | same as dark | hover/selected fills, disabled |
 
 States carry meaning beyond color: playing = accent text **and** eq overlay on the thumb; liked = filled pink heart; unavailable = dimmed + warn glyph; selected = alpha fill + weight. `playback.active` = `accent.active` (split only if the two meanings differ beyond color). No decorative text below 4.5:1; decorative-only roles (grab handles, hints) may sit below.
 

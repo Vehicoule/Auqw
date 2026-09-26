@@ -272,6 +272,7 @@ function stubProvider(
     artwork: unavailable,
     getLyrics: unavailable,
     radioSeed: unavailable,
+    suggest: unavailable,
     dispose() {
       disposed?.push(id);
     },

@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -489,6 +490,18 @@ class AuqwExpoModule : Module() {
      * for the JS thread. */
     Function("syncRandomBytes") { length: Double ->
       syncSocketsInstance().randomBytes(length.toInt())
+    }
+
+    /** The user-visible device name for the sync hello — the paired
+     * list on the other end shows this verbatim. DEVICE_NAME is the
+     * user-set name where the ROM exposes it; the marketing model is
+     * the fallback. */
+    Function("syncDeviceName") { ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+      Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME)
+        ?.takeIf { it.isNotBlank() }
+        ?: Build.MODEL
     }
 
     AsyncFunction("createHost") { config: HostConfigInput ->

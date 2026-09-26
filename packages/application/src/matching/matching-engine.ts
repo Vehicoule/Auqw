@@ -221,6 +221,57 @@ function normalizeFree(text: string): string {
 }
 
 /**
+ * Featuring/collab credit separators in an artist field. Splitting
+ * happens on the raw string — normalizeFree would already have
+ * folded the punctuation away. 'and'/'with' are deliberately absent:
+ * they live inside canonical act names ('Florence and the Machine'),
+ * so splitting on them would promote a fragment to full-artist
+ * certainty. Punctuation-based separators ('Earth, Wind & Fire')
+ * remain ambiguous — an inherent limit of string-level matching —
+ * but at least the act's own canonical name can't be confused with
+ * collab syntax.
+ */
+const ARTIST_SPLIT =
+  /[&,+]|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bvs\.?\b|\bx\b/iu;
+
+/**
+ * The whole normalized name plus each credited act it splits into.
+ * Catalogs differ on collab credits — a file tagged 'A & B' and a
+ * provider's plain 'A' name the same act, so the best pairwise view
+ * wins rather than requiring the whole lists to match.
+ */
+function artistViews(text: string): readonly string[] {
+  const views = [normalizeFree(text)];
+  for (const part of text.split(ARTIST_SPLIT)) {
+    const normalized = normalizeFree(part);
+    if (normalized.length > 0 && normalized !== views[0]) {
+      views.push(normalized);
+    }
+  }
+  return views;
+}
+
+function artistSimilarityBetween(a: string, b: string): number {
+  return (dice(a, b) + tokenDice(a, b)) / 2;
+}
+
+function bestArtistSimilarity(a: string, b: string): number {
+  let best = 0;
+  for (const left of artistViews(a)) {
+    for (const right of artistViews(b)) {
+      const score = artistSimilarityBetween(left, right);
+      if (score > best) {
+        best = score;
+        if (best === 1) {
+          return 1;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * What a review row actually shows: title + `artist · provider ·
  * duration`. A provider often lists the same song under several ids
  * (album audio, topic video, short uploads) — those candidates are
@@ -476,20 +527,13 @@ export class MatchingEngine {
 
     const candidateBase = analyzeTitle(candidate.title).base;
     const titleSimilarity = dice(intended.base, candidateBase);
-    // Artist similarity blends code-point and token Dice: near-equal
-    // names like 'Artist A'/'Artist B' separate cleanly while
-    // reorderings and dropped articles stay close.
+    // Artist similarity blends code-point and token Dice over the
+    // best pairwise credit view: near-equal names like 'Artist A'/
+    // 'Artist B' separate cleanly while collab-credit variants
+    // ('A & B' vs 'A') and reorderings stay close.
     const artistSimilarity =
       recording.artist !== null && candidate.artist !== null
-        ? (dice(
-          normalizeFree(recording.artist),
-          normalizeFree(candidate.artist),
-        ) +
-          tokenDice(
-            normalizeFree(recording.artist),
-            normalizeFree(candidate.artist),
-          )) /
-        2
+        ? bestArtistSimilarity(recording.artist, candidate.artist)
         : null;
 
     const candidateIsrc = candidate.isrc ?? null;

@@ -21,6 +21,7 @@ export type ProviderCapability =
   | 'catalog.metadata'
   | 'catalog.artwork'
   | 'catalog.entity'
+  | 'catalog.suggest'
   | 'playback.candidates'
   | 'playback.resolve'
   | 'lyrics.plain'
@@ -32,6 +33,7 @@ const PROVIDER_CAPABILITIES: ReadonlySet<string> = new Set([
   'catalog.metadata',
   'catalog.artwork',
   'catalog.entity',
+  'catalog.suggest',
   'playback.candidates',
   'playback.resolve',
   'lyrics.plain',
@@ -224,4 +226,13 @@ export interface ProviderPort {
     input: RadioSeed,
     context: OperationContext,
   ): Promise<Result<RadioPage>>;
+  /**
+   * `catalog.suggest`: keystroke-time query completions — flat
+   * strings in upstream order. Auto-routes over declaring providers
+   * (no settings slot); a capability nobody declares is `unsupported`.
+   */
+  suggest(
+    input: { input: string; limit?: number },
+    context: OperationContext,
+  ): Promise<Result<readonly string[]>>;
 }

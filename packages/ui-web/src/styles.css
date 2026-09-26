@@ -568,10 +568,12 @@
   margin-top: var(--spacing-xs);
   padding: var(--spacing-xs) var(--spacing-lg);
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-state__retry:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 /* Inside a rail the state is a quiet stub — the default flex:1 shell
    would stretch into a column of dead space mid-screen. */
@@ -715,10 +717,12 @@
   margin-left: auto;
   padding: var(--spacing-xs) var(--spacing-md);
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-rail__see-all:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-rail__cards {
   display: flex;
@@ -1061,26 +1065,30 @@
   background: var(--fg08);
 }
 .uw-toggle {
-  width: 36px;
-  height: 20px;
+  width: 42px;
+  height: 24px;
   border-radius: var(--radius-pill);
   background: var(--fg18);
+  border: var(--stroke-hairline) solid var(--hairline);
   display: inline-flex;
   align-items: center;
-  padding: 0 2px;
+  padding: 0 3px;
   flex-shrink: 0;
 }
 .uw-toggle--on {
   background: var(--accent);
+  border-color: transparent;
 }
 .uw-toggle__thumb {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
   border-radius: var(--radius-pill);
-  background: var(--text-bright);
+  background: var(--thumb);
+  border: var(--stroke-hairline) solid var(--fg40);
 }
 .uw-toggle--on .uw-toggle__thumb {
-  transform: translateX(16px);
+  transform: translateX(17px);
+  border-color: transparent;
 }
 
 /* ---- entity / collection / playlist -------------------------------------- */
@@ -1110,13 +1118,19 @@
   padding: 0 var(--spacing-lg);
   min-height: 34px;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-pill:hover:not(:disabled):not(.uw-pill--accent) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-pill--accent {
-  background: var(--accent-soft);
+  background: var(--accent);
+  border-color: transparent;
+}
+.uw-pill--accent:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 999px var(--fg18);
 }
 .uw-load-more {
   display: flex;
@@ -1169,10 +1183,12 @@
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-headbtn:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 .uw-headbtn--warn .uw-text {
   color: var(--warn);
@@ -1232,10 +1248,12 @@
   padding: var(--spacing-xs) var(--spacing-md);
   min-height: 26px;
   border-radius: var(--radius-pill);
-  background: var(--fg08);
+  background: transparent;
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-review__action:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--fg08);
+  border-color: var(--fg25);
 }
 
 /* ---- transfer ------------------------------------------------------------- */
