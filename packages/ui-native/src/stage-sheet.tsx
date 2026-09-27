@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, View } from 'react-native';
+import {
+  Platform,
+  ScrollView,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -415,6 +421,7 @@ export function StageSheet({
   style,
 }: StageSheetProps) {
   const theme = useTheme();
+  const { width: windowWidth } = useWindowDimensions();
   const [height, setHeight] = useState(0);
   const translateY = useSharedValue(2000);
   const opacity = useSharedValue(expanded ? 1 : 0);
@@ -608,8 +615,13 @@ export function StageSheet({
               <View
                 style={{
                   // Sized off the measured sheet height so short screens
-                  // keep room for the meta/transport cluster below it.
-                  width: Math.max(160, Math.min(360, height * 0.36)),
+                  // keep room for the meta/transport cluster below it,
+                  // and capped by the padded content width so narrow
+                  // screens don't overflow.
+                  width: Math.min(
+                    Math.max(160, Math.min(360, height * 0.36)),
+                    windowWidth - theme.spacing.xl * 2,
+                  ),
                   aspectRatio: 1,
                   alignSelf: 'center',
                   marginBottom: theme.spacing.lg,
