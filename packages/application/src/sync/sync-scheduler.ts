@@ -2,7 +2,11 @@ import { CancellationSource } from '../cancellation.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import { isSafeNonNegative } from '../domain.ts';
-import type { SyncClient, SyncClientStatus } from './sync-client.ts';
+import type {
+  SyncClient,
+  SyncClientStatus,
+  SyncRoundOutcome,
+} from './sync-client.ts';
 
 /**
  * Application-level sync scheduling (docs/specs/sync.md): the client
@@ -71,6 +75,15 @@ type PeerTrack = {
   notBeforeMs?: number;
   /** A scheduler-owned round is in flight. */
   running: boolean;
+  /**
+   * The last completed-round counters this track already consumed.
+   * The client lands a round's `lastRound` on the view exactly once,
+   * but may publish it a hop before the op drains (counters record
+   * inside the still-syncing window), so freshness vs the previous
+   * emission cannot tell a new landing from a republished status
+   * carrying the same object — identity here is the ledger.
+   */
+  seenRound?: SyncRoundOutcome;
   /**
    * Cancels the in-flight round when the peer is unpaired or the
    * scheduler stops — an orphaned exchange must not run to
@@ -360,6 +373,17 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       const prevPeer = prevViews?.peers.find(
         (v) => v.peer.fp === view.peer.fp,
       );
+      // A completed round lands its exchange counters on the view
+      // exactly once; consume that identity at the first drained
+      // emission carrying it (whatever the state) so later republish-
+      // es — another op's drain, a status fan-out — never re-fire it.
+      const roundLanded =
+        !view.syncing &&
+        view.lastRound !== undefined &&
+        view.lastRound !== track.seenRound;
+      if (roundLanded) {
+        track.seenRound = view.lastRound;
+      }
       if (view.state === 'open') {
         // 'open' during a scheduler-owned round is that round's
         // intermediate dial status — syncNow publishes it before
@@ -367,18 +391,13 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // the ladder. Resetting here would pin every live-but-
         // failing peer to the base delay forever.
         if (!track.running) {
-          // A completed clean round — fresh lastRound, op drained,
-          // no verdict — is the only 'open' that retires the floor:
-          // the client also publishes 'open' at dial time, before
-          // the exchange's outcome is known, so the status alone is
-          // not proof the rate-limit wait is obsolete. The pending
-          // wake it armed dies with it; a write debounce stands.
-          const completedClean =
-            view.lastError === undefined &&
-            !view.syncing &&
-            view.lastRound !== undefined &&
-            view.lastRound !== prevPeer?.lastRound;
-          if (completedClean) {
+          if (roundLanded && view.lastError === undefined) {
+            // The only 'open' that retires the floor is a drained,
+            // clean completion: the client also publishes 'open' at
+            // dial time, before the exchange's outcome is known, so
+            // the status alone is not proof the rate-limit wait is
+            // obsolete. The pending wake it armed dies with it; a
+            // write debounce stands.
             track.backoffMs = reconnectBaseMs;
             if (track.notBeforeMs !== undefined) {
               delete track.notBeforeMs;
@@ -387,21 +406,16 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
                 track.timer = null;
               }
             }
-          } else if (view.lastError !== undefined) {
-            // A round that completed FAILED — its verdict may carry
-            // a fresh rate-limit. Same rule as the offline path:
-            // only a fresh verdict rewrites the floor (republished
-            // emissions must not slide it).
+          } else if (roundLanded && view.lastError !== undefined) {
+            // The landed round FAILED — its verdict may carry a
+            // rate-limit. It landed once (consumed above), so a
+            // republished status cannot slide the floor it sets.
             const hint = view.lastError.retryAfterMs;
-            const prevError = prevPeer?.lastError;
             const now = safeNow();
             if (
               hint !== undefined &&
               isSafeNonNegative(hint) &&
-              now !== null &&
-              (prevError === undefined ||
-                prevError.kind !== view.lastError.kind ||
-                prevError.retryAfterMs !== hint)
+              now !== null
             ) {
               track.notBeforeMs = now + hint;
             }
@@ -506,7 +520,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
               return;
             }
             for (const peer of peers.value) {
-              schedule(peer.fp, 0, 'stand');
+              // 'replace', not 'stand': while peers() was resolving,
+              // a hydration emit may already have armed these peers'
+              // first-round debounce — the launch round preempts it
+              // rather than waiting a trailing edge out.
+              schedule(peer.fp, 0, 'replace');
             }
           })
           .then(

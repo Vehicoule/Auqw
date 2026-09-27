@@ -347,16 +347,22 @@ async function manualSuccessClearsStaleFloor(): Promise<void> {
   // completed round: the floor must stand through it.
   client.peerViews.set('fp-a', { state: 'open' });
   client.emitStatus();
-  client.peerViews.set('fp-a', { state: 'open', syncing: true });
-  client.emitStatus();
-  await pump();
-  // The exchange lands clean: the op drains and a fresh lastRound
-  // reports the completed round — the floor is obsolete now and its
-  // armed wake dies with it.
+  // The real client publishes the round's counters one hop early —
+  // inside the still-syncing window — then the op drains carrying
+  // the SAME lastRound object. Freshness vs the previous emission
+  // cannot see the landing; the scheduler tracks its identity.
+  const landed = outcome('fp-a');
   client.peerViews.set('fp-a', {
     state: 'open',
-    lastRound: outcome('fp-a'),
+    syncing: true,
+    lastRound: landed,
   });
+  client.emitStatus();
+  await pump();
+  // The exchange lands clean: the op drains and the verdict-bearing
+  // emission reports the completed round — the floor is obsolete now
+  // and its armed wake dies with it.
+  client.peerViews.set('fp-a', { state: 'open', lastRound: landed });
   client.emitStatus();
   await pump();
   // A write now debounces at 500 ms — not the obsolete 30 s floor.
@@ -416,12 +422,20 @@ async function connectOpenKeepsRateLimitFloor(): Promise<void> {
     1,
     'write cannot slip inside the floor on a bare connect',
   );
-  // The manual round fails with a FRESH 30 s verdict — published on
-  // the drained open view, so the floor re-arms to t=31_500.
+  // The manual round fails with a FRESH 30 s verdict — counters land
+  // a hop early inside the syncing window, then the verdict-bearing
+  // drain publishes them with the error: the floor re-arms to 31_500.
+  const failed = outcome('fp-a');
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    syncing: true,
+    lastRound: failed,
+  });
+  client.emitStatus();
   client.peerViews.set('fp-a', {
     state: 'open',
     lastError: appError('rate-limit', 'still slow', 30_000),
-    lastRound: outcome('fp-a'),
+    lastRound: failed,
   });
   client.emitStatus();
   await pump();
@@ -440,6 +454,33 @@ async function connectOpenKeepsRateLimitFloor(): Promise<void> {
     client.syncNowCalls.length,
     2,
     'retry lands at the fresh verdict floor',
+  );
+  scheduler.stop();
+}
+
+async function launchRoundPreemptsHydrationDebounce(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  // Unhydrated client: peers() emits the restored peers before the
+  // call resolves — onStatus reads them as new pairings and arms a
+  // write-debounce wake per peer. The launch fan-out must preempt
+  // that timer, not stand behind it a full trailing edge.
+  client.peers = () => {
+    client.peersList = [peer('fp-a')];
+    client.peerViews.set('fp-a', { state: 'open' });
+    client.emitStatus();
+    return Promise.resolve(ok(client.peersList));
+  };
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round fires now');
+  clock.advance(10_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'hydration debounce was preempted, not doubled',
   );
   scheduler.stop();
 }
@@ -1033,6 +1074,7 @@ export async function run(): Promise<void> {
   await unpairMidRoundCancelsAndNeverReschedules();
   await manualSuccessClearsStaleFloor();
   await connectOpenKeepsRateLimitFloor();
+  await launchRoundPreemptsHydrationDebounce();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();
