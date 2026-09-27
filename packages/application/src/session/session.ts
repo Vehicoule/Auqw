@@ -4134,8 +4134,9 @@ export class Session {
    * The dealt play order under shuffle — occurrence ids the cursor
    * walks, `null` when off. Reconciles against the live queue on every
    * call: removed occurrences drop out; newly enqueued ones insert at
-   * uniform random positions behind the cursor's dealt position, so a
-   * mutation never reshuffles dealt successors or rewrites history.
+   * uniform random positions behind the cursor's dealt position (at
+   * the dealt tail when the walk has no cursor), so a mutation never
+   * reshuffles dealt successors or rewrites history.
    */
   #dealtOrder(r: Ready): readonly string[] | null {
     const dealt = r.shuffleOrder;
@@ -4156,9 +4157,19 @@ export class Session {
         continue;
       }
       dealtSet.add(occurrence.occurrenceId);
-      const lo = cursorPos + 1;
+      // No cursor means the walk is all history (drained) or all
+      // future (never started) — new items append in order rather
+      // than landing mid-walk, which also keeps a drained queue's
+      // resume pointed at the first appended item. With a cursor,
+      // insert at a uniform slot behind it.
       const slot =
-        lo + Math.floor(this.#random.unit() * (order.length - lo + 1));
+        snap.currentOccurrenceId === null
+          ? order.length
+          : cursorPos +
+            1 +
+            Math.floor(
+              this.#random.unit() * (order.length - cursorPos),
+            );
       order.splice(slot, 0, occurrence.occurrenceId);
       changed = true;
     }
@@ -4607,8 +4618,24 @@ export class Session {
     const before = r.queue.snapshot();
     const wasCurrent = before.currentOccurrenceId === id;
     const radioBefore = r.radio;
+    // Under shuffle the item after a removed current is the dealt
+    // successor — the engine's canonical pick would replay an item
+    // the walk already passed or stop short of the deal's real
+    // continuation. Captured pre-remove: the reconcile drops the id.
+    const dealt = wasCurrent ? this.#dealtOrder(r) : null;
+    const dealtPos = dealt === null ? -1 : dealt.indexOf(id);
+    const dealtNext =
+      dealtPos < 0 ? undefined : (dealt?.[dealtPos + 1] ?? null);
     try {
       r.queue.remove(id);
+      if (dealtNext !== undefined) {
+        if (dealtNext === null) {
+          // Dealt tail: nothing walks next.
+          r.queue.stop();
+        } else {
+          r.queue.select(dealtNext, before.mode === 'playing');
+        }
+      }
     } catch {
       return err(appError('not-found', 'unknown occurrence'));
     }

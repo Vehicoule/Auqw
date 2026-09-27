@@ -2885,6 +2885,43 @@ async function shuffleArmsOnDealtTail(): Promise<void> {
   await r.session.dispose();
 }
 
+async function shuffleRemoveCurrentFollowsDeal(): Promise<void> {
+  // Removing the current item lands on the dealt successor — the
+  // engine's canonical pick would replay a walked item or stop at the
+  // canonical tail short of the deal's continuation.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(readyOf(r).shuffleOrder, ['oA', 'oC', 'oB']);
+  assert((await r.session.removeOccurrence('oA')).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'the dealt successor resumes — not canonical oB',
+  );
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oC', 'oB'],
+    'the deal keeps walking after the drop',
+  );
+  assert((await r.session.removeOccurrence('oC')).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB');
+  assert((await r.session.removeOccurrence('oB')).ok);
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    null,
+    'removing the dealt tail stops the walk',
+  );
+  assertEqual(snap.queue.mode, 'stopped');
+  await r.session.dispose();
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -5488,6 +5525,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleStaleProjectionEdge', shuffleStaleProjectionEdge],
   ['shuffleMapsDealtSuccessor', shuffleMapsDealtSuccessor],
   ['shuffleArmsOnDealtTail', shuffleArmsOnDealtTail],
+  ['shuffleRemoveCurrentFollowsDeal', shuffleRemoveCurrentFollowsDeal],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

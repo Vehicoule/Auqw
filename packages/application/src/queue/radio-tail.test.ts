@@ -16,6 +16,7 @@ import type {
   PlaybackIdentity,
 } from '../ports/player.ts';
 import type { QueueSnapshot } from './queue-engine.ts';
+import type { RandomPort } from '../ports/runtime.ts';
 import {
   isRadioPage,
   planRadioPage,
@@ -184,6 +185,7 @@ function rig(
   deps: {
     isOnline?: () => boolean;
     localPlaybackFor?: (recordingId: string) => string | null;
+    random?: RandomPort;
   } = {},
 ): Rig {
   const storage = new FakeStorage(state);
@@ -201,7 +203,7 @@ function rig(
     providers: [itunes, ytm, ...extraProviders],
     clock,
     ids: new SequenceIds(),
-    random: new SequenceRandom(),
+    random: deps.random ?? new SequenceRandom(),
     log,
     defaults: SETTINGS,
     ...(deps.isOnline === undefined ? {} : { isOnline: deps.isOnline }),
@@ -1319,6 +1321,99 @@ async function autoArmDrainResumesIntoTail(): Promise<void> {
   await r.session.dispose();
 }
 
+async function shuffleArmResumeWalksDeal(): Promise<void> {
+  // Under shuffle the dealt tail arms the radio; a page landing on the
+  // drained queue appends behind the walked deal, so resume starts the
+  // first appended item and the rest of the page still walks after it.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rU', [ref('youtube-music', 'u')]),
+        recording('rV', [ref('youtube-music', 'v')]),
+        recording('rW', [ref('youtube-music', 'w')]),
+      ],
+      queue: queue({
+        revision: 1,
+        occurrences: [
+          occurrence('u1', 'rU'),
+          occurrence('u2', 'rV'),
+          occurrence('u3', 'rW'),
+        ],
+        currentOccurrenceId: 'u1',
+        positionMs: 0,
+        mode: 'paused',
+      }),
+    }),
+    [],
+    { random: new SequenceRandom([0.8, 0.1]) },
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok, 'toggle failed');
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['u1', 'u3', 'u2'],
+    'successors dealt u3 before u2',
+  );
+  const resumed = r.session.resume();
+  await emitPrepared(r, 'h-u1');
+  assert((await resumed).ok, 'resume failed');
+  assertEqual(radioCalls(r).length, 0, 'dealt successors remain');
+  const next1 = r.session.next();
+  await emitPrepared(r, 'h-u3');
+  assert((await next1).ok, 'next onto the deal failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'u3');
+  assertEqual(radioCalls(r).length, 0, 'u2 still walks after u3');
+  const next2 = r.session.next();
+  await emitPrepared(r, 'h-u2');
+  assert((await next2).ok, 'next onto the dealt tail failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'u2');
+  assertEqual(radioCalls(r).length, 1, 'the dealt tail arms');
+  assert((await r.session.next()).ok, 'skip past the dealt end drains');
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, null, 'queue drained');
+  r.ytm.settleRadio(
+    ok(
+      page(
+        [
+          meta('youtube-music', 'v10', 'New A', 'A', 200_000),
+          meta('youtube-music', 'v11', 'New B', 'B', 200_000),
+        ],
+        'cont-1',
+      ),
+    ),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 5, 'page appended behind the deal');
+  const first = snap.queue.occurrences[3]?.occurrenceId;
+  const second = snap.queue.occurrences[4]?.occurrenceId;
+  assert(first !== undefined && second !== undefined);
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['u1', 'u3', 'u2', first, second],
+    'appended items deal at the walk tail in order',
+  );
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    first,
+    'resume starts the first appended item',
+  );
+  assertEqual(snap.queue.mode, 'playing');
+  // The rest of the page still walks after the resumed item.
+  await emitPrepared(r, `h-${first}`);
+  const onward = r.session.next();
+  await emitPrepared(r, `h-${second}`);
+  assert((await onward).ok, 'next onto the next page item failed');
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    second,
+    'the dealt walk reaches the second appended item',
+  );
+  await r.session.dispose();
+}
+
 async function autoArmServiceDrainResumes(): Promise<void> {
   const r = rig(pausedTailQueue());
   await restoreOk(r);
@@ -1990,6 +2085,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['autoArmSuppressedAfterDisarm', autoArmSuppressedAfterDisarm],
   ['autoArmDrainResumesIntoTail', autoArmDrainResumesIntoTail],
   ['autoArmServiceDrainResumes', autoArmServiceDrainResumes],
+  ['shuffleArmResumeWalksDeal', shuffleArmResumeWalksDeal],
   ['stopDropsInFlightArm', stopDropsInFlightArm],
   ['seedOnStoppedQueueStaysIdle', seedOnStoppedQueueStaysIdle],
   ['nativeAdvanceArmsTail', nativeAdvanceArmsTail],
