@@ -142,11 +142,13 @@ export const createPeerTracker = (
   >();
   const hostOf = (s: Service): string | undefined =>
     typeof s.host === 'string' && s.host !== '' ? s.host : undefined;
-  // Retract the rows whose generation matches this record — the
-  // advert's own identity: the `dev` fp when it carries one (precise
-  // — survives every mutable field), else the SRV host+port pair.
-  // Never the picked dial address, which re-ranks.
-  const retract = (service: Service) => {
+  // Retract the rows belonging to this record's generation. The
+  // `dev` fp pins the device (stable across host/port/address churn);
+  // `staleOnly` additionally requires the SRV host+port fields the
+  // record carries to match the stored generation — a `down` reports
+  // the DEAD generation, which can lag a re-announce, so the same fp
+  // on an old host/port must not kill the fresh row.
+  const retract = (service: Service, staleOnly: boolean) => {
     const fp = fpOf(service);
     const host = hostOf(service);
     const port =
@@ -155,11 +157,10 @@ export const createPeerTracker = (
       if (entry.name !== service.name) {
         continue;
       }
-      if (fp !== null) {
-        if (entry.fp !== fp) {
-          continue;
-        }
-      } else {
+      if (fp !== null && entry.fp !== fp) {
+        continue;
+      }
+      if (staleOnly || fp === null) {
         if (
           host !== undefined &&
           entry.host !== undefined &&
@@ -186,8 +187,9 @@ export const createPeerTracker = (
         // A re-announcement with no pairable address (or a malformed
         // fp) must retract the previously emitted row for that
         // generation — otherwise the last pick stays dialable
-        // forever.
-        retract(service);
+        // forever. A pinned advert retracts its own row outright;
+        // an unpinned one needs generation matching like a down.
+        retract(service, fpOf(service) === null);
         return;
       }
       // Identity: the advert's own fp when pinned, else the SRV host.
@@ -209,7 +211,7 @@ export const createPeerTracker = (
       onFound(peer);
     },
     down(service) {
-      retract(service);
+      retract(service, true);
     },
   };
 };

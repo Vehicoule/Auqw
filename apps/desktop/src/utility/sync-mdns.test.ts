@@ -257,8 +257,19 @@ function fpSurvivesSrvMove(): void {
   assertEqual(r.found.length, 2, 'moved service re-emitted');
   assertEqual(r.lost.length, 1, 'old target retracted');
   assertEqual(r.lost[0], 'Phone|10.0.0.4', 'stale key gone');
-  // And its goodbye carries the fp — retracts the current row even
-  // though the SRV host/port moved.
+  // A DELAYED goodbye of the OLD generation (same fp, old host+port)
+  // must not kill the fresh row — the down's SRV fields identify the
+  // dead generation, so they must match the stored ones.
+  t.down(
+    service({
+      name: 'Phone',
+      host: 'old.local',
+      port: 41000,
+      txt: { dev: fp },
+    }),
+  );
+  assertEqual(r.lost.length, 1, 'stale-generation goodbye ignored');
+  // The goodbye matching the live generation's SRV fields retracts it.
   t.down(
     service({
       name: 'Phone',
@@ -267,7 +278,7 @@ function fpSurvivesSrvMove(): void {
       txt: { dev: fp },
     }),
   );
-  assertEqual(r.lost.length, 2, 'down by fp retracts');
+  assertEqual(r.lost.length, 2, 'down by fp+generation retracts');
   assertEqual(r.lost[1], 'Phone|10.0.0.9', 'current row gone');
 }
 
