@@ -8,6 +8,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useSharedValue } from 'react-native-reanimated';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -720,6 +721,14 @@ function Main({
   const { session } = controller;
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
+  // Shared 0..1 morph progress between the mini-player pill and the
+  // stage sheet — drags write it directly so the sheet tracks the
+  // finger; `expanded` only flips once a gesture commits.
+  const stageProgress = useSharedValue(0);
+  // The sheet publishes its measured pixel travel here so the pill's
+  // drag converts finger distance to progress over the same distance
+  // the sheet physically translates.
+  const stageTravel = useSharedValue(0);
   const [showGallery, setShowGallery] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
@@ -2453,24 +2462,32 @@ function Main({
     [session],
   );
 
-  // Lyrics load lazily — only while the Stage's lyrics mode is
-  // actually showing — and refetch whenever the track under it
-  // changes. Leaving lyrics mode keeps the last sheet cached.
+  // Lyrics prefetch while the Stage is open in any mode — one provider
+  // call per track — so switching to the lyrics tab is instant. Leaving
+  // lyrics mode (or the sheet) keeps the last sheet cached.
   useEffect(() => {
-    if (!expanded || stageMode !== 'lyrics' || currentRecordingId === null) {
+    if (!expanded || currentRecordingId === null) {
       return;
     }
     if (lyricsFetch?.recordingId === currentRecordingId) {
       return;
     }
     fetchLyrics(currentRecordingId);
-  }, [
-    expanded,
-    stageMode,
-    currentRecordingId,
-    lyricsFetch,
-    fetchLyrics,
-  ]);
+  }, [expanded, currentRecordingId, lyricsFetch, fetchLyrics]);
+
+  // A new track under an open sheet returns it to player mode — the
+  // playing item is what the sheet exists to show. Explicit opens
+  // (deep links, menus) set the mode before expanding, so this only
+  // listens for the track change, not the expand flip.
+  const expandedForMode = useRef(expanded);
+  useEffect(() => {
+    expandedForMode.current = expanded;
+  }, [expanded]);
+  useEffect(() => {
+    if (currentRecordingId !== null && expandedForMode.current) {
+      setStageMode('player');
+    }
+  }, [currentRecordingId]);
 
   // Lyrics highlight rides a smoothed clock so the active line tracks
   // playback between the engine's sparse position ticks; it only ticks
@@ -4093,10 +4110,20 @@ function Main({
             }}
             renderTab={renderTabScreen}
             accessory={
-              player !== null && !expanded ? (
+              // The pill stays mounted through the morph — its own
+              // alpha rides stageProgress; `interactive` keeps the
+              // invisible rest state out of touch and a11y reach.
+              player !== null ? (
                 <MiniPlayer
                   player={player}
-                  onPress={() => setExpanded(true)}
+                  progress={stageProgress}
+                  travel={stageTravel}
+                  interactive={!expanded}
+                  onPress={() => {
+                    setStageMode('player');
+                    setExpanded(true);
+                  }}
+                  onCollapse={() => setExpanded(false)}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
@@ -4110,7 +4137,12 @@ function Main({
             <StageSheet
               player={player}
               expanded={expanded}
-              onExpandChange={setExpanded}
+              progress={stageProgress}
+              travel={stageTravel}
+              onExpandChange={(value) => {
+                if (value) setStageMode('player');
+                setExpanded(value);
+              }}
               mode={stageMode}
               onModeChange={setStageMode}
               queue={queueModel}

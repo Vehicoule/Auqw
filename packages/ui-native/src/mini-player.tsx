@@ -1,10 +1,25 @@
 import { useMemo } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import {
+  Platform,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import { BlurView } from 'expo-blur';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
+import {
+  resolveStageAnchor,
+  stageCollapsedAlpha,
+} from './stage-motion';
 import {
   IconButton,
   PlayPauseIcon,
@@ -26,6 +41,22 @@ export type MiniPlayerProps = {
   readonly onToggleLike?: (() => void) | undefined;
   /** Swipe-down: dismiss stops playback; the queue keeps its items. */
   readonly onDismiss?: (() => void) | undefined;
+  /** Drag release committed to collapse while grabbing a mid-flight
+      sheet (never fires from the rest anchor — there the pill just
+      settles back). */
+  readonly onCollapse?: (() => void) | undefined;
+  /** Shared 0..1 stage-sheet progress: an upward drag writes it
+      directly so the sheet rises with the finger, and the pill fades
+      out on the same value. Omitted in static fixtures. */
+  readonly progress?: SharedValue<number> | undefined;
+  /** Shared pixel travel published by the sheet's layout — finger
+      distance is divided by it so the sheet's translation and this
+      drag's progress conversion use the same physical distance. Falls
+      back to the window height until the sheet has measured. */
+  readonly travel?: SharedValue<number> | undefined;
+  /** False while the sheet owns the screen — keeps the invisible pill
+      out of the touch path and the accessibility tree. */
+  readonly interactive?: boolean | undefined;
 };
 
 export function MiniPlayer({
@@ -37,9 +68,18 @@ export function MiniPlayer({
   onPrevious,
   onToggleLike,
   onDismiss,
+  onCollapse,
+  progress: sheetProgress,
+  travel: sheetTravel,
+  interactive = true,
 }: MiniPlayerProps) {
   const theme = useTheme();
   const ios = platform === 'ios';
+  const { height: windowHeight } = useWindowDimensions();
+  const dragStart = useSharedValue(0);
+  // Set on the first vertical-dominant update — distinguishes a gesture
+  // that displaced the sheet from one that merely observed a settle.
+  const wroteProgress = useSharedValue(false);
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
@@ -47,12 +87,43 @@ export function MiniPlayer({
   const busy = player.status === 'preparing' || player.status === 'buffering';
   // Stable gesture object — a fresh Pan() per render would cancel an
   // in-flight swipe when the position tick re-renders the row.
-  const swipe = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetX([-12, 12])
-        .activeOffsetY([-24, 24])
-        .onEnd((e) => {
+  // ONE pan owns both axes (the pre-morph structure — a Race of two
+  // pans ate taps before the inner pressables could resolve): it
+  // activates on either axis, tracks the rise only while vertical
+  // dominates, and the release picks the axis by dominance.
+  const swipe = useMemo(() => {
+    const travelPx = () => {
+      'worklet';
+      const measured =
+        sheetTravel !== undefined && sheetTravel.value > 0
+          ? sheetTravel.value
+          : windowHeight;
+      return Math.max(1, measured);
+    };
+    return Gesture.Pan()
+      .activeOffsetX([-12, 12])
+      .activeOffsetY([-8, 8])
+      .onBegin(() => {
+        if (sheetProgress !== undefined) {
+          dragStart.value = sheetProgress.value;
+          wroteProgress.value = false;
+        }
+      })
+      .onUpdate((e) => {
+        if (sheetProgress === undefined) return;
+        // Horizontal intent owns the recognizer without lifting the
+        // sheet — only a vertically-dominant pull writes progress.
+        if (Math.abs(e.translationX) > Math.abs(e.translationY)) return;
+        wroteProgress.value = true;
+        sheetProgress.value = Math.min(
+          1,
+          Math.max(0, dragStart.value - e.translationY / travelPx()),
+        );
+      })
+      .onFinalize((e) => {
+        if (sheetProgress === undefined) {
+          // Static hosts (the gallery) keep the release-threshold
+          // contract — no shared progress to track.
           if (e.translationX < -40 && onNext !== undefined) {
             scheduleOnRN(onNext);
           } else if (e.translationX > 40 && onPrevious !== undefined) {
@@ -62,11 +133,86 @@ export function MiniPlayer({
           } else if (e.translationY < -40 && onPress !== undefined) {
             scheduleOnRN(onPress);
           }
-        }),
-    [onNext, onPrevious, onPress, onDismiss],
-  );
+          return;
+        }
+        if (Math.abs(e.translationX) >= Math.abs(e.translationY)) {
+          // Only settle when this gesture actually displaced the sheet —
+          // restoring toward `dragStart` after grabbing a closing sheet
+          // would resurrect it mid-collapse (the pill is interactive
+          // only while `expanded` is false, so the anchor here is 0).
+          if (wroteProgress.value && sheetProgress.value > 0) {
+            sheetProgress.value = theme.reducedMotion
+              ? 0
+              : withSpring(0, { stiffness: 200, damping: 28 });
+          }
+          if (e.translationX < -40 && onNext !== undefined) {
+            scheduleOnRN(onNext);
+          } else if (e.translationX > 40 && onPrevious !== undefined) {
+            scheduleOnRN(onPrevious);
+          }
+          return;
+        }
+        // A pull-down that never left the rest anchor dismisses the
+        // player outright rather than bouncing an unmoved sheet.
+        if (
+          dragStart.value < 0.01 &&
+          e.translationY > 48 &&
+          onDismiss !== undefined
+        ) {
+          scheduleOnRN(onDismiss);
+          return;
+        }
+        const travel = travelPx();
+        const target =
+          resolveStageAnchor(
+            dragStart.value,
+            sheetProgress.value,
+            e.velocityY,
+          ) === 'expanded'
+            ? 1
+            : 0;
+        sheetProgress.value = theme.reducedMotion
+          ? target
+          : withSpring(target, {
+              stiffness: 200,
+              damping: 28,
+              velocity: -e.velocityY / travel,
+            });
+        if (target === 1) {
+          if (onPress !== undefined) scheduleOnRN(onPress);
+        } else if (dragStart.value > 0.5 && onCollapse !== undefined) {
+          scheduleOnRN(onCollapse);
+        }
+      });
+  }, [
+    onNext,
+    onPrevious,
+    onPress,
+    onDismiss,
+    onCollapse,
+    sheetProgress,
+    sheetTravel,
+    windowHeight,
+    theme.reducedMotion,
+    dragStart,
+    wroteProgress,
+  ]);
+  // The pill fades out inside the sheet's first stretch of travel — the
+  // fade window ends exactly where the expanded content's reveal begins.
+  const fade = useAnimatedStyle(() => ({
+    opacity:
+      sheetProgress === undefined
+        ? 1
+        : stageCollapsedAlpha(sheetProgress.value),
+  }));
   return (
     <GestureDetector gesture={swipe}>
+      <Animated.View
+        style={fade}
+        pointerEvents={interactive ? 'auto' : 'none'}
+        accessibilityElementsHidden={!interactive}
+        importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+      >
       <View
         style={{
           marginHorizontal: 10,
@@ -196,6 +342,7 @@ export function MiniPlayer({
           </Pressable>
         </View>
       </View>
+      </Animated.View>
     </GestureDetector>
   );
 }

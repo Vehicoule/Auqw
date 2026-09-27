@@ -1337,7 +1337,75 @@ testDesignTokenAuthority();
 testGalleryNestingSafety();
 testTrackRowTextScale();
 testNavbarTextScale();
+function testStageMotion(): void {
+  // Release decision — the shared CMP deck contract.
+  assertEqual(
+    resolveStageAnchor(0, 0.1, -700),
+    'expanded',
+    'an up-fling commits regardless of distance',
+  );
+  assertEqual(
+    resolveStageAnchor(1, 0.9, 700),
+    'collapsed',
+    'a down-fling commits regardless of distance',
+  );
+  assertEqual(
+    resolveStageAnchor(0, 0.29, 0),
+    'collapsed',
+    'below the commit fraction the release settles home',
+  );
+  assertEqual(
+    resolveStageAnchor(0, 0.31, 0),
+    'expanded',
+    'the deck edge commits at 30% of the travel',
+  );
+  assertEqual(
+    resolveStageAnchor(1, 0.69, 0),
+    'collapsed',
+    'a 30% pull from expanded commits the collapse',
+  );
+  assertEqual(
+    resolveStageAnchor(1, 0.9, 0),
+    'expanded',
+    'a short pull from expanded settles back up',
+  );
+
+  // Pill fade: full at rest, gone exactly at the reveal start.
+  assertEqual(stageCollapsedAlpha(0), 1);
+  assertEqual(stageCollapsedAlpha(0.1), 1);
+  assertEqual(stageCollapsedAlpha(0.25), 0);
+  assertEqual(stageCollapsedAlpha(1), 0);
+
+  // Content reveal: invisible through the coupled phase + pill fade,
+  // fully present at the input gate.
+  assertEqual(stageContentAlpha(0), 0);
+  assertEqual(stageContentAlpha(0.25), 0);
+  assertEqual(stageContentAlpha(0.5), 1);
+  assertEqual(stageContentAlpha(1), 1);
+
+  // Corners: rest radius, sheet radius mid-rise, square at the anchor.
+  assertEqual(stageTopRadius(0, 16, 28), 16);
+  assertEqual(stageTopRadius(0.18, 16, 28), 28);
+  assertEqual(stageTopRadius(1, 16, 28), 0);
+  assert(
+    stageTopRadius(0.09, 16, 28) === 22,
+    'mid-coupled corners interpolate evenly',
+  );
+
+  // Scrim rises with progress.
+  assertEqual(stageScrimAlpha(0), 0);
+  assertEqual(stageScrimAlpha(1), 0.5);
+}
+
 testGallerySafeArea();
+testStageMotion();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';
+import {
+  resolveStageAnchor,
+  stageCollapsedAlpha,
+  stageContentAlpha,
+  stageScrimAlpha,
+  stageTopRadius,
+} from './stage-motion.ts';

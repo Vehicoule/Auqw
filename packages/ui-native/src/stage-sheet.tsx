@@ -10,10 +10,12 @@ import {
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
-  withTiming,
+  withSpring,
 } from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import Svg, {
   Defs,
@@ -40,6 +42,12 @@ import {
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
+import {
+  resolveStageAnchor,
+  stageContentAlpha,
+  stageScrimAlpha,
+  stageTopRadius,
+} from './stage-motion';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
@@ -55,6 +63,16 @@ import type {
 import { t } from '@auqw/ui-shared';
 
 export type { LyricsModel, StageMode } from '@auqw/ui-shared';
+
+// Settle dynamics — the CMP deck's spring (StiffnessLow + no bounce): the
+// release keeps the drag's velocity and lands without overshoot.
+// damping 28 ≈ critically damped at stiffness 200 (ratio ~0.99): the settle
+// carries the release velocity without overshooting past the anchor.
+const STAGE_SETTLE_SPRING = { stiffness: 200, damping: 28 } as const;
+
+// Corner morph: the pill's card radius at rest opening to the shared
+// sheet radius mid-rise, square only at the completed expanded anchor.
+const SHEET_CORNER_RADIUS = 28;
 
 export type TransportProps = {
   readonly variant?: 'm3e' | 'ios' | undefined;
@@ -226,9 +244,9 @@ const MODES: readonly {
   label: MessageId;
   icon: IconName;
 }[] = [
+  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
   { key: 'player', label: 'stage.mode.player', icon: 'note' },
   { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
 ];
 
 export function ModeSegment({
@@ -412,6 +430,16 @@ export type StageSheetProps = {
   readonly queueScrollEnabled?: boolean | undefined;
   readonly dragPreview?: 'rest' | 'mid-drag' | 'dismissed' | undefined;
   readonly topInset?: number | undefined;
+  /** Shared 0..1 morph progress — the mini-player's rise drag writes it
+      directly, so the sheet tracks the finger instead of replaying the
+      `expanded` change after the fact. Standalone hosts (the gallery)
+      omit it and the sheet animates from `expanded` alone. */
+  readonly progress?: SharedValue<number> | undefined;
+  /** Shared pixel travel for the morph — the sheet publishes its
+      measured height here so the mini-player's drag converts finger
+      pixels to progress against the same distance the sheet translates
+      over. Standalone hosts omit it and the sheet measures itself. */
+  readonly travel?: SharedValue<number> | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
@@ -449,8 +477,10 @@ export function StageSheet({
   radio,
   queueReordering = false,
   queueScrollEnabled = true,
-  dragPreview = 'rest',
+  dragPreview,
   topInset = 0,
+  progress: progressProp,
+  travel: travelProp,
   onPlayPause,
   onNext,
   onPrevious,
@@ -475,40 +505,49 @@ export function StageSheet({
   const theme = useTheme();
   const { width: windowWidth } = useWindowDimensions();
   const [height, setHeight] = useState(0);
-  const translateY = useSharedValue(2000);
-  const opacity = useSharedValue(expanded ? 1 : 0);
+  const internalProgress = useSharedValue(expanded ? 1 : 0);
+  // One progress drives the morph: the pill's rise drag writes it from
+  // the UI thread, `expanded` flips only on commit.
+  const progress = progressProp ?? internalProgress;
+  const internalTravel = useSharedValue(0);
+  // The measured sheet height is the morph's travel distance; the pill
+  // divides finger pixels by this same value so the rise is 1:1.
+  const travelPx = travelProp ?? internalTravel;
   const dragStart = useSharedValue(0);
   const [internalMode, setInternalMode] = useState<StageMode>('player');
   const activeMode = mode ?? internalMode;
 
   useEffect(() => {
-    const target = expanded ? 0 : height;
-    const fade = expanded ? 1 : 0;
-    if (theme.reducedMotion) {
-      translateY.value = expanded ? 0 : height;
-      opacity.value = fade;
-    } else {
-      translateY.value = withTiming(target, { duration: theme.motion.sheet });
-      opacity.value = withTiming(fade, { duration: theme.motion.state });
-    }
-  }, [expanded, height, theme.reducedMotion, theme.motion, translateY, opacity]);
+    const target = expanded ? 1 : 0;
+    progress.value = theme.reducedMotion
+      ? target
+      : withSpring(target, STAGE_SETTLE_SPRING);
+  }, [expanded, theme.reducedMotion, progress]);
 
+  // Gallery-only preview states — production never passes dragPreview,
+  // and this must not run for ordinary `expanded` flips or it would
+  // stomp the settle spring the expand effect just started.
   useEffect(() => {
+    if (dragPreview === undefined) return;
     if (dragPreview === 'rest') {
-      translateY.value = expanded ? 0 : height;
-      opacity.value = expanded ? 1 : 0;
+      progress.value = expanded ? 1 : 0;
     } else if (dragPreview === 'mid-drag') {
-      translateY.value = Math.max(0, height * 0.25);
-      opacity.value = 0.86;
+      progress.value = 0.75;
     } else {
-      translateY.value = height;
-      opacity.value = 0;
+      progress.value = 0;
     }
-  }, [dragPreview, expanded, height, opacity, translateY]);
+  }, [dragPreview, expanded, progress]);
 
   const collapse = useCallback(() => {
     onExpandChange?.(false);
   }, [onExpandChange]);
+
+  const commitAnchor = useCallback(
+    (target: number) => {
+      onExpandChange?.(target === 1);
+    },
+    [onExpandChange],
+  );
 
   // The gesture object is stable across renders — a fresh Pan() per
   // render would cancel an in-flight sheet drag on the next tick.
@@ -518,45 +557,67 @@ export function StageSheet({
         .activeOffsetY(8)
         .failOffsetX([-16, 16])
         .onBegin(() => {
-          dragStart.value = translateY.value;
+          dragStart.value = progress.value;
         })
         .onUpdate((e) => {
-          translateY.value = Math.max(0, dragStart.value + e.translationY);
+          const travel = Math.max(1, travelPx.value);
+          progress.value = Math.min(
+            1,
+            Math.max(0, dragStart.value - e.translationY / travel),
+          );
         })
-        .onEnd((e) => {
-          const shouldClose = e.translationY > 120 || e.velocityY > 700;
-          if (shouldClose) {
-            translateY.value = theme.reducedMotion
-              ? height
-              : withTiming(height, { duration: theme.motion.sheet });
-            opacity.value = theme.reducedMotion
-              ? 0
-              : withTiming(0, { duration: theme.motion.sheet });
-            scheduleOnRN(collapse);
-          } else {
-            translateY.value = theme.reducedMotion
-              ? 0
-              : withTiming(0, { duration: theme.motion.gesture.duration });
-            opacity.value = theme.reducedMotion
+        .onFinalize((e) => {
+          const travel = Math.max(1, travelPx.value);
+          const target =
+            resolveStageAnchor(
+              dragStart.value,
+              progress.value,
+              e.velocityY,
+            ) === 'expanded'
               ? 1
-              : withTiming(1, { duration: theme.motion.gesture.duration });
-          }
+              : 0;
+          progress.value = theme.reducedMotion
+            ? target
+            : withSpring(target, {
+                ...STAGE_SETTLE_SPRING,
+                velocity: -e.velocityY / travel,
+              });
+          scheduleOnRN(commitAnchor, target);
         }),
-    [
-      height,
-      theme.reducedMotion,
-      theme.motion.sheet,
-      theme.motion.gesture.duration,
-      collapse,
-      dragStart,
-      translateY,
-      opacity,
-    ],
+    [travelPx, theme.reducedMotion, progress, dragStart, commitAnchor],
   );
 
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: translateY.value }],
-    opacity: opacity.value,
+  const restCorner = theme.radius.float;
+  const animatedStyle = useAnimatedStyle(() => {
+    const radius = stageTopRadius(
+      progress.value,
+      restCorner,
+      SHEET_CORNER_RADIUS,
+    );
+    return {
+      // Before the first layout measure lands, keep the sheet parked
+      // off-screen rather than flashing a zero-travel frame.
+      transform: [
+        {
+          translateY:
+            travelPx.value <= 0
+              ? 4000
+              : // progress may overshoot 1 while the spring settles — clamp
+                // so the sheet never paints past the top edge.
+                travelPx.value * (1 - Math.min(1, progress.value)),
+        },
+      ],
+      borderTopLeftRadius: radius,
+      borderTopRightRadius: radius,
+    };
+  });
+
+  const contentStyle = useAnimatedStyle(() => ({
+    opacity: stageContentAlpha(progress.value),
+  }));
+
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: stageScrimAlpha(progress.value),
   }));
 
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
@@ -565,21 +626,27 @@ export function StageSheet({
   // here is bound to the outer (possibly light) scheme.
   const colors = immersive ? schemes.dark : theme.colors;
 
-  // The full-bleed artwork + blur is expensive enough that a collapsed
-  // sheet shouldn't keep it mounted; it stays through the collapse
-  // animation so the dismissal never exposes an empty surface.
+  // The full-bleed artwork + blur is expensive enough that a parked
+  // sheet shouldn't keep it mounted; it mounts the moment the sheet
+  // starts rising (a mid-flight drag must never reveal bare surface)
+  // and unmounts only once the morph is fully back at the pill — the
+  // settle-back path still gets its backdrop.
   const [backdropOn, setBackdropOn] = useState(expanded);
+  // `expanded` mirrored onto the UI thread — the reaction below must
+  // read a shared value; a captured ref only snapshots at worklet
+  // creation and would pin a sheet mounted-expanded forever.
+  const expandedShared = useSharedValue(expanded);
   useEffect(() => {
-    if (expanded) {
-      setBackdropOn(true);
-      return;
-    }
-    const timer = setTimeout(
-      () => setBackdropOn(false),
-      theme.motion.sheet + 60,
-    );
-    return () => clearTimeout(timer);
-  }, [expanded, theme.motion.sheet]);
+    expandedShared.value = expanded;
+  }, [expanded, expandedShared]);
+  useAnimatedReaction(
+    () => progress.value > 0.001,
+    (risen, prev) => {
+      if (risen === prev) return;
+      scheduleOnRN(setBackdropOn, risen || expandedShared.value);
+    },
+    [progress],
+  );
 
   const body = (
     <>
@@ -951,55 +1018,85 @@ export function StageSheet({
   );
 
   return (
-    <Animated.View
-      onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
-      pointerEvents={expanded ? 'auto' : 'none'}
-      accessibilityViewIsModal={expanded}
-      style={[
-        {
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: immersive
-            ? schemes.dark.stage
-            : theme.colors.stage,
-        },
-        animatedStyle,
-        style,
-      ]}
-    >
-      {immersive && backdropOn && (
-        <PlayerBackdrop artworkUrl={player.artworkUrl} />
+    <>
+      {/* Scrim over whatever the rising sheet hasn't covered yet — same
+          role as the CMP deck's scrim: it fades in with progress and is
+          tappable to collapse once the sheet is the presented surface. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFill,
+          { backgroundColor: theme.colors.scrim },
+          scrimStyle,
+        ]}
+      />
+      {expanded && (
+        <Pressable
+          compact
+          onPress={collapse}
+          accessibilityLabel={t('sheets.closeA11y')}
+          style={StyleSheet.absoluteFill}
+        />
       )}
-      {immersive ? (
-        <ThemeProvider
-          theme="dark"
-          textScale={theme.textScale}
-          reducedMotion={theme.reducedMotion}
-        >
-          <View
-            style={{
-              flex: 1,
-              paddingHorizontal: theme.spacing.xl,
-              paddingBottom: theme.spacing.lg,
-            }}
-          >
-            {body}
-          </View>
-        </ThemeProvider>
-      ) : (
-        <View
-          style={{
-            flex: 1,
-            paddingHorizontal: theme.spacing.xl,
-            paddingBottom: theme.spacing.lg,
-          }}
-        >
-          {body}
-        </View>
-      )}
-    </Animated.View>
+      <Animated.View
+        onLayout={(e) => {
+          setHeight(e.nativeEvent.layout.height);
+          travelPx.value = e.nativeEvent.layout.height;
+        }}
+        pointerEvents={expanded ? 'auto' : 'none'}
+        accessibilityViewIsModal={expanded}
+        style={[
+          {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            overflow: 'hidden',
+            backgroundColor: immersive
+              ? schemes.dark.stage
+              : theme.colors.stage,
+          },
+          animatedStyle,
+          style,
+        ]}
+      >
+        {/* Staged reveal: the surface sweeps up as a tone first, the
+            artwork and controls fade in through the pill's fade window
+            and are fully present at the input gate. */}
+        <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
+          {immersive && backdropOn && (
+            <PlayerBackdrop artworkUrl={player.artworkUrl} />
+          )}
+          {immersive ? (
+            <ThemeProvider
+              theme="dark"
+              textScale={theme.textScale}
+              reducedMotion={theme.reducedMotion}
+            >
+              <View
+                style={{
+                  flex: 1,
+                  paddingHorizontal: theme.spacing.xl,
+                  paddingBottom: theme.spacing.lg,
+                }}
+              >
+                {body}
+              </View>
+            </ThemeProvider>
+          ) : (
+            <View
+              style={{
+                flex: 1,
+                paddingHorizontal: theme.spacing.xl,
+                paddingBottom: theme.spacing.lg,
+              }}
+            >
+              {body}
+            </View>
+          )}
+        </Animated.View>
+      </Animated.View>
+    </>
   );
 }
