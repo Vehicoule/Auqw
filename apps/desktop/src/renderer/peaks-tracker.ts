@@ -1,9 +1,15 @@
 import { CancellationSource } from '@auqw/application';
 import type { PeaksPort } from '@auqw/application';
 
-/** What the tracker needs to fetch — the live playback session fields. */
+/**
+ * What the tracker needs to fetch — the live playback session fields.
+ * `id` is the cache identity: the caller builds it as
+ * `recordingId|attemptId` so a re-prepared stream (a new attempt, a
+ * new handle, possibly new bytes) never inherits peaks — or a cached
+ * failure — from the attempt it replaced.
+ */
 export type PeaksTarget = {
-  readonly recordingId: string;
+  readonly id: string;
   readonly handle: string;
   readonly durationMs: number | null;
 };
@@ -49,8 +55,8 @@ export type PeaksTrackerDeps = {
  */
 export function createPeaksTracker(deps: PeaksTrackerDeps): {
   pull(target: PeaksTarget): void;
-  cancel(recordingId: string): void;
-  get(recordingId: string): readonly number[] | null | undefined;
+  cancel(id: string): void;
+  get(id: string): readonly number[] | null | undefined;
 } {
   const port = deps.port;
   const onChange = deps.onChange;
@@ -75,28 +81,28 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   }
 
   function pull(target: PeaksTarget): void {
-    const { recordingId, handle, durationMs } = target;
-    if (cache.has(recordingId)) {
+    const { id, handle, durationMs } = target;
+    if (cache.has(id)) {
       // Cache hit (including a settled `null`): reinsert so the
       // revisit bumps recency — the Map's iteration order is the LRU
       // order eviction walks.
-      const value = cache.get(recordingId);
-      cache.delete(recordingId);
-      cache.set(recordingId, value === undefined ? null : value);
+      const value = cache.get(id);
+      cache.delete(id);
+      cache.set(id, value === undefined ? null : value);
       return;
     }
-    if (inflight.has(recordingId)) {
+    if (inflight.has(id)) {
       return;
     }
     const entry: Inflight = { source: new CancellationSource(), timer: null };
-    inflight.set(recordingId, entry);
+    inflight.set(id, entry);
 
     const attempt = (n: number): void => {
       void port
         .peaks(
           { handle, durationMs },
           {
-            requestId: `peaks-${recordingId}-${n}`,
+            requestId: `peaks-${id}-${n}`,
             deadlineMs: now() + deadlineMs,
             signal: entry.source.signal,
           },
@@ -104,20 +110,20 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         .then((result) => {
           // A cancelled extraction's result belongs to a stale target —
           // decode may finish after `cancel` ran, and a late success
-          // must never overwrite the replacement handle's peaks.
+          // must never overwrite the replacement attempt's peaks.
           if (entry.source.signal.cancelled) {
             return;
           }
           if (result.ok) {
-            cache.set(recordingId, result.value);
+            cache.set(id, result.value);
             evict();
           } else if (
             result.error.kind === 'budget-exceeded' ||
             result.error.kind === 'invalid-response'
           ) {
             // Terminal failures cache `null` — seeded bars stick and
-            // the same recording never re-pulls on revisit.
-            cache.set(recordingId, null);
+            // the same attempt never re-pulls on revisit.
+            cache.set(id, null);
             evict();
           } else if (
             result.error.kind !== 'cancelled' &&
@@ -130,7 +136,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
             }, retryDelayMs);
             return;
           }
-          inflight.delete(recordingId);
+          inflight.delete(id);
           onChange?.();
         });
     };
@@ -139,19 +145,19 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
 
   return {
     pull,
-    cancel(recordingId) {
-      const entry = inflight.get(recordingId);
+    cancel(id) {
+      const entry = inflight.get(id);
       if (entry === undefined) {
         return;
       }
-      inflight.delete(recordingId);
+      inflight.delete(id);
       if (entry.timer !== null) {
         clearTimeoutFn(entry.timer);
       }
       entry.source.cancel();
     },
-    get(recordingId) {
-      return cache.get(recordingId);
+    get(id) {
+      return cache.get(id);
     },
   };
 }

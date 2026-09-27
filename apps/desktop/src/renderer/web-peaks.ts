@@ -13,6 +13,8 @@ import type { StreamClient } from './web-player.ts';
 /** Minimal decoded-audio surface — what `decodeAudioData` returns. */
 export type DecodedAudio = {
   readonly numberOfChannels: number;
+  /** Frame count — AudioBuffer.length. */
+  readonly length: number;
   getChannelData(index: number): Float32Array;
 };
 
@@ -23,10 +25,26 @@ const READ_CHUNK = 1024 * 1024; // matches the stream:read MAX_READ_LEN
 /** Decoration, not analysis — never pull more than this for a bar row. */
 const MAX_PEAK_BYTES = 24 * 1024 * 1024;
 /**
- * Decoded PCM for a very long track spikes heap even though reads are
- * capped; skip tracks longer than this rather than decode a giant.
+ * `decodeAudioData` expands the whole compressed buffer to per-channel
+ * PCM before peak bucketing: 8 min of stereo 48 kHz is ~184 MiB of
+ * Float32s. That's the transient spike the renderer pays for a bar
+ * row — tracks longer than this keep the seeded pattern.
  */
-const MAX_DECODE_MS = 15 * 60 * 1000;
+const MAX_DECODE_MS = 8 * 60 * 1000;
+/**
+ * Lowest plausible music bitrate — the bound for streams whose
+ * `durationMs` is unknown. At this floor, this many encoded bytes
+ * can't decode past the 8-minute PCM gate; anything denser is shorter.
+ */
+const BITRATE_FLOOR_BPS = 64_000;
+const MAX_UNKNOWN_DURATION_BYTES =
+  (MAX_DECODE_MS / 1000) * (BITRATE_FLOOR_BPS / 8);
+/**
+ * Post-decode belt for the gate: multichannel/high-rate outliers (or a
+ * container whose declared duration lies) bail instead of bucketing a
+ * giant buffer.
+ */
+const MAX_PCM_BYTES = 256 * 1024 * 1024;
 /** Cold-start patience for the first read — the element's own first
  * byte takes a while too; peaks may wait for the same warm-up. */
 const FIRST_READ_TIMEOUT_MS = 15_000;
@@ -109,12 +127,17 @@ export function createWebPeaksPort(deps: {
   readonly decode?: PeaksDecoder;
   readonly maxBytes?: number;
   readonly maxDecodeMs?: number;
+  readonly maxUnknownDurationBytes?: number;
+  readonly maxPcmBytes?: number;
   readonly firstReadTimeoutMs?: number;
   readonly parkTimeoutMs?: number;
   readonly now?: () => number;
 }): PeaksPort {
   const maxBytes = deps.maxBytes ?? MAX_PEAK_BYTES;
   const maxDecodeMs = deps.maxDecodeMs ?? MAX_DECODE_MS;
+  const maxUnknownDurationBytes =
+    deps.maxUnknownDurationBytes ?? MAX_UNKNOWN_DURATION_BYTES;
+  const maxPcmBytes = deps.maxPcmBytes ?? MAX_PCM_BYTES;
   const firstReadTimeoutMs =
     deps.firstReadTimeoutMs ?? FIRST_READ_TIMEOUT_MS;
   const parkTimeoutMs = deps.parkTimeoutMs ?? PARK_TIMEOUT_MS;
@@ -184,6 +207,7 @@ export function createWebPeaksPort(deps: {
 
   async function pullBytes(
     handle: string,
+    cap: number,
     context: OperationContext,
   ): Promise<Result<Uint8Array>> {
     const chunks: Uint8Array[] = [];
@@ -195,8 +219,8 @@ export function createWebPeaksPort(deps: {
     // and chasing holes steals the pump's demand priority from the
     // element mid-track.
     let timeoutMs = firstReadTimeoutMs;
-    // `<=` so an exactly-`maxBytes` stream still reaches its EOF read.
-    while (total <= maxBytes) {
+    // `<=` so an exactly-`cap` stream still reaches its EOF read.
+    while (total <= cap) {
       const chunk = await readWithDeadline(
         { handle, position, maxLen: READ_CHUNK },
         timeoutMs,
@@ -246,7 +270,14 @@ export function createWebPeaksPort(deps: {
           appError('budget-exceeded', 'track too long for decorative peaks'),
         );
       }
-      const bytes = await pullBytes(request.handle, context);
+      // Unknown duration can't gate on time — bound the encoded pull
+      // by the lowest plausible bitrate instead, so decoded PCM stays
+      // under the same ceiling the duration gate enforces.
+      const cap =
+        request.durationMs === null
+          ? Math.min(maxBytes, maxUnknownDurationBytes)
+          : maxBytes;
+      const bytes = await pullBytes(request.handle, cap, context);
       if (!bytes.ok) {
         return bytes;
       }
@@ -258,6 +289,16 @@ export function createWebPeaksPort(deps: {
       );
       if (!decoded.ok) {
         return decoded;
+      }
+      // Belt for the gates above: a container that decodes wider than
+      // its duration suggests (multichannel, high sample rate, a lying
+      // header) stops here rather than bucketing a giant buffer.
+      const pcmBytes =
+        decoded.value.length * decoded.value.numberOfChannels * 4;
+      if (pcmBytes > maxPcmBytes) {
+        return err(
+          appError('budget-exceeded', 'decoded audio too large for peaks'),
+        );
       }
       const channels: Float32Array[] = [];
       for (let c = 0; c < decoded.value.numberOfChannels; c++) {

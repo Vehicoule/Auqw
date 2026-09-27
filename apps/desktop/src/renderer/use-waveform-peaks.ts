@@ -7,10 +7,11 @@ export type { PeaksTarget } from './peaks-tracker.ts';
 
 /**
  * Real waveform peaks for the currently playing recording — lazily
- * extracted on track change, cached per recordingId (a `null` entry
- * marks a settled failure so the seeded pattern sticks without
- * re-pulling on every render), and bounded by a small LRU. A
- * cancelled extraction never caches — revisiting the track retries.
+ * extracted on track change, cached per attempt (`recordingId|attemptId`
+ * — a re-prepared stream never inherits the attempt it replaced), a
+ * `null` entry marks a settled failure so the seeded pattern sticks
+ * without re-pulling on every render, and a small LRU bounds memory.
+ * A cancelled extraction never caches — revisiting the track retries.
  * Returns `null` while pending or on failure — the renderer falls
  * back to the seeded pattern. The lifecycle itself lives in
  * `peaks-tracker.ts`; this hook only bridges it to React.
@@ -31,23 +32,23 @@ export function useWaveformPeaks(
     [port],
   );
 
-  const recordingId = target?.recordingId ?? null;
+  const id = target?.id ?? null;
   const handle = target?.handle ?? null;
   const durationMs = target?.durationMs ?? null;
 
   useEffect(() => {
-    if (tracker === null || recordingId === null || handle === null) {
+    if (tracker === null || id === null || handle === null) {
       return;
     }
-    tracker.pull({ recordingId, handle, durationMs });
+    tracker.pull({ id, handle, durationMs });
     // Cleanup abandons the pull when the track or its handle changes
     // underneath it, or on unmount — a settled read is a no-op to
     // cancel.
-    return () => tracker.cancel(recordingId);
-  }, [tracker, recordingId, handle, durationMs]);
+    return () => tracker.cancel(id);
+  }, [tracker, id, handle, durationMs]);
 
-  if (recordingId === null) {
+  if (id === null) {
     return null;
   }
-  return tracker?.get(recordingId) ?? null;
+  return tracker?.get(id) ?? null;
 }

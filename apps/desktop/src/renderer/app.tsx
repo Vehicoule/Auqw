@@ -1955,7 +1955,9 @@ function Main({
     playback.type === 'playing' ||
     playback.type === 'paused'
       ? {
-          recordingId: playback.recordingId,
+          // recordingId alone would reuse a waveform across
+          // re-prepared streams — attemptId keys the resolved source.
+          id: `${playback.recordingId}|${playback.identity.attemptId}`,
           handle: playback.handle,
           durationMs: playback.durationMs ?? null,
         }

@@ -81,6 +81,7 @@ function fakeDecode(channels: Float32Array[]): (bytes: Uint8Array) => Promise<De
   return () =>
     Promise.resolve({
       numberOfChannels: channels.length,
+      length: channels[0]?.length ?? 0,
       getChannelData: (i: number) => channels[i] ?? new Float32Array(0),
     });
 }
@@ -316,6 +317,54 @@ export async function run(): Promise<void> {
       context(),
     );
     assert(result.ok, 'an exactly-capped stream still decodes');
+  }
+
+  // Unknown duration falls back to a conservative encoded-bytes cap —
+  // a low-bitrate stream that size already decodes past the PCM gate.
+  {
+    const chunks = new Map<number, Uint8Array>([
+      [0, new Uint8Array(64)],
+      [64, new Uint8Array(64)],
+      [128, new Uint8Array(64)],
+      [192, new Uint8Array(0)],
+    ]);
+    const stream = fakeStream({ chunks });
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([new Float32Array(4)]),
+      maxBytes: 1024,
+      maxUnknownDurationBytes: 128,
+    });
+    const result = await port.peaks(
+      { handle: 'h-9', durationMs: null },
+      context(),
+    );
+    assert(!result.ok && result.error.kind === 'budget-exceeded');
+    assertEqual(
+      stream.calls.filter((c) => c.method === 'read').length,
+      3,
+      'unknown-duration pulls stop at the tighter cap',
+    );
+  }
+
+  // A decode that produces more PCM than the frames bound — e.g. a
+  // multichannel outlier — bails rather than bucketing a giant buffer.
+  {
+    const chunks = new Map<number, Uint8Array>([
+      [0, new Uint8Array(64)],
+      [64, new Uint8Array(0)],
+    ]);
+    const stream = fakeStream({ chunks });
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([new Float32Array(4096), new Float32Array(4096)]),
+      maxPcmBytes: 1024,
+    });
+    const result = await port.peaks(
+      { handle: 'h-10', durationMs: 60_000 },
+      context(),
+    );
+    assert(!result.ok && result.error.kind === 'budget-exceeded');
   }
 
   // Over-long tracks skip the pull entirely — decoration only.

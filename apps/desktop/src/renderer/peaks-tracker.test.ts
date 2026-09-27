@@ -6,8 +6,8 @@ import type { PeaksTarget } from './peaks-tracker.ts';
 
 const PEAKS: readonly number[] = [0.5, 1, 0.25];
 
-function target(recordingId: string, handle = 'h'): PeaksTarget {
-  return { recordingId, handle, durationMs: 120_000 };
+function target(id: string, handle = 'h'): PeaksTarget {
+  return { id, handle, durationMs: 120_000 };
 }
 
 /** Flush pending promise chains without a real timer. */
@@ -168,6 +168,21 @@ export async function run(): Promise<void> {
     assertEqual(tracker.get('b'), undefined, 'oldest entry evicts');
     assertEqual(tracker.get('a'), PEAKS, 'a revisited entry survives');
     assertEqual(tracker.get('d'), PEAKS, 'the new entry caches');
+  }
+
+  // A re-prepared stream is a new cache identity — the same recording
+  // under a new attempt pulls fresh instead of inheriting the old
+  // stream's peaks or failure.
+  {
+    const { calls, port } = fakePort(() =>
+      err(appError('invalid-response', 'not audio')),
+    );
+    const tracker = createPeaksTracker({ port });
+    tracker.pull(target('r-7|a1', 'h1'));
+    await flush();
+    assertEqual(tracker.get('r-7|a1'), null, 'first attempt cached its failure');
+    tracker.pull(target('r-7|a2', 'h2'));
+    assertEqual(calls.length, 2, 'a new attempt pulls its own stream');
   }
 
   // Cancellation mid-retry clears the scheduled attempt.
