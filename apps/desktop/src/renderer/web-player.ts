@@ -95,6 +95,16 @@ function toKind(kind: unknown): ErrorKind {
     : 'internal';
 }
 
+/** Stream dead-resource kinds — a failed op with one of these means the
+ * registry dropped the session, which the session layer re-prepares. */
+const DEAD_HANDLE_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'released',
+  'evicted',
+  'expired',
+  'superseded',
+  'not-found',
+]);
+
 function toError(thrown: unknown): AppError {
   if (isRecord(thrown)) {
     const kind = toKind(thrown['kind']);
@@ -807,8 +817,8 @@ export function createWebPlayerPort(deps: {
     advanceQueue('ended');
   });
   audio.addEventListener('error', () => {
-    const handle = current?.handle;
-    if (handle === undefined) {
+    const owner = current;
+    if (owner === null) {
       status('failed', appError('transient', 'audio element failed'));
       return;
     }
@@ -818,16 +828,24 @@ export function createWebPlayerPort(deps: {
     // sees the dead-resource kind (which it re-prepares) instead of a
     // transient media failure that fails the occurrence. The probe
     // resolving means the stream lives — a real flake — so stay
-    // 'transient'.
-    void stream.marks({ handle }).then(
+    // 'transient', and a non-dead probe failure tells us nothing about
+    // the stream, so it stays 'transient' too.
+    const gen = opGen;
+    void stream.marks({ handle: owner.handle }).then(
       () => {
-        if (current?.handle === handle) {
+        if (current?.handle === owner.handle && gen === opGen) {
           status('failed', appError('transient', 'audio element failed'));
         }
       },
       (thrown) => {
-        if (current?.handle === handle) {
-          status('failed', toError(thrown));
+        const probeError = toError(thrown);
+        if (current?.handle === owner.handle && gen === opGen) {
+          status(
+            'failed',
+            DEAD_HANDLE_KINDS.has(probeError.kind)
+              ? probeError
+              : appError('transient', 'audio element failed'),
+          );
         }
       },
     );
