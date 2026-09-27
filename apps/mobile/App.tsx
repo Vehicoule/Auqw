@@ -4014,11 +4014,15 @@ function Main({
 
   // The immersive player (open sheet, player mode, artwork present)
   // renders dark regardless of scheme — its system-bar styles flip.
+  // A pushed overlay is an opaque screen over the player, so it owns
+  // the bars while it is the visible surface; action sheets only dim
+  // it and keep the light treatment.
   const immersiveStage =
     expanded &&
     stageMode === 'player' &&
     player !== null &&
-    player.artworkUrl !== null;
+    player.artworkUrl !== null &&
+    overlay === null;
 
   // Gate frame: the ready UI must not render before the persisted
   // language has been applied — only gate copy (whose system-language
