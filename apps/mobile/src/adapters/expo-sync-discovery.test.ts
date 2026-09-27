@@ -121,7 +121,64 @@ async function rerankPicksDialableOverList(): Promise<void> {
   session.ok && session.value.close();
 }
 
+async function sameNameServicesCoexist(): Promise<void> {
+  const { native, emit } = fakeNative();
+  const discovery = createExpoSyncDiscovery(native);
+  const found: SyncDiscoveredPeer[] = [];
+  const lost: string[] = [];
+  const session = await discovery.browse({
+    onFound: (p) => found.push(p),
+    onLost: (k) => lost.push(k),
+  });
+  assert(session.ok, 'browse session opens');
+
+  // Two devices advertising the same instance name on different
+  // listener ports — both rows must live independently.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.4'],
+    port: 41000,
+    fp: null,
+  });
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.5'],
+    port: 41001,
+    fp: null,
+  });
+  assertEqual(found.length, 2, 'both services emitted');
+  assertEqual(lost.length, 0, 'no retraction between devices');
+
+  // A same-port re-announce of A with a new address is A's new
+  // generation — retracts A's old key only.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.9'],
+    port: 41000,
+    fp: null,
+  });
+  assertEqual(found.length, 3, 'A re-announce emits');
+  assertEqual(lost.length, 1, 'A old row retracted');
+  assertEqual(lost[0], 'Phone|10.0.0.4', 'retracted A key');
+
+  // A unpairable re-announce of B retracts only B's row.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['203.0.113.8'],
+    port: 41001,
+    fp: null,
+  });
+  assertEqual(lost.length, 2, 'B retracted');
+  assertEqual(lost[1], 'Phone|10.0.0.5', 'retracted B key');
+  session.ok && session.value.close();
+}
+
 export async function run(): Promise<void> {
   await rerankToUnpairableRetracts();
   await rerankPicksDialableOverList();
+  await sameNameServicesCoexist();
 }

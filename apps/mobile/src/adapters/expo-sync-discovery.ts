@@ -64,19 +64,39 @@ export function createExpoSyncDiscovery(
         // browse slot, so don't install a listener we'd leak.
         return err(appError('cancelled', 'sync: browse superseded'));
       }
-      // serviceName → emitted key — a native 'lost' carries only the
-      // service name, and a native 'stopped' (async NSD failure) must
-      // retract each emitted peer so the UI holds no ghosts.
-      const emitted = new Map<string, string>();
-      // A `found` that fails any gate below must still retract the row
-      // a previous `found` emitted for the same name — otherwise the
-      // last usable endpoint stays dialable after the service's advert
-      // turned unpairable.
-      const retract = (name: string) => {
-        const key = emitted.get(name);
-        emitted.delete(name);
-        if (key !== undefined) {
-          browsing?.onLost(key);
+      // name → (key → port) — an instance name is NOT unique on a LAN
+      // (two devices can both advertise "Phone"), so rows coexist per
+      // service and a generation is matched by its listener port,
+      // which is stable for the life of that pairing offer. A native
+      // 'lost' carries only the service name, and a native 'stopped'
+      // (async NSD failure) must retract each emitted peer so the UI
+      // holds no ghosts.
+      const emitted = new Map<
+        string,
+        Map<string, number | undefined>
+      >();
+      // A `found` that fails any gate below must still retract rows a
+      // previous `found` emitted for that service — otherwise the last
+      // usable endpoint stays dialable after the advert turned
+      // unpairable. Port-less events can't identify a generation, so
+      // they retract every row under the name.
+      const retract = (name: string, port?: number) => {
+        const entries = emitted.get(name);
+        if (entries === undefined) {
+          return;
+        }
+        for (const [key, p] of entries) {
+          if (
+            port === undefined ||
+            p === undefined ||
+            p === port
+          ) {
+            entries.delete(key);
+            browsing?.onLost(key);
+          }
+        }
+        if (entries.size === 0) {
+          emitted.delete(name);
         }
       };
       browseSub = native.addSyncDiscoveryListener((event) => {
@@ -88,14 +108,18 @@ export function createExpoSyncDiscovery(
           const host = pickDialableHost(
             event.hosts ?? (event.host !== undefined ? [event.host] : []),
           );
+          const port =
+            Number.isSafeInteger(event.port) &&
+            (event.port ?? 0) >= 1 &&
+            (event.port ?? 0) <= 65_535
+              ? (event.port as number)
+              : undefined;
           // Shape-check before it becomes a dial target — an advert
           // with a junk port or an unbounded name never reaches the
           // nearby list.
           if (
             host === null ||
-            !Number.isSafeInteger(event.port) ||
-            (event.port ?? 0) < 1 ||
-            (event.port ?? 0) > 65_535 ||
+            port === undefined ||
             event.name.length === 0 ||
             event.name.length > 128 ||
             // A PRESENT-but-malformed `fp` poisons the pin the pair
@@ -104,30 +128,45 @@ export function createExpoSyncDiscovery(
             // TXT-less advert — that's a valid unpinned candidate.
             (event.fp != null && !/^[0-9a-f]{64}$/.test(event.fp))
           ) {
-            retract(event.name);
+            retract(
+              event.name,
+              Number.isSafeInteger(event.port)
+                ? (event.port as number)
+                : undefined,
+            );
             return;
           }
           const key = `${event.name}|${host}`;
-          // Re-advertise on a new address: retract the old key's row
-          // first — the 'lost' event (name-only) would only clear
-          // the NEW key, leaving the stale endpoint dialable.
-          const prior = emitted.get(event.name);
+          let entries = emitted.get(event.name);
+          if (entries === undefined) {
+            entries = new Map();
+            emitted.set(event.name, entries);
+          }
+          // Same service re-announcing (port identifies its listener
+          // generation): retract the old key's row first — the 'lost'
+          // event (name-only) would retract every row under the name.
+          const prior = [...entries.entries()].find(
+            ([, p]) => p === port,
+          )?.[0];
           if (prior !== undefined && prior !== key) {
+            entries.delete(prior);
             browsing?.onLost(prior);
           }
           browsing?.onFound({
             key,
             name: event.name,
             host,
-            port: event.port as number,
+            port,
             fp: event.fp ?? null,
           });
-          emitted.set(event.name, key);
+          entries.set(key, port);
         } else if (event.type === 'lost') {
           retract(event.name);
         } else if (event.type === 'stopped') {
-          for (const key of emitted.values()) {
-            browsing?.onLost(key);
+          for (const entries of emitted.values()) {
+            for (const key of entries.keys()) {
+              browsing?.onLost(key);
+            }
           }
           emitted.clear();
         }

@@ -105,31 +105,45 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
 }
 
 /**
- * Name-keyed tracking of emitted peers for one browse — shared by the
- * `up`/`down` handlers so a re-announcement or a late `down` can
- * retract exactly the row that was emitted. Keyed by service NAME
- * (unique on the LAN): `service.host` on a `down` can differ from the
- * chosen advert address, so name|host would miss and leave a stale
- * row behind. Exported for the tracker unit test.
+ * Tracking of emitted peers for one browse — shared by the `up`/`down`
+ * handlers so a re-announcement or a late `down` can retract exactly
+ * the row that was emitted. Entries are keyed by `name|srvHost`: an
+ * instance name is NOT unique on a LAN (two devices can both call
+ * themselves "Phone"), and `service.host` (the SRV target) identifies
+ * the device — never the picked dial address, which re-ranks.
+ * Exported for the tracker unit test.
  */
 export const createPeerTracker = (
   onFound: (peer: SyncDiscoveredPeer) => void,
   onLost: (key: string) => void,
 ): { up(service: Service): void; down(service: Service): void } => {
+  // Keyed by `name|srvHost` — the SRV target identifies the DEVICE
+  // behind the advert, so two services sharing an instance name keep
+  // independent rows; a same-device re-announce (host unchanged) is
+  // the same generation even when its port or picked address changed.
   const seen = new Map<
     string,
-    { peer: SyncDiscoveredPeer; host?: string; port?: number }
+    {
+      name: string;
+      host: string | undefined;
+      port: number | undefined;
+      peer: SyncDiscoveredPeer;
+    }
   >();
+  const hostOf = (s: Service): string | undefined =>
+    typeof s.host === 'string' && s.host !== '' ? s.host : undefined;
+  const keyOf = (s: Service) => `${s.name}|${hostOf(s) ?? ''}`;
   return {
     up(service) {
-      const prior = seen.get(service.name);
+      const id = keyOf(service);
+      const prior = seen.get(id);
       const peer = peerOf(service);
       if (peer === null) {
         // A re-announcement with no pairable address must retract the
         // previously emitted row — otherwise the last pick stays
         // dialable forever.
         if (prior !== undefined) {
-          seen.delete(service.name);
+          seen.delete(id);
           onLost(prior.peer.key);
         }
         return;
@@ -140,36 +154,44 @@ export const createPeerTracker = (
       if (prior !== undefined && prior.peer.key !== peer.key) {
         onLost(prior.peer.key);
       }
-      seen.set(service.name, {
-        peer,
-        host: service.host,
+      seen.set(id, {
+        name: service.name,
+        host: hostOf(service),
         port: service.port,
+        peer,
       });
       onFound(peer);
     },
     down(service) {
-      const entry = seen.get(service.name);
-      if (entry === undefined) {
-        return;
-      }
       // Match the down to the emitted GENERATION by the service's own
       // SRV identity — never by the address we picked to dial, which
       // can re-rank across ups of the same generation. A down from an
       // older generation (death + re-announce on a new port/host) can
       // arrive after the new up and must not kill the fresh row.
-      const staleGeneration =
-        (typeof service.port === 'number' &&
-          service.port !== entry.port) ||
-        (typeof service.host === 'string' &&
-          service.host !== '' &&
-          typeof entry.host === 'string' &&
-          entry.host !== '' &&
-          service.host !== entry.host);
-      if (staleGeneration) {
-        return;
+      const downHost = hostOf(service);
+      const downPort =
+        typeof service.port === 'number' ? service.port : undefined;
+      for (const [id, entry] of seen) {
+        if (entry.name !== service.name) {
+          continue;
+        }
+        if (
+          downHost !== undefined &&
+          entry.host !== undefined &&
+          entry.host !== downHost
+        ) {
+          continue;
+        }
+        if (
+          downPort !== undefined &&
+          entry.port !== undefined &&
+          entry.port !== downPort
+        ) {
+          continue;
+        }
+        seen.delete(id);
+        onLost(entry.peer.key);
       }
-      seen.delete(service.name);
-      onLost(entry.peer.key);
     },
   };
 };

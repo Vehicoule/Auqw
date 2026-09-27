@@ -185,6 +185,50 @@ function unpairableReannounceRetracts(): void {
   assertEqual(r.lost[0], 'Phone|10.0.0.4', 'retracted key');
 }
 
+function sameNameServicesCoexist(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  // Two DIFFERENT devices advertising the same instance name — the
+  // SRV target host distinguishes them.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone-a.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone-b.local',
+      port: 41001,
+      addresses: ['10.0.0.5'],
+    }),
+  );
+  assertEqual(r.found.length, 2, 'both services emitted');
+  assertEqual(r.lost.length, 0, 'no retraction between devices');
+
+  // A down for A retracts only A's row; B stays.
+  t.down(
+    service({ name: 'Phone', host: 'phone-a.local', port: 41000 }),
+  );
+  assertEqual(r.lost.length, 1, 'only A retracted');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'A key retracted');
+
+  // An unpairable re-announce of B retracts only B.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone-b.local',
+      port: 41001,
+      addresses: ['203.0.113.8'],
+    }),
+  );
+  assertEqual(r.lost.length, 2, 'B retracted');
+  assertEqual(r.lost[1], 'Phone|10.0.0.5', 'B key retracted');
+}
+
 export function run(): void {
   rerankRetractsOldKey();
   sameKeyReannounceKeepsRow();
@@ -193,4 +237,5 @@ export function run(): void {
   downWithoutSrvStillRetracts();
   unpairableUpEmitsNothing();
   unpairableReannounceRetracts();
+  sameNameServicesCoexist();
 }
