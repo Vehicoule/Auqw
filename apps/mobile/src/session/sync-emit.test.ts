@@ -78,6 +78,17 @@ export async function runSyncEmit(): Promise<void> {
     assertDeepIds(live.batches[0], ['x'], 'empty flush drains buffer');
   }
 
+  // An empty flush with an EMPTY buffer short-circuits —
+  // localChangeBatch([]) is an 'empty local write' failure, and
+  // bring-up logs it as a spurious sync warn otherwise.
+  {
+    const live = fakeSurface();
+    const emit = createSyncEmit({ surface: () => live });
+    const r = await emit([]);
+    assert(r.ok, 'empty-on-empty flush resolves ok');
+    expectEq(live.batches.length, 0, 'no empty batch stamped');
+  }
+
   // Concurrent emits serialize — batches arrive in call order even
   // when the first localChangeBatch is slow.
   {
