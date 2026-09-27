@@ -68,6 +68,15 @@ export type PlayerStatus =
 
 export type PlayerModel = {
   readonly status: PlayerStatus;
+  /**
+   * The user's effective play/pause intent — queue mode is
+   * 'playing' AND transport hasn't already paused on its own (a
+   * native status pause keeps queue intent but still needs a
+   * resume, not another pause). Controls key glyph and action on
+   * this, not `status`: a retry backoff publishes 'preparing' while
+   * the intent stays playing, and pause must still win there.
+   */
+  readonly intentPlaying: boolean;
   readonly title: string;
   readonly artist: string | null;
   readonly albumLabel: string | null;
@@ -863,6 +872,8 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     liked: recordingId !== null && liked.has(recordingId),
     canPrevious,
     canNext,
+    intentPlaying:
+      queue.mode === 'playing' && playback.type !== 'paused',
   };
   switch (playback.type) {
     case 'preparing':

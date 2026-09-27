@@ -68,14 +68,14 @@ export function MiniPlayer({
       )}
       <Pressable
         onPress={onPlayPause}
-        ariaLabel={player.status === 'playing' ? t('common.pause') : t('common.play')}
+        ariaLabel={player.intentPlaying ? t('common.pause') : t('common.play')}
         className="uw-mini__play"
       >
         {busy ? (
           <Spinner size={14} color="var(--accent)" />
         ) : (
           <PlayPauseIcon
-            playing={player.status === 'playing'}
+            playing={player.intentPlaying}
             size={16}
             color="var(--accent)"
           />

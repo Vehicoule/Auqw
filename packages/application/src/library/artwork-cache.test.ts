@@ -107,6 +107,11 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     destPath: string;
     signal: CancellationSignal;
   }[] = [];
+  /**
+   * When set, downloads ignore the caller's cancel signal — models
+   * a port that reports its own verdict even after cancellation.
+   */
+  deaf = false;
   #deferreds: Deferred<Result<{ bytes: number }>>[] = [];
   #auto: ((url: string) => Result<{ bytes: number }>) | null = null;
 
@@ -138,12 +143,14 @@ class FakeArtworkFetch implements ArtworkFetchPort {
     }
     const deferred = new Deferred<Result<{ bytes: number }>>();
     this.#deferreds.push(deferred);
-    signal.subscribe(() => {
-      deferred.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
+    if (!this.deaf) {
+      signal.subscribe(() => {
+        deferred.resolve({
+          ok: false,
+          error: appError('cancelled', 'cancelled'),
+        });
       });
-    });
+    }
     return deferred.promise;
   }
 
@@ -293,17 +300,219 @@ async function fetchErrorsPropagate(): Promise<void> {
   r.fetch.respond(() =>
     err(appError('rate-limit', 'slow down', 30_000)),
   );
-  const res = await r.cache.get(A, ctx());
+  // A retryable failure earns one in-deadline retry; both attempts
+  // hit the same verdict, then the error propagates unchanged.
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  r.clock.advance(30_000);
+  const res = await pending;
   assert(!res.ok, 'rate-limited get must fail');
   assertEqual(res.error.kind, 'rate-limit');
   assertEqual(res.error.retryAfterMs, 30_000);
+  assertEqual(r.fetch.calls.length, 2, 'one bounded retry ran');
   assertEqual((await storedUrls(r.storage)).length, 0);
 
+  // Negative cache: inside the verdict's retryAfter window a second
+  // get answers from memory — no download at all.
+  const again = await r.cache.get(A, ctx());
+  assert(!again.ok && again.error.kind === 'rate-limit');
+  assertEqual(
+    r.fetch.calls.length,
+    2,
+    'negative cache suppresses the refetch',
+  );
+
   r.fetch.respond(() => err(appError('unavailable', 'offline')));
-  const off = await r.cache.get(B, ctx());
+  const second = r.cache.get(B, ctx());
+  await pump();
+  // 'unavailable' carries no retryAfter — the backoff fires next tick.
+  r.clock.advance(1_000);
+  const off = await second;
   assert(!off.ok);
   assertEqual(off.error.kind, 'unavailable');
   assertEqual((await storedUrls(r.storage)).length, 0);
+}
+
+async function negativeCacheExpiry(): Promise<void> {
+  const r = rig(persisted());
+  // Fail once transiently; the verdict caches for FAILURE_TTL_MS.
+  let call = 0;
+  r.fetch.respond(() => {
+    call += 1;
+    return call === 1
+      ? err(appError('transient', 'blip'))
+      : ok({ bytes: 4 * MB });
+  });
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const first = await pending;
+  // The in-get retry already recovered — this get succeeded.
+  assert(first.ok, 'transient then success must resolve');
+  assertEqual(r.fetch.calls.length, 2, 'retry recovered in-window');
+
+  // A hard-failing url: 'not-found' is the url's own verdict — one
+  // attempt lands and the dead verdict negative-caches.
+  r.fetch.respond(() => err(appError('not-found', 'dead')));
+  const dead = r.cache.get(B, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await dead;
+  assert(!failed.ok);
+  assertEqual(r.fetch.calls.length, 3, 'one attempt for B');
+  // Remounts inside the TTL cost zero network calls.
+  for (let i = 0; i < 5; i += 1) {
+    const hit = await r.cache.get(B, ctx());
+    assert(!hit.ok && hit.error.kind === 'not-found');
+  }
+  assertEqual(r.fetch.calls.length, 3, 'remounts stay suppressed');
+  // Past the TTL the url earns a fresh try — and can succeed.
+  r.fetch.respondBytes(4 * MB);
+  r.clock.advance(25_000);
+  const healed = await r.cache.get(B, ctx());
+  assert(healed.ok, 'expired negative verdict must refetch');
+  assertEqual(r.fetch.calls.length, 4);
+}
+
+async function unavailableIsNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  // 'unavailable' is the network's verdict, not the url's — an
+  // offline get must not pin the url dead for the TTL while
+  // connectivity could already be back on the next mount.
+  r.fetch.respond(() => err(appError('unavailable', 'offline')));
+  const failed = await r.cache.get(A, ctx());
+  assert(!failed.ok && failed.error.kind === 'unavailable');
+  assertEqual(r.fetch.calls.length, 1, 'one attempt, non-retryable');
+  // Remount after recovery: the url earns a fresh download NOW,
+  // not after FAILURE_TTL_MS.
+  r.fetch.respondBytes(4 * MB);
+  const recovered = await r.cache.get(A, ctx());
+  assert(recovered.ok, 'recovery must not wait out a negative verdict');
+  assertEqual(r.fetch.calls.length, 2, 'recovery refetches');
+}
+
+async function transportFailuresAreNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  // 'transient' after the in-get retry — like 'timeout' and
+  // 'unavailable' — is the network's verdict, not the url's. The
+  // negative cache must not pin it while connectivity could already
+  // be back on the next mount.
+  r.fetch.respond(() => err(appError('transient', 'blip')));
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await pending;
+  assert(!failed.ok && failed.error.kind === 'transient');
+  assertEqual(r.fetch.calls.length, 2, 'in-window retry ran');
+  // Recovery on the next mount — no TTL wait.
+  r.fetch.respondBytes(4 * MB);
+  const recovered = await r.cache.get(A, ctx());
+  assert(recovered.ok, 'recovered get must refetch immediately');
+  assertEqual(r.fetch.calls.length, 3, 'recovery refetches');
+}
+
+async function shortDeadlineWaiterLeavesSharedWork(): Promise<void> {
+  const r = rig(persisted());
+  // Leader with a 5 s budget; a second waiter joins with 30 s — the
+  // shared download must outlive the leader's expiry and still
+  // deliver to the waiter that had the budget for it.
+  const leaderCtx: OperationContext = {
+    requestId: 'leader',
+    deadlineMs: r.clock.nowMs() + 5_000,
+    signal: new CancellationSource().signal,
+  };
+  const p1 = r.cache.get(A, leaderCtx);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'shared download started');
+  const followerCtx: OperationContext = {
+    requestId: 'follower',
+    deadlineMs: r.clock.nowMs() + 30_000,
+    signal: new CancellationSource().signal,
+  };
+  const p2 = r.cache.get(A, followerCtx);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'follower coalesced');
+  // The leader's deadline dies mid-download — it times out alone.
+  r.clock.advance(5_000);
+  await pump();
+  const r1 = await p1;
+  assert(!r1.ok && r1.error.kind === 'timeout', 'leader timed out');
+  // The transfer keeps flying on the follower's budget — the
+  // leader's expiry must not have cancelled the shared work.
+  assert(
+    r.fetch.calls[0]?.signal.cancelled === false,
+    'shared download outlives the leader deadline',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 4 * MB })));
+  const r2 = await p2;
+  assert(r2.ok, 'follower receives the shared result');
+  assertEqual(r.fetch.calls.length, 1, 'still one download');
+}
+
+async function zeroRetryAfterStillNegativeCaches(): Promise<void> {
+  const r = rig(persisted());
+  // retryAfterMs: 0 is a floor, not a bypass — the verdict still
+  // negative-caches for the default TTL instead of expiring
+  // immediately and letting remounts re-hammer the dead url.
+  r.fetch.respond(() => err(appError('rate-limit', 'slow down', 0)));
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await pending;
+  assert(!failed.ok && failed.error.kind === 'rate-limit');
+  assertEqual(r.fetch.calls.length, 2, 'in-window retry ran');
+  for (let i = 0; i < 3; i += 1) {
+    const hit = await r.cache.get(A, ctx());
+    assert(!hit.ok && hit.error.kind === 'rate-limit');
+  }
+  assertEqual(
+    r.fetch.calls.length,
+    2,
+    'a zero retry hint cannot expire the verdict early',
+  );
+  // Past the default TTL the url earns a fresh try — and heals.
+  r.fetch.respondBytes(4 * MB);
+  r.clock.advance(25_000);
+  const healed = await r.cache.get(A, ctx());
+  assert(healed.ok, 'expired verdict refetches');
+  assertEqual(r.fetch.calls.length, 3);
+}
+
+async function cancelledGetIsNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  const source = new CancellationSource();
+  const pending = r.cache.get(A, ctx(source));
+  await pump();
+  source.cancel();
+  const res = await pending;
+  assert(!res.ok && res.error.kind === 'cancelled');
+  // A cancel is the caller's choice, not the url's verdict — the
+  // next get downloads afresh.
+  r.fetch.respondBytes(4 * MB);
+  const after = await r.cache.get(A, ctx());
+  assert(after.ok, 'post-cancel get must fetch');
+  assertEqual(r.fetch.calls.length, 2, 'cancel + refetch');
+}
+
+async function transientRetryRecovers(): Promise<void> {
+  const r = rig(persisted());
+  let call = 0;
+  r.fetch.respond(() => {
+    call += 1;
+    return call === 1
+      ? err(appError('timeout', 'upstream slow'))
+      : ok({ bytes: 2 * MB });
+  });
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  r.clock.advance(400);
+  const res = await pending;
+  assert(res.ok, 'timeout then success must resolve');
+  assertEqual(res.value.filePath, destOf(A));
+  assertEqual(r.fetch.calls.length, 2);
+  assertEqual((await storedUrls(r.storage)).length, 1);
 }
 
 async function invalidUrls(): Promise<void> {
@@ -457,6 +666,71 @@ async function coalescedConcurrentGets(): Promise<void> {
   assert(r.fetch.settleDownload(ok({ bytes: 1 * MB })));
   const r9 = await p9;
   assert(r9.ok && r9.value.filePath === destOf(D));
+}
+
+async function abandonedGetCannotPoison(): Promise<void> {
+  const r = rig(persisted());
+  // This port answers on its own schedule — a cancelled signal does
+  // not stop it returning a late HTTP error for the abandoned run.
+  r.fetch.deaf = true;
+  const s1 = new CancellationSource();
+  const s2 = new CancellationSource();
+  const p1 = r.cache.get(A, ctx(s1));
+  const p2 = r.cache.get(A, ctx(s2));
+  await pump();
+  assertEqual(r.fetch.calls.length, 1);
+  s1.cancel();
+  s2.cancel();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert(!r1.ok && !r2.ok, 'all waiters cancelled');
+  // A fresh get takes over while the abandoned download still flies.
+  const p3 = r.cache.get(A, ctx());
+  await pump();
+  assertEqual(r.fetch.calls.length, 2, 'replacement run started');
+  // The abandoned run reports a late HTTP failure — a teardown
+  // artifact, not a verdict: it must not negative-cache over the
+  // replacement's success.
+  assert(
+    r.fetch.settleDownload(err(appError('transient', 'server 500'))),
+    'old download still pending',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 4 * MB })));
+  const res3 = await p3;
+  assert(res3.ok, 'replacement get succeeded');
+  const after = await r.cache.get(A, ctx());
+  assert(
+    after.ok && after.value.hit,
+    'stale verdict must not mask the stored file',
+  );
+  assertEqual(r.fetch.calls.length, 2, 'no refetch after the race');
+}
+
+async function deadlineCancelsDownloadSignal(): Promise<void> {
+  const r = rig(persisted());
+  // A hung transfer that ignores even its own signal — the deadline
+  // watchdog must still cancel the signal it was handed so the port
+  // knows the budget died.
+  r.fetch.deaf = true;
+  const source = new CancellationSource();
+  const context: OperationContext = {
+    requestId: 'test-req',
+    deadlineMs: r.clock.nowMs() + 10_000,
+    signal: source.signal,
+  };
+  const pending = r.cache.get(A, context);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'download in flight');
+  r.clock.advance(10_000);
+  const res = await pending;
+  assert(!res.ok && res.error.kind === 'timeout', 'deadline surfaces timeout');
+  assert(
+    r.fetch.calls[0]?.signal.cancelled === true,
+    'watchdog cancellation reached the transfer signal',
+  );
+  assert(
+    source.signal.cancelled === false,
+    'the caller signal is untouched — only the attempt child died',
+  );
 }
 
 async function cancellation(): Promise<void> {
@@ -647,11 +921,20 @@ async function sweepExistsErrorKeepsRow(): Promise<void> {
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
+  await negativeCacheExpiry();
+  await unavailableIsNotNegativeCached();
+  await transportFailuresAreNotNegativeCached();
+  await shortDeadlineWaiterLeavesSharedWork();
+  await zeroRetryAfterStillNegativeCaches();
+  await cancelledGetIsNotNegativeCached();
+  await transientRetryRecovers();
   await invalidUrls();
   await lruEvictionOrder();
   await touchOnHitReorders();
   await oversizeEntryRejected();
   await coalescedConcurrentGets();
+  await abandonedGetCannotPoison();
+  await deadlineCancelsDownloadSignal();
   await cancellation();
   await storageFailures();
   await sweepShrinkAndNoop();

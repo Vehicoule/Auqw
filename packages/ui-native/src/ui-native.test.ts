@@ -64,6 +64,7 @@ import {
   fixturePlaylistModel,
   fixturePlaylistModelEmpty,
   fixturePlaylists,
+  fixtureIdentity,
   fixtureQueue,
   fixtureQueueModel,
   fixtureRecordings,
@@ -359,6 +360,33 @@ function testPlayerMapper(): void {
   assertEqual(playing.canPrevious, false);
   const paused = toPlayerModel({ ...base, playback: fixturePlaybackPaused });
   assert(paused !== null && paused.status === 'paused', 'paused mapping');
+  assertEqual(
+    playing.intentPlaying,
+    true,
+    'playing intent follows queue mode',
+  );
+  // A transport pause that arrived natively (queue still 'playing')
+  // must read as resumable — the tap resumes, not re-pauses.
+  assertEqual(
+    paused.intentPlaying,
+    false,
+    'transport-paused under playing queue resumes',
+  );
+  // Retry backoff publishes 'preparing' while queue intent stays
+  // playing — the tap must still pause.
+  const preparing = toPlayerModel({
+    ...base,
+    playback: {
+      type: 'preparing',
+      recordingId: 'rec-self-aware',
+      occurrenceId: 'occ-1',
+      identity: fixtureIdentity,
+    },
+  });
+  assert(
+    preparing !== null && preparing.intentPlaying === true,
+    'backoff keeps pause intent',
+  );
   const failed = toPlayerModel({ ...base, playback: fixturePlaybackFailed });
   assert(failed !== null, 'failed model null');
   assertEqual(failed.status, 'failed');

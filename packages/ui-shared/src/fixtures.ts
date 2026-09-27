@@ -558,6 +558,7 @@ function rec(id: string): Recording {
 
 export const fixturePlayerPlaying: PlayerModel = {
   status: 'playing',
+  intentPlaying: true,
   title: 'Self Aware',
   artist: 'Temper City',
   albumLabel: 'Self Aware · 2024',
@@ -573,6 +574,7 @@ export const fixturePlayerPlaying: PlayerModel = {
 export const fixturePlayerPaused: PlayerModel = {
   ...fixturePlayerPlaying,
   status: 'paused',
+  intentPlaying: false,
   positionMs: 61_000,
 };
 
@@ -591,6 +593,7 @@ export const fixturePlayerBuffering: PlayerModel = {
 export const fixturePlayerFailed: PlayerModel = {
   ...fixturePlayerPlaying,
   status: 'failed',
+  intentPlaying: false,
   title: 'Roads',
   artist: 'Portishead',
   albumLabel: 'Dummy · 1994',

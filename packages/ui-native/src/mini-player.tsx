@@ -169,7 +169,7 @@ export function MiniPlayer({
             compact
             onPress={onPlayPause}
             accessibilityLabel={
-              player.status === 'playing' ? t('common.pause') : t('common.play')
+              player.intentPlaying ? t('common.pause') : t('common.play')
             }
             style={{
               width: 32,
@@ -188,7 +188,7 @@ export function MiniPlayer({
               <Spinner size={14} color={ios ? theme.colors.textBright : theme.colors.accent} />
             ) : (
               <PlayPauseIcon
-                playing={player.status === 'playing'}
+                playing={player.intentPlaying}
                 size={16}
                 color={ios ? theme.colors.textBright : theme.colors.accent}
               />

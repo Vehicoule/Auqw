@@ -168,6 +168,11 @@ export type SyncServiceDeps = {
   readonly appliedSpillPath?: string;
   /** Cipher seam — defaults to the noise-style node:crypto impl. */
   readonly cipher?: SyncCipher;
+  /**
+   * Wire-pump factory seam — defaults to the framed socket pump.
+   * Tests wrap it to fault-inject send failures on live sessions.
+   */
+  readonly pump?: typeof attachWirePump;
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
   readonly deviceName?: string;
   /**
@@ -458,6 +463,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const deviceName =
     deps.deviceName ??
     (hostname().trim().slice(0, DEVICE_NAME_MAX) || 'auqw-desktop');
+  const attachPump = deps.pump ?? attachWirePump;
   const pairing = createPairing({
     nowMs,
     ttlMs: deps.codeTtlMs ?? 90_000,
@@ -490,6 +496,14 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   const sessions = new Set<Session>();
   const pendingSync = new Set<string>();
+  /**
+   * The spec's on-change sync trigger (docs/specs/sync.md): committed
+   * local writes debounce into one trigger pass that marks offline
+   * devices pending and kicks live ones. start() fires one too, so a
+   * phone that connects after launch still gets the round.
+   */
+  const AUTO_SYNC_DEBOUNCE_MS = 500;
+  let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
   // The resolved engine — a promise dep settles inside start(),
   // and every consumer reads this, never `deps.engine` (which may
   // itself be the unsettled promise).
@@ -620,7 +634,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       for await (const chunk of stream) {
         let buf = carry + (chunk as string);
         carry = '';
-        for (;;) {
+        for (; ;) {
           const nl = buf.indexOf('\n');
           if (nl < 0) {
             break;
@@ -1537,7 +1551,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       return;
     }
     const session: Session = {
-      pump: attachWirePump({
+      pump: attachPump({
         socket,
         maxPayload: handshakeCap,
         onFrame: (payload) => {
@@ -1655,6 +1669,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     boundPort = bound;
     listener = 'listening';
+    // On-launch trigger (docs/specs/sync.md): mark every paired device
+    // pending so the next connect gets the sync-request kick, and kick
+    // any session that somehow already opened.
+    scheduleAutoTrigger();
     if (deps.advertise !== undefined && deps.advertise !== null) {
       try {
         advertiser = deps.advertise({
@@ -1679,6 +1697,90 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
     }
     return status();
+  }
+
+  /**
+   * One trigger pass: mark offline devices pending FIRST, then a
+   * final live pass that sends + clears — a device that opened during
+   * the registry await is caught by the pass and never left with a
+   * stale mark (the reverse order would snapshot `live` before the
+   * await). Shared by the IPC handler and the debounced auto-trigger.
+   */
+  async function triggerSync(): Promise<{
+    triggered: boolean;
+    pending: boolean;
+  }> {
+    let registryError: unknown;
+    try {
+      const { devices } = await deps.keys.deviceList();
+      const live = new Set<string>();
+      for (const session of sessions) {
+        if (session.phase === 'open' && session.deviceId !== null) {
+          live.add(session.deviceId);
+        }
+      }
+      for (const device of devices) {
+        if (!live.has(device.id)) {
+          pendingSync.add(device.id);
+        }
+      }
+    } catch (thrown) {
+      registryError = thrown;
+    }
+    const delivered = new Set<string>();
+    const refused = new Set<string>();
+    for (const session of sessions) {
+      if (session.phase === 'open' && session.deviceId !== null) {
+        if (sendSealed(session, { t: 'sync-request' })) {
+          delivered.add(session.deviceId);
+        } else {
+          refused.add(session.deviceId);
+        }
+      }
+    }
+    // The mark clears only when a kick is accepted — a socket that
+    // refuses the frame (dying mid-trigger, wedged writer) leaves the
+    // device pending so its next connection still gets the
+    // sync-request. One accepted sibling session is enough — refused
+    // marks apply only when no live session took the kick.
+    for (const id of delivered) {
+      pendingSync.delete(id);
+    }
+    for (const id of refused) {
+      if (!delivered.has(id)) {
+        pendingSync.add(id);
+      }
+    }
+    const sent = delivered.size > 0;
+    // A dead registry is NOT an empty one — after the live kick the
+    // custody error still surfaces typed, never a false `pending`.
+    if (registryError !== undefined) {
+      throw isShellError(registryError)
+        ? registryError
+        : shellError('internal', 'sync:trigger registry read failed');
+    }
+    return { triggered: sent, pending: pendingSync.size > 0 };
+  }
+
+  /**
+   * Debounced auto-trigger — trailing edge, matching the mobile
+   * scheduler: each write re-arms the wake so a sustained burst
+   * fires once when it goes quiet instead of mid-burst.
+   */
+  function scheduleAutoTrigger(): void {
+    if (closing) {
+      return;
+    }
+    if (autoSyncTimer !== null) {
+      clearTimeout(autoSyncTimer);
+    }
+    autoSyncTimer = setTimeout(() => {
+      autoSyncTimer = null;
+      void triggerSync().catch(() => {
+        // The writes already landed in the log — a failed pass only
+        // means the phone learns on its own next round.
+      });
+    }, AUTO_SYNC_DEBOUNCE_MS);
   }
 
   /* -------------------------- handlers ---------------------------- */
@@ -1711,7 +1813,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   function engineError(error: AppError): ShellError {
     return shellError(
       ENGINE_ERROR_KINDS[error.kind] ??
-        (error.retryable ? 'unavailable' : 'internal'),
+      (error.retryable ? 'unavailable' : 'internal'),
       error.message,
     );
   }
@@ -2029,50 +2131,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
           pending: false,
         });
       }
-      // Mark offline devices pending FIRST, then do a final live pass
-      // that sends + clears: a device that opened during the registry
-      // await is caught by the pass and never left with a stale mark
-      // (the reverse order would snapshot `live` before the await).
-      let registryError: unknown;
-      try {
-        const { devices } = await deps.keys.deviceList();
-        const live = new Set<string>();
-        for (const session of sessions) {
-          if (session.phase === 'open' && session.deviceId !== null) {
-            live.add(session.deviceId);
-          }
-        }
-        for (const device of devices) {
-          if (!live.has(device.id)) {
-            pendingSync.add(device.id);
-          }
-        }
-      } catch (thrown) {
-        registryError = thrown;
-      }
-      let sent = false;
-      for (const session of sessions) {
-        if (session.phase === 'open' && session.deviceId !== null) {
-          // The mark clears only when the kick is accepted — a socket
-          // dying mid-trigger must leave the device pending so its next
-          // connection still gets the sync-request.
-          if (sendSealed(session, { t: 'sync-request' })) {
-            sent = true;
-            pendingSync.delete(session.deviceId);
-          }
-        }
-      }
-      // A dead registry is NOT an empty one — after the live kick the
-      // custody error still surfaces typed, never a false `pending`.
-      if (registryError !== undefined) {
-        throw isShellError(registryError)
-          ? registryError
-          : shellError('internal', 'sync:trigger registry read failed');
-      }
-      return checked(isSyncTriggerResult, 'sync:trigger')({
-        triggered: sent,
-        pending: pendingSync.size > 0,
-      });
+      return checked(isSyncTriggerResult, 'sync:trigger')(
+        await triggerSync(),
+      );
     },
 
     'sync:localChanges': async (args) => {
@@ -2091,6 +2152,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       );
       if (!result.ok) {
         throw engineError(result.error);
+      }
+      // Committed writes trigger the spec's on-change sync — the
+      // debounce coalesces the burst into one trigger pass.
+      if (args.writes.length > 0) {
+        scheduleAutoTrigger();
       }
       // Small ack only — the caller discards per-write results, and
       // echoing the appended batch would overflow the result cap
@@ -2190,6 +2256,10 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       }
       closing = true;
       serviceCancel.cancel();
+      if (autoSyncTimer !== null) {
+        clearTimeout(autoSyncTimer);
+        autoSyncTimer = null;
+      }
       if (startPromise === null) {
         // Never started — settle `ready` so a dormant awaiter doesn't
         // hang, and mark the listener terminally unavailable: the

@@ -508,6 +508,7 @@ function GalleryBody({
             <TransportControls
               variant={variant}
               status={fixturePlayerPlaying.status}
+              intentPlaying={fixturePlayerPlaying.intentPlaying}
               liked={fixturePlayerPlaying.liked}
               canPrevious
               canNext

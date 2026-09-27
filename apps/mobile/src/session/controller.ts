@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import {
   appError,
   CancellationSource,
+  createSyncScheduler,
   DownloadManager,
   err,
   LocalFileSource,
@@ -22,6 +23,7 @@ import type {
   QueueSnapshot,
   Result,
   Settings,
+  SyncScheduler,
 } from '@auqw/application';
 import { SqliteStorage, SqliteSyncLogStore } from '@auqw/storage-sqlite';
 import type {
@@ -263,6 +265,9 @@ export async function createSessionController(
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
+  // The spec's trigger layer (on-launch, on-change debounced,
+  // reconnect backoff, connectivity edge) — created with the client.
+  let syncScheduler: SyncScheduler | null = null;
   // Pre-surface emission buffer: domain edits made before the engine
   // exists (or while its bring-up is still in flight) queue here and
   // flush through one localChangeBatch once the surface lands — a
@@ -313,19 +318,19 @@ export async function createSessionController(
     // bytes there fall back to remote playback instead of failing.
     ...(Platform.OS === 'android'
       ? {
-          localPlaybackFor: (recordingId: string) => {
-            // Owned bytes first: a stored download wins; a local
-            // file whose download was removed still plays from its
-            // document URI. fileFor returns a bare ledger name —
-            // resolve it to the transfer directory's file URI.
-            const file = downloads.fileFor(recordingId);
-            if (file !== null) {
-              return downloadUriFor(file);
-            }
-            return localSource?.uriFor(recordingId) ?? null;
-          },
-          isOnline: () => lastOnline,
-        }
+        localPlaybackFor: (recordingId: string) => {
+          // Owned bytes first: a stored download wins; a local
+          // file whose download was removed still plays from its
+          // document URI. fileFor returns a bare ledger name —
+          // resolve it to the transfer directory's file URI.
+          const file = downloads.fileFor(recordingId);
+          if (file !== null) {
+            return downloadUriFor(file);
+          }
+          return localSource?.uriFor(recordingId) ?? null;
+        },
+        isOnline: () => lastOnline,
+      }
       : {}),
     // Commit-then-log over the in-process engine: every syncable
     // domain write emits mapped LocalWrites here post-commit. While
@@ -335,7 +340,14 @@ export async function createSessionController(
     // a failed flush re-pends the buffer.
     sync: {
       localChanges: (writes: readonly LocalWrite[], signal) =>
-        emitWrites(writes, signal),
+        emitWrites(writes, signal).then((result) => {
+          // Committed writes trigger the spec's on-change sync —
+          // the scheduler debounces the burst into one round.
+          if (result.ok && writes.length > 0) {
+            syncScheduler?.notifyLocalWrites();
+          }
+          return result;
+        }),
     },
   });
   type ReadyState = Extract<
@@ -599,6 +611,9 @@ export async function createSessionController(
             // connectivityChanged() reads isOnline() synchronously.
             lastOnline = snap.online;
             session.connectivityChanged();
+            // Same edge drives the sync scheduler: offline cancels
+            // pending rounds, recovery reschedules them.
+            syncScheduler?.notifyConnectivity(snap.online);
           }),
         );
       } catch {
@@ -674,6 +689,45 @@ export async function createSessionController(
         });
         if (built.ok) {
           syncSurface = built.value;
+          // Flush buffered pre-surface writes BEFORE the scheduler's
+          // on-launch round — a round that exports first carries a
+          // page missing them, and a flush landing after notifies
+          // nobody, so they'd sit unsynced until the next trigger.
+          // A failed flush re-pends the buffer with no other wake
+          // until the next edit, so retry bounded here; a still-
+          // failing prefix stays buffered for the next emitWrites.
+          let flushed = await emitWrites([]);
+          for (
+            let attempt = 0;
+            !flushed.ok && attempt < 3 && !signal.cancelled;
+            attempt += 1
+          ) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, 400 * (attempt + 1)),
+            );
+            if (signal.cancelled) {
+              break;
+            }
+            flushed = await emitWrites([]);
+          }
+          if (!flushed.ok) {
+            void log.write({
+              level: 'warn',
+              message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+              atMs: clock.nowMs(),
+            });
+          }
+          // Trigger layer lives with the client: on-launch round per
+          // peer now, debounced rounds on committed writes, reconnect
+          // backoff on session drops, and rounds on the connectivity
+          // recovery edge (wired into the monitor below).
+          syncScheduler = createSyncScheduler({
+            client: built.value.client,
+            clock,
+            log,
+            isOnline: () => lastOnline,
+          });
+          syncScheduler.start();
           // Reconcile from the engine's materialized view ONCE at
           // bring-up — pending outcomes are in-memory only, so a kill
           // mid-apply loses them; the durable sync log keeps the
@@ -723,17 +777,6 @@ export async function createSessionController(
             }
             await session.emitUnsynced(synced).catch(() => undefined);
           })().catch(() => undefined);
-          // Flush buffered pre-surface writes NOW — the next edit
-          // may never come, and the buffer only rides emit calls.
-          void emitWrites([]).then((flushed) => {
-            if (!flushed.ok) {
-              void log.write({
-                level: 'warn',
-                message: `sync pre-surface flush failed: ${flushed.error.kind}`,
-                atMs: clock.nowMs(),
-              });
-            }
-          });
         } else {
           void log.write({
             level: 'warn',
@@ -799,6 +842,10 @@ export async function createSessionController(
       // (Review #46). dispose() also bars new session work, so the
       // client can't be re-entered once it goes down.
       await session.dispose();
+      // Scheduler before the client: its timers die here so no round
+      // can fire against a closing socket surface.
+      syncScheduler?.stop();
+      syncScheduler = null;
       // Sync goes down next — bye frames flush while the sockets
       // still answer; a live session must never outlive its client.
       if (syncSurface !== null) {
