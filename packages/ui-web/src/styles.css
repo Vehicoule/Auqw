@@ -463,6 +463,11 @@
 .uw-track-row:hover {
   background: var(--fg08);
 }
+/* The row tints as one surface — the inner pressable doesn't add a
+   second layer of gray over the main area. */
+.uw-track-row .uw-track-row__main:hover:not(:disabled) {
+  background: transparent;
+}
 .uw-track-row[data-playing='true'] {
   background: var(--accent-soft);
 }
@@ -836,32 +841,35 @@
 }
 .uw-collections {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  /* GTK quick-access dashboard: always the four tiles, 2x2. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--spacing-md);
   margin-bottom: var(--spacing-lg);
+}
+.uw-collections__cell {
+  display: flex;
+}
+.uw-collections__cell > .uw-collection {
+  /* Buttons shrink to content — the tile must fill its cell. */
+  flex: 1;
 }
 .uw-collection {
   display: flex;
   align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+  text-align: left;
   border-radius: var(--radius-control);
   border: var(--stroke-hairline) solid var(--hairline);
   background: var(--raised);
 }
 .uw-collection:hover:not(:disabled) {
   border-color: var(--fg40);
-}
-.uw-collection__body {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  flex: 1;
-  min-width: 0;
-  padding: var(--spacing-md);
-  text-align: left;
+  background: var(--fg08);
 }
 .uw-collection__icon {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -872,17 +880,16 @@
 .uw-collection.uw-off .uw-collection__icon {
   background: var(--fg08);
 }
-.uw-collection__text {
+.uw-collection__label {
   flex: 1;
   min-width: 0;
 }
-.uw-collection .uw-icon-btn {
-  margin-right: var(--spacing-sm);
-  border-radius: var(--radius-pill);
-  background: var(--accent-soft);
-}
-.uw-collection .uw-icon-btn:hover:not(:disabled) {
-  box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fg25);
+.uw-collection__count {
+  /* Long counts ellipsize instead of squeezing the name to zero. */
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
+  font-variant-numeric: tabular-nums;
 }
 .uw-library__controls {
   display: flex;
@@ -1648,92 +1655,204 @@
 }
 
 .uw-chrome {
-  display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  display: flex;
   height: 100%;
   min-height: 0;
   background: var(--canvas);
+  position: relative;
+  /* the stage column's narrow-overlay breakpoint queries this width */
+  container-type: inline-size;
 }
-.uw-sidebar {
+/* Golden-ratio stage column — the GTK sidebar's split fraction
+   (0.382) inside its 280/480 clamps. */
+.uw-stage-col {
+  position: relative;
+  flex: 0 0 38.2%;
+  min-width: 280px;
+  max-width: 480px;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-xxs);
-  padding: var(--spacing-md) var(--spacing-sm);
+  min-height: 0;
   background: var(--deep);
   border-right: var(--stroke-hairline) solid var(--hairline);
-  /* frameless window: the sidebar dead space doubles as a drag grip */
-  -webkit-app-region: drag;
 }
-/* macOS traffic lights overlay the sidebar's top-left corner —
-   push its content clear of them. */
-[data-platform='darwin'] .uw-sidebar {
-  padding-top: var(--uw-titlebar-h);
+.uw-chrome[data-stage='closed'] .uw-stage-col {
+  display: none;
 }
-.uw-sidebar__item,
-.uw-sidebar__item * {
-  -webkit-app-region: no-drag;
-}
-.uw-sidebar__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm);
-  margin-bottom: var(--spacing-md);
-}
-.uw-sidebar__item {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  width: 100%;
-  min-height: 36px;
-  padding: 0 var(--spacing-md);
-  border-radius: var(--radius-control);
-  text-align: left;
-}
-.uw-sidebar__item--on {
-  background: var(--accent-soft);
-}
-.uw-sidebar__item:hover:not(:disabled):not(.uw-sidebar__item--on) {
+/* No header strip on the stage column — the GTK sidebar player ran
+   edge to edge; the only control is the floating stop/dismiss. */
+.uw-stage-col__stop {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: var(--spacing-sm);
+  z-index: 5;
   background: var(--fg08);
 }
-.uw-chrome__main {
+/* The queue tools row's reorder button shares the top-right corner —
+   reserve the stop button's footprint when it exists. */
+.uw-stage-col:has(> .uw-stage-col__stop) .uw-stage__queue-tools {
+  padding-right: 44px;
+}
+/* macOS traffic lights pin over the stage column's top-left — keep
+   the player's top edge clear of them. */
+[data-platform='darwin'] .uw-chrome[data-stage='open'] .uw-stage-col__body {
+  padding-top: var(--uw-titlebar-h);
+}
+.uw-stage-col__body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+}
+.uw-stage-col__body > .uw-stage {
+  flex: 1;
+  min-height: 0;
+  max-width: none;
+}
+.uw-world {
+  flex: 1;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-/* Frameless titlebar strip — keeps the Electron window-control
-   overlay off screen content and gives the window a drag grip. */
-.uw-chrome__main::before {
-  content: '';
-  flex: 0 0 var(--uw-titlebar-h);
+.uw-world-bar {
+  flex: none;
+  height: var(--uw-titlebar-h);
+  /* 3 tracks, equal outer columns: the tabs sit at the bar's true
+     midpoint and can never overlap the side clusters. The outer
+     minimum matches the larger cluster (toggle+search ≈ 68px) so a
+     squeezed track clamps instead of letting its buttons slide under
+     the pills. */
+  display: grid;
+  grid-template-columns: minmax(68px, 1fr) minmax(0, max-content) minmax(68px, 1fr);
+  align-items: center;
+  gap: var(--spacing-xxs);
+  padding: 0 var(--spacing-sm);
+  position: relative;
   -webkit-app-region: drag;
+  border-bottom: var(--stroke-hairline) solid var(--hairline);
 }
-/* macOS uses hiddenInset — no overlay strip to host, but the spacer is
-   still the main column's only drag surface (the app renders no
-   .uw-header), so it stays on every platform. */
-.uw-chrome__content {
+.uw-world-bar > * {
+  -webkit-app-region: no-drag;
+}
+/* WCO caption buttons overlay the bar's far right — controls keep
+   clear of them. `--uw-caption-w` is measured in the renderer
+   (windowControlsOverlay) since its width is platform-drawn. The
+   padding is symmetric on purpose: the pills center on the world
+   column's midpoint, not on the bar minus its caption zone. */
+[data-platform='win32'] .uw-world-bar,
+[data-platform='linux'] .uw-world-bar {
+  padding-inline: var(--uw-caption-w, 140px);
+}
+/* On macOS the lights land over the world bar once the stage column
+   that hosts them is collapsed — same symmetric reserve. */
+[data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
+  padding-inline: 96px;
+}
+.uw-world-bar__start,
+.uw-world-bar__end {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xxs);
+  min-width: 0;
+  /* shrink to content: the rest of the outer track stays the bar's
+     own surface, so the gaps keep dragging the window */
+  justify-self: start;
+}
+.uw-world-bar__end {
+  justify-content: flex-end;
+  justify-self: end;
+}
+.uw-tabs {
+  min-width: 0;
+  /* last resort for narrow windows + long translations: pills scroll
+     (bar stays reachable, nothing overlaps the clusters) */
+  overflow-x: auto;
+  scrollbar-width: none;
+  display: flex;
+  gap: var(--spacing-xxs);
+}
+.uw-tabs__item {
+  padding: 3px 12px;
+  border-radius: 999px;
+}
+.uw-tabs__item--on {
+  background: var(--accent-soft);
+}
+.uw-tabs__item:hover:not(:disabled):not(.uw-tabs__item--on) {
+  background: var(--fg08);
+}
+.uw-world__content {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* pushed pages cover this column only — the stage stays reachable */
+  position: relative;
 }
-.uw-header {
+.uw-menu {
+  position: relative;
+  flex: none;
+}
+.uw-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: default;
+}
+.uw-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 160px;
+  padding: var(--spacing-xxs);
+  background: var(--raised);
+  border: var(--stroke-hairline) solid var(--hairline);
+  border-radius: var(--radius-float);
+  z-index: 31;
+}
+.uw-menu-row {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  min-height: var(--size-touch);
-  padding: 0 var(--spacing-md);
-  border-bottom: var(--stroke-hairline) solid var(--hairline);
+  width: 100%;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-control);
+  text-align: left;
 }
-.uw-header__slot {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--spacing-sm);
-  min-width: 0;
+.uw-menu-row:hover:not(:disabled) {
+  background: var(--fg08);
+}
+.uw-stage-scrim {
+  display: none;
+}
+/* GTK breakpoint behavior: under ~860px the stage column stops
+   shrinking and overlays the world instead. */
+@container (max-width: 860px) {
+  .uw-stage-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    border: 0;
+    padding: 0;
+    background: var(--scrim);
+  }
+  .uw-stage-col {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(85%, 380px);
+    min-width: 0;
+    max-width: none;
+    z-index: 20;
+  }
 }
 
 /* ---- stack ------------------------------------------------------------------ */

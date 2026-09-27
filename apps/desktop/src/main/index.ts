@@ -43,6 +43,8 @@ import {
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
   saveWindowState,
   saveWindowStateSync,
 } from './window-state.ts';
@@ -380,6 +382,8 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   const options: BrowserWindowConstructorOptions = {
     width: state.width,
     height: state.height,
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     title: 'auqw',
     // macOS draws a themed strip if a titleBarOverlay is given even under
     // hiddenInset, so it gets the bare option instead.

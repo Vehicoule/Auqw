@@ -159,3 +159,68 @@ export function isPairableLanHost(host: string): boolean {
     (first & 0xfe00) === 0xfc00 // fc00::/7 ULA
   );
 }
+
+/**
+ * One dialable address out of a resolved advert's list — the LAN gate
+ * decides what MAY be dialed, this picks which SHOULD be dialed first.
+ * Ranked: non-loopback IPv4 > any other v6 > bare `fe80::` > loopback.
+ * A link-local literal without a zone has no egress interface and
+ * always fails to connect, so it stays a last resort even though the
+ * gate accepts it. Loopback ranks below even that for DISCOVERY: a
+ * remote advert's `127.0.0.1`/`::1` points at the browsing machine,
+ * not the advertiser — it only stays selectable so a co-located test
+ * advert (sim host on the same box) still resolves when it's the only
+ * candidate. Null when no pairable address exists (e.g. only publics).
+ */
+export function pickDialableHost(
+  addresses: readonly string[],
+): string | null {
+  let best: string | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const address of addresses) {
+    if (typeof address !== 'string' || !isPairableLanHost(address)) {
+      continue;
+    }
+    const bare =
+      address.startsWith('[') && address.endsWith(']')
+        ? address.slice(1, -1)
+        : address;
+    const v4 = parseIpv4(bare);
+    const v6 = v4 === null ? parseIpv6(bare) : null;
+    const groups = v6?.groups ?? null;
+    // ::ffff:a.b.c.d maps to the v4 octets — a mapped loopback is
+    // still a loopback.
+    const octets =
+      v4 ??
+      (groups !== null &&
+      groups.slice(0, 5).every((g) => g === 0) &&
+      groups[5] === 0xffff
+        ? [
+            (groups[6]! >> 8) & 0xff,
+            groups[6]! & 0xff,
+            (groups[7]! >> 8) & 0xff,
+            groups[7]! & 0xff,
+          ]
+        : null);
+    const first = groups?.[0];
+    const loopback =
+      (octets !== null && octets[0] === 127) ||
+      (groups !== null &&
+        groups.slice(0, 7).every((g) => g === 0) &&
+        groups[7] === 1);
+    const rank = loopback
+      ? 3 // remote loopback would dial the browser itself
+      : v6 === null
+        ? 0 // IPv4
+        : v6.zone === null &&
+            first !== undefined &&
+            (first & 0xffc0) === 0xfe80
+          ? 2 // bare fe80:: — undialable
+          : 1;
+    if (rank < bestRank) {
+      bestRank = rank;
+      best = address;
+    }
+  }
+  return best;
+}
