@@ -171,7 +171,7 @@ export function SearchScreen({
               ariaLabel={t('search.a11y.suggestion', { query: suggestion })}
               className="uw-search__recent"
             >
-              <Icon name="clock" size={14} color="var(--text-secondary)" />
+              <Icon name="search" size={14} color="var(--text-secondary)" />
               <Text variant="body" color="primary" numberOfLines={1}>
                 {suggestion}
               </Text>

@@ -257,7 +257,7 @@ export function NowPlayingScreen({
             <Artwork url={player.artworkUrl} fill />
           </div>
           <div className="uw-stage__meta">
-            <Text variant="title" color="bright" numberOfLines={1}>
+            <Text variant="title" color="bright" numberOfLines={2}>
               {player.title}
             </Text>
             <Text variant="body" color="primary" numberOfLines={1}>

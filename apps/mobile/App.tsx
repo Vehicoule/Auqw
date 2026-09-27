@@ -129,6 +129,7 @@ import type {
 } from '@auqw/ui-native';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
+import { activateHomeCard } from './src/session/home-card.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
@@ -3764,7 +3765,27 @@ function Main({
           <HomeScreen
             model={homeModel}
             topInset={topInset}
-            onPressCard={(card) => void playRecording(card.key)}
+            onPressCard={(card) =>
+              activateHomeCard(
+                card,
+                homeModel.recents,
+                searchState.type === 'content' ? searchState.page.items : [],
+                {
+                  canPlayMetadata: canPlayMeta,
+                  playMetadata: (meta) => {
+                    if (searchState.type === 'content') {
+                      recordRecentSearch(searchState.query);
+                    }
+                    void session
+                      .addAndPlay(meta)
+                      .then((result) => reportPlay('action.playResult', result));
+                  },
+                  playRecording: (id) => {
+                    void playRecording(id);
+                  },
+                },
+              )
+            }
             onResume={() =>
               void session.resume().then((r) => reportPlay('action.resume', r))
             }

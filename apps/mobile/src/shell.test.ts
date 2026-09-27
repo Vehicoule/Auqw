@@ -8,6 +8,7 @@ import { run as runExpoDiscovery } from './adapters/expo-sync-discovery.test.ts'
 import { run as runNobleResponder } from './adapters/noble-sync-responder.test.ts';
 import { run as runPotProvider } from './adapters/pot-provider.test.ts';
 import { runSyncEmit } from './session/sync-emit.test.ts';
+import { runHomeCard } from './session/home-card.test.ts';
 import { devRoute } from './dev-routes.ts';
 
 assertEqual(devRoute('auqw://gallery'), 'gallery');
@@ -47,6 +48,7 @@ await runExpoDiscovery();
 await runNobleResponder();
 runPotProvider();
 await runSyncEmit();
+runHomeCard();
 console.log('mobile shell tests passed');
 
 function assertEqual<T>(actual: T, expected: T): void {

@@ -2859,7 +2859,9 @@ function Main({
               const meta = suggestionMeta.get(card.key);
               if (meta !== undefined) {
                 if (canPlayMeta(meta)) {
-                  recordRecentSearch(query);
+                  if (searchState.type === 'content') {
+                    recordRecentSearch(searchState.query);
+                  }
                   void session.addAndPlay(meta);
                 }
                 return;

@@ -433,7 +433,7 @@ export function GalleryScreen() {
           </div>
           <Frame height={620}>
             <NowPlayingScreen
-              player={fixturePlayerPlaying}
+              player={{ ...fixturePlayerPlaying, title: 'Self Aware (Live at the Observatory)' }}
               queue={fixtureQueueModel}
               lyrics={fixtureLyrics}
               radio={fixtureRadioModels[1]}

@@ -672,7 +672,10 @@ export function StageSheet({
         <>
           {/* Title/artist bottom-anchored in the light-frost zone; the
               timeline/transport cluster stays pinned at the bottom. */}
-          <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
+          >
             {player.artworkUrl === null && (
               <View
                 style={{
@@ -701,7 +704,7 @@ export function StageSheet({
               }}
             >
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text variant="display" color="bright" numberOfLines={1}>
+                <Text variant="display" color="bright" numberOfLines={2}>
                   {player.title}
                 </Text>
                 <Text
@@ -788,7 +791,7 @@ export function StageSheet({
                 </View>
               )}
             </View>
-          </View>
+          </ScrollView>
           <WaveformSeek
             positionMs={player.positionMs}
             durationMs={player.durationMs}
