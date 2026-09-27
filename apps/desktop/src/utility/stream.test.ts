@@ -265,8 +265,8 @@ export async function run(): Promise<void> {
     assert(false, 'napi rejection must surface typed');
   } catch (thrown) {
     assert(
-      isRecord(thrown) && thrown['kind'] === 'invalid-request',
-      'not-found slug maps to invalid-request',
+      isRecord(thrown) && thrown['kind'] === 'released',
+      'a dead-handle not-found reports released so callers re-prepare',
     );
   }
 }

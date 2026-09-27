@@ -812,6 +812,145 @@ async function pauseResumeSeek(): Promise<void> {
   assertEqual(seekCall.identity.queueRev, rev0 + 3);
 }
 
+// A paused stream can outlive its registry session — detached
+// streams are reaped past the TTL (or superseded while detached), so
+// resume's transport call lands on a dead handle. That failure must
+// re-prepare the occurrence, not mark it unplayable: the queue's
+// persisted position survives the swap, so playback picks up where
+// it paused instead of resetting to 0:00.
+async function resumeDeadHandleRePrepares(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  assert((await r.session.pause()).ok, 'pause failed');
+  const snapP = readyOf(r);
+  const idP =
+    'identity' in snapP.playback ? snapP.playback.identity : undefined;
+  assert(idP !== undefined);
+  r.player.emit(statusEvent(idP, 'h-o1', 'paused', 4_500));
+  await pump();
+  const preparesBefore = calls(r, 'prepare').length;
+
+  // The transport call lands on the reaped handle.
+  r.player.setNextResult(
+    err(appError('released', 'host call failed: not-found')),
+  );
+  const resumed = r.session.resume();
+  await pump();
+
+  const prepareCalls = calls(r, 'prepare');
+  assertEqual(
+    prepareCalls.length,
+    preparesBefore + 1,
+    'dead-handle resume re-prepares',
+  );
+  const prep = prepareCalls[prepareCalls.length - 1]?.input as {
+    provider: string;
+    sourceRef: string;
+  };
+  assertEqual(prep.provider, 'youtube-music');
+  assertEqual(prep.sourceRef, 'y1');
+
+  r.player.emit(preparedEvent(lastPrepareIdentity(r), 'h-o1b'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-o1b')), 'prepare still pending');
+  assert((await resumed).ok, 'resume failed');
+  await pump();
+
+  const replay = calls(r, 'play').at(-1)?.input as {
+    handle: string;
+    positionMs: number;
+  };
+  assertEqual(replay.handle, 'h-o1b', 'plays the fresh handle');
+  assertEqual(replay.positionMs, 4_500, 'position survives the swap');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'playing');
+  assert(
+    snap.playback.type === 'playing' ||
+      snap.playback.type === 'buffering',
+    'occurrence is not marked unplayable',
+  );
+}
+
+// The stream's death can also arrive async: a paused seek past the
+// registry TTL makes the element refetch a dead URL, surfacing as a
+// failed status — not a transport-call result. Same recovery: the
+// queue holds the committed position, so re-prepare parks the fresh
+// handle for the next resume instead of failing the occurrence.
+async function deadHandleFailedStatusRePrepares(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  assert((await r.session.pause()).ok, 'pause failed');
+  const snapP = readyOf(r);
+  const idP =
+    'identity' in snapP.playback ? snapP.playback.identity : undefined;
+  assert(idP !== undefined);
+  const preparesBefore = calls(r, 'prepare').length;
+
+  r.player.emit(
+    statusEvent(
+      idP,
+      'h-o1',
+      'failed',
+      4_500,
+      appError('released', 'host call failed: not-found'),
+    ),
+  );
+  await pump();
+
+  const prepareCalls = calls(r, 'prepare');
+  assertEqual(
+    prepareCalls.length,
+    preparesBefore + 1,
+    'dead-handle status re-prepares',
+  );
+  const prep = prepareCalls[prepareCalls.length - 1]?.input as {
+    provider: string;
+    sourceRef: string;
+  };
+  assertEqual(prep.provider, 'youtube-music');
+  assertEqual(prep.sourceRef, 'y1');
+
+  // Still paused — the fresh handle parks for the next resume.
+  r.player.emit(preparedEvent(lastPrepareIdentity(r), 'h-o1c'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-o1c')), 'prepare still pending');
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'paused');
+  assert(
+    snap.playback.type === 'paused' || snap.playback.type === 'preparing',
+    'occurrence is not marked unplayable',
+  );
+}
+
 // A failed queue commit rolls the engine back: the caller gets the
 // error, the published queue stays on storage's truth, and the
 // native transport call is never issued (commit precedes transport).
@@ -4751,6 +4890,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['naturalEnded', naturalEnded],
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
+  ['resumeDeadHandleRePrepares', resumeDeadHandleRePrepares],
+  ['deadHandleFailedStatusRePrepares', deadHandleFailedStatusRePrepares],
   ['queueCommitRollback', queueCommitRollback],
   ['queueCommitCascade', queueCommitCascade],
   ['queueCommitIsolatesRacingMutations', queueCommitIsolatesRacingMutations],

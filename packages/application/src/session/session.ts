@@ -3,7 +3,7 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import type { AppError, Result } from '../errors.ts';
+import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
   EntityKind,
@@ -300,6 +300,21 @@ const SYNC_EMIT_PENDING_MAX = 2_048;
 const SYNC_APPLY_PENDING_MAX = 2_048;
 
 const SYNC_APPLY_STABLE: SyncApplyReport = { rehydrateMedia: false };
+
+/**
+ * A stored stream handle that no longer resolves registry-side —
+ * detached sessions are reaped past the prepare TTL and superseded
+ * while detached, so a long pause can outlive the stream even though
+ * the queue item stays playable. A transport call failing with one of
+ * these kinds on a stored handle means re-prepare, not markUnplayable.
+ */
+const DEAD_STREAM_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'released',
+  'evicted',
+  'expired',
+  'superseded',
+  'not-found',
+]);
 
 function isSafeNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -4215,6 +4230,16 @@ export class Session {
     this.#setPlaybackFromStatus(active, 'paused');
     const result = await this.#bounded(() => this.#player.pause(identity));
     if (!result.ok) {
+      if (
+        DEAD_STREAM_KINDS.has(result.error.kind) &&
+        !this.#isStale(active)
+      ) {
+        // The registry already dropped the stream — 'paused' is the
+        // achieved state, not a failure of this occurrence. A later
+        // resume's play re-prepares via its own dead-handle path.
+        this.#publish();
+        return ok(undefined);
+      }
       await this.#failAttempt(active, result.error);
       return result;
     }
@@ -4274,6 +4299,16 @@ export class Session {
         }),
       );
       if (!result.ok) {
+        // The stored handle died registry-side while paused — the
+        // stream is gone, not the occurrence. Mint a fresh prepare
+        // from the queue's persisted position instead of marking the
+        // item unplayable (which also surfaced as a 0:00 reset).
+        if (
+          DEAD_STREAM_KINDS.has(result.error.kind) &&
+          !this.#isStale(active)
+        ) {
+          return this.#startAttempt(active.occurrenceId);
+        }
         await this.#failAttempt(active, result.error);
         return result;
       }
@@ -4339,6 +4374,15 @@ export class Session {
       this.#player.seekTo({ positionMs, identity }),
     );
     if (!result.ok) {
+      // Same dead-handle recovery as resume(): the queue commit
+      // above already holds the seeked position, so the fresh
+      // prepare autostarts (or parks, when paused) on it.
+      if (
+        DEAD_STREAM_KINDS.has(result.error.kind) &&
+        !this.#isStale(active)
+      ) {
+        return this.#startAttempt(active.occurrenceId);
+      }
       await this.#failAttempt(active, result.error);
       return result;
     }
@@ -5000,7 +5044,10 @@ export class Session {
         this.#player.release({ handle, identity }),
       );
       this.#releaseWork.delete(handle);
-      if (result.ok) {
+      if (result.ok || DEAD_STREAM_KINDS.has(result.error.kind)) {
+        // A dead-handle failure means the registry already dropped
+        // it — there is nothing left to release, so retrying would
+        // only re-offer a phantom forever.
         this.#releasedHandles.add(handle);
         this.#leakedHandles.delete(handle);
       } else {
@@ -5270,10 +5317,16 @@ export class Session {
       null,
     );
     if (event.state === 'failed') {
-      await this.#failOrRetryAttempt(
-        active,
-        event.error ?? appError('transient', 'player failed'),
-      );
+      const error = event.error ?? appError('transient', 'player failed');
+      if (DEAD_STREAM_KINDS.has(error.kind) && !this.#isStale(active)) {
+        // The stream's death can arrive async too — a paused seek
+        // past the registry TTL makes the element refetch a dead
+        // URL, which surfaces here, not on a transport call. The
+        // queue holds the committed position; re-prepare.
+        await this.#startAttempt(active.occurrenceId);
+        return;
+      }
+      await this.#failOrRetryAttempt(active, error);
       return;
     }
     if (event.state === 'ended') {
