@@ -203,6 +203,42 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A durationMs landing mid-sweep must not cancel+restart the byte
+  // pull: the live extraction rides on, and only a provisional-cap
+  // bail re-attempts — in place, at the full cap.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port });
+    tracker.pull({ id: 'r-8b', handle: 'h', durationMs: null });
+    tracker.pull({ id: 'r-8b', handle: 'h', durationMs: 120_000 });
+    await flush();
+    assertEqual(
+      calls.length,
+      1,
+      'a durationMs update rides the in-flight sweep',
+    );
+    // Now the bail case: the sweep exhausts the provisional cap after
+    // the real duration landed — it re-attempts against it, no user
+    // re-trigger needed.
+    const { calls: calls2, port: port2 } = fakePort((request) =>
+      request.durationMs === null
+        ? err(appError('not-applicable', 'stream too large'))
+        : ok(PEAKS),
+    );
+    const tracker2 = createPeaksTracker({ port: port2 });
+    tracker2.pull({ id: 'r-8c', handle: 'h', durationMs: null });
+    tracker2.pull({ id: 'r-8c', handle: 'h', durationMs: 120_000 });
+    await flush();
+    await flush();
+    assertEqual(calls2.length, 2, 'a provisional bail retries in place');
+    assertEqual(
+      calls2[1]?.request.durationMs,
+      120_000,
+      'the in-place retry runs at the real cap',
+    );
+    assertEqual(tracker2.get('r-8c'), PEAKS);
+  }
+
   // A real budget-exceeded while durationMs is unknown (the decoded
   // PCM ceiling) is still terminal — the duration landing later must
   // not re-decode the same oversized audio.

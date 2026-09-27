@@ -36,15 +36,27 @@ export function useWaveformPeaks(
   const handle = target?.handle ?? null;
   const durationMs = target?.durationMs ?? null;
 
+  // Identity lifecycle: pull on a new recording/handle, cancel on
+  // change or unmount — a settled read is a no-op to cancel.
   useEffect(() => {
     if (tracker === null || id === null || handle === null) {
       return;
     }
     tracker.pull({ id, handle, durationMs });
-    // Cleanup abandons the pull when the track or its handle changes
-    // underneath it, or on unmount — a settled read is a no-op to
-    // cancel.
     return () => tracker.cancel(id);
+    // durationMs is read live in the refresh effect below — pulling
+    // it into these deps would cancel+restart the whole byte sweep
+    // mid-flight when metadata lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracker, id, handle]);
+
+  // Metadata refresh: `durationMs` arriving mid-extraction re-pulls
+  // without a cancel — the tracker folds it into the live sweep.
+  useEffect(() => {
+    if (tracker === null || id === null || handle === null) {
+      return;
+    }
+    tracker.pull({ id, handle, durationMs });
   }, [tracker, id, handle, durationMs]);
 
   if (id === null) {

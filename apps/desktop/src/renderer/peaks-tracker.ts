@@ -29,6 +29,8 @@ const PEAK_RETRY_DELAY_MS = 4_000;
 type Inflight = {
   readonly source: CancellationSource;
   timer: ReturnType<typeof setTimeout> | null;
+  /** Latest pull args — a `durationMs` update rides the live sweep. */
+  target: PeaksTarget;
 };
 
 export type PeaksTrackerDeps = {
@@ -81,7 +83,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   }
 
   function pull(target: PeaksTarget): void {
-    const { id, handle, durationMs } = target;
+    const { id } = target;
     if (cache.has(id)) {
       // Cache hit (including a settled `null`): reinsert so the
       // revisit bumps recency — the Map's iteration order is the LRU
@@ -91,16 +93,27 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       cache.set(id, value === undefined ? null : value);
       return;
     }
-    if (inflight.has(id)) {
+    const live = inflight.get(id);
+    if (live !== undefined) {
+      // A re-pull under the same id (durationMs landed mid-sweep)
+      // updates the target instead of restarting — the sweep keeps
+      // running, and a provisional-cap bail re-attempts against the
+      // fresher args rather than settling blind.
+      live.target = target;
       return;
     }
-    const entry: Inflight = { source: new CancellationSource(), timer: null };
+    const entry: Inflight = {
+      source: new CancellationSource(),
+      timer: null,
+      target,
+    };
     inflight.set(id, entry);
 
     const attempt = (n: number): void => {
+      const sentMs = entry.target.durationMs;
       void port
         .peaks(
-          { handle, durationMs },
+          { handle: entry.target.handle, durationMs: sentMs },
           {
             requestId: `peaks-${id}-${n}`,
             deadlineMs: now() + deadlineMs,
@@ -115,11 +128,22 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
             return;
           }
           // 'not-applicable' marks a provisional bound (the tighter
-          // unknown-duration byte cap): neither terminal nor worth a
-          // spot-retry at the same cap — it settles uncached so the
-          // pull a durationMs update retriggers gets the real budget.
+          // unknown-duration byte cap): a durationMs that landed
+          // mid-sweep retries it in place at the real cap — no wasted
+          // restart. Restarting on an unchanged durationMs would loop
+          // forever against a port that always refuses, so it keys off
+          // freshness; otherwise the bail settles uncached so a later
+          // pull still gets the full budget.
           const provisionalCap =
             !result.ok && result.error.kind === 'not-applicable';
+          if (
+            provisionalCap &&
+            entry.target.durationMs !== null &&
+            entry.target.durationMs !== sentMs
+          ) {
+            attempt(1);
+            return;
+          }
           if (result.ok) {
             cache.set(id, result.value);
             evict();
