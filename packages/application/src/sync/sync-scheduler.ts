@@ -344,18 +344,35 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // wait for the peer list to change instead of hammering a
         // dead route.
         const hint = view.lastError.retryAfterMs;
-        const wait =
-          hint !== undefined && isSafeNonNegative(hint)
-            ? Math.max(track.backoffMs, hint)
-            : track.backoffMs;
-        const hintedAt = safeNow();
+        // The floor is absolute and set only by a FRESH verdict — an
+        // unchanged offline lastError republished by some other
+        // peer's status emission must not slide it later. Republish
+        // re-arms wait out the floor's remainder, not a new hint.
+        const prevPeer = prevViews?.peers.find(
+          (v) => v.peer.fp === view.peer.fp,
+        );
+        const prevOffline =
+          prevPeer !== undefined && prevPeer.state === 'offline'
+            ? prevPeer.lastError
+            : undefined;
+        const now = safeNow();
         if (
           hint !== undefined &&
           isSafeNonNegative(hint) &&
-          hintedAt !== null
+          now !== null &&
+          (prevOffline === undefined ||
+            prevOffline.kind !== view.lastError.kind ||
+            prevOffline.retryAfterMs !== hint)
         ) {
-          track.notBeforeMs = hintedAt + hint;
+          track.notBeforeMs = now + hint;
         }
+        const floorWait =
+          track.notBeforeMs !== undefined &&
+            now !== null &&
+            track.notBeforeMs > now
+            ? track.notBeforeMs - now
+            : 0;
+        const wait = Math.max(track.backoffMs, floorWait);
         track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         schedule(view.peer.fp, wait, 'stand');
       } else if (

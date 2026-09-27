@@ -806,6 +806,60 @@ async function rateLimitFloorSurvivesRecovery(): Promise<void> {
   scheduler.stop();
 }
 
+async function republishedVerdictDoesNotSlideFloor(): Promise<void> {
+  let isOnline = true;
+  const { client, clock, scheduler } = rig({
+    isOnline: () => isOnline,
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a'), peer('fp-b')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  client.peerViews.set('fp-b', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'launch rounds ran');
+  // fp-a drops at t=0 with a 30 s rate-limit verdict → floor 30_000.
+  client.peerViews.set('fp-a', {
+    state: 'offline',
+    lastError: appError('rate-limit', 'slow down', 30_000),
+  });
+  client.emitStatus();
+  await pump();
+  // Offline cancels fp-a's armed retry; the floor survives on the
+  // track.
+  isOnline = false;
+  scheduler.notifyConnectivity(false);
+  await pump();
+  // An unrelated peer's emission republishes fp-a's unchanged
+  // offline verdict — the floor must not slide to now+hint (50 s).
+  clock.advance(20_000);
+  client.peerViews.set('fp-b', { state: 'offline' });
+  client.emitStatus();
+  await pump();
+  isOnline = true;
+  scheduler.notifyConnectivity(true);
+  await pump();
+  clock.advance(9_999);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.filter((fp) => fp === 'fp-a').length,
+    1,
+    'republished verdict does not slide the floor',
+  );
+  clock.advance(1);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.filter((fp) => fp === 'fp-a').length,
+    2,
+    'fp-a retry lands at the original expiry',
+  );
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
@@ -813,6 +867,7 @@ export async function run(): Promise<void> {
   await unreachableDialReconnects();
   await rateLimitHintFloorsBackoff();
   await rateLimitFloorSurvivesRecovery();
+  await republishedVerdictDoesNotSlideFloor();
   await writeStandsBehindBackoff();
   await pageCapProgressContinues();
   await stopStartAcrossInFlightRound();
