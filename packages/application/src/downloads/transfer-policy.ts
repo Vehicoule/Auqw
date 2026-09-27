@@ -178,6 +178,9 @@ async function fetchChunk(
     }
     throw thrown;
   } finally {
+    // The sleeper outlives a thrown chunk otherwise — cancel on every
+    // exit, not just the success path above.
+    child.cancel();
     unsubscribe();
   }
 }
