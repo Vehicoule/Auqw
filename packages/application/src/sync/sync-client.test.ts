@@ -694,6 +694,51 @@ async function unpairSaysByeAndForgets(): Promise<void> {
   await client.close();
 }
 
+// 9b. A completed round's counters die with the pairing — re-pairing
+// the same fingerprint must not expose the dead round as fresh state.
+async function unpairDropsLastRound(): Promise<void> {
+  const { client } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  const round = await client.syncNow(SERVER_FP);
+  assert(round.ok, 'round completes');
+  assert(
+    client.status().peers[0]?.lastRound !== undefined,
+    'round counters recorded on the view',
+  );
+  const removed = await client.unpair(SERVER_FP);
+  assert(removed.ok, 'unpair resolves');
+  const rePaired = await client.pair({ payload: qrPayload() });
+  assert(rePaired.ok, 're-pair resolves');
+  assertEqual(client.status().peers.length, 1);
+  assert(
+    client.status().peers[0]?.lastRound === undefined,
+    're-pair must not inherit stale round counters',
+  );
+  await client.close();
+}
+
+// 9c. An unpair mid-round strands the round's staged report — its
+// drain must not republish counters for the dead pairing.
+async function unpairMidRoundDropsStagedReport(): Promise<void> {
+  const { client, server } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  server.muteOnSync = true;
+  const round = client.syncNow(SERVER_FP);
+  const removed = await client.unpair(SERVER_FP);
+  assert(removed.ok, 'unpair resolves mid-round');
+  const settled = await round;
+  assert(!settled.ok, 'stranded round fails');
+  const rePaired = await client.pair({ payload: qrPayload() });
+  assert(rePaired.ok, 're-pair resolves');
+  assert(
+    client.status().peers[0]?.lastRound === undefined,
+    'stranded round republished dead-pairing counters',
+  );
+  await client.close();
+}
+
 // 10. A resume that meets `unpaired` rejects auth-required and drops
 // the stale custody record locally.
 async function resumeUnpairedDropsCustody(): Promise<void> {
@@ -944,6 +989,49 @@ async function incompleteRoundFailsHonest(): Promise<void> {
   const view = client.status().peers[0];
   assert(view !== undefined && view.state === 'open', 'session survived');
   assertEqual(view.lastError?.kind, 'budget-exceeded');
+  // The failed round still reports its exchange counters — a stall
+  // shows zero movement, which is how the scheduler knows not to
+  // book a continuation for it.
+  assert(view.lastRound !== undefined, 'failed round reports counters');
+  assertEqual(view.lastRound.remoteEntries, 0, 'stall moved nothing in');
+  assertEqual(view.lastRound.sentEntries, 0, 'stall moved nothing out');
+  await client.close();
+}
+
+// 19b. A capped round that still moved entries reports both
+// directions on the view — a phone-only upload never moves the
+// desktop's custody cursor, so `lastRound` is the progress probe
+// the scheduler continues on.
+async function cappedRoundReportsMovedEntries(): Promise<void> {
+  const { client, clientEngine, server, keys } = await rig();
+  keys.seed({
+    fp: SERVER_FP,
+    name: 'auqw-desk',
+    endpoints: [ENDPOINT],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    peerCursor: {},
+  });
+  server.forceDeltaMore = true;
+  assert(
+    (
+      await clientEngine.localChange({
+        kind: 'playlist',
+        recordId: 'pl-phone',
+        field: 'name',
+        value: 'Phone Mix',
+      })
+    ).ok,
+    'phone write',
+  );
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(!outcome.ok && outcome.error.kind === 'budget-exceeded');
+  const view = client.status().peers[0];
+  assert(view !== undefined && view.lastRound !== undefined);
+  assert(
+    view.lastRound.sentEntries > 0,
+    'upload direction moved before the cap',
+  );
   await client.close();
 }
 
@@ -1068,6 +1156,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['socketDeathUnwedges', socketDeathUnwedges],
   ['syncRequestKicksRound', syncRequestKicksRound],
   ['unpairSaysByeAndForgets', unpairSaysByeAndForgets],
+  ['unpairDropsLastRound', unpairDropsLastRound],
+  ['unpairMidRoundDropsStagedReport', unpairMidRoundDropsStagedReport],
   ['resumeUnpairedDropsCustody', resumeUnpairedDropsCustody],
   ['refreshPeerReadsDevices', refreshPeerReadsDevices],
   ['keepalivePings', keepalivePings],
@@ -1079,6 +1169,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['failedRoundSurfacesLastError', failedRoundSurfacesLastError],
   ['oversizedExportPaginates', oversizedExportPaginates],
   ['incompleteRoundFailsHonest', incompleteRoundFailsHonest],
+  ['cappedRoundReportsMovedEntries', cappedRoundReportsMovedEntries],
   ['rePairKeepsWatermark', rePairKeepsWatermark],
   ['failedRePairKeepsPeer', failedRePairKeepsPeer],
 ];

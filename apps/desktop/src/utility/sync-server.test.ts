@@ -726,6 +726,142 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A refused kick leaves the device pending for its next connect ——
+  {
+    let refuseSends = false;
+    const { service, port } = await startService({
+      pump: (opts) => {
+        const inner = attachWirePump(opts);
+        return {
+          send: (payload: Buffer) =>
+            refuseSends ? false : inner.send(payload),
+          upgrade: (nextMax: number) => inner.upgrade(nextMax),
+          get maxPayload() {
+            return inner.maxPayload;
+          },
+          get closed() {
+            return inner.closed;
+          },
+          close: () => inner.close(),
+          end: () => inner.end(),
+        };
+      },
+    });
+    try {
+      const pairing = await pairingCode(service);
+      const peer = createTestPeer({
+        deviceId: 'phone-failkick1',
+        name: 'failkick',
+      });
+      const c1 = await dial(port);
+      const h1 = await phoneHandshake(c1, peer, pairing.fp);
+      c1.send(sealJson(h1.codec, { t: 'pair', code: pairing.code }));
+      const welcome = openJson(h1.codec, await c1.recv());
+      assert(
+        isRecord(welcome) && welcome['t'] === 'welcome',
+        'pairing welcome lands',
+      );
+      // The open session now refuses every send — a socket whose
+      // close event hasn't landed yet looks exactly like this.
+      refuseSends = true;
+      const kick = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(kick.ok && isRecord(kick.value));
+      assertEqual(
+        kick.value['triggered'],
+        false,
+        'refused kick reports not-triggered',
+      );
+      assertEqual(
+        kick.value['pending'],
+        true,
+        'refused kick keeps the device pending',
+      );
+      // The mark survives the session's death — the next connect's
+      // enterOpen consumes it into a sync-request.
+      refuseSends = false;
+      const c2 = await dial(port);
+      const h2 = await phoneHandshake(c2, peer, pairing.fp);
+      c2.send(sealJson(h2.codec, { t: 'resume' }));
+      const again = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(again) && again['t'] === 'welcome',
+        'resume welcome lands',
+      );
+      const req = openJson(h2.codec, await c2.recv());
+      assert(
+        isRecord(req) && req['t'] === 'sync-request',
+        `pending mark kicks on reconnect, got ${JSON.stringify(req)}`,
+      );
+      const after = await invokeHandler(
+        service,
+        'sync:trigger',
+        undefined,
+      );
+      assert(after.ok && isRecord(after.value));
+      assertEqual(
+        after.value['pending'],
+        false,
+        'mark clears once a kick lands',
+      );
+      c1.close();
+      c2.close();
+    } finally {
+      await service.close();
+    }
+  }
+
+  // —— Local-write kicks debounce trailing-edge, like the phone ——
+  {
+    const desk = await testUtilityEngine('dsk-trail');
+    const { service, port } = await startService({
+      engine: desk.port,
+      localChanges: (writes, signal) =>
+        desk.localChanges(writes, signal),
+    });
+    try {
+      // Let the launch auto-trigger fire before any device pairs —
+      // it marks nothing pending, leaving the phone's frame stream
+      // clean for the write-kick assertion below.
+      await new Promise((r) => setTimeout(r, 650));
+      const pairing = await pairingCode(service);
+      const phone = await pairPhone({
+        port,
+        deviceId: 'phone-trail',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      // Two writes inside one window: the kick fires ~500 ms after
+      // the LAST write — a mid-burst write re-arms the wake.
+      const first = await invokeHandler(service, 'sync:localChanges', {
+        writes: [writeName('pl-t1', 'one')],
+      });
+      assert(first.ok, 'first write');
+      const kickP = phone.client.recv();
+      await new Promise((r) => setTimeout(r, 350));
+      const second = await invokeHandler(service, 'sync:localChanges', {
+        writes: [writeName('pl-t2', 'two')],
+      });
+      assert(second.ok, 'second write');
+      const quiet = await Promise.race([
+        kickP.then(() => 'kicked'),
+        new Promise((r) => setTimeout(r, 300)).then(() => 'quiet'),
+      ]);
+      assertEqual(quiet, 'quiet', 'mid-burst write re-armed the wake');
+      const kick = openJson(phone.codec, await kickP);
+      assert(
+        isRecord(kick) && kick['t'] === 'sync-request',
+        `trailing kick landed, got ${JSON.stringify(kick)}`,
+      );
+      phone.client.close();
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— IPC: engine failures keep their error kind ——
   {
     const { service } = await startService({

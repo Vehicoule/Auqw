@@ -115,7 +115,11 @@ function toCount(value: number | bigint): number {
 const PRAGMA_FOREIGN_KEYS_ON = /^pragma\s+foreign_keys\s*=\s*on\s*;?$/i;
 // `;` counts as trivia: prepare() skips leading empty statements, so
 // ';ATTACH' would otherwise reach the driver under an empty head.
-const STATEMENT_HEAD = /^(?:[\s;]|--[^\n]*\n|\/\*[^]*?\*\/)*([a-z]+)/i;
+// The comment body is unrolled (`[^*]*` / `[^/*]` arms) so a run of
+// `*` can only partition one way — a lazy `[^]*?` inside the looped
+// group backtracks exponentially on strings like `/*` + `*//*`*n.
+const STATEMENT_HEAD =
+  /^(?:[\s;]|--[^\n]*\n|\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\/)*([a-z]+)/i;
 const BLOCKED_HEADS = new Set([
   'attach',
   'detach',

@@ -3,7 +3,7 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import type { AppError, Result } from '../errors.ts';
+import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
@@ -17,6 +17,7 @@ import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { StoragePort } from '../ports/storage.ts';
+import { retryBounded } from '../retry.ts';
 import { isArtworkCacheEntry } from './library.ts';
 import type { ArtworkCacheEntry } from './library.ts';
 
@@ -147,6 +148,18 @@ type Inflight = {
    */
   waiters: number;
   work: CancellationSource;
+  /**
+   * Every live waiter's own deadline — the multiset backing the
+   * shared bound so a departing caller's budget leaves with them.
+   */
+  waiterDeadlines: number[];
+  /**
+   * The shared bound: the LATEST deadline any waiter brought, so a
+   * short-deadline leader doesn't expire a transfer a later caller
+   * still has budget for. Recomputed on join and on leave;
+   * retryBounded re-reads it.
+   */
+  deadlineMs: number;
 };
 
 type Eviction = {
@@ -154,6 +167,46 @@ type Eviction = {
   readonly evictedBytes: number;
   readonly firstError: AppError | null;
 };
+
+/**
+ * In-memory verdict on a url that just failed — see `failures`
+ * below. `untilMs` is the absolute expiry; a rate-limit's
+ * `retryAfterMs` sets it when the server asks for longer.
+ */
+type Failure = {
+  readonly error: AppError;
+  readonly untilMs: number;
+};
+
+/**
+ * A dead url's verdict is remembered for this long so a remounting
+ * image grid doesn't re-hammer the network on every mount. Short
+ * enough to recover quickly when the server heals — this only
+ * suppresses the retry loop, it never poisons the on-disk cache.
+ */
+const FAILURE_TTL_MS = 20_000;
+const FAILURE_MAX_ENTRIES = 512;
+
+/**
+ * Verdicts that describe the url itself — only these may
+ * negative-cache. Transport and environment kinds (timeout,
+ * transient, unavailable, auth, storage, internal, lifecycle) say
+ * nothing about what the url holds: pinning them would keep a
+ * healthy url dead through a connectivity blip, long after the
+ * network recovered. 'rate-limit' stays — its TTL is the
+ * server-asked wait that suppresses re-hammering.
+ */
+const NEGATIVE_CACHE_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'not-found',
+  'invalid-response',
+  'artifact-rejected',
+  'no-result',
+  'not-applicable',
+  'unsupported',
+  'permission-denied',
+  'expired-resource',
+  'rate-limit',
+]);
 
 /**
  * Bounded LRU on-disk artwork cache (docs/specs/data.md: ~200 MB,
@@ -170,6 +223,13 @@ type Eviction = {
 export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   let tail: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Inflight>();
+  /**
+   * Per-url negative cache: a failed download is remembered briefly
+   * so repeated mounts of the same dead url answer with the stored
+   * error instead of re-downloading. Memory only — never persisted
+   * — and bounded so a hostile manifest can't grow it forever.
+   */
+  const failures = new Map<string, Failure>();
   const owned = new Set<Promise<unknown>>();
 
   /** Defensive clock read: unsafe values never reach downstream math. */
@@ -372,6 +432,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   async function runGet(
     url: string,
     context: OperationContext,
+    record: Inflight,
   ): Promise<Result<ArtworkLookup>> {
     // Phase 1 (serialized): a present entry is touched write-through,
     // but only after proving its file still exists — the directory is
@@ -432,11 +493,52 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         ),
       );
     }
-    const downloaded = await call(() =>
-      deps.fetch.download(url, destPath, context.signal),
-    );
+    // Transient verdicts retry once inside the record's deadline —
+    // the live max over its waiters, not just the leader's, so a
+    // joined caller's budget keeps the shared transfer alive; a
+    // still-failing url lands in the negative cache so the next
+    // mount answers with the stored error rather than re-hammering.
+    const downloaded = await retryBounded({
+      get deadlineMs() {
+        return record.deadlineMs;
+      },
+      signal: context.signal,
+      clock: deps.clock,
+      // The attempt's child signal, not the outer work signal — the
+      // deadline watchdog cancels it so a timed-out download stops
+      // writing rather than racing a replacement to the same path.
+      call: (signal) => call(() => deps.fetch.download(url, destPath, signal)),
+    });
     if (!downloaded.ok) {
       // Honest miss: the typed error crosses back, nothing is cached.
+      // Only a live run writes the negative verdict — a fetch whose
+      // waiters all left can report a late HTTP error while its
+      // replacement already downloaded the same url successfully.
+      if (
+        NEGATIVE_CACHE_KINDS.has(downloaded.error.kind) &&
+        !record.work.signal.cancelled
+      ) {
+        const now = safeNow();
+        if (now !== null) {
+          failures.delete(url);
+          failures.set(url, {
+            error: downloaded.error,
+            // retryAfterMs can only lengthen the hold — a zero or
+            // tiny server hint must not defeat negative caching.
+            untilMs: Math.min(
+              now + Math.max(downloaded.error.retryAfterMs ?? 0, FAILURE_TTL_MS),
+              Number.MAX_SAFE_INTEGER,
+            ),
+          });
+          while (failures.size > FAILURE_MAX_ENTRIES) {
+            const oldest = failures.keys().next();
+            if (oldest.done) {
+              break;
+            }
+            failures.delete(oldest.value);
+          }
+        }
+      }
       return downloaded;
     }
     const bytes = downloaded.value.bytes;
@@ -455,6 +557,11 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       return err(
         appError('internal', 'clock returned an unsafe timestamp'),
       );
+    }
+    // A live success clears any stale verdict a racing run stored —
+    // the proof the url fetches is fresher than the failure.
+    if (!record.work.signal.cancelled) {
+      failures.delete(url);
     }
 
     // Phase 2 (serialized): insert under the current budget.
@@ -531,16 +638,38 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
     record.waiters += 1;
+    // A later waiter brings its own budget — the shared bound grows
+    // to the latest deadline so the leader's expiry doesn't kill a
+    // download newer waiters still have time for. A non-finite or
+    // negative budget contributes nothing (that caller's own wait
+    // times out immediately below).
+    const mine = isSafeNonNegative(context.deadlineMs)
+      ? context.deadlineMs
+      : 0;
+    record.waiterDeadlines.push(mine);
+    record.deadlineMs = Math.max(record.deadlineMs, mine);
     return new Promise<Result<ArtworkLookup>>((resolve) => {
-      let unsubscribe: () => void = () => {};
+      let unsubscribe: () => void = () => { };
       let done = false;
+      const deadline = new CancellationSource();
       const finish = (result: Result<ArtworkLookup>): void => {
         if (done) {
           return;
         }
         done = true;
         unsubscribe();
+        deadline.cancel();
         record.waiters -= 1;
+        // The departed budget leaves the shared bound — the transfer
+        // keeps flying only while a remaining waiter's deadline
+        // covers it; the last leaver still cancels the work.
+        const slot = record.waiterDeadlines.indexOf(mine);
+        if (slot !== -1) {
+          record.waiterDeadlines.splice(slot, 1);
+        }
+        if (record.waiterDeadlines.length > 0) {
+          record.deadlineMs = Math.max(...record.waiterDeadlines);
+        }
         if (record.waiters === 0) {
           record.work.cancel();
         }
@@ -549,6 +678,24 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       unsubscribe = context.signal.subscribe(() => {
         finish(err(appError('cancelled', 'cancelled')));
       });
+      // Each waiter's own deadline bounds its wait — a caller whose
+      // budget dies while others remain leaves without cancelling
+      // the shared work.
+      const now = safeNow();
+      const remaining = now === null ? 0 : mine - now;
+      if (remaining <= 0) {
+        finish(err(appError('timeout', 'operation deadline exceeded')));
+      } else {
+        void deps.clock
+          .sleep(remaining, deadline.signal)
+          .then((slept) => {
+            if (slept.ok) {
+              finish(
+                err(appError('timeout', 'operation deadline exceeded')),
+              );
+            }
+          });
+      }
       if (!context.signal.cancelled) {
         void record.promise.then(finish);
       }
@@ -569,6 +716,16 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         err(appError('cancelled', 'cancelled')),
       );
     }
+    const remembered = failures.get(url);
+    if (remembered !== undefined) {
+      const now = safeNow();
+      if (now !== null && now < remembered.untilMs) {
+        return Promise.resolve(err(remembered.error));
+      }
+      // Expired — or a broken clock can't vouch for the verdict —
+      // either way the url earns a fresh try.
+      failures.delete(url);
+    }
     // Concurrent gets for the same url coalesce onto one download —
     // except a record whose work is already cancelled but not yet
     // unwound: joining it could only ever answer cancelled, so a
@@ -585,12 +742,18 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       ),
       waiters: 0,
       work: new CancellationSource(),
+      waiterDeadlines: [],
+      deadlineMs: context.deadlineMs,
     };
     record.promise = (async (): Promise<Result<ArtworkLookup>> => {
       try {
         // The download answers to `work`, not any caller's signal —
         // it outlives a waiter until every waiter is gone.
-        return await runGet(url, { ...context, signal: record.work.signal });
+        return await runGet(
+          url,
+          { ...context, signal: record.work.signal },
+          record,
+        );
       } catch (thrown) {
         return err(fromUnknown(thrown));
       } finally {

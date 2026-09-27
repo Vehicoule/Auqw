@@ -148,6 +148,12 @@ export type SyncPeerView = {
   readonly state: SyncPeerState;
   readonly syncing: boolean;
   readonly lastError?: AppError;
+  /**
+   * Exchange counters of the most recent completed round — present
+   * on failed rounds too, so a page-capped exchange that still
+   * moved entries is distinguishable from a stalled one.
+   */
+  readonly lastRound?: SyncRoundOutcome;
 };
 
 export type SyncClientStatus = {
@@ -222,6 +228,14 @@ type ClientSession = {
   /** A kick round is already queued on ops. */
   kickQueued: boolean;
   activeOps: number;
+  /**
+   * A completed round's counters — staged until the op drains, then
+   * published atomically with the verdict and the drain emission so
+   * a status() snapshot never sees a landed-but-unsigned round.
+   */
+  roundReport?: SyncRoundOutcome;
+  /** The completed round's failure verdict — staged for the drain. */
+  roundError?: AppError;
 };
 
 type PeerView = {
@@ -306,6 +320,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   const peers = new Map<string, SyncPeer>();
   const views = new Map<string, PeerView>();
   const sessions = new Map<string, ClientSession>();
+  /** Latest completed round's counters per peer — set even on
+   *  failure, since the verdict alone can't express progress. */
+  const lastRounds = new Map<string, SyncRoundOutcome>();
   /** In-flight dials keyed by fp — concurrent syncNow shares one. */
   const connecting = new Map<
     string,
@@ -327,6 +344,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       peers: [...peers.values()].map((peer) => {
         const view = views.get(peer.fp);
         const session = sessions.get(peer.fp);
+        const lastRound = lastRounds.get(peer.fp);
         return {
           peer,
           state: view?.state ?? 'offline',
@@ -334,6 +352,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           ...(view?.lastError !== undefined
             ? { lastError: view.lastError }
             : {}),
+          ...(lastRound !== undefined ? { lastRound } : {}),
         };
       }),
     };
@@ -400,6 +419,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       // custody yet — never evict a live session's row.
       if (!seen.has(fp) && !sessions.has(fp)) {
         peers.delete(fp);
+        lastRounds.delete(fp);
       }
     }
     peersLoaded = true;
@@ -617,6 +637,28 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     emit();
     const done = run.finally(() => {
       session.activeOps -= 1;
+      // A completed round publishes counters and verdict together,
+      // here, synchronously with the drain emission — until now they
+      // lived only on the session, so no emission ever carries one
+      // half of a landing without the other.
+      if (session.roundReport !== undefined) {
+        // An unpair mid-round already deleted this peer's counters —
+        // a landing that drains after it must not repopulate state
+        // for a pairing that no longer exists.
+        if (peers.has(session.peerFp)) {
+          lastRounds.set(session.peerFp, session.roundReport);
+          if (!session.closed) {
+            views.set(
+              session.peerFp,
+              session.roundError !== undefined
+                ? { state: 'open', lastError: session.roundError }
+                : { state: 'open' },
+            );
+          }
+        }
+        delete session.roundReport;
+        delete session.roundError;
+      }
       if (session.kickPending && session.activeOps === 0) {
         drainKick(session);
       }
@@ -828,7 +870,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         return;
       }
       const outcome = await syncRound(session, peer);
+      // Same staged verdict as syncNow — a kicked round that failed
+      // must not drain looking like a clean open. The op's drain
+      // publishes it atomically with the counters.
       if (!outcome.ok) {
+        session.roundError = outcome.error;
         void deps.log.write({
           level: 'warn',
           message: `sync-requested round failed: ${outcome.error.kind}`,
@@ -944,8 +990,19 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         rounds,
       });
     } finally {
+      // Recorded on success and failure alike — staged on the
+      // session until the op's drain publishes it atomically with
+      // the verdict; the scheduler reads the counters to tell a
+      // capped-but-moving round (worth a continuation) from a
+      // stalled cap (terminal here).
+      session.roundReport = {
+        peerFp: session.peerFp,
+        remoteEntries,
+        sentEntries,
+        divergence,
+        rounds,
+      };
       cleanup();
-      emit();
     }
   }
 
@@ -1088,6 +1145,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         peers.set(stored.fp, actual);
       } else {
         peers.delete(stored.fp);
+        lastRounds.delete(stored.fp);
       }
       sessions.delete(stored.fp);
       killSession(session, persisted.error);
@@ -1203,6 +1261,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           if (opened.error.kind === 'auth-required') {
             // The desktop forgot us — local custody is stale too.
             peers.delete(fp);
+            lastRounds.delete(fp);
             void deps.keys.peerDelete(fp, signal);
           }
           return err(opened.error);
@@ -1261,6 +1320,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
               appError('auth-required', 'sync: device re-bound remotely'),
             );
             peers.delete(fp);
+            lastRounds.delete(fp);
             void deps.keys.peerDelete(fp, signal);
             return err(
               appError('auth-required', 'sync: device re-bound remotely'),
@@ -1299,20 +1359,17 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           }
         }
       }
-      const outcome = await enqueue(session, () =>
-        syncRound(session, peer, signal),
-      );
-      if (!session.closed) {
-        // A dead session already reported its cause through
-        // killSession. On a live one the round's verdict is the
-        // lastError — a failed round must not read as connected.
-        setView(
-          fp,
-          outcome.ok
-            ? { state: 'open' }
-            : { state: 'open', lastError: outcome.error },
-        );
-      }
+      const outcome = await enqueue(session, async () => {
+        const round = await syncRound(session, peer, signal);
+        // The verdict stages on the session — the op's drain
+        // publishes it atomically with the counters, so a bare
+        // 'open' with no lastError is a live or clean round, never
+        // a failed one reading as connected.
+        if (!round.ok) {
+          session.roundError = round.error;
+        }
+        return round;
+      });
       return outcome;
     },
 
@@ -1368,6 +1425,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       }
       peers.delete(fp);
       views.delete(fp);
+      // Dead pairing, dead counters — a later re-pair of the same
+      // fingerprint must not inherit this round's exchange numbers.
+      // An in-flight round stranded by the kill publishes nothing:
+      // its drain sees the peer already gone from `peers`.
+      lastRounds.delete(fp);
       const removed = await deps.keys.peerDelete(fp, signal);
       emit();
       return removed;

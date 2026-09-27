@@ -27,6 +27,7 @@ import {
   recordingFromMetadata,
 } from '../domain.ts';
 import { countsAsPlay, recordPlay } from '../library/history.ts';
+import { retryBounded } from '../retry.ts';
 import { isPersistedState } from '../library/library.ts';
 import type {
   Entity,
@@ -257,6 +258,20 @@ export type SessionDeps = {
 
 const OP_DEADLINE_MS = 15_000;
 const CANDIDATE_LIMIT = 25;
+/**
+ * One event-driven failure gets a single re-attempt inside the
+ * original 15s budget (docs/specs/playback.md: the budget includes
+ * retries). A retry only arms when this much budget is left — a
+ * re-prepare with no room can only time out.
+ */
+const AUTO_RETRY_BACKOFF_MS = 400;
+const AUTO_RETRY_MIN_BUDGET_MS = 1_000;
+/**
+ * `player.prepare` calls one play intent may spend across its whole
+ * attempt chain — the in-attempt bounded retry and the event-level
+ * re-attempt draw on the same budget instead of stacking ceilings.
+ */
+const PREPARE_CALL_BUDGET = 2;
 // Status ticks fire ~1 s; a position delta above this between ticks
 // is a seek/jump, not played time.
 const MAX_TICK_DELTA_MS = 2_500;
@@ -341,12 +356,16 @@ type ActiveAttempt = {
   handle?: string;
   preparedHandled: boolean;
   endedHandled: boolean;
+  /** True on the single in-budget re-attempt after a retryable failure. */
+  autoRetried?: boolean;
   terminalError?: AppError;
   timer?: CancellationSource;
   /** Last accepted status position — deltas feed `listenedMs`. */
   lastStatusPositionMs?: number;
   /** Actual played span summed from tick deltas (seeks don't count). */
   listenedMsAccum: number;
+  /** Prepare calls spent so far across this intent's attempt chain. */
+  preparesUsed: number;
 };
 
 type Ready = {
@@ -643,6 +662,13 @@ export class Session {
   #ready: Ready | null = null;
   #active: ActiveAttempt | null = null;
   #releasedHandles = new Set<string>();
+  /**
+   * Streams whose release call failed — off the attempt's `handle`
+   * slot so their events can't reach a newer attempt, but still
+   * session-owned so teardown can re-offer the release instead of
+   * stranding a native handle for the rest of the session.
+   */
+  #leakedHandles = new Map<string, PlaybackIdentity>();
   #releaseWork = new Map<string, Promise<Result<void>>>();
   #timers = new Set<CancellationSource>();
   #opSources = new Set<CancellationSource>();
@@ -1649,12 +1675,12 @@ export class Session {
           : r.settings.playbackProvider,
         lyricsProvider:
           s.lyricsProvider != null &&
-          !this.#providers.has(s.lyricsProvider)
+            !this.#providers.has(s.lyricsProvider)
             ? null
             : (s.lyricsProvider ?? null),
         radioProvider:
           s.radioProvider != null &&
-          !this.#providers.has(s.radioProvider)
+            !this.#providers.has(s.radioProvider)
             ? null
             : (s.radioProvider ?? null),
       };
@@ -2256,12 +2282,21 @@ export class Session {
     let page: Result<EntityPage>;
     try {
       const deadlineMs = this.#deadline();
-      const context = this.#newContext('entity', deadlineMs, source.signal);
-      page = await this.#withDeadline(
-        () => this.#router.getEntity(ref, context),
+      page = await retryBounded({
         deadlineMs,
-        source,
-      );
+        signal: source.signal,
+        clock: this.#clock,
+        call: (signal) =>
+          this.#withDeadline(
+            () =>
+              this.#router.getEntity(
+                ref,
+                this.#newContext('entity', deadlineMs, signal),
+              ),
+            deadlineMs,
+            source,
+          ),
+      });
     } finally {
       this.#opSources.delete(source);
     }
@@ -2867,12 +2902,21 @@ export class Session {
         durationMs: recording.durationMs,
         isrc: recording.isrc,
       };
-      const opContext = this.#newContext('lyrics', deadlineMs, source.signal);
-      const fetched = await this.#withDeadline(
-        () => provider.getLyrics({ query, prefer: 'synced' }, opContext),
+      const fetched = await retryBounded({
         deadlineMs,
-        source,
-      );
+        signal: source.signal,
+        clock: this.#clock,
+        call: (signal) =>
+          this.#withDeadline(
+            () =>
+              provider.getLyrics(
+                { query, prefer: 'synced' },
+                this.#newContext('lyrics', deadlineMs, signal),
+              ),
+            deadlineMs,
+            source,
+          ),
+      });
       if (!fetched.ok) {
         return err(fetched.error);
       }
@@ -2884,12 +2928,12 @@ export class Session {
         fetchedMs === null
           ? null
           : lyricsCacheEntry(
-              recording.id,
-              provider.id,
-              provider.version,
-              accepted,
-              fetchedMs,
-            );
+            recording.id,
+            provider.id,
+            provider.version,
+            accepted,
+            fetchedMs,
+          );
       if (entry !== null) {
         const next = [
           ...r.lyricsCache.filter((e) => e.recordingId !== recording.id),
@@ -3236,7 +3280,7 @@ export class Session {
     const windowOpen = whileDrained
       ? snap.currentOccurrenceId === null && record.resumeOnDrain
       : snap.currentOccurrenceId !== null &&
-        remainingAfterCurrent(snap) < RADIO_FETCH_AHEAD;
+      remainingAfterCurrent(snap) < RADIO_FETCH_AHEAD;
     if (
       record.status !== 'growing' ||
       record.continuation === null ||
@@ -4249,7 +4293,14 @@ export class Session {
     );
   }
 
-  async #startAttempt(occurrenceId: string): Promise<Result<void>> {
+  async #startAttempt(
+    occurrenceId: string,
+    retry?: {
+      deadlineMs: number;
+      listenedMsAccum: number;
+      preparesUsed: number;
+    },
+  ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
       return ready;
@@ -4273,7 +4324,10 @@ export class Session {
       prev.source.cancel();
       prev.timer?.cancel();
     }
-    const deadlineMs = this.#deadline();
+    const deadlineMs =
+      retry !== undefined && isSafeNonNegative(retry.deadlineMs)
+        ? retry.deadlineMs
+        : this.#deadline();
     const attempt: ActiveAttempt = {
       identity: {
         attemptId: this.#ids.next('attempt'),
@@ -4283,9 +4337,19 @@ export class Session {
       occurrenceId,
       source: new CancellationSource(),
       deadlineMs,
+      autoRetried: retry !== undefined,
       preparedHandled: false,
       endedHandled: false,
-      listenedMsAccum: 0,
+      // Listening validated before a retried failure still counts —
+      // the fresh handle re-baselines position, not the threshold.
+      listenedMsAccum:
+        retry !== undefined && isSafeNonNegative(retry.listenedMsAccum)
+          ? retry.listenedMsAccum
+          : 0,
+      preparesUsed:
+        retry !== undefined && isSafeNonNegative(retry.preparesUsed)
+          ? retry.preparesUsed
+          : 0,
     };
     this.#active = attempt;
     r.playback = {
@@ -4345,7 +4409,7 @@ export class Session {
     // The playing ref is now known — an auto-arm queued while this
     // attempt was still resolving can seed the real version.
     this.#maybeArmRadio();
-    if (this.#isStale(attempt)) {
+    if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
       );
@@ -4363,24 +4427,52 @@ export class Session {
         return err(routed.error);
       }
     }
-    const prepared = await this.#withDeadline(
-      () =>
-        this.#player.prepare({
-          provider: ref.provider,
-          sourceRef: ref.id,
-          identity: attempt.identity,
-        }),
+    const prepared = await retryBounded({
       deadlineMs,
-      attempt.source,
-    );
+      signal: attempt.source.signal,
+      clock: this.#clock,
+      // The prepare budget is per intent, not per attempt — a
+      // retried attempt spends only what its predecessor left.
+      maxAttempts: Math.max(
+        1,
+        PREPARE_CALL_BUDGET - attempt.preparesUsed,
+      ),
+      call: () => {
+        attempt.preparesUsed += 1;
+        return this.#withDeadline(
+          () =>
+            this.#player.prepare({
+              provider: ref.provider,
+              sourceRef: ref.id,
+              identity: attempt.identity,
+            }),
+          deadlineMs,
+          // Every call shares the attempt's source — a supersede
+          // aborts whichever prepare is in flight.
+          attempt.source,
+        );
+      },
+    });
     if (this.#isStale(attempt)) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
       );
     }
     if (!prepared.ok) {
+      // terminalError is set before a retry handoff or supersede
+      // cancels the source — the early wake is bookkeeping, not a
+      // fresh failure to publish. A bare deadline-cancelled call has
+      // no seal: its own verdict stands.
+      if (attempt.terminalError !== undefined) {
+        return err(attempt.terminalError);
+      }
       await this.#failAttempt(attempt, prepared.error);
       return prepared;
+    }
+    if (attempt.source.signal.cancelled) {
+      return err(
+        attempt.terminalError ?? appError('superseded', 'play superseded'),
+      );
     }
     attempt.requestId = prepared.value;
     const ready2 = this.#ready;
@@ -4428,20 +4520,45 @@ export class Session {
       versionLabels: recording.versionLabels,
       isrc: recording.isrc,
     };
-    const context = this.#newContext('cand', deadlineMs, attempt.source.signal);
-    const result = await this.#withDeadline(
-      () => provider.candidates({ query, limit: CANDIDATE_LIMIT }, context),
+    const result = await retryBounded({
       deadlineMs,
-      attempt.source,
-    );
+      signal: attempt.source.signal,
+      clock: this.#clock,
+      call: (signal) =>
+        this.#withDeadline(
+          () =>
+            provider.candidates(
+              { query, limit: CANDIDATE_LIMIT },
+              this.#newContext('cand', deadlineMs, signal),
+            ),
+          deadlineMs,
+          attempt.source,
+        ),
+    });
     if (this.#isStale(attempt)) {
+      // A newer intent owns playback — the loser reports
+      // 'superseded' whatever its in-flight call resolved to.
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
       );
     }
     if (!result.ok) {
+      // terminalError is set before a retry handoff or supersede
+      // cancels the source — the early wake is bookkeeping, not a
+      // fresh failure to publish. A bare deadline-cancelled call has
+      // no seal: its own verdict stands.
+      if (attempt.terminalError !== undefined) {
+        return err(attempt.terminalError);
+      }
+      // A source cancelled by the deadline or a retry handoff still
+      // publishes the real verdict, not a bare 'superseded'.
       await this.#failAttempt(attempt, result.error);
       return result;
+    }
+    if (attempt.source.signal.cancelled) {
+      return err(
+        attempt.terminalError ?? appError('superseded', 'play superseded'),
+      );
     }
     // Malformed provider candidates can throw inside match — that
     // must fail the attempt honestly, not wedge it unwound.
@@ -4617,6 +4734,25 @@ export class Session {
     if (attempt.handle !== undefined) {
       await this.#releaseHandle(attempt.handle, attempt.identity);
     }
+    await this.#drainLeakedHandles();
+  }
+
+  /**
+   * Handles dropped from an attempt after a failed release get a
+   * fresh coalesced re-offer — once per drain, so a dead release
+   * can't strand a native handle for the session's life.
+   */
+  async #drainLeakedHandles(): Promise<void> {
+    if (this.#leakedHandles.size === 0) {
+      return;
+    }
+    const leaked = [...this.#leakedHandles];
+    this.#leakedHandles.clear();
+    await Promise.allSettled(
+      leaked.map(([handle, identity]) =>
+        this.#releaseHandle(handle, identity),
+      ),
+    );
   }
 
   /** Supersede and tear down the current active attempt, if any. */
@@ -4651,11 +4787,138 @@ export class Session {
       this.#releaseWork.delete(handle);
       if (result.ok) {
         this.#releasedHandles.add(handle);
+        this.#leakedHandles.delete(handle);
+      } else {
+        // Ownership outlives the attempt slot: teardown re-offers.
+        this.#leakedHandles.set(handle, identity);
       }
       return result;
     })();
     this.#releaseWork.set(handle, work);
     return work;
+  }
+
+  /**
+   * An event-driven failure — a rejected prepare outcome, a refused
+   * play, a mid-play 'failed' status — gets one re-attempt inside
+   * the attempt's original deadline before the queue marks the item
+   * unplayable. The budget includes retries, so a transient hiccup
+   * should not stop the queue; a non-retryable verdict or a spent
+   * budget still fails straight through. Playback stays published as
+   * preparing throughout — no failed flicker while recovery is
+   * still possible — and a supersede or dispose during the backoff
+   * abandons the retry.
+   */
+  async #failOrRetryAttempt(
+    attempt: ActiveAttempt,
+    error: AppError,
+  ): Promise<void> {
+    const now = this.#safeNow();
+    const remaining = now === null ? 0 : attempt.deadlineMs - now;
+    // retryAfterMs is the provider's floor — squeezing it to fit the
+    // budget would re-attempt sooner than permitted, so a wait that
+    // leaves too little room fails with the original verdict.
+    const wait = Math.max(
+      error.retryAfterMs ?? 0,
+      AUTO_RETRY_BACKOFF_MS,
+    );
+    if (
+      !error.retryable ||
+      attempt.autoRetried === true ||
+      attempt.preparesUsed >= PREPARE_CALL_BUDGET ||
+      this.#disposed ||
+      this.#isStale(attempt) ||
+      wait + AUTO_RETRY_MIN_BUDGET_MS > remaining
+    ) {
+      await this.#failAttempt(attempt, error);
+      return;
+    }
+    attempt.autoRetried = true;
+    attempt.terminalError ??= error;
+    // Kill the attempt's own source now: a still-pending prepare or
+    // resolve unwinds at its cancelled checkpoints with the real
+    // verdict instead of racing the retry.
+    attempt.source.cancel();
+    // Stop advertising the dead stream: while the backoff runs the
+    // occurrence republishes as preparing — a live playing/paused
+    // state would keep offering a handle that no longer exists, and
+    // controls (pause/seek) would spend calls on it.
+    const ready = this.#ready;
+    if (
+      ready !== null &&
+      this.#active === attempt &&
+      (ready.playback.type === 'playing' ||
+        ready.playback.type === 'paused' ||
+        ready.playback.type === 'buffering') &&
+      attemptEq(ready.playback.identity, attempt.identity)
+    ) {
+      ready.playback = {
+        type: 'preparing',
+        recordingId: attempt.recordingId,
+        occurrenceId: attempt.occurrenceId,
+        identity: attempt.identity,
+        ...(attempt.ref !== undefined ? { ref: attempt.ref } : {}),
+      };
+      this.#publish();
+    }
+    // The dead stream's handle goes now — the retry prepares a fresh
+    // one — and with it gone, stray status events for this attempt
+    // are rejected instead of republishing mid-backoff.
+    if (attempt.handle !== undefined) {
+      const handle = attempt.handle;
+      // exactOptionalPropertyTypes: cleared slots get `delete`, not
+      // an explicit undefined.
+      delete attempt.handle;
+      await this.#releaseHandle(handle, attempt.identity);
+    }
+    // The backoff rides attempt.timer — #startAttempt's supersede
+    // (new play intent, teardown) cancels it and kills the retry.
+    // A leftover timer (e.g. the armed prepare timeout) is cancelled
+    // first so it can't fire a duplicate failure mid-backoff.
+    attempt.timer?.cancel();
+    const timer = new CancellationSource();
+    attempt.timer = timer;
+    // Backoff and the re-attempt run as owned work, not on the event
+    // tail — a re-prepare that blocks must not stall every player
+    // event queued behind it.
+    this.#own(this.#retryAfter(attempt, timer, wait));
+  }
+
+  async #retryAfter(
+    attempt: ActiveAttempt,
+    timer: CancellationSource,
+    wait: number,
+  ): Promise<void> {
+    const slept = await this.#call(() =>
+      this.#clock.sleep(wait, timer.signal),
+    );
+    if (
+      this.#disposed ||
+      this.#isStale(attempt) ||
+      timer.signal.cancelled
+    ) {
+      // Superseded or torn down mid-backoff — the superseder owns
+      // playback state now.
+      return;
+    }
+    if (!slept.ok) {
+      if (slept.error.kind === 'internal') {
+        await this.#failAttempt(attempt, slept.error);
+      }
+      // A cancelled sleep means a supersede already ran — leave the
+      // state it published alone.
+      return;
+    }
+    // A returned err is already published by #failAttempt inside
+    // #startAttempt — the Result is for the original caller chain
+    // that no longer exists here. Validated listening time carries
+    // across the retry so a mid-play failure doesn't zero the play
+    // threshold's progress.
+    await this.#startAttempt(attempt.occurrenceId, {
+      deadlineMs: attempt.deadlineMs,
+      listenedMsAccum: attempt.listenedMsAccum,
+      preparesUsed: attempt.preparesUsed,
+    });
   }
 
   async #failAttempt(
@@ -4792,7 +5055,7 @@ export class Session {
       null,
     );
     if (event.state === 'failed') {
-      await this.#failAttempt(
+      await this.#failOrRetryAttempt(
         active,
         event.error ?? appError('transient', 'player failed'),
       );
@@ -4958,7 +5221,7 @@ export class Session {
     active.timer?.cancel();
     if (event.outcome.type === 'failed') {
       const attempts = [event.outcome.attempt];
-      await this.#failAttempt(active, event.outcome.error);
+      await this.#failOrRetryAttempt(active, event.outcome.error);
       await this.#persist({ attempts });
       return;
     }
@@ -4985,7 +5248,7 @@ export class Session {
       return;
     }
     if (!playResult.ok) {
-      await this.#failAttempt(active, playResult.error);
+      await this.#failOrRetryAttempt(active, playResult.error);
       // The trace survives the transport failure, same contract as
       // the prepare-failure branch above.
       await this.#persist({ attempts: [event.outcome.attempt] });
@@ -5247,8 +5510,8 @@ export class Session {
         projProvider === null || projRefId === null
           ? undefined
           : toRecording?.sourceRefs.find(
-                (s) => s.provider === projProvider && s.id === projRefId,
-              ) ?? { provider: projProvider, kind: 'track', id: projRefId };
+            (s) => s.provider === projProvider && s.id === projRefId,
+          ) ?? { provider: projProvider, kind: 'track', id: projRefId };
       // Statuses continue to echo the immutable service projection until
       // app intent installs a new one; reconciliation alone must not re-key it.
       const identity = event.identity;
@@ -5266,6 +5529,9 @@ export class Session {
         // from the adopted position so threshold math stays honest.
         listenedMsAccum: event.positionMs,
         lastStatusPositionMs: event.positionMs,
+        // The adopted stream was attached outside this intent's
+        // attempt chain — its own prepare budget starts fresh.
+        preparesUsed: 0,
       };
       this.#active = attempt;
       r.playback = {
@@ -5292,7 +5558,7 @@ export class Session {
     const queueEpoch = r.queueEpoch;
     const queueWrite = this.#persist(() =>
       r.queueEpoch === queueEpoch &&
-      queueSnap.revision > r.queueCommittedRev
+        queueSnap.revision > r.queueCommittedRev
         ? { queue: queueSnap }
         : {},
     );
@@ -5562,6 +5828,8 @@ export class Session {
     this.#active = null;
     if (active !== null) {
       await this.#teardownAttempt(active);
+    } else {
+      await this.#drainLeakedHandles();
     }
     this.#playerUnsub();
     await this.#drainAll();

@@ -1,6 +1,7 @@
 export * from './errors.ts';
 export * from './cancellation.ts';
 export * from './domain.ts';
+export * from './retry.ts';
 export * from './ports/provider.ts';
 export * from './ports/player.ts';
 export * from './ports/storage.ts';
@@ -32,6 +33,7 @@ export * from './sync/sync-engine.ts';
 export * from './sync/sync-wire.ts';
 export * from './sync/engine-port.ts';
 export * from './sync/sync-client.ts';
+export * from './sync/sync-scheduler.ts';
 export * from './sync/sync-host.ts';
 export * from './library/playlists.ts';
 export * from './library/history.ts';
