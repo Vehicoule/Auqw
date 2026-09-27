@@ -661,7 +661,10 @@ export async function createSessionController(
               // Attempt 1 folds the fresh outcomes; retries refold
               // the session's retained pending with [].
               const result = await retryBounded({
-                deadlineMs: clock.nowMs() + 30_000,
+                // Backstop sized past the call's own internal op
+                // deadline — it must never abandon a healthy
+                // in-flight commit, only a wedged one.
+                deadlineMs: clock.nowMs() + 300_000,
                 signal,
                 clock,
                 maxAttempts: 4,
@@ -698,7 +701,10 @@ export async function createSessionController(
           // until the next edit, so retry bounded here; a still-
           // failing prefix stays buffered for the next emitWrites.
           const flushed = await retryBounded({
-            deadlineMs: clock.nowMs() + 30_000,
+            // Backstop sized past the call's own internal op
+            // deadline — it must never abandon a healthy in-flight
+            // flush, only a wedged one.
+            deadlineMs: clock.nowMs() + 300_000,
             signal,
             clock,
             maxAttempts: 4,
@@ -736,7 +742,10 @@ export async function createSessionController(
             // than drop the recovery page until restart (Review #46):
             // attempt 1 folds the fresh view, later attempts [].
             const applied = await retryBounded({
-              deadlineMs: clock.nowMs() + 30_000,
+              // Backstop sized past the call's own internal op
+              // deadline — it must never abandon a healthy
+              // in-flight commit, only a wedged one.
+              deadlineMs: clock.nowMs() + 300_000,
               signal,
               clock,
               maxAttempts: 4,

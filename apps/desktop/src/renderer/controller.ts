@@ -633,7 +633,10 @@ export async function createSessionController(
         // drop the recovery page until the next reconcile (Review
         // #46): attempt 1 folds the fresh page, later attempts [].
         const applied = await retryBounded({
-          deadlineMs: clock.nowMs() + 30_000,
+          // Backstop sized past the call's own internal op
+          // deadline — it must never abandon a healthy in-flight
+          // commit, only a wedged one.
+          deadlineMs: clock.nowMs() + 300_000,
           signal: disposeSource.signal,
           clock,
           maxAttempts: APPLY_RETRY_MAX + 1,
@@ -719,7 +722,10 @@ export async function createSessionController(
           // `sync:applied` push re-arms. Attempt 1 folds the fresh
           // outcomes; later attempts refold the pending with [].
           const applied = await retryBounded({
-            deadlineMs: clock.nowMs() + 30_000,
+            // Backstop sized past the call's own internal op
+            // deadline — it must never abandon a healthy in-flight
+            // commit, only a wedged one.
+            deadlineMs: clock.nowMs() + 300_000,
             signal: disposeSource.signal,
             clock,
             maxAttempts: APPLY_RETRY_MAX + 1,
