@@ -387,6 +387,25 @@ function testPlayerMapper(): void {
     atHead !== null && atHead.canPrevious,
     'repeat=all keeps previous live at the head',
   );
+  // A lone queue item under repeat=all self-wraps — next stays live
+  // as an in-place restart, matching the cursor.
+  const first = fixtureQueue.occurrences[0];
+  assert(first !== undefined);
+  const soloQueue = {
+    ...fixtureQueue,
+    occurrences: [first],
+    currentOccurrenceId: 'occ-1',
+  };
+  const solo = toPlayerModel({
+    ...base,
+    queue: soloQueue,
+    repeat: 'all',
+    playback: fixturePlaybackPaused,
+  });
+  assert(
+    solo !== null && solo.canNext,
+    'repeat=all keeps next live on a lone queue item',
+  );
   const paused = toPlayerModel({ ...base, playback: fixturePlaybackPaused });
   assert(paused !== null && paused.status === 'paused', 'paused mapping');
   assertEqual(

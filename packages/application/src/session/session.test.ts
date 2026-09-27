@@ -2024,6 +2024,111 @@ async function repeatReplaysCountEachLoop(): Promise<void> {
   assertEqual(plays[2]?.occurrenceId, 'oA#2', 'replay two keys off its cycle');
 }
 
+async function repeatCyclesSurviveRestart(): Promise<void> {
+  // Cycles seed from restored history: a replayed occurrence keeps
+  // counting past its stored `#cycle` keys instead of colliding.
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      playHistory: [
+        {
+          eventId: 'p0',
+          recordingId: 'rA',
+          occurrenceId: 'oA',
+          playedMs: 1,
+          listenedMs: 300_000,
+        },
+        {
+          eventId: 'p1',
+          recordingId: 'rA',
+          occurrenceId: 'oA#1',
+          playedMs: 2,
+          listenedMs: 300_000,
+        },
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA', ref('youtube-music', 'yA'))],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('one')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'one');
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  const plays = readyOf(r).playHistory.filter((e) => e.recordingId === 'rA');
+  assertEqual(plays.length, 3, 'the post-restart loop still counts');
+  assertEqual(
+    plays[2]?.occurrenceId,
+    'oA#2',
+    'the new loop keys past the restored cycles',
+  );
+}
+
+async function repeatLongOccurrenceIdCounts(): Promise<void> {
+  // A 64-char occurrence id still records replays: the cycle suffix
+  // truncates into the id bound rather than throwing mid-transition.
+  const long = 'x'.repeat(64);
+  const r = rig(
+    persisted({
+      recordings: [recording('rL', [ref('youtube-music', 'yL')])],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence(long, 'rL', ref('youtube-music', 'yL'))],
+        currentOccurrenceId: long,
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('one')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'one');
+  for (let i = 0; i < 2; i += 1) {
+    r.player.emit(
+      transitionEvent(r, {
+        from: long,
+        to: long,
+        reason: 'ended',
+        positionMs: 0,
+        identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+        handle: 'h-svc',
+      }),
+    );
+    await pump();
+  }
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    long,
+    'the same-id transitions reconcile under the long id',
+  );
+  const plays = readyOf(r).playHistory.filter((e) => e.recordingId === 'rL');
+  assertEqual(plays.length, 2, 'each completed loop counts');
+  assert(
+    plays.every((e) => e.occurrenceId !== null && e.occurrenceId.length <= 64),
+    'dedupe keys stay inside the id bound',
+  );
+}
+
 async function repeatOneEndedFallback(): Promise<void> {
   // Without an installed projection the JS fallback replays the cursor
   // item instead of advancing.
@@ -4666,6 +4771,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatAllHeadPrevInWindowWraps', repeatAllHeadPrevInWindowWraps],
   ['repeatAllHeadPrevPastWindowRestarts', repeatAllHeadPrevPastWindowRestarts],
   ['repeatReplaysCountEachLoop', repeatReplaysCountEachLoop],
+  ['repeatCyclesSurviveRestart', repeatCyclesSurviveRestart],
+  ['repeatLongOccurrenceIdCounts', repeatLongOccurrenceIdCounts],
   ['repeatOneEndedFallback', repeatOneEndedFallback],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],

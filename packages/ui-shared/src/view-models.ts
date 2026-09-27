@@ -865,8 +865,9 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   );
   // Under repeat=all the wrap edges are real moves — the transport
   // keeps both controls enabled at queue boundaries so they stay
-  // reachable (the cursor applies the same wrap rules).
-  const wraps = repeat === 'all' && queue.occurrences.length > 1;
+  // reachable (the cursor applies the same wrap rules; a lone item
+  // self-wraps into an in-place restart).
+  const wraps = repeat === 'all' && queue.occurrences.length > 0;
   const canPrevious =
     currentIndex > 0 || (wraps && currentIndex === 0);
   const canNext =

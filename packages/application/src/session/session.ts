@@ -450,6 +450,52 @@ function bumpListenCycle(r: Ready, occurrenceId: string): void {
   r.listenCycles[occurrenceId] = (r.listenCycles[occurrenceId] ?? 0) + 1;
 }
 
+/**
+ * The per-listen dedupe key: cycle 0 records under the occurrence id
+ * itself, replays under `${id}#${cycle}` — the base truncates into the
+ * 64-char id bound so a max-length id can't fail validation mid
+ * transition.
+ */
+function playDedupeId(occurrenceId: string, cycle: number): string {
+  if (cycle === 0) {
+    return occurrenceId;
+  }
+  const suffix = `#${cycle}`;
+  const base = occurrenceId.slice(0, Math.max(0, 64 - suffix.length));
+  return `${base}${suffix}`;
+}
+
+/**
+ * Seeds replay cycles from restored play history: a replayed
+ * occurrence already carries `#cycle` entries, so post-restart loops
+ * must keep counting past them rather than collide on `id#1`.
+ */
+function listenCycleBaseline(
+  occurrences: readonly QueueOccurrence[],
+  history: readonly PlayEvent[],
+): Record<string, number> {
+  const live = new Set(occurrences.map((o) => o.occurrenceId));
+  const counts: Record<string, number> = {};
+  for (const e of history) {
+    const id = e.occurrenceId;
+    if (id === null) {
+      continue;
+    }
+    const hash = id.lastIndexOf('#');
+    const base = hash > 0 ? id.slice(0, hash) : id;
+    // A stored key is either the raw occurrence id or its truncated
+    // `base#cycle` form — the base is always a prefix of the real id;
+    // an exact hit wins before the ambiguous prefix fallback.
+    const owner =
+      (live.has(base) ? base : undefined) ??
+      [...live].find((occ) => occ.startsWith(base));
+    if (owner !== undefined) {
+      counts[owner] = (counts[owner] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
 /** The committed sections emission diffs a batch against. */
 function syncEmitInput(r: Ready): SyncEmitInput {
   return {
@@ -1854,7 +1900,10 @@ export class Session {
       settings: { ...data.settings },
       playback: { type: 'idle' },
       repeat: 'off',
-      listenCycles: {},
+      listenCycles: listenCycleBaseline(
+        queue.snapshot().occurrences,
+        data.playHistory,
+      ),
       radio: null,
       persistenceError: undefined,
       syncPending: [],
@@ -2615,8 +2664,7 @@ export class Session {
       return;
     }
     const cycle = r.listenCycles[occurrenceId] ?? 0;
-    const dedupeId =
-      cycle === 0 ? occurrenceId : `${occurrenceId}#${cycle}`;
+    const dedupeId = playDedupeId(occurrenceId, cycle);
     if (
       !isSafeNonNegative(listenedMs) ||
       (durationMs !== null && !isSafeNonNegative(durationMs)) ||
