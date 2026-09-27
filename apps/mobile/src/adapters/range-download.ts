@@ -102,6 +102,8 @@ export async function downloadTo(options: {
   // `begin` at start and after an encoding-changing re-mint, so the
   // remint wrapper is where a fresh mime arrives.
   let pendingMime = options.first.mime;
+  let readyFired = false;
+  let sinkOpened = false;
 
   // ByteSink behind the transfer port: the expo file handle's writes
   // are durable as they land, so `commit` just reports the offset and
@@ -111,6 +113,13 @@ export async function downloadTo(options: {
   const transfer: MediaTransferPort = {
     ensureDir: () => Promise.resolve(ok(undefined)),
     begin: async ({ resumeAtBytes }) => {
+      if (sinkOpened) {
+        // A reopened sink is an encoding restart — the ready
+        // threshold re-arms on the fresh encoding's bytes (progress
+        // offsets alone can't see a one-chunk catch-up).
+        readyFired = false;
+      }
+      sinkOpened = true;
       const byteSink = openSink(pendingMime);
       await byteSink.reset();
       let written = resumeAtBytes;
@@ -161,6 +170,19 @@ export async function downloadTo(options: {
         arrayBuffer: async () => {
           try {
             return await resp.arrayBuffer();
+          } catch (thrown) {
+            // A body-phase abort with no cancel behind it is the same
+            // fetch-side abort as above — a stall, not a cancel.
+            if (
+              !chunkSignal.cancelled &&
+              (thrown as { name?: unknown }).name === 'AbortError'
+            ) {
+              throw new DownloadFailure(
+                'transient',
+                'chunk body aborted',
+              );
+            }
+            throw thrown;
           } finally {
             release();
           }
@@ -178,8 +200,6 @@ export async function downloadTo(options: {
     }
   };
 
-  let readyFired = false;
-  let lastCommitted = 0;
   const outcome = await runTransfer({
     destName: 'provisional.part',
     first: toResource(options.first),
@@ -198,12 +218,6 @@ export async function downloadTo(options: {
     signal,
     hasher: createSha256,
     onProgress: ({ committed }) => {
-      // An encoding restart rewinds the counter — the ready threshold
-      // applies to the fresh encoding's bytes.
-      if (committed < lastCommitted) {
-        readyFired = false;
-      }
-      lastCommitted = committed;
       if (!readyFired && committed >= readyAtBytes) {
         readyFired = true;
         onReady(committed);

@@ -385,7 +385,10 @@ export async function runTransfer(options: {
           }
           const sameEncoding =
             fresh.value.mime === current.mime &&
-            fresh.value.contentLength === total &&
+            // A mint that can't declare a length offers no splice
+            // evidence either way — the wire total stays the guard.
+            (fresh.value.contentLength === null ||
+              fresh.value.contentLength === total) &&
             fresh.value.bitrateKbps === current.bitrateKbps &&
             fresh.value.itag === current.itag;
           if (sameEncoding) {

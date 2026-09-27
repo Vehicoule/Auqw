@@ -392,6 +392,43 @@ async function remintResumeOn403(): Promise<void> {
   );
 }
 
+async function remintUnknownLengthResumes(): Promise<void> {
+  // A mint that can't declare a length gives no splice evidence —
+  // the wire total stays the guard, so the remint resumes.
+  const wire = new Wire();
+  wire.serve('https://cdn/a', bytes(8));
+  wire.serve('https://cdn/b', bytes(8));
+  wire.script(1, { kind: 'status', status: 403 });
+  const transfer = new FakeTransfer();
+  transfer.enqueueSink({ digest: 'cc'.repeat(32) });
+  const result = await runTransfer({
+    destName: 'track.mp4',
+    first: resource('https://cdn/a', null),
+    remint: remintServes(resource('https://cdn/b', null)),
+    transfer,
+    fetchImpl: wire.fetch,
+    clock: new FakeClock(),
+    signal: source().signal,
+    hasher: createSha256,
+    chunkSize: 4,
+  });
+  assert(result.ok, `null-length remint ok, got ${JSON.stringify(result)}`);
+  assertEqual(
+    transfer.sinks.length,
+    1,
+    'unknown-length remint keeps the sink',
+  );
+  assertDeepEqual(
+    wire.requests.map((r) => [r.url, r.start, r.end]),
+    [
+      ['https://cdn/a', 0, 3],
+      ['https://cdn/a', 4, 7],
+      ['https://cdn/b', 4, 7],
+    ],
+    'resumed at the durable offset on the fresh url',
+  );
+}
+
 async function remint416Too(): Promise<void> {
   const wire = new Wire();
   wire.serve('https://cdn/a', bytes(4));
@@ -905,6 +942,7 @@ export async function run(): Promise<void> {
   await resumeOffset();
   await resumeEncodingDescriptor();
   await remintResumeOn403();
+  await remintUnknownLengthResumes();
   await remint416Too();
   await encodingChangeRestarts();
   await zeroProgressExpires();

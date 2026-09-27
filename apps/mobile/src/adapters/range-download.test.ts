@@ -16,7 +16,9 @@ import type {
 type Step =
   | { status: number; body: number[]; range?: string }
   | { hang: true }
-  | { throwAbort: true };
+  | { hangBody: true; onAbort?: () => void }
+  | { throwAbort: true }
+  | { throwAbortBody: true };
 
 function chunk(start: number, bytes: number[], total: number): Step {
   const end = start + bytes.length - 1;
@@ -65,8 +67,41 @@ function scriptedFetch(
       });
       throw new DOMException('aborted', 'AbortError');
     }
+    if ('hangBody' in step) {
+      // Headers land; the body never does — the stall the chunk
+      // timeout must still abort through the bridge.
+      const resp: RangeFetchResponse = {
+        status: 206,
+        headers: {
+          get: (name) =>
+            name === 'content-range' ? 'bytes 0-3/8' : null,
+        },
+        arrayBuffer: () =>
+          new Promise<ArrayBuffer>((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => {
+              step.onAbort?.();
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          }),
+      };
+      return resp;
+    }
     if ('throwAbort' in step) {
       throw new DOMException('aborted', 'AbortError');
+    }
+    if ('throwAbortBody' in step) {
+      // Headers land fine; the body read itself aborts with no
+      // cancel behind it — a stall, not a cancellation.
+      const resp: RangeFetchResponse = {
+        status: 206,
+        headers: {
+          get: (name) =>
+            name === 'content-range' ? 'bytes 0-3/8' : null,
+        },
+        arrayBuffer: () =>
+          Promise.reject(new DOMException('aborted', 'AbortError')),
+      };
+      return resp;
     }
     const resp: RangeFetchResponse = {
       status: step.status,
@@ -224,6 +259,37 @@ export async function run(): Promise<void> {
     assertDeepEqual(state.data, [9, 9, 9, 9, 8, 8, 8, 8]);
   }
 
+  // Encoding restart re-arms onReady even when the replacement's
+  // first chunk lands exactly on the previous high-water mark.
+  {
+    const pages = new Map<number, Step[]>([
+      [0, [chunk(0, [1, 2, 3, 4], 8), chunk(0, [9, 9, 9, 9], 8)]],
+      [4, [{ status: 403, body: [] }, chunk(4, [8, 8, 8, 8], 8)]],
+    ]);
+    const calls: { url: string; start: number }[] = [];
+    const state = sink();
+    const ready: number[] = [];
+    const opts = baseOptions(
+      source(),
+      () =>
+        Promise.resolve({
+          url: 'https://gvs.example/webm',
+          mime: 'audio/webm',
+          bitrateKbps: 96,
+          contentLength: 8,
+        }),
+      state,
+      calls,
+      pages,
+    );
+    opts.onReady = (n) => {
+      ready.push(n);
+    };
+    const written = await downloadTo(opts);
+    assertEqual(written, 8);
+    assertDeepEqual(ready, [4, 4]);
+  }
+
   // Two consecutive zero-progress mints → expired-resource.
   {
     const pages = new Map<number, Step[]>([
@@ -359,6 +425,56 @@ export async function run(): Promise<void> {
       pages,
     );
     await expectFailure(() => downloadTo(opts), 'transient');
+  }
+
+  // A body-phase abort with no cancel behind it is a stall too —
+  // transient, not cancelled.
+  {
+    const pages = new Map<number, Step[]>([[0, [{ throwAbortBody: true }]]]);
+    const calls: { url: string; start: number }[] = [];
+    const state = sink();
+    const opts = baseOptions(
+      source(),
+      () => Promise.reject(new Error('no remint')),
+      state,
+      calls,
+      pages,
+    );
+    await expectFailure(() => downloadTo(opts), 'transient');
+  }
+
+  // A stalled body read loses the stall race too — the abort bridge
+  // stays subscribed until the body lands.
+  {
+    let bodyAborted = false;
+    const pages = new Map<number, Step[]>([
+      [
+        0,
+        [
+          {
+            hangBody: true,
+            onAbort: () => {
+              bodyAborted = true;
+            },
+          },
+        ],
+      ],
+    ]);
+    const calls: { url: string; start: number }[] = [];
+    const state = sink();
+    const opts = baseOptions(
+      source(),
+      () => Promise.reject(new Error('no remint')),
+      state,
+      calls,
+      pages,
+    );
+    opts.chunkTimeoutMs = 25;
+    await expectFailure(() => downloadTo(opts), 'transient');
+    assert(
+      bodyAborted,
+      'the chunk timeout aborts the in-flight body read',
+    );
   }
 
   // Non-https mints are refused at the fetch site.
