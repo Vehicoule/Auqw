@@ -85,6 +85,16 @@ type PeerTrack = {
    */
   seenRound?: SyncRoundOutcome;
   /**
+   * The `lastRound` a still-syncing view carried when start()
+   * snapshotted it — present but unclassified: it may be a round
+   * that just landed its counters and still awaits its verdict, or
+   * yesterday's history republished while an unrelated op (a
+   * refreshPeer, a keepalive) holds `syncing`. The first drained
+   * emission settles it: the same counters with an unchanged
+   * verdict is history; anything else is a real landing.
+   */
+  startRound?: SyncRoundOutcome;
+  /**
    * Cancels the in-flight round when the peer is unpaired or the
    * scheduler stops — an orphaned exchange must not run to
    * completion against a removed peer.
@@ -380,12 +390,18 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       // exactly once; consume that identity at the first drained
       // emission carrying it (whatever the state) so later republish-
       // es — another op's drain, a status fan-out — never re-fire it.
+      // A drained emission showing the same counters the start()
+      // snapshot found mid-op is history republished, not a landing —
+      // unless its verdict changed too, which only a real landing does.
+      const verdictMoved = view.lastError !== prevPeer?.lastError;
       const roundLanded =
         !view.syncing &&
         view.lastRound !== undefined &&
-        view.lastRound !== track.seenRound;
+        view.lastRound !== track.seenRound &&
+        (view.lastRound !== track.startRound || verdictMoved);
       if (roundLanded) {
         track.seenRound = view.lastRound;
+        delete track.startRound;
       }
       if (view.state === 'open') {
         // 'open' during a scheduler-owned round is that round's
@@ -516,16 +532,20 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // history — seeding marks it consumed so a republished status
         // can't re-fire its verdict (an old rate-limit would
         // otherwise slide its floor to now+hint on the first
-        // unrelated emission). Never seed a still-syncing view: its
-        // counters may be up but the verdict lands with the drain,
-        // and that emission must still count as a landing. Persisted
-        // tracks keep their own record across a stop()/start().
-        if (
-          track.seenRound === undefined &&
-          !view.syncing &&
-          view.lastRound !== undefined
-        ) {
-          track.seenRound = view.lastRound;
+        // unrelated emission). Persisted tracks keep their own
+        // record across a stop()/start(). A still-syncing view is
+        // different: `syncing` counts every queued op, not just
+        // rounds, so its counters are remembered but unclassified —
+        // the first drained emission decides whether they were a
+        // landing (new counters or a moved verdict) or old history.
+        if (track.seenRound === undefined) {
+          if (view.syncing) {
+            if (view.lastRound !== undefined) {
+              track.startRound = view.lastRound;
+            }
+          } else if (view.lastRound !== undefined) {
+            track.seenRound = view.lastRound;
+          }
         }
       }
       // On-launch round per known peer — the custody read is the

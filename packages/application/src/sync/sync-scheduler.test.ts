@@ -594,6 +594,48 @@ async function startMidRoundHonorsDrainedVerdict(): Promise<void> {
   scheduler.stop();
 }
 
+async function midOpStartDoesNotReArmStaleVerdict(): Promise<void> {
+  const { client, clock, scheduler } = rig();
+  client.peersList = [peer('fp-a')];
+  // The snapshot lands while a non-round op (a refreshPeer) holds
+  // syncing — the view still carries a completed round's counters and
+  // its rate-limit verdict from before the scheduler subscribed.
+  const stale = outcome('fp-a');
+  const verdict = appError('rate-limit', 'slow down', 30_000);
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    syncing: true,
+    lastError: verdict,
+    lastRound: stale,
+  });
+  scheduler.start();
+  await pump();
+  // The op drains — republishing the SAME counters and verdict.
+  // Identical objects, unchanged verdict: history, not a landing.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: verdict,
+    lastRound: stale,
+  });
+  client.emitStatus();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'launch round fires — the drain republished history, not a landing',
+  );
+  clock.advance(30_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'no retry armed off the stale verdict',
+  );
+  scheduler.stop();
+}
+
 async function stopHaltsEverything(): Promise<void> {
   const { client, clock, scheduler } = rig({ debounceMs: 100 });
   client.peersList = [peer('fp-a')];
@@ -1187,6 +1229,7 @@ export async function run(): Promise<void> {
   await reconnectSurvivesLaunchFanout();
   await staleVerdictDoesNotSlideFloor();
   await startMidRoundHonorsDrainedVerdict();
+  await midOpStartDoesNotReArmStaleVerdict();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();
