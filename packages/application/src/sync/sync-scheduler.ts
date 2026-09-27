@@ -422,6 +422,17 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             ) {
               track.notBeforeMs = now + hint;
             }
+            // A page-capped landing that still moved entries has
+            // more to exchange. Scheduler-owned rounds chain the
+            // continuation in runRound; a kicked or manual one
+            // surfaces only here. A stalled cap moved nothing —
+            // no continuation, and the chain can never spin.
+            if (
+              view.lastError.kind === 'budget-exceeded' &&
+              lastRoundMoved(view.peer.fp)
+            ) {
+              schedule(view.peer.fp, debounceMs, 'replace');
+            }
           }
         }
         if (track.dirty && !track.running) {

@@ -68,6 +68,11 @@ function statusError(status: number, headers: Headers): AppError {
     const base = appError('rate-limit', `artwork http ${status}`);
     return retryMs === undefined ? base : { ...base, retryAfterMs: retryMs };
   }
+  if (status === 404 || status === 410) {
+    // The url itself is dead — the verdict negative-caches, so a
+    // remounting grid doesn't re-hammer it each time.
+    return appError('not-found', `artwork http ${status}`);
+  }
   if (status >= 500) {
     return appError('transient', `artwork http ${status}`);
   }

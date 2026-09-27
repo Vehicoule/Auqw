@@ -718,6 +718,27 @@ async function unpairDropsLastRound(): Promise<void> {
   await client.close();
 }
 
+// 9c. An unpair mid-round strands the round's staged report — its
+// drain must not republish counters for the dead pairing.
+async function unpairMidRoundDropsStagedReport(): Promise<void> {
+  const { client, server } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  server.muteOnSync = true;
+  const round = client.syncNow(SERVER_FP);
+  const removed = await client.unpair(SERVER_FP);
+  assert(removed.ok, 'unpair resolves mid-round');
+  const settled = await round;
+  assert(!settled.ok, 'stranded round fails');
+  const rePaired = await client.pair({ payload: qrPayload() });
+  assert(rePaired.ok, 're-pair resolves');
+  assert(
+    client.status().peers[0]?.lastRound === undefined,
+    'stranded round republished dead-pairing counters',
+  );
+  await client.close();
+}
+
 // 10. A resume that meets `unpaired` rejects auth-required and drops
 // the stale custody record locally.
 async function resumeUnpairedDropsCustody(): Promise<void> {
@@ -1136,6 +1157,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['syncRequestKicksRound', syncRequestKicksRound],
   ['unpairSaysByeAndForgets', unpairSaysByeAndForgets],
   ['unpairDropsLastRound', unpairDropsLastRound],
+  ['unpairMidRoundDropsStagedReport', unpairMidRoundDropsStagedReport],
   ['resumeUnpairedDropsCustody', resumeUnpairedDropsCustody],
   ['refreshPeerReadsDevices', refreshPeerReadsDevices],
   ['keepalivePings', keepalivePings],

@@ -642,14 +642,19 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       // lived only on the session, so no emission ever carries one
       // half of a landing without the other.
       if (session.roundReport !== undefined) {
-        lastRounds.set(session.peerFp, session.roundReport);
-        if (!session.closed) {
-          views.set(
-            session.peerFp,
-            session.roundError !== undefined
-              ? { state: 'open', lastError: session.roundError }
-              : { state: 'open' },
-          );
+        // An unpair mid-round already deleted this peer's counters —
+        // a landing that drains after it must not repopulate state
+        // for a pairing that no longer exists.
+        if (peers.has(session.peerFp)) {
+          lastRounds.set(session.peerFp, session.roundReport);
+          if (!session.closed) {
+            views.set(
+              session.peerFp,
+              session.roundError !== undefined
+                ? { state: 'open', lastError: session.roundError }
+                : { state: 'open' },
+            );
+          }
         }
         delete session.roundReport;
         delete session.roundError;
@@ -1422,6 +1427,8 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       views.delete(fp);
       // Dead pairing, dead counters — a later re-pair of the same
       // fingerprint must not inherit this round's exchange numbers.
+      // An in-flight round stranded by the kill publishes nothing:
+      // its drain sees the peer already gone from `peers`.
       lastRounds.delete(fp);
       const removed = await deps.keys.peerDelete(fp, signal);
       emit();

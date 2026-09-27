@@ -1190,6 +1190,66 @@ async function republishedVerdictDoesNotSlideFloor(): Promise<void> {
   scheduler.stop();
 }
 
+// A round the client kicked itself (a server sync-request) can hit
+// the page cap mid-exchange — runRound only chains continuations for
+// scheduler-owned rounds, so a still-moving external landing must
+// book its own follow-up here. A stalled cap earns none.
+async function kickedCappedRoundContinues(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // The kicked round lands capped but moving — pages exchanged,
+  // more pending.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: appError('budget-exceeded', 'page cap'),
+    lastRound: {
+      peerFp: 'fp-a',
+      remoteEntries: 40,
+      sentEntries: 10,
+      divergence: 0,
+      rounds: 40,
+    },
+  });
+  client.emitStatus();
+  await pump();
+  clock.advance(500);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'still-moving capped landing books its continuation',
+  );
+  // A second landing capped but stalled — nothing moved — must not
+  // chain another wake.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: appError('budget-exceeded', 'page cap'),
+    lastRound: {
+      peerFp: 'fp-a',
+      remoteEntries: 0,
+      sentEntries: 0,
+      divergence: 0,
+      rounds: 1,
+    },
+  });
+  client.emitStatus();
+  await pump();
+  clock.advance(5_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'stalled cap never chains — the chain cannot spin',
+  );
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
@@ -1213,6 +1273,7 @@ export async function run(): Promise<void> {
   await staleVerdictDoesNotSlideFloor();
   await startMidRoundHonorsDrainedVerdict();
   await midOpStartDoesNotReArmStaleVerdict();
+  await kickedCappedRoundContinues();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();
