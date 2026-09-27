@@ -229,6 +229,48 @@ function sameNameServicesCoexist(): void {
   assertEqual(r.lost[1], 'Phone|10.0.0.5', 'B key retracted');
 }
 
+function fpSurvivesSrvMove(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  const fp = 'a'.repeat(64);
+  // Same device re-announces from a NEW SRV target with a NEW address
+  // — the fp identifies it as the same generation, so the old row
+  // must be retracted rather than stranded.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'old.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+      txt: { dev: fp },
+    }),
+  );
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'new.local',
+      port: 42000,
+      addresses: ['10.0.0.9'],
+      txt: { dev: fp },
+    }),
+  );
+  assertEqual(r.found.length, 2, 'moved service re-emitted');
+  assertEqual(r.lost.length, 1, 'old target retracted');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'stale key gone');
+  // And its goodbye carries the fp — retracts the current row even
+  // though the SRV host/port moved.
+  t.down(
+    service({
+      name: 'Phone',
+      host: 'new.local',
+      port: 42000,
+      txt: { dev: fp },
+    }),
+  );
+  assertEqual(r.lost.length, 2, 'down by fp retracts');
+  assertEqual(r.lost[1], 'Phone|10.0.0.9', 'current row gone');
+}
+
 export function run(): void {
   rerankRetractsOldKey();
   sameKeyReannounceKeepsRow();
@@ -238,4 +280,5 @@ export function run(): void {
   unpairableUpEmitsNothing();
   unpairableReannounceRetracts();
   sameNameServicesCoexist();
+  fpSurvivesSrvMove();
 }

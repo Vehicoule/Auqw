@@ -104,27 +104,37 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
   };
 }
 
+/** TXT `dev` (device fingerprint) from a service, or null/undefined. */
+const fpOf = (service: Service): string | null => {
+  const txt = service.txt;
+  const raw =
+    txt !== null && typeof txt === 'object' && TXT_FP in txt
+      ? txt[TXT_FP]
+      : undefined;
+  return typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)
+    ? raw
+    : null;
+};
+
 /**
  * Tracking of emitted peers for one browse — shared by the `up`/`down`
  * handlers so a re-announcement or a late `down` can retract exactly
- * the row that was emitted. Entries are keyed by `name|srvHost`: an
- * instance name is NOT unique on a LAN (two devices can both call
- * themselves "Phone"), and `service.host` (the SRV target) identifies
- * the device — never the picked dial address, which re-ranks.
- * Exported for the tracker unit test.
+ * the row that was emitted. The service IDENTITY is its `dev` TXT
+ * fingerprint — stable across hostname/port/address changes, which
+ * are exactly what a re-announce mutates. Adverts without a valid fp
+ * fall back to the SRV target host as the device id (an instance name
+ * is NOT unique on a LAN — two devices can both call themselves
+ * "Phone"). Exported for the tracker unit test.
  */
 export const createPeerTracker = (
   onFound: (peer: SyncDiscoveredPeer) => void,
   onLost: (key: string) => void,
 ): { up(service: Service): void; down(service: Service): void } => {
-  // Keyed by `name|srvHost` — the SRV target identifies the DEVICE
-  // behind the advert, so two services sharing an instance name keep
-  // independent rows; a same-device re-announce (host unchanged) is
-  // the same generation even when its port or picked address changed.
   const seen = new Map<
     string,
     {
       name: string;
+      fp: string | null;
       host: string | undefined;
       port: number | undefined;
       peer: SyncDiscoveredPeer;
@@ -132,22 +142,57 @@ export const createPeerTracker = (
   >();
   const hostOf = (s: Service): string | undefined =>
     typeof s.host === 'string' && s.host !== '' ? s.host : undefined;
-  const keyOf = (s: Service) => `${s.name}|${hostOf(s) ?? ''}`;
+  // Retract the rows whose generation matches this record — the
+  // advert's own identity: the `dev` fp when it carries one (precise
+  // — survives every mutable field), else the SRV host+port pair.
+  // Never the picked dial address, which re-ranks.
+  const retract = (service: Service) => {
+    const fp = fpOf(service);
+    const host = hostOf(service);
+    const port =
+      typeof service.port === 'number' ? service.port : undefined;
+    for (const [id, entry] of seen) {
+      if (entry.name !== service.name) {
+        continue;
+      }
+      if (fp !== null) {
+        if (entry.fp !== fp) {
+          continue;
+        }
+      } else {
+        if (
+          host !== undefined &&
+          entry.host !== undefined &&
+          entry.host !== host
+        ) {
+          continue;
+        }
+        if (
+          port !== undefined &&
+          entry.port !== undefined &&
+          entry.port !== port
+        ) {
+          continue;
+        }
+      }
+      seen.delete(id);
+      onLost(entry.peer.key);
+    }
+  };
   return {
     up(service) {
-      const id = keyOf(service);
-      const prior = seen.get(id);
       const peer = peerOf(service);
       if (peer === null) {
-        // A re-announcement with no pairable address must retract the
-        // previously emitted row — otherwise the last pick stays
-        // dialable forever.
-        if (prior !== undefined) {
-          seen.delete(id);
-          onLost(prior.peer.key);
-        }
+        // A re-announcement with no pairable address (or a malformed
+        // fp) must retract the previously emitted row for that
+        // generation — otherwise the last pick stays dialable
+        // forever.
+        retract(service);
         return;
       }
+      // Identity: the advert's own fp when pinned, else the SRV host.
+      const id = `${service.name}|${peer.fp ?? hostOf(service) ?? ''}`;
+      const prior = seen.get(id);
       // A re-announcement whose resolved addresses changed can
       // re-rank the chosen host — retract the row keyed by the
       // old pick so the stale endpoint never stays dialable.
@@ -156,6 +201,7 @@ export const createPeerTracker = (
       }
       seen.set(id, {
         name: service.name,
+        fp: peer.fp,
         host: hostOf(service),
         port: service.port,
         peer,
@@ -163,35 +209,7 @@ export const createPeerTracker = (
       onFound(peer);
     },
     down(service) {
-      // Match the down to the emitted GENERATION by the service's own
-      // SRV identity — never by the address we picked to dial, which
-      // can re-rank across ups of the same generation. A down from an
-      // older generation (death + re-announce on a new port/host) can
-      // arrive after the new up and must not kill the fresh row.
-      const downHost = hostOf(service);
-      const downPort =
-        typeof service.port === 'number' ? service.port : undefined;
-      for (const [id, entry] of seen) {
-        if (entry.name !== service.name) {
-          continue;
-        }
-        if (
-          downHost !== undefined &&
-          entry.host !== undefined &&
-          entry.host !== downHost
-        ) {
-          continue;
-        }
-        if (
-          downPort !== undefined &&
-          entry.port !== undefined &&
-          entry.port !== downPort
-        ) {
-          continue;
-        }
-        seen.delete(id);
-        onLost(entry.peer.key);
-      }
+      retract(service);
     },
   };
 };
