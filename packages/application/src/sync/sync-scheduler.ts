@@ -513,12 +513,18 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       for (const view of views.peers) {
         const track = trackFor(view.peer.fp);
         // A round that completed before this subscription is already
-        // history — seeding keeps a republished status from re-firing
-        // its verdict (an old rate-limit would otherwise slide its
-        // floor to now+hint on the first unrelated emission). The ??=
-        // guards a restart: a track that persisted through stop()
-        // keeps its own consumption record.
-        if (track.seenRound === undefined && view.lastRound !== undefined) {
+        // history — seeding marks it consumed so a republished status
+        // can't re-fire its verdict (an old rate-limit would
+        // otherwise slide its floor to now+hint on the first
+        // unrelated emission). Never seed a still-syncing view: its
+        // counters may be up but the verdict lands with the drain,
+        // and that emission must still count as a landing. Persisted
+        // tracks keep their own record across a stop()/start().
+        if (
+          track.seenRound === undefined &&
+          !view.syncing &&
+          view.lastRound !== undefined
+        ) {
           track.seenRound = view.lastRound;
         }
       }

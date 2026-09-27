@@ -555,6 +555,45 @@ async function staleVerdictDoesNotSlideFloor(): Promise<void> {
   scheduler.stop();
 }
 
+async function startMidRoundHonorsDrainedVerdict(): Promise<void> {
+  const { client, clock, scheduler } = rig();
+  client.peersList = [peer('fp-a')];
+  // The snapshot lands between a round's counters emission and its
+  // drained verdict — seeding must not consume the unfinished view,
+  // or the rate-limit below never floors the launch round.
+  const landing = outcome('fp-a');
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    syncing: true,
+    lastRound: landing,
+  });
+  scheduler.start();
+  await pump();
+  // The op drains carrying a fresh 30 s verdict — a real landing.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: appError('rate-limit', 'slow down', 30_000),
+    lastRound: landing,
+  });
+  client.emitStatus();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    0,
+    'launch round defers to the drained verdict floor',
+  );
+  clock.advance(30_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'launch round fires once the floor elapses',
+  );
+  scheduler.stop();
+}
+
 async function stopHaltsEverything(): Promise<void> {
   const { client, clock, scheduler } = rig({ debounceMs: 100 });
   client.peersList = [peer('fp-a')];
@@ -1147,6 +1186,7 @@ export async function run(): Promise<void> {
   await launchRoundPreemptsHydrationDebounce();
   await reconnectSurvivesLaunchFanout();
   await staleVerdictDoesNotSlideFloor();
+  await startMidRoundHonorsDrainedVerdict();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();
