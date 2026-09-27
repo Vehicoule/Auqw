@@ -1314,6 +1314,7 @@ function Main({
         recordings: state.recordings,
         likes: state.likes,
         repeat: state.repeat,
+        shuffleOrder: state.shuffleOrder,
       }),
     [state, localeTick],
   );
@@ -1798,23 +1799,30 @@ function Main({
     [session, state.queue, canPlay, reportPlay],
   );
 
-  // Mirrors QueueEngine.next()/previous() targeting: next → index+1
-  // (never wraps); previous → restart current when positionMs>3s or
-  // at index 0, else index−1. The gate sees the same target the
-  // engine would land on.
+  // Mirrors the cursor's targeting in walk space — the dealt order
+  // under shuffle, canonical otherwise: next → walk position+1;
+  // previous → restart current when positionMs>3s or at the walk's
+  // head, else position−1. The gate sees the same target the engine
+  // would land on.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       if (online === false) {
         const { occurrences, currentOccurrenceId, positionMs } = state.queue;
-        const index = occurrences.findIndex(
-          (o) => o.occurrenceId === currentOccurrenceId,
-        );
-        const target =
+        const walk =
+          state.shuffleOrder ?? occurrences.map((o) => o.occurrenceId);
+        const pos =
+          currentOccurrenceId === null
+            ? -1
+            : walk.indexOf(currentOccurrenceId);
+        const targetId =
           method === 'next'
-            ? occurrences[index + 1]
-            : positionMs > 3000 || index <= 0
-              ? occurrences[index]
-              : occurrences[index - 1];
+            ? walk[pos + 1]
+            : positionMs > 3000 || pos <= 0
+              ? walk[pos]
+              : walk[pos - 1];
+        const target = occurrences.find(
+          (o) => o.occurrenceId === targetId,
+        );
         if (target !== undefined && !isOwned(target.recordingId)) {
           return;
         }
@@ -1827,7 +1835,7 @@ function Main({
           ),
       );
     },
-    [online, state.queue, isOwned, session, reportPlay],
+    [online, state.queue, state.shuffleOrder, isOwned, session, reportPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
@@ -4155,6 +4163,8 @@ function Main({
               onNext={() => advance('next')}
               onPrevious={() => advance('previous')}
               onToggleLike={onToggleLike}
+              shuffle={state.type === 'ready' ? state.shuffle : false}
+              onToggleShuffle={() => void session.toggleShuffle()}
               repeat={state.type === 'ready' ? state.repeat : 'off'}
               onCycleRepeat={() => void session.cycleRepeat()}
               download={

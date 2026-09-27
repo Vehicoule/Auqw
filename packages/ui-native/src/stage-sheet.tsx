@@ -90,6 +90,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /** Shuffle toggle state — the cursor walks a dealt play order. */
+  readonly shuffle?: boolean | undefined;
+  readonly onToggleShuffle?: (() => void) | undefined;
   /** Current repeat mode — off / all / one from the player port. */
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
@@ -148,6 +151,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
+  shuffle = false,
+  onToggleShuffle,
   repeat = 'off',
   onCycleRepeat,
 }: TransportProps) {
@@ -173,6 +178,17 @@ export function TransportControls({
         accessibilityLabel={liked ? t('common.unlike') : t('common.like')}
         active={liked}
         onPress={onToggleLike}
+        style={v.side}
+      />
+      <IconButton
+        icon="shuffle"
+        size={32}
+        iconSize={14}
+        color={shuffle ? theme.colors.accent : theme.colors.textSecondary}
+        accessibilityLabel={t('common.shuffle')}
+        disabled={onToggleShuffle === undefined}
+        active={shuffle}
+        onPress={onToggleShuffle}
         style={v.side}
       />
       <IconButton
@@ -453,6 +469,8 @@ export type StageSheetProps = {
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onAddToPlaylist?: (() => void) | undefined;
+  readonly shuffle?: boolean | undefined;
+  readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
@@ -494,6 +512,8 @@ export function StageSheet({
   download = null,
   onDownload,
   onAddToPlaylist,
+  shuffle = false,
+  onToggleShuffle,
   repeat = 'off',
   onCycleRepeat,
   onSeek,
@@ -885,6 +905,8 @@ export function StageSheet({
               onPrevious={onPrevious}
               onNext={onNext}
               onToggleLike={onToggleLike}
+              shuffle={shuffle}
+              onToggleShuffle={onToggleShuffle}
               repeat={repeat}
               onCycleRepeat={onCycleRepeat}
             />

@@ -2328,6 +2328,405 @@ async function repeatOneEndedFallback(): Promise<void> {
   );
 }
 
+function shuffleRig(
+  draws: readonly number[],
+  current: string | null = 'oA',
+  positionMs = 0,
+): Rig {
+  return rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`, ref('youtube-music', `y${id}`)),
+        ),
+        currentOccurrenceId: current,
+        positionMs,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom(draws),
+  );
+}
+
+async function shuffleToggleDealsOrder(): Promise<void> {
+  // Draws rank the canonical successors — oB(0.8) after oC(0.1): the
+  // dealt walk keeps the prefix through the cursor, then shuffles on.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assertEqual(readyOf(r).shuffle, false, 'shuffle starts off');
+  assertEqual(readyOf(r).shuffleOrder, null, 'no walk while off');
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertEqual(readyOf(r).shuffle, true, 'toggle lands on');
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oC', 'oB'],
+    'the deal preserves history and shuffles successors',
+  );
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined, 'a toggle re-projects');
+  assertDeepEqual(
+    p.order,
+    [0, 2, 1],
+    'the projection walks the dealt permutation',
+  );
+  assertDeepEqual(
+    p.items.map((i) => i.occurrenceId),
+    ['oA', 'oB', 'oC'],
+    'canonical item order is untouched',
+  );
+  const count = r.player.projections.length;
+  assert((await r.session.setShuffle(true)).ok);
+  await pump();
+  assertEqual(
+    r.player.projections.length,
+    count,
+    'an unchanged flag does not re-project',
+  );
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertEqual(readyOf(r).shuffle, false, 'toggle lands off');
+  assertEqual(readyOf(r).shuffleOrder, null);
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 1, 2],
+    'off walks the canonical identity',
+  );
+}
+
+async function shuffleNextFollowsDeal(): Promise<void> {
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  // The dealt walk oA → oC → oB drives the moves, then the dealt end
+  // stops like the canonical tail.
+  assert((await r.session.next()).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'next lands the dealt successor',
+  );
+  assert((await r.session.next()).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB');
+  assert((await r.session.next()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    null,
+    'the dealt end runs off like the canonical tail',
+  );
+  assertEqual(q.mode, 'stopped');
+}
+
+async function shufflePreviousFollowsDeal(): Promise<void> {
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.next()).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC');
+  // Inside the restart window previous steps to the dealt predecessor.
+  assert((await r.session.previous()).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oA',
+    'previous lands the dealt predecessor',
+  );
+  // At the dealt head without a wrap, previous restarts in place — a
+  // complete no-op at position 0.
+  const rev = readyOf(r).queue.revision;
+  assert((await r.session.previous()).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oA');
+  assertEqual(
+    readyOf(r).queue.revision,
+    rev,
+    'dealt-head previous at 0 is a no-op',
+  );
+}
+
+async function shufflePreviousPastWindowRestarts(): Promise<void> {
+  // Past the restart window previous restarts the item, dealt or not.
+  const r = shuffleRig([0.8, 0.1], 'oC', 5_000);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.previous()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oC',
+    'past the window previous restarts in place',
+  );
+  assertEqual(q.positionMs, 0, 'the restart seeks to 0');
+}
+
+async function shuffleTransitionLegality(): Promise<void> {
+  // Legal service edges live in walk space: the dealt successor is
+  // accepted, a canonical neighbour that is not dealt is rejected.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined);
+  assertDeepEqual(p.order, [0, 2, 1]);
+  const identity = (id: string): PlaybackIdentity => ({
+    attemptId: `svc-${id}`,
+    queueRev: p.queueRev,
+  });
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oC',
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: identity('oC'),
+      handle: 'h-oC',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'a dealt-successor edge reconciles',
+  );
+  const rev = readyOf(r).queue.revision;
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oA',
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: identity('oA'),
+      handle: 'h-oA',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'a non-dealt edge is rejected',
+  );
+  assertEqual(readyOf(r).queue.revision, rev, 'rejection leaves the cursor');
+}
+
+async function shuffleRepeatAllWrapsDealtEnds(): Promise<void> {
+  // repeat=all wraps the dealt ends: previous at the dealt head lands
+  // on the dealt tail oB — not the canonical tail oC.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.previous()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oB',
+    'head previous wraps to the dealt tail',
+  );
+  assertEqual(q.positionMs, 0, 'the wrap lands at 0');
+  // And a manual next off the dealt tail wraps to the dealt head.
+  assert((await r.session.next()).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oA',
+    'tail next wraps to the dealt head',
+  );
+}
+
+async function shuffleWrapCountsLoop(): Promise<void> {
+  // A dealt-tail→head wrap under repeat=all is a repeat edge: the
+  // wrapped item's next completed listen keys off a fresh cycle.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined);
+  const identity = (id: string): PlaybackIdentity => ({
+    attemptId: `svc-${id}`,
+    queueRev: p.queueRev,
+  });
+  // Walk the deal oA → oC → oB, then wrap the dealt tail to oA.
+  for (const [from, to] of [
+    ['oA', 'oC'],
+    ['oC', 'oB'],
+    ['oB', 'oA'],
+  ] as const) {
+    r.player.emit(
+      transitionEvent(r, {
+        from,
+        to,
+        reason: 'ended',
+        positionMs: 0,
+        identity: identity(to),
+        handle: `h-${to}`,
+      }),
+    );
+    await pump();
+  }
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oA', 'wrapped to head');
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oC',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oC'),
+      handle: 'h-oC',
+    }),
+  );
+  await pump();
+  const plays = readyOf(r).playHistory.filter((e) => e.recordingId === 'rA');
+  assertEqual(plays.length, 2, 'each oA listen counts once');
+  assertEqual(plays[0]?.occurrenceId, 'oA');
+  assertEqual(plays[1]?.occurrenceId, 'oA#1', 'the wrap mints a new cycle');
+}
+
+async function shuffleMutationReconciles(): Promise<void> {
+  // Dealt successors survive edits: a removal drops out of the walk,
+  // an enqueue inserts at a random slot behind the cursor, and dealt
+  // items never reshuffle.
+  const r = shuffleRig([0.8, 0.1, 0.9]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.removeOccurrence('oC')).ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oB'],
+    'a removal drops out of the deal',
+  );
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 1],
+    'the re-projected walk shrinks with it',
+  );
+  const enqueued = await r.session.enqueueRecording('rD');
+  assert(enqueued.ok);
+  await pump();
+  // Draw 0.9 → slot = behind-cursor tail: [oA, oB] + new at the end.
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oB', enqueued.value],
+    'an enqueue inserts behind the cursor without reshuffling',
+  );
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 1, 2],
+    'the new walk rides the next projection',
+  );
+}
+
+async function shuffleToggleOffRestoresCanonical(): Promise<void> {
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.next()).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC');
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  // Canonical again: oC's predecessor is oB — not the dealt oA.
+  assert((await r.session.previous()).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'off walks the canonical order again',
+  );
+}
+
+async function shuffleEndedFallbackFollowsDeal(): Promise<void> {
+  // Without an installed projection the JS fallback walks the deal.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1]),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('oA');
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'ytm-a', 'Song rA', 'Artist', 300_000)]),
+  );
+  await pump();
+  const idA = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idA, 'h-A'));
+  await pump();
+  r.player.settlePrepare(ok('req-A'));
+  assert((await playing).ok);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oC', 'oB'],
+    'the deal lands under live playback',
+  );
+  // Fail the next projection so the ended status runs the fallback.
+  r.player.failNextProjection(appError('transient', 'projection down'));
+  assert((await r.session.seekTo(100)).ok);
+  await pump();
+  const idNow = readyOf(r).playback;
+  const identity = 'identity' in idNow ? idNow.identity : undefined;
+  assert(identity !== undefined);
+  r.player.emit(statusEvent(identity, 'h-A', 'ended', 300_000));
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oC',
+    'the fallback lands the dealt successor',
+  );
+  assertEqual(q.mode, 'playing');
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -4918,6 +5317,16 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatCyclesSurviveRestart', repeatCyclesSurviveRestart],
   ['repeatLongOccurrenceIdCounts', repeatLongOccurrenceIdCounts],
   ['repeatOneEndedFallback', repeatOneEndedFallback],
+  ['shuffleToggleDealsOrder', shuffleToggleDealsOrder],
+  ['shuffleNextFollowsDeal', shuffleNextFollowsDeal],
+  ['shufflePreviousFollowsDeal', shufflePreviousFollowsDeal],
+  ['shufflePreviousPastWindowRestarts', shufflePreviousPastWindowRestarts],
+  ['shuffleTransitionLegality', shuffleTransitionLegality],
+  ['shuffleRepeatAllWrapsDealtEnds', shuffleRepeatAllWrapsDealtEnds],
+  ['shuffleWrapCountsLoop', shuffleWrapCountsLoop],
+  ['shuffleMutationReconciles', shuffleMutationReconciles],
+  ['shuffleToggleOffRestoresCanonical', shuffleToggleOffRestoresCanonical],
+  ['shuffleEndedFallbackFollowsDeal', shuffleEndedFallbackFollowsDeal],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

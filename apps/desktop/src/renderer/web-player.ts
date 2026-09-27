@@ -662,6 +662,16 @@ export function createWebPlayerPort(deps: {
     if (idx < 0) {
       return;
     }
+    // The cursor walks `order` positions — the dealt play order under
+    // shuffle; a malformed/absent walk reads as canonical identity.
+    const order =
+      p.order.length === p.items.length
+        ? p.order
+        : p.items.map((_, i) => i);
+    const pos = order.indexOf(idx);
+    if (pos < 0) {
+      return;
+    }
     const restartInPlace = (): boolean => {
       // Same-item cursor move: the live attach replays/restarts — the
       // emitted transition carries the attempt's own identity per the
@@ -690,17 +700,17 @@ export function createWebPlayerPort(deps: {
     };
     if (reason === 'remote-previous') {
       // Past the restart threshold previous restarts the current item;
-      // at the head, repeat=all wraps to the tail instead.
+      // at the walk's head, repeat=all wraps to its tail instead.
       const wrapTo =
-        idx === 0 && p.repeat === 'all' && p.items.length > 1
-          ? p.items[p.items.length - 1]
+        pos === 0 && p.repeat === 'all' && order.length > 1
+          ? p.items[order[order.length - 1] ?? -1]
           : undefined;
-      if (posMs() > 3000 || (idx === 0 && wrapTo === undefined)) {
+      if (posMs() > 3000 || (pos === 0 && wrapTo === undefined)) {
         if (restartInPlace()) {
           return;
         }
       } else {
-        const item = wrapTo ?? p.items[idx - 1];
+        const item = wrapTo ?? p.items[order[pos - 1] ?? -1];
         if (item === undefined) {
           return;
         }
@@ -709,16 +719,16 @@ export function createWebPlayerPort(deps: {
       return;
     }
     // repeat=one replays the cursor item on a natural end (manual
-    // remote-next still advances); repeat=all wraps the tail to the
-    // head — a single-item queue lands back on itself, handled by the
-    // same in-place restart as any same-item target.
+    // remote-next still advances); repeat=all wraps the walk's tail
+    // to its head — a single-item queue lands back on itself, handled
+    // by the same in-place restart as any same-item target.
     const successor =
       reason === 'ended' && p.repeat === 'one'
         ? p.items[idx]
-        : idx + 1 < p.items.length
-          ? p.items[idx + 1]
-          : p.repeat === 'all' && p.items.length > 0
-            ? p.items[0]
+        : pos + 1 < order.length
+          ? p.items[order[pos + 1] ?? -1]
+          : p.repeat === 'all' && order.length > 0
+            ? p.items[order[0] ?? -1]
             : undefined;
     if (successor === undefined) {
       const tailPositionMs = posMs();

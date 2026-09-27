@@ -186,6 +186,12 @@ export type QueueProjection = {
    * cursor item on `ended`. Manual moves never replay under `one`.
    */
   readonly repeat: RepeatMode;
+  /**
+   * The dealt walk order: a permutation of `items` indices the cursor
+   * steps through — the identity under shuffle=off. Canonical item
+   * order never changes; only the walk does (decisions.md).
+   */
+  readonly order: readonly number[];
   readonly items: readonly QueueProjectionItem[];
 };
 

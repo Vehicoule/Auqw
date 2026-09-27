@@ -31,6 +31,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'common.repeat': 'repetir',
   'common.repeatAll': 'repetir todo',
   'common.repeatOne': 'repetir la canción',
+  'common.shuffle': 'aleatorio',
   'common.unlike': 'ya no me gusta',
   'common.unavailable': 'no disponible',
   'common.cardA11y': '{title}, {subtitle}',

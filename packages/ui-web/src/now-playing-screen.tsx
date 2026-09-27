@@ -42,6 +42,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /** Shuffle toggle state — the cursor walks a dealt play order. */
+  readonly shuffle?: boolean | undefined;
+  readonly onToggleShuffle?: (() => void) | undefined;
   /** Current repeat mode — off / all / one from the player port. */
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
@@ -63,6 +66,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
+  shuffle = false,
+  onToggleShuffle,
   repeat = 'off',
   onCycleRepeat,
   download = null,
@@ -81,6 +86,17 @@ export function TransportControls({
         ariaLabel={liked ? t('common.unlike') : t('common.like')}
         active={liked}
         onPress={onToggleLike}
+        className="uw-transport__side"
+      />
+      <IconButton
+        icon="shuffle"
+        size={32}
+        iconSize={14}
+        color={shuffle ? 'var(--accent)' : 'var(--text-secondary)'}
+        ariaLabel={t('common.shuffle')}
+        disabled={onToggleShuffle === undefined}
+        active={shuffle}
+        onPress={onToggleShuffle}
         className="uw-transport__side"
       />
       <IconButton
@@ -226,6 +242,8 @@ export type NowPlayingScreenProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  readonly shuffle?: boolean | undefined;
+  readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
   readonly download?: DownloadChip | null | undefined;
@@ -261,6 +279,8 @@ export function NowPlayingScreen({
   onNext,
   onPrevious,
   onToggleLike,
+  shuffle = false,
+  onToggleShuffle,
   repeat = 'off',
   onCycleRepeat,
   download = null,
@@ -327,6 +347,8 @@ export function NowPlayingScreen({
             onPrevious={onPrevious}
             onNext={onNext}
             onToggleLike={onToggleLike}
+            shuffle={shuffle}
+            onToggleShuffle={onToggleShuffle}
             repeat={repeat}
             onCycleRepeat={onCycleRepeat}
             download={download}

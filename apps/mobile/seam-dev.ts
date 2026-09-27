@@ -624,6 +624,7 @@ export async function runSeamLink(url: string): Promise<void> {
         positionMs: 0,
         mode: 'playing',
         repeat: 'off',
+        order: [0, 1],
         items: [
           {
             occurrenceId: 'occ-a',

@@ -187,6 +187,15 @@ export type ReadySession = {
    */
   readonly repeat: RepeatMode;
   /**
+   * Shuffle deals a play order, it doesn't reorder the queue:
+   * `shuffleOrder` carries the dealt occurrence ids the cursor walks
+   * (`null` when off — the canonical walk). Runtime-only, rides the
+   * queue projection like `repeat` so adapters never see a separate
+   * channel (decisions.md → Playback).
+   */
+  readonly shuffle: boolean;
+  readonly shuffleOrder: readonly string[] | null;
+  /**
    * The lazy radio tail (queue/radio-tail.ts): `null` unless a radio
    * was seeded this session — runtime-only, never persisted; the
    * queue occurrences it appended are ordinary persisted rows.
@@ -427,6 +436,14 @@ type Ready = {
   settings: Settings;
   playback: SessionPlayback;
   repeat: RepeatMode;
+  /**
+   * The dealt play order under shuffle — occurrence ids the cursor
+   * walks; `null` when off. `#dealtOrder` reconciles it against the
+   * live queue on every read: removals drop out, enqueues insert at
+   * uniform random positions behind the cursor's dealt position.
+   * Runtime-only, never persisted.
+   */
+  shuffleOrder: string[] | null;
   /**
    * Replay cycles per queue occurrence: a repeat-driven replay or wrap
    * bumps the target's cycle, and a recorded play stamps
@@ -887,6 +904,9 @@ export class Session {
   #publish(): void {
     if (this.#ready !== null) {
       const ready = this.#ready;
+      // Reconcile on emit: mutation paths publish inside the storage
+      // segment, before #derived would re-key the deal.
+      const dealt = this.#dealtOrder(ready);
       const base = deepFreeze({
         type: 'ready' as const,
         recordings: Object.freeze([...ready.recordings]),
@@ -901,6 +921,8 @@ export class Session {
         settings: { ...ready.settings },
         playback: ready.playback,
         repeat: ready.repeat,
+        shuffle: dealt !== null,
+        shuffleOrder: dealt === null ? null : [...dealt],
         radio: publishRadio(ready.radio),
         // The published error is a clone sealed by the same freeze —
         // a subscriber must never mutate the mirror's own error.
@@ -1932,6 +1954,7 @@ export class Session {
       settings: { ...data.settings },
       playback: { type: 'idle' },
       repeat: 'off',
+      shuffleOrder: null,
       listenCycles: listenCycleBaseline(
         queue.snapshot().occurrences,
         data.playHistory,
@@ -4035,6 +4058,93 @@ export class Session {
     );
   }
 
+  /**
+   * The queue's shuffle rule. Like `repeat` it travels inside the
+   * queue projection: toggling on deals a fresh `order` — the
+   * canonical prefix through the cursor stays (real `previous`
+   * history), successors shuffle uniformly — and re-installs the
+   * current revision so service and JS fallback walk the same deal
+   * (decisions.md → Playback).
+   */
+  async setShuffle(enabled: boolean): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if ((r.shuffleOrder !== null) === enabled) {
+      return ok(undefined);
+    }
+    if (enabled) {
+      const snap = r.queue.snapshot();
+      const ids = snap.occurrences.map((o) => o.occurrenceId);
+      const cursorIndex =
+        snap.currentOccurrenceId === null
+          ? -1
+          : ids.indexOf(snap.currentOccurrenceId);
+      const upcoming = ids
+        .slice(cursorIndex + 1)
+        // Random-key sort — uniform over permutations, same deal as
+        // playMetadata's enqueue shuffle.
+        .map((id) => ({ id, rank: this.#random.unit() }))
+        .sort((a, b) => a.rank - b.rank)
+        .map(({ id }) => id);
+      r.shuffleOrder = [...ids.slice(0, cursorIndex + 1), ...upcoming];
+    } else {
+      r.shuffleOrder = null;
+    }
+    this.#publish();
+    await this.#projectQueue();
+    return ok(undefined);
+  }
+
+  /** Transport toggle: dealt order on, canonical order off. */
+  async toggleShuffle(): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    return this.setShuffle(ready.value.shuffleOrder === null);
+  }
+
+  /**
+   * The dealt play order under shuffle — occurrence ids the cursor
+   * walks, `null` when off. Reconciles against the live queue on every
+   * call: removed occurrences drop out; newly enqueued ones insert at
+   * uniform random positions behind the cursor's dealt position, so a
+   * mutation never reshuffles dealt successors or rewrites history.
+   */
+  #dealtOrder(r: Ready): readonly string[] | null {
+    const dealt = r.shuffleOrder;
+    if (dealt === null) {
+      return null;
+    }
+    const snap = r.queue.snapshot();
+    const live = new Set(snap.occurrences.map((o) => o.occurrenceId));
+    const order = dealt.filter((id) => live.has(id));
+    const dealtSet = new Set(order);
+    const cursorPos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : order.indexOf(snap.currentOccurrenceId);
+    let changed = order.length !== dealt.length;
+    for (const occurrence of snap.occurrences) {
+      if (dealtSet.has(occurrence.occurrenceId)) {
+        continue;
+      }
+      dealtSet.add(occurrence.occurrenceId);
+      const lo = cursorPos + 1;
+      const slot =
+        lo + Math.floor(this.#random.unit() * (order.length - lo + 1));
+      order.splice(slot, 0, occurrence.occurrenceId);
+      changed = true;
+    }
+    if (changed) {
+      r.shuffleOrder = order;
+    }
+    return r.shuffleOrder;
+  }
+
   async #advance(method: 'next' | 'previous'): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -4049,21 +4159,68 @@ export class Session {
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
+    const dealt = this.#dealtOrder(r);
     try {
       if (method === 'next') {
-        r.queue.next();
-        // repeat=all: a move that ran off the tail wraps to the head
-        // instead of stopping — the same rule the service cursor uses.
-        if (r.repeat === 'all') {
-          const tail = r.queue.snapshot();
-          const head =
-            tail.currentOccurrenceId === null
-              ? tail.occurrences[0]
-              : undefined;
-          if (head !== undefined) {
-            r.queue.select(head.occurrenceId, before.mode === 'playing');
-            bumpListenCycle(r, head.occurrenceId);
+        if (dealt === null) {
+          r.queue.next();
+          // repeat=all: a move that ran off the tail wraps to the head
+          // instead of stopping — the same rule the service cursor uses.
+          if (r.repeat === 'all') {
+            const tail = r.queue.snapshot();
+            const head =
+              tail.currentOccurrenceId === null
+                ? tail.occurrences[0]
+                : undefined;
+            if (head !== undefined) {
+              r.queue.select(head.occurrenceId, before.mode === 'playing');
+              bumpListenCycle(r, head.occurrenceId);
+            }
           }
+        } else {
+          // Under shuffle the walk is the dealt order: `next` steps to
+          // the dealt successor, wraps dealt tail→head under repeat=all,
+          // or runs off the dealt end into the same stopped state a
+          // canonical tail move produces.
+          const pos = dealt.indexOf(before.currentOccurrenceId);
+          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          if (nextId !== undefined) {
+            r.queue.select(nextId, before.mode === 'playing');
+          } else if (r.repeat === 'all' && dealt.length > 0) {
+            const head = dealt[0];
+            if (head !== undefined) {
+              r.queue.select(head, before.mode === 'playing');
+              bumpListenCycle(r, head);
+            }
+          } else {
+            r.queue.stop();
+          }
+        }
+      } else if (dealt !== null) {
+        const pos = dealt.indexOf(before.currentOccurrenceId);
+        if (
+          pos === 0 &&
+          before.positionMs <= 3000 &&
+          r.repeat === 'all' &&
+          dealt.length > 1
+        ) {
+          // Dealt head inside the restart window wraps to the dealt
+          // tail — the same rule the service cursor applies.
+          const tail = dealt[dealt.length - 1];
+          if (tail !== undefined) {
+            r.queue.select(tail, before.mode === 'playing');
+            bumpListenCycle(r, tail);
+          }
+        } else if (pos > 0 && before.positionMs <= 3000) {
+          const prev = dealt[pos - 1];
+          if (prev !== undefined) {
+            r.queue.select(prev, before.mode === 'playing');
+          }
+        } else {
+          // Past the restart window, or parked at the dealt head
+          // without a wrap: the same in-place restart the engine's
+          // previous() applies — position 0, ticking only past 0.
+          r.queue.seekTo(0);
         }
       } else if (
         r.repeat === 'all' &&
@@ -5360,13 +5517,14 @@ export class Session {
       active.timer?.cancel();
       this.#active = null;
       const before = r.queue.snapshot();
+      const dealt = this.#dealtOrder(r);
       try {
         // repeat=one replays the cursor item; repeat=all wraps a tail
         // end back to the head — the same rules the service follows.
         if (r.repeat === 'one' && before.currentOccurrenceId !== null) {
           r.queue.select(before.currentOccurrenceId, true);
           bumpListenCycle(r, before.currentOccurrenceId);
-        } else {
+        } else if (dealt === null) {
           r.queue.next();
           if (r.repeat === 'all') {
             const tail = r.queue.snapshot();
@@ -5378,6 +5536,25 @@ export class Session {
               r.queue.select(head.occurrenceId, true);
               bumpListenCycle(r, head.occurrenceId);
             }
+          }
+        } else {
+          // Under shuffle the fallback walks the dealt order: dealt
+          // successor, dealt head under repeat=all, else run off.
+          const pos =
+            before.currentOccurrenceId === null
+              ? -1
+              : dealt.indexOf(before.currentOccurrenceId);
+          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          if (nextId !== undefined) {
+            r.queue.select(nextId, true);
+          } else if (r.repeat === 'all' && dealt.length > 0) {
+            const head = dealt[0];
+            if (head !== undefined) {
+              r.queue.select(head, true);
+              bumpListenCycle(r, head);
+            }
+          } else {
+            r.queue.stop();
           }
         }
       } catch {
@@ -5582,6 +5759,18 @@ export class Session {
         };
       },
     );
+    // The walk the cursor steps through: the dealt order under shuffle,
+    // the identity otherwise — `items` itself stays canonical.
+    const dealt = this.#dealtOrder(r);
+    const indexOfId = new Map(
+      snap.occurrences.map((o, i) => [o.occurrenceId, i] as const),
+    );
+    const order =
+      dealt === null
+        ? snap.occurrences.map((_, i) => i)
+        : dealt
+          .map((id) => indexOfId.get(id))
+          .filter((i): i is number => i !== undefined);
     return {
       projectionId: this.#ids.next('projection'),
       queueRev: snap.revision,
@@ -5589,6 +5778,7 @@ export class Session {
       positionMs: snap.positionMs,
       mode: snap.mode,
       repeat: r.repeat,
+      order,
       items,
     };
   }
@@ -5671,6 +5861,13 @@ export class Session {
         : items.findIndex(
           (i) => i.occurrenceId === marker?.currentOccurrenceId,
         );
+    // Legal edges live in walk space: `order` maps a walk position to
+    // an item index — the dealt order under shuffle, the identity
+    // under canonical play (or on a projection that predates `order`).
+    const order = projection?.order ?? items.map((_, i) => i);
+    const orderPos = cursorIndex < 0 ? -1 : order.indexOf(cursorIndex);
+    const atWalk = (pos: number): string | null =>
+      items[order[pos] ?? -1]?.occurrenceId ?? null;
     // A service move emits the projection it captured at move-start,
     // which can lag one JS install. Its identity echoes that captured
     // rev (a fresh attach keys to proj.queueRev) while a same-item
@@ -5698,10 +5895,7 @@ export class Session {
     // starts a fresh listen, which the play dedup counts as a new loop.
     let repeatEdge = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
-      const successor =
-        cursorIndex >= 0
-          ? items[cursorIndex + 1]?.occurrenceId ?? null
-          : null;
+      const successor = orderPos >= 0 ? atWalk(orderPos + 1) : null;
       legal = event.toOccurrenceId === successor;
       // repeat=one replays the cursor item on `ended` — a same-item
       // edge is legal only there (remote-next still advances). The
@@ -5717,34 +5911,31 @@ export class Session {
         legal = true;
         repeatEdge = true;
       }
-      // repeat=all wraps a tail move back to the head.
+      // repeat=all wraps a dealt-tail move back to the dealt head.
       if (
         !legal &&
         projection?.repeat === 'all' &&
-        cursorIndex === items.length - 1 &&
-        items.length > 0 &&
-        event.toOccurrenceId === items[0]?.occurrenceId
+        orderPos === order.length - 1 &&
+        order.length > 0 &&
+        event.toOccurrenceId === atWalk(0)
       ) {
         legal = true;
         repeatEdge = true;
       }
     } else if (event.reason === 'remote-previous') {
-      const predecessor =
-        cursorIndex > 0
-          ? items[cursorIndex - 1]?.occurrenceId ?? null
-          : null;
+      const predecessor = orderPos > 0 ? atWalk(orderPos - 1) : null;
       legal =
         (event.toOccurrenceId !== null &&
           event.toOccurrenceId === event.fromOccurrenceId) ||
         (predecessor !== null &&
           event.toOccurrenceId === predecessor);
-      // repeat=all wraps a head move to the tail.
+      // repeat=all wraps a dealt-head move to the dealt tail.
       if (
         !legal &&
         projection?.repeat === 'all' &&
-        cursorIndex === 0 &&
-        items.length > 1 &&
-        event.toOccurrenceId === items[items.length - 1]?.occurrenceId
+        orderPos === 0 &&
+        order.length > 1 &&
+        event.toOccurrenceId === atWalk(order.length - 1)
       ) {
         legal = true;
         repeatEdge = true;

@@ -829,6 +829,8 @@ export type PlayerModelInput = {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
   readonly repeat: RepeatMode;
+  /** The dealt play order under shuffle (occurrence ids); canonical when null. */
+  readonly shuffleOrder: readonly string[] | null;
 };
 
 function indexById(
@@ -850,7 +852,7 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
 }
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
-  const { playback, queue, recordings, likes, repeat } = input;
+  const { playback, queue, recordings, likes, repeat, shuffleOrder } = input;
   if (playback.type === 'idle') {
     return null;
   }
@@ -860,19 +862,22 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   // transition the playing occurrence can legitimately differ from
   // the queue's current until the reconcile lands.
   const activeId = playback.occurrenceId ?? queue.currentOccurrenceId;
-  const currentIndex = queue.occurrences.findIndex(
-    (o) => o.occurrenceId === activeId,
-  );
+  // Boundaries live in walk space: the dealt order under shuffle, the
+  // canonical occurrence order otherwise — same space the cursor uses.
+  const walk =
+    shuffleOrder ?? queue.occurrences.map((o) => o.occurrenceId);
+  const currentIndex =
+    activeId === null ? -1 : walk.indexOf(activeId);
   // Under repeat=all the wrap edges are real moves — the transport
-  // keeps both controls enabled at queue boundaries so they stay
+  // keeps both controls enabled at walk boundaries so they stay
   // reachable (the cursor applies the same wrap rules; a lone item
   // self-wraps into an in-place restart).
-  const wraps = repeat === 'all' && queue.occurrences.length > 0;
+  const wraps = repeat === 'all' && walk.length > 0;
   const canPrevious =
     currentIndex > 0 || (wraps && currentIndex === 0);
   const canNext =
     currentIndex >= 0 &&
-    (currentIndex < queue.occurrences.length - 1 || wraps);
+    (currentIndex < walk.length - 1 || wraps);
   const recordingId = playback.recordingId;
   const recording = recordingId === null ? undefined : byId.get(recordingId);
   const base = {
