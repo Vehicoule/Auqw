@@ -99,13 +99,14 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     }
     const live = inflight.get(id);
     if (live !== undefined) {
-      if (
-        target.durationMs !== null &&
-        target.durationMs > maxDurationMs
-      ) {
-        // The update revealed a duration the port would reject
-        // outright — kill the sweep in place; nothing may cache a
-        // result the duration gate exists to skip.
+      const priorMs = live.target.durationMs;
+      const updatedMs = target.durationMs;
+      if (priorMs === null && updatedMs !== null && updatedMs > maxDurationMs) {
+        // A duration that only now becomes known is checked like the
+        // port checks it up front — past the decode bound the sweep
+        // dies in place; its settle caches nothing. (An unchanged
+        // durationMs is a duplicate pull, not a reveal — the live
+        // request's own terminal failure must still cache.)
         inflight.delete(id);
         if (live.timer !== null) {
           clearTimeoutFn(live.timer);

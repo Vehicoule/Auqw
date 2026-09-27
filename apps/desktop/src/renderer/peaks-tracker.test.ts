@@ -261,6 +261,28 @@ export async function run(): Promise<void> {
     );
   }
 
+  // But a pull that STARTED over the cap is not an "update" — the
+  // duplicate (the hook fires pull twice on mount) must leave the
+  // in-flight request to settle its terminal failure, so revisits
+  // hit the cached null instead of re-pulling forever.
+  {
+    const { calls, port } = fakePort(() =>
+      err(appError('budget-exceeded', 'track too long')),
+    );
+    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    tracker.pull({ id: 'r-8e', handle: 'h', durationMs: 2000 });
+    tracker.pull({ id: 'r-8e', handle: 'h', durationMs: 2000 });
+    await flush();
+    assertEqual(calls.length, 1, 'the duplicate pull dedupes');
+    assertEqual(
+      tracker.get('r-8e'),
+      null,
+      'the terminal failure still caches',
+    );
+    tracker.pull({ id: 'r-8e', handle: 'h', durationMs: 2000 });
+    assertEqual(calls.length, 1, 'a revisit never re-pulls');
+  }
+
   // A real budget-exceeded while durationMs is unknown (the decoded
   // PCM ceiling) is still terminal — the duration landing later must
   // not re-decode the same oversized audio.
