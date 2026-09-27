@@ -174,6 +174,13 @@ class QueueProjectionInput : Record {
   @Field
   var repeat: String = "off"
 
+  /** The dealt walk order: a permutation of `items` indices the
+   * cursor steps through (shuffle). Canonical item order never
+   * changes — only the walk does. Absent from older JS bundles =
+   * the identity order. */
+  @Field
+  var order: List<Int> = emptyList()
+
   @Field
   var items: List<ProjectionItemInput> = emptyList()
 }
@@ -1451,6 +1458,13 @@ class AuqwExpoModule : Module() {
     if (p.items.map { it.occurrenceId }.toSet().size != p.items.size) {
       bad("duplicate occurrenceId")
     }
+    if (p.order.isNotEmpty() &&
+      (p.order.size != p.items.size ||
+        p.order.any { it < 0 || it >= p.items.size } ||
+        p.order.toSet().size != p.order.size)
+    ) {
+      bad("order must be a permutation of item indices")
+    }
     if (p.currentOccurrenceId != null &&
       p.items.none { it.occurrenceId == p.currentOccurrenceId }
     ) {
@@ -1523,6 +1537,13 @@ class AuqwExpoModule : Module() {
     if (idx < 0) {
       return
     }
+    // The cursor walks `order` positions — the dealt play order under
+    // shuffle; an absent list (older JS bundles) reads as identity.
+    val order = if (proj.order.isEmpty()) proj.items.indices.toList() else proj.order
+    val pos = order.indexOf(idx)
+    if (pos < 0) {
+      return
+    }
     if (reason == "remote-previous") {
       // Transport rule: past the restart threshold, previous restarts
       // the current item — a legal same-item target reusing the live
@@ -1535,10 +1556,10 @@ class AuqwExpoModule : Module() {
         )
         return
       }
-      if (idx == 0) {
-        // At the head: repeat=all wraps to the tail; otherwise the
-        // item restarts in place, same as before.
-        val last = proj.items.lastOrNull()
+      if (pos == 0) {
+        // At the walk's head: repeat=all wraps to its tail; otherwise
+        // the item restarts in place, same as before.
+        val last = order.lastOrNull()?.let { proj.items.getOrNull(it) }
         if (proj.repeat == "all" && last != null && proj.items.size > 1) {
           moveTo(p, proj, from, last, reason)
         } else {
@@ -1550,7 +1571,7 @@ class AuqwExpoModule : Module() {
         }
         return
       }
-      moveTo(p, proj, from, proj.items[idx - 1], reason)
+      moveTo(p, proj, from, proj.items[order[pos - 1]], reason)
       return
     }
     // repeat=one replays the cursor item on a natural end — the live
@@ -1565,11 +1586,11 @@ class AuqwExpoModule : Module() {
       )
       return
     }
-    var next = proj.items.getOrNull(idx + 1)
-    if (next == null && proj.repeat == "all" && proj.items.isNotEmpty()) {
-      // Tail under repeat=all wraps to the head — a single-item queue
-      // lands back on itself and becomes an in-place restart.
-      next = proj.items[0]
+    var next = order.getOrNull(pos + 1)?.let { proj.items.getOrNull(it) }
+    if (next == null && proj.repeat == "all" && order.isNotEmpty()) {
+      // Walk's tail under repeat=all wraps to its head — a single-item
+      // queue lands back on itself and becomes an in-place restart.
+      next = proj.items[order.first()]
     }
     if (next != null && next.occurrenceId == from) {
       p.seekTo(0)

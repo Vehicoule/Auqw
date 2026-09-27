@@ -348,6 +348,7 @@ function testPlayerMapper(): void {
     recordings: fixtureRecordings,
     likes: fixtureLikes,
     repeat: 'off' as const,
+    shuffleOrder: null,
   };
   assertEqual(toPlayerModel({ ...base, playback: { type: 'idle' } }), null);
   const playing = toPlayerModel({ ...base, playback: fixturePlaybackPlaying });

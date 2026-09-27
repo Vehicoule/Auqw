@@ -1417,6 +1417,7 @@ function Main({
         recordings: state.recordings,
         likes: state.likes,
         repeat: state.repeat,
+        shuffleOrder: state.shuffleOrder,
       }),
     [state, localeTick],
   );
@@ -1767,41 +1768,46 @@ function Main({
     [session, state.queue, canPlay],
   );
 
-  // Mirrors the cursor's targeting: next → index+1; previous → restart
-  // current when positionMs>3s or at index 0, else index−1 — and under
-  // repeat=all both edges wrap (tail→head, head→tail). The gate sees
-  // the same target the engine would land on — an owned target still
-  // advances offline.
+  // Mirrors the cursor's targeting in walk space — the dealt order
+  // under shuffle, canonical otherwise: next → walk position+1;
+  // previous → restart current when positionMs>3s or at the walk's
+  // head, else position−1 — and under repeat=all both edges wrap
+  // (tail→head, head→tail). The gate sees the same target the engine
+  // would land on — an owned target still advances offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       const { occurrences, currentOccurrenceId, positionMs } =
         state.queue;
-      const index = occurrences.findIndex(
-        (o) => o.occurrenceId === currentOccurrenceId,
-      );
-      if (index < 0) {
+      const walk =
+        state.type === 'ready' && state.shuffleOrder !== null
+          ? state.shuffleOrder
+          : occurrences.map((o) => o.occurrenceId);
+      const pos =
+        currentOccurrenceId === null ? -1 : walk.indexOf(currentOccurrenceId);
+      if (pos < 0) {
         return;
       }
       const wraps =
         state.type === 'ready' &&
         state.repeat === 'all' &&
-        occurrences.length > 0;
-      const target =
-        occurrences[
-          method === 'next'
-            ? index + 1 < occurrences.length
-              ? index + 1
-              : wraps
-                ? 0
-                : index + 1
-            : positionMs > 3_000
-              ? index
-              : index === 0
-                ? wraps
-                  ? occurrences.length - 1
-                  : index
-                : index - 1
-        ];
+        walk.length > 0;
+      const targetId =
+        method === 'next'
+          ? pos + 1 < walk.length
+            ? walk[pos + 1]
+            : wraps
+              ? walk[0]
+              : undefined
+          : positionMs > 3_000
+            ? walk[pos]
+            : pos === 0
+              ? wraps
+                ? walk[walk.length - 1]
+                : walk[pos]
+              : walk[pos - 1];
+      const target = occurrences.find(
+        (o) => o.occurrenceId === targetId,
+      );
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
@@ -3190,6 +3196,8 @@ function Main({
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
                   onToggleLike={onToggleLike}
+                  shuffle={state.type === 'ready' ? state.shuffle : false}
+                  onToggleShuffle={() => void session.toggleShuffle()}
                   repeat={state.type === 'ready' ? state.repeat : 'off'}
                   onCycleRepeat={() => void session.cycleRepeat()}
                   download={

@@ -135,16 +135,19 @@ export function isRadioPage(value: unknown): value is RadioPage {
 /**
  * Queue occurrences after the current one — the buffered tail the
  * fetch-ahead window measures. A stopped queue (no current) has no
- * playhead to buffer ahead of: 0.
+ * playhead to buffer ahead of: 0. `walk` is the cursor's play order
+ * — the dealt order under shuffle; omitted = canonical.
  */
-export function remainingAfterCurrent(queue: QueueSnapshot): number {
+export function remainingAfterCurrent(
+  queue: QueueSnapshot,
+  walk?: readonly string[],
+): number {
   if (queue.currentOccurrenceId === null) {
     return 0;
   }
-  const index = queue.occurrences.findIndex(
-    (o) => o.occurrenceId === queue.currentOccurrenceId,
-  );
-  return index < 0 ? 0 : queue.occurrences.length - index - 1;
+  const path = walk ?? queue.occurrences.map((o) => o.occurrenceId);
+  const index = path.indexOf(queue.currentOccurrenceId);
+  return index < 0 ? 0 : path.length - index - 1;
 }
 
 /**
@@ -156,6 +159,7 @@ export function remainingAfterCurrent(queue: QueueSnapshot): number {
 export function shouldGrowRadio(
   record: RadioTailRecord | null,
   queue: QueueSnapshot,
+  walk?: readonly string[],
 ): boolean {
   return (
     record !== null &&
@@ -163,7 +167,7 @@ export function shouldGrowRadio(
     record.continuation !== null &&
     !record.fetching &&
     queue.currentOccurrenceId !== null &&
-    remainingAfterCurrent(queue) < RADIO_FETCH_AHEAD
+    remainingAfterCurrent(queue, walk) < RADIO_FETCH_AHEAD
   );
 }
 

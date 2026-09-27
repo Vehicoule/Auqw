@@ -31,6 +31,7 @@ export const en = {
   'common.repeat': 'repeat',
   'common.repeatAll': 'repeat all',
   'common.repeatOne': 'repeat one',
+  'common.shuffle': 'shuffle',
   'common.unlike': 'unlike',
   'common.unavailable': 'unavailable',
   'common.cardA11y': '{title}, {subtitle}',

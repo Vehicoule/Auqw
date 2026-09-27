@@ -214,6 +214,12 @@ export type QueueProjection = {
    * remote-previous→tail), `one` replays the cursor item on `ended`.
    */
   repeat: 'off' | 'all' | 'one';
+  /**
+   * The dealt walk order: a permutation of `items` indices the cursor
+   * steps through — the identity when shuffle is off. Canonical item
+   * order never changes; only the walk does (decisions.md).
+   */
+  order: number[];
   items: QueueProjectionItem[];
 };
 

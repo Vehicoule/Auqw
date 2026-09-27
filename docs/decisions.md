@@ -18,6 +18,12 @@ rationale and the condition that would reopen it.
 | --- | --- | --- | --- |
 | `serde` (derive) joins youtube-music guest deps for `radio.seed`'s `next` parse | Decided | A 565 KB `next` body as a `Value` DOM burns ~340 M fuel against the 200 M per-entry cap — the mobile `budget-exceeded: fuel` failure. Typed structs with per-field tolerance visitors parse once (~84 M fuel) at identical skip semantics. serde + serde_json were already SDK deps; this adds only `serde`'s `derive` feature to the guest crate. | If the guest grows a second large-body endpoint, generalize the opt_* helpers into the SDK or revisit a streaming parse. |
 
+## Playback
+
+| Decision | Status | Rationale | Reopen when |
+| --- | --- | --- | --- |
+| Shuffle deals a play order, not a queue order: `QueueProjection.order` carries a permutation of item indices the cursor walks — dealt at toggle-on as the canonical prefix through the cursor + uniformly shuffled successors | Decided | Canonical `items` (and the persisted queue) stay untouched, `previous` keeps real history, and the strict immediate-successor legality check on `queue-transition` survives — a random-next rule would have to accept any target. Mirrors ExoPlayer's ShuffleOrder model. Mutations reconcile the deal: removed occurrences drop out, enqueued ones insert at uniform random positions behind the cursor's dealt position, and dealt successors never reshuffle. `repeat=one` still replays the cursor item; `repeat=all` wraps the dealt ends (tail→head on next/ended, head→tail on previous); a lone item self-wraps into a restart. The queue list keeps showing canonical order. | If "up next" must display the dealt order, or a random-next mode is requested, revisit here first. |
+
 ## Presentation
 
 | Decision | Status | Rationale | Reopen when |

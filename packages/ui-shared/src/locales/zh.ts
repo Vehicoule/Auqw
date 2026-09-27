@@ -32,6 +32,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'common.repeat': '重复',
   'common.repeatAll': '全部重复',
   'common.repeatOne': '单曲重复',
+  'common.shuffle': '随机播放',
   'common.unlike': '取消喜欢',
   'common.unavailable': '不可用',
   'common.cardA11y': '{title}，{subtitle}',

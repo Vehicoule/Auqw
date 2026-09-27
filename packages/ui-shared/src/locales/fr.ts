@@ -31,6 +31,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'common.repeat': 'répéter',
   'common.repeatAll': 'tout répéter',
   'common.repeatOne': 'répéter le titre',
+  'common.shuffle': 'aléatoire',
   'common.unlike': "je n'aime plus",
   'common.unavailable': 'indisponible',
   'common.cardA11y': '{title}, {subtitle}',

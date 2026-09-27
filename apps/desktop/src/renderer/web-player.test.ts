@@ -144,6 +144,7 @@ function twoItemProjection(
     positionMs: 0,
     mode: 'playing',
     repeat: 'off',
+    order: [0, 1],
     items: [
       {
         occurrenceId: 'occ-1',
@@ -455,6 +456,7 @@ export async function run(): Promise<void> {
     const events = collect(player);
     await player.setQueueProjection(
       twoItemProjection({
+        order: [0],
         items: [
           {
             occurrenceId: 'occ-1',
@@ -1104,6 +1106,7 @@ export async function run(): Promise<void> {
     const events = collect(player);
     await player.setQueueProjection(
       twoItemProjection({
+        order: [0],
         items: [
           {
             occurrenceId: 'occ-1',

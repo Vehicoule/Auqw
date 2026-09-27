@@ -227,6 +227,7 @@ async function methodForwarding(): Promise<void> {
     positionMs: 0,
     mode: 'playing',
     repeat: 'off',
+    order: [0],
     items: [
       {
         occurrenceId: 'o1',
@@ -288,6 +289,7 @@ async function rejectionWrapping(): Promise<void> {
             positionMs: 0,
             mode: 'stopped',
             repeat: 'off',
+            order: [],
             items: [],
           }),
       },
