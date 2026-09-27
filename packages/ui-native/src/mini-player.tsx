@@ -49,6 +49,11 @@ export type MiniPlayerProps = {
       directly so the sheet rises with the finger, and the pill fades
       out on the same value. Omitted in static fixtures. */
   readonly progress?: SharedValue<number> | undefined;
+  /** Shared pixel travel published by the sheet's layout — finger
+      distance is divided by it so the sheet's translation and this
+      drag's progress conversion use the same physical distance. Falls
+      back to the window height until the sheet has measured. */
+  readonly travel?: SharedValue<number> | undefined;
   /** False while the sheet owns the screen — keeps the invisible pill
       out of the touch path and the accessibility tree. */
   readonly interactive?: boolean | undefined;
@@ -65,6 +70,7 @@ export function MiniPlayer({
   onDismiss,
   onCollapse,
   progress: sheetProgress,
+  travel: sheetTravel,
   interactive = true,
 }: MiniPlayerProps) {
   const theme = useTheme();
@@ -101,10 +107,13 @@ export function MiniPlayer({
       })
       .onUpdate((e) => {
         if (sheetProgress !== undefined) {
-          const travel = Math.max(1, windowHeight);
+          const travel =
+            sheetTravel !== undefined && sheetTravel.value > 0
+              ? sheetTravel.value
+              : windowHeight;
           sheetProgress.value = Math.min(
             1,
-            Math.max(0, dragStart.value - e.translationY / travel),
+            Math.max(0, dragStart.value - e.translationY / Math.max(1, travel)),
           );
         }
       })
@@ -129,7 +138,12 @@ export function MiniPlayer({
           scheduleOnRN(onDismiss);
           return;
         }
-        const travel = Math.max(1, windowHeight);
+        const travel = Math.max(
+          1,
+          sheetTravel !== undefined && sheetTravel.value > 0
+            ? sheetTravel.value
+            : windowHeight,
+        );
         const target =
           resolveStageAnchor(
             dragStart.value,
@@ -159,6 +173,7 @@ export function MiniPlayer({
     onDismiss,
     onCollapse,
     sheetProgress,
+    sheetTravel,
     windowHeight,
     theme.reducedMotion,
     dragStart,

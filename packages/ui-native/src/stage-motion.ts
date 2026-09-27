@@ -22,13 +22,17 @@ export const STAGE_FLING_VELOCITY = 600;
 
 export type StageAnchor = 'expanded' | 'collapsed';
 
-const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+const clamp01 = (v: number): number => {
+  'worklet';
+  return Math.min(1, Math.max(0, v));
+};
 
 /**
  * The collapsed pill's opacity: 1 at rest, 0 at STAGE_PILL_GONE — its fade
  * window ends exactly where the expanded content's reveal begins.
  */
 export function stageCollapsedAlpha(progress: number): number {
+  'worklet';
   if (!Number.isFinite(progress)) return 1;
   return 1 - clamp01(
     (progress - STAGE_COUPLED_END) / (STAGE_PILL_GONE - STAGE_COUPLED_END),
@@ -41,6 +45,7 @@ export function stageCollapsedAlpha(progress: number): number {
  * revealed exactly at the input gate.
  */
 export function stageContentAlpha(progress: number): number {
+  'worklet';
   if (!Number.isFinite(progress)) return 0;
   return clamp01(
     (progress - STAGE_PILL_GONE) / (STAGE_CONTENT_GATE - STAGE_PILL_GONE),
@@ -49,6 +54,7 @@ export function stageContentAlpha(progress: number): number {
 
 /** Scrim over the uncovered region: rises with the sheet, stays subtle. */
 export function stageScrimAlpha(progress: number): number {
+  'worklet';
   if (!Number.isFinite(progress)) return 0;
   return clamp01(progress) * 0.5;
 }
@@ -63,6 +69,7 @@ export function stageTopRadius(
   restRadius: number,
   sheetRadius: number,
 ): number {
+  'worklet';
   if (!Number.isFinite(progress)) return restRadius;
   if (progress >= 0.999) return 0;
   const coupled = clamp01(progress / STAGE_COUPLED_END);
@@ -81,6 +88,7 @@ export function resolveStageAnchor(
   commitFraction: number = STAGE_COMMIT_FRACTION,
   flingVelocity: number = STAGE_FLING_VELOCITY,
 ): StageAnchor {
+  'worklet';
   if (Number.isFinite(velocityY) && velocityY <= -flingVelocity) {
     return 'expanded';
   }

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Image,
   Platform,
@@ -10,6 +16,7 @@ import {
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
@@ -432,6 +439,11 @@ export type StageSheetProps = {
       `expanded` change after the fact. Standalone hosts (the gallery)
       omit it and the sheet animates from `expanded` alone. */
   readonly progress?: SharedValue<number> | undefined;
+  /** Shared pixel travel for the morph — the sheet publishes its
+      measured height here so the mini-player's drag converts finger
+      pixels to progress against the same distance the sheet translates
+      over. Standalone hosts omit it and the sheet measures itself. */
+  readonly travel?: SharedValue<number> | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
@@ -469,9 +481,10 @@ export function StageSheet({
   radio,
   queueReordering = false,
   queueScrollEnabled = true,
-  dragPreview = 'rest',
+  dragPreview,
   topInset = 0,
   progress: progressProp,
+  travel: travelProp,
   onPlayPause,
   onNext,
   onPrevious,
@@ -500,6 +513,10 @@ export function StageSheet({
   // One progress drives the morph: the pill's rise drag writes it from
   // the UI thread, `expanded` flips only on commit.
   const progress = progressProp ?? internalProgress;
+  const internalTravel = useSharedValue(0);
+  // The measured sheet height is the morph's travel distance; the pill
+  // divides finger pixels by this same value so the rise is 1:1.
+  const travelPx = travelProp ?? internalTravel;
   const dragStart = useSharedValue(0);
   const [internalMode, setInternalMode] = useState<StageMode>('player');
   const activeMode = mode ?? internalMode;
@@ -511,7 +528,11 @@ export function StageSheet({
       : withSpring(target, STAGE_SETTLE_SPRING);
   }, [expanded, theme.reducedMotion, progress]);
 
+  // Gallery-only preview states — production never passes dragPreview,
+  // and this must not run for ordinary `expanded` flips or it would
+  // stomp the settle spring the expand effect just started.
   useEffect(() => {
+    if (dragPreview === undefined) return;
     if (dragPreview === 'rest') {
       progress.value = expanded ? 1 : 0;
     } else if (dragPreview === 'mid-drag') {
@@ -543,14 +564,14 @@ export function StageSheet({
           dragStart.value = progress.value;
         })
         .onUpdate((e) => {
-          const travel = Math.max(1, height);
+          const travel = Math.max(1, travelPx.value);
           progress.value = Math.min(
             1,
             Math.max(0, dragStart.value - e.translationY / travel),
           );
         })
         .onFinalize((e) => {
-          const travel = Math.max(1, height);
+          const travel = Math.max(1, travelPx.value);
           const target =
             resolveStageAnchor(
               dragStart.value,
@@ -567,7 +588,7 @@ export function StageSheet({
               });
           scheduleOnRN(commitAnchor, target);
         }),
-    [height, theme.reducedMotion, progress, dragStart, commitAnchor],
+    [travelPx, theme.reducedMotion, progress, dragStart, commitAnchor],
   );
 
   const restCorner = theme.radius.float;
@@ -581,7 +602,12 @@ export function StageSheet({
       // Before the first layout measure lands, keep the sheet parked
       // off-screen rather than flashing a zero-travel frame.
       transform: [
-        { translateY: height === 0 ? 4000 : height * (1 - progress.value) },
+        {
+          translateY:
+            travelPx.value <= 0
+              ? 4000
+              : travelPx.value * (1 - progress.value),
+        },
       ],
       borderTopLeftRadius: radius,
       borderTopRightRadius: radius,
@@ -602,21 +628,22 @@ export function StageSheet({
   // here is bound to the outer (possibly light) scheme.
   const colors = immersive ? schemes.dark : theme.colors;
 
-  // The full-bleed artwork + blur is expensive enough that a collapsed
-  // sheet shouldn't keep it mounted; it stays through the collapse
-  // animation so the dismissal never exposes an empty surface.
+  // The full-bleed artwork + blur is expensive enough that a parked
+  // sheet shouldn't keep it mounted; it mounts the moment the sheet
+  // starts rising (a mid-flight drag must never reveal bare surface)
+  // and unmounts only once the morph is fully back at the pill — the
+  // settle-back path still gets its backdrop.
   const [backdropOn, setBackdropOn] = useState(expanded);
-  useEffect(() => {
-    if (expanded) {
-      setBackdropOn(true);
-      return;
-    }
-    const timer = setTimeout(
-      () => setBackdropOn(false),
-      theme.motion.sheet + 60,
-    );
-    return () => clearTimeout(timer);
-  }, [expanded, theme.motion.sheet]);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  useAnimatedReaction(
+    () => progress.value > 0.001,
+    (risen, prev) => {
+      if (risen === prev) return;
+      scheduleOnRN(setBackdropOn, risen || expandedRef.current);
+    },
+    [progress],
+  );
 
   const body = (
     <>
@@ -1006,7 +1033,10 @@ export function StageSheet({
         />
       )}
       <Animated.View
-        onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
+        onLayout={(e) => {
+          setHeight(e.nativeEvent.layout.height);
+          travelPx.value = e.nativeEvent.layout.height;
+        }}
         pointerEvents={expanded ? 'auto' : 'none'}
         accessibilityViewIsModal={expanded}
         style={[

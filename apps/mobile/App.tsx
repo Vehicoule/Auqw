@@ -724,6 +724,10 @@ function Main({
   // stage sheet — drags write it directly so the sheet tracks the
   // finger; `expanded` only flips once a gesture commits.
   const stageProgress = useSharedValue(0);
+  // The sheet publishes its measured pixel travel here so the pill's
+  // drag converts finger distance to progress over the same distance
+  // the sheet physically translates.
+  const stageTravel = useSharedValue(0);
   const [showGallery, setShowGallery] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
@@ -4084,6 +4088,7 @@ function Main({
                 <MiniPlayer
                   player={player}
                   progress={stageProgress}
+                  travel={stageTravel}
                   interactive={!expanded}
                   onPress={() => setExpanded(true)}
                   onCollapse={() => setExpanded(false)}
@@ -4101,6 +4106,7 @@ function Main({
               player={player}
               expanded={expanded}
               progress={stageProgress}
+              travel={stageTravel}
               onExpandChange={setExpanded}
               mode={stageMode}
               onModeChange={setStageMode}
