@@ -27,6 +27,32 @@ class CollectingSender implements NetSender {
   }
 }
 
+/** Sender with the WebContents lifecycle events — destroyed/navigate. */
+class NavigableSender extends CollectingSender {
+  private listeners = new Map<string, (() => void)[]>();
+  on(event: string, listener: () => void): void {
+    const cbs = this.listeners.get(event) ?? [];
+    cbs.push(listener);
+    this.listeners.set(event, cbs);
+  }
+  off(event: string, listener: () => void): void {
+    this.listeners.set(
+      event,
+      (this.listeners.get(event) ?? []).filter((cb) => cb !== listener),
+    );
+  }
+  navigate(): void {
+    for (const cb of this.listeners.get('did-navigate') ?? []) {
+      cb();
+    }
+  }
+  crash(): void {
+    for (const cb of this.listeners.get('render-process-gone') ?? []) {
+      cb();
+    }
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -348,6 +374,27 @@ export async function run(): Promise<void> {
         },
       },
     });
+    monitor.stop();
+  }
+
+  {
+    // Renderer navigation/crash inside a live WebContents releases its
+    // subscriptions — the replacement document's subscribe pushes the
+    // snapshot again.
+    const rig = env();
+    rig.files.set(`/home/test/${OMARCHY_CONFIG}`, OMARCHY_TOML);
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
+    const sender = new NavigableSender();
+    monitor.attach(sender);
+    monitor.attach(sender); // refcounted: two logical subscriptions
+    assertEqual(sender.sent.length, 1);
+    sender.navigate();
+    monitor.attach(sender); // replacement document subscribes
+    assertEqual(
+      sender.sent.length,
+      2,
+      'a fresh subscribe after navigation gets the snapshot',
+    );
     monitor.stop();
   }
 

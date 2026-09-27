@@ -176,14 +176,15 @@ function overlay(
   const values: { -readonly [K in keyof SchemeValues]: string } = {
     ...base,
   };
-  // accentSoft is the active-row selection tint — the OS `sel` color
-  // wins when present, otherwise it derives as accent @14%.
+  // accentSoft is the active-row selection tint — an OS `sel` colors it
+  // at the same bounded alpha (opaque sel over light text would erase
+  // the label); absent sel it derives as accent @14%.
+  const softSrc = sel ?? (accent !== null ? nudgeToContrast(accent, canvas, pole) : null);
+  if (softSrc !== null) {
+    values.accentSoft = alphaOf(softSrc, ACCENT_SOFT_ALPHA);
+  }
   if (accent !== null) {
-    const guarded = nudgeToContrast(accent, canvas, pole);
-    values.accent = toHex(guarded);
-    values.accentSoft = sel !== null ? toHex(sel) : alphaOf(guarded, ACCENT_SOFT_ALPHA);
-  } else if (sel !== null) {
-    values.accentSoft = toHex(sel);
+    values.accent = toHex(nudgeToContrast(accent, canvas, pole));
   }
   if (warn !== null) {
     values.warn = toHex(nudgeToContrast(warn, canvas, pole));
@@ -231,7 +232,9 @@ function fullPalette(palette: AdaptivePalette, bg: Rgb, fg: Rgb): DerivedTheme {
     textSecondary: toHex(text(mix(fg, bg, SECONDARY_MIX))),
     divider: toHex(mix(bg, textPrimary, DIVIDER_MIX)),
     accent: toHex(accent),
-    accentSoft: sel !== null ? toHex(sel) : alphaOf(accent, ACCENT_SOFT_ALPHA),
+    // `sel` tints the selection surface at the same bounded alpha — an
+    // opaque sel behind the standard text roles could erase labels.
+    accentSoft: alphaOf(sel ?? accent, ACCENT_SOFT_ALPHA),
     warn: toHex(text(warnRaw ?? parseHex(base.warn) ?? pole)),
     liked: toHex(text(parseHex(base.liked) ?? pole)),
     fg08: alphaOf(textPrimary, alphas.fg08),

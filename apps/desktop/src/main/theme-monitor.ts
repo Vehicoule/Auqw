@@ -29,17 +29,33 @@ export interface ThemeSourceEnv {
   readonly onSystemChange: (cb: () => void) => () => void;
 }
 
+/**
+ * Subscriptions key off the WebContents, so a renderer restart inside a
+ * surviving WebContents (navigation, crash) must release them — the
+ * replacement document subscribes afresh and needs the snapshot. The
+ * lifecycle mirror is `ipc.ts`'s tx watcher.
+ */
+export interface ThemeSender extends NetSender {
+  on?(
+    event: 'destroyed' | 'render-process-gone' | 'did-navigate',
+    listener: () => void,
+  ): void;
+  off?(
+    event: 'destroyed' | 'render-process-gone' | 'did-navigate',
+    listener: () => void,
+  ): void;
+}
+
 export interface ThemeMonitor {
   /** Subscribes a sender to `theme:events`; the current source is pushed
       immediately. Refcounted like `net`: the first attach starts the
       platform watchers, the last detach stops them. */
-  attach(sender: NetSender): void;
-  detach(sender: NetSender): void;
+  attach(sender: ThemeSender): void;
+  detach(sender: ThemeSender): void;
   stop(): void;
 }
 
 const PALETTE_RE = /([A-Za-z_0-9]+)\s*=\s*"([^"\n]+)"/g;
-const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 /** Flat `key = "value"` TOML read — Omarchy `colors.toml` carries
     `background`/`foreground`/`accent`/`selection`/`red` (warn) keys. */
@@ -250,8 +266,8 @@ export function createThemeMonitor(opts: {
 }): ThemeMonitor {
   const pollMs = opts.pollMs ?? 4_000;
   const env = opts.env;
-  const senders = new Map<NetSender, number>();
-  const destroyedHooked = new WeakSet<NetSender>();
+  const senders = new Map<ThemeSender, number>();
+  const destroyedHooked = new WeakSet<ThemeSender>();
   let stops: (() => void)[] | null = null;
   let last: ThemeSource | null = null;
 
@@ -269,14 +285,31 @@ export function createThemeMonitor(opts: {
     return source as ThemeSource;
   }
 
-  function drop(sender: NetSender): void {
+  function drop(sender: ThemeSender): void {
     senders.delete(sender);
     if (senders.size === 0) {
       teardown();
     }
   }
 
-  function sendTo(sender: NetSender, source: ThemeSource): void {
+  /** Releases every subscription of a sender whose document died. */
+  function hookLifecycle(sender: ThemeSender): void {
+    if (sender.on === undefined || destroyedHooked.has(sender)) {
+      return;
+    }
+    destroyedHooked.add(sender);
+    const release = (): void => drop(sender);
+    const onDestroyed = (): void => {
+      drop(sender);
+      sender.off?.('render-process-gone', release);
+      sender.off?.('did-navigate', release);
+    };
+    sender.on('destroyed', onDestroyed);
+    sender.on('render-process-gone', release);
+    sender.on('did-navigate', release);
+  }
+
+  function sendTo(sender: ThemeSender, source: ThemeSource): void {
     try {
       const event: ThemeSourceEvent = { source };
       sender.send(CHANNELS.themeEvents, event);
@@ -335,10 +368,7 @@ export function createThemeMonitor(opts: {
       const count = senders.get(sender) ?? 0;
       senders.set(sender, count + 1);
       if (count === 0) {
-        if (sender.on !== undefined && !destroyedHooked.has(sender)) {
-          destroyedHooked.add(sender);
-          sender.on('destroyed', () => drop(sender));
-        }
+        hookLifecycle(sender);
         if (stops === null) {
           setup();
         }

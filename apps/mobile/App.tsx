@@ -425,6 +425,9 @@ function useAdaptiveSource(enabled: boolean): ThemeSource | null {
       return undefined;
     }
     let live = true;
+    // A reselection must not flash the previous read's palette — start
+    // flag-only until the fresh read lands.
+    setTones(null);
     const read = () => {
       void AuqwExpo.systemTonalPalette()
         .then((next) => {

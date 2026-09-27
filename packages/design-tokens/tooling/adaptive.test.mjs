@@ -94,7 +94,10 @@ const TEXT_ROLES = [
       contrast(d.values[role], d.values.raised) >= 4.5,
     );
   }
-  check('sel wins accentSoft', d.values.accentSoft === '#1c4a63');
+  check(
+    'sel tints accentSoft at the bounded alpha',
+    d.values.accentSoft === 'rgba(28,74,99,0.14)',
+  );
   check(
     'warn nudges when it fails on the raised surface',
     d.values.warn !== '#ff5555' &&

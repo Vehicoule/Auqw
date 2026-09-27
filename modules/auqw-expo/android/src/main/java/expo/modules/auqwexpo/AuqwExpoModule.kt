@@ -511,7 +511,9 @@ class AuqwExpoModule : Module() {
         "accent1_200" to tone("system_accent1_200"),
         "accent1_600" to tone("system_accent1_600")
       )
-      if (palette.values.all { it == null }) null else palette
+      // All four stops or nothing — a partial palette would reach JS
+      // with nulls where strings are typed.
+      if (palette.values.any { it == null }) null else palette
     }
 
     /**
