@@ -501,6 +501,26 @@ export function StageSheet({
   }));
 
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
+  // StageSheet's own inline colors must follow the sheet's surface —
+  // children re-resolve via the nested dark provider, but a color read
+  // here is bound to the outer (possibly light) scheme.
+  const colors = immersive ? schemes.dark : theme.colors;
+
+  // The full-bleed artwork + blur is expensive enough that a collapsed
+  // sheet shouldn't keep it mounted; it stays through the collapse
+  // animation so the dismissal never exposes an empty surface.
+  const [backdropOn, setBackdropOn] = useState(expanded);
+  useEffect(() => {
+    if (expanded) {
+      setBackdropOn(true);
+      return;
+    }
+    const timer = setTimeout(
+      () => setBackdropOn(false),
+      theme.motion.sheet + 60,
+    );
+    return () => clearTimeout(timer);
+  }, [expanded, theme.motion.sheet]);
 
   const body = (
     <>
@@ -516,7 +536,7 @@ export function StageSheet({
               width: 36,
               height: 4,
               borderRadius: 2,
-              backgroundColor: theme.colors.fg40,
+              backgroundColor: colors.fg40,
             }}
           />
         </View>
@@ -540,8 +560,8 @@ export function StageSheet({
               size={13}
               color={
                 radio.armed && radio.status !== 'failed'
-                  ? theme.colors.accent
-                  : theme.colors.textSecondary
+                  ? colors.accent
+                  : colors.textSecondary
               }
             />
             {radio.armed ? (
@@ -587,8 +607,11 @@ export function StageSheet({
             {player.artworkUrl === null && (
               <View
                 style={{
-                  width: '100%',
+                  // Sized off the measured sheet height so short screens
+                  // keep room for the meta/transport cluster below it.
+                  width: Math.max(160, Math.min(360, height * 0.36)),
                   aspectRatio: 1,
+                  alignSelf: 'center',
                   marginBottom: theme.spacing.lg,
                 }}
               >
@@ -660,10 +683,10 @@ export function StageSheet({
                       iconSize={15}
                       color={
                         download === 'failed'
-                          ? theme.colors.warn
+                          ? colors.warn
                           : download === 'stored'
-                            ? theme.colors.accent
-                            : theme.colors.textSecondary
+                            ? colors.accent
+                            : colors.textSecondary
                       }
                       accessibilityLabel={
                         download === 'stored'
@@ -683,7 +706,7 @@ export function StageSheet({
                       icon="list-plus"
                       size={36}
                       iconSize={15}
-                      color={theme.colors.textSecondary}
+                      color={colors.textSecondary}
                       accessibilityLabel={t('sheets.addToPlaylist')}
                       onPress={onAddToPlaylist}
                     />
@@ -814,9 +837,7 @@ export function StageSheet({
                     size={32}
                     iconSize={14}
                     color={
-                      queueReordering
-                        ? theme.colors.accent
-                        : theme.colors.textSecondary
+                      queueReordering ? colors.accent : colors.textSecondary
                     }
                     accessibilityLabel={
                       queueReordering ? t('queue.reorderDone') : t('queue.reorder')
@@ -871,7 +892,9 @@ export function StageSheet({
         style,
       ]}
     >
-      {immersive && <PlayerBackdrop artworkUrl={player.artworkUrl} />}
+      {immersive && backdropOn && (
+        <PlayerBackdrop artworkUrl={player.artworkUrl} />
+      )}
       {immersive ? (
         <ThemeProvider
           theme="dark"
