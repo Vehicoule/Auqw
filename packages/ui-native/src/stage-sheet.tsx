@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Image,
   Platform,
@@ -634,13 +628,18 @@ export function StageSheet({
   // and unmounts only once the morph is fully back at the pill — the
   // settle-back path still gets its backdrop.
   const [backdropOn, setBackdropOn] = useState(expanded);
-  const expandedRef = useRef(expanded);
-  expandedRef.current = expanded;
+  // `expanded` mirrored onto the UI thread — the reaction below must
+  // read a shared value; a captured ref only snapshots at worklet
+  // creation and would pin a sheet mounted-expanded forever.
+  const expandedShared = useSharedValue(expanded);
+  useEffect(() => {
+    expandedShared.value = expanded;
+  }, [expanded, expandedShared]);
   useAnimatedReaction(
     () => progress.value > 0.001,
     (risen, prev) => {
       if (risen === prev) return;
-      scheduleOnRN(setBackdropOn, risen || expandedRef.current);
+      scheduleOnRN(setBackdropOn, risen || expandedShared.value);
     },
     [progress],
   );
