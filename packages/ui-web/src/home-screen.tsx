@@ -107,7 +107,7 @@ function Rail({
               className="uw-rail__card"
             >
               <Artwork url={card.artworkUrl} size={136} />
-              <Text variant="body" color="primary" numberOfLines={1}>
+              <Text variant="body" color="primary" numberOfLines={2}>
                 {card.title}
               </Text>
               <Text variant="metadata" color="secondary" numberOfLines={1}>

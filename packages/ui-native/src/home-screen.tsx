@@ -107,30 +107,38 @@ function Rail({
     <View style={{ marginTop: theme.spacing.xl }}>
       <View
         style={{
-          flexDirection: 'row',
-          alignItems: 'baseline',
           paddingHorizontal: theme.spacing.screen,
           marginBottom: theme.spacing.md,
         }}
       >
-        <Text variant="heading" color="bright">
-          {title}
-        </Text>
-        {subtitle !== null && (
-          <Text variant="metadata" color="secondary" style={{ marginLeft: 10 }}>
-            {subtitle}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: theme.spacing.sm,
+          }}
+        >
+          <Text variant="heading" color="bright">
+            {title}
           </Text>
-        )}
-        {onPressSeeAll !== undefined && (
-          <>
-            <View style={{ flex: 1 }} />
+          {onPressSeeAll !== undefined && (
             <PillButton
               label={t('home.seeAll')}
               minHeight={26}
               onPress={() => onPressSeeAll(section)}
               accessibilityLabel={t('home.seeAllA11y', { title })}
             />
-          </>
+          )}
+        </View>
+        {subtitle !== null && (
+          <Text
+            variant="metadata"
+            color="secondary"
+            style={{ marginTop: theme.spacing.xxs }}
+          >
+            {subtitle}
+          </Text>
         )}
       </View>
       {cards.length === 0 ? (
@@ -165,8 +173,11 @@ function Rail({
               <Text
                 variant="body"
                 color="primary"
-                numberOfLines={1}
-                style={{ marginTop: theme.spacing.sm }}
+                numberOfLines={2}
+                style={{
+                  marginTop: theme.spacing.sm,
+                  minHeight: theme.typography.body.lineHeight * theme.textScale * 2,
+                }}
               >
                 {item.title}
               </Text>

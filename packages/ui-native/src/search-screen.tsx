@@ -200,7 +200,7 @@ export function SearchScreen({
               ]}
             >
               <Icon
-                name="clock"
+                name="search"
                 size={14}
                 color={theme.colors.textSecondary}
               />
@@ -214,8 +214,7 @@ export function SearchScreen({
       {!draft && state.phase === 'ready' && (
         <View
           style={{
-            flexDirection: 'row',
-            alignItems: 'baseline',
+            alignItems: 'flex-start',
             paddingHorizontal: theme.spacing.screen,
             marginBottom: theme.spacing.sm,
           }}
@@ -226,7 +225,7 @@ export function SearchScreen({
           <Text
             variant="metadata"
             color="secondary"
-            style={{ marginLeft: 10 }}
+            style={{ marginTop: theme.spacing.xxs }}
           >
             {t('search.resultsMeta', {
               provider: state.providerId ?? t('search.providerFallback'),

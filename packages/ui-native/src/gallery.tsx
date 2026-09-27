@@ -585,7 +585,10 @@ function GalleryBody({
             </Text>
             <Frame height={620}>
               <StageSheet
-                player={fixturePlayerPlaying}
+                player={{
+                  ...fixturePlayerPlaying,
+                  title: 'Self Aware (Live at the Observatory)',
+                }}
                 platform={platform}
                 expanded={expanded}
                 dragPreview={gestureState}

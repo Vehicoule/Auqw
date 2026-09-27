@@ -139,7 +139,9 @@ export type HomeModel = {
   readonly subline: string | null;
   /** Present when playback is paused mid-track — the resume card. */
   readonly resume: ResumeModel | null;
+  /** Materialized track recordings ordered by like time. */
   readonly recents: readonly RailCardModel[];
+  /** Provider metadata from the current committed search page. */
   readonly suggestions: readonly RailCardModel[];
 };
 

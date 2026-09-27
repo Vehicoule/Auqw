@@ -187,7 +187,9 @@
   .rail{display:flex;gap:16px;overflow:hidden}
   .card{width:126px;flex:none}
   .card .cv{width:126px;height:126px;border-radius:var(--r-thumb);position:relative;overflow:hidden}
-  .card .ct{font-size:11px;color:var(--fg);margin-top:8px;font-weight:500}
+  .card .ct{font-size:11px;color:var(--fg);margin-top:8px;font-weight:500;
+            line-height:15px;min-height:30px;display:-webkit-box;-webkit-box-orient:vertical;
+            -webkit-line-clamp:2;overflow:hidden}
   .card .ca{font-size:9.5px;color:var(--fg-muted);margin-top:2px}
   .transport .lk{color:var(--fg-muted)}
   .transport .lk.on{color:var(--pink)}
@@ -327,10 +329,9 @@
   .mrows .r .s .ib{width:30px;height:30px}
   .mrows .r .s .ib .ic{width:14px;height:14px}
 
-  /* sheets: two auto margins split the free space — art | air | meta | air |
-     waveform+transport+seg anchored at the bottom */
+  /* The immersive player anchors metadata and controls over the artwork. */
   .sheet .t-meta{margin-top:auto}
-  .sheet .wf{margin-top:auto}
+  .sheet .wf{margin-top:14px}
   .sheet .transport{gap:6px}
   .sheet .seg{margin-top:12px}
 
@@ -386,6 +387,26 @@
   .grab i{width:36px;height:4px;border-radius:2px;background:var(--fg40)}
   .sheet .art{margin-top:12px}
   .sheet .transport{margin-top:12px}
+  .sheet.immersive{isolation:isolate;background:#100e0c}
+  .sheet.immersive .sheet-art,.sheet.immersive .sheet-frost,.sheet.immersive .sheet-scrim{
+    position:absolute;inset:0;pointer-events:none}
+  .sheet.immersive .sheet-art{z-index:0}
+  .sheet.immersive .sheet-frost{z-index:1;filter:blur(36px);
+    mask-image:linear-gradient(transparent 50%,rgba(0,0,0,.55) 72%,#000 90%)}
+  .sheet.immersive .sheet-scrim{z-index:2;
+    background:linear-gradient(180deg,rgba(11,10,9,.30),rgba(11,10,9,.82))}
+  .sheet.immersive > :not(.sheet-art):not(.sheet-frost):not(.sheet-scrim){position:relative;z-index:3}
+  .sheet.immersive .radio-top{display:flex;align-items:center;align-self:center;gap:6px;
+    margin-top:8px;padding:6px 12px;border-radius:999px;background:var(--accent-soft);
+    color:var(--accent);font-size:10px;font-weight:700}
+  .sheet.immersive .radio-top .ic{width:13px;height:13px}
+  .sheet.immersive .t-meta{align-items:flex-end;padding-bottom:4px}
+  .sheet.immersive .t-meta h3{line-height:1.25;display:-webkit-box;
+    -webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+  .sheet.immersive .seg{border-radius:999px}
+  .sheet.immersive .seg span{border-radius:999px}
+  .sheet.immersive .seg span.on{background:var(--accent-soft);color:var(--accent)}
+  .sheet.immersive .tbt:disabled{opacity:.42}
 
   /* platform media controls */
   /* Android — M3 Expressive: filled accent squircle play, tonal prev/next */
@@ -418,6 +439,7 @@
   <symbol id="i-next" viewBox="0 0 24 24"><path d="M7 5v14l10-7z"/><rect x="17" y="5" width="2" height="14"/></symbol>
   <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M4 6h4l9 12h5m0 0-3-3m3 3-3 3M4 18h4l2.5-3.3M14.5 9.3 16 7.5h5m0 0-3-3m3 3-3 3"/></symbol>
   <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 4l3 3-3 3M20 7H7a3 3 0 0 0-3 3v1M7 20l-3-3 3-3M4 17h13a3 3 0 0 0 3-3v-1"/></symbol>
+  <symbol id="i-radio" viewBox="0 0 24 24"><circle cx="12" cy="18" r="2"/><path d="M5 15a7 7 0 0 1 14 0M2 12a10 10 0 0 1 20 0"/></symbol>
   <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-8-4.7-8-10a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 20 10c0 5.3-8 10-8 10z"/></symbol>
   <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M4 19h16"/></symbol>
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
@@ -505,24 +527,22 @@
       </div>
       <div class="wbody">
         <div class="greet">good evening</div>
-        <div class="greet-sub">wednesday · 3 new releases in your library</div>
-        <div class="sech"><h4>jump back in</h4><span class="ss">pick up where you left off</span>
-          <span class="chev"><span><svg class="ic"><use href="#i-chl"/></svg></span><span><svg class="ic"><use href="#i-chr"/></svg></span></span></div>
+        <div class="greet-sub">3 liked</div>
+        <div class="sech"><h4>recently liked</h4><span class="ss">your latest liked tracks</span></div>
         <div class="rail">
-          <div class="card"><div class="cv cov-eye"></div><div class="ct">Self Aware</div><div class="ca">Temper City</div></div>
+          <div class="card"><div class="cv cov-eye"></div><div class="ct">Self Aware (Live at the Observatory)</div><div class="ca">Temper City</div></div>
           <div class="card"><div class="cv cov-petit"></div><div class="ct">Le Petit Pêcheur</div><div class="ca">Manon Lisa</div></div>
           <div class="card"><div class="cv cov-drac"></div><div class="ct">Dracula</div><div class="ca">Tame Impala</div></div>
           <div class="card"><div class="cv cov-mala"></div><div class="ct">Maladie</div><div class="ca">Mauvais Djo</div></div>
           <div class="card"><div class="cv cov-rel"></div><div class="ct">New Religion</div><div class="ca">—</div></div>
         </div>
-        <div class="sech"><h4>your playlists</h4><span class="ss">in your collection</span>
-          <span class="chev"><span><svg class="ic"><use href="#i-chl"/></svg></span><span><svg class="ic"><use href="#i-chr"/></svg></span></span></div>
+        <div class="sech"><h4>search results</h4><span class="ss">from your last search</span></div>
         <div class="rail">
-          <div class="card"><div class="cv cov-rel"></div><div class="ct">test</div><div class="ca">user playlist · 3</div></div>
-          <div class="card"><div class="cv cov-drac"></div><div class="ct">late night drives</div><div class="ca">album · tame impala</div></div>
-          <div class="card"><div class="cv cov-mala"></div><div class="ct">morning slow</div><div class="ca">user playlist · 28</div></div>
-          <div class="card"><div class="cv cov-petit"></div><div class="ct">french touch</div><div class="ca">user playlist · 41</div></div>
-          <div class="card"><div class="cv cov-eye"></div><div class="ct">static bloom</div><div class="ca">album · temper city</div></div>
+          <div class="card"><div class="cv cov-rel"></div><div class="ct">Roads (Live at Roskilde)</div><div class="ca">Portishead</div></div>
+          <div class="card"><div class="cv cov-drac"></div><div class="ct">Roads</div><div class="ca">Portishead</div></div>
+          <div class="card"><div class="cv cov-mala"></div><div class="ct">Glory Box</div><div class="ca">Portishead</div></div>
+          <div class="card"><div class="cv cov-petit"></div><div class="ct">Sour Times</div><div class="ca">Portishead</div></div>
+          <div class="card"><div class="cv cov-eye"></div><div class="ct">Mysterons</div><div class="ca">Portishead</div></div>
         </div>
       </div>
     </div>
@@ -732,13 +752,14 @@
 
       <div class="arrow">tap / swipe-up ⟶</div>
 
-      <!-- Android sheet — M3E controls -->
+      <!-- Android immersive sheet — full-bleed artwork, progressive frost, M3E controls -->
       <div class="phone phone-android t-dark">
-        <div class="sheet">
+        <div class="sheet immersive">
+          <div class="sheet-art cov-eye"></div><div class="sheet-frost cov-eye"></div><div class="sheet-scrim"></div>
           <div class="grab"><i></i></div>
-          <div class="art"><div class="cv cov-eye"></div></div>
+          <div class="radio-top"><svg class="ic"><use href="#i-radio"/></svg>start radio</div>
           <div class="t-meta">
-            <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+            <div class="tt"><h3>Self Aware (Live at the Observatory)</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
             <div class="iconbt"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></div>
           </div>
           <div class="wf" data-p="0.5"></div>
@@ -748,7 +769,7 @@
             <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
             <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
-            <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+            <button class="tbt" disabled aria-label="repeat unavailable"><svg class="ic"><use href="#i-repeat"/></svg></button>
           </div>
           <div class="seg">
             <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
@@ -797,13 +818,14 @@
 
       <div class="arrow">tap / swipe-up ⟶</div>
 
-      <!-- iOS sheet — liquid glass controls -->
+      <!-- iOS immersive sheet — the same backdrop with platform glass controls -->
       <div class="phone phone-ios t-dark">
-        <div class="sheet">
+        <div class="sheet immersive">
+          <div class="sheet-art cov-eye"></div><div class="sheet-frost cov-eye"></div><div class="sheet-scrim"></div>
           <div class="grab"><i></i></div>
-          <div class="art"><div class="cv cov-eye"></div></div>
+          <div class="radio-top"><svg class="ic"><use href="#i-radio"/></svg>start radio</div>
           <div class="t-meta">
-            <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+            <div class="tt"><h3>Self Aware (Live at the Observatory)</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
             <div class="iconbt"><span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span><span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span></div>
           </div>
           <div class="wf" data-p="0.5"></div>
@@ -813,7 +835,7 @@
             <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
             <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
-            <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+            <button class="tbt" disabled aria-label="repeat unavailable"><svg class="ic"><use href="#i-repeat"/></svg></button>
           </div>
           <div class="seg">
             <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
@@ -827,9 +849,11 @@
       One row anatomy everywhere — <b>thumb (eq overlay when playing) · title · version · length ·
       state · add</b>. Mini-player is OpenTune-style: artwork left hugged by a <b>squared progress
       ring</b> (wavy M3E outline on Android, thin arc on iOS — artwork stays square), <b>like +
-      resume</b> right, swipe sideways to skip, tap/swipe-up to open. Media controls go platform-native: <b>M3E on Android</b>
+      resume</b> right, swipe sideways to skip, tap/swipe-up to open. The sheet uses <b>full-bleed
+      artwork with a progressive bottom frost</b>, a top radio pill, and a bottom-pinned two-line
+      title and control cluster. Media controls go platform-native: <b>M3E on Android</b>
       (filled accent squircle play, tonal prev/next) vs <b>liquid glass on iOS</b> (translucent
-      circles, real blur — OS chrome, not app surface). Navbars: M3 Expressive bar vs floating
+      circles, real blur — OS chrome plus the deliberate artwork frost). Navbars: M3 Expressive bar vs floating
       glass capsule; settings is the 4th tab.
     </div>
   </div>

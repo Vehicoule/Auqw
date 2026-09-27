@@ -701,7 +701,7 @@ export function StageSheet({
               }}
             >
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text variant="display" color="bright" numberOfLines={1}>
+                <Text variant="display" color="bright" numberOfLines={2}>
                   {player.title}
                 </Text>
                 <Text
