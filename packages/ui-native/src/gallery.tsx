@@ -151,16 +151,18 @@ function Section({
 
 function Frame({
   height = 560,
+  scaleWithText = true,
   children,
 }: {
   readonly height?: number | undefined;
+  readonly scaleWithText?: boolean | undefined;
   readonly children: ReactNode;
 }) {
   const theme = useTheme();
   return (
     <View
       style={{
-        height: height * theme.textScale,
+        height: scaleWithText ? height * theme.textScale : height,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.divider,
         borderRadius: theme.radius.float,
@@ -603,6 +605,36 @@ function GalleryBody({
                 onToggleLike={noop}
                 onSeek={noop}
                 onStopRadio={noop}
+              />
+            </Frame>
+          </View>
+        ))}
+        <Text variant="metadata" color="secondary">
+          compact 400pt viewport · switch to 200% text above · long title and ownership actions
+        </Text>
+        {(['android', 'ios'] as const).map((platform) => (
+          <View key={platform} style={{ marginTop: theme.spacing.sm }}>
+            <Text variant="metadata" color="secondary">
+              {platform}
+            </Text>
+            <Frame height={400} scaleWithText={false}>
+              <StageSheet
+                player={{
+                  ...fixturePlayerPlaying,
+                  title: 'Self Aware (Live at the Observatory)',
+                }}
+                platform={platform}
+                expanded
+                topInset={theme.spacing.xxl}
+                onExpandChange={noop}
+                radio={fixtureRadioModels[1]}
+                download="idle"
+                onDownload={noop}
+                onAddToPlaylist={noop}
+                onPlayPause={noop}
+                onNext={noop}
+                onPrevious={noop}
+                onSeek={noop}
               />
             </Frame>
           </View>
