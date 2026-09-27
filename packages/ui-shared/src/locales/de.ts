@@ -30,7 +30,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'common.save': 'speichern',
   'common.repeat': 'wiederholen',
   'common.repeatAll': 'alle wiederholen',
-  'common.repeatOne': 'einen wiederholen',
+  'common.repeatOne': 'titel wiederholen',
   'common.unlike': 'gefällt mir nicht mehr',
   'common.unavailable': 'nicht verfügbar',
   'common.cardA11y': '{title}, {subtitle}',

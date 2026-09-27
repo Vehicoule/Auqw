@@ -466,9 +466,10 @@ function playDedupeId(occurrenceId: string, cycle: number): string {
 }
 
 /**
- * Seeds replay cycles from restored play history: a replayed
- * occurrence already carries `#cycle` entries, so post-restart loops
- * must keep counting past them rather than collide on `id#1`.
+ * Seeds replay cycles from restored play history: the in-flight listen
+ * resumes at the highest recorded `#cycle` for its occurrence so it
+ * re-keys under the same play (dedup-safe), and post-restart loops
+ * count past it rather than collide.
  */
 function listenCycleBaseline(
   occurrences: readonly QueueOccurrence[],
@@ -478,19 +479,29 @@ function listenCycleBaseline(
   const counts: Record<string, number> = {};
   for (const e of history) {
     const id = e.occurrenceId;
-    if (id === null) {
+    // Exact ids are cycle-0 records — including ids that legitimately
+    // contain '#'. Only a numeric `#cycle` suffix on a live prefix is
+    // a replay marker.
+    if (id === null || live.has(id)) {
       continue;
     }
     const hash = id.lastIndexOf('#');
-    const base = hash > 0 ? id.slice(0, hash) : id;
-    // A stored key is either the raw occurrence id or its truncated
-    // `base#cycle` form — the base is always a prefix of the real id;
-    // an exact hit wins before the ambiguous prefix fallback.
+    if (hash <= 0) {
+      continue;
+    }
+    const suffix = Number(id.slice(hash + 1));
+    if (!Number.isInteger(suffix) || suffix < 0) {
+      continue;
+    }
+    const base = id.slice(0, hash);
+    // A stored replay key is `base#cycle` where the base is the
+    // occurrence id (possibly truncated) — an exact hit wins before
+    // the ambiguous prefix fallback.
     const owner =
       (live.has(base) ? base : undefined) ??
       [...live].find((occ) => occ.startsWith(base));
     if (owner !== undefined) {
-      counts[owner] = (counts[owner] ?? 0) + 1;
+      counts[owner] = Math.max(counts[owner] ?? 0, suffix);
     }
   }
   return counts;

@@ -2025,8 +2025,9 @@ async function repeatReplaysCountEachLoop(): Promise<void> {
 }
 
 async function repeatCyclesSurviveRestart(): Promise<void> {
-  // Cycles seed from restored history: a replayed occurrence keeps
-  // counting past its stored `#cycle` keys instead of colliding.
+  // Cycles seed from restored history at the max recorded suffix: the
+  // resumed in-flight listen re-keys under its stored `oA#1` play
+  // (dedup drops it), and the next loop mints a fresh `oA#2`.
   const r = rig(
     persisted({
       recordings: [recording('rA', [ref('youtube-music', 'yA')])],
@@ -2061,19 +2062,21 @@ async function repeatCyclesSurviveRestart(): Promise<void> {
   await pump();
   const p = r.player.projections.at(-1);
   assert(p !== undefined && p.repeat === 'one');
-  r.player.emit(
-    transitionEvent(r, {
-      from: 'oA',
-      to: 'oA',
-      reason: 'ended',
-      positionMs: 0,
-      identity: { attemptId: 'svc-1', queueRev: p.queueRev },
-      handle: 'h-svc',
-    }),
-  );
-  await pump();
+  for (let i = 0; i < 2; i += 1) {
+    r.player.emit(
+      transitionEvent(r, {
+        from: 'oA',
+        to: 'oA',
+        reason: 'ended',
+        positionMs: 0,
+        identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+        handle: 'h-svc',
+      }),
+    );
+    await pump();
+  }
   const plays = readyOf(r).playHistory.filter((e) => e.recordingId === 'rA');
-  assertEqual(plays.length, 3, 'the post-restart loop still counts');
+  assertEqual(plays.length, 3, 'the post-restart loop still counts once');
   assertEqual(
     plays[2]?.occurrenceId,
     'oA#2',

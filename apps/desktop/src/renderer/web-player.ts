@@ -685,7 +685,7 @@ export function createWebPlayerPort(deps: {
         idx === 0 && p.repeat === 'all' && p.items.length > 1
           ? p.items[p.items.length - 1]
           : undefined;
-      if (posMs() >= 3000 || (idx === 0 && wrapTo === undefined)) {
+      if (posMs() > 3000 || (idx === 0 && wrapTo === undefined)) {
         if (restartInPlace()) {
           return;
         }

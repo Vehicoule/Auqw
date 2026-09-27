@@ -30,7 +30,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'common.save': 'guardar',
   'common.repeat': 'repetir',
   'common.repeatAll': 'repetir todo',
-  'common.repeatOne': 'repetir una vez',
+  'common.repeatOne': 'repetir la canción',
   'common.unlike': 'ya no me gusta',
   'common.unavailable': 'no disponible',
   'common.cardA11y': '{title}, {subtitle}',
