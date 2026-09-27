@@ -258,17 +258,22 @@ export async function readPlatformPalette(
   if (env.platform !== 'linux') {
     return null;
   }
-  for (const path of omarchyPaths(env)) {
-    const text = env.readFileSync(path);
-    if (text === null) {
-      continue;
-    }
-    const palette = parseOmarchyColors(text);
-    if (palette !== null) {
-      return palette;
+  const desktop = env.env['XDG_CURRENT_DESKTOP'] ?? '';
+  // Omarchy sessions run Hyprland; on another active DE a colors.toml
+  // left on disk is a stale leftover, so only read it for omarchy-ish
+  // or unidentified sessions.
+  if (desktop.trim() === '' || /omarchy|hyprland/i.test(desktop)) {
+    for (const path of omarchyPaths(env)) {
+      const text = env.readFileSync(path);
+      if (text === null) {
+        continue;
+      }
+      const palette = parseOmarchyColors(text);
+      if (palette !== null) {
+        return palette;
+      }
     }
   }
-  const desktop = env.env['XDG_CURRENT_DESKTOP'] ?? '';
   if (/kde/i.test(desktop)) {
     const text = env.readFileSync(kdeGlobalsPath(env));
     if (text !== null) {
@@ -277,7 +282,8 @@ export async function readPlatformPalette(
         return palette;
       }
     }
-    return null;
+    // No usable globals — a KDE session can still expose the accent
+    // through the appearance portal; fall through.
   }
   const stdout = await env.execFile(PORTAL_CMD, PORTAL_ARGS, 800);
   const accent =
@@ -291,8 +297,12 @@ function watchedPaths(env: ThemeSourceEnv): readonly string[] {
   if (env.platform !== 'linux') {
     return [];
   }
-  const paths = [...omarchyPaths(env)];
-  if (/kde/i.test(env.env['XDG_CURRENT_DESKTOP'] ?? '')) {
+  const desktop = env.env['XDG_CURRENT_DESKTOP'] ?? '';
+  const paths: string[] = [];
+  if (desktop.trim() === '' || /omarchy|hyprland/i.test(desktop)) {
+    paths.push(...omarchyPaths(env));
+  }
+  if (/kde/i.test(desktop)) {
     paths.push(kdeGlobalsPath(env));
   }
   return paths;

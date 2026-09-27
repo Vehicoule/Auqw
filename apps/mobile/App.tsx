@@ -415,7 +415,9 @@ function BootGate({
  * repeats when the app returns to the foreground.
  */
 function useAdaptiveSource(enabled: boolean): ThemeSource | null {
-  const scheme = useColorScheme() === 'light' ? 'light' : 'dark';
+  // useColorScheme() can return null — match ThemeProvider's light
+  // fallback rather than guessing dark.
+  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   const [tones, setTones] = useState<AuqwExpo.SystemTonalPalette | null>(
     null,
   );

@@ -267,6 +267,10 @@ async function main(): Promise<void> {
       watch: (path, onChange) => {
         try {
           const watcher = watch(path, { persistent: false }, onChange);
+          // An async watch error (dir removed, fd limits) must not
+          // escape as an uncaught exception in main — drop the watcher;
+          // the poll loop still tracks the path.
+          watcher.on('error', () => watcher.close());
           return () => watcher.close();
         } catch {
           return null;

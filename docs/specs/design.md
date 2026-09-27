@@ -66,8 +66,8 @@ The token set is a small ramp, so an external palette maps onto it mechanically.
 
 | Surface | Source | Yields |
 |---|---|---|
-| Omarchy | watch `current/theme/colors.toml` (`~/.config/omarchy/`; newer builds `~/.local/state/omarchy/`) | full palette + light/dark mode |
-| KDE | `~/.config/kdeglobals` `[Colors:*]` | full palette |
+| Omarchy | watch `current/theme/colors.toml` (`~/.config/omarchy/`; newer builds `~/.local/state/omarchy/`) — Omarchy/Hyprland sessions only, so a stale file on another DE can't win | full palette + light/dark mode |
+| KDE | `~/.config/kdeglobals` `[Colors:*]`, portal accent when globals lack usable colors | full palette |
 | GNOME 47+ | portal `org.freedesktop.appearance accent-color` | accent only |
 | Windows / macOS | Electron `systemPreferences.getAccentColor()` / `getColor('control-accent-color')` | accent only |
 | Android 12+ | Material You `system_accent*` via a small Expo module | tonal palette |

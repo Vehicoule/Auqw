@@ -345,6 +345,26 @@ export async function run(): Promise<void> {
   }
 
   {
+    // KDE session without usable globals falls through to the portal,
+    // and a stale omarchy colors.toml on a KDE session can't win.
+    const rig = env({ env: { XDG_CURRENT_DESKTOP: 'KDE' } });
+    rig.files.set(`/home/test/${OMARCHY_CONFIG}`, OMARCHY_TOML);
+    rig.env = {
+      ...rig.env,
+      execFile: async () =>
+        '(<<<(0.20784313725490197, 0.5176470588235295, 0.8941176470588236)>>>)',
+    };
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
+    const sender = new CollectingSender();
+    monitor.attach(sender);
+    await sleep(0);
+    assertDeepEqual(sender.sent[0]?.payload, {
+      source: { scheme: 'dark', palette: { accent: '#3584e4' } },
+    });
+    monitor.stop();
+  }
+
+  {
     // GNOME: portal accent read via gdbus → accent-only palette.
     const rig = env();
     rig.env = {
