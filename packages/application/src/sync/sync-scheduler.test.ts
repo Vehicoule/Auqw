@@ -42,6 +42,7 @@ class FakeSyncClient implements SyncClient {
       state: SyncPeerView['state'];
       lastError?: AppError;
       lastRound?: SyncRoundOutcome;
+      syncing?: boolean;
     }
   >();
   syncNowCalls: string[] = [];
@@ -58,7 +59,7 @@ class FakeSyncClient implements SyncClient {
         const out: SyncPeerView = {
           peer: p,
           state: view?.state ?? 'offline',
-          syncing: false,
+          syncing: view?.syncing ?? false,
           ...(view?.lastRound !== undefined
             ? { lastRound: view.lastRound }
             : {}),
@@ -341,9 +342,21 @@ async function manualSuccessClearsStaleFloor(): Promise<void> {
   });
   client.emitStatus();
   await pump();
-  // A manual syncNow succeeds — the peer proves it takes traffic and
-  // the floor is obsolete; its armed wake dies with it.
+  // A manual syncNow dials — the client publishes 'open' at connect
+  // time, before the exchange's verdict. A bare open is NOT a
+  // completed round: the floor must stand through it.
   client.peerViews.set('fp-a', { state: 'open' });
+  client.emitStatus();
+  client.peerViews.set('fp-a', { state: 'open', syncing: true });
+  client.emitStatus();
+  await pump();
+  // The exchange lands clean: the op drains and a fresh lastRound
+  // reports the completed round — the floor is obsolete now and its
+  // armed wake dies with it.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastRound: outcome('fp-a'),
+  });
   client.emitStatus();
   await pump();
   // A write now debounces at 500 ms — not the obsolete 30 s floor.
@@ -361,6 +374,72 @@ async function manualSuccessClearsStaleFloor(): Promise<void> {
     client.syncNowCalls.length,
     2,
     'no resurrected wake at the old floor',
+  );
+  scheduler.stop();
+}
+
+async function connectOpenKeepsRateLimitFloor(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A rate-limit verdict lands a 30 s floor (expiry t=30_000) and
+  // arms the reconnect there.
+  client.peerViews.set('fp-a', {
+    state: 'offline',
+    lastError: appError('rate-limit', 'slow down', 30_000),
+  });
+  client.emitStatus();
+  await pump();
+  clock.advance(1_000);
+  // A manual syncNow dials mid-wait: 'open' publishes at connect,
+  // before the exchange's verdict is known. The floor must survive
+  // it — a write inside the window still waits.
+  client.peerViews.set('fp-a', { state: 'open' });
+  client.emitStatus();
+  client.peerViews.set('fp-a', { state: 'open', syncing: true });
+  client.emitStatus();
+  await pump();
+  scheduler.notifyLocalWrites();
+  clock.advance(500); // t=1_500
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'write cannot slip inside the floor on a bare connect',
+  );
+  // The manual round fails with a FRESH 30 s verdict — published on
+  // the drained open view, so the floor re-arms to t=31_500.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: appError('rate-limit', 'still slow', 30_000),
+    lastRound: outcome('fp-a'),
+  });
+  client.emitStatus();
+  await pump();
+  // The wakes armed at the old expiry fire at t=30_000, see the new
+  // floor, and reschedule — nothing runs inside the peer's wait.
+  clock.advance(28_500); // t=30_000
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'old-expiry wake defers to the fresh verdict floor',
+  );
+  clock.advance(1_500); // t=31_500
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'retry lands at the fresh verdict floor',
   );
   scheduler.stop();
 }
@@ -953,6 +1032,7 @@ export async function run(): Promise<void> {
   await unpairedPeerDrops();
   await unpairMidRoundCancelsAndNeverReschedules();
   await manualSuccessClearsStaleFloor();
+  await connectOpenKeepsRateLimitFloor();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();

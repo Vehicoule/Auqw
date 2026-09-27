@@ -1942,7 +1942,7 @@ function Main({
       return;
     }
     void (intentPlaying ? session.pause() : session.resume());
-  }, [session, state.queue.mode, currentRecordingId, canPlay]);
+  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void session.toggleLike(currentRecordingId);

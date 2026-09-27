@@ -840,6 +840,16 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         return;
       }
       const outcome = await syncRound(session, peer);
+      // Same in-op verdict publication as syncNow — a kicked round
+      // that failed must not drain looking like a clean open.
+      if (!session.closed) {
+        views.set(
+          session.peerFp,
+          outcome.ok
+            ? { state: 'open' }
+            : { state: 'open', lastError: outcome.error },
+        );
+      }
       if (!outcome.ok) {
         void deps.log.write({
           level: 'warn',
@@ -1324,20 +1334,23 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           }
         }
       }
-      const outcome = await enqueue(session, () =>
-        syncRound(session, peer, signal),
-      );
-      if (!session.closed) {
-        // A dead session already reported its cause through
-        // killSession. On a live one the round's verdict is the
-        // lastError — a failed round must not read as connected.
-        setView(
-          fp,
-          outcome.ok
-            ? { state: 'open' }
-            : { state: 'open', lastError: outcome.error },
-        );
-      }
+      const outcome = await enqueue(session, async () => {
+        const round = await syncRound(session, peer, signal);
+        // The verdict lands on the view while the op is still
+        // counted — the drain emit already carries it, so a bare
+        // 'open' with no lastError is a live or clean round, never
+        // a failed one reading as connected. A dead session already
+        // reported its cause through killSession.
+        if (!session.closed) {
+          views.set(
+            fp,
+            round.ok
+              ? { state: 'open' }
+              : { state: 'open', lastError: round.error },
+          );
+        }
+        return round;
+      });
       return outcome;
     },
 

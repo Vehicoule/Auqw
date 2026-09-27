@@ -356,6 +356,10 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       if (isNew) {
         schedule(view.peer.fp, debounceMs, 'stand');
       }
+      // Shared look-back for the verdict-freshness checks below.
+      const prevPeer = prevViews?.peers.find(
+        (v) => v.peer.fp === view.peer.fp,
+      );
       if (view.state === 'open') {
         // 'open' during a scheduler-owned round is that round's
         // intermediate dial status — syncNow publishes it before
@@ -363,17 +367,43 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // the ladder. Resetting here would pin every live-but-
         // failing peer to the base delay forever.
         if (!track.running) {
-          track.backoffMs = reconnectBaseMs;
-          // An open observed with no scheduler round in flight is an
-          // independently completed round (manual syncNow) — the
-          // rate-limit floor belonged to the round that set it and
-          // is obsolete now that a newer round succeeded. The pending
+          // A completed clean round — fresh lastRound, op drained,
+          // no verdict — is the only 'open' that retires the floor:
+          // the client also publishes 'open' at dial time, before
+          // the exchange's outcome is known, so the status alone is
+          // not proof the rate-limit wait is obsolete. The pending
           // wake it armed dies with it; a write debounce stands.
-          if (track.notBeforeMs !== undefined) {
-            delete track.notBeforeMs;
-            if (track.timer !== null && !track.debouncing) {
-              track.timer.cancel();
-              track.timer = null;
+          const completedClean =
+            view.lastError === undefined &&
+            !view.syncing &&
+            view.lastRound !== undefined &&
+            view.lastRound !== prevPeer?.lastRound;
+          if (completedClean) {
+            track.backoffMs = reconnectBaseMs;
+            if (track.notBeforeMs !== undefined) {
+              delete track.notBeforeMs;
+              if (track.timer !== null && !track.debouncing) {
+                track.timer.cancel();
+                track.timer = null;
+              }
+            }
+          } else if (view.lastError !== undefined) {
+            // A round that completed FAILED — its verdict may carry
+            // a fresh rate-limit. Same rule as the offline path:
+            // only a fresh verdict rewrites the floor (republished
+            // emissions must not slide it).
+            const hint = view.lastError.retryAfterMs;
+            const prevError = prevPeer?.lastError;
+            const now = safeNow();
+            if (
+              hint !== undefined &&
+              isSafeNonNegative(hint) &&
+              now !== null &&
+              (prevError === undefined ||
+                prevError.kind !== view.lastError.kind ||
+                prevError.retryAfterMs !== hint)
+            ) {
+              track.notBeforeMs = now + hint;
             }
           }
         }
@@ -400,9 +430,6 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // unchanged offline lastError republished by some other
         // peer's status emission must not slide it later. Republish
         // re-arms wait out the floor's remainder, not a new hint.
-        const prevPeer = prevViews?.peers.find(
-          (v) => v.peer.fp === view.peer.fp,
-        );
         const prevOffline =
           prevPeer !== undefined && prevPeer.state === 'offline'
             ? prevPeer.lastError

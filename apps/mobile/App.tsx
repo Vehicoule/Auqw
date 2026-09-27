@@ -2383,7 +2383,7 @@ function Main({
     void (intentPlaying ? session.pause() : session.resume()).then((r) =>
       reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
     );
-  }, [session, state.queue.mode, currentRecordingId, canPlay, reportPlay]);
+  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
