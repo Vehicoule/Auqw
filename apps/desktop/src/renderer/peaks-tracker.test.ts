@@ -239,6 +239,28 @@ export async function run(): Promise<void> {
     assertEqual(tracker2.get('r-8c'), PEAKS);
   }
 
+  // A durationMs update past the port's decode bound cancels the
+  // sweep outright — a successful result for a now-known long track
+  // must not cache.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    tracker.pull({ id: 'r-8d', handle: 'h', durationMs: null });
+    tracker.pull({ id: 'r-8d', handle: 'h', durationMs: 2000 });
+    calls[0]?.resolve(ok(PEAKS));
+    await flush();
+    assertEqual(
+      calls.length,
+      1,
+      'the over-cap update kills the sweep without re-pulling',
+    );
+    assertEqual(
+      tracker.get('r-8d'),
+      undefined,
+      'a cancelled-over-cap sweep caches nothing',
+    );
+  }
+
   // A real budget-exceeded while durationMs is unknown (the decoded
   // PCM ceiling) is still terminal — the duration landing later must
   // not re-decode the same oversized audio.

@@ -29,8 +29,10 @@ const MAX_PEAK_BYTES = 24 * 1024 * 1024;
  * PCM before peak bucketing: 8 min of stereo 48 kHz is ~184 MiB of
  * Float32s. That's the transient spike the renderer pays for a bar
  * row — tracks longer than this keep the seeded pattern.
+ * Exported so the tracker can cancel an in-flight sweep whose
+ * late-arriving duration crosses the same bound.
  */
-const MAX_DECODE_MS = 8 * 60 * 1000;
+export const MAX_DECODE_MS = 8 * 60 * 1000;
 /**
  * Lowest plausible music bitrate — the bound for streams whose
  * `durationMs` is unknown. At this floor, this many encoded bytes

@@ -1,5 +1,6 @@
 import { CancellationSource } from '@auqw/application';
 import type { PeaksPort } from '@auqw/application';
+import { MAX_DECODE_MS } from './web-peaks.ts';
 
 /**
  * What the tracker needs to fetch — the live playback session fields.
@@ -41,6 +42,8 @@ export type PeaksTrackerDeps = {
   readonly deadlineMs?: number;
   readonly retryLimit?: number;
   readonly retryDelayMs?: number;
+  /** A durationMs update past this cancels the live sweep outright. */
+  readonly maxDurationMs?: number;
   readonly setTimeoutFn?: typeof setTimeout;
   readonly clearTimeoutFn?: typeof clearTimeout;
   readonly now?: () => number;
@@ -66,6 +69,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const deadlineMs = deps.deadlineMs ?? PEAK_DEADLINE_MS;
   const retryLimit = deps.retryLimit ?? PEAK_RETRY_LIMIT;
   const retryDelayMs = deps.retryDelayMs ?? PEAK_RETRY_DELAY_MS;
+  const maxDurationMs = deps.maxDurationMs ?? MAX_DECODE_MS;
   const setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
   const clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
   const now = deps.now ?? (() => Date.now());
@@ -95,6 +99,20 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     }
     const live = inflight.get(id);
     if (live !== undefined) {
+      if (
+        target.durationMs !== null &&
+        target.durationMs > maxDurationMs
+      ) {
+        // The update revealed a duration the port would reject
+        // outright — kill the sweep in place; nothing may cache a
+        // result the duration gate exists to skip.
+        inflight.delete(id);
+        if (live.timer !== null) {
+          clearTimeoutFn(live.timer);
+        }
+        live.source.cancel();
+        return;
+      }
       // A re-pull under the same id (durationMs landed mid-sweep)
       // updates the target instead of restarting — the sweep keeps
       // running, and a provisional-cap bail re-attempts against the
