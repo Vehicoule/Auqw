@@ -94,7 +94,7 @@ function context(signal?: CancellationSource): OperationContext {
 }
 
 export async function run(): Promise<void> {
-  // Happy path: open at 0, positional reads to EOF, decode to peaks.
+  // Happy path: positional reads to EOF, decode to peaks.
   {
     const pcm = new Float32Array(512);
     pcm[400] = 1; // a hot bucket in the back half
@@ -118,23 +118,30 @@ export async function run(): Promise<void> {
       (result.value[200] ?? 0) === 1,
       'the decoded impulse owns its bucket',
     );
-    const methods = stream.calls.map((c) => c.method);
-    assertEqual(methods[0], 'open', 'the handle is opened first');
-    assert(
-      methods.every((m) => m !== 'close' && m !== 'release'),
-      'the borrowed handle is never closed or released',
-    );
-    const openCall = stream.calls[0];
+    const firstRead = stream.calls[0];
+    assertEqual(firstRead?.method, 'read', 'extraction reads first');
     assertEqual(
-      (openCall?.args as { position: number }).position,
+      (firstRead?.args as { position: number }).position,
       0,
-      'extraction anchors at position 0',
+      'extraction starts at position 0',
+    );
+    const methods = stream.calls.map((c) => c.method);
+    assert(
+      methods.every(
+        (m) => m !== 'open' && m !== 'close' && m !== 'release',
+      ),
+      'the borrowed handle is never opened, closed, or released',
     );
   }
 
-  // A known-oversized stream bails before a single read.
+  // An oversized stream bails at the byte cap.
   {
-    const stream = fakeStream({ remaining: 2 * 1024 * 1024 });
+    const chunks = new Map<number, Uint8Array>([
+      [0, new Uint8Array(700)],
+      [700, new Uint8Array(700)],
+      [1400, new Uint8Array(0)],
+    ]);
+    const stream = fakeStream({ chunks });
     const port = createWebPeaksPort({
       stream,
       decode: fakeDecode([new Float32Array(8)]),
@@ -145,9 +152,10 @@ export async function run(): Promise<void> {
       context(),
     );
     assert(!result.ok && result.error.kind === 'budget-exceeded');
-    assert(
-      stream.calls.every((c) => c.method !== 'read'),
-      'no bytes are pulled past the byte budget',
+    assertEqual(
+      stream.calls.filter((c) => c.method === 'read').length,
+      2,
+      'reads stop at the byte budget',
     );
   }
 
@@ -288,6 +296,26 @@ export async function run(): Promise<void> {
       context(),
     );
     assert(!result.ok && result.error.kind === 'invalid-response');
+  }
+
+  // Exactly-cap streams still resolve: the loop reads once past the
+  // cap to see EOF instead of bailing on a boundary total.
+  {
+    const chunks = new Map<number, Uint8Array>([
+      [0, new Uint8Array(1024).fill(3)],
+      [1024, new Uint8Array(0)],
+    ]);
+    const stream = fakeStream({ chunks });
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([new Float32Array(8).fill(0.5)]),
+      maxBytes: 1024,
+    });
+    const result = await port.peaks(
+      { handle: 'h-cap', durationMs: null },
+      context(),
+    );
+    assert(result.ok, 'an exactly-capped stream still decodes');
   }
 
   // Over-long tracks skip the pull entirely — decoration only.

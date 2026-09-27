@@ -90,10 +90,13 @@ function fromBase64(data: string): Uint8Array {
  * Desktop/web `PeaksPort`: pull bytes off the live stream handle and
  * decode them with WebAudio, then bucket to the canonical resolution.
  *
- * The handle is borrowed, never owned: `stream:close` on it would
- * detach the session and wake every parked reader (the MSE pump) as
- * `cancelled`, so this port opens and reads but never closes or
- * releases.
+ * The handle is borrowed, never owned — the port only ever calls
+ * positional `stream:read`, which touches `read_pos` upward-only:
+ * `stream:open` re-anchors the session's speculative fill (`attach`
+ * resets `read_pos` on every call, so opening at 0 would rewind a
+ * mid-track pump's read-ahead window), and `stream:close`/`release`
+ * would detach the session and wake every parked reader (the MSE
+ * pump) as `cancelled`.
  *
  * Extraction is opportunistic: reads beyond the first must hit bytes
  * already committed, because a `read` parked on a hole queues demand
@@ -161,9 +164,14 @@ export function createWebPeaksPort(deps: {
     const timeout = new Promise<'timeout'>((resolve) => {
       timer = setTimeout(() => resolve('timeout'), remainingMs);
     });
-    // A losing read keeps running to completion in the background —
-    // the stream API has no per-read abort; the discarded promise is
-    // inert (it resolves into `timed`, already settled).
+    // A JS-side timeout cannot retract the native demand: the losing
+    // read keeps its `fetch_through` position queued until bytes land
+    // there (the first commit covering it releases it — a probe fetch,
+    // not the full want) or its own read deadline lapses. Since reads
+    // here run sequentially and each attempt issues one, at most one
+    // stale demand per attempt lingers; a per-read cancel needs a
+    // `stream:read` requestId, a contract-level change deferred to
+    // decisions.md.
     const raced = await Promise.race([timed, timeout]);
     if (timer !== null) {
       clearTimeout(timer);
@@ -178,27 +186,17 @@ export function createWebPeaksPort(deps: {
     handle: string,
     context: OperationContext,
   ): Promise<Result<Uint8Array>> {
-    const opened = await guard(() =>
-      deps.stream.open({ handle, position: 0 }),
-    );
-    if (!opened.ok) {
-      return opened;
-    }
-    const remaining = opened.value.remaining;
-    if (remaining !== null && remaining > maxBytes) {
-      return err(
-        appError('budget-exceeded', 'stream too large for peak extraction'),
-      );
-    }
     const chunks: Uint8Array[] = [];
     let total = 0;
     let position = 0;
+    let ended = false;
     // The first read gets cold-start patience; later reads must hit
     // already-committed bytes — a parked read is an unfetched hole,
     // and chasing holes steals the pump's demand priority from the
     // element mid-track.
     let timeoutMs = firstReadTimeoutMs;
-    for (;;) {
+    // `<=` so an exactly-`maxBytes` stream still reaches its EOF read.
+    while (total <= maxBytes) {
       const chunk = await readWithDeadline(
         { handle, position, maxLen: READ_CHUNK },
         timeoutMs,
@@ -217,16 +215,17 @@ export function createWebPeaksPort(deps: {
       }
       const bytes = fromBase64(chunk.value.data);
       if (bytes.byteLength === 0) {
+        ended = true;
         break;
       }
       total += bytes.byteLength;
-      if (total > maxBytes) {
-        return err(
-          appError('budget-exceeded', 'stream too large for peak extraction'),
-        );
-      }
       chunks.push(bytes);
       position += bytes.byteLength;
+    }
+    if (!ended) {
+      return err(
+        appError('budget-exceeded', 'stream too large for peak extraction'),
+      );
     }
     const out = new Uint8Array(total);
     let at = 0;
