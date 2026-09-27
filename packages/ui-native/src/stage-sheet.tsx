@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Image,
   Platform,
   ScrollView,
   StyleSheet,
@@ -308,13 +309,36 @@ function PlayerBackdrop({
 }: {
   readonly artworkUrl: string;
 }) {
-  // One resolution for both copies — the blurred layer must read the
-  // same cache-local file the sharp Artwork does, never a second fetch
-  // of the remote url (offline it would just be absent).
-  const { uri, pending } = useResolvedArtworkUri(artworkUrl);
+  // One resolution for both copies — a second useResolvedArtworkUri
+  // inside Artwork would repeat the persisted lookup and access-time
+  // write; the blurred layer must read the same cache-local file the
+  // sharp copy does anyway (offline a remote refetch is just absent).
+  const { uri, pending, markRemote } = useResolvedArtworkUri(artworkUrl);
+  const theme = useTheme();
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      <Artwork url={artworkUrl} fill cornerRadius={0} />
+      {pending || uri === null ? (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              backgroundColor: theme.colors.raised,
+              alignItems: 'center',
+              justifyContent: 'center',
+            },
+          ]}
+        >
+          <Icon name="note" size={36} color={theme.colors.textSecondary} />
+        </View>
+      ) : (
+        <Image
+          source={{ uri }}
+          style={StyleSheet.absoluteFill}
+          resizeMode="cover"
+          onError={markRemote}
+          accessibilityIgnoresInvertColors
+        />
+      )}
       <Svg style={StyleSheet.absoluteFill}>
         <Defs>
           <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
@@ -325,10 +349,18 @@ function PlayerBackdrop({
               frost zone, fully opaque by the transport row. */}
           <LinearGradient id="uwfp-frost-reveal" x1="0" y1="0" x2="0" y2="1">
             <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="0" />
-            <Stop offset="0.78" stopColor={MASK_LIGHT} stopOpacity="0.7" />
-            <Stop offset="0.95" stopColor={MASK_LIGHT} stopOpacity="1" />
+            <Stop offset="0.72" stopColor={MASK_LIGHT} stopOpacity="0.55" />
+            <Stop offset="0.9" stopColor={MASK_LIGHT} stopOpacity="1" />
           </LinearGradient>
-          <Mask id="uwfp-frost">
+          <Mask
+            id="uwfp-frost"
+            x="0"
+            y="0"
+            width="100%"
+            height="100%"
+            maskUnits="userSpaceOnUse"
+            maskContentUnits="userSpaceOnUse"
+          >
             <Rect
               x="0"
               y="0"
@@ -338,11 +370,11 @@ function PlayerBackdrop({
             />
           </Mask>
           <Filter id="uwfp-blur">
-            <FeGaussianBlur stdDeviation={18} />
+            <FeGaussianBlur stdDeviation={36} />
           </Filter>
         </Defs>
         {!pending && uri !== null && (
-          <G mask="url(#uwfp-frost)">
+          <G mask="#uwfp-frost">
             <SvgImage
               href={uri}
               x="0"
@@ -350,7 +382,7 @@ function PlayerBackdrop({
               width="100%"
               height="100%"
               preserveAspectRatio="xMidYMid slice"
-              filter="url(#uwfp-blur)"
+              filter="#uwfp-blur"
             />
           </G>
         )}
