@@ -46,6 +46,13 @@ export function createSyncEmit(opts: {
       return ok(undefined);
     }
     const pending = buffered.splice(0);
+    // localChangeBatch rejects an empty batch as 'empty local
+    // write' — a bare flush call (`writes` = []) with nothing
+    // buffered has nothing to stamp, so it must short-circuit
+    // rather than surface a spurious failure to the bring-up warn.
+    if (pending.length === 0 && writes.length === 0) {
+      return ok(undefined);
+    }
     const stamped = await surface.localChangeBatch(
       pending.length > 0 ? [...pending, ...writes] : writes,
       signal,
