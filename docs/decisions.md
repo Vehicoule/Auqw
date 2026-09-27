@@ -11,6 +11,10 @@ rationale and the condition that would reopen it.
 | `catalog.suggest` has no settings slot — it routes automatically over declaring providers | Decided | Suggestions are provider-independent by design: whichever loaded provider declares the capability serves the draft pane (first declarer, registration order). A per-slot choice would fragment the typing surface without benefit. | If a second declarer lands and ordering matters, introduce routing policy in this log first. |
 | Typing no longer runs `catalog.search` — results commit on Enter or a suggestion tap | Decided | Removes per-keystroke catalog load; the committed query is also what caches and recents record, matching what the operator actually searched for. | If users need live results while typing, gate behind a setting — default stays suggestions-first. |
 
+## Plugin guests
+
+| `serde` (derive) joins youtube-music guest deps for `radio.seed`'s `next` parse | Decided | A 565 KB `next` body as a `Value` DOM burns ~340 M fuel against the 200 M per-entry cap — the mobile `budget-exceeded: fuel` failure. Typed structs with per-field tolerance visitors parse once (~84 M fuel) at identical skip semantics. serde + serde_json were already SDK deps; this adds only `serde`'s `derive` feature to the guest crate. | If the guest grows a second large-body endpoint, generalize the opt_* helpers into the SDK or revisit a streaming parse. |
+
 ## Presentation
 
 | UI typeface is Inter (400/500/700 via `@expo-google-fonts/inter` on mobile, `Inter → ui-sans-serif → system-ui` on web/desktop); JetBrains Mono dropped, along with the "type is monospaced" Omarchy rule | Decided | Monospace read terminal-like rather than music-player; owner directed a Mistral-style sans shell (2026-09). Inter ships through the same bundled-google-fonts mechanism that carried JetBrains Mono — dependency swap, not a new mechanism. | If Inter's metrics break dense metadata/duration columns, revisit with `fontVariant: ['tabular-nums']` or a numeric-only mono fallback. |
