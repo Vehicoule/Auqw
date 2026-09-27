@@ -24,6 +24,11 @@ import {
   waveformBarExtent,
   waveformBarLayout,
 } from './waveform.ts';
+import {
+  PEAKS_RESOLUTION,
+  peaksFromChannels,
+  resamplePeaks,
+} from './peaks.ts';
 import { en } from './locales/en.ts';
 import { de } from './locales/de.ts';
 import { es } from './locales/es.ts';
@@ -411,5 +416,86 @@ assert(
   shimmerHighlight(0.02, 0.98) > 0.7,
   'the band wraps across the 1→0 boundary',
 );
+
+// peaksFromChannels: max-abs bucket envelope, normalized and sqrt-lifted.
+// Synthetic PCM: a sine's flat envelope, an impulse train's spikes.
+{
+  const sine = new Float32Array(1024).map((_, i) =>
+    0.5 * Math.sin((2 * Math.PI * i) / 32),
+  );
+  // Bucket width (128 frames) spans four periods → every bucket
+  // contains a crest → the envelope reads as a flat full row.
+  const profile = peaksFromChannels([sine], 8);
+  assertEqual(profile.length, 8, 'profile has the requested width');
+  assert(
+    profile.every((p) => Math.abs(p - 1) < 1e-6),
+    'a constant sine envelope reads as a flat full row',
+  );
+  assertEqual(
+    peaksFromChannels([sine], PEAKS_RESOLUTION).length,
+    PEAKS_RESOLUTION,
+    'canonical resolution yields the canonical width',
+  );
+
+  // One loud impulse among silence → exactly one hot bucket.
+  const quiet = new Float32Array(1024);
+  quiet[768] = 1;
+  const spiked = peaksFromChannels([quiet], 4);
+  assertEqual(spiked[0], 0, 'silent buckets read zero');
+  assertEqual(spiked[3], 1, 'the impulse owns its bucket');
+  assertEqual(spiked[1], 0, 'neighbouring buckets stay silent');
+
+  // Two channels take the max across both.
+  const left = new Float32Array(4);
+  const right = new Float32Array(4);
+  left[0] = 0.25;
+  right[3] = -0.5;
+  const stereo = peaksFromChannels([left, right], 4);
+  assertEqual(stereo[3], 1, 'the louder channel drives the bucket');
+  assert(
+    Math.abs((stereo[0] ?? 0) - Math.sqrt(0.5)) < 0.001,
+    'the quiet channel contributes half-weight after normalization',
+  );
+
+  // Silence and emptiness are honest zeros, never a divide-by-NaN.
+  const flat = peaksFromChannels([new Float32Array(64)], 8);
+  assert(flat.every((p) => p === 0), 'silence yields a zero profile');
+  const empty = peaksFromChannels([new Float32Array(0)], 8);
+  assert(empty.every((p) => p === 0), 'empty input yields a zero profile');
+  assertEqual(peaksFromChannels([sine], 0).length, 0, 'zero count yields empty');
+}
+
+// resamplePeaks: max-pool downsample, linear upsample, zero-padding.
+{
+  const up = resamplePeaks([0, 1], 4);
+  assertEqual(up.length, 4, 'upsampled to the bar count');
+  assertEqual(up[0], 0, 'upsample starts at the first peak');
+  assertEqual(up[3], 1, 'upsample ends at the last peak');
+  assert(
+    Math.abs((up[1] ?? 0) - 1 / 3) < 0.001,
+    'upsample interpolates linearly',
+  );
+
+  // 4→2 max-pool: a transient survives aggregation.
+  const down = resamplePeaks([0.2, 1, 0.4, 0.1], 2);
+  assertEqual(down[0], 1, 'downsample keeps the bucket max');
+  assertEqual(down[1], 0.4, 'downsample keeps the second bucket max');
+
+  // Identity resample is exact.
+  const same = resamplePeaks([0.3, 0.7], 2);
+  assertEqual(same[0], 0.3, 'same-count resample is exact');
+  assertEqual(same[1], 0.7, 'same-count resample is exact');
+
+  assert(
+    resamplePeaks([], 4).every((p) => p === 0),
+    'empty input yields zeros',
+  );
+  assertEqual(resamplePeaks([1], 0).length, 0, 'zero count yields empty');
+  const single = resamplePeaks([0.5], 3);
+  assert(
+    single.every((p) => p === 0.5),
+    'a lone peak broadcasts across the row',
+  );
+}
 
 console.log('ui-shared tests passed');

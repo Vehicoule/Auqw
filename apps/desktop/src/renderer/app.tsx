@@ -112,6 +112,9 @@ import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from './runtime.ts';
+import { createWebPeaksPort } from './web-peaks.ts';
+import { useWaveformPeaks } from './use-waveform-peaks.ts';
+import type { PeaksTarget } from './use-waveform-peaks.ts';
 
 // Boot and gate strings render before the ready settings arrive —
 // seed the UI language from the system tag so those first screens
@@ -1964,6 +1967,27 @@ function Main({
   const playing = playback.type === 'playing';
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
+  // Real waveform peaks for the Stage seek — lazy, cached per
+  // recordingId, and null until resolved (the renderer keeps the
+  // seeded pattern while pending and on failure). The port borrows
+  // the live stream handle; it never owns or closes it.
+  const peaksPort = useMemo(
+    () => createWebPeaksPort({ stream: window.auqw.stream }),
+    [],
+  );
+  const peaksTarget: PeaksTarget | null =
+    playback.type === 'buffering' ||
+    playback.type === 'playing' ||
+    playback.type === 'paused'
+      ? {
+          // recordingId alone would reuse a waveform across
+          // re-prepared streams — attemptId keys the resolved source.
+          id: `${playback.recordingId}|${playback.identity.attemptId}`,
+          handle: playback.handle,
+          durationMs: playback.durationMs ?? null,
+        }
+      : null;
+  const peaks = useWaveformPeaks(peaksPort, peaksTarget);
   const onPlayPause = useCallback(() => {
     // Pause is always allowed; resuming a remote track while offline
     // would start a prepare that cannot finish. The intent is the
@@ -3182,6 +3206,7 @@ function Main({
                       : undefined
                   }
                   onSeek={seekToPosition}
+                  peaks={peaks}
                   onRetryLyrics={onRetryLyrics}
                   onStartRadio={
                     radioSeedable(radioSeedRef) ? onStartRadio : undefined

@@ -231,6 +231,9 @@ export type NowPlayingScreenProps = {
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /** Real measured peaks for the playing recording; null/undefined
+   * keeps the seeded pattern (pending state and failure fallback). */
+  readonly peaks?: readonly number[] | null | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
   readonly onStopRadio?: (() => void) | undefined;
@@ -263,6 +266,7 @@ export function NowPlayingScreen({
   download = null,
   onDownload,
   onSeek,
+  peaks,
   onRetryLyrics,
   onStartRadio,
   onStopRadio,
@@ -309,6 +313,7 @@ export function NowPlayingScreen({
             durationMs={player.durationMs}
             onSeek={onSeek}
             seed={`${player.title}|${player.artist ?? ''}`}
+            peaks={peaks}
             loading={player.status === 'preparing' || player.durationMs === null}
           />
           <TransportControls

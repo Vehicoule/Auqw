@@ -1,7 +1,8 @@
 // Deterministic decorative waveform + ring geometry shared by the
-// native and web progress controls. These are not real peaks — the
-// spec (docs/specs/design.md §87) keeps measured peaks deferred, so a
-// hashed pattern stands in until the audio pipeline provides them.
+// native and web progress controls. The seeded pattern is a
+// placeholder for real peaks: renderers prefer measured amplitudes
+// (`peaks.ts`) when a `PeaksPort` supplies them and fall back to this
+// hashed pattern while extraction is pending or after failure.
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
