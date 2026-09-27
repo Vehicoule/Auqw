@@ -170,6 +170,39 @@ export async function run(): Promise<void> {
     assertEqual(tracker.get('d'), PEAKS, 'the new entry caches');
   }
 
+  // A budget abort under the provisional unknown-duration cap is not
+  // terminal: it settles uncached so the pull a later durationMs
+  // triggers gets the full byte budget.
+  {
+    const timers = fakeTimers();
+    const { calls, port } = fakePort(() =>
+      err(appError('budget-exceeded', 'stream too large')),
+    );
+    const tracker = createPeaksTracker({
+      port,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+      retryDelayMs: 10,
+    });
+    tracker.pull({ id: 'r-8', handle: 'h', durationMs: null });
+    await flush();
+    assertEqual(
+      tracker.get('r-8'),
+      undefined,
+      'a provisional-cap abort stays uncached',
+    );
+    timers.fire();
+    await flush();
+    assertEqual(calls.length, 1, 'no spot-retry on a provisional abort');
+    tracker.pull({ id: 'r-8', handle: 'h', durationMs: 120_000 });
+    await flush();
+    assertEqual(
+      calls.length,
+      2,
+      'a known duration re-extracts under the full cap',
+    );
+  }
+
   // A re-prepared stream is a new cache identity — the same recording
   // under a new attempt pulls fresh instead of inheriting the old
   // stream's peaks or failure.

@@ -114,18 +114,29 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           if (entry.source.signal.cancelled) {
             return;
           }
+          // A budget abort under a *provisional* cap (durationMs was
+          // still unknown, so the pull ran against the tighter
+          // bitrate-floor bound) is neither terminal nor worth
+          // retrying on the spot: it settles uncached so the pull a
+          // durationMs update retriggers gets the full byte cap.
+          const provisionalCap =
+            !result.ok &&
+            result.error.kind === 'budget-exceeded' &&
+            durationMs === null;
           if (result.ok) {
             cache.set(id, result.value);
             evict();
           } else if (
-            result.error.kind === 'budget-exceeded' ||
-            result.error.kind === 'invalid-response'
+            !provisionalCap &&
+            (result.error.kind === 'budget-exceeded' ||
+              result.error.kind === 'invalid-response')
           ) {
             // Terminal failures cache `null` — seeded bars stick and
             // the same attempt never re-pulls on revisit.
             cache.set(id, null);
             evict();
           } else if (
+            !provisionalCap &&
             result.error.kind !== 'cancelled' &&
             n < retryLimit
           ) {
