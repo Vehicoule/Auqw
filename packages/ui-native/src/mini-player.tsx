@@ -77,6 +77,9 @@ export function MiniPlayer({
   const ios = platform === 'ios';
   const { height: windowHeight } = useWindowDimensions();
   const dragStart = useSharedValue(0);
+  // Set on the first vertical-dominant update — distinguishes a gesture
+  // that displaced the sheet from one that merely observed a settle.
+  const wroteProgress = useSharedValue(false);
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
@@ -103,6 +106,7 @@ export function MiniPlayer({
       .onBegin(() => {
         if (sheetProgress !== undefined) {
           dragStart.value = sheetProgress.value;
+          wroteProgress.value = false;
         }
       })
       .onUpdate((e) => {
@@ -110,6 +114,7 @@ export function MiniPlayer({
         // Horizontal intent owns the recognizer without lifting the
         // sheet — only a vertically-dominant pull writes progress.
         if (Math.abs(e.translationX) > Math.abs(e.translationY)) return;
+        wroteProgress.value = true;
         sheetProgress.value = Math.min(
           1,
           Math.max(0, dragStart.value - e.translationY / travelPx()),
@@ -131,16 +136,14 @@ export function MiniPlayer({
           return;
         }
         if (Math.abs(e.translationX) >= Math.abs(e.translationY)) {
-          // A horizontal release after vertical-dominant frames must not
-          // strand the sheet — settle progress back to the drag's start
-          // anchor before the track action runs.
-          if (sheetProgress.value !== dragStart.value) {
+          // Only settle when this gesture actually displaced the sheet —
+          // restoring toward `dragStart` after grabbing a closing sheet
+          // would resurrect it mid-collapse (the pill is interactive
+          // only while `expanded` is false, so the anchor here is 0).
+          if (wroteProgress.value && sheetProgress.value > 0) {
             sheetProgress.value = theme.reducedMotion
-              ? dragStart.value
-              : withSpring(dragStart.value, {
-                  stiffness: 200,
-                  damping: 26,
-                });
+              ? 0
+              : withSpring(0, { stiffness: 200, damping: 26 });
           }
           if (e.translationX < -40 && onNext !== undefined) {
             scheduleOnRN(onNext);
@@ -192,6 +195,7 @@ export function MiniPlayer({
     windowHeight,
     theme.reducedMotion,
     dragStart,
+    wroteProgress,
   ]);
   // The pill fades out inside the sheet's first stretch of travel — the
   // fade window ends exactly where the expanded content's reveal begins.
