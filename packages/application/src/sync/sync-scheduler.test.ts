@@ -485,6 +485,76 @@ async function launchRoundPreemptsHydrationDebounce(): Promise<void> {
   scheduler.stop();
 }
 
+async function reconnectSurvivesLaunchFanout(): Promise<void> {
+  const { client, clock, scheduler } = rig({ reconnectBaseMs: 2_000 });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  // peers() stays pending while the session drops mid-read — the
+  // offline emit arms the reconnect ladder before the fan-out lands.
+  // The launch round must stand behind it, not replace it.
+  let resolvePeers: (r: Result<readonly SyncPeer[]>) => void = () => { };
+  client.peers = () =>
+    new Promise((resolve) => {
+      resolvePeers = resolve;
+    });
+  scheduler.start();
+  client.peerViews.set('fp-a', {
+    state: 'offline',
+    lastError: appError('transient', 'socket closed'),
+  });
+  client.emitStatus();
+  await pump();
+  resolvePeers(ok(client.peersList));
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    0,
+    'launch fan-out stands behind the armed reconnect',
+  );
+  clock.advance(2_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    1,
+    'reconnect fires at its ladder wait',
+  );
+  scheduler.stop();
+}
+
+async function staleVerdictDoesNotSlideFloor(): Promise<void> {
+  const { client, clock, scheduler } = rig();
+  client.peersList = [peer('fp-a'), peer('fp-b')];
+  // fp-a's failed round completed BEFORE the scheduler subscribed —
+  // its verdict is already history, so seeding start() consumes it:
+  // the first unrelated republish must not restart a fresh floor.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastError: appError('rate-limit', 'slow down', 30_000),
+    lastRound: outcome('fp-a'),
+  });
+  client.peerViews.set('fp-b', { state: 'open' });
+  scheduler.start();
+  client.emitStatus();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.join(','),
+    'fp-a,fp-b',
+    'stale verdict cannot floor the launch round',
+  );
+  clock.advance(30_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'no retry at the stale verdict expiry',
+  );
+  scheduler.stop();
+}
+
 async function stopHaltsEverything(): Promise<void> {
   const { client, clock, scheduler } = rig({ debounceMs: 100 });
   client.peersList = [peer('fp-a')];
@@ -1075,6 +1145,8 @@ export async function run(): Promise<void> {
   await manualSuccessClearsStaleFloor();
   await connectOpenKeepsRateLimitFloor();
   await launchRoundPreemptsHydrationDebounce();
+  await reconnectSurvivesLaunchFanout();
+  await staleVerdictDoesNotSlideFloor();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();

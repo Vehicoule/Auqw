@@ -363,11 +363,14 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       seen.add(view.peer.fp);
       // A peer absent from the tracks appeared after start() — a
       // fresh pairing — and the launch fan-out never covered it;
-      // its first round converges edits that predate the pair.
+      // its first round converges edits that predate the pair. The
+      // wake rides debounce semantics: a write during the wait
+      // re-arms it, and the launch fan-out preempts debounce timers
+      // alone, so an armed reconnect ladder keeps standing.
       const isNew = !tracks.has(view.peer.fp);
       const track = trackFor(view.peer.fp);
       if (isNew) {
-        schedule(view.peer.fp, debounceMs, 'stand');
+        schedule(view.peer.fp, debounceMs, 'debounce');
       }
       // Shared look-back for the verdict-freshness checks below.
       const prevPeer = prevViews?.peers.find(
@@ -508,7 +511,16 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       unsubscribe = deps.client.subscribe(onStatus);
       views = deps.client.status();
       for (const view of views.peers) {
-        trackFor(view.peer.fp);
+        const track = trackFor(view.peer.fp);
+        // A round that completed before this subscription is already
+        // history — seeding keeps a republished status from re-firing
+        // its verdict (an old rate-limit would otherwise slide its
+        // floor to now+hint on the first unrelated emission). The ??=
+        // guards a restart: a track that persisted through stop()
+        // keeps its own consumption record.
+        if (track.seenRound === undefined && view.lastRound !== undefined) {
+          track.seenRound = view.lastRound;
+        }
       }
       // On-launch round per known peer — the custody read is the
       // source of truth for devices that predate this status view.
@@ -520,11 +532,18 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
               return;
             }
             for (const peer of peers.value) {
-              // 'replace', not 'stand': while peers() was resolving,
-              // a hydration emit may already have armed these peers'
-              // first-round debounce — the launch round preempts it
-              // rather than waiting a trailing edge out.
-              schedule(peer.fp, 0, 'replace');
+              // Preempt only hydration debounces: while peers() was
+              // resolving, a refresh emit may already have armed this
+              // peer's first-round write wake — the launch round
+              // supersedes it. A reconnect ladder or other one-shot
+              // wake armed in the same window keeps standing (and
+              // schedule()'s clamp still honors a live rate-limit).
+              const track = trackFor(peer.fp);
+              schedule(
+                peer.fp,
+                0,
+                track.debouncing ? 'replace' : 'stand',
+              );
             }
           })
           .then(
