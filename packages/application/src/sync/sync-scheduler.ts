@@ -265,6 +265,9 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       const result = await deps.client.syncNow(fp, round.signal);
       if (result.ok) {
         track.backoffMs = reconnectBaseMs;
+        // A landed round proves the peer takes traffic — any floor a
+        // prior verdict set is spent.
+        delete track.notBeforeMs;
       } else if (result.error.kind === 'cancelled') {
         // Our own lifecycle cancel — no verdict to schedule on.
       } else {
@@ -361,6 +364,18 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // failing peer to the base delay forever.
         if (!track.running) {
           track.backoffMs = reconnectBaseMs;
+          // An open observed with no scheduler round in flight is an
+          // independently completed round (manual syncNow) — the
+          // rate-limit floor belonged to the round that set it and
+          // is obsolete now that a newer round succeeded. The pending
+          // wake it armed dies with it; a write debounce stands.
+          if (track.notBeforeMs !== undefined) {
+            delete track.notBeforeMs;
+            if (track.timer !== null && !track.debouncing) {
+              track.timer.cancel();
+              track.timer = null;
+            }
+          }
         }
         if (track.dirty && !track.running) {
           track.dirty = false;

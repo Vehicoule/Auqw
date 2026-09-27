@@ -392,6 +392,26 @@ async function unavailableIsNotNegativeCached(): Promise<void> {
   assertEqual(r.fetch.calls.length, 2, 'recovery refetches');
 }
 
+async function transportFailuresAreNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  // 'transient' after the in-get retry — like 'timeout' and
+  // 'unavailable' — is the network's verdict, not the url's. The
+  // negative cache must not pin it while connectivity could already
+  // be back on the next mount.
+  r.fetch.respond(() => err(appError('transient', 'blip')));
+  const pending = r.cache.get(A, ctx());
+  await pump();
+  r.clock.advance(1_000);
+  const failed = await pending;
+  assert(!failed.ok && failed.error.kind === 'transient');
+  assertEqual(r.fetch.calls.length, 2, 'in-window retry ran');
+  // Recovery on the next mount — no TTL wait.
+  r.fetch.respondBytes(4 * MB);
+  const recovered = await r.cache.get(A, ctx());
+  assert(recovered.ok, 'recovered get must refetch immediately');
+  assertEqual(r.fetch.calls.length, 3, 'recovery refetches');
+}
+
 async function shortDeadlineWaiterLeavesSharedWork(): Promise<void> {
   const r = rig(persisted());
   // Leader with a 5 s budget; a second waiter joins with 30 s — the
@@ -903,6 +923,7 @@ export async function run(): Promise<void> {
   await fetchErrorsPropagate();
   await negativeCacheExpiry();
   await unavailableIsNotNegativeCached();
+  await transportFailuresAreNotNegativeCached();
   await shortDeadlineWaiterLeavesSharedWork();
   await zeroRetryAfterStillNegativeCaches();
   await cancelledGetIsNotNegativeCached();

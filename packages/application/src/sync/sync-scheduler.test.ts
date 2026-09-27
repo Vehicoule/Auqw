@@ -326,6 +326,45 @@ async function unpairMidRoundCancelsAndNeverReschedules(): Promise<void> {
   scheduler.stop();
 }
 
+async function manualSuccessClearsStaleFloor(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round done');
+  // A rate-limit verdict lands a 30 s floor and arms the reconnect.
+  client.peerViews.set('fp-a', {
+    state: 'offline',
+    lastError: appError('rate-limit', 'slow down', 30_000),
+  });
+  client.emitStatus();
+  await pump();
+  // A manual syncNow succeeds — the peer proves it takes traffic and
+  // the floor is obsolete; its armed wake dies with it.
+  client.peerViews.set('fp-a', { state: 'open' });
+  client.emitStatus();
+  await pump();
+  // A write now debounces at 500 ms — not the obsolete 30 s floor.
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'write debounces once the stale floor clears',
+  );
+  clock.advance(60_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'no resurrected wake at the old floor',
+  );
+  scheduler.stop();
+}
+
 async function stopHaltsEverything(): Promise<void> {
   const { client, clock, scheduler } = rig({ debounceMs: 100 });
   client.peersList = [peer('fp-a')];
@@ -913,6 +952,7 @@ export async function run(): Promise<void> {
   await connectivityEdges();
   await unpairedPeerDrops();
   await unpairMidRoundCancelsAndNeverReschedules();
+  await manualSuccessClearsStaleFloor();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();

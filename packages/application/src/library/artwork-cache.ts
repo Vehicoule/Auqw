@@ -3,7 +3,7 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import type { AppError, Result } from '../errors.ts';
+import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
@@ -149,9 +149,15 @@ type Inflight = {
   waiters: number;
   work: CancellationSource;
   /**
+   * Every live waiter's own deadline — the multiset backing the
+   * shared bound so a departing caller's budget leaves with them.
+   */
+  waiterDeadlines: number[];
+  /**
    * The shared bound: the LATEST deadline any waiter brought, so a
    * short-deadline leader doesn't expire a transfer a later caller
-   * still has budget for. Grows on join; retryBounded re-reads it.
+   * still has budget for. Recomputed on join and on leave;
+   * retryBounded re-reads it.
    */
   deadlineMs: number;
 };
@@ -180,6 +186,27 @@ type Failure = {
  */
 const FAILURE_TTL_MS = 20_000;
 const FAILURE_MAX_ENTRIES = 512;
+
+/**
+ * Verdicts that describe the url itself — only these may
+ * negative-cache. Transport and environment kinds (timeout,
+ * transient, unavailable, auth, storage, internal, lifecycle) say
+ * nothing about what the url holds: pinning them would keep a
+ * healthy url dead through a connectivity blip, long after the
+ * network recovered. 'rate-limit' stays — its TTL is the
+ * server-asked wait that suppresses re-hammering.
+ */
+const NEGATIVE_CACHE_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'not-found',
+  'invalid-response',
+  'artifact-rejected',
+  'no-result',
+  'not-applicable',
+  'unsupported',
+  'permission-denied',
+  'expired-resource',
+  'rate-limit',
+]);
 
 /**
  * Bounded LRU on-disk artwork cache (docs/specs/data.md: ~200 MB,
@@ -488,11 +515,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       // waiters all left can report a late HTTP error while its
       // replacement already downloaded the same url successfully.
       if (
-        downloaded.error.kind !== 'cancelled' &&
-        // 'unavailable' describes the transport, not the url — a
-        // network blip must not pin the url unavailable while a
-        // later mount could already reach it.
-        downloaded.error.kind !== 'unavailable' &&
+        NEGATIVE_CACHE_KINDS.has(downloaded.error.kind) &&
         !record.work.signal.cancelled
       ) {
         const now = safeNow();
@@ -617,8 +640,14 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     record.waiters += 1;
     // A later waiter brings its own budget — the shared bound grows
     // to the latest deadline so the leader's expiry doesn't kill a
-    // download newer waiters still have time for.
-    record.deadlineMs = Math.max(record.deadlineMs, context.deadlineMs);
+    // download newer waiters still have time for. A non-finite or
+    // negative budget contributes nothing (that caller's own wait
+    // times out immediately below).
+    const mine = isSafeNonNegative(context.deadlineMs)
+      ? context.deadlineMs
+      : 0;
+    record.waiterDeadlines.push(mine);
+    record.deadlineMs = Math.max(record.deadlineMs, mine);
     return new Promise<Result<ArtworkLookup>>((resolve) => {
       let unsubscribe: () => void = () => { };
       let done = false;
@@ -631,6 +660,16 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         unsubscribe();
         deadline.cancel();
         record.waiters -= 1;
+        // The departed budget leaves the shared bound — the transfer
+        // keeps flying only while a remaining waiter's deadline
+        // covers it; the last leaver still cancels the work.
+        const slot = record.waiterDeadlines.indexOf(mine);
+        if (slot !== -1) {
+          record.waiterDeadlines.splice(slot, 1);
+        }
+        if (record.waiterDeadlines.length > 0) {
+          record.deadlineMs = Math.max(...record.waiterDeadlines);
+        }
         if (record.waiters === 0) {
           record.work.cancel();
         }
@@ -643,10 +682,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       // budget dies while others remain leaves without cancelling
       // the shared work.
       const now = safeNow();
-      const remaining =
-        now === null || !isSafeNonNegative(context.deadlineMs)
-          ? 0
-          : context.deadlineMs - now;
+      const remaining = now === null ? 0 : mine - now;
       if (remaining <= 0) {
         finish(err(appError('timeout', 'operation deadline exceeded')));
       } else {
@@ -706,6 +742,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       ),
       waiters: 0,
       work: new CancellationSource(),
+      waiterDeadlines: [],
       deadlineMs: context.deadlineMs,
     };
     record.promise = (async (): Promise<Result<ArtworkLookup>> => {
