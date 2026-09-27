@@ -1930,8 +1930,10 @@ function Main({
     // would start a prepare that cannot finish. The intent is the
     // queue's mode, not transport: during a retry backoff playback
     // publishes 'preparing' with no handle, and the tap must still
-    // pause.
-    const intentPlaying = state.queue.mode === 'playing';
+    // pause. A transport 'paused' that arrived natively (queue still
+    // 'playing') means the tap resumes, not re-pauses.
+    const intentPlaying =
+      state.queue.mode === 'playing' && state.playback.type !== 'paused';
     if (
       !intentPlaying &&
       currentRecordingId !== null &&

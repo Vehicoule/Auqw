@@ -71,6 +71,12 @@ type PeerTrack = {
   notBeforeMs?: number;
   /** A scheduler-owned round is in flight. */
   running: boolean;
+  /**
+   * Cancels the in-flight round when the peer is unpaired or the
+   * scheduler stops — an orphaned exchange must not run to
+   * completion against a removed peer.
+   */
+  round: CancellationSource | null;
 };
 
 export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
@@ -134,6 +140,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         dirty: false,
         backoffMs: reconnectBaseMs,
         running: false,
+        round: null,
       };
       tracks.set(fp, track);
     }
@@ -212,13 +219,23 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       if (!slept.ok || lifecycle.signal.cancelled) {
         return;
       }
+      // The peer may have been unpaired while the wake slept — an
+      // orphaned timer never fires a round on a removed track.
+      if (tracks.get(fp) !== track) {
+        return;
+      }
       await runRound(fp);
     })();
     own(work);
   }
 
   async function runRound(fp: string): Promise<void> {
-    const track = trackFor(fp);
+    // Look up — never create — the track: a peer unpaired while its
+    // wake slept must not be resurrected by the orphaned timer.
+    const track = tracks.get(fp);
+    if (track === undefined) {
+      return;
+    }
     if (track.running || lifecycle.signal.cancelled || !online()) {
       track.dirty = true;
       return;
@@ -232,12 +249,20 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       return;
     }
     track.running = true;
+    // The round runs on its own source subscribed to the lifecycle —
+    // an unpair mid-round cancels the exchange instead of letting it
+    // finish and schedule a follow-up for a peer that's gone.
+    const round = new CancellationSource();
+    const unsubscribeLifecycle = lifecycle.signal.subscribe(() => {
+      round.cancel();
+    });
+    track.round = round;
     /** Reconnect delay when the round failed retryably. */
     let reconnectMs: number | null = null;
     /** A page-capped round that still moved entries continues once. */
     let progressed = false;
     try {
-      const result = await deps.client.syncNow(fp, lifecycle.signal);
+      const result = await deps.client.syncNow(fp, round.signal);
       if (result.ok) {
         track.backoffMs = reconnectBaseMs;
       } else if (result.error.kind === 'cancelled') {
@@ -281,24 +306,36 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         }
       }
     } finally {
+      unsubscribeLifecycle();
+      track.round = null;
       track.running = false;
     }
+    // Follow-ups only land while this very track is still installed —
+    // an unpair during the round must not resurrect a schedule for
+    // the removed peer.
+    const stillInstalled = tracks.get(fp) === track;
     if (reconnectMs !== null) {
       // The reconnect round exports whatever accumulated, so pending
       // writes are covered by it rather than a second debounced wake.
-      schedule(fp, reconnectMs, 'replace');
+      if (stillInstalled) {
+        schedule(fp, reconnectMs, 'replace');
+      }
       return;
     }
     if (progressed) {
       // The continuation drains the rest of the backlog AND whatever
       // landed mid-round — consume the flag so no third wake books.
       track.dirty = false;
-      schedule(fp, debounceMs, 'replace');
+      if (stillInstalled) {
+        schedule(fp, debounceMs, 'replace');
+      }
       return;
     }
     if (track.dirty) {
       track.dirty = false;
-      schedule(fp, debounceMs, 'replace');
+      if (stillInstalled) {
+        schedule(fp, debounceMs, 'replace');
+      }
     }
   }
 
@@ -392,10 +429,12 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         schedule(view.peer.fp, wait, 'stand');
       }
     }
-    // An unpaired peer drops its track — pending timers die with it.
+    // An unpaired peer drops its track — pending timers and any
+    // in-flight round die with it.
     for (const [fp, track] of [...tracks]) {
       if (!seen.has(fp)) {
         track.timer?.cancel();
+        track.round?.cancel();
         tracks.delete(fp);
       }
     }

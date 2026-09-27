@@ -148,6 +148,12 @@ type Inflight = {
    */
   waiters: number;
   work: CancellationSource;
+  /**
+   * The shared bound: the LATEST deadline any waiter brought, so a
+   * short-deadline leader doesn't expire a transfer a later caller
+   * still has budget for. Grows on join; retryBounded re-reads it.
+   */
+  deadlineMs: number;
 };
 
 type Eviction = {
@@ -460,11 +466,15 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         ),
       );
     }
-    // Transient verdicts retry once inside the caller's deadline; a
+    // Transient verdicts retry once inside the record's deadline —
+    // the live max over its waiters, not just the leader's, so a
+    // joined caller's budget keeps the shared transfer alive; a
     // still-failing url lands in the negative cache so the next
     // mount answers with the stored error rather than re-hammering.
     const downloaded = await retryBounded({
-      deadlineMs: context.deadlineMs,
+      get deadlineMs() {
+        return record.deadlineMs;
+      },
       signal: context.signal,
       clock: deps.clock,
       // The attempt's child signal, not the outer work signal — the
@@ -479,6 +489,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       // replacement already downloaded the same url successfully.
       if (
         downloaded.error.kind !== 'cancelled' &&
+        // 'unavailable' describes the transport, not the url — a
+        // network blip must not pin the url unavailable while a
+        // later mount could already reach it.
+        downloaded.error.kind !== 'unavailable' &&
         !record.work.signal.cancelled
       ) {
         const now = safeNow();
@@ -601,15 +615,21 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
     record.waiters += 1;
+    // A later waiter brings its own budget — the shared bound grows
+    // to the latest deadline so the leader's expiry doesn't kill a
+    // download newer waiters still have time for.
+    record.deadlineMs = Math.max(record.deadlineMs, context.deadlineMs);
     return new Promise<Result<ArtworkLookup>>((resolve) => {
       let unsubscribe: () => void = () => { };
       let done = false;
+      const deadline = new CancellationSource();
       const finish = (result: Result<ArtworkLookup>): void => {
         if (done) {
           return;
         }
         done = true;
         unsubscribe();
+        deadline.cancel();
         record.waiters -= 1;
         if (record.waiters === 0) {
           record.work.cancel();
@@ -619,6 +639,27 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       unsubscribe = context.signal.subscribe(() => {
         finish(err(appError('cancelled', 'cancelled')));
       });
+      // Each waiter's own deadline bounds its wait — a caller whose
+      // budget dies while others remain leaves without cancelling
+      // the shared work.
+      const now = safeNow();
+      const remaining =
+        now === null || !isSafeNonNegative(context.deadlineMs)
+          ? 0
+          : context.deadlineMs - now;
+      if (remaining <= 0) {
+        finish(err(appError('timeout', 'operation deadline exceeded')));
+      } else {
+        void deps.clock
+          .sleep(remaining, deadline.signal)
+          .then((slept) => {
+            if (slept.ok) {
+              finish(
+                err(appError('timeout', 'operation deadline exceeded')),
+              );
+            }
+          });
+      }
       if (!context.signal.cancelled) {
         void record.promise.then(finish);
       }
@@ -665,6 +706,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       ),
       waiters: 0,
       work: new CancellationSource(),
+      deadlineMs: context.deadlineMs,
     };
     record.promise = (async (): Promise<Result<ArtworkLookup>> => {
       try {

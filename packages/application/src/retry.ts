@@ -1,4 +1,4 @@
-import { appError, err } from './errors.ts';
+import { appError, err, ok } from './errors.ts';
 import type { AppError, Result } from './errors.ts';
 import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
@@ -26,7 +26,11 @@ import { isSafeNonNegative } from './domain.ts';
  * the wait immediately.
  */
 export type RetryOptions = {
-  /** Absolute epoch-ms deadline shared by every attempt. */
+  /**
+   * Absolute epoch-ms deadline shared by every attempt. Read fresh
+   * at each attempt and each watchdog wake, so a dynamic value (a
+   * shared record's live max) may move it forward — never earlier.
+   */
   readonly deadlineMs: number;
   /** Cancels in-flight calls and any pending backoff. */
   readonly signal: CancellationSignal;
@@ -133,10 +137,57 @@ export async function retryBounded<T>(
       unbind();
       throw thrown;
     }
-    const sleepP = opts.clock
-      .sleep(remaining, watchdog.signal)
-      .then((slept) => ({ tag: 'sleep' as const, slept }));
-    const winner = await Promise.race([callP, sleepP]);
+    // The bound is re-read after every wake: callers sharing one
+    // record across waiters (artwork inflight) may move the deadline
+    // forward mid-attempt, and an early wake then re-arms instead of
+    // firing on a stale bound.
+    const watchdogP = (async () => {
+      for (; ;) {
+        let wokeAt: number;
+        try {
+          wokeAt = opts.clock.nowMs();
+        } catch {
+          return {
+            tag: 'sleep' as const,
+            slept: err(internalError()),
+          };
+        }
+        if (!isSafeNonNegative(wokeAt)) {
+          return { tag: 'sleep' as const, slept: err(internalError()) };
+        }
+        if (opts.deadlineMs - wokeAt <= 0) {
+          // The budget died during the call. A call that consumed it
+          // synchronously may settle this same microtask — yield once
+          // so its own verdict wins the race, then confirm the bound
+          // is still dead (a live getter may have moved it forward).
+          await Promise.resolve();
+          let recheck: number;
+          try {
+            recheck = opts.clock.nowMs();
+          } catch {
+            return {
+              tag: 'sleep' as const,
+              slept: err(internalError()),
+            };
+          }
+          if (
+            !isSafeNonNegative(recheck) ||
+            opts.deadlineMs - recheck <= 0
+          ) {
+            return { tag: 'sleep' as const, slept: ok(undefined) };
+          }
+          continue;
+        }
+        const slept = await opts.clock.sleep(
+          opts.deadlineMs - wokeAt,
+          watchdog.signal,
+        );
+        if (!slept.ok) {
+          return { tag: 'sleep' as const, slept };
+        }
+      }
+    })();
+    const winner = await Promise.race([callP, watchdogP]);
     watchdog.cancel();
     unbind();
     if (winner.tag === 'sleep') {

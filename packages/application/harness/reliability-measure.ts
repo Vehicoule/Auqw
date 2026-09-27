@@ -404,7 +404,9 @@ async function scenarioArtwork() {
   const transientCalls = n;
 
   // Dead URL fetched repeatedly — negative cache should suppress.
-  fetch.respond(() => err(appError('unavailable', 'gone')));
+  // 'not-found' is the url's own verdict; 'unavailable' describes
+  // the network and is intentionally never cached.
+  fetch.respond(() => err(appError('not-found', 'gone')));
   const B = 'https://art.example/b.jpg';
   await cache.get(B, ctx());
   const bCalls1 = fetch.calls.filter((u) => u === B).length;

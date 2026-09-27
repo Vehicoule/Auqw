@@ -411,6 +411,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       // custody yet — never evict a live session's row.
       if (!seen.has(fp) && !sessions.has(fp)) {
         peers.delete(fp);
+        lastRounds.delete(fp);
       }
     }
     peersLoaded = true;
@@ -1109,6 +1110,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         peers.set(stored.fp, actual);
       } else {
         peers.delete(stored.fp);
+        lastRounds.delete(stored.fp);
       }
       sessions.delete(stored.fp);
       killSession(session, persisted.error);
@@ -1224,6 +1226,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           if (opened.error.kind === 'auth-required') {
             // The desktop forgot us — local custody is stale too.
             peers.delete(fp);
+            lastRounds.delete(fp);
             void deps.keys.peerDelete(fp, signal);
           }
           return err(opened.error);
@@ -1282,6 +1285,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
               appError('auth-required', 'sync: device re-bound remotely'),
             );
             peers.delete(fp);
+            lastRounds.delete(fp);
             void deps.keys.peerDelete(fp, signal);
             return err(
               appError('auth-required', 'sync: device re-bound remotely'),
@@ -1389,6 +1393,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       }
       peers.delete(fp);
       views.delete(fp);
+      // Dead pairing, dead counters — a later re-pair of the same
+      // fingerprint must not inherit this round's exchange numbers.
+      lastRounds.delete(fp);
       const removed = await deps.keys.peerDelete(fp, signal);
       emit();
       return removed;

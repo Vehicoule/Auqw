@@ -694,6 +694,30 @@ async function unpairSaysByeAndForgets(): Promise<void> {
   await client.close();
 }
 
+// 9b. A completed round's counters die with the pairing — re-pairing
+// the same fingerprint must not expose the dead round as fresh state.
+async function unpairDropsLastRound(): Promise<void> {
+  const { client } = await rig();
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  const round = await client.syncNow(SERVER_FP);
+  assert(round.ok, 'round completes');
+  assert(
+    client.status().peers[0]?.lastRound !== undefined,
+    'round counters recorded on the view',
+  );
+  const removed = await client.unpair(SERVER_FP);
+  assert(removed.ok, 'unpair resolves');
+  const rePaired = await client.pair({ payload: qrPayload() });
+  assert(rePaired.ok, 're-pair resolves');
+  assertEqual(client.status().peers.length, 1);
+  assert(
+    client.status().peers[0]?.lastRound === undefined,
+    're-pair must not inherit stale round counters',
+  );
+  await client.close();
+}
+
 // 10. A resume that meets `unpaired` rejects auth-required and drops
 // the stale custody record locally.
 async function resumeUnpairedDropsCustody(): Promise<void> {
@@ -1111,6 +1135,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['socketDeathUnwedges', socketDeathUnwedges],
   ['syncRequestKicksRound', syncRequestKicksRound],
   ['unpairSaysByeAndForgets', unpairSaysByeAndForgets],
+  ['unpairDropsLastRound', unpairDropsLastRound],
   ['resumeUnpairedDropsCustody', resumeUnpairedDropsCustody],
   ['refreshPeerReadsDevices', refreshPeerReadsDevices],
   ['keepalivePings', keepalivePings],

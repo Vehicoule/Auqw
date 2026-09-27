@@ -352,9 +352,9 @@ async function negativeCacheExpiry(): Promise<void> {
   assert(first.ok, 'transient then success must resolve');
   assertEqual(r.fetch.calls.length, 2, 'retry recovered in-window');
 
-  // A hard-failing url: 'unavailable' isn't retryable, so one
-  // attempt lands and the verdict negative-caches.
-  r.fetch.respond(() => err(appError('unavailable', 'dead')));
+  // A hard-failing url: 'not-found' is the url's own verdict — one
+  // attempt lands and the dead verdict negative-caches.
+  r.fetch.respond(() => err(appError('not-found', 'dead')));
   const dead = r.cache.get(B, ctx());
   await pump();
   r.clock.advance(1_000);
@@ -364,7 +364,7 @@ async function negativeCacheExpiry(): Promise<void> {
   // Remounts inside the TTL cost zero network calls.
   for (let i = 0; i < 5; i += 1) {
     const hit = await r.cache.get(B, ctx());
-    assert(!hit.ok && hit.error.kind === 'unavailable');
+    assert(!hit.ok && hit.error.kind === 'not-found');
   }
   assertEqual(r.fetch.calls.length, 3, 'remounts stay suppressed');
   // Past the TTL the url earns a fresh try — and can succeed.
@@ -373,6 +373,61 @@ async function negativeCacheExpiry(): Promise<void> {
   const healed = await r.cache.get(B, ctx());
   assert(healed.ok, 'expired negative verdict must refetch');
   assertEqual(r.fetch.calls.length, 4);
+}
+
+async function unavailableIsNotNegativeCached(): Promise<void> {
+  const r = rig(persisted());
+  // 'unavailable' is the network's verdict, not the url's — an
+  // offline get must not pin the url dead for the TTL while
+  // connectivity could already be back on the next mount.
+  r.fetch.respond(() => err(appError('unavailable', 'offline')));
+  const failed = await r.cache.get(A, ctx());
+  assert(!failed.ok && failed.error.kind === 'unavailable');
+  assertEqual(r.fetch.calls.length, 1, 'one attempt, non-retryable');
+  // Remount after recovery: the url earns a fresh download NOW,
+  // not after FAILURE_TTL_MS.
+  r.fetch.respondBytes(4 * MB);
+  const recovered = await r.cache.get(A, ctx());
+  assert(recovered.ok, 'recovery must not wait out a negative verdict');
+  assertEqual(r.fetch.calls.length, 2, 'recovery refetches');
+}
+
+async function shortDeadlineWaiterLeavesSharedWork(): Promise<void> {
+  const r = rig(persisted());
+  // Leader with a 5 s budget; a second waiter joins with 30 s — the
+  // shared download must outlive the leader's expiry and still
+  // deliver to the waiter that had the budget for it.
+  const leaderCtx: OperationContext = {
+    requestId: 'leader',
+    deadlineMs: r.clock.nowMs() + 5_000,
+    signal: new CancellationSource().signal,
+  };
+  const p1 = r.cache.get(A, leaderCtx);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'shared download started');
+  const followerCtx: OperationContext = {
+    requestId: 'follower',
+    deadlineMs: r.clock.nowMs() + 30_000,
+    signal: new CancellationSource().signal,
+  };
+  const p2 = r.cache.get(A, followerCtx);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'follower coalesced');
+  // The leader's deadline dies mid-download — it times out alone.
+  r.clock.advance(5_000);
+  await pump();
+  const r1 = await p1;
+  assert(!r1.ok && r1.error.kind === 'timeout', 'leader timed out');
+  // The transfer keeps flying on the follower's budget — the
+  // leader's expiry must not have cancelled the shared work.
+  assert(
+    r.fetch.calls[0]?.signal.cancelled === false,
+    'shared download outlives the leader deadline',
+  );
+  assert(r.fetch.settleDownload(ok({ bytes: 4 * MB })));
+  const r2 = await p2;
+  assert(r2.ok, 'follower receives the shared result');
+  assertEqual(r.fetch.calls.length, 1, 'still one download');
 }
 
 async function zeroRetryAfterStillNegativeCaches(): Promise<void> {
@@ -847,6 +902,8 @@ export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
   await negativeCacheExpiry();
+  await unavailableIsNotNegativeCached();
+  await shortDeadlineWaiterLeavesSharedWork();
   await zeroRetryAfterStillNegativeCaches();
   await cancelledGetIsNotNegativeCached();
   await transientRetryRecovers();

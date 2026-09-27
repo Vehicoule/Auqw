@@ -289,6 +289,43 @@ async function unpairedPeerDrops(): Promise<void> {
   scheduler.stop();
 }
 
+async function unpairMidRoundCancelsAndNeverReschedules(): Promise<void> {
+  const { client, clock, scheduler } = rig({ debounceMs: 500 });
+  client.peersList = [peer('fp-a')];
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round done');
+  // An exchange the unpair lands inside of.
+  client.syncNowCalls.length = 0;
+  let capturedSignal: CancellationSignal | undefined;
+  let resolveRound: (r: Result<SyncRoundOutcome>) => void = () => { };
+  client.syncNow = (fp, signal) => {
+    client.syncNowCalls.push(fp);
+    capturedSignal = signal;
+    return new Promise((resolve) => {
+      resolveRound = resolve;
+    });
+  };
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'round in flight');
+  // Unpair mid-round: the exchange is cancelled and the track drops.
+  client.peersList = [];
+  client.emitStatus();
+  assert(capturedSignal?.cancelled === true, 'unpair cancels the round');
+  // A retryable failure arriving after the unpair must not arm a
+  // reconnect — the peer is gone, the track must not resurrect.
+  resolveRound(err(appError('transient', 'dropped mid-exchange')));
+  await pump();
+  clock.advance(120_000);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'no retry for an unpaired peer');
+  scheduler.stop();
+}
+
 async function stopHaltsEverything(): Promise<void> {
   const { client, clock, scheduler } = rig({ debounceMs: 100 });
   client.peersList = [peer('fp-a')];
@@ -875,6 +912,7 @@ export async function run(): Promise<void> {
   await sessionDropReconnect();
   await connectivityEdges();
   await unpairedPeerDrops();
+  await unpairMidRoundCancelsAndNeverReschedules();
   await stopHaltsEverything();
   await nudgeMidRoundIsDirty();
   await newPeerFirstRound();
