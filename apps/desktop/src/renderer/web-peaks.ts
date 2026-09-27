@@ -1,0 +1,270 @@
+import { appError, err, ok } from '@auqw/application';
+import type {
+  AppError,
+  ErrorKind,
+  OperationContext,
+  PeaksPort,
+  Result,
+} from '@auqw/application';
+import { PEAKS_RESOLUTION, peaksFromChannels } from '@auqw/ui-shared';
+import { isRecord } from '../shared/check.ts';
+import type { StreamClient } from './web-player.ts';
+
+/** Minimal decoded-audio surface — what `decodeAudioData` returns. */
+export type DecodedAudio = {
+  readonly numberOfChannels: number;
+  getChannelData(index: number): Float32Array;
+};
+
+/** Decode container bytes to PCM — tests inject a fake. */
+export type PeaksDecoder = (bytes: Uint8Array) => Promise<DecodedAudio>;
+
+const READ_CHUNK = 1024 * 1024; // matches the stream:read MAX_READ_LEN
+/** Decoration, not analysis — never pull more than this for a bar row. */
+const MAX_PEAK_BYTES = 24 * 1024 * 1024;
+/**
+ * Decoded PCM for a very long track spikes heap even though reads are
+ * capped; skip tracks longer than this rather than decode a giant.
+ */
+const MAX_DECODE_MS = 15 * 60 * 1000;
+/** Cold-start patience for the first read — the element's own first
+ * byte takes a while too; peaks may wait for the same warm-up. */
+const FIRST_READ_TIMEOUT_MS = 15_000;
+/**
+ * Park threshold for subsequent reads: bytes already committed serve
+ * in ~ms, so a read parked past this means the position is an
+ * unfetched hole — chasing it would queue demand that outranks the
+ * element's own (demand serves min position first), stalling playback
+ * for a decoration. Abort instead; the seeded pattern stays.
+ */
+const PARK_TIMEOUT_MS = 400;
+
+const DEAD_HANDLE: ReadonlySet<string> = new Set([
+  'released',
+  'evicted',
+  'expired',
+  'superseded',
+  'not-found',
+]);
+
+function toError(thrown: unknown): AppError {
+  if (isRecord(thrown) && typeof thrown['kind'] === 'string') {
+    const slug = thrown['kind'];
+    const kind: ErrorKind =
+      slug === 'cancelled'
+        ? 'cancelled'
+        : DEAD_HANDLE.has(slug)
+          ? 'released'
+          : slug === 'invalid-request' ||
+              slug === 'invalid-response' ||
+              slug === 'invalid-message'
+            ? 'invalid-response'
+            : 'transient';
+    const message =
+      typeof thrown['message'] === 'string' && thrown['message'].length > 0
+        ? thrown['message']
+        : 'peak extraction failed';
+    return appError(kind, message);
+  }
+  return appError('internal', 'peak extraction failed');
+}
+
+async function guard<T>(fn: () => Promise<T>): Promise<Result<T>> {
+  try {
+    return ok(await fn());
+  } catch (thrown) {
+    return err(toError(thrown));
+  }
+}
+
+function fromBase64(data: string): Uint8Array {
+  const bin = atob(data);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+}
+
+/**
+ * Desktop/web `PeaksPort`: pull bytes off the live stream handle and
+ * decode them with WebAudio, then bucket to the canonical resolution.
+ *
+ * The handle is borrowed, never owned: `stream:close` on it would
+ * detach the session and wake every parked reader (the MSE pump) as
+ * `cancelled`, so this port opens and reads but never closes or
+ * releases.
+ *
+ * Extraction is opportunistic: reads beyond the first must hit bytes
+ * already committed, because a `read` parked on a hole queues demand
+ * that serves minimum-position-first — chasing an unfetched gap would
+ * starve the element's own mid-track demand for a decoration. The
+ * seeded pattern stays whenever a pull outruns the stream's fill.
+ */
+export function createWebPeaksPort(deps: {
+  readonly stream: StreamClient;
+  readonly decode?: PeaksDecoder;
+  readonly maxBytes?: number;
+  readonly maxDecodeMs?: number;
+  readonly firstReadTimeoutMs?: number;
+  readonly parkTimeoutMs?: number;
+  readonly now?: () => number;
+}): PeaksPort {
+  const maxBytes = deps.maxBytes ?? MAX_PEAK_BYTES;
+  const maxDecodeMs = deps.maxDecodeMs ?? MAX_DECODE_MS;
+  const firstReadTimeoutMs =
+    deps.firstReadTimeoutMs ?? FIRST_READ_TIMEOUT_MS;
+  const parkTimeoutMs = deps.parkTimeoutMs ?? PARK_TIMEOUT_MS;
+  const now = deps.now ?? (() => Date.now());
+
+  // Lazily minted — AudioContext decodes off-thread in Chromium, so a
+  // suspended context costs nothing between tracks.
+  let audioContext: BaseAudioContext | null = null;
+  const decode: PeaksDecoder =
+    deps.decode ??
+    ((bytes) => {
+      // OfflineAudioContext decodes without touching the output device;
+      // fall back to AudioContext where Offline is absent.
+      if (audioContext === null) {
+        audioContext =
+          typeof OfflineAudioContext !== 'undefined'
+            ? new OfflineAudioContext(1, 1, 44100)
+            : new AudioContext();
+      }
+      // decodeAudioData may detach the buffer it receives — hand it a
+      // private copy so the caller's Uint8Array stays valid.
+      return audioContext.decodeAudioData(
+        bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer,
+      );
+    });
+
+  async function readWithDeadline(
+    args: { handle: string; position: number; maxLen: number },
+    timeoutMs: number,
+    context_: OperationContext,
+  ): Promise<Result<{ data: string }>> {
+    if (context_.signal.cancelled) {
+      return err(appError('cancelled', 'peak extraction cancelled'));
+    }
+    const remainingMs = Math.min(
+      timeoutMs,
+      Math.max(0, context_.deadlineMs - now()),
+    );
+    if (remainingMs <= 0) {
+      return err(appError('timeout', 'peak extraction deadline'));
+    }
+    const timed = guard(() => deps.stream.read(args));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), remainingMs);
+    });
+    // A losing read keeps running to completion in the background —
+    // the stream API has no per-read abort; the discarded promise is
+    // inert (it resolves into `timed`, already settled).
+    const raced = await Promise.race([timed, timeout]);
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+    if (raced === 'timeout') {
+      return err(appError('timeout', 'stream read timed out'));
+    }
+    return raced;
+  }
+
+  async function pullBytes(
+    handle: string,
+    context: OperationContext,
+  ): Promise<Result<Uint8Array>> {
+    const opened = await guard(() =>
+      deps.stream.open({ handle, position: 0 }),
+    );
+    if (!opened.ok) {
+      return opened;
+    }
+    const remaining = opened.value.remaining;
+    if (remaining !== null && remaining > maxBytes) {
+      return err(
+        appError('budget-exceeded', 'stream too large for peak extraction'),
+      );
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let position = 0;
+    // The first read gets cold-start patience; later reads must hit
+    // already-committed bytes — a parked read is an unfetched hole,
+    // and chasing holes steals the pump's demand priority from the
+    // element mid-track.
+    let timeoutMs = firstReadTimeoutMs;
+    for (;;) {
+      const chunk = await readWithDeadline(
+        { handle, position, maxLen: READ_CHUNK },
+        timeoutMs,
+        context,
+      );
+      timeoutMs = parkTimeoutMs;
+      if (!chunk.ok) {
+        // A park-timeout is not a failure worth caching hard —
+        // 'unavailable' reads as "not buffered yet" to the caller.
+        if (chunk.error.kind === 'timeout') {
+          return err(
+            appError('unavailable', 'stream bytes not yet buffered'),
+          );
+        }
+        return chunk;
+      }
+      const bytes = fromBase64(chunk.value.data);
+      if (bytes.byteLength === 0) {
+        break;
+      }
+      total += bytes.byteLength;
+      if (total > maxBytes) {
+        return err(
+          appError('budget-exceeded', 'stream too large for peak extraction'),
+        );
+      }
+      chunks.push(bytes);
+      position += bytes.byteLength;
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    return ok(out);
+  }
+
+  return {
+    async peaks(request, context) {
+      if (
+        request.durationMs !== null &&
+        request.durationMs > maxDecodeMs
+      ) {
+        return err(
+          appError('budget-exceeded', 'track too long for decorative peaks'),
+        );
+      }
+      const bytes = await pullBytes(request.handle, context);
+      if (!bytes.ok) {
+        return bytes;
+      }
+      // A decode failure means the bytes weren't audio as expected —
+      // `invalid-response`, and the renderer keeps the seeded pattern.
+      const decoded = await decode(bytes.value).then(
+        (audio) => ok(audio),
+        () => err(appError('invalid-response', 'audio decode failed')),
+      );
+      if (!decoded.ok) {
+        return decoded;
+      }
+      const channels: Float32Array[] = [];
+      for (let c = 0; c < decoded.value.numberOfChannels; c++) {
+        channels.push(decoded.value.getChannelData(c));
+      }
+      return ok(peaksFromChannels(channels, PEAKS_RESOLUTION));
+    },
+  };
+}

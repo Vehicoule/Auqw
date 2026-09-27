@@ -87,7 +87,7 @@ Track row (the shared anatomy) · artwork well (missing art = note glyph on a ti
 
 ## Rendering
 
-Stock RN components + Reanimated/Gesture Handler on mobile; DOM/CSS on desktop; SVG for icons. No Skia/canvas/shaders in the first release. The Stage's waveform-style seek renders the **decorative** amplitude pattern shown in the preview — real peak extraction stays deferred ([product.md](../product.md) roadmap); the component must read identically as a plain progress bar.
+Stock RN components + Reanimated/Gesture Handler on mobile; DOM/CSS on desktop; SVG for icons. No Skia/canvas/shaders in the first release. The Stage's waveform-style seek renders the measured amplitude profile on desktop/web — peaks extract lazily off the playing stream's bytes, and the seeded **decorative** pattern stands in while extraction is pending, on failure, and on mobile this slice ([decisions.md](../decisions.md)); the component must read identically as a plain progress bar.
 
 Icon motion contract — no static glyph icons: play⇄pause morph · heart fill-in · eq bars on the playing thumb (live in the preview) · rotate (sync) · bounce (like). Shared values, not per-frame React state; transforms and opacity only; the player clock drives progress; stop animation when invisible; respect reduced motion (eq → static indicator, sheet → crossfade, rings → static arc).
 

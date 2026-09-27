@@ -23,6 +23,7 @@ import { Artwork, Text } from './primitives.tsx';
 import {
   formatClock,
   formatRemaining,
+  resamplePeaks,
   t,
   waveformAmplitudes,
   waveformBarLayout,
@@ -429,6 +430,13 @@ export type WaveformSeekProps = {
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly seed?: string | undefined;
+  /**
+   * Real measured peaks at the canonical resolution (`peaks.ts`),
+   * resampled to the bar count. Absent/null keeps the seeded
+   * `waveformAmplitudes` pattern — extraction is lazy, so the seeded
+   * bars are both the pending state and the failure fallback.
+   */
+  readonly peaks?: readonly number[] | null | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly visible?: boolean | undefined;
@@ -440,6 +448,7 @@ export function WaveformSeek({
   durationMs,
   onSeek,
   seed = 'auqw',
+  peaks,
   loading = false,
   labels = true,
   visible = true,
@@ -463,8 +472,11 @@ export function WaveformSeek({
     [width],
   );
   const amps = useMemo(
-    () => waveformAmplitudes(seed, layout.count),
-    [seed, layout.count],
+    () =>
+      peaks !== undefined && peaks !== null && peaks.length > 0
+        ? resamplePeaks(peaks, layout.count)
+        : waveformAmplitudes(seed, layout.count),
+    [peaks, seed, layout.count],
   );
   const groups = useMemo(() => partitionBars(layout.xs, amps), [layout, amps]);
   const allBars = useMemo<BarGroup>(
@@ -513,7 +525,9 @@ export function WaveformSeek({
   useEffect(() => {
     bloom.value = 0;
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
-  }, [bloom, seed, theme.reducedMotion]);
+    // `peaks` is a second amplitude source: when real bars land they
+    // replay the same stagger a new seed would.
+  }, [bloom, seed, peaks, theme.reducedMotion]);
   useEffect(() => {
     if (isLoading && visible && !theme.reducedMotion) {
       shimmer.value = 0;

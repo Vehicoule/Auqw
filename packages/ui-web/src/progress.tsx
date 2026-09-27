@@ -1,6 +1,7 @@
 import {
   formatClock,
   formatRemaining,
+  resamplePeaks,
   t,
   waveformAmplitudes,
   waveformBarExtent,
@@ -227,6 +228,13 @@ export type WaveformSeekProps = {
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly seed?: string | undefined;
+  /**
+   * Real measured peaks at the canonical resolution (`peaks.ts`),
+   * resampled to the bar count. Absent/null keeps the seeded
+   * `waveformAmplitudes` pattern — extraction is lazy, so the seeded
+   * bars are both the pending state and the failure fallback.
+   */
+  readonly peaks?: readonly number[] | null | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly className?: string | undefined;
@@ -239,6 +247,7 @@ export function WaveformSeek({
   durationMs,
   onSeek,
   seed = 'auqw',
+  peaks,
   loading = false,
   labels = true,
   className,
@@ -269,8 +278,11 @@ export function WaveformSeek({
     [width],
   );
   const amps = useMemo(
-    () => waveformAmplitudes(seed, layout.count),
-    [seed, layout.count],
+    () =>
+      peaks !== undefined && peaks !== null && peaks.length > 0
+        ? resamplePeaks(peaks, layout.count)
+        : waveformAmplitudes(seed, layout.count),
+    [peaks, seed, layout.count],
   );
   const [dLow, dMid, dHigh] = useMemo(
     () => partitionBars(layout.xs, amps),
