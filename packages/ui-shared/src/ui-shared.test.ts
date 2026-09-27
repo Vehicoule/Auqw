@@ -3,6 +3,7 @@
 // they now exercise this module through '@auqw/ui-shared'. Here we only
 // prove the package resolves cleanly for a plain node consumer: the
 // mappers import nothing react-native and fixtures stay coherent.
+import { assert, assertEqual } from '@auqw/application/testing';
 import {
   formatAgo,
   getLocale,
@@ -45,24 +46,6 @@ import {
   fixtureSettings,
   fixtureSettingsModel,
 } from './fixtures.ts';
-
-function assert(
-  condition: unknown,
-  message = 'assertion failed',
-): asserts condition {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function assertEqual<T>(actual: T, expected: T, message?: string): void {
-  if (!Object.is(actual, expected)) {
-    throw new Error(
-      message ??
-      `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-    );
-  }
-}
 
 const home = toHomeModel({
   recordings: fixtureRecordings,

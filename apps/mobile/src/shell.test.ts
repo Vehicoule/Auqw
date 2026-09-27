@@ -1,3 +1,4 @@
+import { assertEqual } from '@auqw/application/testing';
 import { run as runPlayer } from './adapters/auqw-expo-player.test.ts';
 import { run as runProvider } from './adapters/plugin-provider.test.ts';
 import { run as runRuntime } from './adapters/runtime.test.ts';
@@ -50,9 +51,3 @@ runPotProvider();
 await runSyncEmit();
 runHomeCard();
 console.log('mobile shell tests passed');
-
-function assertEqual<T>(actual: T, expected: T): void {
-  if (!Object.is(actual, expected)) {
-    throw new Error(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  }
-}

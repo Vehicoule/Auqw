@@ -545,16 +545,11 @@ export class FakePlayer implements PlayerPort {
   readonly emitted: PlayerEvent[] = [];
   #listeners = new Set<(event: PlayerEvent) => void>();
   #nextResult: Result<unknown> = ok(undefined);
-  #prepareHandle = 'handle-1';
   #prepareDeferreds: Deferred<Result<string>>[] = [];
 
   /** Configures the Result returned by the next control call. */
   setNextResult(result: Result<unknown>): void {
     this.#nextResult = result;
-  }
-
-  setPrepareHandle(handle: string): void {
-    this.#prepareHandle = handle;
   }
 
   /** Settles the oldest pending prepare; false when none pending. */

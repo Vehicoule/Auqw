@@ -20,6 +20,11 @@ import {
   toTrackRowModel,
 } from '@auqw/ui-shared';
 import type { LyricsSheet, SourceRef } from '@auqw/application';
+import {
+  assert,
+  assertDeepEqual,
+  assertEqual,
+} from '@auqw/application/testing';
 import type {
   QueueModel,
   TrackRowModel,
@@ -84,36 +89,6 @@ import {
   PLAY_RIGHT,
   progressPathState,
 } from './motion.ts';
-
-function assert(
-  condition: unknown,
-  message = 'assertion failed',
-): asserts condition {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function assertEqual<T>(actual: T, expected: T, message?: string): void {
-  if (!Object.is(actual, expected)) {
-    throw new Error(
-      message ??
-      `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-    );
-  }
-}
-
-function assertDeepEqual(
-  actual: unknown,
-  expected: unknown,
-  message?: string,
-): void {
-  const a = JSON.stringify(actual);
-  const e = JSON.stringify(expected);
-  if (a !== e) {
-    throw new Error(message ?? `expected ${e}, got ${a}`);
-  }
-}
 
 const VALID_ROW_STATES = new Set(['available', 'unavailable', 'error']);
 const VALID_PHASES = new Set([
@@ -1163,7 +1138,7 @@ function testCorrectionsModel(): void {
     'identical rows collapse; a different shown duration stays',
   );
   assert(
-    collapsed.rows[0]?.candidates[1]?.subtitle.includes('5:00'),
+    collapsed.rows[0]?.candidates[1]?.subtitle.includes('5:00') === true,
     'distinct row shows its duration',
   );
   // Confirmed rows name their resolution provider.

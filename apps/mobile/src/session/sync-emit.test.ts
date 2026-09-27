@@ -1,4 +1,5 @@
 import { appError, err, ok } from '@auqw/application';
+import { assert } from '@auqw/application/testing';
 import type { LocalWrite } from '@auqw/application';
 import { createSyncEmit } from './sync-emit.ts';
 
@@ -165,12 +166,6 @@ function expectEq(actual: number, expected: number, msg?: string): void {
     throw new Error(
       `${msg ?? 'count'}: expected ${expected}, got ${actual}`,
     );
-  }
-}
-
-function assert(cond: boolean, msg?: string): asserts cond {
-  if (!cond) {
-    throw new Error(msg ?? 'assertion failed');
   }
 }
 

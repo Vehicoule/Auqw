@@ -9,6 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/application.test.ts"
+    "test": "node --experimental-strip-types src/application.test.ts",
+    "measure": "node --experimental-strip-types harness/reliability-measure.ts"
   }
 }

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/storage.test.ts"
+    "test": "node --experimental-strip-types src/storage.test.ts && node --experimental-strip-types src/sync-log-store.test.ts"
   },
   "dependencies": {
     "@auqw/application": "workspace:*"
