@@ -1,10 +1,25 @@
 import { useMemo } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import {
+  Platform,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import { BlurView } from 'expo-blur';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
+import {
+  resolveStageAnchor,
+  stageCollapsedAlpha,
+} from './stage-motion';
 import {
   IconButton,
   PlayPauseIcon,
@@ -26,6 +41,17 @@ export type MiniPlayerProps = {
   readonly onToggleLike?: (() => void) | undefined;
   /** Swipe-down: dismiss stops playback; the queue keeps its items. */
   readonly onDismiss?: (() => void) | undefined;
+  /** Drag release committed to collapse while grabbing a mid-flight
+      sheet (never fires from the rest anchor — there the pill just
+      settles back). */
+  readonly onCollapse?: (() => void) | undefined;
+  /** Shared 0..1 stage-sheet progress: an upward drag writes it
+      directly so the sheet rises with the finger, and the pill fades
+      out on the same value. Omitted in static fixtures. */
+  readonly progress?: SharedValue<number> | undefined;
+  /** False while the sheet owns the screen — keeps the invisible pill
+      out of the touch path and the accessibility tree. */
+  readonly interactive?: boolean | undefined;
 };
 
 export function MiniPlayer({
@@ -37,9 +63,14 @@ export function MiniPlayer({
   onPrevious,
   onToggleLike,
   onDismiss,
+  onCollapse,
+  progress: sheetProgress,
+  interactive = true,
 }: MiniPlayerProps) {
   const theme = useTheme();
   const ios = platform === 'ios';
+  const { height: windowHeight } = useWindowDimensions();
+  const dragStart = useSharedValue(0);
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
@@ -47,26 +78,107 @@ export function MiniPlayer({
   const busy = player.status === 'preparing' || player.status === 'buffering';
   // Stable gesture object — a fresh Pan() per render would cancel an
   // in-flight swipe when the position tick re-renders the row.
-  const swipe = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetX([-12, 12])
-        .activeOffsetY([-24, 24])
-        .onEnd((e) => {
-          if (e.translationX < -40 && onNext !== undefined) {
-            scheduleOnRN(onNext);
-          } else if (e.translationX > 40 && onPrevious !== undefined) {
-            scheduleOnRN(onPrevious);
-          } else if (e.translationY > 40 && onDismiss !== undefined) {
+  // Horizontal swipes keep their release-threshold semantics
+  // (next/previous); the vertical pan owns the rise/dismiss axis.
+  const swipe = useMemo(() => {
+    const horizontal = Gesture.Pan()
+      .activeOffsetX([-12, 12])
+      .failOffsetY([-24, 24])
+      .onEnd((e) => {
+        if (e.translationX < -40 && onNext !== undefined) {
+          scheduleOnRN(onNext);
+        } else if (e.translationX > 40 && onPrevious !== undefined) {
+          scheduleOnRN(onPrevious);
+        }
+      });
+    const vertical = Gesture.Pan()
+      .activeOffsetY([-8, 8])
+      .failOffsetX([-24, 24])
+      .onBegin(() => {
+        if (sheetProgress !== undefined) {
+          dragStart.value = sheetProgress.value;
+        }
+      })
+      .onUpdate((e) => {
+        if (sheetProgress !== undefined) {
+          const travel = Math.max(1, windowHeight);
+          sheetProgress.value = Math.min(
+            1,
+            Math.max(0, dragStart.value - e.translationY / travel),
+          );
+        }
+      })
+      .onFinalize((e) => {
+        if (sheetProgress === undefined) {
+          // Static hosts (the gallery) keep the release-threshold
+          // contract — no shared progress to track.
+          if (e.translationY > 40 && onDismiss !== undefined) {
             scheduleOnRN(onDismiss);
           } else if (e.translationY < -40 && onPress !== undefined) {
             scheduleOnRN(onPress);
           }
-        }),
-    [onNext, onPrevious, onPress, onDismiss],
-  );
+          return;
+        }
+        // A pull-down that never left the rest anchor dismisses the
+        // player outright rather than bouncing an unmoved sheet.
+        if (
+          dragStart.value < 0.01 &&
+          e.translationY > 48 &&
+          onDismiss !== undefined
+        ) {
+          scheduleOnRN(onDismiss);
+          return;
+        }
+        const travel = Math.max(1, windowHeight);
+        const target =
+          resolveStageAnchor(
+            dragStart.value,
+            sheetProgress.value,
+            e.velocityY,
+          ) === 'expanded'
+            ? 1
+            : 0;
+        sheetProgress.value = theme.reducedMotion
+          ? target
+          : withSpring(target, {
+              stiffness: 200,
+              damping: 26,
+              velocity: -e.velocityY / travel,
+            });
+        if (target === 1) {
+          if (onPress !== undefined) scheduleOnRN(onPress);
+        } else if (dragStart.value > 0.5 && onCollapse !== undefined) {
+          scheduleOnRN(onCollapse);
+        }
+      });
+    return Gesture.Race(vertical, horizontal);
+  }, [
+    onNext,
+    onPrevious,
+    onPress,
+    onDismiss,
+    onCollapse,
+    sheetProgress,
+    windowHeight,
+    theme.reducedMotion,
+    dragStart,
+  ]);
+  // The pill fades out inside the sheet's first stretch of travel — the
+  // fade window ends exactly where the expanded content's reveal begins.
+  const fade = useAnimatedStyle(() => ({
+    opacity:
+      sheetProgress === undefined
+        ? 1
+        : stageCollapsedAlpha(sheetProgress.value),
+  }));
   return (
     <GestureDetector gesture={swipe}>
+      <Animated.View
+        style={fade}
+        pointerEvents={interactive ? 'auto' : 'none'}
+        accessibilityElementsHidden={!interactive}
+        importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+      >
       <View
         style={{
           marginHorizontal: 10,
@@ -196,6 +308,7 @@ export function MiniPlayer({
           </Pressable>
         </View>
       </View>
+      </Animated.View>
     </GestureDetector>
   );
 }

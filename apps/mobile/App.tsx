@@ -8,6 +8,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useSharedValue } from 'react-native-reanimated';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -719,6 +720,10 @@ function Main({
   const { session } = controller;
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
+  // Shared 0..1 morph progress between the mini-player pill and the
+  // stage sheet — drags write it directly so the sheet tracks the
+  // finger; `expanded` only flips once a gesture commits.
+  const stageProgress = useSharedValue(0);
   const [showGallery, setShowGallery] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
@@ -4072,10 +4077,16 @@ function Main({
             }}
             renderTab={renderTabScreen}
             accessory={
-              player !== null && !expanded ? (
+              // The pill stays mounted through the morph — its own
+              // alpha rides stageProgress; `interactive` keeps the
+              // invisible rest state out of touch and a11y reach.
+              player !== null ? (
                 <MiniPlayer
                   player={player}
+                  progress={stageProgress}
+                  interactive={!expanded}
                   onPress={() => setExpanded(true)}
+                  onCollapse={() => setExpanded(false)}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
@@ -4089,6 +4100,7 @@ function Main({
             <StageSheet
               player={player}
               expanded={expanded}
+              progress={stageProgress}
               onExpandChange={setExpanded}
               mode={stageMode}
               onModeChange={setStageMode}
