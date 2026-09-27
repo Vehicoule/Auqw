@@ -1739,10 +1739,11 @@ function Main({
     [session, state.queue, canPlay],
   );
 
-  // Mirrors QueueEngine.next()/previous() targeting: next → index+1
-  // (never wraps); previous → restart current when positionMs>3s or
-  // at index 0, else index−1. The gate sees the same target the
-  // engine would land on — an owned target still advances offline.
+  // Mirrors the cursor's targeting: next → index+1; previous → restart
+  // current when positionMs>3s or at index 0, else index−1 — and under
+  // repeat=all both edges wrap (tail→head, head→tail). The gate sees
+  // the same target the engine would land on — an owned target still
+  // advances offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       const { occurrences, currentOccurrenceId, positionMs } =
@@ -1753,20 +1754,32 @@ function Main({
       if (index < 0) {
         return;
       }
+      const wraps =
+        state.type === 'ready' &&
+        state.repeat === 'all' &&
+        occurrences.length > 0;
       const target =
         occurrences[
           method === 'next'
-            ? index + 1
-            : positionMs > 3_000 || index === 0
+            ? index + 1 < occurrences.length
+              ? index + 1
+              : wraps
+                ? 0
+                : index + 1
+            : positionMs > 3_000
               ? index
-              : index - 1
+              : index === 0
+                ? wraps
+                  ? occurrences.length - 1
+                  : index
+                : index - 1
         ];
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
       void (method === 'next' ? session.next() : session.previous());
     },
-    [session, state.queue, canPlay],
+    [session, state, canPlay],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
