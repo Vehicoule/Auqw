@@ -699,12 +699,14 @@ export async function createSessionController(
           // nobody, so they'd sit unsynced until the next trigger.
           // A failed flush re-pends the buffer with no other wake
           // until the next edit, so retry bounded here; a still-
-          // failing prefix stays buffered for the next emitWrites.
+          // failing prefix stays buffered for the next emitWrites
+          // (and the boot reconcile's emitUnsynced re-stamps it).
           const flushed = await retryBounded({
-            // Backstop sized past the call's own internal op
-            // deadline — it must never abandon a healthy in-flight
-            // flush, only a wedged one.
-            deadlineMs: clock.nowMs() + 300_000,
+            // Boot-critical: start() awaits this before the
+            // scheduler's launch round, so a wedged batch must
+            // time out promptly — a late commit still stamps the
+            // log and a failure leaves the prefix re-pended.
+            deadlineMs: clock.nowMs() + 30_000,
             signal,
             clock,
             maxAttempts: 4,
