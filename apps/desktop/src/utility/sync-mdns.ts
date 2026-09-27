@@ -116,7 +116,10 @@ export const createPeerTracker = (
   onFound: (peer: SyncDiscoveredPeer) => void,
   onLost: (key: string) => void,
 ): { up(service: Service): void; down(service: Service): void } => {
-  const seen = new Map<string, SyncDiscoveredPeer>();
+  const seen = new Map<
+    string,
+    { peer: SyncDiscoveredPeer; host?: string; port?: number }
+  >();
   return {
     up(service) {
       const peer = peerOf(service);
@@ -125,28 +128,40 @@ export const createPeerTracker = (
         // re-rank the chosen host — retract the row keyed by the
         // old pick so the stale endpoint never stays dialable.
         const prior = seen.get(service.name);
-        if (prior !== undefined && prior.key !== peer.key) {
-          onLost(prior.key);
+        if (prior !== undefined && prior.peer.key !== peer.key) {
+          onLost(prior.peer.key);
         }
-        seen.set(service.name, peer);
+        seen.set(service.name, {
+          peer,
+          host: service.host,
+          port: service.port,
+        });
         onFound(peer);
       }
     },
     down(service) {
-      const peer = seen.get(service.name);
-      // A re-advertised service's down can arrive after its new
-      // up — only retract when the lost service IS the one we
-      // emitted (same host), otherwise it must not kill the
-      // fresh row.
-      if (
-        peer !== undefined &&
-        (typeof service.host !== 'string' ||
-          service.host === '' ||
-          service.host === peer.host)
-      ) {
-        seen.delete(service.name);
-        onLost(peer.key);
+      const entry = seen.get(service.name);
+      if (entry === undefined) {
+        return;
       }
+      // Match the down to the emitted GENERATION by the service's own
+      // SRV identity — never by the address we picked to dial, which
+      // can re-rank across ups of the same generation. A down from an
+      // older generation (death + re-announce on a new port/host) can
+      // arrive after the new up and must not kill the fresh row.
+      const staleGeneration =
+        (typeof service.port === 'number' &&
+          service.port !== entry.port) ||
+        (typeof service.host === 'string' &&
+          service.host !== '' &&
+          typeof entry.host === 'string' &&
+          entry.host !== '' &&
+          service.host !== entry.host);
+      if (staleGeneration) {
+        return;
+      }
+      seen.delete(service.name);
+      onLost(entry.peer.key);
     },
   };
 };

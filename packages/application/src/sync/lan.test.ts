@@ -55,6 +55,29 @@ function lanGate(): void {
     '192.168.1.20',
     'v6 loopback loses to private v4',
   );
+  // Loopback is LAST: a remote advert's 127.0.0.1 dials the browsing
+  // machine, not the advertiser — even an undialable bare fe80:: is a
+  // better pick (it at least fails on the right host's interface).
+  assertEqual(
+    pickDialableHost(['127.0.0.1', 'fd00::8']),
+    'fd00::8',
+    'loopback loses to ULA',
+  );
+  assertEqual(
+    pickDialableHost(['127.0.0.1', 'fe80::1']),
+    'fe80::1',
+    'loopback ranks below bare fe80::',
+  );
+  assertEqual(
+    pickDialableHost(['127.0.0.1']),
+    '127.0.0.1',
+    'loopback still selectable as sole candidate (same-box sim)',
+  );
+  assertEqual(
+    pickDialableHost(['[::ffff:127.0.0.1]', '10.0.0.9']),
+    '10.0.0.9',
+    'v4-mapped loopback loses to private v4',
+  );
 }
 
 export function run(): void {

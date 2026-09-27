@@ -32,7 +32,14 @@ function recorder(): {
 function rerankRetractsOldKey(): void {
   const r = recorder();
   const t = createPeerTracker(r.onFound, r.onLost);
-  t.up(service({ name: 'Phone', port: 41000, addresses: ['fe80::1'] }));
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['fe80::1'],
+    }),
+  );
   assertEqual(r.found.length, 1, 'first up emits');
   assertEqual(r.found[0]!.key, 'Phone|fe80::1', 'bare fe80 picked');
 
@@ -41,6 +48,7 @@ function rerankRetractsOldKey(): void {
   t.up(
     service({
       name: 'Phone',
+      host: 'phone.local',
       port: 41000,
       addresses: ['fe80::1', '192.168.1.8'],
     }),
@@ -58,8 +66,22 @@ function rerankRetractsOldKey(): void {
 function sameKeyReannounceKeepsRow(): void {
   const r = recorder();
   const t = createPeerTracker(r.onFound, r.onLost);
-  t.up(service({ name: 'Phone', port: 41000, addresses: ['10.0.0.4'] }));
-  t.up(service({ name: 'Phone', port: 41000, addresses: ['10.0.0.4'] }));
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
   assertEqual(r.found.length, 2, 're-announce emits again');
   assertEqual(r.lost.length, 0, 'unchanged key is not retracted');
 }
@@ -67,30 +89,63 @@ function sameKeyReannounceKeepsRow(): void {
 function downAfterRerankClearsNewRow(): void {
   const r = recorder();
   const t = createPeerTracker(r.onFound, r.onLost);
-  t.up(service({ name: 'Phone', port: 41000, addresses: ['fe80::1'] }));
   t.up(
     service({
       name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['fe80::1'],
+    }),
+  );
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
       port: 41000,
       addresses: ['fe80::1', '192.168.1.8'],
     }),
   );
-  // The down carries the re-ranked host — retracts the CURRENT row.
-  t.down(service({ name: 'Phone', host: '192.168.1.8', port: 41000 }));
+  // The down carries the service's SRV hostname — NOT the address the
+  // re-rank picked. Generation match is by the up-service's own
+  // host/port, so this must still retract the current row.
+  t.down(
+    service({ name: 'Phone', host: 'phone.local', port: 41000 }),
+  );
   assertEqual(r.lost.length, 2, 'retract + down');
   assertEqual(r.lost[1], 'Phone|192.168.1.8', 'down clears new row');
 }
 
-function downWithForeignHostKeepsRow(): void {
+function staleGenerationDownKeepsRow(): void {
   const r = recorder();
   const t = createPeerTracker(r.onFound, r.onLost);
+  // Death on port 41000, re-announce on 42000 — the OLD generation's
+  // down arriving after the new up must not kill the fresh row.
   t.up(
-    service({ name: 'Phone', port: 41000, addresses: ['192.168.1.8'] }),
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 42000,
+      addresses: ['192.168.1.8'],
+    }),
   );
-  // A stale down from an OLD generation (different host) must not
-  // kill the fresh row.
-  t.down(service({ name: 'Phone', host: 'fe80::1', port: 41000 }));
-  assertEqual(r.lost.length, 0, 'foreign-host down ignored');
+  t.down(
+    service({ name: 'Phone', host: 'phone.local', port: 41000 }),
+  );
+  assertEqual(r.lost.length, 0, 'old-port down ignored');
+  t.down(service({ name: 'Phone', host: 'other.local', port: 42000 }));
+  assertEqual(r.lost.length, 0, 'other-host down ignored');
+  t.down(
+    service({ name: 'Phone', host: 'phone.local', port: 42000 }),
+  );
+  assertEqual(r.lost.length, 1, 'matching generation retracts');
+}
+
+function downWithoutSrvStillRetracts(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  t.up(service({ name: 'Phone', port: 41000, addresses: ['10.0.0.4'] }));
+  t.down(service({ name: 'Phone' }));
+  assertEqual(r.lost.length, 1, 'identity-less down retracts');
 }
 
 function unpairableUpEmitsNothing(): void {
@@ -107,6 +162,7 @@ export function run(): void {
   rerankRetractsOldKey();
   sameKeyReannounceKeepsRow();
   downAfterRerankClearsNewRow();
-  downWithForeignHostKeepsRow();
+  staleGenerationDownKeepsRow();
+  downWithoutSrvStillRetracts();
   unpairableUpEmitsNothing();
 }
