@@ -807,7 +807,30 @@ export function createWebPlayerPort(deps: {
     advanceQueue('ended');
   });
   audio.addEventListener('error', () => {
-    status('failed', appError('transient', 'audio element failed'));
+    const handle = current?.handle;
+    if (handle === undefined) {
+      status('failed', appError('transient', 'audio element failed'));
+      return;
+    }
+    // A media error on a reaped loopback URL is the stream's death
+    // arriving async — e.g. a paused seek past the registry TTL makes
+    // the element refetch a dead URL. Probe the handle so the session
+    // sees the dead-resource kind (which it re-prepares) instead of a
+    // transient media failure that fails the occurrence. The probe
+    // resolving means the stream lives — a real flake — so stay
+    // 'transient'.
+    void stream.marks({ handle }).then(
+      () => {
+        if (current?.handle === handle) {
+          status('failed', appError('transient', 'audio element failed'));
+        }
+      },
+      (thrown) => {
+        if (current?.handle === handle) {
+          status('failed', toError(thrown));
+        }
+      },
+    );
   });
 
   function installMediaActions(): void {

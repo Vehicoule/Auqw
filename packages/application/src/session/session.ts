@@ -5253,10 +5253,16 @@ export class Session {
       null,
     );
     if (event.state === 'failed') {
-      await this.#failOrRetryAttempt(
-        active,
-        event.error ?? appError('transient', 'player failed'),
-      );
+      const error = event.error ?? appError('transient', 'player failed');
+      if (DEAD_STREAM_KINDS.has(error.kind) && !this.#isStale(active)) {
+        // The stream's death can arrive async too — a paused seek
+        // past the registry TTL makes the element refetch a dead
+        // URL, which surfaces here, not on a transport call. The
+        // queue holds the committed position; re-prepare.
+        await this.#startAttempt(active.occurrenceId);
+        return;
+      }
+      await this.#failOrRetryAttempt(active, error);
       return;
     }
     if (event.state === 'ended') {
