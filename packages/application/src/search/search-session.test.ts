@@ -178,6 +178,58 @@ async function cancelAndCache(): Promise<void> {
   await expired;
 }
 
+async function cachedSearchSupersedesPending(): Promise<void> {
+  const { provider, session } = harness();
+  const cachedInput = { ...INPUT, query: 'cached' };
+  const prime = session.search(cachedInput);
+  provider.settleSearch(ok(page(['cached result'])));
+  await prime;
+
+  const pending = session.search(INPUT);
+  const cached = await session.search(cachedInput);
+  assertEqual(provider.calls.length, 2, 'cache hit makes no new request');
+  assertEqual(cached.type, 'content');
+  if (cached.type === 'content') {
+    assertEqual(cached.query, 'cached');
+  }
+
+  provider.settleSearch(ok(page(['late result'])));
+  await pending;
+  const final = session.snapshot();
+  assertEqual(final.type, 'content', 'late request cannot replace cache hit');
+  if (final.type === 'content') {
+    assertEqual(final.query, 'cached');
+    assertEqual(final.page.items[0]?.title, 'cached result');
+  }
+}
+
+async function invalidClockSupersedesPending(): Promise<void> {
+  const provider = new FakeProvider('badclock');
+  const clock = new FakeClock(1_000);
+  let valid = true;
+  const session = new SearchSession(
+    provider,
+    {
+      nowMs: () => (valid ? clock.nowMs() : Number.NaN),
+      sleep: clock.sleep.bind(clock),
+    },
+    new SequenceIds(),
+  );
+
+  const pending = session.search(INPUT);
+  valid = false;
+  const failed = await session.search({ ...INPUT, query: 'other' });
+  assertEqual(failed.type, 'error');
+
+  provider.settleSearch(ok(page(['late result'])));
+  await pending;
+  const final = session.snapshot();
+  assertEqual(final.type, 'error', 'late request cannot replace clock error');
+  if (final.type === 'error') {
+    assertEqual(final.query, 'other');
+  }
+}
+
 async function lruCap(): Promise<void> {
   const provider = new FakeProvider('lru');
   const clock = new FakeClock(0);
@@ -441,6 +493,8 @@ export async function run(): Promise<void> {
   await finalWins();
   await typedErrors();
   await cancelAndCache();
+  await cachedSearchSupersedesPending();
+  await invalidClockSupersedesPending();
   await lruCap();
   await rapidIntent();
   await expiredRefreshLru();

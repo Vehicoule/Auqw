@@ -153,6 +153,11 @@ export class SearchSession {
       return pending.promise;
     }
 
+    // Every new intent supersedes the active request, including paths
+    // that return early from a cache hit or an invalid clock reading.
+    this.#source?.cancel();
+    this.#source = null;
+
     const now = this.#clock.nowMs();
     if (!isSafeNonNegative(now)) {
       // A broken clock must not produce an unsafe context.
@@ -183,7 +188,6 @@ export class SearchSession {
       return Promise.resolve(state);
     }
 
-    this.#source?.cancel();
     const source = new CancellationSource();
     this.#source = source;
     const revision = this.#state.revision + 1;
