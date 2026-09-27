@@ -122,22 +122,30 @@ export const createPeerTracker = (
   >();
   return {
     up(service) {
+      const prior = seen.get(service.name);
       const peer = peerOf(service);
-      if (peer !== null) {
-        // A re-announcement whose resolved addresses changed can
-        // re-rank the chosen host — retract the row keyed by the
-        // old pick so the stale endpoint never stays dialable.
-        const prior = seen.get(service.name);
-        if (prior !== undefined && prior.peer.key !== peer.key) {
+      if (peer === null) {
+        // A re-announcement with no pairable address must retract the
+        // previously emitted row — otherwise the last pick stays
+        // dialable forever.
+        if (prior !== undefined) {
+          seen.delete(service.name);
           onLost(prior.peer.key);
         }
-        seen.set(service.name, {
-          peer,
-          host: service.host,
-          port: service.port,
-        });
-        onFound(peer);
+        return;
       }
+      // A re-announcement whose resolved addresses changed can
+      // re-rank the chosen host — retract the row keyed by the
+      // old pick so the stale endpoint never stays dialable.
+      if (prior !== undefined && prior.peer.key !== peer.key) {
+        onLost(prior.peer.key);
+      }
+      seen.set(service.name, {
+        peer,
+        host: service.host,
+        port: service.port,
+      });
+      onFound(peer);
     },
     down(service) {
       const entry = seen.get(service.name);

@@ -68,6 +68,17 @@ export function createExpoSyncDiscovery(
       // service name, and a native 'stopped' (async NSD failure) must
       // retract each emitted peer so the UI holds no ghosts.
       const emitted = new Map<string, string>();
+      // A `found` that fails any gate below must still retract the row
+      // a previous `found` emitted for the same name — otherwise the
+      // last usable endpoint stays dialable after the service's advert
+      // turned unpairable.
+      const retract = (name: string) => {
+        const key = emitted.get(name);
+        emitted.delete(name);
+        if (key !== undefined) {
+          browsing?.onLost(key);
+        }
+      };
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
           // `hosts` carries every resolved address — pick the dialable
@@ -81,46 +92,39 @@ export function createExpoSyncDiscovery(
           // with a junk port or an unbounded name never reaches the
           // nearby list.
           if (
-            host !== null &&
-            Number.isSafeInteger(event.port) &&
-            (event.port ?? 0) >= 1 &&
-            (event.port ?? 0) <= 65_535 &&
-            event.name.length > 0 &&
-            event.name.length <= 128
-          ) {
+            host === null ||
+            !Number.isSafeInteger(event.port) ||
+            (event.port ?? 0) < 1 ||
+            (event.port ?? 0) > 65_535 ||
+            event.name.length === 0 ||
+            event.name.length > 128 ||
             // A PRESENT-but-malformed `fp` poisons the pin the pair
             // would dial with — drop the advert rather than serve an
             // unpinned tap-target. NSD reports `fp: null` for a
             // TXT-less advert — that's a valid unpinned candidate.
-            if (
-              event.fp != null &&
-              !/^[0-9a-f]{64}$/.test(event.fp)
-            ) {
-              return;
-            }
-            const key = `${event.name}|${host}`;
-            // Re-advertise on a new address: retract the old key's row
-            // first — the 'lost' event (name-only) would only clear
-            // the NEW key, leaving the stale endpoint dialable.
-            const prior = emitted.get(event.name);
-            if (prior !== undefined && prior !== key) {
-              browsing?.onLost(prior);
-            }
-            browsing?.onFound({
-              key,
-              name: event.name,
-              host,
-              port: event.port as number,
-              fp: event.fp ?? null,
-            });
-            emitted.set(event.name, key);
+            (event.fp != null && !/^[0-9a-f]{64}$/.test(event.fp))
+          ) {
+            retract(event.name);
+            return;
           }
+          const key = `${event.name}|${host}`;
+          // Re-advertise on a new address: retract the old key's row
+          // first — the 'lost' event (name-only) would only clear
+          // the NEW key, leaving the stale endpoint dialable.
+          const prior = emitted.get(event.name);
+          if (prior !== undefined && prior !== key) {
+            browsing?.onLost(prior);
+          }
+          browsing?.onFound({
+            key,
+            name: event.name,
+            host,
+            port: event.port as number,
+            fp: event.fp ?? null,
+          });
+          emitted.set(event.name, key);
         } else if (event.type === 'lost') {
-          const key = emitted.get(event.name);
-          emitted.delete(event.name);
-          if (key !== undefined) {
-            browsing?.onLost(key);
-          }
+          retract(event.name);
         } else if (event.type === 'stopped') {
           for (const key of emitted.values()) {
             browsing?.onLost(key);

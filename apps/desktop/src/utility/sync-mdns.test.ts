@@ -158,6 +158,33 @@ function unpairableUpEmitsNothing(): void {
   assertEqual(r.lost.length, 0, 'nothing to retract');
 }
 
+function unpairableReannounceRetracts(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  assertEqual(r.found.length, 1, 'pairable up emits');
+  // Re-announce resolves to a public-only address list — the emitted
+  // row must go away, not linger as a dialable ghost.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['203.0.113.8'],
+    }),
+  );
+  assertEqual(r.found.length, 1, 'no new row');
+  assertEqual(r.lost.length, 1, 'prior row retracted');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'retracted key');
+}
+
 export function run(): void {
   rerankRetractsOldKey();
   sameKeyReannounceKeepsRow();
@@ -165,4 +192,5 @@ export function run(): void {
   staleGenerationDownKeepsRow();
   downWithoutSrvStillRetracts();
   unpairableUpEmitsNothing();
+  unpairableReannounceRetracts();
 }
