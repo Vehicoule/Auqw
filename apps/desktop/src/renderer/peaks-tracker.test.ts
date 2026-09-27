@@ -261,6 +261,20 @@ export async function run(): Promise<void> {
     );
   }
 
+  // The same cancel applies when a *known* duration grows past the
+  // cap mid-sweep — a new request at that duration would be refused,
+  // so the in-flight one dies rather than decoding oversized audio.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    tracker.pull({ id: 'r-8f', handle: 'h', durationMs: 500 });
+    tracker.pull({ id: 'r-8f', handle: 'h', durationMs: 2000 });
+    calls[0]?.resolve(ok(PEAKS));
+    await flush();
+    assertEqual(calls.length, 1, 'a duration crossing the cap cancels');
+    assertEqual(tracker.get('r-8f'), undefined);
+  }
+
   // But a pull that STARTED over the cap is not an "update" — the
   // duplicate (the hook fires pull twice on mount) must leave the
   // in-flight request to settle its terminal failure, so revisits

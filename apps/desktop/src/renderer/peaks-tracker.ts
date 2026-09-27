@@ -101,12 +101,16 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     if (live !== undefined) {
       const priorMs = live.target.durationMs;
       const updatedMs = target.durationMs;
-      if (priorMs === null && updatedMs !== null && updatedMs > maxDurationMs) {
-        // A duration that only now becomes known is checked like the
-        // port checks it up front — past the decode bound the sweep
-        // dies in place; its settle caches nothing. (An unchanged
-        // durationMs is a duplicate pull, not a reveal — the live
-        // request's own terminal failure must still cache.)
+      if (
+        updatedMs !== null &&
+        updatedMs > maxDurationMs &&
+        (priorMs === null || priorMs <= maxDurationMs)
+      ) {
+        // A duration that crosses the bound only after the request
+        // started is checked like the port checks it up front —
+        // the sweep dies in place; its settle caches nothing. (A
+        // request already running over-cap is a duplicate pull, not
+        // a reveal — its own terminal failure must still cache.)
         inflight.delete(id);
         if (live.timer !== null) {
           clearTimeoutFn(live.timer);
