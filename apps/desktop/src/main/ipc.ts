@@ -637,9 +637,27 @@ export function registerChannels(
   // out instead of being retained for the app's lifetime.
   const generations = new WeakMap<Sender, number>();
   const openTxs = new Map<Sender, Set<string>>();
+  // `sync:nearbyStart` shares the utility's browse refcount per
+  // SENDER — a renderer that dies or navigates with a start open can
+  // never send its matching stop, so its share would pin the mDNS
+  // browse for the utility's lifetime.
+  const nearbyStarts = new Map<Sender, number>();
   const watched = new WeakSet<Sender>();
+  const sendNearbyStop = (): void => {
+    void deps.utility
+      .request(CHANNELS.syncNearbyStop, undefined)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  };
   const dropSenderTxs = (sender: Sender): void => {
     generations.set(sender, (generations.get(sender) ?? 0) + 1);
+    const starts = nearbyStarts.get(sender) ?? 0;
+    nearbyStarts.delete(sender);
+    for (let i = 0; i < starts; i += 1) {
+      sendNearbyStop();
+    }
     const txs = openTxs.get(sender);
     if (txs === undefined) {
       return;
@@ -699,6 +717,26 @@ export function registerChannels(
       watch(sender);
       return;
     }
+    if (name === CHANNELS.syncNearbyStart) {
+      if ((generations.get(sender) ?? 0) !== generation) {
+        // The owner navigated or died while the browse start awaited
+        // — release the share it can no longer stop itself.
+        sendNearbyStop();
+        return;
+      }
+      nearbyStarts.set(sender, (nearbyStarts.get(sender) ?? 0) + 1);
+      watch(sender);
+      return;
+    }
+    if (name === CHANNELS.syncNearbyStop) {
+      const left = (nearbyStarts.get(sender) ?? 0) - 1;
+      if (left <= 0) {
+        nearbyStarts.delete(sender);
+      } else {
+        nearbyStarts.set(sender, left);
+      }
+      return;
+    }
     if (
       (name === CHANNELS.storageCommit ||
         name === CHANNELS.storageRollback) &&
@@ -725,15 +763,27 @@ export function registerChannels(
         );
       }
       try {
-        if (name === CHANNELS.storageBegin) {
-          // Lifecycle listeners must exist BEFORE the begin awaits —
-          // `trackTx` only installs them after a tx lands, so a sender
-          // destroyed during its first pending begin would otherwise
-          // escape the generation check and strand the tx slot.
+        if (
+          name === CHANNELS.storageBegin ||
+          name === CHANNELS.syncNearbyStart
+        ) {
+          // Lifecycle listeners must exist BEFORE the begin/start
+          // awaits — `trackTx` only installs them after the call
+          // lands, so a sender destroyed during its first pending
+          // call would otherwise escape the generation check and
+          // strand the resource.
           watch(event.sender);
         }
+        if (
+          name === CHANNELS.syncNearbyStop &&
+          (nearbyStarts.get(event.sender) ?? 0) === 0
+        ) {
+          // This sender holds no share — forwarding would spend
+          // another renderer's owner count.
+          return ok(undefined);
+        }
         const generation =
-          name === CHANNELS.storageBegin
+          name === CHANNELS.storageBegin || name === CHANNELS.syncNearbyStart
             ? (generations.get(event.sender) ?? 0)
             : null;
         const result = await handler.run(args, deps, event.sender);

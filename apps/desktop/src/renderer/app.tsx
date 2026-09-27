@@ -1130,6 +1130,10 @@ function Main({
         })
         .then(() => {
           setDialing(false);
+          // Success retires the sheet like a dismiss — bump the
+          // generation so an in-flight offer mint can't land a
+          // stale offer into `pairing` after close.
+          pairSheetGen.current += 1;
           setPairing(null);
           setPairSheetOpen(false);
           syncRefresh();
@@ -1158,6 +1162,7 @@ function Main({
         .dialPayload({ payload })
         .then(() => {
           setDialing(false);
+          pairSheetGen.current += 1;
           setPairing(null);
           setPairSheetOpen(false);
           syncRefresh();
@@ -1303,10 +1308,24 @@ function Main({
     );
   }, []);
 
-  // Keystrokes debounce into `catalog.suggest` completions routed over
-  // declaring providers — the typing surface is suggestions, not live
-  // result pages, so the debounce runs tighter than a catalog search
-  // ever could. Only a commit (Enter or a row tap) runs catalog.search.
+  // `state` republishes a fresh `settings` object on every tick, and
+  // `searchState` swaps identity on every revision — both would
+  // re-fire this effect (and cancel the debounce) without an actual
+  // change underneath. Depend on the derived values instead: the
+  // provider selection is stable across publishes, and the committed
+  // query is the only searchState field the gate reads.
+  const suggestSelection = useMemo(
+    () => selectionFromSettings(state.settings),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      state.settings.catalogProvider,
+      state.settings.playbackProvider,
+      state.settings.lyricsProvider,
+      state.settings.radioProvider,
+    ],
+  );
+  const committedQuery =
+    searchState.type === 'idle' ? '' : searchState.query;
   useEffect(() => {
     const trimmed = query.trim();
     // An edit invalidates the prior burst at once — a completion that
@@ -1319,11 +1338,9 @@ function Main({
       search?.cancel();
       return undefined;
     }
-    const committed =
-      searchState.type === 'idle' ? '' : searchState.query;
     // Committed text is no draft, and inputs past the payload cap
     // (256) can't be served — neither earns a fetch.
-    if (trimmed === committed || [...trimmed].length > 256) {
+    if (trimmed === committedQuery || [...trimmed].length > 256) {
       setSuggestions([]);
       return undefined;
     }
@@ -1337,7 +1354,7 @@ function Main({
         signal: source.signal,
       };
       void providerRouter
-        .suggest(selectionFromSettings(state.settings), { input: trimmed }, context)
+        .suggest(suggestSelection, { input: trimmed }, context)
         .then((result) => {
           if (suggestSeq.current === seq && !source.signal.cancelled) {
             setSuggestions(result.ok ? result.value : []);
@@ -1345,7 +1362,7 @@ function Main({
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [query, searchState, search, providerRouter, state.settings]);
+  }, [query, committedQuery, search, providerRouter, suggestSelection]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
@@ -1426,7 +1443,11 @@ function Main({
       downloads,
     });
     const playingId =
-      state.playback.type === 'idle' ? null : state.playback.recordingId;
+      state.playback.type === 'idle' ||
+      state.playback.type === 'paused' ||
+      state.playback.type === 'failed'
+        ? null
+        : state.playback.recordingId;
     const chipByRecording = new Map<string, DownloadChip>(
       downloads.map((d) => [
         d.recordingId,
@@ -1482,7 +1503,11 @@ function Main({
         likes: state.likes,
       });
       const playingId =
-        state.playback.type === 'idle' ? null : state.playback.recordingId;
+        state.playback.type === 'idle' ||
+        state.playback.type === 'paused' ||
+        state.playback.type === 'failed'
+          ? null
+          : state.playback.recordingId;
       if (model === null) {
         return model;
       }

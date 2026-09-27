@@ -70,6 +70,9 @@ const SANDBOX_FETCH_MAX_CALLS = 32;
 const SANDBOX_FETCH_MAX_CHARS = 1_024 * 1_024;
 /** Attestation bodies are small; a request past this stops being one. */
 const SANDBOX_REQ_MAX_CHARS = 256 * 1_024;
+/** jsdom's frame-impl prototypes are process-global — track the ones
+ * already patched so a second sandbox doesn't double-wrap them. */
+const potPatchedFrameProtos = new WeakSet<object>();
 /** Header fields the interpreter may legitimately set on a probe —
  * everything else (auth-ish or tracking headers) is dropped. The CORS
  * machinery fields stay because a cross-origin attestation POST
@@ -453,6 +456,53 @@ function botGuardSandbox(
       }
       return innerOpen.apply(this, args);
     };
+  }
+  // Child frames defeat the XHR patch above: an iframe spawns a fresh
+  // window whose XMLHttpRequest.prototype is NOT the patched object,
+  // so guest JS could sync-XHR through the ambient dispatcher — past
+  // the host gate, onto file:// reads. The interpreter has no frame
+  // use, so creation is killed at the impl level: `_postConnectionSteps`
+  // and the `src` branch of `_attributeChangeSteps` are jsdom's only
+  // two loadFrame triggers, and patching them covers createElement,
+  // innerHTML, and named/numeric window access alike. `win._document`
+  // is the impl Document whose createElement returns impl elements —
+  // walking the proto chain lands on the HTMLFrameElementImpl
+  // prototype shared by <frame> and <iframe> (and process-global, so
+  // the patch must be idempotent across sandboxes).
+  {
+    const docImpl = (
+      win as unknown as { _document?: { createElement(n: string): unknown } }
+    )._document;
+    const iframeImpl = docImpl?.createElement('iframe');
+    let frameProto: Record<string, unknown> | null =
+      iframeImpl !== null && typeof iframeImpl === 'object'
+        ? (Object.getPrototypeOf(iframeImpl) as Record<string, unknown>)
+        : null;
+    while (
+      frameProto !== null &&
+      !Object.prototype.hasOwnProperty.call(
+        frameProto,
+        '_postConnectionSteps',
+      )
+    ) {
+      frameProto = Object.getPrototypeOf(frameProto);
+    }
+    if (frameProto !== null && !potPatchedFrameProtos.has(frameProto)) {
+      potPatchedFrameProtos.add(frameProto);
+      const innerAttrSteps = frameProto['_attributeChangeSteps'] as
+        | ((this: unknown, change: { name?: unknown }) => unknown)
+        | undefined;
+      frameProto['_postConnectionSteps'] = () => undefined;
+      frameProto['_attributeChangeSteps'] = function (
+        this: unknown,
+        change: { name?: unknown },
+      ): unknown {
+        if (change?.name === 'src') {
+          return undefined;
+        }
+        return innerAttrSteps?.call(this, change);
+      };
+    }
   }
   // The interpreter's network surface is capped to exact hosts (its
   // own origin + the homepage), read-only methods, no caller body,

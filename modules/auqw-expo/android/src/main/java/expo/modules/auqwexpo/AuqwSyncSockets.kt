@@ -77,8 +77,21 @@ class AuqwSyncSockets(
             val socket =
               try {
                 server.accept()
-              } catch (_: Exception) {
-                return@Thread
+              } catch (e: Exception) {
+                // stopListening() closes the socket — that's the only
+                // accept failure allowed to kill the thread. A
+                // transient reject (e.g. EMFILE under a burst) must
+                // not silently end the listener.
+                if (listener !== server || server.isClosed) {
+                  return@Thread
+                }
+                Log.w(TAG, "syncListen accept failed; retrying", e)
+                try {
+                  Thread.sleep(50)
+                } catch (_: InterruptedException) {
+                  return@Thread
+                }
+                continue
               }
             socket.tcpNoDelay = true
             socket.keepAlive = true

@@ -484,6 +484,20 @@ export async function run(): Promise<void> {
                   ax.send();
                 });
               } catch (e) {}
+              try {
+                var fr = document.createElement('iframe');
+                fr.src = ${JSON.stringify(selfUrl)};
+                (document.body || document.documentElement).appendChild(fr);
+                var child = fr.contentWindow || window[0];
+                if (child) {
+                  var fx = new child.XMLHttpRequest();
+                  fx.open('GET', ${JSON.stringify(selfUrl)}, false);
+                  fx.send();
+                  if (String(fx.responseText).indexOf('${sentinel}') !== -1) {
+                    verdict = 'leak-frame';
+                  }
+                }
+              } catch (e) {}
               var out = [];
               for (var i = 0; i < verdict.length; i++) {
                 out.push(verdict.charCodeAt(i));
