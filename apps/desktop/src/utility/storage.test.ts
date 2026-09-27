@@ -240,6 +240,8 @@ export async function run(): Promise<void> {
       ';; VACUUM',
       '/* c */; ATTACH x AS y',
       '; PRAGMA journal_mode = OFF',
+      // a `*//*` storm must still fail fast — the head scan is linear
+      `/*${'*//*'.repeat(200)}`,
     ]) {
       const res = await execute(gated, sql);
       assert(
