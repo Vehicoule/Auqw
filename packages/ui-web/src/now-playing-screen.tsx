@@ -42,6 +42,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /** Current repeat mode — off / all / one from the player port. */
+  readonly repeat?: 'off' | 'all' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
   /** Owned-bytes state of the current track; null hides the button. */
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
@@ -60,6 +63,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
+  repeat = 'off',
+  onCycleRepeat,
   download = null,
   onDownload,
 }: TransportProps) {
@@ -109,6 +114,23 @@ export function TransportControls({
         disabled={!canNext}
         onPress={onNext}
         className="uw-transport__main"
+      />
+      <IconButton
+        icon={repeat === 'one' ? 'repeat-one' : 'repeat'}
+        size={32}
+        iconSize={14}
+        color={repeat === 'off' ? 'var(--text-secondary)' : 'var(--accent)'}
+        ariaLabel={
+          repeat === 'one'
+            ? t('common.repeatOne')
+            : repeat === 'all'
+              ? t('common.repeatAll')
+              : t('common.repeat')
+        }
+        disabled={onCycleRepeat === undefined}
+        active={repeat !== 'off'}
+        onPress={onCycleRepeat}
+        className="uw-transport__side"
       />
       {download !== null && (
         <IconButton
@@ -204,6 +226,8 @@ export type NowPlayingScreenProps = {
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  readonly repeat?: 'off' | 'all' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
@@ -234,6 +258,8 @@ export function NowPlayingScreen({
   onNext,
   onPrevious,
   onToggleLike,
+  repeat = 'off',
+  onCycleRepeat,
   download = null,
   onDownload,
   onSeek,
@@ -296,6 +322,8 @@ export function NowPlayingScreen({
             onPrevious={onPrevious}
             onNext={onNext}
             onToggleLike={onToggleLike}
+            repeat={repeat}
+            onCycleRepeat={onCycleRepeat}
             download={download}
             onDownload={onDownload}
           />

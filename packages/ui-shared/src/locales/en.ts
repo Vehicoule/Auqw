@@ -29,6 +29,8 @@ export const en = {
   'common.rename': 'rename',
   'common.save': 'save',
   'common.repeat': 'repeat',
+  'common.repeatAll': 'repeat all',
+  'common.repeatOne': 'repeat one',
   'common.unlike': 'unlike',
   'common.unavailable': 'unavailable',
   'common.cardA11y': '{title}, {subtitle}',

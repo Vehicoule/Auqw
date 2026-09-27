@@ -1762,6 +1762,257 @@ async function backgroundTransitionChain(): Promise<void> {
   assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'new app intent rejects the old projection');
 }
 
+// ---- repeat mode ----------------------------------------------------------
+// The rule rides the queue projection: the service executes it inside the
+// installed revision, JS reconciles the transitions it reports, and the
+// ended fallback mirrors the same rules when no projection is installed.
+
+function repeatRig(current: string | null = 'oA'): Rig {
+  return rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`, ref('youtube-music', `y${id}`)),
+        ),
+        currentOccurrenceId: current,
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+}
+
+async function repeatCycle(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  assertEqual(readyOf(r).repeat, 'off', 'repeat starts off');
+  for (const want of ['all', 'one', 'off'] as const) {
+    assert((await r.session.cycleRepeat()).ok);
+    await pump();
+    assertEqual(readyOf(r).repeat, want, `cycle lands on ${want}`);
+    assertEqual(
+      r.player.projections.at(-1)?.repeat,
+      want,
+      'a toggle re-projects carrying the new rule',
+    );
+  }
+  const count = r.player.projections.length;
+  assert((await r.session.setRepeatMode('off')).ok);
+  await pump();
+  assertEqual(
+    r.player.projections.length,
+    count,
+    'an unchanged mode does not re-project',
+  );
+}
+
+async function repeatOneEndedTransition(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('one')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'one');
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(q.currentOccurrenceId, 'oA', 'repeat=one replays the cursor');
+  assertEqual(q.positionMs, 0, 'replay restarts at 0');
+  assertEqual(q.mode, 'playing', 'replayed item plays');
+}
+
+async function repeatAllTailTransitionWraps(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'all');
+  const identity = (id: string): PlaybackIdentity => ({
+    attemptId: `svc-${id}`,
+    queueRev: p.queueRev,
+  });
+  // Walk the service cursor to the tail through remote presses.
+  for (const [from, to] of [['oA', 'oB'], ['oB', 'oC']] as const) {
+    r.player.emit(
+      transitionEvent(r, {
+        from,
+        to,
+        reason: 'remote-next',
+        positionMs: 0,
+        identity: identity(to),
+        handle: `h-${to}`,
+      }),
+    );
+    await pump();
+  }
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'at the tail');
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oA'),
+      handle: 'h-oA',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oA',
+    'repeat=all wraps a tail end back to the head',
+  );
+}
+
+async function repeatAllHeadPrevWraps(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'all');
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oC',
+      reason: 'remote-previous',
+      positionMs: 0,
+      identity: { attemptId: 'svc-oC', queueRev: p.queueRev },
+      handle: 'h-oC',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'repeat=all wraps a head previous to the tail',
+  );
+}
+
+async function repeatOffSameIdRejected(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'off');
+  const rev = readyOf(r).queue.revision;
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(q.currentOccurrenceId, 'oA', 'cursor unmoved');
+  assertEqual(
+    q.revision,
+    rev,
+    'a same-item end is illegal under repeat=off',
+  );
+}
+
+async function repeatAllManualWraps(): Promise<void> {
+  const r = repeatRig('oC');
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  // Manual next off the tail wraps to the head instead of stopping.
+  assert((await r.session.next()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(q.currentOccurrenceId, 'oA', 'manual next wraps tail→head');
+  assertEqual(q.mode, 'paused', 'paused intent survives the wrap');
+  // Manual previous parked at the head wraps to the tail.
+  assert((await r.session.previous()).ok);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'manual previous wraps head→tail',
+  );
+}
+
+async function repeatOneEndedFallback(): Promise<void> {
+  // Without an installed projection the JS fallback replays the cursor
+  // item instead of advancing.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('itunes', 'a')]),
+        recording('rB', [ref('itunes', 'b')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA'), occurrence('oB', 'rB')],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('oA');
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'ytm-a', 'Song rA', 'Artist', 300_000)]),
+  );
+  await pump();
+  const idA = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idA, 'h-A'));
+  await pump();
+  r.player.settlePrepare(ok('req-A'));
+  assert((await playing).ok);
+  await pump();
+  assert((await r.session.setRepeatMode('one')).ok);
+  await pump();
+  // Fail the next projection so the ended status runs the fallback.
+  r.player.failNextProjection(appError('transient', 'projection down'));
+  assert((await r.session.seekTo(100)).ok);
+  await pump();
+  const idNow = readyOf(r).playback;
+  const identity = 'identity' in idNow ? idNow.identity : undefined;
+  assert(identity !== undefined);
+  const preps = calls(r, 'prepare').length;
+  r.player.emit(statusEvent(identity, 'h-A', 'ended', 300_000));
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oA',
+    'fallback replays the cursor under repeat=one',
+  );
+  assertEqual(q.positionMs, 0, 'replay restarts at 0');
+  assertEqual(q.mode, 'playing', 'replayed item plays');
+  assert(
+    calls(r, 'prepare').length > preps,
+    'fallback re-prepares the same occurrence',
+  );
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -4338,6 +4589,13 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['portThrows', portThrows],
   ['projectionBasics', projectionBasics],
   ['backgroundTransitionChain', backgroundTransitionChain],
+  ['repeatCycle', repeatCycle],
+  ['repeatOneEndedTransition', repeatOneEndedTransition],
+  ['repeatAllTailTransitionWraps', repeatAllTailTransitionWraps],
+  ['repeatAllHeadPrevWraps', repeatAllHeadPrevWraps],
+  ['repeatOffSameIdRejected', repeatOffSameIdRejected],
+  ['repeatAllManualWraps', repeatAllManualWraps],
+  ['repeatOneEndedFallback', repeatOneEndedFallback],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

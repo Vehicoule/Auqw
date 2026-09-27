@@ -484,6 +484,7 @@ export type IconName =
   | 'library'
   | 'note'
   | 'repeat'
+  | 'repeat-one'
   | 'shuffle'
   | 'clock'
   | 'lyrics'
@@ -621,6 +622,13 @@ const GLYPHS: Record<IconName, Glyph> = {
     filled: false,
     shapes: [
       p('M17 4l3 3-3 3M20 7H7a3 3 0 0 0-3 3v1M7 20l-3-3 3-3M4 17h13a3 3 0 0 0 3-3v-1'),
+    ],
+  },
+  'repeat-one': {
+    filled: false,
+    shapes: [
+      p('M17 4l3 3-3 3M20 7H7a3 3 0 0 0-3 3v1M7 20l-3-3 3-3M4 17h13a3 3 0 0 0 3-3v-1'),
+      p('M13 15V9h-1l-2 1v1h1.5v4H13z'),
     ],
   },
   shuffle: {

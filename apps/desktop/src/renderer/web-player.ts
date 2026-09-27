@@ -652,41 +652,64 @@ export function createWebPlayerPort(deps: {
     if (idx < 0) {
       return;
     }
+    const restartInPlace = (): boolean => {
+      // Same-item cursor move: the live attach replays/restarts — the
+      // emitted transition carries the attempt's own identity per the
+      // remote-previous restart rule.
+      const cur = current;
+      if (cur === null) {
+        return false;
+      }
+      emitTransition(
+        p,
+        p.currentOccurrenceId,
+        reason,
+        0,
+        cur.identity,
+        cur.handle,
+      );
+      // The track start may have been evicted — rewinding only the
+      // element would wait on bytes the pump never re-requests;
+      // the source re-anchors it, matching the seekTo path.
+      activeMse?.source.seekTo(0);
+      audio.currentTime = 0;
+      if (reason === 'ended' || p.mode === 'playing') {
+        void audio.play().catch(() => undefined);
+      }
+      return true;
+    };
     if (reason === 'remote-previous') {
-      const restart = posMs() >= 3000 || idx === 0;
-      if (restart) {
-        // Restart the current stream in place — same attempt echoes the
-        // live re-keyed revision per the transition contract.
-        const cur = current;
-        if (cur === null) {
+      // Past the restart threshold previous restarts the current item;
+      // at the head, repeat=all wraps to the tail instead.
+      const wrapTo =
+        idx === 0 && p.repeat === 'all' && p.items.length > 1
+          ? p.items[p.items.length - 1]
+          : undefined;
+      if (posMs() >= 3000 || (idx === 0 && wrapTo === undefined)) {
+        if (restartInPlace()) {
           return;
         }
-        emitTransition(
-          p,
-          p.currentOccurrenceId,
-          reason,
-          0,
-          cur.identity,
-          cur.handle,
-        );
-        // The track start may have been evicted — rewinding only the
-        // element would wait on bytes the pump never re-requests;
-        // the source re-anchors it, matching the seekTo path.
-        activeMse?.source.seekTo(0);
-        audio.currentTime = 0;
-        if (p.mode === 'playing') {
-          void audio.play().catch(() => undefined);
+      } else {
+        const item = wrapTo ?? p.items[idx - 1];
+        if (item === undefined) {
+          return;
         }
-        return;
+        void attachItem(p, item, reason);
       }
-      const item = p.items[idx - 1];
-      if (item === undefined) {
-        return;
-      }
-      void attachItem(p, item, reason);
       return;
     }
-    const successor = idx + 1 < p.items.length ? p.items[idx + 1] : undefined;
+    // repeat=one replays the cursor item on a natural end (manual
+    // remote-next still advances); repeat=all wraps the tail to the
+    // head — a single-item queue lands back on itself, handled by the
+    // same in-place restart as any same-item target.
+    const successor =
+      reason === 'ended' && p.repeat === 'one'
+        ? p.items[idx]
+        : idx + 1 < p.items.length
+          ? p.items[idx + 1]
+          : p.repeat === 'all' && p.items.length > 0
+            ? p.items[0]
+            : undefined;
     if (successor === undefined) {
       const tailPositionMs = posMs();
       if (reason !== 'ended') {
@@ -704,6 +727,10 @@ export function createWebPlayerPort(deps: {
       }
       // Tail of the queue — a null target means the cursor ran off.
       emitTransition(p, null, reason, tailPositionMs, null, null);
+      return;
+    }
+    if (successor.occurrenceId === p.currentOccurrenceId) {
+      restartInPlace();
       return;
     }
     void attachItem(p, successor, reason);

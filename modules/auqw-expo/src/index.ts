@@ -209,6 +209,11 @@ export type QueueProjection = {
   currentOccurrenceId: string | null;
   positionMs: number;
   mode: 'stopped' | 'paused' | 'playing';
+  /**
+   * Cursor repeat rule — `all` wraps tail→head (and head
+   * remote-previous→tail), `one` replays the cursor item on `ended`.
+   */
+  repeat: 'off' | 'all' | 'one';
   items: QueueProjectionItem[];
 };
 

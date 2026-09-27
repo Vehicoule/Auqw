@@ -623,6 +623,7 @@ export async function runSeamLink(url: string): Promise<void> {
         currentOccurrenceId: 'occ-a',
         positionMs: 0,
         mode: 'playing',
+        repeat: 'off',
         items: [
           {
             occurrenceId: 'occ-a',

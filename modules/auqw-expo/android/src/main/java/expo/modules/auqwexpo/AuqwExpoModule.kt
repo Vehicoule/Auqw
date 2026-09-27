@@ -168,6 +168,12 @@ class QueueProjectionInput : Record {
   @Field
   var mode: String = "stopped"
 
+  /** Cursor repeat rule: `all` wraps a tail move to the head (and a
+   * head remote-previous to the tail); `one` replays the cursor item
+   * on `ended`. Absent from older JS bundles = `off`. */
+  @Field
+  var repeat: String = "off"
+
   @Field
   var items: List<ProjectionItemInput> = emptyList()
 }
@@ -1428,6 +1434,9 @@ class AuqwExpoModule : Module() {
     if (p.mode != "stopped" && p.mode != "paused" && p.mode != "playing") {
       bad("unknown projection mode")
     }
+    if (p.repeat != "off" && p.repeat != "all" && p.repeat != "one") {
+      bad("unknown repeat mode")
+    }
     if (p.items.size > 500) {
       bad("projection exceeds item bound")
     }
@@ -1515,21 +1524,64 @@ class AuqwExpoModule : Module() {
       return
     }
     if (reason == "remote-previous") {
-      // Transport rule: past the restart threshold, or at the head of
-      // the queue, previous restarts the current item — the only
-      // legal same-item target. It reuses the live handle/identity.
-      if (idx == 0 || p.currentPosition > REMOTE_PREVIOUS_RESTART_MS) {
+      // Transport rule: past the restart threshold, previous restarts
+      // the current item — a legal same-item target reusing the live
+      // handle/identity.
+      if (p.currentPosition > REMOTE_PREVIOUS_RESTART_MS) {
         p.seekTo(0)
         emitTransition(
           proj, from, from, reason, 0.0,
           att.attemptId to att.queueRev, att.handle
         )
-      } else {
-        moveTo(p, proj, from, proj.items[idx - 1], reason)
+        return
       }
+      if (idx == 0) {
+        // At the head: repeat=all wraps to the tail; otherwise the
+        // item restarts in place, same as before.
+        val last = proj.items.lastOrNull()
+        if (proj.repeat == "all" && last != null && proj.items.size > 1) {
+          moveTo(p, proj, from, last, reason)
+        } else {
+          p.seekTo(0)
+          emitTransition(
+            proj, from, from, reason, 0.0,
+            att.attemptId to att.queueRev, att.handle
+          )
+        }
+        return
+      }
+      moveTo(p, proj, from, proj.items[idx - 1], reason)
       return
     }
-    val next = proj.items.getOrNull(idx + 1)
+    // repeat=one replays the cursor item on a natural end — the live
+    // attach stays, only the position resets and playback resumes.
+    // Manual moves (remote-next) still advance under `one`.
+    if (reason == "ended" && proj.repeat == "one") {
+      p.seekTo(0)
+      p.play()
+      emitTransition(
+        proj, from, from, reason, 0.0,
+        att.attemptId to att.queueRev, att.handle
+      )
+      return
+    }
+    var next = proj.items.getOrNull(idx + 1)
+    if (next == null && proj.repeat == "all" && proj.items.isNotEmpty()) {
+      // Tail under repeat=all wraps to the head — a single-item queue
+      // lands back on itself and becomes an in-place restart.
+      next = proj.items[0]
+    }
+    if (next != null && next.occurrenceId == from) {
+      p.seekTo(0)
+      if (reason == "ended") {
+        p.play()
+      }
+      emitTransition(
+        proj, from, from, reason, 0.0,
+        att.attemptId to att.queueRev, att.handle
+      )
+      return
+    }
     if (next == null) {
       // Ran off the tail: a null-target transition is the legal stop.
       val endPosition = p.currentPosition.coerceAtLeast(0).toDouble()

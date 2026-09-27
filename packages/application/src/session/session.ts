@@ -88,6 +88,7 @@ import type {
   PlayerPort,
   QueueProjection,
   QueueProjectionItem,
+  RepeatMode,
 } from '../ports/player.ts';
 import type {
   EntityPage,
@@ -179,6 +180,12 @@ export type ReadySession = {
   readonly queue: QueueSnapshot;
   readonly settings: Settings;
   readonly playback: SessionPlayback;
+  /**
+   * The queue's repeat rule — runtime-only this slice (like `radio`):
+   * it rides the queue projection so adapters never see a separate
+   * channel, and is published for the transport UI.
+   */
+  readonly repeat: RepeatMode;
   /**
    * The lazy radio tail (queue/radio-tail.ts): `null` unless a radio
    * was seeded this session — runtime-only, never persisted; the
@@ -404,6 +411,7 @@ type Ready = {
   queueCommittedRev: number;
   settings: Settings;
   playback: SessionPlayback;
+  repeat: RepeatMode;
   radio: RadioTailRecord | null;
   persistenceError: AppError | undefined;
   /**
@@ -805,6 +813,7 @@ export class Session {
         queue: ready.queue.snapshot(),
         settings: { ...ready.settings },
         playback: ready.playback,
+        repeat: ready.repeat,
         radio: publishRadio(ready.radio),
         // The published error is a clone sealed by the same freeze —
         // a subscriber must never mutate the mirror's own error.
@@ -1829,6 +1838,7 @@ export class Session {
       queueCommittedRev: data.queue.revision,
       settings: { ...data.settings },
       playback: { type: 'idle' },
+      repeat: 'off',
       radio: null,
       persistenceError: undefined,
       syncPending: [],
@@ -3849,6 +3859,39 @@ export class Session {
     return ok(undefined);
   }
 
+  /**
+   * The queue's repeat rule. It travels inside the queue projection —
+   * a toggle re-installs the current revision so the service's next
+   * cursor move follows the new rule; with no projection installed it
+   * only changes the published state (and the JS-side fallback rules).
+   */
+  async setRepeatMode(mode: RepeatMode): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    if (r.repeat === mode) {
+      return ok(undefined);
+    }
+    r.repeat = mode;
+    this.#publish();
+    await this.#projectQueue();
+    return ok(undefined);
+  }
+
+  /** Transport cycle: off → all → one → off. */
+  async cycleRepeat(): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    return this.setRepeatMode(
+      r.repeat === 'off' ? 'all' : r.repeat === 'all' ? 'one' : 'off',
+    );
+  }
+
   async #advance(method: 'next' | 'previous'): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -3866,8 +3909,35 @@ export class Session {
     try {
       if (method === 'next') {
         r.queue.next();
+        // repeat=all: a move that ran off the tail wraps to the head
+        // instead of stopping — the same rule the service cursor uses.
+        if (r.repeat === 'all') {
+          const tail = r.queue.snapshot();
+          const head =
+            tail.currentOccurrenceId === null
+              ? tail.occurrences[0]
+              : undefined;
+          if (head !== undefined) {
+            r.queue.select(head.occurrenceId, before.mode === 'playing');
+          }
+        }
       } else {
         r.queue.previous();
+        // repeat=all: a previous no-op at the head (position 0) wraps
+        // to the tail instead of staying parked.
+        if (r.repeat === 'all') {
+          const head = r.queue.snapshot();
+          if (
+            head.revision === before.revision &&
+            head.occurrences.length > 1 &&
+            head.currentOccurrenceId === head.occurrences[0]?.occurrenceId
+          ) {
+            const last = head.occurrences[head.occurrences.length - 1];
+            if (last !== undefined) {
+              r.queue.select(last.occurrenceId, before.mode === 'playing');
+            }
+          }
+        }
       }
     } catch (thrown) {
       return err(fromUnknown(thrown));
@@ -5093,7 +5163,23 @@ export class Session {
       this.#active = null;
       const before = r.queue.snapshot();
       try {
-        r.queue.next();
+        // repeat=one replays the cursor item; repeat=all wraps a tail
+        // end back to the head — the same rules the service follows.
+        if (r.repeat === 'one' && before.currentOccurrenceId !== null) {
+          r.queue.select(before.currentOccurrenceId, true);
+        } else {
+          r.queue.next();
+          if (r.repeat === 'all') {
+            const tail = r.queue.snapshot();
+            const head =
+              tail.currentOccurrenceId === null
+                ? tail.occurrences[0]
+                : undefined;
+            if (head !== undefined) {
+              r.queue.select(head.occurrenceId, true);
+            }
+          }
+        }
       } catch {
         return;
       }
@@ -5302,6 +5388,7 @@ export class Session {
       currentOccurrenceId: snap.currentOccurrenceId,
       positionMs: snap.positionMs,
       mode: snap.mode,
+      repeat: r.repeat,
       items,
     };
   }
@@ -5413,6 +5500,29 @@ export class Session {
           ? items[cursorIndex + 1]?.occurrenceId ?? null
           : null;
       legal = event.toOccurrenceId === successor;
+      // repeat=one replays the cursor item on `ended` — a same-item
+      // edge is legal only there (remote-next still advances). The
+      // installed projection's rule governs — it is what the service
+      // executed, and may lag the live mode by a toggle.
+      if (
+        !legal &&
+        projection?.repeat === 'one' &&
+        event.reason === 'ended' &&
+        event.toOccurrenceId !== null &&
+        event.toOccurrenceId === event.fromOccurrenceId
+      ) {
+        legal = true;
+      }
+      // repeat=all wraps a tail move back to the head.
+      if (
+        !legal &&
+        projection?.repeat === 'all' &&
+        cursorIndex === items.length - 1 &&
+        items.length > 0 &&
+        event.toOccurrenceId === items[0]?.occurrenceId
+      ) {
+        legal = true;
+      }
     } else if (event.reason === 'remote-previous') {
       const predecessor =
         cursorIndex > 0
@@ -5423,6 +5533,16 @@ export class Session {
           event.toOccurrenceId === event.fromOccurrenceId) ||
         (predecessor !== null &&
           event.toOccurrenceId === predecessor);
+      // repeat=all wraps a head move to the tail.
+      if (
+        !legal &&
+        projection?.repeat === 'all' &&
+        cursorIndex === 0 &&
+        items.length > 1 &&
+        event.toOccurrenceId === items[items.length - 1]?.occurrenceId
+      ) {
+        legal = true;
+      }
     }
     if (
       projection === null ||

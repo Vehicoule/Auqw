@@ -163,6 +163,8 @@ export function isAttemptTrace(value: unknown): value is AttemptTrace {
   );
 }
 
+export type RepeatMode = 'off' | 'all' | 'one';
+
 export type QueueProjectionItem = {
   readonly occurrenceId: string;
   readonly provider: string | null;
@@ -178,6 +180,12 @@ export type QueueProjection = {
   readonly currentOccurrenceId: string | null;
   readonly positionMs: number;
   readonly mode: 'stopped' | 'paused' | 'playing';
+  /**
+   * The cursor's repeat rule: `all` wraps a tail move back to the head
+   * (and a head `remote-previous` to the tail), `one` replays the
+   * cursor item on `ended`. Manual moves never replay under `one`.
+   */
+  readonly repeat: RepeatMode;
   readonly items: readonly QueueProjectionItem[];
 };
 

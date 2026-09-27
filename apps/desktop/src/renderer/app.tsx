@@ -3127,6 +3127,8 @@ function Main({
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
                   onToggleLike={onToggleLike}
+                  repeat={state.type === 'ready' ? state.repeat : 'off'}
+                  onCycleRepeat={() => void session.cycleRepeat()}
                   download={
                     currentRecordingId !== null &&
                     (controller.downloads.recordFor(currentRecordingId) !==
