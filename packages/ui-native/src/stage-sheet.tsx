@@ -532,6 +532,17 @@ export function StageSheet({
           {/* Title/artist bottom-anchored in the light-frost zone; the
               timeline/transport cluster stays pinned at the bottom. */}
           <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+            {player.artworkUrl === null && (
+              <View
+                style={{
+                  width: '100%',
+                  aspectRatio: 1,
+                  marginBottom: theme.spacing.lg,
+                }}
+              >
+                <Artwork url={null} fill />
+              </View>
+            )}
             <View
               style={{
                 flexDirection: 'row',
@@ -815,7 +826,11 @@ export function StageSheet({
     >
       {immersive && <PlayerBackdrop artworkUrl={player.artworkUrl} />}
       {immersive ? (
-        <ThemeProvider theme="dark">
+        <ThemeProvider
+          theme="dark"
+          textScale={theme.textScale}
+          reducedMotion={theme.reducedMotion}
+        >
           <View
             style={{
               flex: 1,

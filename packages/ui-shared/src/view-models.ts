@@ -859,7 +859,10 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     artist: recording?.artist ?? null,
     albumLabel: recording === undefined ? null : albumLabel(recording),
     artworkUrl:
-      recording === undefined ? null : pickArtworkUrl(recording.artwork),
+      // The player model feeds surfaces from the 52 px mini-player up to
+      // the full-bleed stage backdrop — pick at backdrop size; smaller
+      // consumers downscale the same cached file.
+      recording === undefined ? null : pickArtworkUrl(recording.artwork, 512),
     liked: recordingId !== null && liked.has(recordingId),
     canPrevious,
     canNext,
