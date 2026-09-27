@@ -151,6 +151,23 @@ export async function run(): Promise<void> {
     { bg: '#000000', fg: '#ffffff' },
     'sparse omarchy still parses',
   );
+  // A commented-out duplicate after the live value must not win —
+  // Omarchy themes ship commented alternates.
+  const commented = OMARCHY_TOML.replace(
+    'background = "#1a1b26"',
+    'background = "#1a1b26"\n# background = "#faf8f3"\nforeground = "#c0caf5" # trailing',
+  ).replace('foreground = "#c0caf5"\n', '');
+  assertDeepEqual(
+    parseOmarchyColors(commented),
+    {
+      bg: '#1a1b26',
+      fg: '#c0caf5',
+      accent: '#7aa2f7',
+      warn: '#f7768e',
+      sel: '#283457',
+    },
+    'commented assignment never overrides the live value',
+  );
 
   const kde = parseKdeGlobals(KDE_GLOBALS_TEXT);
   assertDeepEqual(
@@ -348,6 +365,70 @@ export async function run(): Promise<void> {
   }
 
   {
+    // XDG roots override the home-relative defaults for both sources.
+    const rig = env({
+      env: {
+        XDG_CONFIG_HOME: '/xconf',
+        XDG_STATE_HOME: '/xstate',
+      },
+    });
+    rig.files.set(
+      '/xstate/omarchy/current/theme/colors.toml',
+      OMARCHY_TOML,
+    );
+    rig.files.set(
+      '/xconf/omarchy/current/theme/colors.toml',
+      OMARCHY_TOML.replace('#1a1b26', '#faf8f3'),
+    );
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
+    const sender = new CollectingSender();
+    monitor.attach(sender);
+    await sleep(0);
+    assertDeepEqual(
+      (sender.sent[0]?.payload as { source: { palette: { bg: string } } })
+        .source.palette.bg,
+      '#1a1b26',
+      'XDG_STATE_HOME omarchy path wins over XDG_CONFIG_HOME',
+    );
+    monitor.stop();
+  }
+
+  {
+    // A read that outlives its subscribers never reaches a fresh attach:
+    // detach during an in-flight portal read bumps the epoch; the new
+    // subscriber only sees its own read's result.
+    const rig = env();
+    const resolvers: Array<(v: string | null) => void> = [];
+    rig.env = {
+      ...rig.env,
+      execFile: () =>
+        new Promise<string | null>((resolve) => resolvers.push(resolve)),
+    };
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 60_000 });
+    const a = new CollectingSender();
+    const b = new CollectingSender();
+    monitor.attach(a);
+    monitor.detach(a); // teardown while read 1 is still in flight
+    monitor.attach(b);
+    resolvers[0]?.(
+      '(<<<(0.20784313725490197, 0.5176470588235295, 0.8941176470588236)>>>)',
+    );
+    await sleep(0);
+    resolvers[1]?.(
+      '(<<<(0.81176470588235293, 0.44313725490196076, 0.090196078431372548)>>>)',
+    );
+    await sleep(0);
+    assertEqual(b.sent.length, 1, 'new attach gets exactly one snapshot');
+    assertDeepEqual(
+      b.sent[0]?.payload,
+      { source: { scheme: 'dark', palette: { accent: '#cf7117' } } },
+      'it is the fresh read, not the stale one',
+    );
+    assertEqual(resolvers.length, 2, 'the rerun supplied the snapshot');
+    monitor.stop();
+  }
+
+  {
     // win32: systemPreferences accent only.
     const rig = env({
       platform: 'win32',
@@ -420,7 +501,7 @@ export async function run(): Promise<void> {
       execFile: () =>
         new Promise<string | null>((resolve) => resolvers.push(resolve)),
     };
-    const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 60_000 });
     const sender = new CollectingSender();
     monitor.attach(sender);
     rig.fireSystem();

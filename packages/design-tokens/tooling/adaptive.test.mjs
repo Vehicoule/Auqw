@@ -204,6 +204,56 @@ const TEXT_ROLES = [
   );
 }
 
+// ---------- property: the 4.5 invariant over random palettes ----------
+{
+  // Deterministic LCG so failures reproduce.
+  let seed = 0x5eed;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+  const hex = () =>
+    '#' +
+    [0, 1, 2]
+      .map(() => Math.floor(rand() * 256).toString(16).padStart(2, '0'))
+      .join('');
+  let derived = 0;
+  let fellBack = 0;
+  for (let i = 0; i < 400; i++) {
+    const flag = rand() < 0.5 ? 'dark' : 'light';
+    const d = deriveScheme(
+      {
+        scheme: flag,
+        palette: {
+          bg: hex(),
+          fg: hex(),
+          accent: hex(),
+          warn: hex(),
+          sel: hex(),
+        },
+      },
+      flag,
+    );
+    if (d.values === schemes[d.scheme]) {
+      fellBack += 1; // honest fallback — no invariant to check
+      continue;
+    }
+    derived += 1;
+    for (const role of TEXT_ROLES) {
+      for (const surface of ['canvas', 'stage', 'deep', 'raised']) {
+        check(
+          `p${i} ${role} ≥4.5 on ${surface}`,
+          contrast(d.values[role], d.values[surface]) >= 4.5,
+        );
+      }
+    }
+  }
+  check(
+    'property run exercises both outcomes',
+    derived > 50 && fellBack > 20,
+  );
+}
+
 // ---------- schemeCssVars ----------
 {
   const vars = schemeCssVars(schemes.dark);

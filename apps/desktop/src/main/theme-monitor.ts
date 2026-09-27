@@ -58,14 +58,38 @@ export interface ThemeMonitor {
   stop(): void;
 }
 
-const PALETTE_RE = /([A-Za-z_0-9]+)\s*=\s*"([^"\n]+)"/g;
+const ASSIGN_RE = /([A-Za-z_0-9]+)\s*=\s*"([^"\n]+)"/;
+
+/** Cuts a TOML `#` comment: a `#` inside a quoted span is data (colors
+    are quoted hex), one outside ends the line. */
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote === null) {
+      if (c === '"' || c === "'") {
+        quote = c;
+      } else if (c === '#') {
+        return line.slice(0, i);
+      }
+    } else if (c === quote) {
+      quote = null;
+    }
+  }
+  return line;
+}
 
 /** Flat `key = "value"` TOML read — Omarchy `colors.toml` carries
-    `background`/`foreground`/`accent`/`selection`/`red` (warn) keys. */
+    `background`/`foreground`/`accent`/`selection`/`red` (warn) keys.
+    Comments are stripped first so a commented-out duplicate can't
+    override the live value. */
 export function parseOmarchyColors(text: string): Palette | null {
   const keys = new Map<string, string>();
-  for (const match of text.matchAll(PALETTE_RE)) {
-    keys.set(match[1]!, match[2]!);
+  for (const line of text.split('\n')) {
+    const match = ASSIGN_RE.exec(stripTomlComment(line));
+    if (match !== null) {
+      keys.set(match[1]!, match[2]!);
+    }
   }
   const bg = keys.get('background');
   const fg = keys.get('foreground');
@@ -187,9 +211,26 @@ export function parsePortalAccent(stdout: string): string | null {
   );
 }
 
-const OMARCHY_STATE = '.local/state/omarchy/current/theme/colors.toml';
-const OMARCHY_CONFIG = '.config/omarchy/current/theme/colors.toml';
-const KDE_GLOBALS = '.config/kdeglobals';
+const OMARCHY_TOML_REL = 'omarchy/current/theme/colors.toml';
+const KDE_GLOBALS_REL = 'kdeglobals';
+
+/** XDG roots: unset/empty falls back to the home-relative defaults,
+    per the basedir spec. */
+function xdgConfig(env: ThemeSourceEnv): string {
+  return env.env['XDG_CONFIG_HOME'] || `${env.home}/.config`;
+}
+function xdgState(env: ThemeSourceEnv): string {
+  return env.env['XDG_STATE_HOME'] || `${env.home}/.local/state`;
+}
+function omarchyPaths(env: ThemeSourceEnv): readonly string[] {
+  return [
+    `${xdgState(env)}/${OMARCHY_TOML_REL}`,
+    `${xdgConfig(env)}/${OMARCHY_TOML_REL}`,
+  ];
+}
+function kdeGlobalsPath(env: ThemeSourceEnv): string {
+  return `${xdgConfig(env)}/${KDE_GLOBALS_REL}`;
+}
 const PORTAL_CMD = 'gdbus';
 const PORTAL_ARGS = [
   'call',
@@ -217,8 +258,8 @@ export async function readPlatformPalette(
   if (env.platform !== 'linux') {
     return null;
   }
-  for (const rel of [OMARCHY_STATE, OMARCHY_CONFIG]) {
-    const text = env.readFileSync(`${env.home}/${rel}`);
+  for (const path of omarchyPaths(env)) {
+    const text = env.readFileSync(path);
     if (text === null) {
       continue;
     }
@@ -229,7 +270,7 @@ export async function readPlatformPalette(
   }
   const desktop = env.env['XDG_CURRENT_DESKTOP'] ?? '';
   if (/kde/i.test(desktop)) {
-    const text = env.readFileSync(`${env.home}/${KDE_GLOBALS}`);
+    const text = env.readFileSync(kdeGlobalsPath(env));
     if (text !== null) {
       const palette = parseKdeGlobals(text);
       if (palette !== null) {
@@ -250,12 +291,9 @@ function watchedPaths(env: ThemeSourceEnv): readonly string[] {
   if (env.platform !== 'linux') {
     return [];
   }
-  const paths = [
-    `${env.home}/${OMARCHY_STATE}`,
-    `${env.home}/${OMARCHY_CONFIG}`,
-  ];
+  const paths = [...omarchyPaths(env)];
   if (/kde/i.test(env.env['XDG_CURRENT_DESKTOP'] ?? '')) {
-    paths.push(`${env.home}/${KDE_GLOBALS}`);
+    paths.push(kdeGlobalsPath(env));
   }
   return paths;
 }
@@ -326,18 +364,22 @@ export function createThemeMonitor(opts: {
 
   // Source reads can await a timed-out gdbus; callers coalesce onto the
   // in-flight read (flag set → one trailing run) instead of stacking
-  // processes, and a teardown mid-flight discards the result.
+  // processes. `epoch` bumps on teardown so a read that outlived its
+  // subscribers can never push a stale palette to a fresh attach — the
+  // queued rerun supplies the new subscriber's real snapshot instead.
   let inflight = false;
   let rerun = false;
+  let epoch = 0;
   function refresh(): void {
     if (inflight) {
       rerun = true;
       return;
     }
     inflight = true;
+    const at = epoch;
     void collect()
       .then((next) => {
-        if (stops === null) {
+        if (stops === null || at !== epoch) {
           return;
         }
         if (JSON.stringify(next) === JSON.stringify(last)) {
@@ -393,6 +435,7 @@ export function createThemeMonitor(opts: {
     }
     stops = null;
     last = null;
+    epoch++;
   }
 
   return {
