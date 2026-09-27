@@ -176,7 +176,7 @@ export async function run(): Promise<void> {
   {
     const timers = fakeTimers();
     const { calls, port } = fakePort(() =>
-      err(appError('budget-exceeded', 'stream too large')),
+      err(appError('not-applicable', 'stream too large')),
     );
     const tracker = createPeaksTracker({
       port,
@@ -201,6 +201,21 @@ export async function run(): Promise<void> {
       2,
       'a known duration re-extracts under the full cap',
     );
+  }
+
+  // A real budget-exceeded while durationMs is unknown (the decoded
+  // PCM ceiling) is still terminal — the duration landing later must
+  // not re-decode the same oversized audio.
+  {
+    const { calls, port } = fakePort(() =>
+      err(appError('budget-exceeded', 'decoded audio too large')),
+    );
+    const tracker = createPeaksTracker({ port });
+    tracker.pull({ id: 'r-9', handle: 'h', durationMs: null });
+    await flush();
+    assertEqual(tracker.get('r-9'), null, 'the PCM ceiling stays terminal');
+    tracker.pull({ id: 'r-9', handle: 'h', durationMs: 120_000 });
+    assertEqual(calls.length, 1, 'a terminal bail never re-decodes');
   }
 
   // A re-prepared stream is a new cache identity — the same recording

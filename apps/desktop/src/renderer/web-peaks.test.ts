@@ -149,7 +149,7 @@ export async function run(): Promise<void> {
       maxBytes: 1024,
     });
     const result = await port.peaks(
-      { handle: 'h-2', durationMs: null },
+      { handle: 'h-2', durationMs: 60_000 },
       context(),
     );
     assert(!result.ok && result.error.kind === 'budget-exceeded');
@@ -174,7 +174,7 @@ export async function run(): Promise<void> {
       maxBytes: 1000,
     });
     const result = await port.peaks(
-      { handle: 'h-3', durationMs: null },
+      { handle: 'h-3', durationMs: 60_000 },
       context(),
     );
     assert(!result.ok && result.error.kind === 'budget-exceeded');
@@ -339,7 +339,9 @@ export async function run(): Promise<void> {
       { handle: 'h-9', durationMs: null },
       context(),
     );
-    assert(!result.ok && result.error.kind === 'budget-exceeded');
+    // 'not-applicable' marks the provisional bound — the tracker leaves
+    // it uncached so a later durationMs gets a pull at the real cap.
+    assert(!result.ok && result.error.kind === 'not-applicable');
     assertEqual(
       stream.calls.filter((c) => c.method === 'read').length,
       3,

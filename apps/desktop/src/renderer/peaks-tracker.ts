@@ -114,15 +114,12 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           if (entry.source.signal.cancelled) {
             return;
           }
-          // A budget abort under a *provisional* cap (durationMs was
-          // still unknown, so the pull ran against the tighter
-          // bitrate-floor bound) is neither terminal nor worth
-          // retrying on the spot: it settles uncached so the pull a
-          // durationMs update retriggers gets the full byte cap.
+          // 'not-applicable' marks a provisional bound (the tighter
+          // unknown-duration byte cap): neither terminal nor worth a
+          // spot-retry at the same cap — it settles uncached so the
+          // pull a durationMs update retriggers gets the real budget.
           const provisionalCap =
-            !result.ok &&
-            result.error.kind === 'budget-exceeded' &&
-            durationMs === null;
+            !result.ok && result.error.kind === 'not-applicable';
           if (result.ok) {
             cache.set(id, result.value);
             evict();

@@ -208,6 +208,7 @@ export function createWebPeaksPort(deps: {
   async function pullBytes(
     handle: string,
     cap: number,
+    provisionalCap: boolean,
     context: OperationContext,
   ): Promise<Result<Uint8Array>> {
     const chunks: Uint8Array[] = [];
@@ -247,8 +248,14 @@ export function createWebPeaksPort(deps: {
       position += bytes.byteLength;
     }
     if (!ended) {
+      // 'not-applicable' marks the tighter unknown-duration bound —
+      // not terminal, unlike the PCM ceiling or a known-long track:
+      // a durationMs update deserves one pull at the real cap.
       return err(
-        appError('budget-exceeded', 'stream too large for peak extraction'),
+        appError(
+          provisionalCap ? 'not-applicable' : 'budget-exceeded',
+          'stream too large for peak extraction',
+        ),
       );
     }
     const out = new Uint8Array(total);
@@ -277,7 +284,12 @@ export function createWebPeaksPort(deps: {
         request.durationMs === null
           ? Math.min(maxBytes, maxUnknownDurationBytes)
           : maxBytes;
-      const bytes = await pullBytes(request.handle, cap, context);
+      const bytes = await pullBytes(
+        request.handle,
+        cap,
+        request.durationMs === null,
+        context,
+      );
       if (!bytes.ok) {
         return bytes;
       }
@@ -292,7 +304,10 @@ export function createWebPeaksPort(deps: {
       }
       // Belt for the gates above: a container that decodes wider than
       // its duration suggests (multichannel, high sample rate, a lying
-      // header) stops here rather than bucketing a giant buffer.
+      // header) stops here rather than bucketing a giant buffer. This
+      // is 'budget-exceeded', not 'not-applicable' — the PCM ceiling is
+      // duration-independent, so the failure is terminal even when
+      // durationMs arrived late.
       const pcmBytes =
         decoded.value.length * decoded.value.numberOfChannels * 4;
       if (pcmBytes > maxPcmBytes) {
