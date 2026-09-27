@@ -32,7 +32,7 @@ Native chrome, per platform — not a shrunken desktop:
 
 - **Navbar:** Android = M3 Expressive bar (tall, wide pill indicator, bold active label, gesture handle); iOS = floating translucent capsule (liquid glass — blur is scoped to OS chrome, never an app surface). Settings is the 4th tab: `home · explore · library · settings`.
 - **Mini-player:** floating card above the navbar — artwork left, title/artist, `like + resume` right. Progress is a **squared ring hugging the artwork** (rounded-rect path, progress sweeps from top-center): the same thin clean arc on every platform. Swipe sideways skips; tap or swipe-up opens the Stage sheet.
-- **Stage sheet:** full-screen, grab handle, swipe-down dismisses. Same modes as desktop. Media controls go platform-native — Android: filled-accent squircle play + tonal prev/next; iOS: translucent glass circles. **No volume control** — hardware buttons own it. Layout splits free space evenly (art → air → meta → air → controls); no filler text.
+- **Stage sheet:** full-screen, grab handle, swipe-down dismisses. Same modes as desktop. Media controls go platform-native — Android: filled-accent squircle play + tonal prev/next; iOS: translucent glass circles. **No volume control** — hardware buttons own it. Player mode is immersive (CMP reference): the artwork fills the surface under a fixed dark scrim, a statically blurred copy of the artwork is revealed by an alpha ramp so the frost fades in progressively under the bottom cluster only (no live blur view, no hard edge), and the layout pins its cluster — the radio affordance sits centered under the grab handle as an accent pill; the title line carries download + add-to-playlist at its right edge; then timeline → transport `like · prev · play · next · repeat` → mode segment, all pinned at the bottom edge. Content always renders in the dark scheme over art. Missing artwork falls back to the flat stage surface; lyrics/queue modes keep the flat surface. (Repeat renders disabled until the session exposes a repeat mode.)
 - **Rows:** same anatomy as desktop (50 px, larger hit areas).
 
 ## Tokens
@@ -90,7 +90,7 @@ Stock RN components + Reanimated/Gesture Handler on mobile; DOM/CSS on desktop; 
 
 Icon motion contract — no static glyph icons: play⇄pause morph · heart fill-in · eq bars on the playing thumb (live in the preview) · rotate (sync) · bounce (like). Shared values, not per-frame React state; transforms and opacity only; the player clock drives progress; stop animation when invisible; respect reduced motion (eq → static indicator, sheet → crossfade, rings → static arc).
 
-Blur rule: translucent blur appears only on OS chrome (iOS capsule navbar, glass mini-player). App surfaces never blur — depth is the bg ramp.
+Blur rule: translucent blur appears on OS chrome (iOS capsule navbar, glass mini-player) and on one deliberate exception — the mobile full player's bottom frost over its artwork backdrop. Everywhere else app surfaces never blur — depth is the bg ramp.
 
 ## Evaluation rules
 

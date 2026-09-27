@@ -29,6 +29,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'common.previous': '上一首',
   'common.rename': '重命名',
   'common.save': '保存',
+  'common.repeat': '重复',
   'common.unlike': '取消喜欢',
   'common.unavailable': '不可用',
   'common.cardA11y': '{title}，{subtitle}',

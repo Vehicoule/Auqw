@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, ScrollView, View } from 'react-native';
+import {
+  Image,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -8,7 +15,19 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
-import { useTheme } from './theme.tsx';
+import Svg, {
+  Defs,
+  FeGaussianBlur,
+  Filter,
+  G,
+  Image as SvgImage,
+  LinearGradient,
+  Mask,
+  Rect,
+  Stop,
+} from 'react-native-svg';
+import { schemes } from '@auqw/design-tokens';
+import { ThemeProvider, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
   Artwork,
@@ -20,6 +39,7 @@ import {
   Text,
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { useResolvedArtworkUri } from './artwork.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
@@ -52,9 +72,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  /** Owned-bytes state of the current track; null hides the button. */
-  readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
-  readonly onDownload?: (() => void) | undefined;
+  /** Current repeat mode; 'one' is the only mode the port exposes. */
+  readonly repeat?: 'off' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
 };
 
 function transportVariant(
@@ -110,8 +130,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
-  download = null,
-  onDownload,
+  repeat = 'off',
+  onCycleRepeat,
 }: TransportProps) {
   const theme = useTheme();
   const v = transportVariant(theme, variant);
@@ -184,38 +204,19 @@ export function TransportControls({
         onPress={onNext}
         style={v.main}
       />
-      {download !== null && (
-        <IconButton
-          icon={
-            download === 'stored'
-              ? 'check'
-              : download === 'failed'
-                ? 'warn'
-                : 'download'
-          }
-          size={32}
-          iconSize={14}
-          color={
-            download === 'failed'
-              ? theme.colors.warn
-              : download === 'stored'
-                ? theme.colors.accent
-                : theme.colors.textSecondary
-          }
-          accessibilityLabel={
-            download === 'stored'
-              ? t('stage.download.storedA11y')
-              : download === 'failed'
-                ? t('stage.download.failedA11y')
-                : download === 'queued' || download === 'downloading'
-                  ? t('stage.download.busyA11y')
-                  : t('stage.download.idleA11y')
-          }
-          active={download === 'stored'}
-          onPress={onDownload}
-          style={v.side}
-        />
-      )}
+      <IconButton
+        icon="repeat"
+        size={32}
+        iconSize={14}
+        color={
+          repeat === 'one' ? theme.colors.accent : theme.colors.textSecondary
+        }
+        accessibilityLabel={t('common.repeat')}
+        disabled={onCycleRepeat === undefined}
+        active={repeat === 'one'}
+        onPress={onCycleRepeat}
+        style={v.side}
+      />
     </View>
   );
 }
@@ -245,7 +246,7 @@ export function ModeSegment({
         gap: 2,
         backgroundColor: theme.colors.fg08,
         padding: 3,
-        borderRadius: theme.radius.control,
+        borderRadius: theme.radius.pill,
         marginTop: theme.spacing.md,
       }}
     >
@@ -253,6 +254,9 @@ export function ModeSegment({
         const active = m.key === mode;
         // M3E segmented-button: the selected segment reads as a tonal
         // (secondary-container) pill; iOS keeps the raised slab.
+        // The pill silhouette matches the rounded transport controls —
+        // only the fill differs per platform (tonal on Android, raised
+        // on iOS).
         const m3e = Platform.OS === 'android';
         const activeBg = m3e ? theme.colors.accentSoft : theme.colors.raised;
         const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
@@ -271,7 +275,7 @@ export function ModeSegment({
               justifyContent: 'center',
               gap: 7,
               minHeight: theme.sizes.touch,
-              borderRadius: m3e ? theme.radius.pill : 4,
+              borderRadius: theme.radius.pill,
               backgroundColor: active ? activeBg : 'transparent',
             }}
           >
@@ -296,6 +300,105 @@ export function ModeSegment({
   );
 }
 
+// Immersive player backdrop (CMP reference): the artwork full-bleed,
+// then a statically blurred copy of it revealed by an alpha-gradient
+// mask so the frost fades in only where the bottom controls sit — one
+// rasterized blur pass, no live blur view and no hard edge — and a
+// dark scrim gradient over the top for text contrast.
+const FROST_TOP_FRACTION = 0.5;
+const NIGHT = schemes.dark.deep;
+// Mask ramps ride luminance — a bright token, alpha carried by
+// stopOpacity.
+const MASK_LIGHT = schemes.dark.textBright;
+
+function PlayerBackdrop({
+  artworkUrl,
+}: {
+  readonly artworkUrl: string;
+}) {
+  // One resolution for both copies — a second useResolvedArtworkUri
+  // inside Artwork would repeat the persisted lookup and access-time
+  // write; the blurred layer must read the same cache-local file the
+  // sharp copy does anyway (offline a remote refetch is just absent).
+  const { uri, pending, markRemote } = useResolvedArtworkUri(artworkUrl);
+  const theme = useTheme();
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {pending || uri === null ? (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              backgroundColor: theme.colors.raised,
+              alignItems: 'center',
+              justifyContent: 'center',
+            },
+          ]}
+        >
+          <Icon name="note" size={36} color={theme.colors.textSecondary} />
+        </View>
+      ) : (
+        <Image
+          source={{ uri }}
+          style={StyleSheet.absoluteFill}
+          resizeMode="cover"
+          onError={markRemote}
+          accessibilityIgnoresInvertColors
+        />
+      )}
+      <Svg style={StyleSheet.absoluteFill}>
+        <Defs>
+          <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
+            <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
+          </LinearGradient>
+          {/* Alpha ramp for the frost mask: invisible until the
+              frost zone, fully opaque by the transport row. */}
+          <LinearGradient id="uwfp-frost-reveal" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="0" />
+            <Stop offset="0.72" stopColor={MASK_LIGHT} stopOpacity="0.55" />
+            <Stop offset="0.9" stopColor={MASK_LIGHT} stopOpacity="1" />
+          </LinearGradient>
+          <Mask
+            id="uwfp-frost"
+            x="0"
+            y="0"
+            width="100%"
+            height="100%"
+            maskUnits="userSpaceOnUse"
+            maskContentUnits="userSpaceOnUse"
+          >
+            <Rect
+              x="0"
+              y="0"
+              width="100%"
+              height="100%"
+              fill="url(#uwfp-frost-reveal)"
+            />
+          </Mask>
+          <Filter id="uwfp-blur">
+            <FeGaussianBlur stdDeviation={36} />
+          </Filter>
+        </Defs>
+        {!pending && uri !== null && (
+          <G mask="#uwfp-frost">
+            <SvgImage
+              href={uri}
+              x="0"
+              y="0"
+              width="100%"
+              height="100%"
+              preserveAspectRatio="xMidYMid slice"
+              filter="#uwfp-blur"
+            />
+          </G>
+        )}
+        <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
+      </Svg>
+    </View>
+  );
+}
+
 export type StageSheetProps = {
   readonly player: PlayerModel;
   readonly expanded: boolean;
@@ -315,6 +418,9 @@ export type StageSheetProps = {
   readonly onToggleLike?: (() => void) | undefined;
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
+  readonly onAddToPlaylist?: (() => void) | undefined;
+  readonly repeat?: 'off' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
@@ -351,6 +457,9 @@ export function StageSheet({
   onToggleLike,
   download = null,
   onDownload,
+  onAddToPlaylist,
+  repeat = 'off',
+  onCycleRepeat,
   onSeek,
   onRetryLyrics,
   onStartRadio,
@@ -364,6 +473,7 @@ export function StageSheet({
   style,
 }: StageSheetProps) {
   const theme = useTheme();
+  const { width: windowWidth } = useWindowDimensions();
   const [height, setHeight] = useState(0);
   const translateY = useSharedValue(2000);
   const opacity = useSharedValue(expanded ? 1 : 0);
@@ -449,26 +559,30 @@ export function StageSheet({
     opacity: opacity.value,
   }));
 
-  return (
-    <Animated.View
-      onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
-      pointerEvents={expanded ? 'auto' : 'none'}
-      accessibilityViewIsModal={expanded}
-      style={[
-        {
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: theme.colors.stage,
-          paddingHorizontal: theme.spacing.xl,
-          paddingBottom: theme.spacing.lg,
-        },
-        animatedStyle,
-        style,
-      ]}
-    >
+  const immersive = activeMode === 'player' && player.artworkUrl !== null;
+  // StageSheet's own inline colors must follow the sheet's surface —
+  // children re-resolve via the nested dark provider, but a color read
+  // here is bound to the outer (possibly light) scheme.
+  const colors = immersive ? schemes.dark : theme.colors;
+
+  // The full-bleed artwork + blur is expensive enough that a collapsed
+  // sheet shouldn't keep it mounted; it stays through the collapse
+  // animation so the dismissal never exposes an empty surface.
+  const [backdropOn, setBackdropOn] = useState(expanded);
+  useEffect(() => {
+    if (expanded) {
+      setBackdropOn(true);
+      return;
+    }
+    const timer = setTimeout(
+      () => setBackdropOn(false),
+      theme.motion.sheet + 60,
+    );
+    return () => clearTimeout(timer);
+  }, [expanded, theme.motion.sheet]);
+
+  const body = (
+    <>
       <GestureDetector gesture={pan}>
         <View
           style={{
@@ -481,114 +595,48 @@ export function StageSheet({
               width: 36,
               height: 4,
               borderRadius: 2,
-              backgroundColor: theme.colors.fg40,
+              backgroundColor: colors.fg40,
             }}
           />
         </View>
       </GestureDetector>
-      {activeMode === 'player' && (
-        <>
-          <View
-            style={{ width: '100%', aspectRatio: 1, marginTop: theme.spacing.md }}
-          >
-            <Artwork url={player.artworkUrl} fill />
-          </View>
-          <View style={{ flex: 1 }} />
+      {/* Radio lives top-center on the player surface, under the grab
+          handle — a seed affordance or the armed tail's status. */}
+      {activeMode === 'player' &&
+        radio !== undefined &&
+        (radio.armed || onStartRadio !== undefined) && (
           <View
             style={{
               flexDirection: 'row',
-              alignItems: 'flex-start',
-              gap: theme.spacing.sm,
+              justifyContent: 'center',
+              marginTop: theme.spacing.sm,
             }}
           >
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text variant="title" color="bright" numberOfLines={1}>
-                {player.title}
-              </Text>
-              <Text
-                variant="body"
-                color="primary"
-                numberOfLines={1}
-                style={{ marginTop: 4 }}
-              >
-                {player.artist ?? '—'}
-              </Text>
-              {player.albumLabel !== null && (
-                <Text
-                  variant="metadata"
-                  color="secondary"
-                  numberOfLines={1}
-                  style={{ marginTop: 3 }}
-                >
-                  {player.albumLabel}
-                </Text>
-              )}
-              {player.errorMessage !== null && (
-                <Text
-                  variant="metadata"
-                  color="warn"
-                  numberOfLines={2}
-                  style={{ marginTop: 3 }}
-                >
-                  {player.errorMessage}
-                </Text>
-              )}
-            </View>
-          </View>
-          <View style={{ flex: 1 }} />
-          <WaveformSeek
-            positionMs={player.positionMs}
-            durationMs={player.durationMs}
-            onSeek={onSeek}
-            seed={`${player.title}|${player.artist ?? ''}`}
-            loading={player.status === 'preparing' || player.durationMs === null}
-            visible={expanded}
-          />
-          <View style={{ marginTop: theme.spacing.md }}>
-            <TransportControls
-              variant={platform === 'ios' ? 'ios' : 'm3e'}
-              status={player.status}
-              intentPlaying={player.intentPlaying}
-              liked={player.liked}
-              canPrevious={player.canPrevious}
-              canNext={player.canNext}
-              onPlayPause={onPlayPause}
-              onPrevious={onPrevious}
-              onNext={onNext}
-              onToggleLike={onToggleLike}
-              download={download}
-              onDownload={onDownload}
-            />
-          </View>
-          {/*
-           * The live radio element: a seed affordance when no tail is
-           * armed, the tail's honest status when one is — 'failed'
-           * carries the typed message, and stop always clears.
-           */}
-          {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
+            {/* Same accent pill as the mode selector's active item —
+                accentSoft fill, accent content, pill radius. */}
             <View
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
-                justifyContent: 'center',
                 gap: theme.spacing.sm,
-                marginTop: theme.spacing.md,
+                borderRadius: theme.radius.pill,
+                backgroundColor: colors.accentSoft,
+                paddingHorizontal: theme.spacing.md,
+                paddingVertical: theme.spacing.xs,
               }}
             >
               <Icon
                 name="radio"
                 size={13}
                 color={
-                  radio.armed && radio.status !== 'failed'
-                    ? theme.colors.accent
-                    : theme.colors.textSecondary
+                  radio.status === 'failed' ? colors.warn : colors.accent
                 }
               />
               {radio.armed ? (
                 <>
                   <Text
                     variant="metadata"
-                    color={radio.status === 'failed' ? 'warn' : 'secondary'}
+                    color={radio.status === 'failed' ? 'warn' : 'accent'}
                   >
                     {radio.label}
                     {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
@@ -612,13 +660,159 @@ export function StageSheet({
                   accessibilityLabel={t('stage.radio.start')}
                   style={{ paddingHorizontal: theme.spacing.xs }}
                 >
-                  <Text variant="metadata" color="secondary">
+                  <Text variant="metadata" color="accent">
                     {t('stage.radio.start')}
                   </Text>
                 </Pressable>
               )}
             </View>
-          )}
+          </View>
+        )}
+      {activeMode === 'player' && (
+        <>
+          {/* Title/artist bottom-anchored in the light-frost zone; the
+              timeline/transport cluster stays pinned at the bottom. */}
+          <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+            {player.artworkUrl === null && (
+              <View
+                style={{
+                  // Sized off the measured sheet height so short screens
+                  // keep room for the meta/transport cluster below it,
+                  // and capped by the padded content width so narrow
+                  // screens don't overflow.
+                  width: Math.min(
+                    Math.max(160, Math.min(360, height * 0.36)),
+                    windowWidth - theme.spacing.xl * 2,
+                  ),
+                  aspectRatio: 1,
+                  alignSelf: 'center',
+                  marginBottom: theme.spacing.lg,
+                }}
+              >
+                <Artwork url={null} fill />
+              </View>
+            )}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-end',
+                gap: theme.spacing.sm,
+                paddingBottom: theme.spacing.lg,
+              }}
+            >
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text variant="display" color="bright" numberOfLines={1}>
+                  {player.title}
+                </Text>
+                <Text
+                  variant="body"
+                  color="primary"
+                  numberOfLines={1}
+                  style={{ marginTop: 4 }}
+                >
+                  {player.artist ?? '—'}
+                </Text>
+                {player.albumLabel !== null && (
+                  <Text
+                    variant="metadata"
+                    color="secondary"
+                    numberOfLines={1}
+                    style={{ marginTop: 3 }}
+                  >
+                    {player.albumLabel}
+                  </Text>
+                )}
+                {player.errorMessage !== null && (
+                  <Text
+                    variant="metadata"
+                    color="warn"
+                    numberOfLines={2}
+                    style={{ marginTop: 3 }}
+                  >
+                    {player.errorMessage}
+                  </Text>
+                )}
+              </View>
+              {/* Ownership actions hug the right edge of the meta
+                  line — download state icon first, then the
+                  playlist-picker affordance. */}
+              {(download !== null || onAddToPlaylist !== undefined) && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: theme.spacing.xs,
+                  }}
+                >
+                  {download !== null && (
+                    <IconButton
+                      icon={
+                        download === 'stored'
+                          ? 'check'
+                          : download === 'failed'
+                            ? 'warn'
+                            : 'download'
+                      }
+                      size={36}
+                      iconSize={15}
+                      color={
+                        download === 'failed'
+                          ? colors.warn
+                          : download === 'stored'
+                            ? colors.accent
+                            : colors.textSecondary
+                      }
+                      accessibilityLabel={
+                        download === 'stored'
+                          ? t('stage.download.storedA11y')
+                          : download === 'failed'
+                            ? t('stage.download.failedA11y')
+                            : download === 'queued' || download === 'downloading'
+                              ? t('stage.download.busyA11y')
+                              : t('stage.download.idleA11y')
+                      }
+                      active={download === 'stored'}
+                      onPress={onDownload}
+                    />
+                  )}
+                  {onAddToPlaylist !== undefined && (
+                    <IconButton
+                      icon="list-plus"
+                      size={36}
+                      iconSize={15}
+                      color={colors.textSecondary}
+                      accessibilityLabel={t('sheets.addToPlaylist')}
+                      onPress={onAddToPlaylist}
+                    />
+                  )}
+                </View>
+              )}
+            </View>
+          </View>
+          <WaveformSeek
+            positionMs={player.positionMs}
+            durationMs={player.durationMs}
+            onSeek={onSeek}
+            seed={`${player.title}|${player.artist ?? ''}`}
+            loading={player.status === 'preparing' || player.durationMs === null}
+            visible={expanded}
+          />
+          <View style={{ marginTop: theme.spacing.md }}>
+            <TransportControls
+              variant={platform === 'ios' ? 'ios' : 'm3e'}
+              status={player.status}
+              intentPlaying={player.intentPlaying}
+              liked={player.liked}
+              canPrevious={player.canPrevious}
+              canNext={player.canNext}
+              onPlayPause={onPlayPause}
+              onPrevious={onPrevious}
+              onNext={onNext}
+              onToggleLike={onToggleLike}
+              repeat={repeat}
+              onCycleRepeat={onCycleRepeat}
+            />
+          </View>
         </>
       )}
       {activeMode === 'lyrics' && (
@@ -718,9 +912,7 @@ export function StageSheet({
                     size={32}
                     iconSize={14}
                     color={
-                      queueReordering
-                        ? theme.colors.accent
-                        : theme.colors.textSecondary
+                      queueReordering ? colors.accent : colors.textSecondary
                     }
                     accessibilityLabel={
                       queueReordering ? t('queue.reorderDone') : t('queue.reorder')
@@ -752,6 +944,59 @@ export function StageSheet({
           }
         }}
       />
+    </>
+  );
+
+  return (
+    <Animated.View
+      onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
+      pointerEvents={expanded ? 'auto' : 'none'}
+      accessibilityViewIsModal={expanded}
+      style={[
+        {
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: immersive
+            ? schemes.dark.stage
+            : theme.colors.stage,
+        },
+        animatedStyle,
+        style,
+      ]}
+    >
+      {immersive && backdropOn && (
+        <PlayerBackdrop artworkUrl={player.artworkUrl} />
+      )}
+      {immersive ? (
+        <ThemeProvider
+          theme="dark"
+          textScale={theme.textScale}
+          reducedMotion={theme.reducedMotion}
+        >
+          <View
+            style={{
+              flex: 1,
+              paddingHorizontal: theme.spacing.xl,
+              paddingBottom: theme.spacing.lg,
+            }}
+          >
+            {body}
+          </View>
+        </ThemeProvider>
+      ) : (
+        <View
+          style={{
+            flex: 1,
+            paddingHorizontal: theme.spacing.xl,
+            paddingBottom: theme.spacing.lg,
+          }}
+        >
+          {body}
+        </View>
+      )}
     </Animated.View>
   );
 }

@@ -4018,6 +4018,18 @@ function Main({
     }
   };
 
+  // The immersive player (open sheet, player mode, artwork present)
+  // renders dark regardless of scheme — its system-bar styles flip.
+  // A pushed overlay is an opaque screen over the player, so it owns
+  // the bars while it is the visible surface; action sheets only dim
+  // it and keep the light treatment.
+  const immersiveStage =
+    expanded &&
+    stageMode === 'player' &&
+    player !== null &&
+    player.artworkUrl !== null &&
+    overlay === null;
+
   // Gate frame: the ready UI must not render before the persisted
   // language has been applied — only gate copy (whose system-language
   // rendering is correct) shows until the effect above has landed.
@@ -4038,11 +4050,17 @@ function Main({
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-      <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      {/* Immersive player (art-backed sheet in player mode) is dark
+          under any scheme — system bars must read light over it. */}
+      <StatusBar
+        style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
+      />
       {/* Android button nav: keep system buttons readable on any
           canvas — 'dark' style = dark buttons (for light canvases);
           the config plugin value is a startup default. */}
-      <NavigationBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      <NavigationBar
+        style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
+      />
       <AppStack>
         <StackItem stackKey="root">
           <PlatformTabs
@@ -4094,6 +4112,15 @@ function Main({
               onDownload={
                 currentRecordingId !== null
                   ? () => onDownloadAction(currentRecordingId)
+                  : undefined
+              }
+              onAddToPlaylist={
+                currentRecordingId !== null
+                  ? () =>
+                      setPickerFor({
+                        kind: 'recording',
+                        recordingId: currentRecordingId,
+                      })
                   : undefined
               }
               onSeek={seekToPosition}

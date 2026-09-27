@@ -28,6 +28,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'common.previous': 'vorheriger titel',
   'common.rename': 'umbenennen',
   'common.save': 'speichern',
+  'common.repeat': 'wiederholen',
   'common.unlike': 'gefällt mir nicht mehr',
   'common.unavailable': 'nicht verfügbar',
   'common.cardA11y': '{title}, {subtitle}',
