@@ -13,6 +13,8 @@ rationale and the condition that would reopen it.
 
 ## Plugin guests
 
+| Decision | Status | Rationale | Reopen when |
+| --- | --- | --- | --- |
 | `serde` (derive) joins youtube-music guest deps for `radio.seed`'s `next` parse | Decided | A 565 KB `next` body as a `Value` DOM burns ~340 M fuel against the 200 M per-entry cap — the mobile `budget-exceeded: fuel` failure. Typed structs with per-field tolerance visitors parse once (~84 M fuel) at identical skip semantics. serde + serde_json were already SDK deps; this adds only `serde`'s `derive` feature to the guest crate. | If the guest grows a second large-body endpoint, generalize the opt_* helpers into the SDK or revisit a streaming parse. |
 
 ## Presentation
