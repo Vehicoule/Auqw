@@ -66,7 +66,9 @@ export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
 // Settle dynamics — the CMP deck's spring (StiffnessLow + no bounce): the
 // release keeps the drag's velocity and lands without overshoot.
-const STAGE_SETTLE_SPRING = { stiffness: 200, damping: 26 } as const;
+// damping 28 ≈ critically damped at stiffness 200 (ratio ~0.99): the settle
+// carries the release velocity without overshooting past the anchor.
+const STAGE_SETTLE_SPRING = { stiffness: 200, damping: 28 } as const;
 
 // Corner morph: the pill's card radius at rest opening to the shared
 // sheet radius mid-rise, square only at the completed expanded anchor.
@@ -242,9 +244,9 @@ const MODES: readonly {
   label: MessageId;
   icon: IconName;
 }[] = [
+  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
   { key: 'player', label: 'stage.mode.player', icon: 'note' },
   { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
 ];
 
 export function ModeSegment({
@@ -600,7 +602,9 @@ export function StageSheet({
           translateY:
             travelPx.value <= 0
               ? 4000
-              : travelPx.value * (1 - progress.value),
+              : // progress may overshoot 1 while the spring settles — clamp
+                // so the sheet never paints past the top edge.
+                travelPx.value * (1 - Math.min(1, progress.value)),
         },
       ],
       borderTopLeftRadius: radius,

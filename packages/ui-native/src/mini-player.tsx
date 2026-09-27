@@ -143,7 +143,7 @@ export function MiniPlayer({
           if (wroteProgress.value && sheetProgress.value > 0) {
             sheetProgress.value = theme.reducedMotion
               ? 0
-              : withSpring(0, { stiffness: 200, damping: 26 });
+              : withSpring(0, { stiffness: 200, damping: 28 });
           }
           if (e.translationX < -40 && onNext !== undefined) {
             scheduleOnRN(onNext);
@@ -175,7 +175,7 @@ export function MiniPlayer({
           ? target
           : withSpring(target, {
               stiffness: 200,
-              damping: 26,
+              damping: 28,
               velocity: -e.velocityY / travel,
             });
         if (target === 1) {

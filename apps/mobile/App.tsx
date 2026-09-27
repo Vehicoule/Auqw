@@ -2461,24 +2461,32 @@ function Main({
     [session],
   );
 
-  // Lyrics load lazily — only while the Stage's lyrics mode is
-  // actually showing — and refetch whenever the track under it
-  // changes. Leaving lyrics mode keeps the last sheet cached.
+  // Lyrics prefetch while the Stage is open in any mode — one provider
+  // call per track — so switching to the lyrics tab is instant. Leaving
+  // lyrics mode (or the sheet) keeps the last sheet cached.
   useEffect(() => {
-    if (!expanded || stageMode !== 'lyrics' || currentRecordingId === null) {
+    if (!expanded || currentRecordingId === null) {
       return;
     }
     if (lyricsFetch?.recordingId === currentRecordingId) {
       return;
     }
     fetchLyrics(currentRecordingId);
-  }, [
-    expanded,
-    stageMode,
-    currentRecordingId,
-    lyricsFetch,
-    fetchLyrics,
-  ]);
+  }, [expanded, currentRecordingId, lyricsFetch, fetchLyrics]);
+
+  // A new track under an open sheet returns it to player mode — the
+  // playing item is what the sheet exists to show. Explicit opens
+  // (deep links, menus) set the mode before expanding, so this only
+  // listens for the track change, not the expand flip.
+  const expandedForMode = useRef(expanded);
+  useEffect(() => {
+    expandedForMode.current = expanded;
+  }, [expanded]);
+  useEffect(() => {
+    if (currentRecordingId !== null && expandedForMode.current) {
+      setStageMode('player');
+    }
+  }, [currentRecordingId]);
 
   // Lyrics highlight rides a smoothed clock so the active line tracks
   // playback between the engine's sparse position ticks; it only ticks
@@ -4090,7 +4098,10 @@ function Main({
                   progress={stageProgress}
                   travel={stageTravel}
                   interactive={!expanded}
-                  onPress={() => setExpanded(true)}
+                  onPress={() => {
+                    setStageMode('player');
+                    setExpanded(true);
+                  }}
                   onCollapse={() => setExpanded(false)}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
@@ -4107,7 +4118,10 @@ function Main({
               expanded={expanded}
               progress={stageProgress}
               travel={stageTravel}
-              onExpandChange={setExpanded}
+              onExpandChange={(value) => {
+                if (value) setStageMode('player');
+                setExpanded(value);
+              }}
               mode={stageMode}
               onModeChange={setStageMode}
               queue={queueModel}
