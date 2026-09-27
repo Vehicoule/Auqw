@@ -804,6 +804,14 @@ export class Session {
   #playerUnsub: () => void;
   #disposed = false;
   #projection: ProjectionMarker | null = null;
+  /**
+   * Recently installed projections by id. A service move emits the
+   * projection it captured at move-start — an install that lands
+   * mid-flight (a shuffle toggle, an edit) must not re-judge that
+   * edge under a deal it never ran, so the legality check resolves
+   * the event's own projection when it's still here.
+   */
+  readonly #installedProjections = new Map<string, QueueProjection>();
   #mappingSource: CancellationSource | null = null;
   /**
    * One auto-seed attempt per tail occurrence — set when the lazy
@@ -3386,7 +3394,11 @@ export class Session {
       return;
     }
     const record = r.radio;
-    if (record === null || !shouldGrowRadio(record, r.queue.snapshot())) {
+    const snap = r.queue.snapshot();
+    if (
+      record === null ||
+      !shouldGrowRadio(record, snap, this.#dealtOrder(r) ?? undefined)
+    ) {
       return;
     }
     // Radio growth spends the network — skip when offline.
@@ -3419,7 +3431,8 @@ export class Session {
     const windowOpen = whileDrained
       ? snap.currentOccurrenceId === null && record.resumeOnDrain
       : snap.currentOccurrenceId !== null &&
-      remainingAfterCurrent(snap) < RADIO_FETCH_AHEAD;
+      remainingAfterCurrent(snap, this.#dealtOrder(r) ?? undefined) <
+        RADIO_FETCH_AHEAD;
     if (
       record.status !== 'growing' ||
       record.continuation === null ||
@@ -3593,7 +3606,9 @@ export class Session {
     if (
       snap.mode !== 'playing' ||
       snap.currentOccurrenceId === null ||
-      remainingAfterCurrent(snap) !== 0 ||
+      // The tail the cursor will actually run off — dealt space
+      // under shuffle, canonical otherwise.
+      remainingAfterCurrent(snap, this.#dealtOrder(r) ?? undefined) !== 0 ||
       this.#radioAutoSeedOccurrence === snap.currentOccurrenceId ||
       r.radio !== null
     ) {
@@ -3627,7 +3642,7 @@ export class Session {
       if (
         live.mode !== 'playing' ||
         live.currentOccurrenceId === null ||
-        remainingAfterCurrent(live) !== 0
+        remainingAfterCurrent(live, this.#dealtOrder(cur) ?? undefined) !== 0
       ) {
         // The cursor left the tail before this arm ran — the
         // occurrence was never judged, so a later return to it may
@@ -4095,6 +4110,14 @@ export class Session {
     }
     this.#publish();
     await this.#projectQueue();
+    // The deal re-targets the cursor's successor — re-run the lazy
+    // derivations (speculative map, radio growth, tail arm) under
+    // the new walk, same as a queue edit would.
+    this.#mappingSource?.cancel();
+    this.#mappingSource = null;
+    this.#maybeMapSuccessor();
+    this.#maybeGrowRadio();
+    this.#maybeArmRadio();
     return ok(undefined);
   }
 
@@ -5808,6 +5831,15 @@ export class Session {
       displaced.status = 'superseded';
     }
     this.#projection = marker;
+    this.#installedProjections.set(projection.projectionId, projection);
+    // Bound the lookup — projections mint one id per install.
+    while (this.#installedProjections.size > 8) {
+      const oldest = this.#installedProjections.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.#installedProjections.delete(oldest);
+    }
     marker.done = (async () => {
       const result = await this.#bounded(() =>
         this.#player.setQueueProjection(projection),
@@ -5861,13 +5893,28 @@ export class Session {
         : items.findIndex(
           (i) => i.occurrenceId === marker?.currentOccurrenceId,
         );
-    // Legal edges live in walk space: `order` maps a walk position to
-    // an item index — the dealt order under shuffle, the identity
-    // under canonical play (or on a projection that predates `order`).
-    const order = projection?.order ?? items.map((_, i) => i);
-    const orderPos = cursorIndex < 0 ? -1 : order.indexOf(cursorIndex);
+    // Legal edges live in walk space — the dealt order under the
+    // projection the service actually executed. A superseding install
+    // (e.g. a shuffle toggle mid-flight) must not re-judge the edge
+    // under the new deal — the player already attached its target —
+    // so resolve the event's own projection when it is still known,
+    // else fall back to the installed one, else the canonical order.
+    const executed =
+      this.#installedProjections.get(event.projectionId) ?? projection;
+    const execItems = executed?.items ?? [];
+    const execOrder =
+      executed === null || executed.order.length !== execItems.length
+        ? execItems.map((_, i) => i)
+        : executed.order;
+    const execCursor =
+      marker === null || marker.currentOccurrenceId === null
+        ? -1
+        : execItems.findIndex(
+          (i) => i.occurrenceId === marker.currentOccurrenceId,
+        );
+    const orderPos = execCursor < 0 ? -1 : execOrder.indexOf(execCursor);
     const atWalk = (pos: number): string | null =>
-      items[order[pos] ?? -1]?.occurrenceId ?? null;
+      execItems[execOrder[pos] ?? -1]?.occurrenceId ?? null;
     // A service move emits the projection it captured at move-start,
     // which can lag one JS install. Its identity echoes that captured
     // rev (a fresh attach keys to proj.queueRev) while a same-item
@@ -5899,11 +5946,11 @@ export class Session {
       legal = event.toOccurrenceId === successor;
       // repeat=one replays the cursor item on `ended` — a same-item
       // edge is legal only there (remote-next still advances). The
-      // installed projection's rule governs — it is what the service
-      // executed, and may lag the live mode by a toggle.
+      // executed projection's rule governs — it is what the service
+      // ran, and may lag the live install by a toggle.
       if (
         !legal &&
-        projection?.repeat === 'one' &&
+        executed?.repeat === 'one' &&
         event.reason === 'ended' &&
         event.toOccurrenceId !== null &&
         event.toOccurrenceId === event.fromOccurrenceId
@@ -5914,9 +5961,9 @@ export class Session {
       // repeat=all wraps a dealt-tail move back to the dealt head.
       if (
         !legal &&
-        projection?.repeat === 'all' &&
-        orderPos === order.length - 1 &&
-        order.length > 0 &&
+        executed?.repeat === 'all' &&
+        orderPos === execOrder.length - 1 &&
+        execOrder.length > 0 &&
         event.toOccurrenceId === atWalk(0)
       ) {
         legal = true;
@@ -5932,10 +5979,10 @@ export class Session {
       // repeat=all wraps a dealt-head move to the dealt tail.
       if (
         !legal &&
-        projection?.repeat === 'all' &&
+        executed?.repeat === 'all' &&
         orderPos === 0 &&
-        order.length > 1 &&
-        event.toOccurrenceId === atWalk(order.length - 1)
+        execOrder.length > 1 &&
+        event.toOccurrenceId === atWalk(execOrder.length - 1)
       ) {
         legal = true;
         repeatEdge = true;
@@ -6152,11 +6199,18 @@ export class Session {
       return;
     }
     const snap = r.queue.snapshot();
-    const index = snap.occurrences.findIndex(
-      (o) => o.occurrenceId === snap.currentOccurrenceId,
+    // The cursor's real successor is the dealt one under shuffle —
+    // prefetch what the service will actually attach next.
+    const dealt = this.#dealtOrder(r);
+    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
+    const pos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : walk.indexOf(snap.currentOccurrenceId);
+    const successorId = pos >= 0 ? walk[pos + 1] : undefined;
+    const successor = snap.occurrences.find(
+      (o) => o.occurrenceId === successorId,
     );
-    const successor =
-      index >= 0 ? snap.occurrences[index + 1] : undefined;
     if (successor === undefined) {
       return;
     }
@@ -6247,13 +6301,20 @@ export class Session {
       const updated = adoptAutomaticMapping(rec, ref, automatic);
       // Recheck it is still the immediate successor of the same
       // current under the same playback provider, and that the
-      // resolved ref actually wins selection precedence.
+      // resolved ref actually wins selection precedence. Successor
+      // means walk space — the dealt position under shuffle.
       const snapNow = ready2.queue.snapshot();
-      const currentIndex = snapNow.occurrences.findIndex(
-        (o) => o.occurrenceId === snapNow.currentOccurrenceId,
+      const walkNow =
+        this.#dealtOrder(ready2) ??
+        snapNow.occurrences.map((o) => o.occurrenceId);
+      const posNow =
+        snapNow.currentOccurrenceId === null
+          ? -1
+          : walkNow.indexOf(snapNow.currentOccurrenceId);
+      const immediateId = posNow >= 0 ? walkNow[posNow + 1] : undefined;
+      const immediate = snapNow.occurrences.find(
+        (o) => o.occurrenceId === immediateId,
       );
-      const immediate =
-        currentIndex >= 0 ? snapNow.occurrences[currentIndex + 1] : undefined;
       if (
         immediate === undefined ||
         immediate.occurrenceId !== occurrenceId ||

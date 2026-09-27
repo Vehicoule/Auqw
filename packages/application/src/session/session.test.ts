@@ -2727,6 +2727,164 @@ async function shuffleEndedFallbackFollowsDeal(): Promise<void> {
   assertEqual(q.mode, 'playing');
 }
 
+async function shuffleStaleProjectionEdge(): Promise<void> {
+  // A service move computed under the canonical projection lands
+  // after the shuffle install — the edge is judged by the walk the
+  // service actually executed, not the new deal.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  const canonical = r.player.projections.at(-1);
+  assert(canonical !== undefined, 'no restore projection');
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 2, 1],
+    'the dealt projection is installed',
+  );
+  const move = (to: string): ReturnType<typeof transitionEvent> =>
+    transitionEvent(r, {
+      from: 'oA',
+      to,
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: { attemptId: `svc-${to}`, queueRev: canonical.queueRev },
+      handle: `h-${to}`,
+      projectionId: canonical.projectionId,
+      projectedQueueRev: canonical.queueRev,
+    });
+  // oA→oC is dealt-legal but was never the move under the projection
+  // the event names — rejected.
+  r.player.emit(move('oC'));
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oA',
+    'an edge illegal under its own projection is still rejected',
+  );
+  // oA→oB was the legal next under the order the service ran —
+  // accepting it keeps JS and the player in sync.
+  r.player.emit(move('oB'));
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'an edge legal under the executed projection is accepted',
+  );
+  await r.session.dispose();
+}
+
+async function shuffleMapsDealtSuccessor(): Promise<void> {
+  // Speculative mapping fetches the dealt successor's ref — the
+  // canonical next that never plays next gets no fetch.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.1, 0.9, 0.5]),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oC', 'oB'],
+    'the deal precedes playback',
+  );
+  await playThrough(r, 'oA');
+  await pump();
+  const titles = r.ytm.calls
+    .filter((c) => c.method === 'candidates')
+    .map((c) => (c.input as { query: { title: string } }).query.title);
+  assertEqual(
+    titles.at(-1),
+    'Song rC',
+    'the dealt successor is the one mapped',
+  );
+  assert(
+    !titles.includes('Song rB'),
+    'the canonical successor is not fetched under shuffle',
+  );
+  await r.session.dispose();
+}
+
+async function shuffleArmsOnDealtTail(): Promise<void> {
+  // The dealt tail — not the canonical tail — is where the queue
+  // runs out, so reaching it under shuffle arms the radio.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`, ref('youtube-music', `y${id}`)),
+        ),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1]),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  const seeds = (): unknown[] =>
+    r.ytm.calls.filter((c) => c.method === 'radioSeed').map((c) => c.input);
+  const resumed = r.session.resume();
+  await pump();
+  await emitPrepared(r, 'h-oA');
+  assert((await resumed).ok, 'resume failed');
+  // next() on a playing queue awaits the attempt — settle each step.
+  const next1 = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-oC');
+  assert((await next1).ok, 'first next failed');
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'the deal puts oC second',
+  );
+  assertEqual(seeds().length, 0, 'a dealt successor remains — no arm');
+  const next2 = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-oB');
+  assert((await next2).ok, 'second next failed');
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'the cursor reached the dealt tail',
+  );
+  assertDeepEqual(
+    seeds(),
+    [{ sourceRef: ref('youtube-music', 'yB') }],
+    'the dealt tail arms the radio from its own ref',
+  );
+  await r.session.dispose();
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -5327,6 +5485,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleMutationReconciles', shuffleMutationReconciles],
   ['shuffleToggleOffRestoresCanonical', shuffleToggleOffRestoresCanonical],
   ['shuffleEndedFallbackFollowsDeal', shuffleEndedFallbackFollowsDeal],
+  ['shuffleStaleProjectionEdge', shuffleStaleProjectionEdge],
+  ['shuffleMapsDealtSuccessor', shuffleMapsDealtSuccessor],
+  ['shuffleArmsOnDealtTail', shuffleArmsOnDealtTail],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

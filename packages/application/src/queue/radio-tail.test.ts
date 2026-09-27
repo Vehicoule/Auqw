@@ -254,6 +254,24 @@ async function pureRemaining(): Promise<void> {
   assertEqual(remainingAfterCurrent(atTail), 0, 'tail item has nothing after');
   const stale = queue({ ...withCurrent, currentOccurrenceId: 'gone' });
   assertEqual(remainingAfterCurrent(stale), 0, 'unknown current is 0');
+  // A dealt walk (shuffle) repositions the cursor's successors.
+  const dealt = ['o1', 'o3', 'o2'];
+  assertEqual(
+    remainingAfterCurrent(withCurrent, dealt),
+    2,
+    'walk order counts dealt successors',
+  );
+  const dealtTail = queue({ ...withCurrent, currentOccurrenceId: 'o2' });
+  assertEqual(
+    remainingAfterCurrent(dealtTail, dealt),
+    0,
+    'the dealt tail has nothing after it',
+  );
+  assertEqual(
+    remainingAfterCurrent(dealtTail),
+    1,
+    'canonical order still counts one',
+  );
 }
 
 async function pureIsRadioPage(): Promise<void> {
@@ -327,6 +345,26 @@ async function pureShouldGrow(): Promise<void> {
   });
   assert(!shouldGrowRadio(armed, full), 'a full window stays put');
   assertEqual(RADIO_FETCH_AHEAD, 3, 'spec window is ~3');
+  // The dealt walk decides what "remaining" means under shuffle.
+  const deep = queue({
+    occurrences: [
+      occurrence('o1', 'r1'),
+      occurrence('o2', 'r2'),
+      occurrence('o3', 'r3'),
+      occurrence('o4', 'r4'),
+      occurrence('o5', 'r5'),
+    ],
+    currentOccurrenceId: 'o2',
+    mode: 'paused',
+  });
+  assert(
+    !shouldGrowRadio(armed, deep),
+    'canonical mid-queue stays outside the window',
+  );
+  assert(
+    shouldGrowRadio(armed, deep, ['o1', 'o3', 'o4', 'o5', 'o2']),
+    'the dealt tail is inside the window',
+  );
 }
 
 async function purePublish(): Promise<void> {
