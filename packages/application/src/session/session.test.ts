@@ -3024,6 +3024,139 @@ async function shuffleRollbackKeepsDeal(): Promise<void> {
   await r.session.dispose();
 }
 
+async function shuffleToggleSurvivesRollback(): Promise<void> {
+  // A toggle that lands while a removal's commit is pending is the
+  // user's newer intent — the failed write's rollback must restore the
+  // queue WITHOUT putting the captured (off) deal back over it. The
+  // revived item re-enters the live deal as a new enqueue.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+          occurrence('oC', 'rC', ref('youtube-music', 'yC')),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.5, 0]),
+  );
+  await restoreOk(r);
+  await pump();
+  assertEqual(readyOf(r).shuffleOrder, null, 'shuffle starts off');
+  r.storage.holdNextCommit();
+  const rm = r.session.removeOccurrence('oB');
+  await pump();
+  // The toggle succeeds against the optimistic queue while the write
+  // waits on storage.
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert(readyOf(r).shuffleOrder !== null, 'shuffle is on');
+  r.storage.settleCommit(err(appError('internal', 'storage down')));
+  assert((await rm).ok === false, 'the removal reports the failure');
+  await pump();
+  const deal = readyOf(r).shuffleOrder;
+  assert(deal !== null, 'the toggle survives the rollback');
+  assertDeepEqual(
+    [...deal].sort(),
+    ['oA', 'oB', 'oC'],
+    'the revived item re-enters the live deal',
+  );
+  await r.session.dispose();
+}
+
+async function transitionAdoptsExecutedRef(): Promise<void> {
+  // A move judged under its own (older) projection must also adopt the
+  // ref that projection resolved — the service attached that version.
+  // The newer install's ref belongs to the next attach.
+  const localPlayback = new Map<string, string>();
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          // Unpinned — the projection resolves its ref at build time.
+          occurrence('oB', 'rB'),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'playing',
+      },
+    }),
+    [],
+    localPlayback,
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const pOld = r.player.projections.at(-1);
+  assert(pOld !== undefined, 'a projection was installed');
+  assertEqual(
+    pOld.items.find((i) => i.occurrenceId === 'oB')?.sourceRef,
+    'yB',
+    'the old projection maps oB to the provider ref',
+  );
+  // A local file lands for rB; the next install resolves it.
+  localPlayback.set('rB', '/l/b.mp3');
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const pNew = r.player.projections.at(-1);
+  assert(
+    pNew !== undefined && pNew.projectionId !== pOld.projectionId,
+    'a newer install exists',
+  );
+  assertEqual(
+    pNew.items.find((i) => i.occurrenceId === 'oB')?.sourceRef,
+    '/l/b.mp3',
+    'the new projection maps oB to the local file',
+  );
+  // The in-flight service transition executed under the old projection.
+  const svc: PlaybackIdentity = {
+    attemptId: 'svc-x',
+    queueRev: pOld.queueRev,
+  };
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oB',
+      reason: 'remote-next',
+      positionMs: 0,
+      identity: svc,
+      handle: 'h-svc',
+      projectionId: pOld.projectionId,
+      projectedQueueRev: pOld.queueRev,
+    }),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.currentOccurrenceId, 'oB', 'the move lands');
+  const pb = snap.playback;
+  assert(pb.type !== 'idle' && pb.type !== 'failed', 'attempt adopted');
+  assertEqual(
+    'ref' in pb ? pb.ref?.id : undefined,
+    'yB',
+    'the adopted ref is the executed projection version',
+  );
+  await r.session.dispose();
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -5630,6 +5763,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleRemoveCurrentFollowsDeal', shuffleRemoveCurrentFollowsDeal],
   ['shuffleRepeatAllLoneWrapRestarts', shuffleRepeatAllLoneWrapRestarts],
   ['shuffleRollbackKeepsDeal', shuffleRollbackKeepsDeal],
+  ['shuffleToggleSurvivesRollback', shuffleToggleSurvivesRollback],
+  ['transitionAdoptsExecutedRef', transitionAdoptsExecutedRef],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

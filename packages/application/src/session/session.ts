@@ -445,6 +445,13 @@ type Ready = {
    */
   shuffleOrder: string[] | null;
   /**
+   * Shuffle-intent generation: `setShuffle` bumps it, `#dealtOrder`
+   * reconciles do not. `#persistQueue` captures it beside the deal so a
+   * rollback restores the pre-edit deal only when the user's shuffle
+   * choice hasn't moved since the mutation captured it.
+   */
+  shuffleEpoch: number;
+  /**
    * Replay cycles per queue occurrence: a repeat-driven replay or wrap
    * bumps the target's cycle, and a recorded play stamps
    * `${occurrenceId}#${cycle}` so each loop of one occurrence counts
@@ -1210,6 +1217,7 @@ export class Session {
     // otherwise the undone removal's id would re-enter the deal at a
     // random slot.
     const dealtBefore = r.shuffleOrder === null ? null : [...r.shuffleOrder];
+    const dealtEpoch = r.shuffleEpoch;
     const generation = this.#ready;
     const source = new CancellationSource();
     this.#opSources.add(source);
@@ -1245,7 +1253,13 @@ export class Session {
         if (!committed.ok) {
           r.queueEpoch += 1;
           r.queue = new QueueEngine(before);
-          r.shuffleOrder = dealtBefore;
+          // Restore the pre-edit deal only when shuffle intent hasn't
+          // moved — a toggle during this pending commit already dealt
+          // against the (then-current) queue and must survive; the
+          // reconcile that follows inserts any revived ids itself.
+          if (r.shuffleEpoch === dealtEpoch) {
+            r.shuffleOrder = dealtBefore;
+          }
           r.persistenceError = committed.error;
           this.#derived();
           this.#publish();
@@ -1970,6 +1984,7 @@ export class Session {
       playback: { type: 'idle' },
       repeat: 'off',
       shuffleOrder: null,
+      shuffleEpoch: 0,
       listenCycles: listenCycleBaseline(
         queue.snapshot().occurrences,
         data.playHistory,
@@ -4115,6 +4130,7 @@ export class Session {
     } else {
       r.shuffleOrder = null;
     }
+    r.shuffleEpoch += 1;
     this.#publish();
     await this.#projectQueue();
     // The deal re-targets the cursor's successor — re-run the lazy
@@ -6100,12 +6116,11 @@ export class Session {
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
       );
-      // The service resolved this item's ref when the projection was
-      // installed — carry it verbatim into the adopted attempt so the
-      // playing mark reflects what the service actually attached.
-      // Re-deriving now could name a different ref: mappings may have
-      // changed since the projection was built.
-      const projected = projection?.items.find(
+      // The service resolved this item's ref under the projection it
+      // executed — carry that projection's ref verbatim into the
+      // adopted attempt so the playing mark reflects what was actually
+      // attached. The latest install may map the same item to a new ref.
+      const projected = executed?.items.find(
         (item) => item.occurrenceId === toId,
       );
       const projProvider = projected?.provider ?? null;
