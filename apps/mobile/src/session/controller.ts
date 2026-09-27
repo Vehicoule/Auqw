@@ -9,6 +9,7 @@ import {
   err,
   LocalFileSource,
   previewImport,
+  retryBounded,
   Session,
   syncedRecordKey,
 } from '@auqw/application';
@@ -657,21 +658,21 @@ export async function createSessionController(
           // inbound delta that may never come.
           onApplied: (applied) => {
             void (async () => {
-              let result = await session.applySyncedEntries(
-                applied.outcomes,
-              );
-              for (
-                let attempt = 0;
-                !result.ok && attempt < 3 && !signal.cancelled;
-                attempt += 1
-              ) {
-                await new Promise<void>((resolve) =>
-                  setTimeout(resolve, 400 * (attempt + 1)),
-                );
-                if (signal.cancelled) {
-                  return;
-                }
-                result = await session.applySyncedEntries([]);
+              // Attempt 1 folds the fresh outcomes; retries refold
+              // the session's retained pending with [].
+              const result = await retryBounded({
+                deadlineMs: clock.nowMs() + 30_000,
+                signal,
+                clock,
+                maxAttempts: 4,
+                baseBackoffMs: 400,
+                call: (_signal, attempt) =>
+                  session.applySyncedEntries(
+                    attempt === 1 ? applied.outcomes : [],
+                  ),
+              });
+              if (signal.cancelled) {
+                return;
               }
               if (!result.ok) {
                 void log.write({
@@ -696,20 +697,14 @@ export async function createSessionController(
           // A failed flush re-pends the buffer with no other wake
           // until the next edit, so retry bounded here; a still-
           // failing prefix stays buffered for the next emitWrites.
-          let flushed = await emitWrites([]);
-          for (
-            let attempt = 0;
-            !flushed.ok && attempt < 3 && !signal.cancelled;
-            attempt += 1
-          ) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, 400 * (attempt + 1)),
-            );
-            if (signal.cancelled) {
-              break;
-            }
-            flushed = await emitWrites([]);
-          }
+          const flushed = await retryBounded({
+            deadlineMs: clock.nowMs() + 30_000,
+            signal,
+            clock,
+            maxAttempts: 4,
+            baseBackoffMs: 400,
+            call: (attemptSignal) => emitWrites([], attemptSignal),
+          });
           if (!flushed.ok) {
             void log.write({
               level: 'warn',
@@ -736,24 +731,23 @@ export async function createSessionController(
           // re-fold to the same rows.
           void (async () => {
             const materialized = syncSurface.engine.materialize();
-            let applied = await session.applyMaterializedEntries(
-              materialized,
-            );
             // A failed apply keeps the whole union in the session's
             // retained pending — refold with bounded retries rather
-            // than drop the recovery page until restart (Review #46).
-            for (
-              let attempt = 0;
-              !applied.ok && attempt < 3 && !signal.cancelled;
-              attempt += 1
-            ) {
-              await new Promise<void>((resolve) =>
-                setTimeout(resolve, 400 * (attempt + 1)),
-              );
-              if (signal.cancelled) {
-                return;
-              }
-              applied = await session.applyMaterializedEntries([]);
+            // than drop the recovery page until restart (Review #46):
+            // attempt 1 folds the fresh view, later attempts [].
+            const applied = await retryBounded({
+              deadlineMs: clock.nowMs() + 30_000,
+              signal,
+              clock,
+              maxAttempts: 4,
+              baseBackoffMs: 400,
+              call: (_signal, attempt) =>
+                session.applyMaterializedEntries(
+                  attempt === 1 ? materialized : [],
+                ),
+            });
+            if (signal.cancelled) {
+              return;
             }
             if (!applied.ok) {
               void log.write({
