@@ -38,6 +38,7 @@ import {
   Text,
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { useResolvedArtworkUri } from './artwork.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
@@ -307,6 +308,10 @@ function PlayerBackdrop({
 }: {
   readonly artworkUrl: string;
 }) {
+  // One resolution for both copies — the blurred layer must read the
+  // same cache-local file the sharp Artwork does, never a second fetch
+  // of the remote url (offline it would just be absent).
+  const { uri, pending } = useResolvedArtworkUri(artworkUrl);
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
       <Artwork url={artworkUrl} fill cornerRadius={0} />
@@ -336,17 +341,19 @@ function PlayerBackdrop({
             <FeGaussianBlur stdDeviation={18} />
           </Filter>
         </Defs>
-        <G mask="url(#uwfp-frost)">
-          <SvgImage
-            href={artworkUrl}
-            x="0"
-            y="0"
-            width="100%"
-            height="100%"
-            preserveAspectRatio="xMidYMid slice"
-            filter="url(#uwfp-blur)"
-          />
-        </G>
+        {!pending && uri !== null && (
+          <G mask="url(#uwfp-frost)">
+            <SvgImage
+              href={uri}
+              x="0"
+              y="0"
+              width="100%"
+              height="100%"
+              preserveAspectRatio="xMidYMid slice"
+              filter="url(#uwfp-blur)"
+            />
+          </G>
+        )}
         <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
       </Svg>
     </View>
