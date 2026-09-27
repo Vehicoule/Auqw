@@ -482,6 +482,39 @@ class AuqwExpoModule : Module() {
     }
 
     /**
+     * Android 12+ Material You tonal stops for the 'adaptive' theme —
+     * the system_accent / system_neutral resources in the android
+     * package. Returns null below API 31 or when a stop is absent; the
+     * JS caller then falls back to the dark/light flag alone.
+     */
+    AsyncFunction("systemTonalPalette") { ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+      if (Build.VERSION.SDK_INT < 31) {
+        return@AsyncFunction null
+      }
+      fun tone(name: String): String? {
+        val id = ctx.resources.getIdentifier(name, "color", "android")
+        if (id == 0) return null
+        val color = try {
+          ctx.getColor(id)
+        } catch (e: Exception) {
+          return null
+        }
+        // ARGB int -> '#rrggbb'; the alpha channel is always 0xff on
+        // these resources and the JS parser ignores it anyway.
+        return "#%06x".format(color and 0xffffff)
+      }
+      val palette = mapOf(
+        "neutral1_50" to tone("system_neutral1_50"),
+        "neutral1_900" to tone("system_neutral1_900"),
+        "accent1_200" to tone("system_accent1_200"),
+        "accent1_600" to tone("system_accent1_600")
+      )
+      if (palette.values.all { it == null }) null else palette
+    }
+
+    /**
      * LAN-sync client sockets (docs/specs/sync.md): the JS pump owns
      * framing; these calls move opaque bytes, bridged as base64.
      * `syncConnect` resolves with the peer's address string.

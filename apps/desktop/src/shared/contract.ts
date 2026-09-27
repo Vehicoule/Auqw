@@ -8,6 +8,7 @@ import {
   isStringOrUndefined,
 } from './check.ts';
 import type { SqlRow, SqlValue } from '@auqw/storage-sqlite';
+import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 
 /**
  * Payload types for every channel in `CHANNELS`. Validators here are the
@@ -39,6 +40,64 @@ export function isNetEvent(value: unknown): value is NetEvent {
     isRecord(value) &&
     hasOnlyKeys(value, ['online']) &&
     isBoolean(value['online'])
+  );
+}
+
+/**
+ * The OS-emitted `{scheme, palette?}` a ThemeSourcePort produces, or
+ * `null` when main has no source to offer (the renderer then resolves
+ * 'adaptive' like 'system'). Pushed on `theme:events`.
+ */
+export type ThemeSourceEvent = { readonly source: ThemeSource | null };
+
+const PALETTE_KEYS = ['bg', 'fg', 'accent', 'warn', 'sel'] as const;
+
+export function isThemeSourceEvent(value: unknown): value is ThemeSourceEvent {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['source'])) {
+    return false;
+  }
+  const source = value['source'];
+  if (source === null) {
+    return true;
+  }
+  if (!isRecord(source) || !hasOnlyKeys(source, ['scheme', 'palette'])) {
+    return false;
+  }
+  if (source['scheme'] !== 'dark' && source['scheme'] !== 'light') {
+    return false;
+  }
+  const palette = source['palette'];
+  if (palette === undefined) {
+    return true;
+  }
+  return (
+    isRecord(palette) &&
+    hasOnlyKeys(palette, PALETTE_KEYS) &&
+    PALETTE_KEYS.every((key) =>
+      isBoundedString(palette[key] ?? 'x', 32),
+    )
+  );
+}
+
+/** `chrome:scheme` payload — resolved built-in scheme plus the canvas/
+    symbol colors to tint the titlebar overlay (differ under adaptive). */
+export type ChromeSchemePayload = {
+  readonly scheme: 'dark' | 'light' | 'oled';
+  readonly canvas?: string;
+  readonly symbol?: string;
+};
+
+export function isChromeSchemePayload(
+  value: unknown,
+): value is ChromeSchemePayload {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['scheme', 'canvas', 'symbol']) &&
+    (value['scheme'] === 'dark' ||
+      value['scheme'] === 'light' ||
+      value['scheme'] === 'oled') &&
+    isStringOrUndefined(value['canvas']) &&
+    isStringOrUndefined(value['symbol'])
   );
 }
 
@@ -2210,7 +2269,7 @@ export type AuqwApi = {
     readonly platform: string;
     /** Reports the resolved ui-web scheme so main can re-tint the
         titlebar overlay. One-way send; nothing to await. */
-    readonly setScheme: (scheme: 'dark' | 'light' | 'oled') => void;
+    readonly setScheme: (scheme: ChromeSchemePayload) => void;
   };
   readonly dialog: {
     readonly pickFolder: (
@@ -2224,6 +2283,13 @@ export type AuqwApi = {
   readonly net: {
     readonly snapshot: () => Promise<NetSnapshot>;
     readonly subscribe: (listener: (event: NetEvent) => void) => () => void;
+  };
+  readonly theme: {
+    /** Subscribes to OS theme-source pushes; the current source is
+        delivered immediately. */
+    readonly subscribe: (
+      listener: (event: ThemeSourceEvent) => void,
+    ) => () => void;
   };
   readonly secure: {
     readonly get: (key: string) => Promise<string | null>;

@@ -156,6 +156,9 @@ function fakeApi(): Rig {
           };
         },
       },
+      theme: {
+        subscribe: () => () => undefined,
+      },
       secure: {
         get: () => Promise.resolve(null),
         set: () => Promise.resolve(),

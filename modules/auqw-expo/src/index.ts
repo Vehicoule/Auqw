@@ -326,7 +326,18 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   syncDestroy(socketId: string): Promise<void>;
   /** Synchronous — the JS crypto suite takes CSPRNG bytes inline. */
   syncRandomBytes(length: number): string;
+  /** Android 12+ Material You stops — null below API 31 / absent on
+      iOS (the JS wrapper resolves null there). */
+  systemTonalPalette(): Promise<SystemTonalPalette | null>;
 }
+
+/** The Android 12+ Material You tones an 'adaptive' theme derives from. */
+export type SystemTonalPalette = {
+  readonly neutral1_50: string;
+  readonly neutral1_900: string;
+  readonly accent1_200: string;
+  readonly accent1_600: string;
+};
 
 const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
 
@@ -503,6 +514,14 @@ export function setQueueProjection(projection: QueueProjection): Promise<void> {
  * carries no state — a process kill just means the next init resumes
  * rows from their committed offsets.
  */
+/** Material You stops for 'adaptive' — Android-only seam; resolves
+    null on iOS (flag-only there) and below API 31. */
+export function systemTonalPalette(): Promise<SystemTonalPalette | null> {
+  return seam.systemTonalPalette !== undefined
+    ? seam.systemTonalPalette()
+    : Promise.resolve(null);
+}
+
 export function downloadsActiveChanged(active: number): Promise<void> {
   return native.downloadsActiveChanged(active);
 }

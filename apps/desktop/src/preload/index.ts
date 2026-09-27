@@ -37,6 +37,7 @@ import {
   isTagreadEnumerateResult,
   isTagreadFingerprintResult,
   isTagreadReadResult,
+  isThemeSourceEvent,
   isTransferBeginResult,
   isTransferCommitResult,
   isTransferFinalizeResult,
@@ -51,8 +52,10 @@ import {
 import type {
   AppMeta,
   AuqwApi,
+  ChromeSchemePayload,
   NetEvent,
   NetSnapshot,
+  ThemeSourceEvent,
   StorageBeginResult,
   StorageExecuteResult,
   StorageQueryResult,
@@ -215,7 +218,7 @@ const api: AuqwApi = {
   },
   chrome: {
     platform: process.platform,
-    setScheme: (scheme): void => {
+    setScheme: (scheme: ChromeSchemePayload): void => {
       ipcRenderer.send(CHANNELS.chromeScheme, scheme);
     },
   },
@@ -254,6 +257,26 @@ const api: AuqwApi = {
       return () => {
         ipcRenderer.removeListener(CHANNELS.netEvents, wrapped);
         ipcRenderer.send(CHANNELS.netUnsubscribe);
+      };
+    },
+  },
+  theme: {
+    subscribe: (
+      listener: (event: ThemeSourceEvent) => void,
+    ): (() => void) => {
+      const wrapped = (
+        _event: IpcRendererEvent,
+        payload: unknown,
+      ): void => {
+        if (isThemeSourceEvent(payload)) {
+          listener(payload);
+        }
+      };
+      ipcRenderer.on(CHANNELS.themeEvents, wrapped);
+      ipcRenderer.send(CHANNELS.themeSubscribe);
+      return () => {
+        ipcRenderer.removeListener(CHANNELS.themeEvents, wrapped);
+        ipcRenderer.send(CHANNELS.themeUnsubscribe);
       };
     },
   },

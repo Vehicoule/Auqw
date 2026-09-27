@@ -73,6 +73,7 @@ import {
 } from '../shared/errors.ts';
 import type { NetSender, NetService } from './net-monitor.ts';
 import type { SecureStore } from './secure-store.ts';
+import type { ThemeMonitor } from './theme-monitor.ts';
 
 /** Structural slices of the Electron IPC surface — keeps this module electron-free. */
 export interface RendererLifecycle {
@@ -129,6 +130,9 @@ export interface ChannelDeps {
     sender: NetSender,
   ) => Promise<readonly string[]>;
   readonly net: NetService;
+  /** `theme:events` push registry — same refcounted sender pattern as
+      `net`; attach starts the OS palette watchers. */
+  readonly theme: ThemeMonitor;
   readonly secure: SecureStore;
   readonly utility: {
     readonly request: (channel: string, args: unknown) => Promise<unknown>;
@@ -801,6 +805,12 @@ export function registerChannels(
   });
   ipcMain.on(CHANNELS.netUnsubscribe, (event) => {
     deps.net.detach(event.sender);
+  });
+  ipcMain.on(CHANNELS.themeSubscribe, (event) => {
+    deps.theme.attach(event.sender);
+  });
+  ipcMain.on(CHANNELS.themeUnsubscribe, (event) => {
+    deps.theme.detach(event.sender);
   });
   ipcMain.on(CHANNELS.syncAppliedSubscribe, (event) => {
     deps.syncApplied.attach(event.sender);

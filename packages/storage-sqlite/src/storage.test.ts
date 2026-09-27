@@ -1993,6 +1993,42 @@ async function migrationV5toV6(): Promise<void> {
   driver.close();
 }
 
+// 27. v7 -> v8: settings rebuilds with 'adaptive' in the theme CHECK —
+// the pre-migration row copies across, 'adaptive' writes, and junk is
+// still rejected by the constraint.
+async function migrationV7toV8(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const m of MIGRATIONS.slice(0, 7)) {
+    driver.execScript(`${m.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 7);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'dark', 1, 'lrclib', NULL, 33554432, 1, 'de');
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v7 -> v8 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.settings.theme, 'dark', 'pre-v8 theme survives');
+  assertEqual(state.settings.language, 'de', 'later columns survive');
+  const adaptive: Settings = { ...SETTINGS, theme: 'adaptive' };
+  assert(
+    (await storage.commit({ settings: adaptive }, ctx().context)).ok,
+    'adaptive writes past the rebuilt CHECK',
+  );
+  assertEqual((await loadOk(storage)).settings.theme, 'adaptive');
+  let rejected = false;
+  try {
+    driver.execScript("UPDATE settings SET theme = 'bogus'");
+  } catch {
+    rejected = true;
+  }
+  assert(rejected, 'junk theme still rejected');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -2030,6 +2066,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['unrelatedTablesTolerated', unrelatedTablesTolerated],
   ['languageRoundtrip', languageRoundtrip],
   ['migrationV5toV6', migrationV5toV6],
+  ['migrationV7toV8', migrationV7toV8],
 ];
 
 for (const [name, fn] of TESTS) {
