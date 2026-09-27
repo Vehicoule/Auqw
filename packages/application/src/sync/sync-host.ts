@@ -920,6 +920,12 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         );
       }
       const minted = pairing.mint();
+      // A fresh offer is a fresh pairing attempt — the operator has
+      // re-invited, so the per-code brute-force counters restart too
+      // (a locked-out peer would otherwise stay banned forever, even
+      // after a deliberate re-pair).
+      badAttempts.clear();
+      totalBadAttempts = 0;
       return ok({ code: minted.code, expiresAt: minted.expiresAt });
     },
     async close() {

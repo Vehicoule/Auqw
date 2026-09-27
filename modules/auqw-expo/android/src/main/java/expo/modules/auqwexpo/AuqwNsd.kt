@@ -34,12 +34,16 @@ class AuqwNsd(
       context.getSystemService(Context.NSD_SERVICE) as NsdManager
 
   private var registration: NsdManager.RegistrationListener? = null
+  // Read on NSD's binder thread, written by JS callers — @Volatile so
+  // a stale listener's failure check sees the current owner.
+  @Volatile
   private var discovery: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
   private var resolveExecutor: ExecutorService? = null
 
   // Bump per browse run — NSD resolve callbacks can land after a stop,
   // and a stale 'found' must not populate a later session's list.
+  @Volatile
   private var browseGeneration = 0
 
   /** Advertise `_auqw._tcp` on the listener's bound port. Re-advertise
@@ -57,6 +61,15 @@ class AuqwNsd(
       object : NsdManager.RegistrationListener {
         override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
           Log.w(TAG, "nsd registration failed: $code")
+          // Async failure after registerService already returned 'ok' —
+          // the advert never went live, so surface it as an event
+          // (the JS advertise seam forwards it to onError). A stale
+          // listener's failure must not clear a newer registration.
+          if (registration !== this) return
+          registration = null
+          emitDiscovery(
+            mapOf("type" to "advertise-failed", "name" to info.serviceName),
+          )
         }
 
         override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
@@ -95,8 +108,16 @@ class AuqwNsd(
     multicastLock =
       wifi?.createMulticastLock("auqw-sync")?.apply {
         setReferenceCounted(true)
-        acquire()
       }
+    try {
+      multicastLock?.acquire()
+    } catch (e: Exception) {
+      // A lock we couldn't take is a browse that would see nothing —
+      // fail typed instead of leaking a held lock field.
+      multicastLock = null
+      Log.w(TAG, "syncBrowse multicast acquire failed", e)
+      throw CodedException("unavailable", "syncBrowse failed", e)
+    }
     val executor = Executors.newSingleThreadExecutor()
     resolveExecutor = executor
     val gen = ++browseGeneration
@@ -105,12 +126,21 @@ class AuqwNsd(
         override fun onDiscoveryStarted(serviceType: String) {}
 
         override fun onServiceFound(info: NsdServiceInfo) {
-          // NSD can deliver a pending callback after stopBrowse() —
-          // drop stale-generation events and never submit to a
-          // shut-down executor (its rejection would crash this
-          // callback thread).
+          // NSD callbacks run serialized on this binder thread —
+          // marking + queueing must happen HERE, not inside a deferred
+          // executor task, or a same-name onServiceLost could land
+          // first and have its mark cleared by this stale 'found',
+          // resurrecting a dead service.
           if (gen != browseGeneration) return
-          runCatching { executor.execute { resolve(info, gen) } }
+          synchronized(resolveLock) {
+            // A re-advertise clears the lost mark before queueing.
+            lostNames.remove(info.serviceName)
+            resolveQueue.addLast(info to 0)
+          }
+          // ...then drain on the executor — never submit resolveService
+          // itself to a shut-down executor (its rejection would crash
+          // this callback thread).
+          runCatching { executor.execute { drainResolves(gen) } }
         }
 
         override fun onServiceLost(info: NsdServiceInfo) {
@@ -188,9 +218,10 @@ class AuqwNsd(
   // Some Android builds reject a second resolveService while one is
   // outstanding — serialize them through a queue instead of trusting
   // the executor's submission order. Transient failures get one retry
-  // while their browse generation is still live. Resolve callbacks
-  // fire on NSD's binder thread while enqueue happens on the
-  // executor — the queue is guarded by `resolveLock`.
+  // while their browse generation is still live. Enqueue happens on
+  // the NSD callback thread (so lost-mark ordering follows callback
+  // order) while resolve/drain run on the executor — the queue is
+  // guarded by `resolveLock`.
   private val resolveQueue = ArrayDeque<Pair<NsdServiceInfo, Int>>()
   private var resolveInFlight = false
   private val resolveLock = Any()
@@ -198,16 +229,6 @@ class AuqwNsd(
   // in-flight resolve must not emit a zombie 'found' afterwards. A
   // fresh onServiceFound for the name clears the mark.
   private val lostNames = mutableSetOf<String>()
-
-  private fun resolve(info: NsdServiceInfo, gen: Int) {
-    if (gen != browseGeneration) return
-    synchronized(resolveLock) {
-      // A re-advertise clears the lost mark before queueing.
-      lostNames.remove(info.serviceName)
-      resolveQueue.addLast(info to 0)
-    }
-    drainResolves(gen)
-  }
 
   private fun drainResolves(gen: Int) {
     val next =

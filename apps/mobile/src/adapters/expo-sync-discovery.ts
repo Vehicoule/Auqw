@@ -42,6 +42,10 @@ export function createExpoSyncDiscovery(
   // land an old advertiseStop on top of a fresh registration.
   let stopChain: Promise<void> = Promise.resolve();
   let advertChain: Promise<void> = Promise.resolve();
+  // Scopes an advertise-failed subscription to the newest advertise —
+  // overlapping advertChain entries must not double-report a failure
+  // that belongs to a superseded registration.
+  let advertGen = 0;
 
   return {
     async browse({ onFound, onLost }) {
@@ -235,9 +239,21 @@ export function createExpoSyncDiscovery(
       return ok(session);
     },
     advertise({ port, name, fp, onError }) {
-      if (native.syncAdvertise === undefined) {
+      if (
+        native.syncAdvertise === undefined ||
+        native.addSyncDiscoveryListener === undefined
+      ) {
         return { close() {} };
       }
+      // Async registration failures arrive on the discovery event
+      // channel (native emits 'advertise-failed'), not through the
+      // start promise — listen while this advertiser owns the seam.
+      const gen = ++advertGen;
+      const sub = native.addSyncDiscoveryListener((event) => {
+        if (event.type === 'advertise-failed' && gen === advertGen) {
+          onError?.();
+        }
+      });
       advertChain = advertChain.then(
         () =>
           (native.syncAdvertise?.(name, port, fp) ?? Promise.resolve()).catch(
@@ -252,6 +268,10 @@ export function createExpoSyncDiscovery(
       );
       return {
         close() {
+          if (gen === advertGen) {
+            advertGen += 1;
+          }
+          sub.remove();
           advertChain = advertChain.then(
             () =>
               (native.syncAdvertiseStop?.() ?? Promise.resolve()).catch(

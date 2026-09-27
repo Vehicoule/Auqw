@@ -1681,47 +1681,53 @@ export class Session {
     this.#opSources.add(source);
     try {
       const deadlineMs = this.#deadline();
-      const loaded = await this.#withDeadline(
-        () =>
-          this.#storage.load(
-            this.#newContext('load', deadlineMs, source.signal),
-          ),
-        deadlineMs,
-        source,
-      );
-      // A ready swap between the delete and this load would read a
-      // generation's persisted view the delete wasn't staged under —
-      // keep the ids queued for the next reconcile instead.
-      if (this.#ready !== r) {
-        return;
-      }
-      if (!loaded.ok || !isPersistedState(loaded.value)) {
-        this.#logWarn(
-          'match-review tombstone load failed; ids retained for retry',
+      // The liveness read must sit on the storage lane: a re-add whose
+      // commit is still queued behind this load would otherwise slip
+      // past the `live` check and get its live reviews tombstoned.
+      await this.#enqueueStorage(async () => {
+        const loaded = await this.#withDeadline(
+          () =>
+            this.#storage.load(
+              this.#newContext('load', deadlineMs, source.signal),
+            ),
+          deadlineMs,
+          source,
         );
-        return;
-      }
-      const state = loaded.value;
-      // A recording re-added between delete and load is live again —
-      // its review rows belong to the live row and no longer owe a
-      // tombstone.
-      const live = new Set(state.recordings.map((rec) => rec.id));
-      const owed = new Set<string>();
-      for (const id of this.#reviewTombstoneIds) {
-        if (!live.has(id)) {
-          owed.add(id);
+        // A ready swap between the delete and this load would read a
+        // generation's persisted view the delete wasn't staged under —
+        // keep the ids queued for the next reconcile instead.
+        if (this.#ready !== r) {
+          return ok(undefined);
         }
-      }
-      this.#reviewTombstoneIds.clear();
-      this.#emitSync(
-        state.matchReviews
-          .filter((review) => owed.has(review.recordingId))
-          .map((review) => ({
-            kind: 'matchReview' as const,
-            recordId: review.reviewId,
-            tombstone: true as const,
-          })),
-      );
+        if (!loaded.ok || !isPersistedState(loaded.value)) {
+          this.#logWarn(
+            'match-review tombstone load failed; ids retained for retry',
+          );
+          return ok(undefined);
+        }
+        const state = loaded.value;
+        // A recording re-added between delete and load is live again —
+        // its review rows belong to the live row and no longer owe a
+        // tombstone.
+        const live = new Set(state.recordings.map((rec) => rec.id));
+        const owed = new Set<string>();
+        for (const id of this.#reviewTombstoneIds) {
+          if (!live.has(id)) {
+            owed.add(id);
+          }
+        }
+        this.#reviewTombstoneIds.clear();
+        this.#emitSync(
+          state.matchReviews
+            .filter((review) => owed.has(review.recordingId))
+            .map((review) => ({
+              kind: 'matchReview' as const,
+              recordId: review.reviewId,
+              tombstone: true as const,
+            })),
+        );
+        return ok(undefined);
+      });
     } finally {
       this.#opSources.delete(source);
     }
@@ -3307,8 +3313,12 @@ export class Session {
     }
     const staged = await this.#commitRadioPage(record, seeded.value);
     if (!staged.ok) {
-      r.radio = null;
-      this.#publish();
+      // The commit's awaits gave a reseed room to swap `r.radio` to a
+      // newer record — only our own failed seed clears it.
+      if (r.radio === record) {
+        r.radio = null;
+        this.#publish();
+      }
       return err(staged.error);
     }
     record.continuation = seeded.value.continuation;
@@ -3765,9 +3775,17 @@ export class Session {
         }
         // The page committed but the disarm already ran — the mirror
         // never applied it, so live sections are the inverse image.
+        // The revert revision must clear BOTH counters: mutations
+        // queued during the commit already raised the live engine
+        // past `queueCommittedRev`, so minting off the committed
+        // counter alone could hand the fresh engine a revision at or
+        // below the content it carries — a later write then re-uses a
+        // durable revision and the persist guard skips it.
+        const liveQueue = r.queue.snapshot();
         const revertedQueue: QueueSnapshot = {
-          ...r.queue.snapshot(),
-          revision: r.queueCommittedRev + 1,
+          ...liveQueue,
+          revision:
+            Math.max(r.queueCommittedRev, liveQueue.revision) + 1,
         };
         const revertBatch: StorageBatch = {
           queue: revertedQueue,
@@ -3795,6 +3813,9 @@ export class Session {
         // The mirror keeps its live content and adopts the fresh
         // revision so queued commands stay on the durable lineage.
         r.queue = new QueueEngine(revertedQueue);
+        // The engine was swapped wholesale — projections and the
+        // tail hooks still reference the pre-swap instance.
+        this.#derived();
         this.#publish();
         return ok({ changed: false, firstAppended: undefined });
       });
@@ -3826,6 +3847,20 @@ export class Session {
     if (firstAppended !== undefined) {
       record.dupPages = 0;
       if (!record.resumeOnDrain) {
+        return;
+      }
+      // A resumed occurrence whose bytes aren't owned fires a
+      // candidates/resolve chain that can only fail offline — stay
+      // armed instead of burning the attempt; the next landed page
+      // retries once connectivity is back. Owned bytes (downloads,
+      // local files) still resume: that's the offline-honest path.
+      const appended = r.queue
+        .snapshot()
+        .occurrences.find((o) => o.occurrenceId === firstAppended);
+      if (
+        !this.#isOnline() &&
+        this.#localPlaybackFor(appended?.recordingId ?? '') === null
+      ) {
         return;
       }
       this.#own(
@@ -3919,17 +3954,29 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
+    // Stop means stop: an armed tail drops BEFORE the persist await —
+    // a page landing during it must find `r.radio` empty, or its
+    // drain-resume would start a fresh attempt mid-teardown.
+    const radioRecord = r.radio;
+    this.#clearRadio(r);
     // Commit the stopped queue before the irreversible transport
     // teardown: a failed commit rolls the engine back to playing and
     // leaves the live attempt untouched — the caller's error is
     // honest and playback genuinely continues.
     const persisted = await this.#persistQueue(r, before);
     if (!persisted.ok) {
+      // The queue stays live, so a tail whose fetch already landed
+      // can ride on; a cancelled mid-flight fetch can't be
+      // resurrected and stays dropped.
+      if (
+        radioRecord !== null &&
+        !radioRecord.fetching &&
+        r.radio === null
+      ) {
+        r.radio = radioRecord;
+      }
       return persisted;
     }
-    // Stop means stop: an armed tail drops with it — an in-flight
-    // page must never append-and-resume past a user's stop.
-    this.#clearRadio(r);
     await this.#supersede();
     const ready2 = this.#ready;
     if (ready2 !== null) {
@@ -4335,6 +4382,7 @@ export class Session {
     const r = ready.value;
     const before = r.queue.snapshot();
     const wasCurrent = before.currentOccurrenceId === id;
+    const radioBefore = r.radio;
     try {
       r.queue.remove(id);
     } catch {
@@ -4346,6 +4394,22 @@ export class Session {
     const persisted = await this.#persistQueue(r, before);
     if (!persisted.ok) {
       return persisted;
+    }
+    {
+      // Same drain authorization as #advance: removing the last item
+      // while playing earns the armed tail a resume; any other
+      // removal revokes a stale grant — a paused drain must never
+      // resurrect playback it was granted under.
+      const rec = r.radio;
+      if (
+        rec !== null &&
+        rec === radioBefore &&
+        rec.status === 'growing'
+      ) {
+        const after = r.queue.snapshot();
+        rec.resumeOnDrain =
+          after.currentOccurrenceId === null && before.mode === 'playing';
+      }
     }
     if (wasCurrent) {
       await this.#supersede();

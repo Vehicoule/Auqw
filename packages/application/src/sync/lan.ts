@@ -7,17 +7,19 @@
 
 /**
  * Dotted-decimal IPv4 parse — returns null on anything that isn't a
- * strict `a.b.c.d` literal with each octet in range.
+ * strict `a.b.c.d` literal with each octet in canonical form:
+ * in range, and no leading zeros (getaddrinfo reads `010` as octal,
+ * so a non-canonical literal can resolve to a different address than
+ * it spells).
  */
 export function parseIpv4(host: string): [number, number, number, number] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  const octet = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d?|0)';
+  const m = new RegExp(`^(${octet})\\.(${octet})\\.(${octet})\\.(${octet})$`).exec(host);
   if (m === null) {
     return null;
   }
   const octets = m.slice(1).map(Number);
-  return octets.every((o) => o <= 255)
-    ? [octets[0]!, octets[1]!, octets[2]!, octets[3]!]
-    : null;
+  return [octets[0]!, octets[1]!, octets[2]!, octets[3]!];
 }
 
 /**

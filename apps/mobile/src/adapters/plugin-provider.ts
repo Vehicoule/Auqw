@@ -478,12 +478,16 @@ function toSuggestionList(value: unknown): readonly string[] | null {
     return null;
   }
   const suggestions = value['suggestions'];
-  if (!Array.isArray(suggestions)) {
+  if (!Array.isArray(suggestions) || suggestions.length > 32) {
     return null;
   }
   const out: string[] = [];
   for (const item of suggestions) {
-    if (typeof item !== 'string' || item.length === 0) {
+    if (
+      typeof item !== 'string' ||
+      item.length === 0 ||
+      item.length > 512
+    ) {
       return null;
     }
     out.push(item);
@@ -691,8 +695,12 @@ export function createPluginProvider(
     // re-arm in slices: setTimeout overflows past ~24.8 days, so a
     // far-out deadline (e.g. a MAX_SAFE_INTEGER sentinel) re-checks
     // instead of firing early.
+    // NaN deadlines (a context built without deadlineMs) must not
+    // slip past: `NaN <= 0` is false, and the re-arm would fire every
+    // ~0ms forever. `!(x > 0)` fails closed on NaN while Infinity
+    // still slices correctly.
     const msLeft = context.deadlineMs - Date.now();
-    if (msLeft <= 0) {
+    if (!(msLeft > 0)) {
       return Promise.resolve(err(timeoutError()));
     }
     return (async () => {
@@ -706,7 +714,7 @@ export function createPluginProvider(
       const armStartDeadline = (): void => {
         startTimer = setTimeout(
           () => {
-            if (context.deadlineMs - Date.now() <= 0) {
+            if (!(context.deadlineMs - Date.now() > 0)) {
               expireStart?.();
             } else {
               armStartDeadline();
@@ -740,7 +748,13 @@ export function createPluginProvider(
             typeof late.id === 'string' &&
             late.id.length > 0
           ) {
-            host.cancel(late.id);
+            // Best-effort abort — a throwing host must not turn the
+            // already-returned timeout into an unhandled rejection.
+            try {
+              host.cancel(late.id);
+            } catch {
+              // dead either way
+            }
           }
         });
         return err(timeoutError());
@@ -753,7 +767,11 @@ export function createPluginProvider(
         return err(appError('invalid-response', 'empty request id'));
       }
       if (disposed || signal.cancelled) {
-        host.cancel(requestId);
+        try {
+          host.cancel(requestId);
+        } catch {
+          // dead either way
+        }
         return err(
           disposed
             ? appError('unavailable', 'provider is disposed')
@@ -814,7 +832,11 @@ export function createPluginProvider(
           }
           // The request is dead to us either way; the host aborts it
           // and any late outcome is dropped.
-          host.cancel(requestId);
+          try {
+            host.cancel(requestId);
+          } catch {
+            // dead either way
+          }
           resolve(err(cancelledError()));
         };
         const timeoutInFlight = (): void => {
@@ -823,13 +845,17 @@ export function createPluginProvider(
             return;
           }
           dropRequest(requestId, current);
-          host.cancel(requestId);
+          try {
+            host.cancel(requestId);
+          } catch {
+            // dead either way
+          }
           resolve(err(timeoutError()));
         };
         const armDeadlineTimer = (): void => {
           deadlineTimer = setTimeout(
             () => {
-              if (context.deadlineMs - Date.now() <= 0) {
+              if (!(context.deadlineMs - Date.now() > 0)) {
                 timeoutInFlight();
               } else {
                 armDeadlineTimer();

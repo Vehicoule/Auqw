@@ -522,12 +522,16 @@ function toSuggestionList(value: unknown): readonly string[] | null {
     return null;
   }
   const suggestions = value['suggestions'];
-  if (!Array.isArray(suggestions)) {
+  if (!Array.isArray(suggestions) || suggestions.length > 32) {
     return null;
   }
   const out: string[] = [];
   for (const item of suggestions) {
-    if (typeof item !== 'string' || item.length === 0) {
+    if (
+      typeof item !== 'string' ||
+      item.length === 0 ||
+      item.length > 512
+    ) {
       return null;
     }
     out.push(item);
