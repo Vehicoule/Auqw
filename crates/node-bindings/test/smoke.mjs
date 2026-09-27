@@ -11,6 +11,7 @@
 // (slice 4 phase 1b).
 
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,6 +62,46 @@ const codeOf = (err) => JSON.parse(err.cause?.message ?? '{}').code;
 
 assert.equal(host.mintRequestId(), 'req-0');
 assert.equal(host.mintRequestId(), 'req-1');
+
+// A foreign addon can wrap a non-null native pointer. Calling a PluginHost
+// method with that object as `this` must throw instead of casting its pointer
+// to JsPluginHost. Run in a child: the unguarded cast can crash the process.
+// The fixture uses POSIX dynamic linking; the normal smoke still runs on Windows.
+if (process.platform !== 'win32') {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'auqw-foreign-receiver-'));
+  try {
+    const fixture = join(fixtureDir, 'foreign.node');
+    const flags = process.platform === 'darwin'
+      ? ['-dynamiclib', '-undefined', 'dynamic_lookup']
+      : ['-shared', '-fPIC'];
+    const build = spawnSync('cc', [
+      ...flags, '-o', fixture, 'crates/node-bindings/test/foreign-receiver.c',
+    ], { encoding: 'utf8' });
+    assert.equal(build.status, 0, build.stderr || build.error?.message);
+
+    const check = spawnSync(process.execPath, [
+      '-e', `
+        const loaded = require(process.argv[1]);
+        const native = loaded.default ?? loaded;
+        const other = require(process.argv[2]).foreignReceiver();
+        const host = new native.PluginHost({ fuelPerEntry: 200e6, fuelTotal: 2e9 });
+        try {
+          host.mintRequestId.call(other);
+          process.exitCode = 1;
+        } catch (err) {
+          if (err.code !== 'InvalidArg' || !/not an instance of class/.test(err.message)) {
+            console.error(err);
+            process.exitCode = 1;
+          }
+        }
+      `, NODE, fixture,
+    ], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(check.status, 0,
+      `foreign receiver was not rejected (${check.signal ?? check.status}): ${check.stderr}`);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+}
 
 const id = host.loadPlugin(wasm, manifest);
 assert.equal(id, 'echo');
