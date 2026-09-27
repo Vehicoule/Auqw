@@ -14,8 +14,17 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
-import { BlurView } from 'expo-blur';
-import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+import Svg, {
+  Defs,
+  FeGaussianBlur,
+  Filter,
+  G,
+  Image as SvgImage,
+  LinearGradient,
+  Mask,
+  Rect,
+  Stop,
+} from 'react-native-svg';
 import { schemes } from '@auqw/design-tokens';
 import { ThemeProvider, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
@@ -282,12 +291,16 @@ export function ModeSegment({
   );
 }
 
-// Immersive player backdrop (CMP reference): a full-bleed copy of the
-// artwork, one static dark scrim gradient for text contrast, and a
-// bottom-anchored frost — BlurView over the backdrop, tinted by a
-// gradient that strengthens toward the bottom edge.
-const FROST_TOP_FRACTION = 0.38;
+// Immersive player backdrop (CMP reference): the artwork full-bleed,
+// then a statically blurred copy of it revealed by an alpha-gradient
+// mask so the frost fades in only where the bottom controls sit — one
+// rasterized blur pass, no live blur view and no hard edge — and a
+// dark scrim gradient over the top for text contrast.
+const FROST_TOP_FRACTION = 0.5;
 const NIGHT = schemes.dark.deep;
+// Mask ramps ride luminance — a bright token, alpha carried by
+// stopOpacity.
+const MASK_LIGHT = schemes.dark.textBright;
 
 function PlayerBackdrop({
   artworkUrl,
@@ -303,46 +316,39 @@ function PlayerBackdrop({
             <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
             <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
           </LinearGradient>
+          {/* Alpha ramp for the frost mask: invisible until the
+              frost zone, fully opaque by the transport row. */}
+          <LinearGradient id="uwfp-frost-reveal" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="0" />
+            <Stop offset="0.78" stopColor={MASK_LIGHT} stopOpacity="0.7" />
+            <Stop offset="0.95" stopColor={MASK_LIGHT} stopOpacity="1" />
+          </LinearGradient>
+          <Mask id="uwfp-frost">
+            <Rect
+              x="0"
+              y="0"
+              width="100%"
+              height="100%"
+              fill="url(#uwfp-frost-reveal)"
+            />
+          </Mask>
+          <Filter id="uwfp-blur">
+            <FeGaussianBlur stdDeviation={18} />
+          </Filter>
         </Defs>
-        <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
-      </Svg>
-      <View
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          bottom: 0,
-          top: `${FROST_TOP_FRACTION * 100}%`,
-          overflow: 'hidden',
-        }}
-      >
-        <BlurView
-          intensity={80}
-          tint="dark"
-          // Without an explicit method Android renders an opaque
-          // dimming veil — a hard-edged slab where the frost region
-          // begins. dimezis supplies real blur on SDK 31+.
-          experimentalBlurMethod="dimezisBlurView"
-          style={StyleSheet.absoluteFill}
-        />
-        <Svg style={StyleSheet.absoluteFill}>
-          <Defs>
-            <LinearGradient id="uwfp-frost" x1="0" y1="0" x2="0" y2="1">
-              <Stop offset="0" stopColor={NIGHT} stopOpacity="0" />
-              <Stop offset="0.22" stopColor={NIGHT} stopOpacity="0.25" />
-              <Stop offset="0.62" stopColor={NIGHT} stopOpacity="0.66" />
-              <Stop offset="1" stopColor={NIGHT} stopOpacity="0.92" />
-            </LinearGradient>
-          </Defs>
-          <Rect
+        <G mask="url(#uwfp-frost)">
+          <SvgImage
+            href={artworkUrl}
             x="0"
             y="0"
             width="100%"
             height="100%"
-            fill="url(#uwfp-frost)"
+            preserveAspectRatio="xMidYMid slice"
+            filter="url(#uwfp-blur)"
           />
-        </Svg>
-      </View>
+        </G>
+        <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
+      </Svg>
     </View>
   );
 }
@@ -556,54 +562,64 @@ export function StageSheet({
           <View
             style={{
               flexDirection: 'row',
-              alignItems: 'center',
               justifyContent: 'center',
-              gap: theme.spacing.sm,
               marginTop: theme.spacing.sm,
             }}
           >
-            <Icon
-              name="radio"
-              size={13}
-              color={
-                radio.armed && radio.status !== 'failed'
-                  ? colors.accent
-                  : colors.textSecondary
-              }
-            />
-            {radio.armed ? (
-              <>
-                <Text
-                  variant="metadata"
-                  color={radio.status === 'failed' ? 'warn' : 'secondary'}
-                >
-                  {radio.label}
-                  {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
-                  {radio.detail === null ? '' : ` · ${radio.detail}`}
-                </Text>
+            {/* Same accent pill as the mode selector's active item —
+                accentSoft fill, accent content, pill radius. */}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: theme.spacing.sm,
+                borderRadius: theme.radius.pill,
+                backgroundColor: colors.accentSoft,
+                paddingHorizontal: theme.spacing.md,
+                paddingVertical: theme.spacing.xs,
+              }}
+            >
+              <Icon
+                name="radio"
+                size={13}
+                color={
+                  radio.status === 'failed' ? colors.warn : colors.accent
+                }
+              />
+              {radio.armed ? (
+                <>
+                  <Text
+                    variant="metadata"
+                    color={radio.status === 'failed' ? 'warn' : 'accent'}
+                  >
+                    {radio.label}
+                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
+                    {radio.detail === null ? '' : ` · ${radio.detail}`}
+                  </Text>
+                  <Pressable
+                    compact
+                    onPress={onStopRadio}
+                    accessibilityLabel={t('stage.radio.stopA11y')}
+                    style={{ paddingHorizontal: theme.spacing.xs }}
+                  >
+                    <Text variant="metadata" color="primary">
+                      {t('stage.radio.stop')}
+                    </Text>
+                  </Pressable>
+                </>
+              ) : (
                 <Pressable
                   compact
-                  onPress={onStopRadio}
-                  accessibilityLabel={t('stage.radio.stopA11y')}
+                  onPress={onStartRadio}
+                  accessibilityLabel={t('stage.radio.start')}
                   style={{ paddingHorizontal: theme.spacing.xs }}
                 >
-                  <Text variant="metadata" color="primary">
-                    {t('stage.radio.stop')}
+                  <Text variant="metadata" color="accent">
+                    {t('stage.radio.start')}
                   </Text>
                 </Pressable>
-              </>
-            ) : (
-              <Pressable
-                compact
-                onPress={onStartRadio}
-                accessibilityLabel={t('stage.radio.start')}
-                style={{ paddingHorizontal: theme.spacing.xs }}
-              >
-                <Text variant="metadata" color="secondary">
-                  {t('stage.radio.start')}
-                </Text>
-              </Pressable>
-            )}
+              )}
+            </View>
           </View>
         )}
       {activeMode === 'player' && (
