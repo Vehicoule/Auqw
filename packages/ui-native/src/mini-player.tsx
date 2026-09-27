@@ -131,6 +131,17 @@ export function MiniPlayer({
           return;
         }
         if (Math.abs(e.translationX) >= Math.abs(e.translationY)) {
+          // A horizontal release after vertical-dominant frames must not
+          // strand the sheet — settle progress back to the drag's start
+          // anchor before the track action runs.
+          if (sheetProgress.value !== dragStart.value) {
+            sheetProgress.value = theme.reducedMotion
+              ? dragStart.value
+              : withSpring(dragStart.value, {
+                  stiffness: 200,
+                  damping: 26,
+                });
+          }
           if (e.translationX < -40 && onNext !== undefined) {
             scheduleOnRN(onNext);
           } else if (e.translationX > 40 && onPrevious !== undefined) {
