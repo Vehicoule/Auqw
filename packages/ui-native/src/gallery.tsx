@@ -208,6 +208,7 @@ const ICON_SET: readonly IconName[] = [
   'library',
   'note',
   'repeat',
+  'repeat-one',
   'shuffle',
   'clock',
   'lyrics',

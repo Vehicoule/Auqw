@@ -90,8 +90,8 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  /** Current repeat mode; 'one' is the only mode the port exposes. */
-  readonly repeat?: 'off' | 'one' | undefined;
+  /** Current repeat mode — off / all / one from the player port. */
+  readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
 };
 
@@ -223,15 +223,21 @@ export function TransportControls({
         style={v.main}
       />
       <IconButton
-        icon="repeat"
+        icon={repeat === 'one' ? 'repeat-one' : 'repeat'}
         size={32}
         iconSize={14}
         color={
-          repeat === 'one' ? theme.colors.accent : theme.colors.textSecondary
+          repeat === 'off' ? theme.colors.textSecondary : theme.colors.accent
         }
-        accessibilityLabel={t('common.repeat')}
+        accessibilityLabel={
+          repeat === 'one'
+            ? t('common.repeatOne')
+            : repeat === 'all'
+              ? t('common.repeatAll')
+              : t('common.repeat')
+        }
         disabled={onCycleRepeat === undefined}
-        active={repeat === 'one'}
+        active={repeat !== 'off'}
         onPress={onCycleRepeat}
         style={v.side}
       />
@@ -447,7 +453,7 @@ export type StageSheetProps = {
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onAddToPlaylist?: (() => void) | undefined;
-  readonly repeat?: 'off' | 'one' | undefined;
+  readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;

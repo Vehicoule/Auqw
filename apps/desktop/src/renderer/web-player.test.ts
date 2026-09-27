@@ -143,6 +143,7 @@ function twoItemProjection(
     currentOccurrenceId: 'occ-1',
     positionMs: 0,
     mode: 'playing',
+    repeat: 'off',
     items: [
       {
         occurrenceId: 'occ-1',

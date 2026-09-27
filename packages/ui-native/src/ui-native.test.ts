@@ -347,6 +347,7 @@ function testPlayerMapper(): void {
     queue: fixtureQueue,
     recordings: fixtureRecordings,
     likes: fixtureLikes,
+    repeat: 'off' as const,
   };
   assertEqual(toPlayerModel({ ...base, playback: { type: 'idle' } }), null);
   const playing = toPlayerModel({ ...base, playback: fixturePlaybackPlaying });
@@ -358,6 +359,53 @@ function testPlayerMapper(): void {
   assertEqual(playing.liked, true);
   assertEqual(playing.canNext, true);
   assertEqual(playing.canPrevious, false);
+  // repeat=all keeps both controls live at the queue boundaries —
+  // the wrap edges are real moves.
+  const atTail = toPlayerModel({
+    ...base,
+    repeat: 'all',
+    playback: {
+      type: 'paused' as const,
+      recordingId: 'rec-noart',
+      occurrenceId: 'occ-8',
+      identity: fixtureIdentity,
+      handle: 'handle-8',
+      positionMs: 0,
+      durationMs: 200_000,
+    },
+  });
+  assert(
+    atTail !== null && atTail.canNext,
+    'repeat=all keeps next live at the tail',
+  );
+  const atHead = toPlayerModel({
+    ...base,
+    repeat: 'all',
+    playback: fixturePlaybackPaused,
+  });
+  assert(
+    atHead !== null && atHead.canPrevious,
+    'repeat=all keeps previous live at the head',
+  );
+  // A lone queue item under repeat=all self-wraps — next stays live
+  // as an in-place restart, matching the cursor.
+  const first = fixtureQueue.occurrences[0];
+  assert(first !== undefined);
+  const soloQueue = {
+    ...fixtureQueue,
+    occurrences: [first],
+    currentOccurrenceId: 'occ-1',
+  };
+  const solo = toPlayerModel({
+    ...base,
+    queue: soloQueue,
+    repeat: 'all',
+    playback: fixturePlaybackPaused,
+  });
+  assert(
+    solo !== null && solo.canNext,
+    'repeat=all keeps next live on a lone queue item',
+  );
   const paused = toPlayerModel({ ...base, playback: fixturePlaybackPaused });
   assert(paused !== null && paused.status === 'paused', 'paused mapping');
   assertEqual(
