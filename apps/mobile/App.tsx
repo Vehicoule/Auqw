@@ -1313,6 +1313,7 @@ function Main({
         queue: state.queue,
         recordings: state.recordings,
         likes: state.likes,
+        repeat: state.repeat,
       }),
     [state, localeTick],
   );

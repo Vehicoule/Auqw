@@ -20,6 +20,7 @@ import type {
   QueueSnapshot,
   RadioTail,
   Recording,
+  RepeatMode,
   SessionPlayback,
   Settings,
   SourceRef,
@@ -827,6 +828,7 @@ export type PlayerModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly repeat: RepeatMode;
 };
 
 function indexById(
@@ -848,7 +850,7 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
 }
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
-  const { playback, queue, recordings, likes } = input;
+  const { playback, queue, recordings, likes, repeat } = input;
   if (playback.type === 'idle') {
     return null;
   }
@@ -861,9 +863,15 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const currentIndex = queue.occurrences.findIndex(
     (o) => o.occurrenceId === activeId,
   );
-  const canPrevious = currentIndex > 0;
+  // Under repeat=all the wrap edges are real moves — the transport
+  // keeps both controls enabled at queue boundaries so they stay
+  // reachable (the cursor applies the same wrap rules).
+  const wraps = repeat === 'all' && queue.occurrences.length > 1;
+  const canPrevious =
+    currentIndex > 0 || (wraps && currentIndex === 0);
   const canNext =
-    currentIndex >= 0 && currentIndex < queue.occurrences.length - 1;
+    currentIndex >= 0 &&
+    (currentIndex < queue.occurrences.length - 1 || wraps);
   const recordingId = playback.recordingId;
   const recording = recordingId === null ? undefined : byId.get(recordingId);
   const base = {

@@ -1767,7 +1767,7 @@ async function backgroundTransitionChain(): Promise<void> {
 // installed revision, JS reconciles the transitions it reports, and the
 // ended fallback mirrors the same rules when no projection is installed.
 
-function repeatRig(current: string | null = 'oA'): Rig {
+function repeatRig(current: string | null = 'oA', positionMs = 0): Rig {
   return rig(
     persisted({
       recordings: ['A', 'B', 'C'].map((id) =>
@@ -1779,7 +1779,7 @@ function repeatRig(current: string | null = 'oA'): Rig {
           occurrence(`o${id}`, `r${id}`, ref('youtube-music', `y${id}`)),
         ),
         currentOccurrenceId: current,
-        positionMs: 0,
+        positionMs,
         mode: 'paused',
       },
     }),
@@ -1954,6 +1954,74 @@ async function repeatAllManualWraps(): Promise<void> {
     'oC',
     'manual previous wraps head→tail',
   );
+}
+
+async function repeatAllHeadPrevInWindowWraps(): Promise<void> {
+  // Head previous inside the restart window wraps to the tail — the
+  // revision-tick restart QueueEngine applies can't mask the wrap.
+  const r = repeatRig('oA', 1500);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  assert((await r.session.previous()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oC',
+    'head previous inside the restart window wraps to the tail',
+  );
+  assertEqual(q.positionMs, 0, 'the wrap lands at 0');
+}
+
+async function repeatAllHeadPrevPastWindowRestarts(): Promise<void> {
+  // Past the restart window a head previous restarts the item — even
+  // under repeat=all, matching the cursor's rule.
+  const r = repeatRig('oA', 5000);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  assert((await r.session.previous()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(
+    q.currentOccurrenceId,
+    'oA',
+    'head previous past the restart window stays put',
+  );
+  assertEqual(q.positionMs, 0, 'the restart seeks to 0');
+}
+
+async function repeatReplaysCountEachLoop(): Promise<void> {
+  // Every completed loop of one occurrence counts a play — the dedup
+  // key gains a listen-cycle suffix instead of stopping at the first.
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.setRepeatMode('one')).ok);
+  await pump();
+  const p = r.player.projections.at(-1);
+  assert(p !== undefined && p.repeat === 'one');
+  for (let i = 0; i < 3; i += 1) {
+    r.player.emit(
+      transitionEvent(r, {
+        from: 'oA',
+        to: 'oA',
+        reason: 'ended',
+        positionMs: 0,
+        identity: { attemptId: 'svc-1', queueRev: p.queueRev },
+        handle: 'h-svc',
+      }),
+    );
+    await pump();
+  }
+  const plays = readyOf(r).playHistory.filter((e) => e.recordingId === 'rA');
+  assertEqual(plays.length, 3, 'each completed loop counts a play');
+  assertEqual(plays[0]?.occurrenceId, 'oA');
+  assertEqual(plays[1]?.occurrenceId, 'oA#1', 'replay one keys off its cycle');
+  assertEqual(plays[2]?.occurrenceId, 'oA#2', 'replay two keys off its cycle');
 }
 
 async function repeatOneEndedFallback(): Promise<void> {
@@ -4595,6 +4663,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatAllHeadPrevWraps', repeatAllHeadPrevWraps],
   ['repeatOffSameIdRejected', repeatOffSameIdRejected],
   ['repeatAllManualWraps', repeatAllManualWraps],
+  ['repeatAllHeadPrevInWindowWraps', repeatAllHeadPrevInWindowWraps],
+  ['repeatAllHeadPrevPastWindowRestarts', repeatAllHeadPrevPastWindowRestarts],
+  ['repeatReplaysCountEachLoop', repeatReplaysCountEachLoop],
   ['repeatOneEndedFallback', repeatOneEndedFallback],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],

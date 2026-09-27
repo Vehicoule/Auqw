@@ -412,6 +412,13 @@ type Ready = {
   settings: Settings;
   playback: SessionPlayback;
   repeat: RepeatMode;
+  /**
+   * Replay cycles per queue occurrence: a repeat-driven replay or wrap
+   * bumps the target's cycle, and a recorded play stamps
+   * `${occurrenceId}#${cycle}` so each loop of one occurrence counts
+   * while same-loop status echoes still dedupe. Runtime-only.
+   */
+  listenCycles: Record<string, number>;
   radio: RadioTailRecord | null;
   persistenceError: AppError | undefined;
   /**
@@ -433,6 +440,14 @@ type Ready = {
 
 function playlistSections(r: Ready): PlaylistState {
   return { playlists: r.playlists, entries: r.playlistEntries };
+}
+
+/**
+ * A repeat-driven replay or wrap begins a new listen for the target
+ * occurrence — bump its cycle so play-history dedup counts the loop.
+ */
+function bumpListenCycle(r: Ready, occurrenceId: string): void {
+  r.listenCycles[occurrenceId] = (r.listenCycles[occurrenceId] ?? 0) + 1;
 }
 
 /** The committed sections emission diffs a batch against. */
@@ -1839,6 +1854,7 @@ export class Session {
       settings: { ...data.settings },
       playback: { type: 'idle' },
       repeat: 'off',
+      listenCycles: {},
       radio: null,
       persistenceError: undefined,
       syncPending: [],
@@ -2581,9 +2597,12 @@ export class Session {
   }
 
   /**
-   * One counted play per occurrence: 50% of duration or 120 s,
-   * committed first like every owned write. A no-op below the
-   * threshold, on repeat, or when the clock is dead.
+   * One counted play per occurrence and listen cycle: 50% of duration
+   * or 120 s, committed first like every owned write. A replay
+   * (repeat-one loop, a wrap back to an already-played item) stamps
+   * `${occurrenceId}#${cycle}` so the loop counts once while the
+   * dedup still swallows same-loop duplicates. A no-op below the
+   * threshold, on a dedupe hit, or when the clock is dead.
    */
   async #maybeRecordPlay(
     occurrenceId: string,
@@ -2595,11 +2614,14 @@ export class Session {
     if (r === null) {
       return;
     }
+    const cycle = r.listenCycles[occurrenceId] ?? 0;
+    const dedupeId =
+      cycle === 0 ? occurrenceId : `${occurrenceId}#${cycle}`;
     if (
       !isSafeNonNegative(listenedMs) ||
       (durationMs !== null && !isSafeNonNegative(durationMs)) ||
       !countsAsPlay(listenedMs, durationMs) ||
-      r.playHistory.some((e) => e.occurrenceId === occurrenceId)
+      r.playHistory.some((e) => e.occurrenceId === dedupeId)
     ) {
       return;
     }
@@ -2612,7 +2634,7 @@ export class Session {
       {
         eventId: this.#ids.next('play'),
         recordingId,
-        occurrenceId,
+        occurrenceId: dedupeId,
         listenedMs,
         durationMs,
         nowMs: now,
@@ -3919,25 +3941,25 @@ export class Session {
               : undefined;
           if (head !== undefined) {
             r.queue.select(head.occurrenceId, before.mode === 'playing');
+            bumpListenCycle(r, head.occurrenceId);
           }
+        }
+      } else if (
+        r.repeat === 'all' &&
+        before.currentOccurrenceId === before.occurrences[0]?.occurrenceId &&
+        before.occurrences.length > 1 &&
+        before.positionMs <= 3000
+      ) {
+        // repeat=all at the head, within the restart threshold: the
+        // move wraps to the tail — the same rule the service cursor
+        // applies. Past the threshold `previous` restarts the item.
+        const last = before.occurrences[before.occurrences.length - 1];
+        if (last !== undefined) {
+          r.queue.select(last.occurrenceId, before.mode === 'playing');
+          bumpListenCycle(r, last.occurrenceId);
         }
       } else {
         r.queue.previous();
-        // repeat=all: a previous no-op at the head (position 0) wraps
-        // to the tail instead of staying parked.
-        if (r.repeat === 'all') {
-          const head = r.queue.snapshot();
-          if (
-            head.revision === before.revision &&
-            head.occurrences.length > 1 &&
-            head.currentOccurrenceId === head.occurrences[0]?.occurrenceId
-          ) {
-            const last = head.occurrences[head.occurrences.length - 1];
-            if (last !== undefined) {
-              r.queue.select(last.occurrenceId, before.mode === 'playing');
-            }
-          }
-        }
       }
     } catch (thrown) {
       return err(fromUnknown(thrown));
@@ -5167,6 +5189,7 @@ export class Session {
         // end back to the head — the same rules the service follows.
         if (r.repeat === 'one' && before.currentOccurrenceId !== null) {
           r.queue.select(before.currentOccurrenceId, true);
+          bumpListenCycle(r, before.currentOccurrenceId);
         } else {
           r.queue.next();
           if (r.repeat === 'all') {
@@ -5177,6 +5200,7 @@ export class Session {
                 : undefined;
             if (head !== undefined) {
               r.queue.select(head.occurrenceId, true);
+              bumpListenCycle(r, head.occurrenceId);
             }
           }
         }
@@ -5494,6 +5518,9 @@ export class Session {
         (event.identity.queueRev === projection?.queueRev ||
           event.identity.queueRev === event.projectedQueueRev);
     let legal = false;
+    // The edge was legal only because of a repeat rule — the target
+    // starts a fresh listen, which the play dedup counts as a new loop.
+    let repeatEdge = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
       const successor =
         cursorIndex >= 0
@@ -5512,6 +5539,7 @@ export class Session {
         event.toOccurrenceId === event.fromOccurrenceId
       ) {
         legal = true;
+        repeatEdge = true;
       }
       // repeat=all wraps a tail move back to the head.
       if (
@@ -5522,6 +5550,7 @@ export class Session {
         event.toOccurrenceId === items[0]?.occurrenceId
       ) {
         legal = true;
+        repeatEdge = true;
       }
     } else if (event.reason === 'remote-previous') {
       const predecessor =
@@ -5542,6 +5571,7 @@ export class Session {
         event.toOccurrenceId === items[items.length - 1]?.occurrenceId
       ) {
         legal = true;
+        repeatEdge = true;
       }
     }
     if (
@@ -5583,6 +5613,9 @@ export class Session {
       }
     }
     const toId = event.toOccurrenceId;
+    if (repeatEdge && toId !== null) {
+      bumpListenCycle(r, toId);
+    }
     const wasPlaying = r.queue.snapshot().mode === 'playing';
     try {
       // A null target means the cursor ran off the end: stopped.
