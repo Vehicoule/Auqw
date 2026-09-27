@@ -4108,6 +4108,15 @@ function Main({
                   ? () => onDownloadAction(currentRecordingId)
                   : undefined
               }
+              onAddToPlaylist={
+                currentRecordingId !== null
+                  ? () =>
+                      setPickerFor({
+                        kind: 'recording',
+                        recordingId: currentRecordingId,
+                      })
+                  : undefined
+              }
               onSeek={seekToPosition}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={radioCapable ? onStartRadio : undefined}

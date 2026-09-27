@@ -49,9 +49,9 @@ export type TransportProps = {
   readonly onPrevious?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
-  /** Owned-bytes state of the current track; null hides the button. */
-  readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
-  readonly onDownload?: (() => void) | undefined;
+  /** Current repeat mode; 'one' is the only mode the port exposes. */
+  readonly repeat?: 'off' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
 };
 
 function transportVariant(
@@ -106,8 +106,8 @@ export function TransportControls({
   onPrevious,
   onNext,
   onToggleLike,
-  download = null,
-  onDownload,
+  repeat = 'off',
+  onCycleRepeat,
 }: TransportProps) {
   const theme = useTheme();
   const v = transportVariant(theme, variant);
@@ -180,38 +180,19 @@ export function TransportControls({
         onPress={onNext}
         style={v.main}
       />
-      {download !== null && (
-        <IconButton
-          icon={
-            download === 'stored'
-              ? 'check'
-              : download === 'failed'
-                ? 'warn'
-                : 'download'
-          }
-          size={32}
-          iconSize={14}
-          color={
-            download === 'failed'
-              ? theme.colors.warn
-              : download === 'stored'
-                ? theme.colors.accent
-                : theme.colors.textSecondary
-          }
-          accessibilityLabel={
-            download === 'stored'
-              ? t('stage.download.storedA11y')
-              : download === 'failed'
-                ? t('stage.download.failedA11y')
-                : download === 'queued' || download === 'downloading'
-                  ? t('stage.download.busyA11y')
-                  : t('stage.download.idleA11y')
-          }
-          active={download === 'stored'}
-          onPress={onDownload}
-          style={v.side}
-        />
-      )}
+      <IconButton
+        icon="repeat"
+        size={32}
+        iconSize={14}
+        color={
+          repeat === 'one' ? theme.colors.accent : theme.colors.textSecondary
+        }
+        accessibilityLabel={t('common.repeat')}
+        disabled={onCycleRepeat === undefined}
+        active={repeat === 'one'}
+        onPress={onCycleRepeat}
+        style={v.side}
+      />
     </View>
   );
 }
@@ -241,7 +222,7 @@ export function ModeSegment({
         gap: 2,
         backgroundColor: theme.colors.fg08,
         padding: 3,
-        borderRadius: theme.radius.control,
+        borderRadius: theme.radius.pill,
         marginTop: theme.spacing.md,
       }}
     >
@@ -249,6 +230,9 @@ export function ModeSegment({
         const active = m.key === mode;
         // M3E segmented-button: the selected segment reads as a tonal
         // (secondary-container) pill; iOS keeps the raised slab.
+        // The pill silhouette matches the rounded transport controls —
+        // only the fill differs per platform (tonal on Android, raised
+        // on iOS).
         const m3e = Platform.OS === 'android';
         const activeBg = m3e ? theme.colors.accentSoft : theme.colors.raised;
         const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
@@ -267,7 +251,7 @@ export function ModeSegment({
               justifyContent: 'center',
               gap: 7,
               minHeight: theme.sizes.touch,
-              borderRadius: m3e ? theme.radius.pill : 4,
+              borderRadius: theme.radius.pill,
               backgroundColor: active ? activeBg : 'transparent',
             }}
           >
@@ -329,6 +313,10 @@ function PlayerBackdrop({
         <BlurView
           intensity={80}
           tint="dark"
+          // Without an explicit method Android renders an opaque
+          // dimming veil — a hard-edged slab where the frost region
+          // begins. dimezis supplies real blur on SDK 31+.
+          experimentalBlurMethod="dimezisBlurView"
           style={StyleSheet.absoluteFill}
         />
         <Svg style={StyleSheet.absoluteFill}>
@@ -372,6 +360,9 @@ export type StageSheetProps = {
   readonly onToggleLike?: (() => void) | undefined;
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
+  readonly onAddToPlaylist?: (() => void) | undefined;
+  readonly repeat?: 'off' | 'one' | undefined;
+  readonly onCycleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
@@ -408,6 +399,9 @@ export function StageSheet({
   onToggleLike,
   download = null,
   onDownload,
+  onAddToPlaylist,
+  repeat = 'off',
+  onCycleRepeat,
   onSeek,
   onRetryLyrics,
   onStartRadio,
@@ -527,6 +521,64 @@ export function StageSheet({
           />
         </View>
       </GestureDetector>
+      {/* Radio lives top-center on the player surface, under the grab
+          handle — a seed affordance or the armed tail's status. */}
+      {activeMode === 'player' &&
+        radio !== undefined &&
+        (radio.armed || onStartRadio !== undefined) && (
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: theme.spacing.sm,
+              marginTop: theme.spacing.sm,
+            }}
+          >
+            <Icon
+              name="radio"
+              size={13}
+              color={
+                radio.armed && radio.status !== 'failed'
+                  ? theme.colors.accent
+                  : theme.colors.textSecondary
+              }
+            />
+            {radio.armed ? (
+              <>
+                <Text
+                  variant="metadata"
+                  color={radio.status === 'failed' ? 'warn' : 'secondary'}
+                >
+                  {radio.label}
+                  {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
+                  {radio.detail === null ? '' : ` · ${radio.detail}`}
+                </Text>
+                <Pressable
+                  compact
+                  onPress={onStopRadio}
+                  accessibilityLabel={t('stage.radio.stopA11y')}
+                  style={{ paddingHorizontal: theme.spacing.xs }}
+                >
+                  <Text variant="metadata" color="primary">
+                    {t('stage.radio.stop')}
+                  </Text>
+                </Pressable>
+              </>
+            ) : (
+              <Pressable
+                compact
+                onPress={onStartRadio}
+                accessibilityLabel={t('stage.radio.start')}
+                style={{ paddingHorizontal: theme.spacing.xs }}
+              >
+                <Text variant="metadata" color="secondary">
+                  {t('stage.radio.start')}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        )}
       {activeMode === 'player' && (
         <>
           {/* Title/artist bottom-anchored in the light-frost zone; the
@@ -584,6 +636,60 @@ export function StageSheet({
                   </Text>
                 )}
               </View>
+              {/* Ownership actions hug the right edge of the meta
+                  line — download state icon first, then the
+                  playlist-picker affordance. */}
+              {(download !== null || onAddToPlaylist !== undefined) && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: theme.spacing.xs,
+                  }}
+                >
+                  {download !== null && (
+                    <IconButton
+                      icon={
+                        download === 'stored'
+                          ? 'check'
+                          : download === 'failed'
+                            ? 'warn'
+                            : 'download'
+                      }
+                      size={36}
+                      iconSize={15}
+                      color={
+                        download === 'failed'
+                          ? theme.colors.warn
+                          : download === 'stored'
+                            ? theme.colors.accent
+                            : theme.colors.textSecondary
+                      }
+                      accessibilityLabel={
+                        download === 'stored'
+                          ? t('stage.download.storedA11y')
+                          : download === 'failed'
+                            ? t('stage.download.failedA11y')
+                            : download === 'queued' || download === 'downloading'
+                              ? t('stage.download.busyA11y')
+                              : t('stage.download.idleA11y')
+                      }
+                      active={download === 'stored'}
+                      onPress={onDownload}
+                    />
+                  )}
+                  {onAddToPlaylist !== undefined && (
+                    <IconButton
+                      icon="list-plus"
+                      size={36}
+                      iconSize={15}
+                      color={theme.colors.textSecondary}
+                      accessibilityLabel={t('sheets.addToPlaylist')}
+                      onPress={onAddToPlaylist}
+                    />
+                  )}
+                </View>
+              )}
             </View>
           </View>
           <WaveformSeek
@@ -605,69 +711,10 @@ export function StageSheet({
               onPrevious={onPrevious}
               onNext={onNext}
               onToggleLike={onToggleLike}
-              download={download}
-              onDownload={onDownload}
+              repeat={repeat}
+              onCycleRepeat={onCycleRepeat}
             />
           </View>
-          {/*
-           * The live radio element: a seed affordance when no tail is
-           * armed, the tail's honest status when one is — 'failed'
-           * carries the typed message, and stop always clears.
-           */}
-          {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: theme.spacing.sm,
-                marginTop: theme.spacing.md,
-              }}
-            >
-              <Icon
-                name="radio"
-                size={13}
-                color={
-                  radio.armed && radio.status !== 'failed'
-                    ? theme.colors.accent
-                    : theme.colors.textSecondary
-                }
-              />
-              {radio.armed ? (
-                <>
-                  <Text
-                    variant="metadata"
-                    color={radio.status === 'failed' ? 'warn' : 'secondary'}
-                  >
-                    {radio.label}
-                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
-                    {radio.detail === null ? '' : ` · ${radio.detail}`}
-                  </Text>
-                  <Pressable
-                    compact
-                    onPress={onStopRadio}
-                    accessibilityLabel={t('stage.radio.stopA11y')}
-                    style={{ paddingHorizontal: theme.spacing.xs }}
-                  >
-                    <Text variant="metadata" color="primary">
-                      {t('stage.radio.stop')}
-                    </Text>
-                  </Pressable>
-                </>
-              ) : (
-                <Pressable
-                  compact
-                  onPress={onStartRadio}
-                  accessibilityLabel={t('stage.radio.start')}
-                  style={{ paddingHorizontal: theme.spacing.xs }}
-                >
-                  <Text variant="metadata" color="secondary">
-                    {t('stage.radio.start')}
-                  </Text>
-                </Pressable>
-              )}
-            </View>
-          )}
         </>
       )}
       {activeMode === 'lyrics' && (

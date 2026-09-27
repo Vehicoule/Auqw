@@ -28,6 +28,7 @@ export const en = {
   'common.previous': 'previous',
   'common.rename': 'rename',
   'common.save': 'save',
+  'common.repeat': 'repeat',
   'common.unlike': 'unlike',
   'common.unavailable': 'unavailable',
   'common.cardA11y': '{title}, {subtitle}',
