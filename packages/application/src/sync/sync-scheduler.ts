@@ -63,6 +63,12 @@ type PeerTrack = {
   dirty: boolean;
   /** Current reconnect delay; doubles on each failed round. */
   backoffMs: number;
+  /**
+   * Absolute epoch-ms a rate-limited peer asked us to wait until —
+   * every wake path clamps behind it so a connectivity flap or a
+   * local write can't fire a round inside the floor.
+   */
+  notBeforeMs?: number;
   /** A scheduler-owned round is in flight. */
   running: boolean;
 };
@@ -181,11 +187,22 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       track.timer = null;
       track.debouncing = false;
     }
+    // A live retry-after floor rewrites the wake, whichever path
+    // armed it — recovery edges and write debounces stand behind the
+    // peer's asked-for wait instead of firing early.
+    const floor = track.notBeforeMs;
+    let wakeMs = delayMs;
+    if (floor !== undefined) {
+      const now = safeNow();
+      if (now !== null && now < floor) {
+        wakeMs = Math.max(wakeMs, floor - now);
+      }
+    }
     const timer = new CancellationSource();
     track.timer = timer;
     track.debouncing = mode === 'debounce';
     const work = (async () => {
-      const slept = await deps.clock.sleep(delayMs, timer.signal);
+      const slept = await deps.clock.sleep(wakeMs, timer.signal);
       // Only OUR sleep clears the slot — a replacement armed while
       // this one was in flight must stay cancelable.
       if (track.timer === timer) {
@@ -204,6 +221,14 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
     const track = trackFor(fp);
     if (track.running || lifecycle.signal.cancelled || !online()) {
       track.dirty = true;
+      return;
+    }
+    // A timer armed before a rate-limit floor landed still defers to
+    // it — reschedule at the floor instead of firing inside it.
+    const floor = track.notBeforeMs;
+    const floorNow = safeNow();
+    if (floor !== undefined && floorNow !== null && floorNow < floor) {
+      schedule(fp, floor - floorNow, 'replace');
       return;
     }
     track.running = true;
@@ -235,6 +260,14 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             hint !== undefined && isSafeNonNegative(hint)
               ? Math.max(track.backoffMs, hint)
               : track.backoffMs;
+          const hintedAt = safeNow();
+          if (
+            hint !== undefined &&
+            isSafeNonNegative(hint) &&
+            hintedAt !== null
+          ) {
+            track.notBeforeMs = hintedAt + hint;
+          }
           track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         } else if (
           result.error.kind === 'budget-exceeded' &&
@@ -315,6 +348,14 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
           hint !== undefined && isSafeNonNegative(hint)
             ? Math.max(track.backoffMs, hint)
             : track.backoffMs;
+        const hintedAt = safeNow();
+        if (
+          hint !== undefined &&
+          isSafeNonNegative(hint) &&
+          hintedAt !== null
+        ) {
+          track.notBeforeMs = hintedAt + hint;
+        }
         track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         schedule(view.peer.fp, wait, 'stand');
       } else if (

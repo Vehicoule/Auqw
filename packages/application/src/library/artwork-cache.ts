@@ -467,7 +467,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       deadlineMs: context.deadlineMs,
       signal: context.signal,
       clock: deps.clock,
-      call: () => call(() => deps.fetch.download(url, destPath, context.signal)),
+      // The attempt's child signal, not the outer work signal — the
+      // deadline watchdog cancels it so a timed-out download stops
+      // writing rather than racing a replacement to the same path.
+      call: (signal) => call(() => deps.fetch.download(url, destPath, signal)),
     });
     if (!downloaded.ok) {
       // Honest miss: the typed error crosses back, nothing is cached.

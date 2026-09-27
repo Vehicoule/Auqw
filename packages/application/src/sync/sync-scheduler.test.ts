@@ -763,12 +763,56 @@ async function rateLimitHintFloorsBackoff(): Promise<void> {
   scheduler.stop();
 }
 
+async function rateLimitFloorSurvivesRecovery(): Promise<void> {
+  const { client, clock, scheduler } = rig({
+    debounceMs: 500,
+    reconnectBaseMs: 1_000,
+    reconnectMaxMs: 8_000,
+  });
+  client.peersList = [peer('fp-a')];
+  client.peerViews.set('fp-a', { state: 'open' });
+  scheduler.start();
+  await pump();
+  clock.advance(0);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 1, 'launch round ran');
+  // A 30 s floor lands from the failed round at t=500 (expiry
+  // t=30_500). A connectivity flap inside the floor must not fire
+  // an early recovery round.
+  client.outcomes = [err(appError('rate-limit', 'slow down', 30_000))];
+  scheduler.notifyLocalWrites();
+  clock.advance(500);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'rate-limited round ran');
+  scheduler.notifyConnectivity(false);
+  scheduler.notifyConnectivity(true);
+  clock.advance(1_000);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    2,
+    'recovery edge stands behind the floor',
+  );
+  clock.advance(28_999);
+  await pump();
+  assertEqual(client.syncNowCalls.length, 2, 'floor not yet reached');
+  clock.advance(1);
+  await pump();
+  assertEqual(
+    client.syncNowCalls.length,
+    3,
+    'recovery round lands at the floor',
+  );
+  scheduler.stop();
+}
+
 export async function run(): Promise<void> {
   await onLaunchRoundPerPeer();
   await debouncedOnChange();
   await writeBurstTrailingEdge();
   await unreachableDialReconnects();
   await rateLimitHintFloorsBackoff();
+  await rateLimitFloorSurvivesRecovery();
   await writeStandsBehindBackoff();
   await pageCapProgressContinues();
   await stopStartAcrossInFlightRound();

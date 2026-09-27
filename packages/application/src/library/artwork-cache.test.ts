@@ -630,6 +630,34 @@ async function abandonedGetCannotPoison(): Promise<void> {
   assertEqual(r.fetch.calls.length, 2, 'no refetch after the race');
 }
 
+async function deadlineCancelsDownloadSignal(): Promise<void> {
+  const r = rig(persisted());
+  // A hung transfer that ignores even its own signal — the deadline
+  // watchdog must still cancel the signal it was handed so the port
+  // knows the budget died.
+  r.fetch.deaf = true;
+  const source = new CancellationSource();
+  const context: OperationContext = {
+    requestId: 'test-req',
+    deadlineMs: r.clock.nowMs() + 10_000,
+    signal: source.signal,
+  };
+  const pending = r.cache.get(A, context);
+  await pump();
+  assertEqual(r.fetch.calls.length, 1, 'download in flight');
+  r.clock.advance(10_000);
+  const res = await pending;
+  assert(!res.ok && res.error.kind === 'timeout', 'deadline surfaces timeout');
+  assert(
+    r.fetch.calls[0]?.signal.cancelled === true,
+    'watchdog cancellation reached the transfer signal',
+  );
+  assert(
+    source.signal.cancelled === false,
+    'the caller signal is untouched — only the attempt child died',
+  );
+}
+
 async function cancellation(): Promise<void> {
   const r = rig(persisted());
   const dead = new CancellationSource();
@@ -828,6 +856,7 @@ export async function run(): Promise<void> {
   await oversizeEntryRejected();
   await coalescedConcurrentGets();
   await abandonedGetCannotPoison();
+  await deadlineCancelsDownloadSignal();
   await cancellation();
   await storageFailures();
   await sweepShrinkAndNoop();

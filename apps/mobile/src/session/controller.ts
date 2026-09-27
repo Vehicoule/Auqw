@@ -693,7 +693,23 @@ export async function createSessionController(
           // on-launch round — a round that exports first carries a
           // page missing them, and a flush landing after notifies
           // nobody, so they'd sit unsynced until the next trigger.
-          const flushed = await emitWrites([]);
+          // A failed flush re-pends the buffer with no other wake
+          // until the next edit, so retry bounded here; a still-
+          // failing prefix stays buffered for the next emitWrites.
+          let flushed = await emitWrites([]);
+          for (
+            let attempt = 0;
+            !flushed.ok && attempt < 3 && !signal.cancelled;
+            attempt += 1
+          ) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, 400 * (attempt + 1)),
+            );
+            if (signal.cancelled) {
+              break;
+            }
+            flushed = await emitWrites([]);
+          }
           if (!flushed.ok) {
             void log.write({
               level: 'warn',
