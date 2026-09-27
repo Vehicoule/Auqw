@@ -84,47 +84,57 @@ export function MiniPlayer({
   const busy = player.status === 'preparing' || player.status === 'buffering';
   // Stable gesture object — a fresh Pan() per render would cancel an
   // in-flight swipe when the position tick re-renders the row.
-  // Horizontal swipes keep their release-threshold semantics
-  // (next/previous); the vertical pan owns the rise/dismiss axis.
+  // ONE pan owns both axes (the pre-morph structure — a Race of two
+  // pans ate taps before the inner pressables could resolve): it
+  // activates on either axis, tracks the rise only while vertical
+  // dominates, and the release picks the axis by dominance.
   const swipe = useMemo(() => {
-    const horizontal = Gesture.Pan()
+    const travelPx = () => {
+      'worklet';
+      const measured =
+        sheetTravel !== undefined && sheetTravel.value > 0
+          ? sheetTravel.value
+          : windowHeight;
+      return Math.max(1, measured);
+    };
+    return Gesture.Pan()
       .activeOffsetX([-12, 12])
-      .failOffsetY([-24, 24])
-      .onEnd((e) => {
-        if (e.translationX < -40 && onNext !== undefined) {
-          scheduleOnRN(onNext);
-        } else if (e.translationX > 40 && onPrevious !== undefined) {
-          scheduleOnRN(onPrevious);
-        }
-      });
-    const vertical = Gesture.Pan()
       .activeOffsetY([-8, 8])
-      .failOffsetX([-24, 24])
       .onBegin(() => {
         if (sheetProgress !== undefined) {
           dragStart.value = sheetProgress.value;
         }
       })
       .onUpdate((e) => {
-        if (sheetProgress !== undefined) {
-          const travel =
-            sheetTravel !== undefined && sheetTravel.value > 0
-              ? sheetTravel.value
-              : windowHeight;
-          sheetProgress.value = Math.min(
-            1,
-            Math.max(0, dragStart.value - e.translationY / Math.max(1, travel)),
-          );
-        }
+        if (sheetProgress === undefined) return;
+        // Horizontal intent owns the recognizer without lifting the
+        // sheet — only a vertically-dominant pull writes progress.
+        if (Math.abs(e.translationX) > Math.abs(e.translationY)) return;
+        sheetProgress.value = Math.min(
+          1,
+          Math.max(0, dragStart.value - e.translationY / travelPx()),
+        );
       })
       .onFinalize((e) => {
         if (sheetProgress === undefined) {
           // Static hosts (the gallery) keep the release-threshold
           // contract — no shared progress to track.
-          if (e.translationY > 40 && onDismiss !== undefined) {
+          if (e.translationX < -40 && onNext !== undefined) {
+            scheduleOnRN(onNext);
+          } else if (e.translationX > 40 && onPrevious !== undefined) {
+            scheduleOnRN(onPrevious);
+          } else if (e.translationY > 40 && onDismiss !== undefined) {
             scheduleOnRN(onDismiss);
           } else if (e.translationY < -40 && onPress !== undefined) {
             scheduleOnRN(onPress);
+          }
+          return;
+        }
+        if (Math.abs(e.translationX) >= Math.abs(e.translationY)) {
+          if (e.translationX < -40 && onNext !== undefined) {
+            scheduleOnRN(onNext);
+          } else if (e.translationX > 40 && onPrevious !== undefined) {
+            scheduleOnRN(onPrevious);
           }
           return;
         }
@@ -138,12 +148,7 @@ export function MiniPlayer({
           scheduleOnRN(onDismiss);
           return;
         }
-        const travel = Math.max(
-          1,
-          sheetTravel !== undefined && sheetTravel.value > 0
-            ? sheetTravel.value
-            : windowHeight,
-        );
+        const travel = travelPx();
         const target =
           resolveStageAnchor(
             dragStart.value,
@@ -165,7 +170,6 @@ export function MiniPlayer({
           scheduleOnRN(onCollapse);
         }
       });
-    return Gesture.Race(vertical, horizontal);
   }, [
     onNext,
     onPrevious,
