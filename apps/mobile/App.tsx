@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   BackHandler,
   Linking,
   Platform,
   StyleSheet,
   View,
+  useColorScheme,
   useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -125,6 +127,7 @@ import type {
   ProviderPickerOption,
   SearchStateModel,
   StageMode,
+  ThemeSource,
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-native';
@@ -206,7 +209,7 @@ function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
   );
 }
 
-const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
+const THEME_ORDER = ['system', 'adaptive', 'dark', 'light', 'oled'] as const;
 
 // Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
 // bound; 128 is the spec default (providers.md).
@@ -227,6 +230,11 @@ function themeOptions(): readonly ProviderPickerOption[] {
       key: 'system',
       label: t('settings.themeValue.system'),
       detail: t('optionDetail.themeSystem'),
+    },
+    {
+      key: 'adaptive',
+      label: t('settings.themeValue.adaptive'),
+      detail: t('optionDetail.themeAdaptive'),
     },
     // 'tokyo night' is the color scheme's name, not UI copy.
     {
@@ -398,6 +406,78 @@ function BootGate({
   );
 }
 
+/**
+ * 'adaptive' asks the OS for its palette: Android 12+ reads the
+ * Material You system_accent / system_neutral tonal stops — the flag
+ * chooses which tone serves bg vs fg and accent1_200 vs _600 — while
+ * iOS exposes no palette and resolves flag-only (same as 'system').
+ * There's no push channel for wallpaper-driven changes, so the read
+ * repeats when the app returns to the foreground.
+ */
+function useAdaptiveSource(enabled: boolean): ThemeSource | null {
+  // useColorScheme() can return null — match ThemeProvider's light
+  // fallback rather than guessing dark.
+  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const [tones, setTones] = useState<AuqwExpo.SystemTonalPalette | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!enabled || Platform.OS !== 'android') {
+      setTones(null);
+      return undefined;
+    }
+    let live = true;
+    // A reselection must not flash the previous read's palette — start
+    // flag-only until the fresh read lands.
+    setTones(null);
+    // Overlapping reads can resolve out of order (a stalled first read
+    // landing after a foreground refresh); only the newest generation
+    // may write.
+    let generation = 0;
+    const read = () => {
+      const mine = ++generation;
+      void AuqwExpo.systemTonalPalette()
+        .then((next) => {
+          if (live && mine === generation) {
+            setTones(next);
+          }
+        })
+        .catch(() => {
+          if (live && mine === generation) {
+            setTones(null);
+          }
+        });
+    };
+    read();
+    const sub = AppState.addEventListener('change', (status) => {
+      if (status === 'active') {
+        read();
+      }
+    });
+    return () => {
+      live = false;
+      sub.remove();
+    };
+  }, [enabled]);
+  return useMemo<ThemeSource | null>(() => {
+    if (!enabled) {
+      return null;
+    }
+    if (tones === null) {
+      return { scheme };
+    }
+    return {
+      scheme,
+      palette: {
+        bg: scheme === 'dark' ? tones.neutral1_900 : tones.neutral1_50,
+        fg: scheme === 'dark' ? tones.neutral1_50 : tones.neutral1_900,
+        accent:
+          scheme === 'dark' ? tones.accent1_200 : tones.accent1_600,
+      },
+    };
+  }, [enabled, tones, scheme]);
+}
+
 function Shell({ controller }: { readonly controller: SessionController }) {
   const [state, setState] = useState<SessionState>(() =>
     controller.session.snapshot(),
@@ -421,10 +501,11 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     [controller],
   );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
+  const source = useAdaptiveSource(theme === 'adaptive');
   // OS font scale feeds textScale — accessibility sizing isn't opt-in.
   const { fontScale } = useWindowDimensions();
   return (
-    <ThemeProvider theme={theme} textScale={fontScale}>
+    <ThemeProvider theme={theme} textScale={fontScale} source={source}>
       <ArtworkResolverProvider resolve={resolveArtwork}>
         {state.type === 'ready' ? (
           <Main controller={controller} state={state} />

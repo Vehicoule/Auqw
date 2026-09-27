@@ -60,14 +60,14 @@ Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes
 
 States carry meaning beyond color: playing = accent text **and** eq overlay on the thumb; liked = filled pink heart; unavailable = dimmed + warn glyph; selected = alpha fill + weight. `playback.active` = `accent.active` (split only if the two meanings differ beyond color). No decorative text below 4.5:1; decorative-only roles (grab handles, hints) may sit below.
 
-### Scheme sources (deferred — see decisions.md)
+### Scheme sources
 
-The token set is a small ramp, so an external palette maps onto it mechanically. A `ThemeSourcePort` emits `{scheme, palette?}`; one generator turns `{bg, fg, accent, warn?, sel?}` into a full scheme — `stage/deep/raise` as luminance steps off `bg`, hairlines as `fg` alphas, `accent-soft` = accent @14%, `text.secondary` = fg mixed toward bg — with a contrast guard that nudges derived text roles toward the source until ≥4.5:1 or falls back to the built-in scheme honestly.
+The token set is a small ramp, so an external palette maps onto it mechanically. A `ThemeSourcePort` emits `{scheme, palette?}`; one generator (`deriveScheme` in `@auqw/design-tokens/adaptive`) turns `{bg, fg, accent, warn?, sel?}` into a full scheme — `stage/deep/raise` as luminance steps off `bg`, hairlines as `fg` alphas, `accent-soft` = accent @14% (an OS `sel` color overrides it), `text.secondary` = fg mixed toward bg — with a contrast guard that nudges derived text roles toward the source until ≥4.5:1 or falls back to the built-in scheme honestly. A palette carrying only `accent`/`warn`/`sel` overlays those roles on the flag-polarity built-in; polarity for a full palette is read off `bg` itself.
 
 | Surface | Source | Yields |
 |---|---|---|
-| Omarchy | watch `current/theme/colors.toml` (`~/.config/omarchy/`; newer builds `~/.local/state/omarchy/`) | full palette + light/dark mode |
-| KDE | `~/.config/kdeglobals` `[Colors:*]` | full palette |
+| Omarchy | watch `current/theme/colors.toml` (`~/.config/omarchy/`; newer builds `~/.local/state/omarchy/`) — Omarchy/Hyprland sessions only, so a stale file on another DE can't win | full palette + light/dark mode |
+| KDE | `~/.config/kdeglobals` `[Colors:*]`, portal accent when globals lack usable colors | full palette |
 | GNOME 47+ | portal `org.freedesktop.appearance accent-color` | accent only |
 | Windows / macOS | Electron `systemPreferences.getAccentColor()` / `getColor('control-accent-color')` | accent only |
 | Android 12+ | Material You `system_accent*` via a small Expo module | tonal palette |

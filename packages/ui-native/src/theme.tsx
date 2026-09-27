@@ -13,11 +13,13 @@ import {
   strokes,
   typography,
 } from '@auqw/design-tokens';
+import { deriveScheme } from '@auqw/design-tokens/adaptive';
 import type { SchemeName, ThemeName } from '@auqw/design-tokens';
+import type { SchemeValues, ThemeSource } from '@auqw/design-tokens/adaptive';
 
 export type Theme = {
   readonly scheme: SchemeName;
-  readonly colors: (typeof schemes)[SchemeName];
+  readonly colors: SchemeValues;
   readonly spacing: typeof spacing;
   readonly radius: typeof radius;
   readonly sizes: typeof sizes;
@@ -35,6 +37,12 @@ export type ThemeProviderProps = {
   readonly theme?: ThemeName;
   readonly reducedMotion?: boolean;
   readonly textScale?: number;
+  /**
+   * The OS palette the 'adaptive' theme derives from (system tonal
+   * stops on Android 12+, none elsewhere). `null` resolves like
+   * 'system'.
+   */
+  readonly source?: ThemeSource | null;
   readonly children: ReactNode;
 };
 
@@ -42,15 +50,19 @@ export function ThemeProvider({
   theme = 'system',
   reducedMotion,
   textScale = 1,
+  source = null,
   children,
 }: ThemeProviderProps) {
   const system = useColorScheme();
   const systemReduced = useReducedMotion();
   const value = useMemo<Theme>(() => {
-    const scheme = resolveTheme(theme, system === 'dark' ? 'dark' : 'light');
+    const live = system === 'dark' ? 'dark' : 'light';
+    const derived =
+      theme === 'adaptive' ? deriveScheme(source, live) : null;
+    const scheme = derived?.scheme ?? resolveTheme(theme, live);
     return {
       scheme,
-      colors: schemes[scheme],
+      colors: derived?.values ?? schemes[scheme],
       spacing,
       radius,
       sizes,
@@ -64,7 +76,7 @@ export function ThemeProvider({
       // guards against a degenerate value zeroing text.
       textScale: Math.min(2, Math.max(0.5, textScale)),
     };
-  }, [theme, system, reducedMotion, systemReduced, textScale]);
+  }, [theme, source, system, reducedMotion, systemReduced, textScale]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 

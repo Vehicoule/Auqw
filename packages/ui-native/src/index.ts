@@ -1,5 +1,7 @@
 export { ThemeProvider, useTheme } from './theme.tsx';
 export type { Theme, ThemeProviderProps } from './theme.tsx';
+// The adaptive-theme source contract — apps read OS palettes into it.
+export type { ThemeSource } from '@auqw/design-tokens/adaptive';
 
 export {
     ArtworkResolverProvider,

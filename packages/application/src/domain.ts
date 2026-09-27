@@ -129,7 +129,7 @@ export type Settings = {
   playbackProvider: string;
   storefront: string | null;
   qualityKbps: number;
-  theme: 'dark' | 'light' | 'oled' | 'system';
+  theme: 'dark' | 'light' | 'oled' | 'system' | 'adaptive';
   prefetch: boolean;
   /**
    * Per-capability provider overrides for lyrics and radio; `null`
@@ -524,7 +524,8 @@ export function isSettings(value: unknown): value is Settings {
     (value['theme'] === 'dark' ||
       value['theme'] === 'light' ||
       value['theme'] === 'oled' ||
-      value['theme'] === 'system') &&
+      value['theme'] === 'system' ||
+      value['theme'] === 'adaptive') &&
     typeof value['prefetch'] === 'boolean' &&
     (value['lyricsProvider'] === undefined ||
       isOptString(value['lyricsProvider'], 64)) &&

@@ -4,12 +4,13 @@
   "version": "0.0.1-alpha.1",
   "type": "module",
   "exports": {
-    ".": "./src/tokens.ts"
+    ".": "./src/tokens.ts",
+    "./adaptive": "./src/adaptive.ts"
   },
   "scripts": {
     "generate": "node tooling/generate.mjs",
     "check": "node tooling/test.mjs --check",
     "typecheck": "tsc --noEmit",
-    "test": "node tooling/test.mjs"
+    "test": "node tooling/test.mjs && node --experimental-strip-types tooling/adaptive.test.mjs"
   }
 }

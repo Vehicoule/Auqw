@@ -8,6 +8,11 @@ export const CHANNELS = {
   netEvents: 'net:events',
   netSubscribe: 'net:subscribe',
   netUnsubscribe: 'net:unsubscribe',
+  /** Main→renderer push of the OS theme source for the `adaptive`
+      setting; subscribe/unsubscribe gate the platform watchers. */
+  themeEvents: 'theme:events',
+  themeSubscribe: 'theme:subscribe',
+  themeUnsubscribe: 'theme:unsubscribe',
   secureGet: 'secure:get',
   secureSet: 'secure:set',
   secureDelete: 'secure:delete',

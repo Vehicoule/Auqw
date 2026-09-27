@@ -8,6 +8,7 @@ import {
   net,
   safeStorage,
   screen,
+  systemPreferences,
   utilityProcess,
 } from 'electron';
 import type {
@@ -15,20 +16,25 @@ import type {
   TitleBarOverlay,
   WebContents,
 } from 'electron';
+import { execFile } from 'node:child_process';
+import { readFileSync, watch } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { schemes } from '@auqw/design-tokens';
-import type { SchemeName } from '@auqw/design-tokens';
 import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { fromUnknown, isShellError, shellError } from '../shared/errors.ts';
 import { redactSensitive } from '../shared/redact.ts';
 import {
+  isChromeSchemePayload,
   isSyncAppliedEvent,
   isSyncNearbyEvent,
 } from '../shared/contract.ts';
+import type { ChromeSchemePayload } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
 import { createNetService } from './net-monitor.ts';
+import { createThemeMonitor } from './theme-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
 import {
@@ -227,6 +233,93 @@ async function main(): Promise<void> {
   const netService = createNetService({
     readOnline: () => net.isOnline(),
   });
+  // OS theme source for the 'adaptive' setting: Linux reads Omarchy
+  // colors.toml / KDE kdeglobals / the GNOME 47+ portal accent via
+  // gdbus; win32/darwin take the Electron systemPreferences accent
+  // (UNVERIFIED on this Linux dev box — the call shape is Electron's
+  // documented one). Watchers run only while a renderer is subscribed.
+  const themeMonitor = createThemeMonitor({
+    env: {
+      platform: process.platform,
+      home: homedir(),
+      env: process.env,
+      readFileSync: (path) => {
+        try {
+          return readFileSync(path, 'utf8');
+        } catch {
+          return null;
+        }
+      },
+      execFile: (file, args, timeoutMs) =>
+        // Async on purpose: a hanging portal must not stall the main
+        // process — a sync read would freeze IPC/window events for the
+        // full timeout on every poll tick.
+        new Promise<string | null>((resolve) => {
+          execFile(
+            file,
+            [...args],
+            { encoding: 'utf8', timeout: timeoutMs },
+            (error, stdout) => {
+              resolve(error === null ? stdout : null);
+            },
+          );
+        }),
+      watch: (path, onChange) => {
+        try {
+          const watcher = watch(path, { persistent: false }, onChange);
+          // An async watch error (dir removed, fd limits) must not
+          // escape as an uncaught exception in main — drop the watcher;
+          // the poll loop still tracks the path.
+          watcher.on('error', () => watcher.close());
+          return () => watcher.close();
+        } catch {
+          return null;
+        }
+      },
+      darkFlag: () => nativeTheme.shouldUseDarkColors,
+      systemAccent: () => {
+        try {
+          if (process.platform === 'win32') {
+            // 'RRGGBBAA' (unprefixed on win32 — tolerate a '#' anyway)
+            // — the scheme roles only take the rgb half.
+            const raw = systemPreferences
+              .getAccentColor()
+              .replace(/^#/, '');
+            return `#${raw.slice(0, 6)}`;
+          }
+          if (process.platform === 'darwin') {
+            // 'control-accent-color' predates the installed Electron
+            // typings' color-name list — cast keeps the spec's name.
+            return systemPreferences.getColor(
+              'control-accent-color' as Parameters<
+                typeof systemPreferences.getColor
+              >[0],
+            );
+          }
+        } catch {
+          // accent unset / API absent
+        }
+        return null;
+      },
+      onSystemChange: (cb) => {
+        nativeTheme.on('updated', cb);
+        let offAccent: (() => void) | null = null;
+        if (process.platform === 'win32') {
+          systemPreferences.on('accent-color-changed', cb);
+          offAccent = () =>
+            systemPreferences.removeListener('accent-color-changed', cb);
+        } else if (process.platform === 'darwin') {
+          systemPreferences.on('color-changed', cb);
+          offAccent = () =>
+            systemPreferences.removeListener('color-changed', cb);
+        }
+        return () => {
+          nativeTheme.removeListener('updated', cb);
+          offAccent?.();
+        };
+      },
+    },
+  });
   const appliedPush = createAppliedPushService();
   const nearbyPush = createNearbyPushService();
   const supervisor = createSupervisor({
@@ -304,6 +397,7 @@ async function main(): Promise<void> {
       return result.canceled ? [] : result.filePaths;
     },
     net: netService,
+    theme: themeMonitor,
     syncApplied: appliedPush,
     syncNearby: nearbyPush,
     secure,
@@ -316,13 +410,13 @@ async function main(): Promise<void> {
   // The renderer reports its resolved ui-web scheme (which may differ
   // from the OS theme when the user picked an explicit one) so the
   // window-control overlay can re-tint itself to match the canvas.
-  ipcMain.on(CHANNELS.chromeScheme, (event, scheme) => {
-    if (!isSchemeName(scheme) || process.platform === 'darwin') {
+  ipcMain.on(CHANNELS.chromeScheme, (event, payload) => {
+    if (!isChromeSchemePayload(payload) || process.platform === 'darwin') {
       return;
     }
     const sender = BrowserWindow.fromWebContents(event.sender);
     try {
-      sender?.setTitleBarOverlay(titleBarOverlay(scheme));
+      sender?.setTitleBarOverlay(titleBarOverlay(payload));
     } catch {
       // platform without a working window-control overlay — ignore
     }
@@ -361,19 +455,20 @@ async function main(): Promise<void> {
   });
   app.on('will-quit', () => {
     netService.stop();
+    themeMonitor.stop();
     appliedPush.stop();
     nearbyPush.stop();
     supervisor.shutdown();
   });
 }
 
-function titleBarOverlay(scheme: SchemeName): TitleBarOverlay {
-  const tokens = schemes[scheme];
-  return { color: tokens.canvas, symbolColor: tokens.textBright, height: 40 };
-}
-
-function isSchemeName(value: unknown): value is SchemeName {
-  return value === 'dark' || value === 'light' || value === 'oled';
+function titleBarOverlay(payload: ChromeSchemePayload): TitleBarOverlay {
+  const tokens = schemes[payload.scheme];
+  return {
+    color: payload.canvas ?? tokens.canvas,
+    symbolColor: payload.symbol ?? tokens.textBright,
+    height: 40,
+  };
 }
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
@@ -398,9 +493,9 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   if (isMac) {
     options.trafficLightPosition = { x: 14, y: 12 };
   } else {
-    options.titleBarOverlay = titleBarOverlay(
-      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
-    );
+    options.titleBarOverlay = titleBarOverlay({
+      scheme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    });
   }
   if (!app.isPackaged) {
     options.icon = WINDOW_ICON;

@@ -107,6 +107,7 @@ import type {
   SyncPairingResult,
   SyncStatusResult,
 } from '../shared/contract.ts';
+import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { isSyncDeltaDoc } from '../shared/contract.ts';
 import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
@@ -133,7 +134,7 @@ function navItems(): readonly NavItemModel[] {
   ];
 }
 
-const THEME_ORDER = ['system', 'dark', 'light', 'oled'] as const;
+const THEME_ORDER = ['system', 'adaptive', 'dark', 'light', 'oled'] as const;
 
 function themeOptions(): readonly ProviderPickerOption[] {
   return [
@@ -141,6 +142,11 @@ function themeOptions(): readonly ProviderPickerOption[] {
       key: 'system',
       label: t('settings.themeValue.system'),
       detail: t('optionDetail.themeSystem'),
+    },
+    {
+      key: 'adaptive',
+      label: t('settings.themeValue.adaptive'),
+      detail: t('optionDetail.themeAdaptive'),
     },
     // 'tokyo night' is the color scheme's name, not UI copy.
     {
@@ -286,8 +292,20 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     () => controller.session.snapshot(),
   );
   const theme = state.type === 'ready' ? state.settings.theme : 'system';
+  // The OS source is only worth watching while 'adaptive' is picked —
+  // subscribing is what powers up main's palette watchers.
+  const [themeSource, setThemeSource] = useState<ThemeSource | null>(null);
+  useEffect(() => {
+    if (theme !== 'adaptive') {
+      setThemeSource(null);
+      return undefined;
+    }
+    return window.auqw.theme.subscribe((event) => {
+      setThemeSource(event.source);
+    });
+  }, [theme]);
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={theme} source={themeSource}>
       <ChromeSchemeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
@@ -304,7 +322,7 @@ function Shell({ controller }: { readonly controller: SessionController }) {
     traffic lights, and measures the caption-button zone so toolbar
     controls keep clear of it on win32/linux. */
 function ChromeSchemeReporter(): null {
-  const { scheme } = useTheme();
+  const { scheme, canvas, textBright } = useTheme();
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.platform = window.auqw.chrome.platform;
@@ -335,9 +353,15 @@ function ChromeSchemeReporter(): null {
     // The caption zone can change without a theme change (resize,
     // overlay visibility) — re-measure on geometrychange.
     wco?.addEventListener('geometrychange', measureCaptions);
-    window.auqw.chrome.setScheme(scheme);
+    // canvas/symbol ride along so an adaptive palette re-tints the
+    // overlay too, not just the built-ins.
+    window.auqw.chrome.setScheme({
+      scheme,
+      canvas,
+      symbol: textBright,
+    });
     return () => wco?.removeEventListener('geometrychange', measureCaptions);
-  }, [scheme]);
+  }, [scheme, canvas, textBright]);
   return null;
 }
 

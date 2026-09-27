@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -321,6 +321,33 @@ const MIGRATION_7: readonly string[] = [
   `ALTER TABLE lyrics_cache ADD COLUMN provider_version TEXT`,
 ];
 
+/**
+ * v7 -> v8: `settings.theme` gains 'adaptive' (docs/specs/design.md
+ * "Scheme sources"). CHECK constraints are immutable in SQLite —
+ * same rebuild pattern `likes` took in v2: copy into a widened
+ * `settings_new`, drop, rename.
+ */
+const MIGRATION_8: readonly string[] = [
+  `CREATE TABLE settings_new (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  catalog_provider TEXT NOT NULL,
+  playback_provider TEXT NOT NULL,
+  storefront TEXT,
+  quality_kbps INTEGER NOT NULL CHECK (quality_kbps BETWEEN 1 AND 512),
+  theme TEXT NOT NULL CHECK (theme IN ('dark','light','oled','system','adaptive')),
+  prefetch INTEGER NOT NULL CHECK (prefetch IN (0,1)),
+  lyrics_provider TEXT,
+  radio_provider TEXT,
+  artwork_cache_bytes INTEGER CHECK (artwork_cache_bytes BETWEEN 16777216 AND 1073741824),
+  download_metered INTEGER NOT NULL DEFAULT 0 CHECK (download_metered IN (0,1)),
+  language TEXT
+)`,
+  `INSERT INTO settings_new (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+   SELECT id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language FROM settings`,
+  `DROP TABLE settings`,
+  `ALTER TABLE settings_new RENAME TO settings`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -330,6 +357,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_5]),
   Object.freeze([...MIGRATION_6]),
   Object.freeze([...MIGRATION_7]),
+  Object.freeze([...MIGRATION_8]),
 ]);
 
 const CREATED_OBJECT_NAME =

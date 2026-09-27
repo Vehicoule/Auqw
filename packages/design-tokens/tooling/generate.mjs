@@ -43,7 +43,7 @@ export function renderTokens(source) {
   ts += `export type SchemeName = ${schemeNames
     .map((n) => `'${n}'`)
     .join(' | ')};\n`;
-  ts += `export type ThemeName = SchemeName | 'system';\n\n`;
+  ts += `export type ThemeName = SchemeName | 'system' | 'adaptive';\n\n`;
 
   ts += 'export const schemes = {\n';
   for (const [scheme, roles] of Object.entries(source['schemes'])) {
@@ -102,10 +102,19 @@ export function renderTokens(source) {
   }
   ts += '} as const;\n\n';
 
-  ts += `export function resolveTheme(
+  ts += `/**
+ * Resolves a ThemeName to a concrete scheme. 'adaptive' without a
+ * derived scheme is the honest fallback — it resolves like 'system'
+ * (packages/design-tokens/src/adaptive.ts owns palette derivation).
+ */
+export function resolveTheme(
   theme: ThemeName,
   system: 'light' | 'dark',
+  adaptiveScheme?: 'light' | 'dark',
 ): SchemeName {
+  if (theme === 'adaptive') {
+    return adaptiveScheme ?? system;
+  }
   return theme === 'system' ? system : theme;
 }
 `;

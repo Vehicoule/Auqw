@@ -671,7 +671,8 @@ function isThemeValue(value: unknown): boolean {
     value === 'dark' ||
     value === 'light' ||
     value === 'oled' ||
-    value === 'system'
+    value === 'system' ||
+    value === 'adaptive'
   );
 }
 
