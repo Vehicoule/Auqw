@@ -1894,16 +1894,20 @@ function Main({
     playback.type === 'idle' ? null : playback.recordingId;
   const onPlayPause = useCallback(() => {
     // Pause is always allowed; resuming a remote track while offline
-    // would start a prepare that cannot finish.
+    // would start a prepare that cannot finish. The intent is the
+    // queue's mode, not transport: during a retry backoff playback
+    // publishes 'preparing' with no handle, and the tap must still
+    // pause.
+    const intentPlaying = state.queue.mode === 'playing';
     if (
-      !playing &&
+      !intentPlaying &&
       currentRecordingId !== null &&
       !canPlay(currentRecordingId)
     ) {
       return;
     }
-    void (playing ? session.pause() : session.resume());
-  }, [session, playing, currentRecordingId, canPlay]);
+    void (intentPlaying ? session.pause() : session.resume());
+  }, [session, state.queue.mode, currentRecordingId, canPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void session.toggleLike(currentRecordingId);

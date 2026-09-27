@@ -2365,19 +2365,23 @@ function Main({
     playback.type === 'idle' ? null : playback.recordingId;
   const onPlayPause = useCallback(() => {
     // Pause is always allowed; resuming an unowned remote track while
-    // offline would start a prepare that cannot finish.
+    // offline would start a prepare that cannot finish. The intent
+    // is the queue's mode, not transport: during a retry backoff
+    // playback publishes 'preparing' with no handle, and the tap
+    // must still pause.
+    const intentPlaying = state.queue.mode === 'playing';
     if (
-      !playing &&
+      !intentPlaying &&
       currentRecordingId !== null &&
       !canPlay(currentRecordingId)
     ) {
       return;
     }
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    void (playing ? session.pause() : session.resume()).then((r) =>
-      reportPlay(playing ? 'common.pause' : 'action.resume', r),
+    void (intentPlaying ? session.pause() : session.resume()).then((r) =>
+      reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
     );
-  }, [session, playing, currentRecordingId, canPlay, reportPlay]);
+  }, [session, state.queue.mode, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);

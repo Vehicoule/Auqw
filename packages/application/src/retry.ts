@@ -1,5 +1,6 @@
 import { appError, err } from './errors.ts';
 import type { AppError, Result } from './errors.ts';
+import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
 import type { ClockPort } from './ports/clock.ts';
 import { isSafeNonNegative } from './domain.ts';
@@ -12,6 +13,11 @@ import { isSafeNonNegative } from './domain.ts';
  * `retryAfterMs` is honored as a minimum wait, compared against the
  * remaining budget: a server-asked wait longer than the deadline
  * has left surfaces the failure instead of sleeping past it.
+ *
+ * The deadline binds the calls too, not just their scheduling: each
+ * invocation rides a child signal cancelled when the budget dies,
+ * and the wait races the remaining time so a hung port promise
+ * surfaces `timeout` rather than pinning the loop.
  *
  * Only `error.retryable` kinds retry — the taxonomy decides — so
  * cancellation, no-result, and validation failures pass through
@@ -97,10 +103,50 @@ export async function retryBounded<T>(
     if (!isSafeNonNegative(now)) {
       return err(internalError());
     }
-    if (opts.deadlineMs - now <= 0) {
+    const remaining = opts.deadlineMs - now;
+    if (remaining <= 0) {
       return err(attempt > 1 ? lastError : timeoutError());
     }
-    const result = await opts.call(opts.signal, attempt);
+    // The deadline binds the call itself, not only attempt starts:
+    // the call races a sleep of the remaining budget on a child
+    // signal — a hung port promise loses the race, gets cancelled,
+    // and surfaces 'timeout' instead of pinning the loop forever.
+    const attemptSource = new CancellationSource();
+    const watchdog = new CancellationSource();
+    // A parent cancel must wake the race too — it cancels the call's
+    // signal and aborts the deadline sleep so the loop unwinds
+    // immediately instead of waiting the remaining budget out.
+    const unbind = opts.signal.subscribe(() => {
+      attemptSource.cancel();
+      watchdog.cancel();
+    });
+    // The call starts synchronously (callers rely on the port being
+    // hit before `search()` returns); a synchronous throw still
+    // unwinds the subscription before propagating.
+    let callP: Promise<{ tag: 'call'; result: Result<T> } | { tag: 'call'; thrown: unknown }>;
+    try {
+      callP = opts.call(attemptSource.signal, attempt).then(
+        (result) => ({ tag: 'call' as const, result }),
+        (thrown: unknown) => ({ tag: 'call' as const, thrown }),
+      );
+    } catch (thrown) {
+      unbind();
+      throw thrown;
+    }
+    const sleepP = opts.clock
+      .sleep(remaining, watchdog.signal)
+      .then((slept) => ({ tag: 'sleep' as const, slept }));
+    const winner = await Promise.race([callP, sleepP]);
+    watchdog.cancel();
+    unbind();
+    if (winner.tag === 'sleep') {
+      attemptSource.cancel();
+      return err(winner.slept.ok ? timeoutError() : winner.slept.error);
+    }
+    if ('thrown' in winner) {
+      throw winner.thrown;
+    }
+    const result = winner.result;
     if (result.ok) {
       return result;
     }
@@ -117,8 +163,8 @@ export async function retryBounded<T>(
     if (!isSafeNonNegative(now2)) {
       return err(internalError());
     }
-    const remaining = opts.deadlineMs - now2;
-    if (remaining <= 0) {
+    const budgetLeft = opts.deadlineMs - now2;
+    if (budgetLeft <= 0) {
       // The attempt consumed the whole budget — its verdict stands.
       return result;
     }
@@ -138,7 +184,7 @@ export async function retryBounded<T>(
           ? Number.POSITIVE_INFINITY
           : Math.max(0, asked);
     const wait = Math.max(floor, backoff);
-    if (wait >= remaining) {
+    if (wait >= budgetLeft) {
       // The asked-for wait outlives the budget — retrying into a
       // dead deadline can only time out.
       return result;

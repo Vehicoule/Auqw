@@ -2554,7 +2554,7 @@ async function earlyPrepareFailure(): Promise<void> {
   assertEqual(
     readyOf(r).playback.type,
     'preparing',
-    'auto-retry holds preparing',
+    `auto-retry holds preparing, got ${readyOf(r).playback.type}`,
   );
   r.clock.advance(500);
   await pump();
@@ -2788,6 +2788,57 @@ async function prepareBudgetIsPerIntent(): Promise<void> {
     'retried attempt cannot stack its own retry',
   );
   assertEqual(readyOf(r2).playback.type, 'failed', 'terminal on spent budget');
+}
+
+async function pauseDuringRetryBackoff(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const snap = readyOf(r);
+  const idA = 'identity' in snap.playback ? snap.playback.identity : undefined;
+  assert(idA !== undefined, 'attempt identity');
+  r.player.emit(statusEvent(idA, 'h-o1', 'playing', 1_000));
+  await pump(4);
+  assertEqual(readyOf(r).playback.type, 'playing');
+  // Mid-play transient → backoff; the dead handle is gone and the
+  // state honestly republishes 'preparing' — the queue's intent
+  // still says playing.
+  r.player.emit(statusEvent(idA, 'h-o1', 'failed', 5_000));
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'preparing', 'backoff republished');
+  // The user pauses mid-backoff: no handle exists, so the intent
+  // lands on the queue alone.
+  const paused = await r.session.pause();
+  assert(paused.ok, 'pause lands during backoff');
+  assertEqual(readyOf(r).queue.mode, 'paused', 'intent paused');
+  // The retry still runs — recovery continues — but its prepared
+  // stream must hold paused instead of autostarting.
+  r.clock.advance(600);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'retry re-prepared');
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-o1b'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-h-o1b')), 'pending retry prepare');
+  await pump();
+  const after = readyOf(r);
+  assertEqual(after.playback.type, 'paused', 'replacement held paused');
+  assert(
+    'handle' in after.playback,
+    'paused playback carries the fresh handle',
+  );
+  assertEqual(calls(r, 'play').length, 1, 'never auto-played');
 }
 
 async function releaseRetry(): Promise<void> {
@@ -4301,6 +4352,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['retryAfterBeyondBudget', retryAfterBeyondBudget],
   ['listenedMsCarriesAcrossRetry', listenedMsCarriesAcrossRetry],
   ['prepareBudgetIsPerIntent', prepareBudgetIsPerIntent],
+  ['pauseDuringRetryBackoff', pauseDuringRetryBackoff],
   ['releaseRetry', releaseRetry],
   ['failedRetryReleaseIsNotStranded', failedRetryReleaseIsNotStranded],
   ['statusBoundary', statusBoundary],

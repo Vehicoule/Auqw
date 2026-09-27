@@ -1,4 +1,5 @@
 import { CancellationSource } from './cancellation.ts';
+import type { CancellationSignal } from './cancellation.ts';
 import { appError, err, ok } from './errors.ts';
 import type { Result } from './errors.ts';
 import { retryBounded } from './retry.ts';
@@ -248,7 +249,8 @@ async function timeoutVerdictAfterBudgetBurn(): Promise<void> {
   });
   await settle();
   // 300 ms of backoff fits the 500 ms remaining — the second call
-  // burns it all and the last verdict stands.
+  // burns it all. It still settles, so its verdict stands; the
+  // watchdog only beats calls still pending at the deadline.
   clock.advance(400);
   const result = await pending;
   assert(
@@ -418,6 +420,30 @@ async function cancelledSignalNeverCallsAgain(): Promise<void> {
   assertEqual(s.calls.length, 1, 'cancel after wake skips the call');
 }
 
+async function hungCallDiesAtDeadline(): Promise<void> {
+  const { clock, source } = rig();
+  // A port promise that never settles must not pin the loop — the
+  // deadline cancels the call's signal and surfaces 'timeout'.
+  const signals: CancellationSignal[] = [];
+  const pending = retryBounded({
+    deadlineMs: DEADLINE_MS,
+    signal: source.signal,
+    clock,
+    call: (signal) => {
+      signals.push(signal);
+      return new Promise<Result<string>>(() => { });
+    },
+  });
+  await settle();
+  assertEqual(signals.length, 1, 'call issued');
+  clock.advance(DEADLINE_MS - 1);
+  await settle();
+  clock.advance(1);
+  const result = await pending;
+  assert(!result.ok && result.error.kind === 'timeout', 'hung call timed out');
+  assert(signals[0]?.cancelled === true, 'deadline cancels the call signal');
+}
+
 export async function run(): Promise<void> {
   await succeedsFirstTry();
   await transientThenSuccess();
@@ -435,4 +461,5 @@ export async function run(): Promise<void> {
   await invalidOptionsFallBackSafely();
   await nonFiniteRetryAfterStandsVerdict();
   await cancelledSignalNeverCallsAgain();
+  await hungCallDiesAtDeadline();
 }

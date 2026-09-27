@@ -4459,6 +4459,13 @@ export class Session {
       );
     }
     if (!prepared.ok) {
+      // terminalError is set before a retry handoff or supersede
+      // cancels the source — the early wake is bookkeeping, not a
+      // fresh failure to publish. A bare deadline-cancelled call has
+      // no seal: its own verdict stands.
+      if (attempt.terminalError !== undefined) {
+        return err(attempt.terminalError);
+      }
       await this.#failAttempt(attempt, prepared.error);
       return prepared;
     }
@@ -4536,6 +4543,13 @@ export class Session {
       );
     }
     if (!result.ok) {
+      // terminalError is set before a retry handoff or supersede
+      // cancels the source — the early wake is bookkeeping, not a
+      // fresh failure to publish. A bare deadline-cancelled call has
+      // no seal: its own verdict stands.
+      if (attempt.terminalError !== undefined) {
+        return err(attempt.terminalError);
+      }
       // A source cancelled by the deadline or a retry handoff still
       // publishes the real verdict, not a bare 'superseded'.
       await this.#failAttempt(attempt, result.error);

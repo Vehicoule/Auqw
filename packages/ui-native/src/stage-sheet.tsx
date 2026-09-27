@@ -39,6 +39,12 @@ export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 export type TransportProps = {
   readonly variant?: 'm3e' | 'ios' | undefined;
   readonly status: PlayerModel['status'];
+  /**
+   * The user's play/pause intent (queue mode) — the glyph and action
+   * follow it even when transport is 'preparing' mid-retry, so pause
+   * still wins while no handle exists.
+   */
+  readonly intentPlaying: PlayerModel['intentPlaying'];
   readonly liked: boolean;
   readonly canPrevious: boolean;
   readonly canNext: boolean;
@@ -96,6 +102,7 @@ function transportVariant(
 export function TransportControls({
   variant = Platform.OS === 'ios' ? 'ios' : 'm3e',
   status,
+  intentPlaying,
   liked,
   canPrevious,
   canNext,
@@ -109,7 +116,7 @@ export function TransportControls({
   const theme = useTheme();
   const v = transportVariant(theme, variant);
   const busy = status === 'preparing' || status === 'buffering';
-  const playing = status === 'playing';
+  const playing = intentPlaying;
   const playColor = variant === 'm3e' ? theme.colors.canvas : theme.colors.textBright;
   return (
     <View
@@ -541,6 +548,7 @@ export function StageSheet({
             <TransportControls
               variant={platform === 'ios' ? 'ios' : 'm3e'}
               status={player.status}
+              intentPlaying={player.intentPlaying}
               liked={player.liked}
               canPrevious={player.canPrevious}
               canNext={player.canNext}
