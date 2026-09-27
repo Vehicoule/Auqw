@@ -20,3 +20,9 @@ rationale and the condition that would reopen it.
 ## Presentation
 
 | UI typeface is Inter (400/500/700 via `@expo-google-fonts/inter` on mobile, `Inter → ui-sans-serif → system-ui` on web/desktop); JetBrains Mono dropped, along with the "type is monospaced" Omarchy rule | Decided | Monospace read terminal-like rather than music-player; owner directed a Mistral-style sans shell (2026-09). Inter ships through the same bundled-google-fonts mechanism that carried JetBrains Mono — dependency swap, not a new mechanism. | If Inter's metrics break dense metadata/duration columns, revisit with `fontVariant: ['tabular-nums']` or a numeric-only mono fallback. |
+
+## Playback
+
+| Decision | Status | Rationale | Reopen when |
+| --- | --- | --- | --- |
+| Handle-keyed stream ops (`stream:serve-url|open|read|close|release|marks`) report a dead registry session as `released`, and pause/resume/seek recover by re-preparing | Decided | Serve-url sessions detach on pause (the last range conn ends) and the reaper evicts them past the 120 s TTL, so a long pause outlives the stream. `not-found` there is dead-resource semantics, not malformed input: mapping it to `released` lets session re-prepare from the queue's persisted position instead of `markUnplayable` + 0:00 reset. | If a handle-keyed op gains a not-found source that is genuinely caller error (e.g. bad arg shape), split that slug back out. |

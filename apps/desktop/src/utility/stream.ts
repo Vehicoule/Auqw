@@ -85,6 +85,21 @@ export function napiError(thrown: unknown): ShellError {
   return shellError('internal', 'host call failed');
 }
 
+/**
+ * `napiError` for the handle-keyed stream ops (serve-url, open, read,
+ * close, release, marks). Their only `not-found` source is the handle
+ * lookup itself — the session is gone registry-side (reaped after the
+ * detach TTL, superseded while detached, or already released) — which
+ * is `released` semantics, not malformed args. Surfacing it as
+ * `released` lets the session re-prepare instead of failing the item.
+ */
+function napiStreamError(thrown: unknown): ShellError {
+  if (napiSlug(thrown) === 'not-found') {
+    return shellError('released', 'host call failed: not-found');
+  }
+  return napiError(thrown);
+}
+
 function validated<A>(
   isArgs: (value: unknown) => value is A,
   label: string,
@@ -188,7 +203,7 @@ export function createStreamHandlers(deps: {
       try {
         return { url: deps.host().streamServeUrl(a.handle) };
       } catch (thrown) {
-        throw napiError(thrown);
+        throw napiStreamError(thrown);
       }
     },
 
@@ -197,7 +212,7 @@ export function createStreamHandlers(deps: {
       try {
         return { remaining: deps.host().streamOpen(a.handle, a.position) };
       } catch (thrown) {
-        throw napiError(thrown);
+        throw napiStreamError(thrown);
       }
     },
 
@@ -207,7 +222,7 @@ export function createStreamHandlers(deps: {
         .host()
         .streamRead(a.handle, a.position, a.maxLen)
         .catch((thrown: unknown) => {
-          throw napiError(thrown);
+          throw napiStreamError(thrown);
         });
       return { data: data.toString('base64') };
     },
@@ -218,7 +233,7 @@ export function createStreamHandlers(deps: {
         deps.host().streamClose(a.handle);
         return undefined;
       } catch (thrown) {
-        throw napiError(thrown);
+        throw napiStreamError(thrown);
       }
     },
 
@@ -228,7 +243,7 @@ export function createStreamHandlers(deps: {
         deps.host().streamRelease(a.handle);
         return undefined;
       } catch (thrown) {
-        throw napiError(thrown);
+        throw napiStreamError(thrown);
       }
     },
 
@@ -238,7 +253,7 @@ export function createStreamHandlers(deps: {
         const marks = deps.host().streamPhaseMarks(a.handle);
         return checked(isStreamMarksResult, 'stream:marks')(marks);
       } catch (thrown) {
-        throw napiError(thrown);
+        throw napiStreamError(thrown);
       }
     },
 
