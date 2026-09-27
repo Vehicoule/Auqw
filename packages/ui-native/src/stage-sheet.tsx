@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, ScrollView, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, View } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -8,7 +8,10 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
-import { useTheme } from './theme.tsx';
+import { BlurView } from 'expo-blur';
+import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+import { schemes } from '@auqw/design-tokens';
+import { ThemeProvider, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
   Artwork,
@@ -289,6 +292,67 @@ export function ModeSegment({
   );
 }
 
+// Immersive player backdrop (CMP reference): a full-bleed copy of the
+// artwork, one static dark scrim gradient for text contrast, and a
+// bottom-anchored frost — BlurView over the backdrop, tinted by a
+// gradient that strengthens toward the bottom edge.
+const FROST_TOP_FRACTION = 0.38;
+const NIGHT = schemes.dark.deep;
+
+function PlayerBackdrop({
+  artworkUrl,
+}: {
+  readonly artworkUrl: string;
+}) {
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <Artwork url={artworkUrl} fill cornerRadius={0} />
+      <Svg style={StyleSheet.absoluteFill}>
+        <Defs>
+          <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
+            <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
+          </LinearGradient>
+        </Defs>
+        <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
+      </Svg>
+      <View
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          top: `${FROST_TOP_FRACTION * 100}%`,
+          overflow: 'hidden',
+        }}
+      >
+        <BlurView
+          intensity={80}
+          tint="dark"
+          style={StyleSheet.absoluteFill}
+        />
+        <Svg style={StyleSheet.absoluteFill}>
+          <Defs>
+            <LinearGradient id="uwfp-frost" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={NIGHT} stopOpacity="0" />
+              <Stop offset="0.22" stopColor={NIGHT} stopOpacity="0.25" />
+              <Stop offset="0.62" stopColor={NIGHT} stopOpacity="0.66" />
+              <Stop offset="1" stopColor={NIGHT} stopOpacity="0.92" />
+            </LinearGradient>
+          </Defs>
+          <Rect
+            x="0"
+            y="0"
+            width="100%"
+            height="100%"
+            fill="url(#uwfp-frost)"
+          />
+        </Svg>
+      </View>
+    </View>
+  );
+}
+
 export type StageSheetProps = {
   readonly player: PlayerModel;
   readonly expanded: boolean;
@@ -442,26 +506,10 @@ export function StageSheet({
     opacity: opacity.value,
   }));
 
-  return (
-    <Animated.View
-      onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
-      pointerEvents={expanded ? 'auto' : 'none'}
-      accessibilityViewIsModal={expanded}
-      style={[
-        {
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: theme.colors.stage,
-          paddingHorizontal: theme.spacing.xl,
-          paddingBottom: theme.spacing.lg,
-        },
-        animatedStyle,
-        style,
-      ]}
-    >
+  const immersive = activeMode === 'player' && player.artworkUrl !== null;
+
+  const body = (
+    <>
       <GestureDetector gesture={pan}>
         <View
           style={{
@@ -481,54 +529,52 @@ export function StageSheet({
       </GestureDetector>
       {activeMode === 'player' && (
         <>
-          <View
-            style={{ width: '100%', aspectRatio: 1, marginTop: theme.spacing.md }}
-          >
-            <Artwork url={player.artworkUrl} fill />
-          </View>
-          <View style={{ flex: 1 }} />
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'flex-start',
-              gap: theme.spacing.sm,
-            }}
-          >
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text variant="title" color="bright" numberOfLines={1}>
-                {player.title}
-              </Text>
-              <Text
-                variant="body"
-                color="primary"
-                numberOfLines={1}
-                style={{ marginTop: 4 }}
-              >
-                {player.artist ?? '—'}
-              </Text>
-              {player.albumLabel !== null && (
+          {/* Title/artist bottom-anchored in the light-frost zone; the
+              timeline/transport cluster stays pinned at the bottom. */}
+          <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-end',
+                gap: theme.spacing.sm,
+                paddingBottom: theme.spacing.lg,
+              }}
+            >
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text variant="display" color="bright" numberOfLines={1}>
+                  {player.title}
+                </Text>
                 <Text
-                  variant="metadata"
-                  color="secondary"
+                  variant="body"
+                  color="primary"
                   numberOfLines={1}
-                  style={{ marginTop: 3 }}
+                  style={{ marginTop: 4 }}
                 >
-                  {player.albumLabel}
+                  {player.artist ?? '—'}
                 </Text>
-              )}
-              {player.errorMessage !== null && (
-                <Text
-                  variant="metadata"
-                  color="warn"
-                  numberOfLines={2}
-                  style={{ marginTop: 3 }}
-                >
-                  {player.errorMessage}
-                </Text>
-              )}
+                {player.albumLabel !== null && (
+                  <Text
+                    variant="metadata"
+                    color="secondary"
+                    numberOfLines={1}
+                    style={{ marginTop: 3 }}
+                  >
+                    {player.albumLabel}
+                  </Text>
+                )}
+                {player.errorMessage !== null && (
+                  <Text
+                    variant="metadata"
+                    color="warn"
+                    numberOfLines={2}
+                    style={{ marginTop: 3 }}
+                  >
+                    {player.errorMessage}
+                  </Text>
+                )}
+              </View>
             </View>
           </View>
-          <View style={{ flex: 1 }} />
           <WaveformSeek
             positionMs={player.positionMs}
             durationMs={player.durationMs}
@@ -744,6 +790,53 @@ export function StageSheet({
           }
         }}
       />
+    </>
+  );
+
+  return (
+    <Animated.View
+      onLayout={(e) => setHeight(e.nativeEvent.layout.height)}
+      pointerEvents={expanded ? 'auto' : 'none'}
+      accessibilityViewIsModal={expanded}
+      style={[
+        {
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: immersive
+            ? schemes.dark.stage
+            : theme.colors.stage,
+        },
+        animatedStyle,
+        style,
+      ]}
+    >
+      {immersive && <PlayerBackdrop artworkUrl={player.artworkUrl} />}
+      {immersive ? (
+        <ThemeProvider theme="dark">
+          <View
+            style={{
+              flex: 1,
+              paddingHorizontal: theme.spacing.xl,
+              paddingBottom: theme.spacing.lg,
+            }}
+          >
+            {body}
+          </View>
+        </ThemeProvider>
+      ) : (
+        <View
+          style={{
+            flex: 1,
+            paddingHorizontal: theme.spacing.xl,
+            paddingBottom: theme.spacing.lg,
+          }}
+        >
+          {body}
+        </View>
+      )}
     </Animated.View>
   );
 }
