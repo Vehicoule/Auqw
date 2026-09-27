@@ -2922,6 +2922,108 @@ async function shuffleRemoveCurrentFollowsDeal(): Promise<void> {
   await r.session.dispose();
 }
 
+async function shuffleRepeatAllLoneWrapRestarts(): Promise<void> {
+  // A lone dealt item under repeat=all: manual next() must restart it.
+  // select() on the same id at position 0 is a no-op, so the wrap runs
+  // off the dealt end first — the same restart the canonical tail wrap
+  // produces.
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA', ref('youtube-music', 'yA'))],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const beforeRev = readyOf(r).queue.revision;
+  assert((await r.session.next()).ok);
+  await pump();
+  const q = readyOf(r).queue;
+  assertEqual(q.currentOccurrenceId, 'oA', 'the lone item stays current');
+  assert(
+    q.revision > beforeRev,
+    'the wrap ticks — a restart, not a same-id no-op',
+  );
+  assertEqual(q.mode, 'paused', 'paused intent survives the wrap');
+  await r.session.dispose();
+}
+
+async function shuffleRollbackKeepsDeal(): Promise<void> {
+  // A publish that runs while a removal's commit is pending reconciles
+  // the deal against the optimistic queue and drops the removed id.
+  // When the commit fails the rollback restores the queue — and must
+  // restore the pre-edit deal with it, or the revived id re-enters at a
+  // random slot and the rejected edit reshuffles playback anyway.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+          occurrence('oC', 'rC', ref('youtube-music', 'yC')),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.9, 0.1, 0]),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(readyOf(r).shuffleOrder, ['oA', 'oC', 'oB']);
+  // Remove oB with its storage commit held pending.
+  r.storage.holdNextCommit();
+  const rm = r.session.removeOccurrence('oB');
+  await pump();
+  // An interleaved publish (a projection refresh persists nothing)
+  // reconciles the deal against the optimistic oB-less queue — oB drops
+  // out of the walk before the commit lands.
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  assertDeepEqual(readyOf(r).shuffleOrder, ['oA', 'oC']);
+  // Storage rejects the removal: the queue rolls back and so does the
+  // deal — oB keeps its dealt slot instead of re-entering at random
+  // (a fresh draw of 0 would land it right behind the cursor).
+  r.storage.settleCommit(err(appError('internal', 'storage down')));
+  assert((await rm).ok === false, 'the removal reports the failure');
+  await pump();
+  const q = readyOf(r).queue;
+  assertDeepEqual(
+    q.occurrences.map((o) => o.occurrenceId),
+    ['oA', 'oB', 'oC'],
+    'the queue restores all three items',
+  );
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oC', 'oB'],
+    'the deal is restored',
+  );
+  await r.session.dispose();
+}
+
 async function transitionReconcile(): Promise<void> {
   const r = rig(
     persisted({
@@ -5526,6 +5628,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleMapsDealtSuccessor', shuffleMapsDealtSuccessor],
   ['shuffleArmsOnDealtTail', shuffleArmsOnDealtTail],
   ['shuffleRemoveCurrentFollowsDeal', shuffleRemoveCurrentFollowsDeal],
+  ['shuffleRepeatAllLoneWrapRestarts', shuffleRepeatAllLoneWrapRestarts],
+  ['shuffleRollbackKeepsDeal', shuffleRollbackKeepsDeal],
   ['transitionReconcile', transitionReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],

@@ -1204,6 +1204,12 @@ export class Session {
     // command's mutation can neither ride this commit nor survive in
     // storage after its own commit rolls memory back.
     const after = r.queue.snapshot();
+    // The dealt order is a derivation of this same queue state — an
+    // interleaved publish can already reconcile it (a removed id drops
+    // out), so the rollback restores it alongside the engine snapshot:
+    // otherwise the undone removal's id would re-enter the deal at a
+    // random slot.
+    const dealtBefore = r.shuffleOrder === null ? null : [...r.shuffleOrder];
     const generation = this.#ready;
     const source = new CancellationSource();
     this.#opSources.add(source);
@@ -1239,6 +1245,7 @@ export class Session {
         if (!committed.ok) {
           r.queueEpoch += 1;
           r.queue = new QueueEngine(before);
+          r.shuffleOrder = dealtBefore;
           r.persistenceError = committed.error;
           this.#derived();
           this.#publish();
@@ -4223,6 +4230,12 @@ export class Session {
           } else if (r.repeat === 'all' && dealt.length > 0) {
             const head = dealt[0];
             if (head !== undefined) {
+              // A lone dealt item wraps onto itself — select() no-ops on
+              // a same-id zero-position pick, so run off the end first:
+              // the same restart the canonical next()-then-wrap makes.
+              if (head === before.currentOccurrenceId) {
+                r.queue.stop();
+              }
               r.queue.select(head, before.mode === 'playing');
               bumpListenCycle(r, head);
             }
