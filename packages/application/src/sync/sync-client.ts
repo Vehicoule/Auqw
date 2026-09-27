@@ -228,6 +228,14 @@ type ClientSession = {
   /** A kick round is already queued on ops. */
   kickQueued: boolean;
   activeOps: number;
+  /**
+   * A completed round's counters — staged until the op drains, then
+   * published atomically with the verdict and the drain emission so
+   * a status() snapshot never sees a landed-but-unsigned round.
+   */
+  roundReport?: SyncRoundOutcome;
+  /** The completed round's failure verdict — staged for the drain. */
+  roundError?: AppError;
 };
 
 type PeerView = {
@@ -629,6 +637,23 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     emit();
     const done = run.finally(() => {
       session.activeOps -= 1;
+      // A completed round publishes counters and verdict together,
+      // here, synchronously with the drain emission — until now they
+      // lived only on the session, so no emission ever carries one
+      // half of a landing without the other.
+      if (session.roundReport !== undefined) {
+        lastRounds.set(session.peerFp, session.roundReport);
+        if (!session.closed) {
+          views.set(
+            session.peerFp,
+            session.roundError !== undefined
+              ? { state: 'open', lastError: session.roundError }
+              : { state: 'open' },
+          );
+        }
+        delete session.roundReport;
+        delete session.roundError;
+      }
       if (session.kickPending && session.activeOps === 0) {
         drainKick(session);
       }
@@ -840,17 +865,11 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         return;
       }
       const outcome = await syncRound(session, peer);
-      // Same in-op verdict publication as syncNow — a kicked round
-      // that failed must not drain looking like a clean open.
-      if (!session.closed) {
-        views.set(
-          session.peerFp,
-          outcome.ok
-            ? { state: 'open' }
-            : { state: 'open', lastError: outcome.error },
-        );
-      }
+      // Same staged verdict as syncNow — a kicked round that failed
+      // must not drain looking like a clean open. The op's drain
+      // publishes it atomically with the counters.
       if (!outcome.ok) {
+        session.roundError = outcome.error;
         void deps.log.write({
           level: 'warn',
           message: `sync-requested round failed: ${outcome.error.kind}`,
@@ -966,18 +985,19 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         rounds,
       });
     } finally {
-      // Recorded on success and failure alike: the scheduler reads
-      // the exchange counters to tell a capped-but-moving round
-      // (worth a continuation) from a stalled cap (terminal here).
-      lastRounds.set(peer.fp, {
+      // Recorded on success and failure alike — staged on the
+      // session until the op's drain publishes it atomically with
+      // the verdict; the scheduler reads the counters to tell a
+      // capped-but-moving round (worth a continuation) from a
+      // stalled cap (terminal here).
+      session.roundReport = {
         peerFp: session.peerFp,
         remoteEntries,
         sentEntries,
         divergence,
         rounds,
-      });
+      };
       cleanup();
-      emit();
     }
   }
 
@@ -1336,18 +1356,12 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       }
       const outcome = await enqueue(session, async () => {
         const round = await syncRound(session, peer, signal);
-        // The verdict lands on the view while the op is still
-        // counted — the drain emit already carries it, so a bare
+        // The verdict stages on the session — the op's drain
+        // publishes it atomically with the counters, so a bare
         // 'open' with no lastError is a live or clean round, never
-        // a failed one reading as connected. A dead session already
-        // reported its cause through killSession.
-        if (!session.closed) {
-          views.set(
-            fp,
-            round.ok
-              ? { state: 'open' }
-              : { state: 'open', lastError: round.error },
-          );
+        // a failed one reading as connected.
+        if (!round.ok) {
+          session.roundError = round.error;
         }
         return round;
       });

@@ -347,22 +347,16 @@ async function manualSuccessClearsStaleFloor(): Promise<void> {
   // completed round: the floor must stand through it.
   client.peerViews.set('fp-a', { state: 'open' });
   client.emitStatus();
-  // The real client publishes the round's counters one hop early —
-  // inside the still-syncing window — then the op drains carrying
-  // the SAME lastRound object. Freshness vs the previous emission
-  // cannot see the landing; the scheduler tracks its identity.
-  const landed = outcome('fp-a');
-  client.peerViews.set('fp-a', {
-    state: 'open',
-    syncing: true,
-    lastRound: landed,
-  });
+  client.peerViews.set('fp-a', { state: 'open', syncing: true });
   client.emitStatus();
   await pump();
-  // The exchange lands clean: the op drains and the verdict-bearing
-  // emission reports the completed round — the floor is obsolete now
-  // and its armed wake dies with it.
-  client.peerViews.set('fp-a', { state: 'open', lastRound: landed });
+  // The exchange lands clean: the op drains and counters+verdict
+  // publish atomically on the drained emission — the floor is
+  // obsolete now and its armed wake dies with it.
+  client.peerViews.set('fp-a', {
+    state: 'open',
+    lastRound: outcome('fp-a'),
+  });
   client.emitStatus();
   await pump();
   // A write now debounces at 500 ms — not the obsolete 30 s floor.
@@ -422,20 +416,13 @@ async function connectOpenKeepsRateLimitFloor(): Promise<void> {
     1,
     'write cannot slip inside the floor on a bare connect',
   );
-  // The manual round fails with a FRESH 30 s verdict — counters land
-  // a hop early inside the syncing window, then the verdict-bearing
-  // drain publishes them with the error: the floor re-arms to 31_500.
-  const failed = outcome('fp-a');
-  client.peerViews.set('fp-a', {
-    state: 'open',
-    syncing: true,
-    lastRound: failed,
-  });
-  client.emitStatus();
+  // The manual round fails with a FRESH 30 s verdict — counters and
+  // verdict publish atomically on the drain: the floor re-arms to
+  // t=31_500.
   client.peerViews.set('fp-a', {
     state: 'open',
     lastError: appError('rate-limit', 'still slow', 30_000),
-    lastRound: failed,
+    lastRound: outcome('fp-a'),
   });
   client.emitStatus();
   await pump();
@@ -558,18 +545,14 @@ async function staleVerdictDoesNotSlideFloor(): Promise<void> {
 async function startMidRoundHonorsDrainedVerdict(): Promise<void> {
   const { client, clock, scheduler } = rig();
   client.peersList = [peer('fp-a')];
-  // The snapshot lands between a round's counters emission and its
-  // drained verdict — seeding must not consume the unfinished view,
-  // or the rate-limit below never floors the launch round.
+  // The snapshot lands mid-round — the in-flight round's counters
+  // are still staged on the session, so the view shows nothing of it
+  // yet. Seeding skips nothing the drain won't still publish.
   const landing = outcome('fp-a');
-  client.peerViews.set('fp-a', {
-    state: 'open',
-    syncing: true,
-    lastRound: landing,
-  });
+  client.peerViews.set('fp-a', { state: 'open', syncing: true });
   scheduler.start();
   await pump();
-  // The op drains carrying a fresh 30 s verdict — a real landing.
+  // The op drains: counters and fresh 30 s verdict land atomically.
   client.peerViews.set('fp-a', {
     state: 'open',
     lastError: appError('rate-limit', 'slow down', 30_000),
@@ -611,7 +594,7 @@ async function midOpStartDoesNotReArmStaleVerdict(): Promise<void> {
   scheduler.start();
   await pump();
   // The op drains — republishing the SAME counters and verdict.
-  // Identical objects, unchanged verdict: history, not a landing.
+  // Identical object identity: history, not a landing.
   client.peerViews.set('fp-a', {
     state: 'open',
     lastError: verdict,

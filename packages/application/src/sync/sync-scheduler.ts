@@ -77,23 +77,12 @@ type PeerTrack = {
   running: boolean;
   /**
    * The last completed-round counters this track already consumed.
-   * The client lands a round's `lastRound` on the view exactly once,
-   * but may publish it a hop before the op drains (counters record
-   * inside the still-syncing window), so freshness vs the previous
-   * emission cannot tell a new landing from a republished status
-   * carrying the same object — identity here is the ledger.
+   * The client publishes a round's counters and verdict atomically
+   * with its op's drain emission, so a `lastRound` on the view was
+   * always emitted exactly once — a new object identity is a landing,
+   * the same object a republish, whatever the surrounding flags.
    */
   seenRound?: SyncRoundOutcome;
-  /**
-   * The `lastRound` a still-syncing view carried when start()
-   * snapshotted it — present but unclassified: it may be a round
-   * that just landed its counters and still awaits its verdict, or
-   * yesterday's history republished while an unrelated op (a
-   * refreshPeer, a keepalive) holds `syncing`. The first drained
-   * emission settles it: the same counters with an unchanged
-   * verdict is history; anything else is a real landing.
-   */
-  startRound?: SyncRoundOutcome;
   /**
    * Cancels the in-flight round when the peer is unpaired or the
    * scheduler stops — an orphaned exchange must not run to
@@ -386,22 +375,17 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       const prevPeer = prevViews?.peers.find(
         (v) => v.peer.fp === view.peer.fp,
       );
-      // A completed round lands its exchange counters on the view
-      // exactly once; consume that identity at the first drained
-      // emission carrying it (whatever the state) so later republish-
-      // es — another op's drain, a status fan-out — never re-fire it.
-      // A drained emission showing the same counters the start()
-      // snapshot found mid-op is history republished, not a landing —
-      // unless its verdict changed too, which only a real landing does.
-      const verdictMoved = view.lastError !== prevPeer?.lastError;
+      // A completed round publishes counters and verdict together
+      // on the op's drain emission, exactly once — consume that
+      // identity at the first drained emission carrying it so later
+      // republishes (another op's drain, a status fan-out) can
+      // never re-fire it.
       const roundLanded =
         !view.syncing &&
         view.lastRound !== undefined &&
-        view.lastRound !== track.seenRound &&
-        (view.lastRound !== track.startRound || verdictMoved);
+        view.lastRound !== track.seenRound;
       if (roundLanded) {
         track.seenRound = view.lastRound;
-        delete track.startRound;
       }
       if (view.state === 'open') {
         // 'open' during a scheduler-owned round is that round's
@@ -528,24 +512,16 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
       views = deps.client.status();
       for (const view of views.peers) {
         const track = trackFor(view.peer.fp);
-        // A round that completed before this subscription is already
-        // history — seeding marks it consumed so a republished status
-        // can't re-fire its verdict (an old rate-limit would
-        // otherwise slide its floor to now+hint on the first
-        // unrelated emission). Persisted tracks keep their own
-        // record across a stop()/start(). A still-syncing view is
-        // different: `syncing` counts every queued op, not just
-        // rounds, so its counters are remembered but unclassified —
-        // the first drained emission decides whether they were a
-        // landing (new counters or a moved verdict) or old history.
-        if (track.seenRound === undefined) {
-          if (view.syncing) {
-            if (view.lastRound !== undefined) {
-              track.startRound = view.lastRound;
-            }
-          } else if (view.lastRound !== undefined) {
-            track.seenRound = view.lastRound;
-          }
+        // Any lastRound already on the view was published by its
+        // landing emission — which fired before this subscription
+        // existed — so it's already-consumed history. Seeding keeps
+        // a republished status from re-firing its verdict (an old
+        // rate-limit would otherwise slide its floor to now+hint on
+        // the first unrelated emission). A round still in flight is
+        // unaffected: its counters publish only at drain, so the
+        // snapshot can't see them and the landing still counts.
+        if (track.seenRound === undefined && view.lastRound !== undefined) {
+          track.seenRound = view.lastRound;
         }
       }
       // On-launch round per known peer — the custody read is the
