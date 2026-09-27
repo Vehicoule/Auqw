@@ -2,8 +2,8 @@ import { Bonjour, type Service } from 'bonjour-service';
 import {
   appError,
   err,
-  isPairableLanHost,
   ok,
+  pickDialableHost,
   type SyncDiscoveredPeer,
   type SyncDiscoveryPort,
   type SyncDiscoverySession,
@@ -69,21 +69,13 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
 
 /** One discovered service → the port's peer shape, or null when unusable. */
 function peerOf(service: Service): SyncDiscoveredPeer | null {
-  // Only LAN-pairable addresses are candidates — a public v6 listed
-  // first must not shadow a reachable private v4 behind it. Prefer an
-  // unscoped address among the survivors; keep a scoped (zone-suffixed)
-  // one — link-local v6 is only dialable WITH its zone, and the LAN
-  // gate validates the zone id.
-  const pairable = (service.addresses ?? []).filter(
-    (a): a is string =>
-      typeof a === 'string' && isPairableLanHost(a),
-  );
-  const host =
-    pairable.find((a) => !a.includes('%')) ??
-    pairable.find((a) => a.includes('%'));
+  // The resolved address list arrives in resolver order — a bare
+  // link-local v6 (fe80:: without a zone) sorts ahead of a routable
+  // private v4 and is undialable, so rank by dialability.
+  const host = pickDialableHost(service.addresses ?? []);
   if (
     typeof service.name !== 'string' ||
-    host === undefined ||
+    host === null ||
     typeof service.port !== 'number'
   ) {
     // A non-LAN advert is undialable — never a nearby row.
@@ -111,6 +103,118 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
     fp: rawFp ?? null,
   };
 }
+
+/** TXT `dev` (device fingerprint) from a service, or null/undefined. */
+const fpOf = (service: Service): string | null => {
+  const txt = service.txt;
+  const raw =
+    txt !== null && typeof txt === 'object' && TXT_FP in txt
+      ? txt[TXT_FP]
+      : undefined;
+  return typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)
+    ? raw
+    : null;
+};
+
+/**
+ * Tracking of emitted peers for one browse — shared by the `up`/`down`
+ * handlers so a re-announcement or a late `down` can retract exactly
+ * the row that was emitted. The service IDENTITY is its `dev` TXT
+ * fingerprint — stable across hostname/port/address changes, which
+ * are exactly what a re-announce mutates. Adverts without a valid fp
+ * fall back to the SRV target host as the device id (an instance name
+ * is NOT unique on a LAN — two devices can both call themselves
+ * "Phone"). Exported for the tracker unit test.
+ */
+export const createPeerTracker = (
+  onFound: (peer: SyncDiscoveredPeer) => void,
+  onLost: (key: string) => void,
+): { up(service: Service): void; down(service: Service): void } => {
+  const seen = new Map<
+    string,
+    {
+      name: string;
+      fp: string | null;
+      host: string | undefined;
+      port: number | undefined;
+      peer: SyncDiscoveredPeer;
+    }
+  >();
+  const hostOf = (s: Service): string | undefined =>
+    typeof s.host === 'string' && s.host !== '' ? s.host : undefined;
+  // Retract the rows belonging to this record's generation. The
+  // `dev` fp pins the device (stable across host/port/address churn);
+  // `staleOnly` additionally requires the SRV host+port fields the
+  // record carries to match the stored generation — a `down` reports
+  // the DEAD generation, which can lag a re-announce, so the same fp
+  // on an old host/port must not kill the fresh row.
+  const retract = (service: Service, staleOnly: boolean) => {
+    const fp = fpOf(service);
+    const host = hostOf(service);
+    const port =
+      typeof service.port === 'number' ? service.port : undefined;
+    for (const [id, entry] of seen) {
+      if (entry.name !== service.name) {
+        continue;
+      }
+      if (fp !== null && entry.fp !== fp) {
+        continue;
+      }
+      if (staleOnly || fp === null) {
+        if (
+          host !== undefined &&
+          entry.host !== undefined &&
+          entry.host !== host
+        ) {
+          continue;
+        }
+        if (
+          port !== undefined &&
+          entry.port !== undefined &&
+          entry.port !== port
+        ) {
+          continue;
+        }
+      }
+      seen.delete(id);
+      onLost(entry.peer.key);
+    }
+  };
+  return {
+    up(service) {
+      const peer = peerOf(service);
+      if (peer === null) {
+        // A re-announcement with no pairable address (or a malformed
+        // fp) must retract the previously emitted row for that
+        // generation — otherwise the last pick stays dialable
+        // forever. A pinned advert retracts its own row outright;
+        // an unpinned one needs generation matching like a down.
+        retract(service, fpOf(service) === null);
+        return;
+      }
+      // Identity: the advert's own fp when pinned, else the SRV host.
+      const id = `${service.name}|${peer.fp ?? hostOf(service) ?? ''}`;
+      const prior = seen.get(id);
+      // A re-announcement whose resolved addresses changed can
+      // re-rank the chosen host — retract the row keyed by the
+      // old pick so the stale endpoint never stays dialable.
+      if (prior !== undefined && prior.peer.key !== peer.key) {
+        onLost(prior.peer.key);
+      }
+      seen.set(id, {
+        name: service.name,
+        fp: peer.fp,
+        host: hostOf(service),
+        port: service.port,
+        peer,
+      });
+      onFound(peer);
+    },
+    down(service) {
+      retract(service, true);
+    },
+  };
+};
 
 /**
  * mDNS browse — the desktop's LocalSend-style "nearby" list. Same
@@ -146,33 +250,9 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
           protocol: SERVICE_PROTOCOL,
         });
         browser = br;
-        // Keyed by service NAME (unique on the LAN): `service.host`
-        // on a `down` can differ from the chosen advert address, so
-        // name|host would miss and leave a stale row behind.
-        const seen = new Map<string, SyncDiscoveredPeer>();
-        const up = (service: Service) => {
-          const peer = peerOf(service);
-          if (peer !== null) {
-            seen.set(service.name, peer);
-            onFound(peer);
-          }
-        };
-        const down = (service: Service) => {
-          const peer = seen.get(service.name);
-          // A re-advertised service's down can arrive after its new
-          // up — only retract when the lost service IS the one we
-          // emitted (same host), otherwise it must not kill the
-          // fresh row.
-          if (
-            peer !== undefined &&
-            (typeof service.host !== 'string' ||
-              service.host === '' ||
-              service.host === peer.host)
-          ) {
-            seen.delete(service.name);
-            onLost(peer.key);
-          }
-        };
+        const tracker = createPeerTracker(onFound, onLost);
+        const up = tracker.up;
+        const down = tracker.down;
         br.on('up', up);
         br.on('down', down);
         br.start();

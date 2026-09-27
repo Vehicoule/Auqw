@@ -37,6 +37,7 @@ class AuqwNsd(
   private var discovery: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
   private var resolveExecutor: ExecutorService? = null
+
   // Bump per browse run — NSD resolve callbacks can land after a stop,
   // and a stale 'found' must not populate a later session's list.
   private var browseGeneration = 0
@@ -247,20 +248,27 @@ class AuqwNsd(
               lostNames.contains(resolved.serviceName)
             }
           if (gen == browseGeneration && !lost) {
-            val host =
+            // Emit every resolved address — the JS discovery adapter
+            // owns LAN-policy filtering and dialability ranking (a
+            // public v4 or a bare fe80:: literal must not shadow a
+            // pairable address behind it).
+            val addresses =
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                resolved.hostAddresses.firstOrNull()?.hostAddress
+                resolved.hostAddresses
               } else {
                 @Suppress("DEPRECATION")
-                resolved.host?.hostAddress
+                listOfNotNull(resolved.host)
               }
+            val hosts = addresses.mapNotNull { it.hostAddress }
+            val host = hosts.firstOrNull()
             val fp = resolved.attributes["dev"]?.let { String(it) }
-            if (host != null) {
+            if (hosts.isNotEmpty()) {
               emitDiscovery(
                 mapOf(
                   "type" to "found",
                   "name" to resolved.serviceName,
                   "host" to host,
+                  "hosts" to hosts,
                   "port" to resolved.port,
                   "fp" to fp,
                 ),
