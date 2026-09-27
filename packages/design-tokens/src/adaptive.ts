@@ -133,6 +133,12 @@ function lumStep(rgb: Rgb, ratio: number): Rgb {
   ];
 }
 
+/** Rounds to the emitted 8-bit channel values — guards run on what
+    actually ships, not on float intermediates. */
+function round(rgb: Rgb): Rgb {
+  return [Math.round(rgb[0]), Math.round(rgb[1]), Math.round(rgb[2])];
+}
+
 function toHex(rgb: Rgb): string {
   const part = (v: number): string =>
     Math.round(v)
@@ -147,14 +153,23 @@ function alphaOf(rgb: Rgb, a: number): string {
 
 /**
  * The contrast guard: nudge a text role toward the readable pole until
- * it clears 4.5:1 against `surface`. Callers check the pole itself
- * passes first, so the final jump is guaranteed to land.
+ * it clears 4.5:1 against every surface it can render on — a single
+ * passing surface says nothing about the rest (a mid-gray canvas can
+ * swallow text that a lighter raised row shows). Callers check the
+ * pole itself clears the whole set first, so the final jump lands.
  */
-function nudgeToContrast(value: Rgb, surface: Rgb, pole: Rgb): Rgb {
+function nudgeToContrast(
+  value: Rgb,
+  surfaces: readonly Rgb[],
+  pole: Rgb,
+): Rgb {
   let out = value;
   for (let i = 0; i < 16; i++) {
-    if (contrastRatio(out, surface) >= MIN_CONTRAST) {
-      return out;
+    const rounded = round(out);
+    if (
+      surfaces.every((s) => contrastRatio(rounded, s) >= MIN_CONTRAST)
+    ) {
+      return rounded;
     }
     out = mix(out, pole, 0.18);
   }
@@ -168,8 +183,15 @@ function overlay(
   palette: AdaptivePalette,
 ): DerivedTheme {
   const base = schemes[flag];
-  const canvas = parseHex(base.canvas) ?? BLACK;
   const pole = flag === 'dark' ? WHITE : BLACK;
+  const surfaces = [base.canvas, base.stage, base.deep, base.raised].map(
+    (hex) => parseHex(hex) ?? BLACK,
+  );
+  // No readable pole over the built-in surfaces → keep the base roles
+  // untouched rather than emit text that vanishes on one of them.
+  const poleOk = surfaces.every(
+    (s) => contrastRatio(pole, s) >= MIN_CONTRAST,
+  );
   const sel = palette.sel !== undefined ? parseHex(palette.sel) : null;
   const accent = palette.accent !== undefined ? parseHex(palette.accent) : null;
   const warn = palette.warn !== undefined ? parseHex(palette.warn) : null;
@@ -179,15 +201,19 @@ function overlay(
   // accentSoft is the active-row selection tint — an OS `sel` colors it
   // at the same bounded alpha (opaque sel over light text would erase
   // the label); absent sel it derives as accent @14%.
-  const softSrc = sel ?? (accent !== null ? nudgeToContrast(accent, canvas, pole) : null);
+  const softSrc =
+    sel ??
+    (accent !== null && poleOk
+      ? nudgeToContrast(accent, surfaces, pole)
+      : null);
   if (softSrc !== null) {
     values.accentSoft = alphaOf(softSrc, ACCENT_SOFT_ALPHA);
   }
-  if (accent !== null) {
-    values.accent = toHex(nudgeToContrast(accent, canvas, pole));
+  if (accent !== null && poleOk) {
+    values.accent = toHex(nudgeToContrast(accent, surfaces, pole));
   }
-  if (warn !== null) {
-    values.warn = toHex(nudgeToContrast(warn, canvas, pole));
+  if (warn !== null && poleOk) {
+    values.warn = toHex(nudgeToContrast(warn, surfaces, pole));
   }
   return { scheme: flag, values };
 }
@@ -204,13 +230,18 @@ function fullPalette(palette: AdaptivePalette, bg: Rgb, fg: Rgb): DerivedTheme {
 
   const raised = lumStep(bg, steps.raised);
   const deep = lumStep(bg, steps.deep);
-  // The surface nearest the pole is the worst case for pole-ward text;
-  // clearing 4.5 against it clears every flatter surface too.
-  const guardSurface = dark ? raised : deep;
-  if (contrastRatio(pole, guardSurface) < MIN_CONTRAST) {
+  // Text roles render on every surface; the rounded emitted values are
+  // the guard set — the pole must clear all of them or the palette is
+  // unfixable and the built-in scheme stands in honestly.
+  const surfaces = [bg, lumStep(bg, steps.stage), deep, raised].map(
+    round,
+  );
+  if (
+    !surfaces.every((s) => contrastRatio(pole, s) >= MIN_CONTRAST)
+  ) {
     return { scheme, values: base };
   }
-  const text = (v: Rgb): Rgb => nudgeToContrast(v, guardSurface, pole);
+  const text = (v: Rgb): Rgb => nudgeToContrast(v, surfaces, pole);
 
   const textPrimary = text(fg);
   const accentRaw =

@@ -428,15 +428,20 @@ function useAdaptiveSource(enabled: boolean): ThemeSource | null {
     // A reselection must not flash the previous read's palette — start
     // flag-only until the fresh read lands.
     setTones(null);
+    // Overlapping reads can resolve out of order (a stalled first read
+    // landing after a foreground refresh); only the newest generation
+    // may write.
+    let generation = 0;
     const read = () => {
+      const mine = ++generation;
       void AuqwExpo.systemTonalPalette()
         .then((next) => {
-          if (live) {
+          if (live && mine === generation) {
             setTones(next);
           }
         })
         .catch(() => {
-          if (live) {
+          if (live && mine === generation) {
             setTones(null);
           }
         });

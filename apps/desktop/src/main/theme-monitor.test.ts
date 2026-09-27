@@ -76,7 +76,7 @@ function env(overrides: Partial<ThemeSourceEnv> = {}): {
     home: '/home/test',
     env: {},
     readFileSync: (path) => files.get(path) ?? null,
-    execFileSync: () => null,
+    execFile: async () => null,
     watch: (path, onChange) => {
       const cbs = watchers.get(path) ?? [];
       cbs.push(onChange);
@@ -194,6 +194,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0); // the first read resolves off the microtask queue
     assertEqual(sender.sent.length, 1);
     const event = sender.sent[0];
     assertEqual(event?.channel, CHANNELS.themeEvents);
@@ -214,6 +215,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     assertEqual(sender.sent.length, 1);
     assertDeepEqual(sender.sent[0]?.payload, {
       source: {
@@ -232,6 +234,7 @@ export async function run(): Promise<void> {
       OMARCHY_TOML.replace('#7aa2f7', '#bb9af7'),
     );
     rig.fireWatch(`/home/test/${OMARCHY_STATE}`);
+    await sleep(0);
     assertEqual(sender.sent.length, 2, 'watched file change pushes');
     const event = sender.sent[1];
     assert(isThemeSourceEvent(event?.payload), 'update validates');
@@ -250,6 +253,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     rig.files.set(
       `/home/test/${OMARCHY_CONFIG}`,
       OMARCHY_TOML.replace('#1a1b26', '#24283b'),
@@ -268,7 +272,9 @@ export async function run(): Promise<void> {
     const b = new CollectingSender();
     monitor.attach(a);
     monitor.attach(b);
+    await sleep(0);
     rig.fireSystem();
+    await sleep(0);
     assertEqual(a.sent.length, 1, 'unchanged source not re-pushed');
     assertEqual(b.sent.length, 1);
     monitor.detach(a);
@@ -297,7 +303,7 @@ export async function run(): Promise<void> {
     const gdbusCalls: string[] = [];
     rig.env = {
       ...rig.env,
-      execFileSync: (file) => {
+      execFile: async (file) => {
         gdbusCalls.push(file);
         return null;
       },
@@ -305,6 +311,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     assertDeepEqual(sender.sent[0]?.payload, {
       source: {
         scheme: 'dark',
@@ -325,7 +332,7 @@ export async function run(): Promise<void> {
     const rig = env();
     rig.env = {
       ...rig.env,
-      execFileSync: (file, args) =>
+      execFile: async (file, args) =>
         file === 'gdbus' && args.includes('accent-color')
           ? '(<<<(0.20784313725490197, 0.5176470588235295, 0.8941176470588236)>>>)'
           : null,
@@ -333,6 +340,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     assertDeepEqual(sender.sent[0]?.payload, {
       source: { scheme: 'dark', palette: { accent: '#3584e4' } },
     });
@@ -348,6 +356,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     assertDeepEqual(sender.sent[0]?.payload, {
       source: { scheme: 'dark', palette: { accent: '#0078d4' } },
     });
@@ -362,6 +371,7 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
     const sender = new CollectingSender();
     monitor.attach(sender);
+    await sleep(0);
     assertDeepEqual(sender.sent[0]?.payload, {
       source: {
         scheme: 'light',
@@ -387,14 +397,45 @@ export async function run(): Promise<void> {
     const sender = new NavigableSender();
     monitor.attach(sender);
     monitor.attach(sender); // refcounted: two logical subscriptions
+    await sleep(0);
     assertEqual(sender.sent.length, 1);
     sender.navigate();
     monitor.attach(sender); // replacement document subscribes
+    await sleep(0);
     assertEqual(
       sender.sent.length,
       2,
       'a fresh subscribe after navigation gets the snapshot',
     );
+    monitor.stop();
+  }
+
+  {
+    // Triggers during an in-flight source read coalesce into a single
+    // trailing run — a hanging portal must not stack gdbus processes.
+    const rig = env();
+    const resolvers: Array<(v: string | null) => void> = [];
+    rig.env = {
+      ...rig.env,
+      execFile: () =>
+        new Promise<string | null>((resolve) => resolvers.push(resolve)),
+    };
+    const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
+    const sender = new CollectingSender();
+    monitor.attach(sender);
+    rig.fireSystem();
+    rig.fireSystem();
+    rig.fireSystem();
+    resolvers[0]?.(
+      '(<<<(0.20784313725490197, 0.5176470588235295, 0.8941176470588236)>>>)',
+    );
+    await sleep(0);
+    assertEqual(resolvers.length, 2, 'three triggers fold to one rerun');
+    resolvers[1]?.(
+      '(<<<(0.20784313725490197, 0.5176470588235295, 0.8941176470588236)>>>)',
+    );
+    await sleep(0);
+    assertEqual(sender.sent.length, 1, 'identical rerun stays deduped');
     monitor.stop();
   }
 
@@ -426,6 +467,7 @@ export async function run(): Promise<void> {
       const monitor = createThemeMonitor({ env: rig.env, pollMs: 10 });
       const sender = new CollectingSender();
       monitor.attach(sender);
+      await sleep(0);
       assertEqual(sender.sent.length, 1);
       writeFileSync(path, OMARCHY_TOML.replace('#7aa2f7', '#7dcfff'));
       await sleep(80);

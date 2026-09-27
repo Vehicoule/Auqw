@@ -16,7 +16,7 @@ import type {
   TitleBarOverlay,
   WebContents,
 } from 'electron';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { readFileSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -250,17 +250,20 @@ async function main(): Promise<void> {
           return null;
         }
       },
-      execFileSync: (file, args, timeoutMs) => {
-        try {
-          return execFileSync(file, [...args], {
-            encoding: 'utf8',
-            timeout: timeoutMs,
-            stdio: ['ignore', 'pipe', 'ignore'],
-          });
-        } catch {
-          return null;
-        }
-      },
+      execFile: (file, args, timeoutMs) =>
+        // Async on purpose: a hanging portal must not stall the main
+        // process — a sync read would freeze IPC/window events for the
+        // full timeout on every poll tick.
+        new Promise<string | null>((resolve) => {
+          execFile(
+            file,
+            [...args],
+            { encoding: 'utf8', timeout: timeoutMs },
+            (error, stdout) => {
+              resolve(error === null ? stdout : null);
+            },
+          );
+        }),
       watch: (path, onChange) => {
         try {
           const watcher = watch(path, { persistent: false }, onChange);
@@ -273,8 +276,12 @@ async function main(): Promise<void> {
       systemAccent: () => {
         try {
           if (process.platform === 'win32') {
-            // '#RRGGBBAA' — the scheme roles only take the rgb half.
-            return systemPreferences.getAccentColor().slice(0, 7);
+            // 'RRGGBBAA' (unprefixed on win32 — tolerate a '#' anyway)
+            // — the scheme roles only take the rgb half.
+            const raw = systemPreferences
+              .getAccentColor()
+              .replace(/^#/, '');
+            return `#${raw.slice(0, 6)}`;
           }
           if (process.platform === 'darwin') {
             // 'control-accent-color' predates the installed Electron

@@ -85,14 +85,12 @@ const TEXT_ROLES = [
       luminance(d.values.canvas) < luminance(d.values.raised),
   );
   for (const role of TEXT_ROLES) {
-    check(
-      `${role} holds 4.5 on canvas`,
-      contrast(d.values[role], d.values.canvas) >= 4.5,
-    );
-    check(
-      `${role} holds 4.5 on raised`,
-      contrast(d.values[role], d.values.raised) >= 4.5,
-    );
+    for (const surface of ['canvas', 'stage', 'deep', 'raised']) {
+      check(
+        `${role} holds 4.5 on ${surface}`,
+        contrast(d.values[role], d.values[surface]) >= 4.5,
+      );
+    }
   }
   check(
     'sel tints accentSoft at the bounded alpha',
@@ -123,10 +121,12 @@ const TEXT_ROLES = [
       luminance(d.values.canvas) < luminance(d.values.raised),
   );
   for (const role of TEXT_ROLES) {
-    check(
-      `light ${role} holds 4.5 on canvas`,
-      contrast(d.values[role], d.values.canvas) >= 4.5,
-    );
+    for (const surface of ['canvas', 'stage', 'deep', 'raised']) {
+      check(
+        `light ${role} holds 4.5 on ${surface}`,
+        contrast(d.values[role], d.values[surface]) >= 4.5,
+      );
+    }
   }
   check(
     'no sel → accentSoft is accent alpha',
@@ -164,6 +164,27 @@ const TEXT_ROLES = [
     'invisible accent nudges up to ≥4.5',
     contrast(d.values.accent, d.values.raised) >= 4.5,
   );
+}
+
+{
+  // Mid-gray canvas: black fg clears the lighter raised surface but
+  // vanishes on the canvas — the guard must hold on every surface.
+  const d = deriveScheme(
+    {
+      scheme: 'dark',
+      palette: { bg: '#4f4f4f', fg: '#000000' },
+    },
+    'dark',
+  );
+  check('mid-gray palette stays derived', d.values !== schemes.dark);
+  for (const role of TEXT_ROLES) {
+    for (const surface of ['canvas', 'stage', 'deep', 'raised']) {
+      check(
+        `mid-gray ${role} holds 4.5 on ${surface}`,
+        contrast(d.values[role], d.values[surface]) >= 4.5,
+      );
+    }
+  }
 }
 
 // ---------- degenerate palette → honest built-in fallback ----------

@@ -7,8 +7,9 @@ type Palette = NonNullable<ThemeSource['palette']>;
 
 /**
  * Platform specifics are injected so the service stays electron-free and
- * testable: `readFileSync`/`execFileSync` return null on any failure
- * (missing file, timed-out gdbus), `watch` returns a stop function or
+ * testable: `readFileSync`/`execFile` return null on any failure
+ * (missing file, timed-out gdbus — async so a hanging portal can never
+ * stall the Electron main process), `watch` returns a stop function or
  * null when the path can't be watched, `darkFlag` is the OS dark-mode
  * boolean, `systemAccent` the win32/darwin accent read, and
  * `onSystemChange` hooks the native 'updated'/'color-changed' events.
@@ -18,11 +19,11 @@ export interface ThemeSourceEnv {
   readonly home: string;
   readonly env: NodeJS.ProcessEnv;
   readonly readFileSync: (path: string) => string | null;
-  readonly execFileSync: (
+  readonly execFile: (
     file: string,
     args: readonly string[],
     timeoutMs: number,
-  ) => string | null;
+  ) => Promise<string | null>;
   readonly watch: (path: string, onChange: () => void) => (() => void) | null;
   readonly darkFlag: () => boolean;
   readonly systemAccent: () => string | null;
@@ -48,8 +49,10 @@ export interface ThemeSender extends NetSender {
 
 export interface ThemeMonitor {
   /** Subscribes a sender to `theme:events`; the current source is pushed
-      immediately. Refcounted like `net`: the first attach starts the
-      platform watchers, the last detach stops them. */
+      as soon as the first read resolves (immediately for senders that
+      re-subscribe while a snapshot is already known). Refcounted like
+      `net`: the first attach starts the platform watchers, the last
+      detach stops them. */
   attach(sender: ThemeSender): void;
   detach(sender: ThemeSender): void;
   stop(): void;
@@ -202,8 +205,11 @@ const PORTAL_ARGS = [
 ] as const;
 
 /** Reads the best available OS palette for this platform; null when no
-    source exposes one (the renderer then falls back to the flag). */
-export function readPlatformPalette(env: ThemeSourceEnv): Palette | null {
+    source exposes one (the renderer then falls back to the flag). Async
+    because the portal leg shells out to gdbus. */
+export async function readPlatformPalette(
+  env: ThemeSourceEnv,
+): Promise<Palette | null> {
   if (env.platform === 'win32' || env.platform === 'darwin') {
     const accent = env.systemAccent();
     return accent !== null ? { accent } : null;
@@ -232,7 +238,7 @@ export function readPlatformPalette(env: ThemeSourceEnv): Palette | null {
     }
     return null;
   }
-  const stdout = env.execFileSync(PORTAL_CMD, PORTAL_ARGS, 800);
+  const stdout = await env.execFile(PORTAL_CMD, PORTAL_ARGS, 800);
   const accent =
     stdout === null ? null : parsePortalAccent(stdout);
   return accent !== null ? { accent } : null;
@@ -271,11 +277,11 @@ export function createThemeMonitor(opts: {
   let stops: (() => void)[] | null = null;
   let last: ThemeSource | null = null;
 
-  function collect(): ThemeSource {
+  async function collect(): Promise<ThemeSource> {
     const source: { -readonly [K in keyof ThemeSource]?: ThemeSource[K] } =
       { scheme: env.darkFlag() ? 'dark' : 'light' };
     try {
-      const palette = readPlatformPalette(env);
+      const palette = await readPlatformPalette(env);
       if (palette !== null) {
         source.palette = palette;
       }
@@ -318,20 +324,46 @@ export function createThemeMonitor(opts: {
     }
   }
 
+  // Source reads can await a timed-out gdbus; callers coalesce onto the
+  // in-flight read (flag set → one trailing run) instead of stacking
+  // processes, and a teardown mid-flight discards the result.
+  let inflight = false;
+  let rerun = false;
   function refresh(): void {
-    const next = collect();
-    if (JSON.stringify(next) === JSON.stringify(last)) {
+    if (inflight) {
+      rerun = true;
       return;
     }
-    last = next;
-    for (const sender of senders.keys()) {
-      sendTo(sender, next);
-    }
+    inflight = true;
+    void collect()
+      .then((next) => {
+        if (stops === null) {
+          return;
+        }
+        if (JSON.stringify(next) === JSON.stringify(last)) {
+          return;
+        }
+        last = next;
+        for (const sender of senders.keys()) {
+          sendTo(sender, next);
+        }
+      })
+      .catch(() => {
+        // collect() isolates source failures already — keep the monitor.
+      })
+      .finally(() => {
+        inflight = false;
+        if (rerun && stops !== null) {
+          rerun = false;
+          refresh();
+        }
+        rerun = false;
+      });
   }
 
   function setup(): void {
     stops = [];
-    last = collect();
+    refresh();
     for (const path of watchedPaths(env)) {
       try {
         const unwatch = env.watch(path, refresh);
