@@ -85,20 +85,26 @@ export function resolveStageAnchor(
   dragStart: number,
   current: number,
   velocityY: number,
-  commitFraction: number = STAGE_COMMIT_FRACTION,
-  flingVelocity: number = STAGE_FLING_VELOCITY,
+  commitFraction?: number,
+  flingVelocity?: number,
 ): StageAnchor {
   'worklet';
-  if (Number.isFinite(velocityY) && velocityY <= -flingVelocity) {
+  // Default values via `??` in the body, not the signature — a worklet's
+  // default-parameter initializers can't reference module scope (the
+  // transform captures body refs into __closure only), so the signature
+  // form throws ReferenceError on the UI runtime.
+  const commit = commitFraction ?? STAGE_COMMIT_FRACTION;
+  const fling = flingVelocity ?? STAGE_FLING_VELOCITY;
+  if (Number.isFinite(velocityY) && velocityY <= -fling) {
     return 'expanded';
   }
-  if (Number.isFinite(velocityY) && velocityY >= flingVelocity) {
+  if (Number.isFinite(velocityY) && velocityY >= fling) {
     return 'collapsed';
   }
-  if (dragStart <= 0.5 && current - dragStart >= commitFraction) {
+  if (dragStart <= 0.5 && current - dragStart >= commit) {
     return 'expanded';
   }
-  if (dragStart >= 0.5 && dragStart - current >= commitFraction) {
+  if (dragStart >= 0.5 && dragStart - current >= commit) {
     return 'collapsed';
   }
   return dragStart >= 0.5 ? 'expanded' : 'collapsed';
