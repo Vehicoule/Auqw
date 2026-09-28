@@ -1074,7 +1074,7 @@ function Main({
   const isOwned = useCallback(
     (recordingId: string): boolean =>
       controller.downloads.fileFor(recordingId) !== null ||
-      (controller.local()?.uriFor(recordingId) ?? null) !== null,
+      (controller.local()?.uriMap().has(recordingId) ?? false),
     [controller],
   );
 
@@ -1510,8 +1510,7 @@ function Main({
                 : 'failed',
         ]),
     );
-    const localUriFor = (id: string): string | null =>
-      local?.uriFor(id) ?? null;
+    const localUris = local?.uriMap();
     // Honest-offline: with connectivity explicitly down, a row plays
     // only from owned bytes (stored download or local file) — remote
     // streams degrade to 'unavailable' instead of spinning.
@@ -1522,7 +1521,7 @@ function Main({
     ): TrackRowModel => {
       const chip = chipByRecording.get(recordingId) ?? row.download;
       const owned =
-        chip === 'stored' || localUriFor(recordingId) !== null;
+        chip === 'stored' || localUris?.has(recordingId) === true;
       const offlineRow =
         offline && !owned
           ? { state: 'unavailable' as const, note: t('note.offline') }
@@ -1573,6 +1572,7 @@ function Main({
         return model;
       }
       const local = controller.local();
+      const localUris = local?.uriMap();
       const offline = online === false;
       return {
         ...model,
@@ -1581,7 +1581,7 @@ function Main({
             downloadChipFor(entry.recordingId) ?? entry.row.download;
           const owned =
             chip === 'stored' ||
-            local?.uriFor(entry.recordingId) != null;
+            localUris?.has(entry.recordingId) === true;
           const offlineRow =
             offline && !owned
               ? { state: 'unavailable' as const, note: t('note.offline') }
@@ -1601,7 +1601,7 @@ function Main({
         }),
       };
     },
-    // localTick re-reads local.uriFor after a folder mutation.
+    // localTick re-reads local.uriMap after a folder mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       state,
@@ -1696,11 +1696,12 @@ function Main({
         .map((l) => l.targetId),
     );
     const local = controller.local();
+    const localUris = local?.uriMap();
     const rows: TrackRowModel[] = [];
     for (const rec of state.recordings) {
       // Folder removal keeps the recording but drops its file row —
-      // uriFor is the owned-bytes truth; orphans never surface.
-      if (rec.provenance !== 'local' || local?.uriFor(rec.id) == null) {
+      // the uri index is the owned-bytes truth; orphans never surface.
+      if (rec.provenance !== 'local' || localUris?.has(rec.id) !== true) {
         continue;
       }
       const haystack =
@@ -1724,7 +1725,7 @@ function Main({
       }
     }
     return rows;
-    // localTick re-reads local.uriFor after a folder mutation — a
+    // localTick re-reads local.uriMap after a folder mutation — a
     // removed folder's recordings persist but must stop matching.
     // state.playback is read for the per-row playing mark.
   }, [

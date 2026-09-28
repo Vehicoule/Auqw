@@ -578,8 +578,9 @@ export function emissionWrites(
     // An unchanged entity whose ref set still moved (a late-arriving
     // ref rides the same commit's entitySourceRefs section) emits
     // just the presence diff.
+    const nextById = new Map(batch.entities.map((e) => [e.entityId, e]));
     for (const entityId of new Set([...prevRefs.keys(), ...nextRefs.keys()])) {
-      if (prevById.get(entityId) !== batch.entities.find((e) => e.entityId === entityId)) {
+      if (prevById.get(entityId) !== nextById.get(entityId)) {
         continue; // entity itself changed or vanished — covered above
       }
       // Keyed by provider, compared by value: a same-provider ref

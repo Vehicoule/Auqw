@@ -6,9 +6,11 @@ import type {
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
+  DownloadRecord,
   EntityKind,
   EntityRef,
   Like,
+  LocalFile,
   QueueOccurrence,
   Recording,
   Settings,
@@ -544,6 +546,17 @@ type Ready = {
   radio: RadioTailRecord | null;
   persistenceError: AppError | undefined;
   /**
+   * Reusable sync-apply projection input: seeded by one storage load
+   * at the start of a drain, refreshed from each committed batch, and
+   * cleared by any non-apply segment on the storage tail so a write
+   * between pages can't feed a stale section into the next
+   * projection. Owners outside the tail — LocalFileSource,
+   * DownloadManager — commit on their own lanes; an apply whose
+   * cached batch rewrites their sections reloads and re-projects
+   * once before committing.
+   */
+  syncApplyCache: SyncApplySections | null;
+  /**
    * Remote merge outcomes whose records still can't materialize
    * (a field or a parent row hasn't arrived) — refolded on every
    * drain, dropped when the record lands or its fold is superseded
@@ -558,6 +571,20 @@ type Ready = {
    * without dropping cross-page dependents (Review #46).
    */
   materializedPending: MaterializedRecord[];
+};
+
+/**
+ * The projection input the Ready mirror does not carry: match
+ * reviews, the disposable lyrics cache, and device-local download /
+ * local-file rows. A drain's consecutive apply segments share one
+ * snapshot instead of re-reading all sections per page.
+ */
+type SyncApplySections = {
+  -readonly [K in
+    | 'matchReviews'
+    | 'lyricsCache'
+    | 'downloads'
+    | 'localFiles']: PersistedState[K];
 };
 
 function playlistSections(r: Ready): PlaylistState {
@@ -1225,11 +1252,62 @@ export class Session {
    * whole read-modify-write cycles inside a segment, so they are
    * atomic against every session commit — and a commit queued behind
    * them evaluates its batch against the freshest mirror.
+   *
+   * `syncApply` segments keep the Ready projection cache across a
+   * drain's pages; every other segment drops it first — a write
+   * landing between applies must never feed a stale section into the
+   * next projection.
    */
-  #enqueueStorage<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
-    const work = this.#storageTail.then(fn);
+  #enqueueStorage<T>(
+    fn: () => Promise<Result<T>>,
+    options?: { readonly syncApply?: boolean },
+  ): Promise<Result<T>> {
+    const work = this.#storageTail.then(() => {
+      if (options?.syncApply !== true && this.#ready !== null) {
+        this.#ready.syncApplyCache = null;
+      }
+      return fn();
+    });
     this.#storageTail = work.then(() => undefined, () => undefined);
     return work;
+  }
+
+  /**
+   * The projection input a sync apply needs beyond the Ready mirror —
+   * loaded once per drain, then reused by the drain's remaining apply
+   * segments. The cache lives on `r` so a Ready swap drops it whole.
+   */
+  async #syncApplySections(
+    r: Ready,
+    source: CancellationSource,
+    deadlineMs: number,
+  ): Promise<Result<SyncApplySections>> {
+    if (r.syncApplyCache !== null) {
+      return ok(r.syncApplyCache);
+    }
+    const loaded = await this.#withDeadline(
+      () =>
+        this.#storage.load(
+          this.#newContext('load', deadlineMs, source.signal),
+        ),
+      deadlineMs,
+      source,
+    );
+    if (!loaded.ok) {
+      return err(loaded.error);
+    }
+    if (!isPersistedState(loaded.value)) {
+      return err(
+        appError('invalid-response', 'persisted state failed validation'),
+      );
+    }
+    r.syncApplyCache = {
+      matchReviews: loaded.value.matchReviews,
+      lyricsCache: loaded.value.lyricsCache,
+      downloads: loaded.value.downloads,
+      localFiles: loaded.value.localFiles,
+    };
+    return ok(r.syncApplyCache);
   }
 
   /** Bounded, nonfatal persistence. Failures publish persistenceError. */
@@ -1630,13 +1708,15 @@ export class Session {
           );
         }
         const deadlineMs = this.#deadline();
-        const loaded = await this.#withDeadline(
-          () =>
-            this.#storage.load(
-              this.#newContext('load', deadlineMs, source.signal),
-            ),
-          deadlineMs,
+        // One load seeds the whole drain — later pages reuse the
+        // cached sections. `reused` marks an input older than this
+        // segment: its download/local-file rows may have moved under
+        // their off-tail owners, checked again below.
+        const reused = r.syncApplyCache !== null;
+        const loaded = await this.#syncApplySections(
+          r,
           source,
+          deadlineMs,
         );
         // The transport already consumed these outcomes — every one
         // feeds projection; the bound applies only to post-projection
@@ -1651,17 +1731,6 @@ export class Session {
           this.#publish();
           return err(loaded.error);
         }
-        if (!isPersistedState(loaded.value)) {
-          const error = appError(
-            'invalid-response',
-            'persisted state failed validation',
-          );
-          r.syncPending = retainSyncPending(union, warn);
-          r.persistenceError = error;
-          this.#publish();
-          return err(error);
-        }
-        const data = loaded.value;
         // Refold earlier pending outcomes with the new ones — a
         // parent row landing this drain unblocks a held insert.
         const superseded = outcomes.filter(
@@ -1674,28 +1743,60 @@ export class Session {
             `sync projection dropped ${superseded} non-applied outcomes`,
           );
         }
-        const projection = projectAppliedEntries(union, {
-          recordings: r.recordings,
-          likes: r.likes,
-          entities: r.entities,
-          entitySourceRefs: r.entitySourceRefs,
-          playlists: r.playlists,
-          playlistEntries: r.playlistEntries,
-          playHistory: r.playHistory,
-          playCounts: r.playCounts,
-          matchReviews: data.matchReviews,
-          lyricsCache: data.lyricsCache,
-          downloads: data.downloads,
-          localFiles: data.localFiles,
-          queue: r.queue.snapshot(),
-          settings: r.settings,
-        });
+        const project = (input: SyncApplySections) =>
+          projectAppliedEntries(union, {
+            recordings: r.recordings,
+            likes: r.likes,
+            entities: r.entities,
+            entitySourceRefs: r.entitySourceRefs,
+            playlists: r.playlists,
+            playlistEntries: r.playlistEntries,
+            playHistory: r.playHistory,
+            playCounts: r.playCounts,
+            matchReviews: input.matchReviews,
+            lyricsCache: input.lyricsCache,
+            downloads: input.downloads,
+            localFiles: input.localFiles,
+            queue: r.queue.snapshot(),
+            settings: r.settings,
+          });
+        let projection = project(loaded.value);
+        // Spread lifts the readonly section map — the settings
+        // reconcile below may rewrite the projected row.
+        let batch = { ...projection.batch };
+        if (
+          reused &&
+          (batch.recordings !== undefined ||
+            batch.recordingsMerge !== undefined ||
+            batch.downloads !== undefined ||
+            batch.localFiles !== undefined)
+        ) {
+          // DownloadManager and LocalFileSource commit on their own
+          // lanes — rows cached from an earlier page may be stale, so
+          // a batch that rewrites either section re-loads and
+          // re-projects against fresh truth before committing it. A
+          // recordings write must reload too even when no media
+          // section projected: a fresh off-tail row referencing a
+          // deleted recording is invisible to the cached projection,
+          // but the commit's in-transaction merge still validates it.
+          r.syncApplyCache = null;
+          const fresh = await this.#syncApplySections(
+            r,
+            source,
+            deadlineMs,
+          );
+          if (!fresh.ok) {
+            r.syncPending = retainSyncPending(union, warn);
+            r.persistenceError = fresh.error;
+            this.#publish();
+            return err(fresh.error);
+          }
+          projection = project(fresh.value);
+          batch = { ...projection.batch };
+        }
         for (const skip of projection.skipped) {
           this.#logWarn(`sync projection skipped ${skip.kind} record`);
         }
-        // Spread lifts the readonly section map — the settings
-        // reconcile below may rewrite the projected row.
-        const batch = { ...projection.batch };
         if (Object.keys(batch).length === 0) {
           r.syncPending = boundSyncPending(projection.pending);
           // A clean projection clears the surface it shares with
@@ -1717,7 +1818,7 @@ export class Session {
         }
         r.syncPending = boundSyncPending(projection.pending);
         return applied;
-      });
+      }, { syncApply: true });
     } finally {
       this.#opSources.delete(source);
     }
@@ -1750,13 +1851,14 @@ export class Session {
           );
         }
         const deadlineMs = this.#deadline();
-        const loaded = await this.#withDeadline(
-          () =>
-            this.#storage.load(
-              this.#newContext('load', deadlineMs, source.signal),
-            ),
-          deadlineMs,
+        // Same drain reuse as applySyncedEntries — one seeded load
+        // serves the whole rebuild; `reused` re-checks the off-tail
+        // sections before a cached batch rewrites them.
+        const reused = r.syncApplyCache !== null;
+        const loaded = await this.#syncApplySections(
+          r,
           source,
+          deadlineMs,
         );
         const warn = (m: string): void => this.#logWarn(m);
         // Union retained pending with the fresh page — a dependent
@@ -1772,37 +1874,57 @@ export class Session {
           this.#publish();
           return err(loaded.error);
         }
-        if (!isPersistedState(loaded.value)) {
-          const error = appError(
-            'invalid-response',
-            'persisted state failed validation',
+        const project = (input: SyncApplySections) =>
+          projectMaterialized(union, {
+            recordings: r.recordings,
+            likes: r.likes,
+            entities: r.entities,
+            entitySourceRefs: r.entitySourceRefs,
+            playlists: r.playlists,
+            playlistEntries: r.playlistEntries,
+            playHistory: r.playHistory,
+            playCounts: r.playCounts,
+            matchReviews: input.matchReviews,
+            lyricsCache: input.lyricsCache,
+            downloads: input.downloads,
+            localFiles: input.localFiles,
+            queue: r.queue.snapshot(),
+            settings: r.settings,
+          });
+        let projection = project(loaded.value);
+        let batch = { ...projection.batch };
+        if (
+          reused &&
+          (batch.recordings !== undefined ||
+            batch.recordingsMerge !== undefined ||
+            batch.downloads !== undefined ||
+            batch.localFiles !== undefined)
+        ) {
+          // Off-tail owners (downloads, local files) may have moved
+          // the cached rows — reload and re-project before a rewrite,
+          // and before a recording write: the commit re-validates
+          // fresh dependent rows a cached projection never saw.
+          r.syncApplyCache = null;
+          const fresh = await this.#syncApplySections(
+            r,
+            source,
+            deadlineMs,
           );
-          r.materializedPending = retainMaterializedPending(union, warn);
-          r.persistenceError = error;
-          this.#publish();
-          return err(error);
+          if (!fresh.ok) {
+            r.materializedPending = retainMaterializedPending(
+              union,
+              warn,
+            );
+            r.persistenceError = fresh.error;
+            this.#publish();
+            return err(fresh.error);
+          }
+          projection = project(fresh.value);
+          batch = { ...projection.batch };
         }
-        const data = loaded.value;
-        const projection = projectMaterialized(union, {
-          recordings: r.recordings,
-          likes: r.likes,
-          entities: r.entities,
-          entitySourceRefs: r.entitySourceRefs,
-          playlists: r.playlists,
-          playlistEntries: r.playlistEntries,
-          playHistory: r.playHistory,
-          playCounts: r.playCounts,
-          matchReviews: data.matchReviews,
-          lyricsCache: data.lyricsCache,
-          downloads: data.downloads,
-          localFiles: data.localFiles,
-          queue: r.queue.snapshot(),
-          settings: r.settings,
-        });
         for (const skip of projection.skipped) {
           this.#logWarn(`sync projection skipped ${skip.kind} record`);
         }
-        const batch = { ...projection.batch };
         if (Object.keys(batch).length === 0) {
           r.materializedPending = boundMaterializedPending(
             projection.pendingRecords,
@@ -1826,7 +1948,7 @@ export class Session {
           projection.pendingRecords,
         );
         return applied;
-      });
+      }, { syncApply: true });
     } finally {
       this.#opSources.delete(source);
     }
@@ -2054,6 +2176,24 @@ export class Session {
       // this queue.
       r.queueEpoch += 1;
     }
+    // The drain's cached projection input rolls forward with what
+    // just committed — the next page folds over durable truth
+    // without a fresh load.
+    const applyCache = r.syncApplyCache;
+    if (applyCache !== null) {
+      if (batch.matchReviews !== undefined) {
+        applyCache.matchReviews = batch.matchReviews;
+      }
+      if (batch.lyricsCache !== undefined) {
+        applyCache.lyricsCache = batch.lyricsCache;
+      }
+      if (batch.downloads !== undefined) {
+        applyCache.downloads = batch.downloads;
+      }
+      if (batch.localFiles !== undefined) {
+        applyCache.localFiles = batch.localFiles;
+      }
+    }
     r.persistenceError = undefined;
     this.#derived();
     this.#publish();
@@ -2152,6 +2292,7 @@ export class Session {
       ),
       radio: null,
       persistenceError: undefined,
+      syncApplyCache: null,
       syncPending: [],
       materializedPending: [],
     };
