@@ -267,7 +267,11 @@ export class SqliteSyncLogStore implements SyncLogStore {
         !write.divergenceDroppedEmissions.every(
           (emission) => isSafeInt(emission) && emission >= 1,
         )) ||
-      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks))
+      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks)) ||
+      (write.dropPeerMarkSenders !== undefined &&
+        !write.dropPeerMarkSenders.every(
+          (sender) => typeof sender === 'string',
+        ))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -350,6 +354,17 @@ export class SqliteSyncLogStore implements SyncLogStore {
               `INSERT INTO sync_watermarks (device_id, mark) VALUES (?, ?)
                ON CONFLICT (device_id) DO UPDATE SET mark = MAX(mark, excluded.mark)`,
               [device, mark],
+              context.signal,
+            );
+          }
+        }
+        if (write.dropPeerMarkSenders !== undefined) {
+          // Bounded-table evictions delete the whole remembered row —
+          // forfeiting only the compaction pin, never a claim.
+          for (const sender of write.dropPeerMarkSenders) {
+            await conn.execute(
+              'DELETE FROM sync_peer_marks WHERE sender = ?',
+              [sender],
               context.signal,
             );
           }

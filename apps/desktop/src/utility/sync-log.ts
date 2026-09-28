@@ -114,7 +114,8 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'dropEntries' &&
       key !== 'divergenceReplayOffset' &&
       key !== 'divergenceDroppedEmissions' &&
-      key !== 'peerMarks'
+      key !== 'peerMarks' &&
+      key !== 'dropPeerMarkSenders'
     ) {
       return false;
     }
@@ -191,6 +192,17 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   if (
     value['peerMarks'] !== undefined &&
     !isPeerMarks(value['peerMarks'])
+  ) {
+    return false;
+  }
+  if (
+    value['dropPeerMarkSenders'] !== undefined &&
+    !(
+      Array.isArray(value['dropPeerMarkSenders']) &&
+      value['dropPeerMarkSenders'].every(
+        (sender) => typeof sender === 'string' && sender.length <= MAX_DEVICE_ID,
+      )
+    )
   ) {
     return false;
   }
@@ -293,6 +305,10 @@ function parseFile(raw: string): Parsed {
     for (const [device, mark] of Object.entries(write.watermarks ?? {})) {
       watermarks[device] = Math.max(watermarks[device] ?? 0, mark);
     }
+    for (const sender of write.dropPeerMarkSenders ?? []) {
+      // Bounded-table evictions delete the whole remembered row.
+      delete peerMarks[sender];
+    }
     for (const [sender, marks] of Object.entries(write.peerMarks ?? {})) {
       // Per-sender row replace — the write carries the whole folded
       // row, so a regressed claim clears what was stored wholesale.
@@ -390,12 +406,16 @@ function serializeSnapshot(
         snapshot.divergenceReplayOffset > 0
           ? { divergenceReplayOffset: snapshot.divergenceReplayOffset }
           : {}),
-      ...(snapshot.peerMarks !== undefined &&
-        Object.keys(snapshot.peerMarks).length > 0
-          ? { peerMarks: snapshot.peerMarks }
-          : {}),
     }),
   );
+  // Peer-mark rows serialize one sender per line: the load fold is
+  // per-sender replace, so split lines carry identical state while
+  // each stays far under MAX_LINE_BYTES — the aggregated table is the
+  // one field sized senders x sources, which a single line could push
+  // past the reader's bound and get truncated as corruption on reopen.
+  for (const [sender, marks] of Object.entries(snapshot.peerMarks ?? {})) {
+    lines.push(JSON.stringify({ peerMarks: { [sender]: marks } }));
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -422,6 +442,19 @@ async function checkpoint(
     return err(appError('invalid-response', 'sync log failed to refold'));
   }
   const body = serializeSnapshot(deviceId, parsed.snapshot);
+  for (const line of body.split('\n')) {
+    if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+      // An over-bound line would parse as corruption on reopen and
+      // repair would truncate it — refuse the rewrite instead and
+      // leave the uncompacted (still valid) file in place.
+      return err(
+        appError(
+          'invalid-response',
+          'sync log snapshot exceeds the durable line bound',
+        ),
+      );
+    }
+  }
   const tmp = `${path}${REWRITE_SUFFIX}`;
   try {
     const handle = await open(tmp, 'w');
