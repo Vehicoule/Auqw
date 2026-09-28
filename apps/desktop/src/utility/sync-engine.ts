@@ -128,6 +128,9 @@ export async function createUtilitySyncEngine(
       }
       return ok(JSON.parse(JSON.stringify(applied.value)));
     },
+    materialize(): readonly unknown[] {
+      return JSON.parse(JSON.stringify(engine.materialize()));
+    },
   };
 
   const localChanges = async (

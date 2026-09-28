@@ -2189,6 +2189,56 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— sync:materialized pages a populated snapshot through the port ——
+  {
+    const utility = await testUtilityEngine('dsk-mat');
+    const padding = 'p'.repeat(512);
+    const seed: ReturnType<typeof writeName>[] = [];
+    for (let i = 0; i < 2_000; i += 1) {
+      seed.push(writeName(`pl-${i}`, padding));
+    }
+    const seeded = await utility.localChanges(seed, undefined);
+    assert(seeded.ok, `seed writes failed: ${JSON.stringify(seeded)}`);
+    const { service } = await startService({ engine: utility.port });
+    try {
+      const seen = new Set<string>();
+      let offset = 0;
+      let pages = 0;
+      for (;;) {
+        const mat = await invokeHandler(service, 'sync:materialized', {
+          offset,
+        });
+        assert(mat.ok, `sync:materialized failed: ${JSON.stringify(mat)}`);
+        if (!mat.ok) {
+          break;
+        }
+        assert(isRecord(mat.value));
+        const records = mat.value['records'] as { recordId: string }[];
+        for (const rec of records) {
+          assert(
+            !seen.has(rec.recordId),
+            `page ${pages} re-served ${rec.recordId}`,
+          );
+          seen.add(rec.recordId);
+        }
+        const next = mat.value['nextOffset'];
+        pages += 1;
+        assert(pages < 100, 'materialized paging did not converge');
+        if (next === null) {
+          break;
+        }
+        assertEqual(typeof next, 'number');
+        offset = next as number;
+      }
+      assert(pages > 1, 'expected the populated snapshot to page');
+      for (let i = 0; i < 2_000; i += 1) {
+        assert(seen.has(`pl-${i}`), `record pl-${i} never materialized`);
+      }
+    } finally {
+      await service.close();
+    }
+  }
+
   // —— Custody failure propagates: sync:status fails typed ——
   {
     const keys = createMemoryKeys();

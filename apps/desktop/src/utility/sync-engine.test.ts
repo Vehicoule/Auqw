@@ -1,4 +1,8 @@
-import type { ApplyResult, SyncDelta } from '@auqw/application';
+import type {
+  ApplyResult,
+  MaterializedRecord,
+  SyncDelta,
+} from '@auqw/application';
 import {
   assert,
   assertDeepEqual,
@@ -142,6 +146,28 @@ export async function run(): Promise<void> {
     assertEqual(result.entries.length, 1);
     assertEqual(result.entries[0]?.deviceId, 'dsk-source');
     assertDeepEqual(result.cursor, { 'dsk-source': 1 });
+  }
+
+  // —— materialize serves the durable-recovery pull, not an empty page ——
+  {
+    const engine = await engineAt('dsk-mat');
+    const changed = await engine.localChanges(
+      [writeName('pl-1', 'road tunes')],
+      undefined,
+    );
+    assert(changed.ok, `localChanges failed: ${JSON.stringify(changed)}`);
+    const materialize = engine.port.materialize;
+    assert(
+      materialize !== undefined,
+      'the port omits materialize — sync:materialized can only answer []',
+    );
+    const records = materialize.call(engine.port) as MaterializedRecord[];
+    const pl = records.find((r) => r.recordId === 'pl-1');
+    assert(pl !== undefined, 'materialized view is missing pl-1');
+    assertEqual(pl.kind, 'playlist');
+    assertEqual(pl.fields['name'], 'road tunes');
+    // Results ride strict JSON like the delta path's.
+    assertDeepEqual(JSON.parse(JSON.stringify(records)), records);
   }
 
   // —— localChanges validates writes through the engine's own rules ——
