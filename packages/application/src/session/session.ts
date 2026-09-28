@@ -1691,6 +1691,7 @@ export class Session {
    */
   async applySyncedEntries(
     outcomes: readonly MergeOutcome[],
+    signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1698,6 +1699,9 @@ export class Session {
     }
     const generation = ready.value;
     const source = new CancellationSource();
+    const unlink = signal?.subscribe(() => {
+      source.cancel();
+    });
     this.#opSources.add(source);
     try {
       return await this.#enqueueStorage(async () => {
@@ -1820,6 +1824,7 @@ export class Session {
         return applied;
       }, { syncApply: true });
     } finally {
+      unlink?.();
       this.#opSources.delete(source);
     }
   }
@@ -1834,6 +1839,7 @@ export class Session {
    */
   async applyMaterializedEntries(
     records: readonly MaterializedRecord[],
+    signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1841,6 +1847,9 @@ export class Session {
     }
     const generation = ready.value;
     const source = new CancellationSource();
+    const unlink = signal?.subscribe(() => {
+      source.cancel();
+    });
     this.#opSources.add(source);
     try {
       return await this.#enqueueStorage(async () => {
@@ -1950,6 +1959,7 @@ export class Session {
         return applied;
       }, { syncApply: true });
     } finally {
+      unlink?.();
       this.#opSources.delete(source);
     }
   }

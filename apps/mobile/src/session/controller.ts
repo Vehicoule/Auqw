@@ -9,6 +9,7 @@ import {
   err,
   LocalFileSource,
   previewImport,
+  retryBounded,
   Session,
   syncedRecordKey,
 } from '@auqw/application';
@@ -669,21 +670,25 @@ export async function createSessionController(
           // inbound delta that may never come.
           onApplied: (applied) => {
             void (async () => {
-              let result = await session.applySyncedEntries(
-                applied.outcomes,
-              );
-              for (
-                let attempt = 0;
-                !result.ok && attempt < 3 && !signal.cancelled;
-                attempt += 1
-              ) {
-                await new Promise<void>((resolve) =>
-                  setTimeout(resolve, 400 * (attempt + 1)),
-                );
-                if (signal.cancelled) {
-                  return;
-                }
-                result = await session.applySyncedEntries([]);
+              // Attempt 1 folds the fresh outcomes; retries refold
+              // the session's retained pending with [].
+              const result = await retryBounded({
+                // Backstop sized past the call's own internal op
+                // deadline — it must never abandon a healthy
+                // in-flight commit, only a wedged one.
+                deadlineMs: clock.nowMs() + 300_000,
+                signal,
+                clock,
+                maxAttempts: 4,
+                baseBackoffMs: 400,
+                call: (attemptSignal, attempt) =>
+                  session.applySyncedEntries(
+                    attempt === 1 ? applied.outcomes : [],
+                    attemptSignal,
+                  ),
+              });
+              if (signal.cancelled) {
+                return;
               }
               if (!result.ok) {
                 void log.write({
@@ -707,21 +712,20 @@ export async function createSessionController(
           // nobody, so they'd sit unsynced until the next trigger.
           // A failed flush re-pends the buffer with no other wake
           // until the next edit, so retry bounded here; a still-
-          // failing prefix stays buffered for the next emitWrites.
-          let flushed = await emitWrites([]);
-          for (
-            let attempt = 0;
-            !flushed.ok && attempt < 3 && !signal.cancelled;
-            attempt += 1
-          ) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, 400 * (attempt + 1)),
-            );
-            if (signal.cancelled) {
-              break;
-            }
-            flushed = await emitWrites([]);
-          }
+          // failing prefix stays buffered for the next emitWrites
+          // (and the boot reconcile's emitUnsynced re-stamps it).
+          const flushed = await retryBounded({
+            // Boot-critical: start() awaits this before the
+            // scheduler's launch round, so a wedged batch must
+            // time out promptly — a late commit still stamps the
+            // log and a failure leaves the prefix re-pended.
+            deadlineMs: clock.nowMs() + 30_000,
+            signal,
+            clock,
+            maxAttempts: 4,
+            baseBackoffMs: 400,
+            call: (attemptSignal) => emitWrites([], attemptSignal),
+          });
           if (!flushed.ok) {
             void log.write({
               level: 'warn',
@@ -748,24 +752,27 @@ export async function createSessionController(
           // re-fold to the same rows.
           void (async () => {
             const materialized = syncSurface.engine.materialize();
-            let applied = await session.applyMaterializedEntries(
-              materialized,
-            );
             // A failed apply keeps the whole union in the session's
             // retained pending — refold with bounded retries rather
-            // than drop the recovery page until restart (Review #46).
-            for (
-              let attempt = 0;
-              !applied.ok && attempt < 3 && !signal.cancelled;
-              attempt += 1
-            ) {
-              await new Promise<void>((resolve) =>
-                setTimeout(resolve, 400 * (attempt + 1)),
-              );
-              if (signal.cancelled) {
-                return;
-              }
-              applied = await session.applyMaterializedEntries([]);
+            // than drop the recovery page until restart (Review #46):
+            // attempt 1 folds the fresh view, later attempts [].
+            const applied = await retryBounded({
+              // Backstop sized past the call's own internal op
+              // deadline — it must never abandon a healthy
+              // in-flight commit, only a wedged one.
+              deadlineMs: clock.nowMs() + 300_000,
+              signal,
+              clock,
+              maxAttempts: 4,
+              baseBackoffMs: 400,
+              call: (attemptSignal, attempt) =>
+                session.applyMaterializedEntries(
+                  attempt === 1 ? materialized : [],
+                  attemptSignal,
+                ),
+            });
+            if (signal.cancelled) {
+              return;
             }
             if (!applied.ok) {
               void log.write({

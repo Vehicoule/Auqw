@@ -6,6 +6,7 @@ import {
   LocalFileSource,
   ok,
   previewImport,
+  retryBounded,
   Session,
   syncedRecordKey,
 } from '@auqw/application';
@@ -596,6 +597,9 @@ export async function createSessionController(
   let draining = false;
   let drainAgain = false;
   let disposed = false;
+  // The retry backoffs' cancellation source — dispose() cancels a
+  // pending wait instead of letting a backoff run out under teardown.
+  const disposeSource = new CancellationSource();
   // A dropped-outbox flag survives the drain that saw it — an apply
   // retry-exhaustion or ack failure exits early, and the reconcile
   // must still run once a later drain gets through.
@@ -624,25 +628,29 @@ export async function createSessionController(
         synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
       }
       if (page.records.length > 0) {
-        let applied = await session.applyMaterializedEntries(
-          page.records as readonly MaterializedRecord[],
-        );
         // A failed apply keeps the served page in the session's
         // retained pending — refold with bounded retries rather than
         // drop the recovery page until the next reconcile (Review
-        // #46).
-        for (
-          let attempt = 0;
-          !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
-          attempt += 1
-        ) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
-          );
-          if (disposed) {
-            return false;
-          }
-          applied = await session.applyMaterializedEntries([]);
+        // #46): attempt 1 folds the fresh page, later attempts [].
+        const applied = await retryBounded({
+          // Backstop sized past the call's own internal op
+          // deadline — it must never abandon a healthy in-flight
+          // commit, only a wedged one.
+          deadlineMs: clock.nowMs() + 300_000,
+          signal: disposeSource.signal,
+          clock,
+          maxAttempts: APPLY_RETRY_MAX + 1,
+          baseBackoffMs: APPLY_RETRY_MS,
+          call: (attemptSignal, attempt) =>
+            session.applyMaterializedEntries(
+              attempt === 1
+                ? (page.records as readonly MaterializedRecord[])
+                : [],
+              attemptSignal,
+            ),
+        });
+        if (disposed) {
+          return false;
         }
         if (!applied.ok) {
           void log.write({
@@ -708,26 +716,31 @@ export async function createSessionController(
           });
         }
         if (batch.outcomes.length > 0) {
-          let applied = await session.applySyncedEntries(
-            batch.outcomes as readonly MergeOutcome[],
-          );
           // A failed projection stays in the session's pending, so
           // refold with bounded retries. The file lines stay unacked
           // — the next drain re-serves them if this never commits.
           // Disposing or exhausting attempts exits; the next
-          // `sync:applied` push re-arms.
-          for (
-            let attempt = 0;
-            !applied.ok && attempt < APPLY_RETRY_MAX && !disposed;
-            attempt += 1
-          ) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, APPLY_RETRY_MS * (attempt + 1)),
-            );
-            if (disposed) {
-              return;
-            }
-            applied = await session.applySyncedEntries([]);
+          // `sync:applied` push re-arms. Attempt 1 folds the fresh
+          // outcomes; later attempts refold the pending with [].
+          const applied = await retryBounded({
+            // Backstop sized past the call's own internal op
+            // deadline — it must never abandon a healthy in-flight
+            // commit, only a wedged one.
+            deadlineMs: clock.nowMs() + 300_000,
+            signal: disposeSource.signal,
+            clock,
+            maxAttempts: APPLY_RETRY_MAX + 1,
+            baseBackoffMs: APPLY_RETRY_MS,
+            call: (attemptSignal, attempt) =>
+              session.applySyncedEntries(
+                attempt === 1
+                  ? (batch.outcomes as readonly MergeOutcome[])
+                  : [],
+                attemptSignal,
+              ),
+          });
+          if (disposed) {
+            return;
           }
           if (!applied.ok) {
             void log.write({
@@ -895,6 +908,7 @@ export async function createSessionController(
     },
     async dispose() {
       disposed = true;
+      disposeSource.cancel();
       unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);
