@@ -295,9 +295,10 @@ type ScriptedServer = {
 async function createEngine(
   deviceId: string,
   clock: FakeClock,
+  store?: FakeSyncLogStore,
 ): Promise<SyncEngine> {
   const engine = await createSyncEngine({
-    store: new FakeSyncLogStore(),
+    store: store ?? new FakeSyncLogStore(),
     clock,
     ids: new SequenceIds(),
     log: new FakeLog(),
@@ -317,7 +318,9 @@ const SERVER_SPUB = 'server-spub';
 const SERVER_FP = fpOf(SERVER_SPUB);
 const ENDPOINT = '10.0.0.4:7777';
 
-async function rig(): Promise<{
+async function rig(options?: {
+  serverStore?: FakeSyncLogStore;
+}): Promise<{
   client: ReturnType<typeof createSyncClient>;
   clientEngine: SyncEngine;
   serverEngine: SyncEngine;
@@ -330,7 +333,11 @@ async function rig(): Promise<{
   const clock = new FakeClock();
   const ids = new SequenceIds();
   const clientEngine = await createEngine(CLIENT_ID, clock);
-  const serverEngine = await createEngine(SERVER_ID, clock);
+  const serverEngine = await createEngine(
+    SERVER_ID,
+    clock,
+    options?.serverStore,
+  );
   const keys = fakeKeys();
 
   const servers = new Map<string, (socket: FakeSocket) => void>();
@@ -1146,6 +1153,33 @@ async function failedRePairKeepsPeer(): Promise<void> {
   await fresh.client.close();
 }
 
+// 22. A peer with nothing to send still ships its delta — the claim
+// carrier. A restarted responder only re-confirms a remembered
+// sender when applyDelta runs, so dropping the delta for an empty
+// export would pin that responder's compaction on a stale mark.
+async function emptyDeltaStillCarriesSenderClaim(): Promise<void> {
+  const serverStore = new FakeSyncLogStore({
+    entries: [],
+    divergence: [],
+    watermarks: {},
+    peerMarks: { [CLIENT_ID]: { [SERVER_ID]: 4 } },
+  });
+  const { client, server } = await rig({ serverStore });
+  const paired = await client.pair({ payload: qrPayload() });
+  assert(paired.ok);
+  const outcome = await client.syncNow(SERVER_FP);
+  assert(outcome.ok, 'empty round converges');
+  const first = server.syncs[0] as { delta?: unknown };
+  assert(
+    first.delta !== undefined,
+    'empty export still ships a delta claim',
+  );
+  // The responder folded it: the remembered non-empty row was
+  // replaced wholesale by the peer's live empty claim.
+  assertDeepEqual(serverStore.storedPeerMarks[CLIENT_ID], {});
+  await client.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pairOverQrPayload', pairOverQrPayload],
   ['pairOverTypedCode', pairOverTypedCode],
@@ -1172,6 +1206,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['cappedRoundReportsMovedEntries', cappedRoundReportsMovedEntries],
   ['rePairKeepsWatermark', rePairKeepsWatermark],
   ['failedRePairKeepsPeer', failedRePairKeepsPeer],
+  ['emptyDeltaStillCarriesSenderClaim', emptyDeltaStillCarriesSenderClaim],
 ];
 
 export async function run(): Promise<void> {
