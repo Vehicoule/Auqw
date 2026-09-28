@@ -1396,6 +1396,59 @@ function testProjectMaterializedPending(): void {
   );
 }
 
+// The materialized guard enforces the delta path's per-field rules:
+// a record carrying a whitelisted field with a bad value, or a field
+// the whitelist never heard of, quarantines as skipped instead of
+// being cast into a row — while a rule-conformant sibling lands.
+function testProjectMaterializedSkipsInvalid(): void {
+  const current = projInput({ recordings: [], likes: [] });
+  const goodRef = ref('itunes', 'g-1');
+  const projected = projectMaterialized(
+    [
+      {
+        kind: 'recording',
+        recordId: 'r-bad',
+        fields: { title: 42 },
+      },
+      {
+        kind: 'recording',
+        recordId: 'r-off',
+        fields: { title: 'ok', sessionToken: 'leak' },
+      },
+      {
+        kind: 'recording',
+        recordId: 'r-good',
+        fields: { title: 'Good', artist: 'G' },
+      },
+      {
+        kind: 'recordingSourceRef',
+        recordId: sourceRefRecordId('r-good', goodRef),
+        fields: { ref: goodRef },
+      },
+    ],
+    current,
+  );
+  assertDeepEqual(
+    projected.skipped,
+    [
+      { kind: 'unknown', reason: 'invalid' },
+      { kind: 'unknown', reason: 'invalid' },
+    ],
+    'invalid-field records quarantine as skipped',
+  );
+  const rows = projected.batch.recordingsMerge?.(current.recordings) ?? [];
+  assertDeepEqual(
+    rows.map((r) => r.id),
+    ['r-good'],
+    'rule-conformant record still materializes',
+  );
+  assertDeepEqual(
+    projected.pendingRecords,
+    [],
+    'rejected records never ride pending',
+  );
+}
+
 // A playlistEntry tombstone deletes the existing row (Devin Review
 // #46 — the existing-row loop must not re-push it).
 function testEntryTombstoneRemoves(): void {
@@ -1692,6 +1745,7 @@ export function run(): void {
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();
+  testProjectMaterializedSkipsInvalid();
   testEntryTombstoneRemoves();
   testEmissionNeverEmitsUndefined();
   testMergeDeadSetConsistent();
