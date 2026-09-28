@@ -1,27 +1,17 @@
-type Quad = {
-  readonly xs: readonly [number, number, number, number];
-  readonly ys: readonly [number, number, number, number];
-};
-
-export const PLAY_LEFT: Quad = {
-  xs: [8, 12, 8, 8],
-  ys: [5, 8.5, 20, 5],
-};
-
-export const PLAY_RIGHT: Quad = {
-  xs: [12, 19, 12, 12],
-  ys: [8.5, 12, 15.5, 8.5],
-};
-
-export const PAUSE_LEFT: Quad = {
-  xs: [7.4, 10.8, 10.8, 7.4],
-  ys: [5, 5, 19, 19],
-};
-
-export const PAUSE_RIGHT: Quad = {
-  xs: [13.2, 16.6, 16.6, 13.2],
-  ys: [5, 5, 19, 19],
-};
+import {
+  PAUSE_LEFT,
+  PAUSE_RIGHT,
+  PLAY_LEFT,
+  PLAY_RIGHT,
+  type Quad,
+} from '@auqw/ui-shared';
+export {
+  PLAY_LEFT,
+  PLAY_RIGHT,
+  PAUSE_LEFT,
+  PAUSE_RIGHT,
+  type Quad,
+} from '@auqw/ui-shared';
 
 function clamp01(value: number): number {
   'worklet';

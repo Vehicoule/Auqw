@@ -4,6 +4,7 @@ export * from './shell.ts';
 
 export * from './peaks.ts';
 export * from './waveform.ts';
+export * from './motion.ts';
 
 export * as fixtures from './fixtures.ts';
 
