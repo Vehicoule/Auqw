@@ -2559,26 +2559,83 @@ async function peerMarkTableAcceptsUnboundedSenders(): Promise<void> {
   await makeEngine('a', 2_000, a.store);
 }
 
-async function peerMarkRowClamps(): Promise<void> {
+async function oversizedCursorRejectedAtWire(): Promise<void> {
   const a = await makeEngine('a', 1_000);
-  // A folded row is bounded to the wire's source count — successive
-  // disjoint claims keep the largest marks, so a dropped source only
-  // delays that lane's compaction rather than crediting a wrong seq.
-  const first: Record<string, number> = {};
-  for (let i = 0; i < 512; i++) {
-    first[`src-${i}`] = i + 1;
+  // A peer-mark row is exactly one validated cursor, so the per-row
+  // source bound lives at the wire: a claim beyond it never folds.
+  const claim: Record<string, number> = {};
+  for (let i = 0; i < 600; i++) {
+    claim[`src-${i}`] = i + 1;
   }
-  await mustApply(a.engine, { ...delta([], 'b'), cursor: first });
-  const second: Record<string, number> = {};
-  for (let i = 512; i < 600; i++) {
-    second[`src-${i}`] = i + 1_000;
+  const applied = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: claim,
+  });
+  assert(!applied.ok, 'a cursor beyond the wire bound is rejected');
+  assertDeepEqual(a.store.storedPeerMarks['b'], undefined);
+}
+
+async function livePeerRegressionReplacesRow(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  // r1: seq1 dies to seq2; r2: seq3 dies to seq4.
+  for (const recordId of ['r1', 'r2']) {
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'Old',
+    });
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'New',
+    });
   }
-  await mustApply(a.engine, { ...delta([], 'b'), cursor: second });
-  const row = a.store.storedPeerMarks['b'] ?? {};
-  assert(Object.keys(row).length <= 512, 'row stays inside the source bound');
-  assert(row['src-599'] === 1599, 'largest marks kept');
-  assert(row['src-88'] === 89, 'above-minimum marks kept');
-  assert(row['src-0'] === undefined, 'smallest mark displaced');
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  // b's claim {a:4} lands: the dead losers at seqs 1 and 3 compact.
+  await mustApply(a.engine, docB.value);
+  assertDeepEqual(
+    a.store.entries.map((entry) => entry.seq),
+    [2, 4],
+  );
+  // seq4 dies to seq5 — merge-dead but still above every floor.
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'Final',
+  });
+  // The peer rebuilt mid-session and now claims only {a:2}. A live
+  // cursor is a complete claim — the row replaces wholesale; a
+  // max-fold would keep crediting {a:4} and let the next claim drop
+  // seq4, which the rebuilt peer never received.
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 2 });
+  await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 6 } });
+  assertDeepEqual(
+    a.store.entries.map((entry) => entry.seq),
+    [2, 4, 5],
+  );
+}
+
+async function peerMarkClaimOnlyDeltaNoops(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A cursor claim with no entries still folds and persists — the
+  // wire path a read-only peer's re-confirm rides each round.
+  const claim = { ...delta([], 'b'), cursor: { a: 1 } };
+  await mustApply(a.engine, claim);
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  const writesAfter = a.store.writes.length;
+  // An identical claim changes nothing — the apply folds but commits
+  // no write, so idle rounds cost the store nothing.
+  await mustApply(a.engine, claim);
+  assertEqual(a.store.writes.length, writesAfter);
 }
 
 async function peerMarkSenderNamedProto(): Promise<void> {
@@ -2829,7 +2886,9 @@ export async function run(): Promise<void> {
   await rebuiltPeerDropsStaleMarks();
   await peerMarkWriteRetriesUntilDurable();
   await peerMarkTableAcceptsUnboundedSenders();
-  await peerMarkRowClamps();
+  await oversizedCursorRejectedAtWire();
+  await livePeerRegressionReplacesRow();
+  await peerMarkClaimOnlyDeltaNoops();
   await peerMarkSenderNamedProto();
   await propertyHarness();
 }

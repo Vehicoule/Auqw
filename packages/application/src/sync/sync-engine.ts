@@ -1346,7 +1346,8 @@ export async function createSyncEngine(
   /**
    * The last contiguous watermarks each delta sender advertised —
    * `peerMarks[sender][src]` is the largest seq that peer provably
-   * holds for `src`. Marks only grow, so each apply max-folds.
+   * holds for `src`. Each apply replaces the row with the claimed
+   * cursor — a live regression retires what a lost instance claimed.
    * Compaction drops an entry only when the per-source MINIMUM across
    * senders passes it: every peer we have heard from already holds it.
    */
@@ -2120,53 +2121,37 @@ export async function createSyncEngine(
   /**
    * Fold the sender's advertised contiguous watermarks into the peer
    * table — `peerMarks[sender][src]` becomes the largest seq the
-   * sender provably holds for `src`. Marks only grow, so a max-fold
-   * keeps the newest claim. The live claim also lifts the sender's
-   * hydrate-restored staleness: whatever the durable table
+   * sender provably holds for `src`. A cursor is a COMPLETE claim,
+   * not a delta: the folded row replaces wholesale, matching the
+   * write's per-sender replace — a live regression (a peer rebuilt
+   * under the same id) must retire the marks its lost instance
+   * claimed, not max-fold over them. The live claim also lifts the
+   * sender's hydrate-restored staleness: whatever the durable table
    * remembered, the claims observed this session now govern.
    *
-   * Bounds: a folded row holds at most MAX_CURSOR_DEVICES sources,
-   * keeping the largest marks — an ignored source contributes 0,
-   * which only delays that lane's cleanup without crediting a claim.
+   * Bounds: a row is exactly one wire-validated cursor, so the
+   * MAX_CURSOR_DEVICES source bound comes free from `isSyncDelta`.
    * The sender count stays unbounded on purpose: a sender's row is
    * what stops compaction dropping entries that peer never received,
    * so evicting one is a data-loss direction, and a safe cap would
    * need protocol-level peer retirement the wire does not carry.
    */
   function notePeerCursor(sender: string, cursor: SyncCursor): void {
-    let advanced = stalePeers.delete(sender);
-    let marks = peerMarks.get(sender);
-    if (marks === undefined) {
-      marks = new Map<string, number>();
-      peerMarks.set(sender, marks);
-      advanced = true;
-    }
-    for (const [src, mark] of Object.entries(cursor)) {
-      const current = marks.get(src) ?? 0;
-      if (mark <= current) {
-        continue;
-      }
-      if (!marks.has(src) && marks.size >= MAX_CURSOR_DEVICES) {
-        // Row at the wire bound: keep the largest marks — a new
-        // source displaces the smallest claim only when it ranks
-        // higher, and a claim below the row's minimum is ignored.
-        let minSrc: string | undefined;
-        let minMark = Number.POSITIVE_INFINITY;
-        for (const [heldSrc, heldMark] of marks) {
-          if (heldMark < minMark) {
-            minMark = heldMark;
-            minSrc = heldSrc;
-          }
+    const claims = new Map<string, number>(Object.entries(cursor));
+    const prev = peerMarks.get(sender);
+    let changed = prev === undefined || prev.size !== claims.size;
+    if (!changed && prev !== undefined) {
+      for (const [src, mark] of claims) {
+        if (prev.get(src) !== mark) {
+          changed = true;
+          break;
         }
-        if (minSrc === undefined || mark <= minMark) {
-          continue;
-        }
-        marks.delete(minSrc);
       }
-      marks.set(src, mark);
-      advanced = true;
     }
-    if (advanced) {
+    if (changed) {
+      peerMarks.set(sender, claims);
+    }
+    if (stalePeers.delete(sender) || changed) {
       dirtyPeerMarkSenders.add(sender);
     }
   }
@@ -2759,17 +2744,30 @@ export async function createSyncEngine(
       // the in-memory lanes and durable sync_log.
       notePeerCursor(doc.senderDeviceId, doc.cursor);
       const foldedRow = peerMarks.get(doc.senderDeviceId);
-      const appended = await appendLog(
-        fresh,
-        doc.skipped,
-        sig,
-        deadlineMs,
-        foldedRow === undefined
-          ? undefined
-          : { sender: doc.senderDeviceId, marks: Object.fromEntries(foldedRow) },
-      );
-      if (!appended.ok) {
-        return err(appended.error);
+      // A cursor-only claim that changed nothing (no fresh entries,
+      // no skipped holes, a row already durable) is a pure re-confirm
+      // — skip the append so an idle round costs the store no write.
+      const needsLog =
+        fresh.length > 0 ||
+        (doc.skipped !== undefined &&
+          Object.keys(doc.skipped).length > 0) ||
+        dirtyPeerMarkSenders.has(doc.senderDeviceId);
+      if (needsLog) {
+        const appended = await appendLog(
+          fresh,
+          doc.skipped,
+          sig,
+          deadlineMs,
+          foldedRow === undefined
+            ? undefined
+            : {
+                sender: doc.senderDeviceId,
+                marks: Object.fromEntries(foldedRow),
+              },
+        );
+        if (!appended.ok) {
+          return err(appended.error);
+        }
       }
       // Once fresh entries are durable the merge runs to completion —
       // bailing here would leave the log ahead of the in-memory merge.
