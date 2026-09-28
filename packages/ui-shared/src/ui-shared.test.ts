@@ -458,9 +458,10 @@ const FLOOR = Math.pow(0.05, 1.2); // normalized floor stub height
   }
   const spiked = peaksFromChannels([burst], 8);
   assertEqual(spiked[6]?.up, 1, 'the burst owns its bucket');
-  assert(
-    Math.abs((spiked[6]?.down ?? 1) - FLOOR) < 1e-6,
-    'a unipolar burst leaves the lower arm a stub — asymmetric',
+  assertEqual(
+    spiked[6]?.down,
+    0,
+    'a unipolar burst leaves the lower arm an honest zero — asymmetric',
   );
   assert(
     (spiked[0]?.up ?? 0) > FLOOR && (spiked[0]?.up ?? 0) < 0.25,
@@ -475,9 +476,10 @@ const FLOOR = Math.pow(0.05, 1.2); // normalized floor stub height
   const stereo = peaksFromChannels([left, right], 4);
   assertEqual(stereo[0]?.up, 1, 'the left channel feeds the upper arm');
   assertEqual(stereo[3]?.down, 1, 'the right channel feeds the lower arm');
-  assert(
-    (stereo[0]?.down ?? 1) < 0.2,
-    'the absent lower channel stays a stub — bars are not mirrors',
+  assertEqual(
+    stereo[0]?.down,
+    0,
+    'the absent lower channel reads zero — bars are not mirrors',
   );
 
   // Dynamics survive: a 14 dB-quiet tail does not normalize to full

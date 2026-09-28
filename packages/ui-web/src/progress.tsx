@@ -240,16 +240,16 @@ function useScrubCommit(
       if (!dragging.current) {
         return;
       }
-      const ms = scrubRef.current ?? commitMs;
-      if (ms === null) {
+      if (commitMs === null) {
         // A cancelled/empty gesture restores the real fill — only a
-        // committed position may move playback.
+        // released pointer's position may move playback, so the
+        // preview must be dropped before any fallback is consulted.
         dragging.current = false;
         scrubRef.current = null;
         setScrubMs(null);
         return;
       }
-      commit(ms);
+      commit(scrubRef.current ?? commitMs);
     },
     [commit],
   );

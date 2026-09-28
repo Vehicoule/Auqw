@@ -93,7 +93,10 @@ export function normalizePeakWindows(
   const hi = Math.max(percentile(mags, 95), lo, peak * 0.5);
   const span = hi - lo;
   const shape = (v: number): number => {
-    const t = span > 1e-9 ? (v - lo) / span : v > 0 ? 1 : 0;
+    if (v <= 0) {
+      return 0;
+    }
+    const t = span > 1e-9 ? (v - lo) / span : 1;
     return Math.pow(Math.min(1, Math.max(PEAK_FLOOR, t)), PEAK_GAMMA);
   };
   const out = new Array<WaveformPeak>(windows.length);

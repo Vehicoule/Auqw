@@ -53,9 +53,22 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         ? Math.min(MAX_PEAK_BYTES, MAX_UNKNOWN_DURATION_BYTES)
         : MAX_PEAK_BYTES;
       const requestId = context.requestId;
+      const remainingMs = context.deadlineMs - Date.now();
+      if (remainingMs <= 0) {
+        return err(appError('timeout', 'peak extraction deadline'));
+      }
       const unsubscribe = context.signal.subscribe(() => {
         cancelNative(requestId);
       });
+      // The caller's operation deadline is enforced here, not inside
+      // the native sweep's own timeouts: expiry cancels the native job
+      // and surfaces 'timeout', the same retryable kind the desktop
+      // port reports when its read deadline lapses.
+      let deadlineFired = false;
+      const deadlineTimer = setTimeout(() => {
+        deadlineFired = true;
+        cancelNative(requestId);
+      }, remainingMs);
       try {
         const flat = await extract(
           requestId,
@@ -69,22 +82,55 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         if (context.signal.cancelled) {
           return err(appError('cancelled', 'peak extraction cancelled'));
         }
+        if (deadlineFired) {
+          return err(appError('timeout', 'peak extraction deadline'));
+        }
+        // The contract is exactly `count` [up,down] pairs — a shorter
+        // list is a partial decode, not a waveform, and caching it
+        // would stretch a truncated profile over the whole track. A
+        // genuinely silent decode still yields `count` zero pairs,
+        // which passes and normalizes to honest zeros.
+        if (flat.length !== PEAKS_RESOLUTION * 2) {
+          return err(
+            appError(
+              'invalid-response',
+              'peak extractor returned a partial profile',
+            ),
+          );
+        }
         const windows: PeakWindow[] = [];
-        for (let i = 0; i + 1 < flat.length; i += 2) {
-          const up = flat[i] ?? 0;
-          const down = flat[i + 1] ?? 0;
-          if (Number.isFinite(up) && Number.isFinite(down)) {
-            windows.push({ up, down });
+        for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
+          const up = flat[i * 2];
+          const down = flat[i * 2 + 1];
+          if (
+            up === undefined ||
+            down === undefined ||
+            !Number.isFinite(up) ||
+            !Number.isFinite(down) ||
+            up < 0 ||
+            down < 0
+          ) {
+            return err(
+              appError(
+                'invalid-response',
+                'peak extractor returned malformed magnitudes',
+              ),
+            );
           }
+          windows.push({ up, down });
         }
         return ok(normalizePeakWindows(windows));
       } catch (thrown) {
         if (context.signal.cancelled) {
           return err(appError('cancelled', 'peak extraction cancelled'));
         }
+        if (deadlineFired) {
+          return err(appError('timeout', 'peak extraction deadline'));
+        }
         return err(nativeError(thrown));
       } finally {
         unsubscribe();
+        clearTimeout(deadlineTimer);
       }
     },
   };

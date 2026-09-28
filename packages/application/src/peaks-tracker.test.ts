@@ -1,4 +1,5 @@
 import { assert, assertEqual } from './testing/assert.ts';
+import type { OperationContext } from './cancellation.ts';
 import { appError, err, ok } from './errors.ts';
 import type { Result } from './errors.ts';
 import { createPeaksTracker } from './peaks-tracker.ts';
@@ -30,6 +31,7 @@ async function settle(rounds = 10): Promise<void> {
 
 type Call = {
   request: PeaksRequest;
+  context: OperationContext;
   resolve: (r: Result<readonly WaveformPeak[]>) => void;
 };
 
@@ -47,13 +49,13 @@ function fakePort(
   return {
     calls,
     port: {
-      peaks(request) {
+      peaks(request, context) {
         if (handler !== undefined) {
-          calls.push({ request, resolve: () => { } });
+          calls.push({ request, context, resolve: () => { } });
           return Promise.resolve(handler(request));
         }
         return new Promise<Result<readonly WaveformPeak[]>>((resolve) => {
-          calls.push({ request, resolve });
+          calls.push({ request, context, resolve });
         });
       },
     },
@@ -151,6 +153,27 @@ export async function run(): Promise<void> {
       tracker.get('r-5'),
       PEAKS,
       'a superseded extraction never overwrites the live peaks',
+    );
+  }
+
+  // A cancelled generation's requestId must never repeat on its
+  // replacement: the abandoned extraction can still be unwinding
+  // natively, and a colliding id lets its teardown unregister the
+  // live one's cancel slot.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-ids', 'h1'));
+    tracker.cancel('r-ids');
+    tracker.pull(target('r-ids', 'h2'));
+    assertEqual(calls.length, 2, 'cancel + re-pull spawns a second call');
+    assert(
+      calls[0]?.context.requestId !== calls[1]?.context.requestId,
+      'request ids stay unique across generations',
+    );
+    assert(
+      calls[1]?.context.requestId.includes('r-ids') === true,
+      'the id still names its recording for diagnostics',
     );
   }
 

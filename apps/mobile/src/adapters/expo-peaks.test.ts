@@ -134,6 +134,97 @@ export async function run(): Promise<void> {
     assert(!result.ok && result.error.kind === 'released');
   }
 
+  // A deadline already past refuses before the native call —
+  // 'timeout', the retryable kind, with zero wire surface.
+  {
+    const native = fakeNative(flatProfile(PEAKS_RESOLUTION));
+    const port = createExpoPeaksPort(native);
+    const result = await port.peaks(
+      { handle: 'h-7', durationMs: 60_000 },
+      {
+        requestId: 'peaks-dead',
+        deadlineMs: Date.now() - 1,
+        signal: new CancellationSource().signal,
+      },
+    );
+    assert(!result.ok && result.error.kind === 'timeout');
+    assertEqual(native.calls.length, 0, 'an expired deadline never decodes');
+  }
+
+  // A deadline lapsing mid-sweep cancels the native job and surfaces
+  // 'timeout' — not the port's 'cancelled', and never a hung decode.
+  {
+    const nativeCall: { reject?: (e: Error) => void } = {};
+    const native = fakeNative(
+      () =>
+        new Promise<readonly number[]>((_resolve, reject) => {
+          nativeCall.reject = reject;
+        }),
+    );
+    const port = createExpoPeaksPort(native);
+    const pending = port.peaks(
+      { handle: 'h-8', durationMs: 60_000 },
+      {
+        requestId: 'peaks-dl',
+        deadlineMs: Date.now() + 40,
+        signal: new CancellationSource().signal,
+      },
+    );
+    await new Promise((r) => setTimeout(r, 90));
+    assertEqual(native.cancels[0], 'peaks-dl', 'the deadline cancels native');
+    // The native side's honest reply to its cancel.
+    nativeCall.reject?.(
+      Object.assign(new Error('cancelled'), { code: 'cancelled' }),
+    );
+    const result = await pending;
+    assert(!result.ok && result.error.kind === 'timeout');
+  }
+
+  // A truncated flat list is a partial decode, not a waveform —
+  // 'invalid-response', never a stretched profile over the track.
+  {
+    const native = fakeNative(flatProfile(PEAKS_RESOLUTION / 2));
+    const port = createExpoPeaksPort(native);
+    const result = await port.peaks(
+      { handle: 'h-9', durationMs: 60_000 },
+      context(),
+    );
+    assert(!result.ok && result.error.kind === 'invalid-response');
+  }
+
+  // Malformed magnitudes (negative / non-finite) are refused the same
+  // way — the contract is finite non-negative pairs only.
+  {
+    const bad = flatProfile(PEAKS_RESOLUTION);
+    bad[10] = -0.5;
+    bad[20] = Number.NaN;
+    const native = fakeNative(bad);
+    const port = createExpoPeaksPort(native);
+    const result = await port.peaks(
+      { handle: 'h-10', durationMs: 60_000 },
+      context(),
+    );
+    assert(!result.ok && result.error.kind === 'invalid-response');
+  }
+
+  // Genuinely silent PCM is a full-length zero profile — it passes
+  // strict validation and normalizes to honest zeros.
+  {
+    const native = fakeNative(
+      Array.from({ length: PEAKS_RESOLUTION * 2 }, () => 0),
+    );
+    const port = createExpoPeaksPort(native);
+    const result = await port.peaks(
+      { handle: 'h-11', durationMs: 60_000 },
+      context(),
+    );
+    assert(result.ok, 'silent audio is a valid profile');
+    assert(
+      result.value.every((p) => p.up === 0 && p.down === 0),
+      'silence normalizes to zeros',
+    );
+  }
+
   // Cancellation forwards to the native sweep and surfaces typed.
   {
     const source = new CancellationSource();

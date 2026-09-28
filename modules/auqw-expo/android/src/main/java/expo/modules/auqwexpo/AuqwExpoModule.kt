@@ -191,7 +191,21 @@ class AuqwExpoModule : Module() {
   private var host: PluginHost? = null
   private val streamRegistry = AuqwStreamRegistry()
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
-  private val waveformPeaks = AuqwWaveformPeaks(streamRegistry)
+  private val waveformPeaks = AuqwWaveformPeaks(streamRegistry) { handle ->
+    // provider:'local' handles are device files — no seam session
+    // exists for them, so peaks decode straight off the
+    // file/content URI the way `play` resolves them.
+    localHandles[handle]?.let { local ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      LocalSource(
+        Uri.parse(
+          if (local.path.contains("://")) local.path else "file://${local.path}"
+        ),
+        ctx
+      )
+    }
+  }
   // The seam's terminal kinds (released/expired/superseded/…) can
   // never succeed on retry — let them fail to onPlayerError at once
   // instead of burning the default policy's ~3s of retries; the

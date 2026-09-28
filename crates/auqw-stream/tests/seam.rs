@@ -503,6 +503,81 @@ async fn read_at_known_end_is_eof() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peek_serves_committed_bytes_and_never_demands() {
+    let d = TestDir::new("peek");
+    let mut pages = HashMap::new();
+    pages.insert(0u64, VecDeque::from([Step::Reply(chunk(0, 128, 1024, 1))]));
+    pages.insert(
+        128u64,
+        VecDeque::from([Step::Reply(chunk(128, 128, 1024, 2))]),
+    );
+    // A demand read on the same hole still works afterwards — the
+    // earlier peeks queued nothing for it to collide with.
+    pages.insert(
+        512u64,
+        VecDeque::from([Step::Reply(chunk(512, 128, 1024, 7))]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    wait_until(|| head_ready(&reg, &h)).await;
+
+    // Committed hit: bytes served straight off the store — no
+    // attach, no parking, no thread hand-off needed.
+    let hit = reg
+        .peek(&h, 0, 64)
+        .unwrap_or_else(|e| panic!("peek hit: {e}"));
+    assert_eq!(hit.as_deref(), Some(&[1u8; 64][..]));
+
+    // An unfetched hole returns `None` at once and — the whole point
+    // — queues no fetch-through demand: nothing is fetched for the
+    // offset even after the pump has had time to see it.
+    let hole = reg
+        .peek(&h, 512, 64)
+        .unwrap_or_else(|e| panic!("peek hole: {e}"));
+    assert_eq!(hole, None);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !fetch.issued(512),
+        "a peek must never queue fetch-through demand"
+    );
+
+    // Past the known total is a confirmed EOF, not a hole.
+    let eof = reg
+        .peek(&h, 1024, 64)
+        .unwrap_or_else(|e| panic!("peek eof: {e}"));
+    assert_eq!(eof.as_deref(), Some(&[][..]));
+
+    // A demanding read on the same hole commits it (the pump fetches
+    // the scripted page), and then the peek serves it — peeks observe,
+    // they don't poison or consume the demand pipeline.
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 512, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert_eq!(got, vec![7u8; 64]);
+    let served = reg
+        .peek(&h, 512, 64)
+        .unwrap_or_else(|e| panic!("peek served: {e}"));
+    assert_eq!(served.as_deref(), Some(&[7u8; 64][..]));
+
+    // Terminal transitions still surface their typed error, and an
+    // unknown handle is not-found — peeks don't hide lifecycle.
+    reg.release(&h).unwrap_or_else(|e| panic!("release: {e}"));
+    let e = err_of(reg.peek(&h, 0, 64));
+    assert_eq!(e.kind(), "released", "{e}");
+    let e = err_of(reg.peek("no-such-handle", 0, 64));
+    assert_eq!(e.kind(), "not-found", "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fetch_through_serves_seek_beyond_head() {
     let d = TestDir::new("through");
     let mut pages = HashMap::new();

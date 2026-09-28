@@ -213,6 +213,56 @@ export async function run(): Promise<void> {
       });
     }
 
+    // A pointercancel mid-drag — the gesture the browser aborts on
+    // touch OS gestures, ESC, or lost capture — abandons the scrub
+    // entirely: the preview must not be consulted as a commit
+    // fallback and the fill restores the real position.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 10_000,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 90_000);
+      });
+      await act(async () => {
+        pointer(input, 'pointercancel');
+      });
+      assertEqual(
+        seeks.length,
+        0,
+        'a pointercancelled drag commits nothing',
+      );
+      assertEqual(
+        input.value,
+        '10000',
+        'the fill snaps back to the session position',
+      );
+      // The gesture is over — a straggler pointerup stays inert.
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(seeks.length, 0, 'no straggler commit after cancel');
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
     // Keyboard commits stay immediate — no pointer drag is in flight
     // when ArrowRight steps +10s.
     {

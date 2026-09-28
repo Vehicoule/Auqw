@@ -72,6 +72,11 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const clock = deps.clock;
   const cache = new Map<string, readonly WaveformPeak[] | null>();
   const inflight = new Map<string, Inflight>();
+  // Request ids must be unique across generations: a re-pull after
+  // cancel can overlap the abandoned extraction still winding down,
+  // and a colliding id lets its teardown unregister the replacement's
+  // native cancel slot.
+  let requestSeq = 0;
 
   function evict(): void {
     while (cache.size > cacheLimit) {
@@ -131,7 +136,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         .peaks(
           { handle: entry.target.handle, durationMs: sentMs },
           {
-            requestId: `peaks-${id}-${n}`,
+            requestId: `peaks-${id}-${n}-${++requestSeq}`,
             deadlineMs: clock.nowMs() + deadlineMs,
             signal: entry.source.signal,
           },

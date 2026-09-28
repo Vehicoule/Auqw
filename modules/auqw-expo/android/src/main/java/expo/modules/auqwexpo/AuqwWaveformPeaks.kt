@@ -1,9 +1,13 @@
 package expo.modules.auqwexpo
 
+import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaDataSource
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import expo.modules.kotlin.exception.CodedException
 import java.io.ByteArrayOutputStream
@@ -15,9 +19,9 @@ import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.auqw_mobile_bindings.PluginHost
 import uniffi.auqw_mobile_bindings.StreamException
 
@@ -27,20 +31,35 @@ private const val READ_CHUNK = 1024 * 1024
 private const val MAX_PEAK_BYTES = 24 * 1024 * 1024
 /** Post-decode belt — matches the desktop port's PCM ceiling. */
 private const val MAX_PCM_BYTES = 256 * 1024 * 1024
-/** Cold-start patience for the first read — the player's own head fill
- * takes a while too; peaks may wait for the same warm-up. */
+/** Cold-start patience while position 0 stays uncommitted — the player's
+ * own head fill takes a while too; peaks may wait for the same warm-up. */
 private const val FIRST_READ_TIMEOUT_MS = 15_000L
-/** Park threshold for subsequent reads: a read parked past this sits on
- * an unfetched hole — chasing it would queue demand that outranks the
- * player's own (demand serves min position first), stalling playback
- * for a decoration. Abort instead; the seeded pattern stays. */
+/** Patience for each later position: a hole still unfetched past this
+ * sits ahead of committed bytes — a demanding read there would queue
+ * fetch-through demand that outranks the player's own (demand serves
+ * min position first), stalling playback for a decoration. Abort
+ * instead; the seeded pattern stays. */
 private const val PARK_TIMEOUT_MS = 400L
+/** Poll gap between peeks on an unfetched hole — a peek queues no
+ * demand, so the poll is a store-level probe, not a retry. */
+private const val PEEK_POLL_MS = 50L
 /** Whole-decode deadline — a wedged codec never owns the sweep. */
 private const val DECODE_DEADLINE_MS = 60_000L
 private const val DEQUEUE_US = 10_000L
 
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
+)
+
+/** A provider:'local' backing for an lf-* handle — the file or content
+ *  URI plus the Context the extractor needs to open it. */
+internal class LocalSource(val uri: Uri, val context: Context)
+
+/** Decoded PCM plus the negotiated shape the bucketer needs. */
+private class DecodedPcm(
+  val bytes: ByteArray,
+  val channels: Int,
+  val floatPcm: Boolean,
 )
 
 /**
@@ -50,17 +69,20 @@ private val DEAD_HANDLE_KINDS = setOf(
  * γ1.2) on the JS side for both platforms, so this class only ever
  * returns raw per-window RMS magnitudes as flat `[up, down]` pairs.
  *
- * The pull borrows the playing stream's own positional `streamRead` —
+ * The pull borrows the playing stream's own positional `streamPeek` —
  * never `streamOpen`/`streamClose`, which would re-anchor the pump's
  * speculative fill or detach the session under the player — so
  * extraction costs no new wire surface and never sees a signed URL.
- * Reads beyond the first must hit bytes already committed: a read
- * parked on a hole abandons like the desktop port (the Rust-side
- * demand it queued releases when the first commit covering it lands
- * or the read's own deadline lapses).
+ * A peek serves only already-committed bytes: it queues no
+ * fetch-through demand and never parks, so a timed-out or cancelled
+ * sweep leaves nothing competing with the player's reads (decisions.md
+ * row on `stream:read` cancellation — the per-read cancel is a peek
+ * instead). `provider:'local'` (lf-*) handles never reach the seam —
+ * they resolve to their file/content URI and decode straight off disk.
  */
 internal class AuqwWaveformPeaks(
   private val registry: AuqwStreamRegistry,
+  private val localFor: (String) -> LocalSource?,
 ) {
   private val jobs = ConcurrentHashMap<String, Job>()
 
@@ -79,9 +101,10 @@ internal class AuqwWaveformPeaks(
    * Pull → decode → bucket. Returns `count` flat `[up, down]` pairs of
    * raw RMS magnitudes. Every failure is a typed [CodedException] whose
    * code is the application kind (`unavailable` for not-yet-buffered
-   * bytes, `released` for a dead handle, `budget-exceeded` over caps,
-   * `not-applicable` for the provisional unknown-duration cap,
-   * `invalid-response` for undecodable bytes, `cancelled` on cancel).
+   * bytes or an unsupported PCM encoding, `released` for a dead
+   * handle, `budget-exceeded` over caps, `not-applicable` for the
+   * provisional unknown-duration cap, `invalid-response` for
+   * undecodable bytes, `cancelled` on cancel).
    */
   suspend fun extract(
     requestId: String,
@@ -95,22 +118,39 @@ internal class AuqwWaveformPeaks(
       jobs[requestId] = job
     }
     try {
-      val host = registry.hostFor(handle)
-        ?: throw CodedException("released", "unknown stream handle", null)
-      val cap = minOf(maxBytes, MAX_PEAK_BYTES.toLong())
-      val encoded = pullBytes(host, handle, cap, provisionalCap)
-      val (pcm, channels) = decodePcm(encoded)
-      return bucket(pcm, channels, count)
+      val local = localFor(handle)
+      val decoded = if (local !== null) {
+        decodePcm { extractor ->
+          extractor.setDataSource(local.context, local.uri, null)
+        }
+      } else {
+        val host = registry.hostFor(handle)
+          ?: throw CodedException("released", "unknown stream handle", null)
+        val cap = minOf(maxBytes, MAX_PEAK_BYTES.toLong())
+        val encoded = pullBytes(host, handle, cap, provisionalCap)
+        decodePcm { extractor ->
+          extractor.setDataSource(ByteArrayMediaDataSource(encoded))
+        }
+      }
+      return bucket(decoded.bytes, decoded.channels, decoded.floatPcm, count)
     } catch (_: CancellationException) {
       throw CodedException("cancelled", "peak extraction cancelled", null)
     } finally {
-      jobs.remove(requestId)
+      // Only the registering job may drop its slot — a stale
+      // extraction finishing late must not evict the replacement
+      // that started under the same request id.
+      if (job !== null) {
+        jobs.remove(requestId, job)
+      }
     }
   }
 
-  /** Sequential positional reads to EOF or the cap — the desktop
-   *  port's pull loop verbatim: first read waits out the head fill,
-   *  every read after must hit already-committed bytes. */
+  /** Sequential non-demanding positional reads to EOF or the cap —
+   *  the same pull discipline as the desktop port, but on
+   *  `streamPeek`: a hole returns `null` at once (nothing queued,
+   *  nothing to retract) and the poll re-probes within the
+   *  position's patience window — cold-start head fill for the
+   *  first bytes, the short hole window after the flow starts. */
   private suspend fun pullBytes(
     host: PluginHost,
     handle: String,
@@ -120,16 +160,14 @@ internal class AuqwWaveformPeaks(
     val out = ByteArrayOutputStream()
     var position = 0L
     var ended = false
-    var timeoutMs = FIRST_READ_TIMEOUT_MS
+    var deadline = SystemClock.uptimeMillis() + FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
       val readPos = position
       val chunk = try {
-        withTimeoutOrNull(timeoutMs) {
-          withContext(Dispatchers.IO) {
-            host.streamRead(handle, readPos.toULong(), READ_CHUNK.toULong())
-          }
+        withContext(Dispatchers.IO) {
+          host.streamPeek(handle, readPos.toULong(), READ_CHUNK.toULong())
         }
       } catch (e: StreamException) {
         throw seamError(e)
@@ -138,18 +176,28 @@ internal class AuqwWaveformPeaks(
       } catch (e: Exception) {
         throw CodedException("transient", e.message ?: "stream read failed", e)
       }
-      timeoutMs = PARK_TIMEOUT_MS
-      if (chunk === null) {
-        // The read parked past its threshold — an unfetched hole, not
-        // a failure worth caching hard.
-        throw CodedException("unavailable", "stream bytes not yet buffered", null)
+      when {
+        chunk === null -> {
+          // An unfetched hole, not a failure worth caching hard —
+          // and unlike a parked streamRead, nothing stays behind
+          // competing with playback when the window lapses.
+          if (SystemClock.uptimeMillis() >= deadline) {
+            throw CodedException(
+              "unavailable", "stream bytes not yet buffered", null
+            )
+          }
+          delay(PEEK_POLL_MS)
+        }
+        chunk.isEmpty() -> {
+          ended = true
+          break
+        }
+        else -> {
+          out.write(chunk, 0, chunk.size)
+          position += chunk.size
+          deadline = SystemClock.uptimeMillis() + PARK_TIMEOUT_MS
+        }
       }
-      if (chunk.isEmpty()) {
-        ended = true
-        break
-      }
-      out.write(chunk, 0, chunk.size)
-      position += chunk.size
     }
     if (!ended) {
       throw CodedException(
@@ -161,131 +209,173 @@ internal class AuqwWaveformPeaks(
     return out.toByteArray()
   }
 
-  /** MediaExtractor + MediaCodec over the collected bytes → raw PCM16
-   *  and the output channel count. */
-  private suspend fun decodePcm(encoded: ByteArray): Pair<ByteArray, Int> =
-    withContext(Dispatchers.IO) {
-      val extractor = MediaExtractor()
-      var codec: MediaCodec? = null
+  /** MediaExtractor + MediaCodec over `setSource` → raw PCM bytes,
+   *  the output channel count, and whether the decoder negotiated
+   *  float samples. The source is either the pulled stream bytes or
+   *  a local file/content URI — decode is identical from there. */
+  private suspend fun decodePcm(
+    setSource: (MediaExtractor) -> Unit,
+  ): DecodedPcm = withContext(Dispatchers.IO) {
+    val extractor = MediaExtractor()
+    var codec: MediaCodec? = null
+    try {
       try {
-        extractor.setDataSource(ByteArrayMediaDataSource(encoded))
-        var track = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-          val f = extractor.getTrackFormat(i)
-          val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-          if (mime.startsWith("audio/")) {
-            track = i
-            format = f
-            break
-          }
-        }
-        if (track < 0 || format === null) {
-          throw CodedException("invalid-response", "no audio track", null)
-        }
-        extractor.selectTrack(track)
-        val mime = format.getString(MediaFormat.KEY_MIME)
-          ?: throw CodedException("invalid-response", "audio track has no mime", null)
-        val decoder = try {
-          MediaCodec.createDecoderByType(mime)
-        } catch (e: Exception) {
-          throw CodedException("invalid-response", "no decoder for $mime", e)
-        }
-        codec = decoder
-        decoder.configure(format, null, null, 0)
-        decoder.start()
-        var channels = formatInt(format, MediaFormat.KEY_CHANNEL_COUNT) ?: 0
-        val pcm = ByteArrayOutputStream()
-        val info = MediaCodec.BufferInfo()
-        var inputEOS = false
-        var outputEOS = false
-        val deadline = android.os.SystemClock.uptimeMillis() + DECODE_DEADLINE_MS
-        while (!outputEOS) {
-          coroutineContext.ensureActive()
-          if (android.os.SystemClock.uptimeMillis() > deadline) {
-            throw CodedException("unavailable", "audio decode timed out", null)
-          }
-          if (!inputEOS) {
-            val inIdx = decoder.dequeueInputBuffer(DEQUEUE_US)
-            if (inIdx >= 0) {
-              val buf = decoder.getInputBuffer(inIdx)
-              val n = buf?.let { extractor.readSampleData(it, 0) } ?: -1
-              if (n < 0) {
-                decoder.queueInputBuffer(
-                  inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                )
-                inputEOS = true
-              } else {
-                decoder.queueInputBuffer(inIdx, 0, n, extractor.sampleTime, 0)
-                extractor.advance()
-              }
-            }
-          }
-          val outIdx = decoder.dequeueOutputBuffer(info, DEQUEUE_US)
-          when {
-            outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-              channels = formatInt(
-                decoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT
-              ) ?: channels
-            }
-            outIdx >= 0 -> {
-              if (info.size > 0) {
-                if (pcm.size() + info.size > MAX_PCM_BYTES) {
-                  throw CodedException(
-                    "budget-exceeded",
-                    "decoded audio too large for peaks",
-                    null
-                  )
-                }
-                val buf = decoder.getOutputBuffer(outIdx)
-                if (buf !== null) {
-                  val data = ByteArray(info.size)
-                  buf.get(data)
-                  pcm.write(data, 0, data.size)
-                }
-              }
-              decoder.releaseOutputBuffer(outIdx, false)
-              if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                outputEOS = true
-              }
-            }
-          }
-        }
-        Pair(pcm.toByteArray(), channels)
-      } catch (e: CodedException) {
-        throw e
-      } catch (e: CancellationException) {
-        throw e
+        setSource(extractor)
       } catch (e: Exception) {
         throw CodedException(
-          "invalid-response", e.message ?: "audio decode failed", e
+          "unavailable", e.message ?: "audio source unavailable", e
         )
-      } finally {
-        try {
-          codec?.stop()
-        } catch (e: Exception) {
-          Log.i(TAG, "codec stop: ${e.message}")
-        }
-        try {
-          codec?.release()
-        } catch (e: Exception) {
-          Log.i(TAG, "codec release: ${e.message}")
-        }
-        extractor.release()
       }
+      var track = -1
+      var format: MediaFormat? = null
+      for (i in 0 until extractor.trackCount) {
+        val f = extractor.getTrackFormat(i)
+        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+        if (mime.startsWith("audio/")) {
+          track = i
+          format = f
+          break
+        }
+      }
+      if (track < 0 || format === null) {
+        throw CodedException("invalid-response", "no audio track", null)
+      }
+      extractor.selectTrack(track)
+      val mime = format.getString(MediaFormat.KEY_MIME)
+        ?: throw CodedException("invalid-response", "audio track has no mime", null)
+      val decoder = try {
+        MediaCodec.createDecoderByType(mime)
+      } catch (e: Exception) {
+        throw CodedException("invalid-response", "no decoder for $mime", e)
+      }
+      codec = decoder
+      decoder.configure(format, null, null, 0)
+      decoder.start()
+      var channels = formatInt(format, MediaFormat.KEY_CHANNEL_COUNT) ?: 0
+      // Missing KEY_PCM_ENCODING means 16-bit — the documented default.
+      var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
+      val pcm = ByteArrayOutputStream()
+      val info = MediaCodec.BufferInfo()
+      var inputEOS = false
+      var outputEOS = false
+      val deadline = SystemClock.uptimeMillis() + DECODE_DEADLINE_MS
+      while (!outputEOS) {
+        coroutineContext.ensureActive()
+        if (SystemClock.uptimeMillis() > deadline) {
+          throw CodedException("unavailable", "audio decode timed out", null)
+        }
+        if (!inputEOS) {
+          val inIdx = decoder.dequeueInputBuffer(DEQUEUE_US)
+          if (inIdx >= 0) {
+            val buf = decoder.getInputBuffer(inIdx)
+            val n = buf?.let { extractor.readSampleData(it, 0) } ?: -1
+            if (n < 0) {
+              decoder.queueInputBuffer(
+                inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
+              )
+              inputEOS = true
+            } else {
+              decoder.queueInputBuffer(inIdx, 0, n, extractor.sampleTime, 0)
+              extractor.advance()
+            }
+          }
+        }
+        val outIdx = decoder.dequeueOutputBuffer(info, DEQUEUE_US)
+        when {
+          outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+            val outFormat = decoder.outputFormat
+            channels = formatInt(outFormat, MediaFormat.KEY_CHANNEL_COUNT)
+              ?: channels
+            pcmEncoding = formatInt(outFormat, MediaFormat.KEY_PCM_ENCODING)
+              ?: AudioFormat.ENCODING_PCM_16BIT
+            if (pcmEncoding != AudioFormat.ENCODING_PCM_16BIT &&
+              pcmEncoding != AudioFormat.ENCODING_PCM_FLOAT
+            ) {
+              throw CodedException(
+                "unavailable", "unsupported PCM encoding $pcmEncoding", null
+              )
+            }
+          }
+          outIdx >= 0 -> {
+            if (info.size > 0) {
+              if (pcm.size() + info.size > MAX_PCM_BYTES) {
+                throw CodedException(
+                  "budget-exceeded",
+                  "decoded audio too large for peaks",
+                  null
+                )
+              }
+              val buf = decoder.getOutputBuffer(outIdx)
+              if (buf !== null) {
+                val data = ByteArray(info.size)
+                buf.get(data)
+                pcm.write(data, 0, data.size)
+              }
+            }
+            decoder.releaseOutputBuffer(outIdx, false)
+            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+              outputEOS = true
+            }
+          }
+        }
+      }
+      DecodedPcm(
+        pcm.toByteArray(),
+        channels,
+        pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT,
+      )
+    } catch (e: CodedException) {
+      throw e
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      throw CodedException(
+        "invalid-response", e.message ?: "audio decode failed", e
+      )
+    } finally {
+      try {
+        codec?.stop()
+      } catch (e: Exception) {
+        Log.i(TAG, "codec stop: ${e.message}")
+      }
+      try {
+        codec?.release()
+      } catch (e: Exception) {
+        Log.i(TAG, "codec release: ${e.message}")
+      }
+      extractor.release()
     }
+  }
 
-  /** PCM16LE frames → `count` raw `[up, down]` RMS windows — the same
-   *  split `peakWindowsFromChannels` applies in ui-shared: stereo+
-   *  feeds even channels to `up` and odd to `down`; mono splits by
-   *  sign, positive samples up and negative down. */
-  private fun bucket(pcm: ByteArray, channels: Int, count: Int): List<Double> {
+  /** Decoded PCM frames → `count` raw `[up, down]` RMS windows — the
+   *  same split `peakWindowsFromChannels` applies in ui-shared:
+   *  stereo+ feeds even channels to `up` and odd to `down`; mono
+   *  splits by sign, positive samples up and negative down. Sample
+   *  reads follow the negotiated encoding: little-endian 16-bit
+   *  divided by full-scale, or float PCM used directly. */
+  private fun bucket(
+    pcm: ByteArray,
+    channels: Int,
+    floatPcm: Boolean,
+    count: Int,
+  ): List<Double> {
     val out = ArrayList<Double>(count * 2)
     if (count <= 0 || channels <= 0) {
       return out
     }
-    val shorts = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-    val frames = shorts.remaining() / channels
+    val buf = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+    val sampleCount: Int
+    val sample: (Int) -> Double
+    if (floatPcm) {
+      val floats = buf.asFloatBuffer()
+      sampleCount = floats.remaining()
+      sample = { i -> floats.get(i).toDouble() }
+    } else {
+      val shorts = buf.asShortBuffer()
+      sampleCount = shorts.remaining()
+      sample = { i -> shorts.get(i).toDouble() / 32768.0 }
+    }
+    val frames = sampleCount / channels
     if (frames <= 0) {
       return out
     }
@@ -304,7 +394,7 @@ internal class AuqwWaveformPeaks(
         val base = f * channels
         if (stereo) {
           for (ch in 0 until channels) {
-            val v = shorts.get(base + ch).toDouble() / 32768.0
+            val v = sample(base + ch)
             if (ch % 2 == 0) {
               upSq += v * v
               upN += 1
@@ -314,7 +404,7 @@ internal class AuqwWaveformPeaks(
             }
           }
         } else {
-          val v = shorts.get(base).toDouble() / 32768.0
+          val v = sample(base)
           if (v >= 0) {
             upSq += v * v
             upN += 1
