@@ -232,7 +232,8 @@ export type SessionController = {
   /**
    * The same probe the session resolves offline playback through —
    * UI gates read it so an owned local row stays playable without
-   * connectivity (a remote ref still honestly refuses).
+   * connectivity (a remote ref still honestly refuses). Gated null
+   * until web-player gains a `provider:'local'` route.
    */
   readonly localPlaybackFor: (recordingId: string) => string | null;
   /**
