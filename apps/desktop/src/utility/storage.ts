@@ -351,6 +351,13 @@ export function createStorageService(
           if (tx.cancelled) {
             throw shellError('cancelled', 'transaction cancelled');
           }
+          // Lifecycle rollback for a dead renderer can close the tx
+          // under a suspended batch — without this the remaining
+          // statements would run in autocommit (or inside the next
+          // tx's BEGIN) and persist despite the rollback.
+          if (openTxs.get(args.txId) !== tx) {
+            throw shellError('cancelled', 'transaction closed mid-batch');
+          }
         }
       }
       return undefined;

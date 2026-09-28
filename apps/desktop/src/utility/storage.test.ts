@@ -199,6 +199,36 @@ export async function run(): Promise<void> {
     );
     await call(CHANNELS.storageCommit, { txId: midCheck });
 
+    // a rollback landing mid-chunk (lifecycle cleanup for a dead
+    // renderer) aborts the batch — the rest must not write in
+    // autocommit on the released connection
+    const lifeTx = await begin();
+    const lifeFlight = call(CHANNELS.storageExecMany, {
+      txId: lifeTx,
+      statements: Array.from({ length: 130 }, (_, i) => ({
+        sql: 'INSERT INTO items (name) VALUES (?)',
+        params: [`life-${i}`],
+      })),
+    });
+    await call(CHANNELS.storageRollback, { txId: lifeTx });
+    const lifeResult = await lifeFlight;
+    assert(
+      !lifeResult.ok && lifeResult.error.kind === 'cancelled',
+      'mid-batch rollback aborts the chunk',
+    );
+    const lifeCheck = await begin();
+    const lifeRows = await query(
+      lifeCheck,
+      `SELECT COUNT(*) AS n FROM items WHERE name LIKE 'life-%'`,
+    );
+    assert(lifeRows.ok);
+    assertDeepEqual(
+      lifeRows.result,
+      { rows: [{ n: 0 }] },
+      'rolled-back prefix persisted nothing',
+    );
+    await call(CHANNELS.storageCommit, { txId: lifeCheck });
+
     // rollback discards
     const tx3 = await begin();
     await execute(tx3, 'INSERT INTO items (name) VALUES (?)', ['dropped']);
