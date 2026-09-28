@@ -1,55 +1,25 @@
 import { randomInt } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
-import {
-  appendFile,
-  open,
-  readFile,
-  rename,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
-import { pipeline } from 'node:stream/promises';
 import { createServer, type Server } from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import {
   CancellationSource,
+  createSyncResponder,
   DEVICE_NAME_MAX,
-  type AppError,
   type CancellationSignal,
+  type ResponderSession,
   type Result,
   type SyncDiscoveryPort,
-  type SyncDiscoverySession,
   type SyncEnginePort,
-  type SyncPeer,
+  type SyncResponder,
 } from '@auqw/application';
 import {
   hasOnlyKeys,
-  isBoundedString,
   isRecord,
 } from '../shared/check.ts';
 import {
   MAX_SYNC_CURSOR_CHARS,
   MAX_SYNC_DOC_BYTES,
-  isJsonValue,
-  isSyncDeltasArgs,
-  isSyncDeltasResult,
   isSyncDeltaDoc,
-  isSyncDevicesResult,
-  isSyncDrainAppliedResult,
-  isSyncImportDeltaArgs,
-  isSyncImportDeltaResult,
-  isSyncLocalChangesArgs,
-  isSyncLocalChangesResult,
-  isSyncMaterializedArgs,
-  isSyncMaterializedResult,
-  isSyncPairingResult,
-  isSyncStatusResult,
-  isSyncTriggerResult,
-  isSyncUnpairArgs,
-  isSyncDialArgs,
-  isSyncDialPayloadArgs,
-  isSyncDialResult,
-  type SyncDialResult,
   type SyncNearbyEvent,
   type SyncStatusResult,
 } from '../shared/contract.ts';
@@ -57,8 +27,6 @@ import type { SyncDialer } from './sync-dialer.ts';
 import {
   isShellError,
   shellError,
-  type ShellError,
-  type ShellErrorKind,
 } from '../shared/errors.ts';
 import type { UtilityHandler } from './router.ts';
 import {
@@ -67,20 +35,13 @@ import {
   generateIdentity,
   isClientHello,
   isUsableIdentity,
-  type SessionCodec,
   type SyncCipher,
   type SyncIdentity,
 } from './sync-crypto.ts';
-import {
-  isDeviceId,
-  type SyncDeviceRecord,
-  type SyncKeys,
-} from './sync-keys.ts';
-import {
-  attachWirePump,
-  type WirePump,
-  type WireSocketLike,
-} from './sync-wire.ts';
+import { createSpillJournal } from './sync-journal.ts';
+import { createSyncHandlers } from './sync-handlers.ts';
+import { type SyncDeviceRecord, type SyncKeys } from './sync-keys.ts';
+import { attachWirePump } from './sync-wire.ts';
 
 /**
  * The desktop half of LAN sync per docs/specs/sync.md: the desktop
@@ -103,6 +64,14 @@ import {
  * same pending session; the phone proves code possession inside the
  * DH-authenticated channel, then the device key installs for good.
  * A wrong code is a typed reject AND the device never registers.
+ *
+ * The responder half of that conversation — phase machine, pairing
+ * store + attempt budgets, pair lock, reject-then-end teardown — is
+ * the shared `createSyncResponder` driver in @auqw/application (the
+ * phone's pair host runs the same one); this service layers the
+ * desktop's own surface on top: the spill journal, the IPC handlers,
+ * the sync-serving 'sync' wire surface, custody via SyncKeys, and the
+ * listener/advertiser lifecycle.
  *
  * Everything user-facing surfaces typed `unavailable` — a dead
  * listener, no LAN address, or a failed mDNS announce never reports a
@@ -241,116 +210,7 @@ export interface SyncService {
   readonly ready: Promise<SyncStatusResult>;
 }
 
-/* ------------------------- pairing codes -------------------------- */
-
-type PairingState = {
-  readonly code: string;
-  readonly expiresAt: number;
-};
-
-type PairCheck =
-  | 'ok'
-  | 'bad-code'
-  | 'pairing-expired'
-  | 'no-pairing';
-
-/**
- * The pending pairing code: minted per `sync:pairing` call, expires on
- * TTL, consumed exactly once on success. Wrong-code attempts do NOT
- * burn the code — rate limiting is per remote address (see the
- * service's bad-attempt map) so a hostile LAN peer can't invalidate a
- * code the legitimate phone is about to type.
- */
-function createPairing(opts: {
-  nowMs: () => number;
-  ttlMs: number;
-}): {
-  mint(): { code: string; expiresAt: number };
-  /** Validate without consuming — a wrong code never burns the mint. */
-  peek(code: string): PairCheck;
-  /**
-   * Consume iff the same code is still pending — one winner only, so a
-   * racing session can't double-register off one mint. Returns the
-   * taken state so a failed custody write can `restore` it.
-   */
-  consume(code: string): PairingState | null;
-  /**
-   * Re-pend a consumed code after its custody write failed — a no-op
-   * once a newer mint already owns the window.
-   */
-  restore(taken: PairingState): void;
-  expire(): void;
-} {
-  let current: PairingState | null = null;
-  return {
-    mint() {
-      const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
-      current = {
-        code,
-        expiresAt: opts.nowMs() + opts.ttlMs,
-      };
-      return { code, expiresAt: current.expiresAt };
-    },
-    peek(code) {
-      if (current === null) {
-        return 'no-pairing';
-      }
-      if (opts.nowMs() >= current.expiresAt) {
-        current = null;
-        return 'pairing-expired';
-      }
-      return code === current.code ? 'ok' : 'bad-code';
-    },
-    consume(code) {
-      if (
-        current === null ||
-        current.code !== code ||
-        opts.nowMs() >= current.expiresAt
-      ) {
-        return null;
-      }
-      const taken = current;
-      current = null; // a code pairs exactly once
-      return taken;
-    },
-    restore(taken) {
-      if (current === null) {
-        current = taken;
-      }
-    },
-    expire() {
-      current = null;
-    },
-  };
-}
-
 /* --------------------- wire message validators -------------------- */
-
-type WireMsg = { readonly t: string };
-
-function isWireMsg(value: unknown): value is WireMsg {
-  return (
-    isRecord(value) && isBoundedString(value['t'], 32)
-  );
-}
-
-function isPairMsg(value: unknown): value is { t: 'pair'; code: string } {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['t', 'code']) &&
-    value['t'] === 'pair' &&
-    typeof value['code'] === 'string' &&
-    /^[0-9]{6}$/.test(value['code'])
-  );
-}
-
-function isResumeMsg(value: unknown): value is { t: 'resume' } {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['t']) &&
-    value['t'] === 'resume'
-  );
-}
 
 function isSyncReq(
   value: unknown,
@@ -365,38 +225,7 @@ function isSyncReq(
   );
 }
 
-function parseJson(payload: Uint8Array): unknown {
-  return JSON.parse(Buffer.from(payload).toString('utf8'));
-}
-
-/* -------------------------- the service --------------------------- */
-
-type SessionPhase = 'hello' | 'auth' | 'open';
-
-type Session = {
-  readonly pump: WirePump;
-  /** Source address for per-peer pairing rate limiting ('' = unknown). */
-  readonly remoteIp: string;
-  /** Cancelled when the session dies — engine ops can stop mid-flight. */
-  readonly cancel: CancellationSource;
-  phase: SessionPhase;
-  codec: SessionCodec | null;
-  deviceId: string | null;
-  devFp: string | null;
-  /** Device long-lived public key (SPKI b64) captured at accept(). */
-  devPub: string;
-  /** Registry lookup result from accept() — echoed, not trusted. */
-  registered: boolean;
-  /** The id the registry already binds to this key — resume pins it. */
-  registeredId: string | null;
-  /** Registry pairedAt for resume, when known. */
-  pairedAtMs: number | null;
-  name: string;
-  handshakeTimer: ReturnType<typeof setTimeout> | null;
-  idleTimer: ReturnType<typeof setTimeout> | null;
-  /** Per-session op chain — engine calls never interleave. */
-  ops: Promise<void>;
-};
+/* --------------------------- endpoints ---------------------------- */
 
 /** RFC1918 — the address class a phone on the same LAN can reach. */
 function isPrivateLanIp(ip: string): boolean {
@@ -441,61 +270,14 @@ function lanIpv4s(): string[] {
   return [...privateIps, ...otherIps];
 }
 
-/** '::ffff:a.b.c.d' is the same peer as 'a.b.c.d' — fold before keying. */
-function normalizeIp(ip: string): string {
-  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-}
+/* -------------------------- the service --------------------------- */
 
 export function createSyncService(deps: SyncServiceDeps): SyncService {
   const nowMs = deps.nowMs ?? (() => Date.now());
   const host = deps.host ?? '0.0.0.0';
-  const handshakeCap = deps.handshakeCap ?? 16 * 1_024;
-  /** AEAD overhead per frame: 12-byte iv + 16-byte auth tag. */
-  const SEAL_OVERHEAD = 28;
-  // A sealed frame carries the protocol wrapper around a contract-max
-  // delta doc — budget the cap above MAX_SYNC_DOC_BYTES + seal or a
-  // valid max-size delta can't cross the wire at all.
-  const sessionCap =
-    deps.sessionCap ?? MAX_SYNC_DOC_BYTES + SEAL_OVERHEAD + 4_096;
-  const maxConnections = deps.maxConnections ?? 16;
-  const handshakeMs = deps.handshakeMs ?? 15_000;
-  const idleMs = deps.idleMs ?? 120_000;
   const deviceName =
     deps.deviceName ??
     (hostname().trim().slice(0, DEVICE_NAME_MAX) || 'auqw-desktop');
-  const attachPump = deps.pump ?? attachWirePump;
-  const pairing = createPairing({
-    nowMs,
-    ttlMs: deps.codeTtlMs ?? 90_000,
-  });
-  // Wrong-code budget, two layers: per remote address (an attacker
-  // exhausts only its own guesses — the legit phone's window can't be
-  // DoS'd away) and one shared ceiling per pending code (address
-  // aliases can't split the attacker's budget into unbounded total
-  // tries). Both cleared on each fresh mint; per-IP also on success.
-  const maxCodeAttempts = deps.maxCodeAttempts ?? 5;
-  const maxTotalCodeAttempts =
-    deps.maxTotalCodeAttempts ?? maxCodeAttempts * 3;
-  const badAttempts = new Map<string, number>();
-  let totalBadAttempts = 0;
-  // The pair path's peek → put → consume is one logical transaction:
-  // serialized here so a losing session sees the consumed code at
-  // peek — never writes its key into the registry at all. (Custody
-  // serializes too, but a consume lost AFTER a write can't unwrite
-  // the sibling's record without a rollback that could hit a legit
-  // same-fp record.)
-  let pairChain: Promise<void> = Promise.resolve();
-  function withPairLock<T>(fn: () => Promise<T>): Promise<T> {
-    const next = pairChain.then(fn);
-    pairChain = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    return next;
-  }
-
-  const sessions = new Set<Session>();
-  const pendingSync = new Set<string>();
   /**
    * The spec's on-change sync trigger (docs/specs/sync.md): committed
    * local writes debounce into one trigger pass that marks offline
@@ -504,6 +286,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    */
   const AUTO_SYNC_DEBOUNCE_MS = 500;
   let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  // Devices owed a sync-request kick — marked by trigger passes,
+  // cleared when a live session takes the kick.
+  const pendingSync = new Set<string>();
   // The resolved engine — a promise dep settles inside start(),
   // and every consumer reads this, never `deps.engine` (which may
   // itself be the unsettled promise).
@@ -541,15 +326,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   let boundPort: number | null = null;
   let fingerprint: string | null = null;
   let ownDeviceId: string | null = null;
-  let browseSession: SyncDiscoverySession | null = null;
-  let browsePending: Promise<
-    Result<SyncDiscoverySession>
-  > | null = null;
-  // Every nearbyStart owns one share of the browse — a window closing
-  // its sheet stops discovery only when the last owner lets go, and a
-  // stop while browse() is pending makes the late session self-close.
-  let browseOwners = 0;
-  let dialerInstance: SyncDialer | null = null;
   let lastSyncAt: number | null = null;
   let closing = false;
   let resolveReady!: (status: SyncStatusResult) => void;
@@ -557,453 +333,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     resolveReady = resolve;
   });
 
-  /* ------------- applied-outcome outbox (renderer drain) ---------- */
-  /**
-   * Every successful applyDelta's 'applied' merge outcomes queue
-   * here until the renderer pulls `sync:drainApplied`. Durable mode
-   * (`appliedSpillPath` set — always in production): outcomes append
-   * to the JSONL spill BEFORE the applyDelta ack goes out (the
-   * caller awaits `recordApplied`), so an acknowledged delta can
-   * never lose its projection work — same durability horizon as the
-   * sync log itself. Drain PEEKS (read only); `sync:ackApplied`
-   * consumes the served lines after the renderer confirms its domain
-   * commit — crash windows collapse to at-least-once redelivery,
-   * which the projector's materialized snapshots make idempotent.
-   * Volatile mode (no path — tests) keeps an in-memory FIFO consumed
-   * at drain, bounded drop-oldest.
-   */
-  const APPLIED_OUTBOX_MAX = 4_096;
-  const appliedOutbox: unknown[] = [];
-  let appliedDropped = false;
-  /** Serializes spill appends against drain reads and ack rewrites. */
-  let spillTail: Promise<unknown> = Promise.resolve();
-  /** Bytes served by the most recent drain, awaiting ack. */
-  let awaitingAckBytes = 0;
+  // Set inside start() once the identity is loaded — connections only
+  // arrive after bind, so the responder never reads it before then.
+  let syncCipher: SyncCipher = deps.cipher ?? {
+    name: 'uninitialized',
+    identity: { pub: '', priv: '' },
+    accept() {
+      throw shellError('internal', 'sync cipher not initialized');
+    },
+  };
 
-  /**
-   * Incremental line walk over the spill starting at `startOff` —
-   * memory bounded by the page budget, not the backlog: served lines
-   * stop at the budget but the walk keeps counting for `remaining`.
-   * `servedBytes` is the exact byte length the ack advances the
-   * durable offset by (line + its newline).
-   */
-  async function spillScan(
-    path: string,
-    startOff: number,
-    budgetBytes: number,
-  ): Promise<{
-    readonly served: readonly string[];
-    readonly servedBytes: number;
-    readonly totalLines: number;
-    readonly skippedLines: number;
-  }> {
-    const served: string[] = [];
-    let servedBytes = 0;
-    let totalLines = 0;
-    let skippedLines = 0;
-    let fits = true;
-    const take = (line: string, terminated: boolean): void => {
-      totalLines += 1;
-      // The byte count is what the durable offset advances by — the
-      // newline exists on disk only for a terminated line. Charging
-      // one for the final unterminated carry would land `.off` a byte
-      // past EOF and drop the next line appended.
-      const lineBytes =
-        Buffer.byteLength(line, 'utf8') + (terminated ? 1 : 0);
-      if (fits && servedBytes + lineBytes <= budgetBytes) {
-        served.push(line);
-        servedBytes += lineBytes;
-        return;
-      }
-      if (served.length === 0 && servedBytes === 0) {
-        // Poison line: bigger than the whole page, so NO offset ever
-        // fits it — leaving it would wedge the drain forever
-        // (Review #46 round-9). Consume its bytes so the ack
-        // advances past it; the dropped flag surfaces the loss and
-        // the materialized reconcile rebuilds the row anyway.
-        servedBytes += lineBytes;
-        skippedLines += 1;
-        return;
-      }
-      fits = false;
-    };
-    const stream = createReadStream(path, { start: startOff });
-    stream.setEncoding('utf8');
-    let carry = '';
-    try {
-      for await (const chunk of stream) {
-        let buf = carry + (chunk as string);
-        carry = '';
-        for (; ;) {
-          const nl = buf.indexOf('\n');
-          if (nl < 0) {
-            break;
-          }
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (line.length > 0) {
-            take(line, true);
-          }
-        }
-        carry = buf;
-      }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { served: [], servedBytes: 0, totalLines: 0, skippedLines: 0 };
-      }
-      throw e;
-    }
-    if (carry.length > 0) {
-      take(carry, false);
-    }
-    return { served, servedBytes, totalLines, skippedLines };
-  }
-
-  /** The ack sidecar: the byte offset the served prefix ends at. */
-  function spillOffsetPath(path: string): string {
-    return `${path}.off`;
-  }
-
-  /**
-   * Durable ack position for the spill, in bytes. A sidecar past EOF
-   * is stale — a crash between a compact's rename and its offset
-   * reset — so rescan from 0: the compacted file already starts at
-   * the old offset and re-serving is correct, not a duplicate.
-   */
-  async function readSpillOffset(
-    offPath: string,
-    path: string,
-  ): Promise<number> {
-    const raw = await readFile(offPath, 'utf8').catch(() => '');
-    const off = Number.parseInt(raw.trim(), 10);
-    if (!Number.isSafeInteger(off) || off < 0) {
-      return 0;
-    }
-    const size = await stat(path)
-      .then((s) => s.size)
-      .catch(() => 0);
-    return off > size ? 0 : off;
-  }
-
-  /**
-   * Drop the consumed prefix by streaming the rest into a fresh file
-   * — bounded IO per ack: only runs once the dead prefix dominates
-   * the file, so each byte is rewritten O(1) times across the
-   * backlog's life instead of the whole remainder per page.
-   */
-  /**
-   * fsync a file's current contents — used before the renames that
-   * commit a compaction, so a power-loss can't resurrect a torn
-   * generation boundary.
-   */
-  async function fsyncFile(path: string): Promise<void> {
-    const fh = await open(path, 'r+');
-    try {
-      await fh.sync();
-    } finally {
-      await fh.close();
-    }
-  }
-
-  async function compactSpill(
-    path: string,
-    offPath: string,
-    startOff: number,
-  ): Promise<void> {
-    // Commit the zeroed sidecar BEFORE the compacted file: the only
-    // bad generation state would be `off > 0` beside the NEW layout
-    // (the offset was measured against the old one and would skip
-    // unserved rows — Review #46 round-8). Resetting first means a
-    // crash mid-compact leaves `off = 0` + the OLD file → rescan
-    // and re-serve a prefix (at-least-once, which the projection
-    // tolerates), never a stale offset on the new file.
-    const offTmp = `${offPath}.tmp`;
-    await writeFile(offTmp, '0');
-    await fsyncFile(offTmp);
-    await rename(offTmp, offPath);
-    const tmp = `${path}.tmp`;
-    await pipeline(
-      createReadStream(path, { start: startOff }),
-      createWriteStream(tmp),
-    );
-    await fsyncFile(tmp);
-    await rename(tmp, path);
-  }
-
-  function notifyApplied(pending: number): void {
-    try {
-      void Promise.resolve(deps.notifyApplied?.(pending)).catch(
-        () => undefined,
-      );
-    } catch {
-      // The push path is a hint — the pull drain never depends on it.
-    }
-  }
-
-  function recordApplied(result: unknown): Promise<void> {
-    if (!isRecord(result) || !Array.isArray(result['outcomes'])) {
-      return Promise.resolve();
-    }
-    const collected: unknown[] = [];
-    for (const outcome of result['outcomes']) {
-      if (
-        !isRecord(outcome) ||
-        outcome['type'] !== 'applied' ||
-        !isJsonValue(outcome)
-      ) {
-        continue;
-      }
-      collected.push(outcome);
-    }
-    if (collected.length === 0) {
-      return Promise.resolve();
-    }
-    const path = deps.appliedSpillPath;
-    if (path !== undefined) {
-      const lines = `${collected.map((o) => JSON.stringify(o)).join('\n')}\n`;
-      const append = spillTail.then(() => appendFile(path, lines));
-      spillTail = append.then(
-        () => undefined,
-        () => {
-          appliedDropped = true;
-        },
-      );
-      notifyApplied(collected.length);
-      return append.catch(() => {
-        appliedDropped = true;
-      });
-    }
-    for (const outcome of collected) {
-      appliedOutbox.push(outcome);
-      if (appliedOutbox.length > APPLIED_OUTBOX_MAX) {
-        appliedOutbox.shift();
-        appliedDropped = true;
-      }
-    }
-    notifyApplied(collected.length);
-    return Promise.resolve();
-  }
-
-  /**
-   * One byte-bounded pull: pack outcomes until the encoded payload
-   * would approach `MAX_SYNC_DOC_BYTES`, leaving headroom for the
-   * envelope keys. Spill lines serve before the memory queue (FIFO
-   * across both). The read is a PEEK — served file lines stay on
-   * disk until `ackApplied` confirms the renderer's domain commit,
-   * so a crash between serve and commit replays rather than loses
-   * (the projector's snapshots keep replay idempotent). Corrupt or
-   * oversized file lines count as served so the ack can drop them —
-   * a poison head must not block the queue forever.
-   */
-  async function drainAppliedChunk(): Promise<{
-    readonly outcomes: readonly unknown[];
-    readonly dropped: boolean;
-    readonly remaining: number;
-  }> {
-    const budget = MAX_SYNC_DOC_BYTES - 16_384;
-    const chunk: unknown[] = [];
-    let bytes = 2; // '[]'
-    const sizeOf = (next: unknown): number => {
-      try {
-        // The contract validates the RESULT in UTF-8 bytes — string
-        // length undercounts multi-byte metadata, and an over-budget
-        // chunk is rejected AFTER these entries were dequeued.
-        return Buffer.byteLength(JSON.stringify(next), 'utf8') + 1;
-      } catch {
-        return -1;
-      }
-    };
-
-    const path = deps.appliedSpillPath;
-    let spilledBacklog = 0;
-    let servedFileBytes = 0;
-    if (path !== undefined) {
-      // Peek inside `spillTail` so a concurrent append or ack rewrite
-      // can't interleave with the read — and scan incrementally so a
-      // huge backlog can't exhaust utility memory (Review #46).
-      const drainFile = spillTail.then(async () => {
-        const offPath = spillOffsetPath(path);
-        const off = await readSpillOffset(offPath, path);
-        const scan = await spillScan(path, off, budget - bytes);
-        servedFileBytes = scan.servedBytes;
-        let parsedLines = 0;
-        for (const line of scan.served) {
-          try {
-            const parsed: unknown = JSON.parse(line);
-            if (isJsonValue(parsed)) {
-              bytes += Buffer.byteLength(line, 'utf8') + 1;
-              chunk.push(parsed);
-              parsedLines += 1;
-            } else {
-              appliedDropped = true;
-            }
-          } catch {
-            // Torn tail line (killed mid-append) — count it served so
-            // the ack drops it rather than poison-blocking the queue.
-            appliedDropped = true;
-          }
-        }
-        // Poison-skipped lines were consumed without being served —
-        // they are neither backlog nor deliverable; the dropped flag
-        // reports the loss honestly (materialized reconcile covers).
-        if (scan.skippedLines > 0) {
-          appliedDropped = true;
-        }
-        // A page that committed nothing — only poison skips, or every
-        // served line unparseable — holds nothing the renderer could
-        // ack, and the ack path is what advances the durable offset.
-        // Advance it here, inside the serialized tail, or the same
-        // lines re-scan on every later drain (Review #46 round-9).
-        if (parsedLines === 0 && scan.servedBytes > 0) {
-          servedFileBytes = 0;
-          await advanceSpillOffset(path, offPath, off + scan.servedBytes);
-        }
-        spilledBacklog =
-          scan.totalLines - scan.served.length - scan.skippedLines;
-      });
-      spillTail = drainFile.then(
-        () => undefined,
-        () => undefined,
-      );
-      await drainFile;
-    }
-    awaitingAckBytes = servedFileBytes;
-
-    while (appliedOutbox.length > 0) {
-      const next = appliedOutbox[0];
-      const size = sizeOf(next);
-      if (size < 0) {
-        appliedOutbox.shift();
-        appliedDropped = true;
-        continue;
-      }
-      if (bytes + size > budget) {
-        if (chunk.length === 0) {
-          appliedOutbox.shift();
-          appliedDropped = true;
-          continue;
-        }
-        break;
-      }
-      appliedOutbox.shift();
-      bytes += size;
-      chunk.push(next);
-    }
-    const dropped = appliedDropped;
-    appliedDropped = false;
-    return {
-      outcomes: chunk,
-      dropped,
-      remaining: spilledBacklog + appliedOutbox.length,
-    };
-  }
-
-  /**
-   * Advance the durable offset: persist the new position first, then
-   * compact the dead prefix once it dominates the file — linear
-   * recovery, never quadratic. Shared by the renderer ack and the
-   * drain's poison-skip self-advance.
-   */
-  async function advanceSpillOffset(
-    path: string,
-    offPath: string,
-    newOff: number,
-  ): Promise<void> {
-    await writeFile(offPath, String(newOff));
-    const size = await stat(path)
-      .then((s) => s.size)
-      .catch(() => 0);
-    if (newOff >= Math.max(1_048_576, size / 2)) {
-      await compactSpill(path, offPath, newOff);
-    }
-  }
-
-  /**
-   * Consume the file bytes the most recent drain served — called by
-   * the renderer only after its domain commit landed, so served
-   * outcomes leave durable storage exactly once they're reflected
-   * downstream. The ack persists a byte-offset sidecar (tiny write)
-   * instead of rewriting the whole remainder; the dead prefix is
-   * compacted only once it dominates the file, so recovery stays
-   * linear rather than quadratic (Review #46). A failed ack must
-   * REJECT, not swallow: the served prefix stays on disk either way,
-   * but the renderer's drain loop stops here instead of re-fetching
-   * the same page forever.
-   */
-  async function ackApplied(): Promise<void> {
-    const path = deps.appliedSpillPath;
-    const dropBytes = awaitingAckBytes;
-    awaitingAckBytes = 0;
-    if (path === undefined || dropBytes === 0) {
-      return;
-    }
-    const offPath = spillOffsetPath(path);
-    const rewrite = spillTail.then(async () => {
-      const off = await readSpillOffset(offPath, path);
-      await advanceSpillOffset(path, offPath, off + dropBytes);
-    });
-    spillTail = rewrite.then(
-      () => undefined,
-      () => undefined,
-    );
-    await rewrite.catch(() => {
-      throw shellError(
-        'io-error',
-        'sync applied ack could not persist; drain stopped',
-      );
-    });
-  }
-
-  /**
-   * The engine's materialized record view, byte-paged — the durable
-   * recovery path for any outcome stream the outbox lost (drained
-   * before ack, evicted, pre-durability version). Records aren't
-   * consumed, so no ack exists.
-   *
-   * One reconcile pass pages a SINGLE snapshot: a fresh `materialize()`
-   * per offset would let a concurrent merge shift every later offset —
-   * pages would duplicate or omit records mid-pass (Review #46). The
-   * snapshot is taken lazily at the pass's first pull, reused for the
-   * rest, and dropped when the pass completes or a new pass restarts
-   * at offset 0. Merges landing mid-pass aren't lost — their outcomes
-   * still flow through the normal applied drain.
-   */
-  let materializedSnapshot: readonly unknown[] | null = null;
-  function materializedChunk(offset: number): {
-    readonly records: readonly unknown[];
-    readonly nextOffset: number | null;
-  } {
-    const start = Math.max(0, Math.floor(offset));
-    if (start === 0 || materializedSnapshot === null) {
-      materializedSnapshot = engine?.materialize?.() ?? [];
-    }
-    const all = materializedSnapshot;
-    const budget = MAX_SYNC_DOC_BYTES - 16_384;
-    const page: unknown[] = [];
-    let bytes = 2;
-    let i = start;
-    for (; i < all.length; i += 1) {
-      const rec = all[i];
-      const size = Buffer.byteLength(JSON.stringify(rec), 'utf8') + 1;
-      if (bytes + size > budget) {
-        if (page.length === 0) {
-          // A lone oversized record can never fit — skip it rather
-          // than wedge the pull.
-          continue;
-        }
-        break;
-      }
-      bytes += size;
-      page.push(rec);
-    }
-    const nextOffset = i < all.length ? i : null;
-    if (nextOffset === null) {
-      // Pass complete — the next offset-0 pull re-snapshots so a later
-      // reconcile sees merges that landed after this pass started.
-      materializedSnapshot = null;
-    }
-    return { records: page, nextOffset };
-  }
+  const journal = createSpillJournal({
+    spillPath: deps.appliedSpillPath,
+    notifyApplied: deps.notifyApplied,
+  });
 
   /**
    * Every `ip:port` a phone could try, best first — `endpoint()`
@@ -1085,7 +428,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
       pairedDevices:
         listener === 'disabled' ? 0 : await deviceCount(),
-      sessions: [...sessions].filter((s) => s.phase === 'open').length,
+      sessions: [...responder.sessions].filter(
+        (s) => s.phase === 'open',
+      ).length,
       lastSyncAt,
       engine: engine === undefined ? 'absent' : 'ready',
       name: deviceName,
@@ -1093,194 +438,217 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     };
   }
 
-  function dropSession(session: Session): void {
-    if (!sessions.has(session)) {
-      return;
-    }
-    sessions.delete(session);
-    session.cancel.cancel();
-    if (session.handshakeTimer !== null) {
-      clearTimeout(session.handshakeTimer);
-      session.handshakeTimer = null;
-    }
-    if (session.idleTimer !== null) {
-      clearTimeout(session.idleTimer);
-      session.idleTimer = null;
-    }
-  }
-
-  /** True iff a frame was accepted by the pump — callers that key
-   *  state off delivery (pendingSync marks) must not clear on a dead
-   *  socket where the kick never went out. */
-  function sendSealed(session: Session, msg: unknown): boolean {
-    const codec = session.codec;
-    if (codec === null) {
-      return false;
-    }
-    const plain = Buffer.from(JSON.stringify(msg), 'utf8');
-    if (plain.length + SEAL_OVERHEAD > session.pump.maxPayload) {
-      // Never silently drop a response: a document that fits the
-      // contract but overflows the sealed frame gets a typed error
-      // instead — and the codec seals that (small) reply, so the
-      // sequence stays contiguous for the peer.
-      const err = Buffer.from(
-        JSON.stringify({ t: 'error', code: 'too-large' }),
-        'utf8',
-      );
-      return session.pump.send(codec.seal(err));
-    }
-    return session.pump.send(codec.seal(plain));
-  }
-
-  function killSession(session: Session): void {
-    dropSession(session);
-    session.pump.close();
-  }
-
   function kickDevice(deviceId: string): void {
-    for (const session of sessions) {
+    for (const session of responder.sessions) {
       if (session.deviceId === deviceId) {
-        killSession(session);
+        responder.kill(session);
       }
     }
   }
 
   /** Kick any OTHER session bound to the same key — stale ids die. */
-  function kickStaleFp(session: Session): void {
-    for (const other of sessions) {
+  function kickStaleFp(session: ResponderSession): void {
+    for (const other of responder.sessions) {
       if (
         other !== session &&
         other.devFp !== null &&
         other.devFp === session.devFp
       ) {
-        killSession(other);
+        responder.kill(other);
       }
     }
   }
 
-  function resetIdle(session: Session): void {
-    if (session.idleTimer !== null) {
-      clearTimeout(session.idleTimer);
-    }
-    session.idleTimer = setTimeout(() => killSession(session), idleMs);
-  }
-
-  async function enterOpen(session: Session): Promise<void> {
-    session.phase = 'open';
-    if (session.handshakeTimer !== null) {
-      clearTimeout(session.handshakeTimer);
-      session.handshakeTimer = null;
-    }
-    resetIdle(session);
-    kickStaleFp(session);
-    if (
-      session.deviceId !== null &&
-      pendingSync.has(session.deviceId) &&
-      sendSealed(session, { t: 'sync-request' })
-    ) {
-      pendingSync.delete(session.deviceId);
-    }
-  }
-
-  async function onAuthFrame(session: Session, payload: Uint8Array) {
-    const codec = session.codec;
-    if (codec === null || session.deviceId === null) {
-      killSession(session);
+  /**
+   * The open-phase 'sync' surface the responder serves on the
+   * desktop — applyDelta the caller's doc (write-through to the
+   * durable outbox before the ack), then exportDelta what it asked
+   * for. Anything else the peer sends is the driver's own dispatch.
+   */
+  async function onSync(
+    session: ResponderSession,
+    msg: { readonly t: string },
+  ): Promise<void> {
+    if (!isSyncReq(msg)) {
+      responder.send(session, { t: 'error', code: 'bad-request' });
       return;
     }
-    let msg: unknown;
+    if (engine === undefined) {
+      responder.send(session, { t: 'error', code: 'engine-absent' });
+      return;
+    }
+    const deviceId = session.deviceId ?? 'unknown';
     try {
-      msg = parseJson(codec.open(payload));
+      if (msg.delta !== undefined) {
+        const applied = await engine.applyDelta(
+          msg.delta,
+          deviceId,
+          session.cancel.signal,
+        );
+        if (!applied.ok) {
+          responder.send(session, {
+            t: 'error',
+            code: applied.error.kind,
+          });
+          return;
+        }
+        // Write-through: the durable outbox append must land
+        // before the export answers — an acknowledged delta's
+        // outcomes can't die with renderer memory.
+        await journal.record(applied.value);
+      }
+      const exported = await engine.exportDelta(
+        msg.since,
+        session.cancel.signal,
+      );
+      if (!exported.ok) {
+        responder.send(session, {
+          t: 'error',
+          code: exported.error.kind,
+        });
+        return;
+      }
+      // The engine returns `unknown` — the wire carries only the
+      // strict JSON domain, and JSON.stringify silently rewrites
+      // anything outside it (undefined drops, NaN→null, sparse
+      // slots→null). The live check rejects those inputs outright.
+      if (!isSyncDeltaDoc(exported.value)) {
+        responder.send(session, {
+          t: 'error',
+          code: 'invalid-response',
+        });
+        return;
+      }
+      // Then serialize once and validate the REPARSED document —
+      // a plain graph is what the wire actually carries, so an
+      // exotic survivor (a proxy whose descriptors lied) can only
+      // ever ship the self-consistent form validation approved.
+      let reparsed: unknown = null;
+      try {
+        reparsed = JSON.parse(JSON.stringify(exported.value));
+      } catch {
+        reparsed = null;
+      }
+      if (reparsed === null || !isSyncDeltaDoc(reparsed)) {
+        responder.send(session, {
+          t: 'error',
+          code: 'invalid-response',
+        });
+        return;
+      }
+      lastSyncAt = nowMs();
+      responder.send(session, { t: 'delta', delta: reparsed });
     } catch {
-      killSession(session);
-      return;
+      responder.send(session, { t: 'error', code: 'internal' });
     }
-    const reject = (reason: string): void => {
-      sendSealed(session, { t: 'reject', reason });
-      // Flush the reject frame before the socket dies — destroy()
-      // would discard queued output and leave the phone with a mute
-      // EOF. killSession stays the path where no reply is owed.
-      session.pump.end();
-    };
-    const now = nowMs();
-    if (isPairMsg(msg)) {
-      type Outcome =
-        | { readonly ok: true; readonly record: SyncDeviceRecord }
-        | { readonly ok: false; readonly reason: string };
-      const outcome = await withPairLock(async (): Promise<Outcome> => {
-        // A peer that already blew its code budget never reaches the
-        // checker — a correct guess after the cap can't quietly pair.
-        const misses = badAttempts.get(session.remoteIp) ?? 0;
-        if (
-          misses >= maxCodeAttempts ||
-          totalBadAttempts >= maxTotalCodeAttempts
-        ) {
-          return { ok: false, reason: 'pairing-attempts' };
-        }
-        const check = pairing.peek(msg.code);
-        if (check === 'bad-code') {
-          badAttempts.set(session.remoteIp, misses + 1);
-          totalBadAttempts += 1;
-          const locked =
-            misses + 1 >= maxCodeAttempts ||
-            totalBadAttempts >= maxTotalCodeAttempts;
+  }
+
+  /**
+   * The SessionTable + PairingStore collaborators — the shared
+   * responder driver runs the hello→auth→open machine, the mint +
+   * attempt budgets, and the pair lock; the service supplies its
+   * custody seam (SyncKeys), record shape, welcome extras, and the
+   * sync-serving open surface.
+   */
+  const responder: SyncResponder = createSyncResponder<SyncDeviceRecord>({
+    crypto: () => syncCipher,
+    attach: deps.pump ?? attachWirePump,
+    name: deviceName,
+    // The desktop's stricter guard — loads the SPKI keys via
+    // node:crypto, never trusted on shape alone.
+    isHello: isClientHello,
+    fingerprintOf,
+    mintCode: () => String(randomInt(0, 1_000_000)).padStart(6, '0'),
+    nowMs,
+    armTimer: (ms, fire) => {
+      const timer = setTimeout(fire, ms);
+      return {
+        cancel: () => {
+          clearTimeout(timer);
+        },
+      };
+    },
+    decodeJson: (payload) =>
+      JSON.parse(Buffer.from(payload).toString('utf8')),
+    custody: {
+      async find(fp) {
+        try {
+          const { devices } = await deps.keys.deviceList();
+          const prior = devices.find((d) => d.fp === fp);
           return {
-            ok: false,
-            reason: locked ? 'pairing-attempts' : 'bad-code',
+            ok: true,
+            value:
+              prior === undefined
+                ? null
+                : { id: prior.id, pairedAt: prior.pairedAt },
           };
+        } catch {
+          return { ok: false };
         }
-        if (check !== 'ok') {
-          return { ok: false, reason: check };
-        }
-        // Consume BEFORE the durable write closes the mint window: a
-        // code consumed while its registry write is in flight can't
-        // also be claimed by a second session racing in. A failed
-        // write restores the taken state — the code stays pending so
-        // the same retry still pairs, unless a fresh mint already
-        // replaced the window.
-        const taken = pairing.consume(msg.code);
-        if (taken === null) {
-          // Defensive: inside the lock a peek-ok always consumes —
-          // this can only mean state was cleared out-of-band.
-          return { ok: false, reason: 'no-pairing' };
-        }
-        const record = {
-          id: session.deviceId ?? '',
-          name: session.name,
-          pub: session.devPub,
-          fp: session.devFp ?? '',
-          pairedAt: now,
-          lastSeenAt: now,
-        };
+      },
+      async put(record) {
         try {
           await deps.keys.devicePut(record);
+          return { ok: true };
         } catch (thrown) {
-          pairing.restore(taken);
           return {
             ok: false,
             reason: isShellError(thrown) ? thrown.kind : 'internal',
           };
         }
-        badAttempts.delete(session.remoteIp);
-        return { ok: true, record };
-      });
-      if (!outcome.ok) {
-        reject(outcome.reason);
-        return;
+      },
+      async touch(record) {
+        try {
+          // Update iff still registered — the hello-time custody read
+          // races a concurrent unpair, and an unconditional put would
+          // resurrect a revoked device.
+          return { ok: true, updated: await deps.keys.deviceTouch(record) };
+        } catch {
+          return { ok: false };
+        }
+      },
+    },
+    buildPeer: (session, kind, now) => ({
+      // 'pair' keeps the caller's claimed id; 'resume' is pinned to
+      // the id custody already binds to this key.
+      id:
+        kind === 'pair'
+          ? session.deviceId ?? ''
+          : session.registeredId ?? '',
+      name: session.name,
+      pub: session.devPub,
+      fp: session.devFp ?? '',
+      pairedAt: kind === 'pair' ? now : session.pairedAtMs ?? now,
+      lastSeenAt: now,
+    }),
+    async ownDeviceRows(session) {
+      try {
+        const { devices } = await deps.keys.deviceList();
+        // The wire exposes only the caller's own record — every
+        // other device's id, name, and activity stays renderer-local
+        // (api.sync.devices), not a free registry dump for any key
+        // holder.
+        return {
+          ok: true,
+          value: devices
+            .filter((d) => d.id === session.deviceId)
+            .map((d) => ({
+              id: d.id,
+              name: d.name,
+              pairedAt: d.pairedAt,
+              lastSeenAt: d.lastSeenAt,
+            })),
+        };
+      } catch {
+        return { ok: false };
       }
-      // Re-pair under a new id evicted the old record — drop its
-      // pending mark too, or triggers report work no device can clear.
-      if (
-        session.registeredId !== null &&
-        session.registeredId !== outcome.record.id
-      ) {
-        pendingSync.delete(session.registeredId);
-      }
-      const pairPot = potEndpoint();
-      sendSealed(session, {
-        t: 'welcome',
-        device: outcome.record,
-        name: deviceName,
+    },
+    welcomeExtra: () => {
+      // The minter advertisement rides the welcome — a guest that
+      // paired by typed code (no QR payload) learns it here, and a
+      // rebound ephemeral minter port heals on the next resume.
+      const pot = potEndpoint();
+      return {
         ...(ownDeviceId === null
           ? {}
           : {
@@ -1290,10 +658,19 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
                 pub: syncCipher.identity.pub,
               },
             }),
-        // The minter advertisement rides the welcome too — a guest
-        // that paired by typed code (no QR payload) learns it here.
-        ...(pairPot !== null ? { pot: pairPot } : {}),
-      });
+        ...(pot !== null ? { pot } : {}),
+      };
+    },
+    onSync,
+    onPair: (session, record) => {
+      // Re-pair under a new id evicted the old record — drop its
+      // pending mark too, or triggers report work no device can clear.
+      if (
+        session.registeredId !== null &&
+        session.registeredId !== record.id
+      ) {
+        pendingSync.delete(session.registeredId);
+      }
       // The shown code is dead the moment it's consumed — poke any
       // open pairing sheet to remint before its expiry timer would.
       try {
@@ -1301,303 +678,29 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       } catch {
         // push is best-effort
       }
-      await enterOpen(session);
-      return;
-    }
-    if (isResumeMsg(msg)) {
-      // The registry — not the client's claimed id — names a resumed
-      // device. A paired key presenting a foreign deviceId cannot take
-      // that id's slot: the canonical id is pinned to the stored key.
-      if (!session.registered || session.registeredId === null) {
-        reject('unpaired');
-        return;
-      }
-      session.deviceId = session.registeredId;
-      const record = {
-        id: session.registeredId,
-        name: session.name,
-        pub: session.devPub,
-        fp: session.devFp ?? '',
-        pairedAt: session.pairedAtMs ?? now,
-        lastSeenAt: now,
-      };
-      try {
-        // Update iff still registered — the hello-time registry read
-        // races a concurrent unpair, and an unconditional put would
-        // resurrect a revoked device.
-        const updated = await deps.keys.deviceTouch(record);
-        if (!updated) {
-          reject('unpaired');
-          return;
-        }
-      } catch {
-        reject('unavailable');
-        return;
-      }
-      const resumePot = potEndpoint();
-      sendSealed(session, {
-        t: 'welcome',
-        device: record,
-        name: deviceName,
-        ...(ownDeviceId === null
-          ? {}
-          : {
-              host: {
-                id: ownDeviceId,
-                name: deviceName,
-                pub: syncCipher.identity.pub,
-              },
-            }),
-        // Refreshed every resume: a rebound ephemeral minter port
-        // heals the stored peer record on the next sync connect.
-        ...(resumePot !== null ? { pot: resumePot } : {}),
-      });
-      await enterOpen(session);
-      return;
-    }
-    reject('bad-auth');
-  }
-
-  async function onHello(session: Session, payload: Uint8Array) {
-    // Advance the phase BEFORE the first await: a second hello frame
-    // while registry lookup/DH is in flight would otherwise run this
-    // body concurrently and overwrite codec + peer identity. Now the
-    // stray frame routes to onAuthFrame, which kills on a null codec.
-    session.phase = 'auth';
-    let msg: unknown;
-    try {
-      msg = parseJson(payload);
-    } catch {
-      killSession(session);
-      return;
-    }
-    if (!isClientHello(msg)) {
-      killSession(session);
-      return;
-    }
-    let registered = false;
-    let registeredId: string | null = null;
-    let pairedAt: number | undefined;
-    const devFp = fingerprintOf(msg.dev);
-    try {
-      const { devices } = await deps.keys.deviceList();
-      for (const device of devices) {
-        if (device.fp === devFp) {
-          registered = true;
-          registeredId = device.id;
-          pairedAt = device.pairedAt;
-          break;
-        }
-      }
-    } catch {
-      killSession(session);
-      return;
-    }
-    let accepted;
-    try {
-      accepted = syncCipher.accept(msg, { registered });
-    } catch {
-      killSession(session);
-      return;
-    }
-    session.deviceId = msg.deviceId;
-    session.devFp = devFp;
-    session.name = msg.name;
-    session.codec = accepted.codec;
-    session.devPub = msg.dev;
-    session.registered = registered;
-    session.registeredId = registeredId;
-    session.pairedAtMs = pairedAt ?? null;
-    session.pump.upgrade(sessionCap);
-    session.pump.send(accepted.challenge);
-  }
-
-  function onOpenFrame(session: Session, payload: Uint8Array): void {
-    resetIdle(session);
-    session.ops = session.ops.then(() =>
-      onOpenMsg(session, payload),
-    );
-  }
-
-  async function onOpenMsg(session: Session, payload: Uint8Array) {
-    const codec = session.codec;
-    if (codec === null || session.pump.closed) {
-      return;
-    }
-    let msg: unknown;
-    try {
-      msg = parseJson(codec.open(payload));
-    } catch {
-      killSession(session);
-      return;
-    }
-    if (!isWireMsg(msg)) {
-      sendSealed(session, { t: 'error', code: 'bad-request' });
-      return;
-    }
-    switch (msg.t) {
-      case 'ping':
-        sendSealed(session, { t: 'pong' });
-        return;
-      case 'devices': {
-        try {
-          const { devices } = await deps.keys.deviceList();
-          // The wire exposes only the caller's own record — every
-          // other device's id, name, and activity stays renderer-local
-          // (api.sync.devices), not a free registry dump for any key
-          // holder.
-          sendSealed(session, {
-            t: 'devices',
-            devices: devices
-              .filter((d) => d.id === session.deviceId)
-              .map((d) => ({
-                id: d.id,
-                name: d.name,
-                pairedAt: d.pairedAt,
-                lastSeenAt: d.lastSeenAt,
-              })),
-          });
-        } catch {
-          sendSealed(session, { t: 'error', code: 'unavailable' });
-        }
-        return;
-      }
-      case 'sync': {
-        if (!isSyncReq(msg)) {
-          sendSealed(session, { t: 'error', code: 'bad-request' });
-          return;
-        }
-        if (engine === undefined) {
-          sendSealed(session, { t: 'error', code: 'engine-absent' });
-          return;
-        }
-        const deviceId = session.deviceId ?? 'unknown';
-        try {
-          if (msg.delta !== undefined) {
-            const applied = await engine.applyDelta(
-              msg.delta,
-              deviceId,
-              session.cancel.signal,
-            );
-            if (!applied.ok) {
-              sendSealed(session, {
-                t: 'error',
-                code: applied.error.kind,
-              });
-              return;
-            }
-            // Write-through: the durable outbox append must land
-            // before the export answers — an acknowledged delta's
-            // outcomes can't die with renderer memory.
-            await recordApplied(applied.value);
-          }
-          const exported = await engine.exportDelta(
-            msg.since,
-            session.cancel.signal,
-          );
-          if (!exported.ok) {
-            sendSealed(session, {
-              t: 'error',
-              code: exported.error.kind,
-            });
-            return;
-          }
-          // The engine returns `unknown` — the wire carries only the
-          // strict JSON domain, and JSON.stringify silently rewrites
-          // anything outside it (undefined drops, NaN→null, sparse
-          // slots→null). The live check rejects those inputs outright.
-          if (!isSyncDeltaDoc(exported.value)) {
-            sendSealed(session, {
-              t: 'error',
-              code: 'invalid-response',
-            });
-            return;
-          }
-          // Then serialize once and validate the REPARSED document —
-          // a plain graph is what the wire actually carries, so an
-          // exotic survivor (a proxy whose descriptors lied) can only
-          // ever ship the self-consistent form validation approved.
-          let reparsed: unknown = null;
-          try {
-            reparsed = JSON.parse(JSON.stringify(exported.value));
-          } catch {
-            reparsed = null;
-          }
-          if (reparsed === null || !isSyncDeltaDoc(reparsed)) {
-            sendSealed(session, {
-              t: 'error',
-              code: 'invalid-response',
-            });
-            return;
-          }
-          lastSyncAt = nowMs();
-          sendSealed(session, { t: 'delta', delta: reparsed });
-        } catch {
-          sendSealed(session, { t: 'error', code: 'internal' });
-        }
-        return;
-      }
-      case 'bye':
-        killSession(session);
-        return;
-      default:
-        sendSealed(session, { t: 'error', code: 'bad-request' });
-    }
-  }
-
-  function onConnection(socket: WireSocketLike): void {
-    if (sessions.size >= maxConnections) {
-      socket.destroy();
-      return;
-    }
-    const session: Session = {
-      pump: attachPump({
-        socket,
-        maxPayload: handshakeCap,
-        onFrame: (payload) => {
-          if (session.phase === 'hello') {
-            void onHello(session, payload);
-          } else if (session.phase === 'auth') {
-            void onAuthFrame(session, payload);
-          } else {
-            onOpenFrame(session, payload);
-          }
-        },
-        onClose: () => dropSession(session),
-      }),
-      remoteIp: normalizeIp(socket.remoteAddress ?? ''),
-      cancel: new CancellationSource(),
-      phase: 'hello',
-      codec: null,
-      deviceId: null,
-      devFp: null,
-      devPub: '',
-      registered: false,
-      registeredId: null,
-      pairedAtMs: null,
-      name: '',
-      handshakeTimer: null,
-      idleTimer: null,
-      ops: Promise.resolve(),
-    };
-    // A socket that never finishes pairing dies instead of idling in
-    // the handshake phase forever.
-    session.handshakeTimer = setTimeout(
-      () => killSession(session),
-      handshakeMs,
-    );
-    sessions.add(session);
-  }
-
-  // Set inside start() once the identity is loaded — connections only
-  // arrive after bind, so `onConnection` never runs before it.
-  let syncCipher: SyncCipher = deps.cipher ?? {
-    name: 'uninitialized',
-    identity: { pub: '', priv: '' },
-    accept() {
-      throw shellError('internal', 'sync cipher not initialized');
     },
-  };
+    afterOpen: (session) => {
+      kickStaleFp(session);
+      // A device marked pending while offline takes its kick the
+      // moment its session opens — but the mark clears only when the
+      // frame is accepted, so a dead socket keeps the debt.
+      if (
+        session.deviceId !== null &&
+        pendingSync.has(session.deviceId) &&
+        responder.send(session, { t: 'sync-request' })
+      ) {
+        pendingSync.delete(session.deviceId);
+      }
+    },
+    codeTtlMs: deps.codeTtlMs ?? 90_000,
+    handshakeCap: deps.handshakeCap,
+    sessionCap: deps.sessionCap,
+    maxConnections: deps.maxConnections,
+    handshakeMs: deps.handshakeMs,
+    idleMs: deps.idleMs,
+    maxCodeAttempts: deps.maxCodeAttempts,
+    maxTotalCodeAttempts: deps.maxTotalCodeAttempts,
+  });
 
   async function start(): Promise<SyncStatusResult> {
     // An async engine resolves before anything reads the seam —
@@ -1642,7 +745,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     ownDeviceId = deps.ownDeviceId === undefined
       ? null
       : await deps.ownDeviceId.catch(() => null);
-    server = createServer((socket) => onConnection(socket));
+    server = createServer((socket) => responder.accept(socket));
     const bound = await new Promise<number | null>((resolve) => {
       const srv = server;
       if (srv === null) {
@@ -1714,7 +817,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     try {
       const { devices } = await deps.keys.deviceList();
       const live = new Set<string>();
-      for (const session of sessions) {
+      for (const session of responder.sessions) {
         if (session.phase === 'open' && session.deviceId !== null) {
           live.add(session.deviceId);
         }
@@ -1729,9 +832,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }
     const delivered = new Set<string>();
     const refused = new Set<string>();
-    for (const session of sessions) {
+    for (const session of responder.sessions) {
       if (session.phase === 'open' && session.deviceId !== null) {
-        if (sendSealed(session, { t: 'sync-request' })) {
+        if (responder.send(session, { t: 'sync-request' })) {
           delivered.add(session.deviceId);
         } else {
           refused.add(session.deviceId);
@@ -1783,414 +886,56 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     }, AUTO_SYNC_DEBOUNCE_MS);
   }
 
-  /* -------------------------- handlers ---------------------------- */
-
   /**
-   * AppError → ShellError: the engine speaks the application taxonomy,
-   * the IPC boundary the shell one. Equivalent kinds map directly;
-   * retryable failures without a shell twin land on 'unavailable' and
-   * the rest on 'internal' — a failed export is never reported as an
-   * actionable 'internal' when the engine named something better.
+   * The engine's materialized record view, byte-paged — the durable
+   * recovery path for any outcome stream the outbox lost (drained
+   * before ack, evicted, pre-durability version). Records aren't
+   * consumed, so no ack exists.
+   *
+   * One reconcile pass pages a SINGLE snapshot: a fresh `materialize()`
+   * per offset would let a concurrent merge shift every later offset —
+   * pages would duplicate or omit records mid-pass (Review #46). The
+   * snapshot is taken lazily at the pass's first pull, reused for the
+   * rest, and dropped when the pass completes or a new pass restarts
+   * at offset 0. Merges landing mid-pass aren't lost — their outcomes
+   * still flow through the normal applied drain.
    */
-  const ENGINE_ERROR_KINDS: Readonly<
-    Partial<Record<AppError['kind'], ShellErrorKind>>
-  > = {
-    'invalid-response': 'invalid-response',
-    cancelled: 'cancelled',
-    released: 'released',
-    'storage-full': 'io-error',
-    'not-found': 'invalid-request',
-    'not-applicable': 'invalid-request',
-    'invalid-message': 'invalid-request',
-    'artifact-rejected': 'invalid-request',
-    'permission-denied': 'invalid-request',
-    'auth-expired': 'invalid-request',
-    'budget-exceeded': 'invalid-request',
-    'guest-trap': 'invalid-request',
-    internal: 'internal',
-  };
-
-  function engineError(error: AppError): ShellError {
-    return shellError(
-      ENGINE_ERROR_KINDS[error.kind] ??
-      (error.retryable ? 'unavailable' : 'internal'),
-      error.message,
-    );
-  }
-
-  // Outbound re-validation per the utility boundary pattern: a
-  // malformed service result must surface as a typed invalid-response,
-  // never as a confused renderer.
-  const checked = <T>(
-    isResult: (value: unknown) => value is T,
-    label: string,
-  ): ((value: unknown) => T) => {
-    return (value) => {
-      if (!isResult(value)) {
-        throw shellError(
-          'invalid-response',
-          `${label}: service returned malformed payload`,
-        );
-      }
-      return value;
-    };
-  };
-
-  /**
-   * Shared dial path — ensureStarted first so identity custody + the
-   * bound port exist (the keychain prompt rightly fires here: pairing
-   * IS the sync use). A failed listener still pairs — hello just
-   * omits `port`, the phone can't dial back until a later run.
-   */
-  async function dialPair(
-    run: (
-      dialer: SyncDialer,
-      signal: CancellationSignal,
-    ) => Promise<Result<SyncPeer>>,
-  ): Promise<SyncDialResult> {
-    if (deps.dialer === undefined) {
-      throw shellError('unavailable', 'sync: caller not installed');
+  let materializedSnapshot: readonly unknown[] | null = null;
+  function materializedChunk(offset: number): {
+    readonly records: readonly unknown[];
+    readonly nextOffset: number | null;
+  } {
+    const start = Math.max(0, Math.floor(offset));
+    if (start === 0 || materializedSnapshot === null) {
+      materializedSnapshot = engine?.materialize?.() ?? [];
     }
-    await ensureStarted();
-    dialerInstance ??= deps.dialer({
-      listenPort: () => boundPort,
-      listenEndpoints: endpoints,
-      deviceName,
-    });
-    const result = await run(dialerInstance, serviceCancel.signal);
-    if (!result.ok) {
-      throw engineError(result.error);
-    }
-    const peer = result.value;
-    if (peer.deviceId === undefined) {
-      // The custody adapter refuses peers without deviceId, so an ok
-      // here without one means a custody write was silently dropped —
-      // surface it rather than return a row the device list won't show.
-      throw shellError(
-        'invalid-response',
-        'sync: paired peer disclosed no device id',
-      );
-    }
-    return checked(isSyncDialResult, 'sync:dial')({
-      device: {
-        id: peer.deviceId,
-        name: peer.name,
-        pairedAt: peer.pairedAt,
-        lastSeenAt: peer.lastSeenAt,
-      },
-    });
-  }
-
-  const handlers: Record<string, UtilityHandler> = {
-    /**
-     * LocalSend-style discovery: browse `_auqw._tcp` while the
-     * renderer's nearby list is open. mDNS only — no custody read, no
-     * keychain prompt — so it doesn't need ensureStarted().
-     */
-    'sync:nearbyStart': async () => {
-      browseOwners += 1;
-      if (browseSession !== null) {
-        return undefined;
-      }
-      // A joiner awaits the shared pending start — on failure it rolls
-      // back its own owner count, on success the session is shared.
-      if (browsePending !== null) {
-        const shared = await browsePending;
-        if (!shared.ok) {
-          browseOwners -= 1;
-          throw engineError(shared.error);
+    const all = materializedSnapshot;
+    const budget = MAX_SYNC_DOC_BYTES - 16_384;
+    const page: unknown[] = [];
+    let bytes = 2;
+    let i = start;
+    for (; i < all.length; i += 1) {
+      const rec = all[i];
+      const size = Buffer.byteLength(JSON.stringify(rec), 'utf8') + 1;
+      if (bytes + size > budget) {
+        if (page.length === 0) {
+          // A lone oversized record can never fit — skip it rather
+          // than wedge the pull.
+          continue;
         }
-        return undefined;
+        break;
       }
-      if (deps.discovery === undefined || deps.discovery === null) {
-        browseOwners -= 1;
-        throw shellError('unavailable', 'sync: discovery not installed');
-      }
-      const pending = deps.discovery.browse({
-        onFound: (peer) => {
-          try {
-            deps.notifyNearby?.({ type: 'found', peer });
-          } catch {
-            // A dead push channel must not kill the browse.
-          }
-        },
-        onLost: (key) => {
-          try {
-            deps.notifyNearby?.({ type: 'lost', key });
-          } catch {
-            // best effort
-          }
-        },
-      });
-      browsePending = pending;
-      const opened = await pending;
-      browsePending = null;
-      if (!opened.ok) {
-        browseOwners -= 1;
-        throw engineError(opened.error);
-      }
-      if (browseOwners === 0) {
-        // Every owner stopped while browse() was pending — drop the
-        // late session rather than browse without a subscriber.
-        try {
-          opened.value.close();
-        } catch {
-          // best effort
-        }
-        return undefined;
-      }
-      browseSession = opened.value;
-      return undefined;
-    },
-
-    'sync:nearbyStop': async () => {
-      browseOwners = Math.max(0, browseOwners - 1);
-      if (browseOwners === 0) {
-        browseSession?.close();
-        browseSession = null;
-      }
-      return undefined;
-    },
-
-    /**
-     * Pair TO a phone-hosted offer — the desktop is the caller. The
-     * peer's pair-host is pairing-only; the phone dials back (hello
-     * carries our bound port) for real rounds.
-     */
-    'sync:dial': async (args) => {
-      if (!isSyncDialArgs(args)) {
-        throw shellError(
-          'invalid-request',
-          'sync:dial expects {host,port,code,fp?}',
-        );
-      }
-      return dialPair(async (dialer, signal) =>
-        dialer.pairTo({
-          host: args.host,
-          port: args.port,
-          code: args.code,
-          ...(args.fp !== undefined ? { fp: args.fp } : {}),
-          signal,
-        }),
-      );
-    },
-
-    'sync:dialPayload': async (args) => {
-      if (!isSyncDialPayloadArgs(args)) {
-        throw shellError(
-          'invalid-request',
-          'sync:dialPayload expects {payload}',
-        );
-      }
-      return dialPair(async (dialer, signal) =>
-        dialer.pairPayload(args.payload, signal),
-      );
-    },
-
-    'sync:status': async () => {
-      // Observational read: the settings panel polls this on every
-      // settings visit. Starting sync here would mint an identity and
-      // (on macOS) fire the Keychain ACL prompt for users who only
-      // opened settings — the explicit start edge is sync:pairing.
-      if (startPromise === null) {
-        await engineReady;
-        return checked(isSyncStatusResult, 'sync:status')(
-          idleStatus(
-            closing
-              ? 'unavailable'
-              : deps.disabled === true
-                ? 'disabled'
-                : 'dormant',
-          ),
-        );
-      }
-      return checked(isSyncStatusResult, 'sync:status')(await status());
-    },
-
-    'sync:pairing': async () => {
-      await ensureStarted();
-      if (listener !== 'listening') {
-        throw shellError(
-          'unavailable',
-          `sync listener is ${listener}`,
-        );
-      }
-      const ep = endpoint();
-      if (ep === null) {
-        throw shellError('unavailable', 'no LAN address to pair to');
-      }
-      const { code, expiresAt } = pairing.mint();
-      badAttempts.clear(); // a fresh code means a fresh budget
-      totalBadAttempts = 0;
-      const pot = potEndpoint();
-      const payload = JSON.stringify({
-        v: 1,
-        endpoint: ep,
-        // All LAN candidates, best first — a multi-homed host's
-        // unreachable first interface can't strand the phone.
-        endpoints: endpoints(),
-        code,
-        fp: fingerprint,
-        ...(pot !== null ? { pot } : {}),
-      });
-      return checked(isSyncPairingResult, 'sync:pairing')({
-        payload,
-        code,
-        endpoint: ep,
-        expiresAt,
-      });
-    },
-
-    'sync:devices': async () => {
-      // Dormant ⟺ never paired — the empty list is truthful without
-      // a custody read.
-      if (startPromise === null) {
-        return checked(isSyncDevicesResult, 'sync:devices')({
-          devices: [],
-        });
-      }
-      const { devices } = await deps.keys.deviceList();
-      return checked(isSyncDevicesResult, 'sync:devices')({
-        devices: devices.map((d) => ({
-          id: d.id,
-          name: d.name,
-          pairedAt: d.pairedAt,
-          lastSeenAt: d.lastSeenAt,
-        })),
-      });
-    },
-
-    'sync:unpair': async (args) => {
-      if (!isSyncUnpairArgs(args) || !isDeviceId(args.id)) {
-        throw shellError('invalid-request', 'sync:unpair expects {id}');
-      }
-      // Dormant installs have no device records to delete — a truthful
-      // no-op that keeps custody untouched.
-      if (startPromise === null) {
-        return undefined;
-      }
-      await deps.keys.deviceDelete(args.id);
-      pendingSync.delete(args.id);
-      kickDevice(args.id);
-      // Library data stays — unpair revokes the key, nothing more.
-      // undefined, not null — the preload boundary validates void as
-      // strictly undefined.
-      return undefined;
-    },
-
-    'sync:deltas': async (args) => {
-      if (!isSyncDeltasArgs(args)) {
-        throw shellError('invalid-request', 'sync:deltas expects {since}');
-      }
-      await engineReady;
-      if (engine === undefined) {
-        throw shellError('unavailable', 'sync engine not installed');
-      }
-      const result = await engine.exportDelta(
-        args.since,
-        serviceCancel.signal,
-      );
-      if (!result.ok) {
-        throw engineError(result.error);
-      }
-      return checked(isSyncDeltasResult, 'sync:deltas')({
-        delta: result.value,
-      });
-    },
-
-    'sync:importDelta': async (args) => {
-      if (!isSyncImportDeltaArgs(args)) {
-        throw shellError(
-          'invalid-request',
-          'sync:importDelta expects {delta}',
-        );
-      }
-      await engineReady;
-      if (engine === undefined) {
-        throw shellError('unavailable', 'sync engine not installed');
-      }
-      const applied = await engine.applyDelta(
-        args.delta,
-        args.deviceId ?? 'local-import',
-        serviceCancel.signal,
-      );
-      if (!applied.ok) {
-        throw engineError(applied.error);
-      }
-      await recordApplied(applied.value);
-      return checked(isSyncImportDeltaResult, 'sync:importDelta')({
-        result: applied.value,
-      });
-    },
-
-    'sync:trigger': async () => {
-      // No paired devices exist while dormant — nothing to kick.
-      if (startPromise === null) {
-        return checked(isSyncTriggerResult, 'sync:trigger')({
-          triggered: false,
-          pending: false,
-        });
-      }
-      return checked(isSyncTriggerResult, 'sync:trigger')(
-        await triggerSync(),
-      );
-    },
-
-    'sync:localChanges': async (args) => {
-      if (!isSyncLocalChangesArgs(args)) {
-        throw shellError(
-          'invalid-request',
-          'sync:localChanges expects {writes}',
-        );
-      }
-      if (deps.localChanges === undefined) {
-        throw shellError('unavailable', 'sync engine not installed');
-      }
-      const result = await deps.localChanges(
-        args.writes,
-        serviceCancel.signal,
-      );
-      if (!result.ok) {
-        throw engineError(result.error);
-      }
-      // Committed writes trigger the spec's on-change sync — the
-      // debounce coalesces the burst into one trigger pass.
-      if (args.writes.length > 0) {
-        scheduleAutoTrigger();
-      }
-      // Small ack only — the caller discards per-write results, and
-      // echoing the appended batch would overflow the result cap
-      // after the writes already landed (Review #46 round-9).
-      return checked(isSyncLocalChangesResult, 'sync:localChanges')({
-        accepted: Array.isArray(result.value)
-          ? result.value.length
-          : args.writes.length,
-      });
-    },
-
-    'sync:drainApplied': async () =>
-      checked(isSyncDrainAppliedResult, 'sync:drainApplied')(
-        await drainAppliedChunk(),
-      ),
-
-    'sync:ackApplied': async () => {
-      await ackApplied();
-      return undefined;
-    },
-
-    'sync:materialized': async (args) => {
-      if (!isSyncMaterializedArgs(args)) {
-        throw shellError(
-          'invalid-request',
-          'sync:materialized expects {offset}',
-        );
-      }
-      await engineReady;
-      return checked(isSyncMaterializedResult, 'sync:materialized')(
-        materializedChunk(args.offset),
-      );
-    },
-  };
+      bytes += size;
+      page.push(rec);
+    }
+    const nextOffset = i < all.length ? i : null;
+    if (nextOffset === null) {
+      // Pass complete — the next offset-0 pull re-snapshots so a later
+      // reconcile sees merges that landed after this pass started.
+      materializedSnapshot = null;
+    }
+    return { records: page, nextOffset };
+  }
 
   // Custody access is deferred until an explicit sync action — a
   // dormant install never touches safeStorage, so the macOS Keychain
@@ -2240,6 +985,37 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       });
     return startPromise;
   }
+
+  /* -------------------------- handlers ---------------------------- */
+
+  const { handlers, browse } = createSyncHandlers({
+    deps,
+    responder,
+    journal,
+    service: {
+      engine: () => engine,
+      engineReady,
+      cancel: serviceCancel.signal,
+      started: () => startPromise !== null,
+      closing: () => closing,
+      listener: () => listener,
+      endpoint,
+      endpoints,
+      potEndpoint,
+      fingerprint: () => fingerprint,
+      boundPort: () => boundPort,
+      deviceName,
+      status,
+      idleStatus,
+      ensureStarted,
+      triggerSync,
+      scheduleAutoTrigger,
+      kickDevice,
+      materialized: materializedChunk,
+      pendingSync,
+    },
+  });
+
   if (deps.armed !== false) {
     void ensureStarted();
   }
@@ -2268,21 +1044,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         resolveReady(idleStatus('unavailable'));
       }
       await (startPromise ?? Promise.resolve()).catch(() => undefined);
-      for (const session of [...sessions]) {
-        killSession(session);
-      }
-      // Sessions are dead — no handler can queue new spill work, so
+      // Sessions die first — no handler can queue new spill work, so
       // settle the tail before tearing down: a mid-flight drain's
       // offset write or compaction must not survive close()
       // (Review #46 round-10).
-      await spillTail.then(
-        () => undefined,
-        () => undefined,
-      );
-      browseOwners = 0;
-      browseSession?.close();
-      browseSession = null;
-      pairing.expire();
+      responder.teardown();
+      await journal.settle();
+      browse.close();
       if (advertiser !== null) {
         try {
           advertiser.close();

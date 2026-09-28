@@ -6,34 +6,32 @@ import {
   appError,
   err,
   ok,
-  type AppError,
   type Result,
 } from '../errors.ts';
-import { isRecord, isString } from '../domain.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type {
   SyncAcceptorPort,
   SyncAdvertiseOpts,
   SyncAdvertiser,
-  SyncFrameCodec,
   SyncResponderCrypto,
   SyncSocket,
   SyncSocketListener,
 } from '../ports/sync-transport.ts';
 import {
   attachSyncPump,
-  decodeJson,
-  encodeJson,
   formatEndpoint,
   isClientHello,
-  HANDSHAKE_CAP,
-  PAIR_CODE_PATTERN,
   parseEndpoint,
-  SESSION_CAP,
-  type SyncDeviceRecord,
-  type SyncWirePump,
 } from './sync-wire.ts';
 import { isPairableLanHost } from './lan.ts';
+import {
+  createSyncResponder,
+  type ResponderSession,
+} from './sync-responder.ts';
+export {
+  createPairingMint,
+  normalizeSyncIp,
+} from './sync-responder.ts';
 
 /**
  * The responder half of LAN pairing, shared by any host that accepts a
@@ -44,11 +42,14 @@ import { isPairableLanHost } from './lan.ts';
  *
  *   hello → challenge → {pair code | resume} → welcome → open
  *
- * In the open phase a pair host answers `ping`, `devices` (the caller's
- * own row only), and `bye`; `sync` requests get a typed `pair-only`
- * error — the established sync direction stays the client dialing the
- * desktop for rounds. A resumed caller fires `onResume` so the host app
- * can kick a client-side sync round back.
+ * The phase machine itself lives in `createSyncResponder` — this host
+ * supplies the custody seam (its peer registry), caller-endpoint
+ * bookkeeping, and the pair-only 'sync' answer. In the open phase the
+ * driver answers `ping`, `devices` (the caller's own row only), and
+ * `bye`; `sync` requests get a typed `pair-only` error — the
+ * established sync direction stays the client dialing the desktop for
+ * rounds. A resumed caller fires `onResume` so the host app can kick a
+ * client-side sync round back.
  *
  * Caller endpoints: a hello carrying `port` advertises the caller's own
  * listener; combined with the socket's remote address it gives this
@@ -84,79 +85,6 @@ export interface SyncHostRegistry {
    * record vanished between hello and auth; the dialer re-pairs.
    */
   touch(peer: SyncHostPeer, signal?: CancellationSignal): Promise<Result<boolean>>;
-}
-
-type PairCheck = 'ok' | 'bad-code' | 'pairing-expired' | 'no-pairing';
-
-type PairingState = {
-  readonly code: string;
-  readonly expiresAt: number;
-};
-
-/**
- * The pending pairing offer: minted per `mintOffer` call, expires on
- * TTL, consumed exactly once on success. Wrong codes never burn the
- * mint — rate limiting is per remote address + a global ceiling (see
- * the host's attempt maps) so a hostile LAN peer can't invalidate the
- * code a legitimate caller is typing.
- */
-export function createPairingMint(opts: {
-  nowMs: () => number;
-  ttlMs: number;
-  /** CSPRNG-backed 6-digit mint — platform-provided. */
-  mintCode: () => string;
-}): {
-  mint(): PairingState;
-  peek(code: string): PairCheck;
-  consume(code: string): PairingState | null;
-  restore(taken: PairingState): void;
-  expire(): void;
-  readonly pending: boolean;
-} {
-  let current: PairingState | null = null;
-  return {
-    mint() {
-      const code = opts.mintCode();
-      if (!PAIR_CODE_PATTERN.test(code)) {
-        throw new Error('pairing mint produced an off-pattern code');
-      }
-      current = { code, expiresAt: opts.nowMs() + opts.ttlMs };
-      return current;
-    },
-    peek(code) {
-      if (current === null) {
-        return 'no-pairing';
-      }
-      if (opts.nowMs() >= current.expiresAt) {
-        current = null;
-        return 'pairing-expired';
-      }
-      return code === current.code ? 'ok' : 'bad-code';
-    },
-    consume(code) {
-      if (
-        current === null ||
-        current.code !== code ||
-        opts.nowMs() >= current.expiresAt
-      ) {
-        return null;
-      }
-      const taken = current;
-      current = null; // a code pairs exactly once
-      return taken;
-    },
-    restore(taken) {
-      if (current === null) {
-        current = taken;
-      }
-    },
-    expire() {
-      current = null;
-    },
-    get pending() {
-      return current !== null;
-    },
-  };
 }
 
 export type SyncPairHostDeps = {
@@ -232,95 +160,21 @@ export interface SyncPairHost {
   close(): Promise<void>;
 }
 
-type SessionPhase = 'hello' | 'auth' | 'open';
-
-type HostSession = {
-  readonly pump: SyncWirePump;
-  readonly remoteIp: string;
-  readonly cancel: CancellationSource;
-  phase: SessionPhase;
-  codec: SyncFrameCodec | null;
-  /** Set post-hello — the caller's identity claims. */
-  deviceId: string | null;
-  devFp: string | null;
-  devPub: string;
-  name: string;
-  /** Registry-resolved id/fp at hello time — resume authorization. */
-  registered: boolean;
-  registeredId: string | null;
-  pairedAtMs: number | null;
-  /** hello.port → the caller's own dialable listener port. */
-  callerPort: number | null;
-  /** hello.endpoints → caller-advertised dialable listener addrs. */
-  advertisedEndpoints: readonly string[];
-  handshakeTimer: CancellationSource | null;
-  idleTimer: CancellationSource | null;
-  ops: Promise<void>;
-};
-
-function parseJson(payload: Uint8Array): unknown {
-  return decodeJson(payload);
-}
-
-function isWireMsg(value: unknown): value is { readonly t: string } {
-  return isRecord(value) && isString(value['t'], 32);
-}
-
-function isPairMsg(value: unknown): value is { t: 'pair'; code: string } {
-  return (
-    isRecord(value) &&
-    value['t'] === 'pair' &&
-    typeof value['code'] === 'string' &&
-    PAIR_CODE_PATTERN.test(value['code'])
-  );
-}
-
-function isResumeMsg(value: unknown): value is { t: 'resume' } {
-  return isRecord(value) && value['t'] === 'resume';
-}
-
-/** Remote-IP the attempt budgets key on — IPv6-wrapped v4 unwrapped. */
-export function normalizeSyncIp(ip: string): string {
-  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-}
-
 export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
   const nowMs = () => deps.clock.nowMs();
-  const handshakeCap = deps.handshakeCap ?? HANDSHAKE_CAP;
-  const sessionCap = deps.sessionCap ?? SESSION_CAP;
-  const maxConnections = deps.maxConnections ?? 16;
-  const handshakeMs = deps.handshakeMs ?? 15_000;
-  const idleMs = deps.idleMs ?? 120_000;
-  const maxCodeAttempts = deps.maxCodeAttempts ?? 5;
-  const maxTotalCodeAttempts =
-    deps.maxTotalCodeAttempts ?? maxCodeAttempts * 3;
 
-  let pairing = createPairingMint({
-    nowMs,
-    ttlMs: deps.codeTtlMs ?? 120_000,
-    mintCode: deps.mintCode,
-  });
-
-  const badAttempts = new Map<string, number>();
-  let totalBadAttempts = 0;
-
-  // Pair-check serialization — same guarantee as the desktop's
-  // pairChain: peek+consume inside one lane so a losing session sees
-  // the consumed code at its own peek, not the pre-consume state.
-  let pairChain: Promise<unknown> = Promise.resolve();
-  function withPairLock<T>(fn: () => Promise<T>): Promise<T> {
-    const next = pairChain.then(fn);
-    pairChain = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    return next;
+  /** A cancellable one-shot — the clock's sleep + a per-timer source
+   * so resetting/cancelling never touches the session's own cancel. */
+  function armTimer(ms: number, fire: () => void): CancellationSource {
+    const source = new CancellationSource();
+    void deps.clock.sleep(ms, source.signal).then((slept) => {
+      if (slept.ok) {
+        fire();
+      }
+    });
+    return source;
   }
 
-  // `sessions` is swapped wholesale on stop — a socket accepted by a
-  // post-stop generation never lands in the set a pending teardown is
-  // killing.
-  let sessions = new Set<HostSession>();
   // Custody writes a stop/close must wait out — a pair whose code was
   // consumed inside the window is allowed to finish writing, but
   // stop() doesn't return until it has (no post-window registration).
@@ -341,7 +195,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       await Promise.allSettled([...pendingWrites]);
     }
   }
-  let serviceCancel = new CancellationSource();
+
   let listener: SyncSocketListener | null = null;
   let advertiser: { close(): void } | null = null;
   let startPromise: Promise<Result<{ port: number }>> | null = null;
@@ -358,72 +212,6 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
 
   const log = deps.log ?? (() => undefined);
 
-  /* ------------------------- session plumbing ---------------------- */
-
-  function sendSealed(session: HostSession, msg: unknown): void {
-    if (session.codec === null) {
-      return;
-    }
-    session.pump.send(session.codec.seal(encodeJson(msg)));
-  }
-
-  function dropSession(session: HostSession): void {
-    if (!sessions.delete(session)) {
-      return;
-    }
-    session.handshakeTimer?.cancel();
-    session.handshakeTimer = null;
-    session.idleTimer?.cancel();
-    session.idleTimer = null;
-    session.cancel.cancel();
-  }
-
-  function killSession(session: HostSession): void {
-    dropSession(session);
-    session.pump.close();
-  }
-
-  function resetIdle(session: HostSession): void {
-    session.idleTimer?.cancel();
-    session.idleTimer = armTimer(idleMs, () => killSession(session));
-  }
-
-  /** A cancellable one-shot — the clock's sleep + a per-timer source
-   * so resetting/cancelling never touches the session's own cancel. */
-  function armTimer(ms: number, fire: () => void): CancellationSource {
-    const source = new CancellationSource();
-    void deps.clock.sleep(ms, source.signal).then((slept) => {
-      if (slept.ok) {
-        fire();
-      }
-    });
-    return source;
-  }
-
-  function welcomeDevice(peer: SyncHostPeer): SyncDeviceRecord {
-    return {
-      id: peer.id,
-      name: peer.name,
-      pub: peer.pub,
-      fp: peer.fp,
-      pairedAt: peer.pairedAt,
-      lastSeenAt: peer.lastSeenAt,
-    };
-  }
-
-  function sendWelcome(session: HostSession, peer: SyncHostPeer): void {
-    sendSealed(session, {
-      t: 'welcome',
-      device: welcomeDevice(peer),
-      name: deps.name,
-      host: {
-        id: deps.deviceId,
-        name: deps.name,
-        pub: deps.crypto.identity.pub,
-      },
-    });
-  }
-
   /**
    * The endpoints worth redialing for this caller: its own
    * advertised listener addrs first (self-reported, so they survive
@@ -431,7 +219,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
    * remoteIp:callerPort as fallback. Advertised entries are
    * validated LAN literals — anything else is dropped, not trusted.
    */
-  function endpointsOf(session: HostSession): string[] {
+  function endpointsOf(session: ResponderSession): string[] {
     const list: string[] = [];
     for (const raw of session.advertisedEndpoints) {
       const ep = parseEndpoint(raw);
@@ -454,324 +242,108 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     return list;
   }
 
-  /* ----------------------------- hello ----------------------------- */
-
-  async function onHello(session: HostSession, payload: Uint8Array) {
-    // Advance the phase BEFORE the first await — a second hello frame
-    // while registry lookup is in flight would re-run this body.
-    session.phase = 'auth';
-    let msg: unknown;
-    try {
-      msg = parseJson(payload);
-    } catch {
-      killSession(session);
-      return;
-    }
-    if (!isClientHello(msg)) {
-      killSession(session);
-      return;
-    }
-    const devFp = deps.fingerprintOf(msg.dev);
-    const found = await deps.registry.find(devFp, serviceCancel.signal);
-    if (!found.ok) {
-      killSession(session);
-      return;
-    }
-    const prior = found.value;
-    let accepted;
-    try {
-      accepted = deps.crypto.accept(msg, { registered: prior !== null });
-    } catch {
-      killSession(session);
-      return;
-    }
-    session.deviceId = msg.deviceId;
-    session.devFp = accepted.peer.devFp;
-    session.devPub = accepted.peer.devPub;
-    session.name = accepted.peer.name;
-    session.callerPort = msg.port ?? null;
-    session.advertisedEndpoints = msg.endpoints ?? [];
-    session.registered = prior !== null;
-    // The registry — never the wire — names a resumed device. Rows
-    // from before deviceId custody stay id-less (''), paired by fp
-    // alone; claiming a different id under an old key fills nothing
-    // (touch only writes a non-empty id).
-    session.registeredId = prior === null ? null : prior.id;
-    session.pairedAtMs = prior?.pairedAt ?? null;
-    session.codec = accepted.codec;
-    session.pump.upgrade(sessionCap);
-    session.pump.send(accepted.challenge);
-  }
-
-  /* ----------------------------- auth ------------------------------ */
-
-  async function onAuthFrame(session: HostSession, payload: Uint8Array) {
-    const codec = session.codec;
-    if (codec === null || session.deviceId === null) {
-      killSession(session);
-      return;
-    }
-    let msg: unknown;
-    try {
-      msg = parseJson(codec.open(payload));
-    } catch {
-      killSession(session);
-      return;
-    }
-    const reject = (reason: string): void => {
-      sendSealed(session, { t: 'reject', reason });
-      // Flush the reject frame before the socket dies — destroy()
-      // would discard queued output and leave the caller at a mute EOF.
-      session.pump.end();
-    };
-    const now = nowMs();
-    if (isPairMsg(msg)) {
-      type Outcome =
-        | { readonly ok: true; readonly record: SyncHostPeer }
-        | { readonly ok: false; readonly reason: string };
-      const outcome = await withPairLock(async (): Promise<Outcome> => {
-        const misses = badAttempts.get(session.remoteIp) ?? 0;
-        if (
-          misses >= maxCodeAttempts ||
-          totalBadAttempts >= maxTotalCodeAttempts
-        ) {
-          return { ok: false, reason: 'pairing-attempts' };
-        }
-        const check = pairing.peek(msg.code);
-        if (check === 'bad-code') {
-          badAttempts.set(session.remoteIp, misses + 1);
-          totalBadAttempts += 1;
-          const locked =
-            misses + 1 >= maxCodeAttempts ||
-            totalBadAttempts >= maxTotalCodeAttempts;
-          return {
-            ok: false,
-            reason: locked ? 'pairing-attempts' : 'bad-code',
-          };
-        }
-        if (check !== 'ok') {
-          return { ok: false, reason: check };
-        }
-        // Consume BEFORE the durable write — a consumed code while the
-        // put is in flight can't be claimed by a racing session.
-        const taken = pairing.consume(msg.code);
-        if (taken === null) {
-          return { ok: false, reason: 'no-pairing' };
-        }
-        const endpoints = endpointsOf(session);
-        const record: SyncHostPeer = {
-          id: session.deviceId ?? '',
-          name: session.name,
-          pub: session.devPub,
-          fp: session.devFp ?? '',
-          pairedAt: now,
-          lastSeenAt: now,
-          endpoints,
-        };
-        // A stop() swapped the sessions set — a session not in the
-        // live set belongs to a dead generation; its custody write
-        // must not start outside the window.
-        if (!sessions.has(session)) {
-          return { ok: false, reason: 'unavailable' };
-        }
-        const put = await trackWrite(
-          deps.registry.put(record, serviceCancel.signal),
-        );
-        if (!put.ok) {
-          pairing.restore(taken);
-          return { ok: false, reason: put.error.kind };
-        }
-        badAttempts.delete(session.remoteIp);
-        return { ok: true, record };
-      });
-      if (!outcome.ok) {
-        reject(outcome.reason);
-        return;
-      }
-      if (!sessions.has(session)) {
-        // The write settled inside the stop window but the socket is
-        // already dead — custody has the peer; nothing more to emit.
-        return;
-      }
-      sendWelcome(session, outcome.record);
-      deps.onPair?.(outcome.record);
-      enterOpen(session);
-      return;
-    }
-    if (isResumeMsg(msg)) {
-      // The registry — not the claimed id — names a resumed device; a
-      // paired key presenting a foreign deviceId cannot take its slot.
-      if (
-        !session.registered ||
-        session.registeredId === null ||
-        session.devFp === null
-      ) {
-        reject('unpaired');
-        return;
-      }
-      const endpoints = endpointsOf(session);
-      const record: SyncHostPeer = {
-        id: session.registeredId,
-        name: session.name,
-        pub: session.devPub,
-        fp: session.devFp,
-        pairedAt: session.pairedAtMs ?? now,
-        lastSeenAt: now,
-        endpoints,
-      };
-      if (!sessions.has(session)) {
-        // Stop-window rejections must not masquerade as 'unpaired' —
-        // the caller would delete custody we still hold.
-        reject('unavailable');
-        return;
-      }
-      const touched = await trackWrite(
-        deps.registry.touch(record, serviceCancel.signal),
-      );
-      if (!touched.ok) {
-        // A custody read/write hiccup isn't a verdict: 'unpaired'
-        // would have the caller erase a record we may still hold.
-        reject('unavailable');
-        return;
-      }
-      if (!touched.value) {
-        reject('unpaired');
-        return;
-      }
-      if (!sessions.has(session)) {
-        return;
-      }
-      sendWelcome(session, record);
-      enterOpen(session);
-      // After the welcome lands — the hook may kick a sync round that
-      // itself dials out; keeping it post-enterOpen keeps ordering sane.
-      deps.onResume?.(record);
-      return;
-    }
-    reject('bad-auth');
-  }
-
-  /* ----------------------------- open ------------------------------ */
-
-  function enterOpen(session: HostSession): void {
-    session.phase = 'open';
-    session.handshakeTimer?.cancel();
-    session.handshakeTimer = null;
-    resetIdle(session);
-  }
-
-  function onOpenFrame(session: HostSession, payload: Uint8Array): void {
-    resetIdle(session);
-    session.ops = session.ops.then(() => onOpenMsg(session, payload));
-  }
-
-  async function onOpenMsg(session: HostSession, payload: Uint8Array) {
-    const codec = session.codec;
-    if (codec === null || session.pump.closed) {
-      return;
-    }
-    let msg: unknown;
-    try {
-      msg = parseJson(codec.open(payload));
-    } catch {
-      killSession(session);
-      return;
-    }
-    if (!isWireMsg(msg)) {
-      sendSealed(session, { t: 'error', code: 'bad-request' });
-      return;
-    }
-    switch (msg.t) {
-      case 'ping':
-        sendSealed(session, { t: 'pong' });
-        return;
-      case 'devices': {
-        // Only the caller's own row ever crosses — no registry dump.
-        const found = await deps.registry.find(
-          session.devFp ?? '',
-          serviceCancel.signal,
-        );
+  const responder = createSyncResponder<SyncHostPeer>({
+    crypto: () => deps.crypto,
+    attach: attachSyncPump,
+    name: deps.name,
+    isHello: isClientHello,
+    fingerprintOf: deps.fingerprintOf,
+    mintCode: deps.mintCode,
+    nowMs,
+    armTimer,
+    custody: {
+      async find(fp, signal) {
+        const found = await deps.registry.find(fp, signal);
         if (!found.ok) {
-          sendSealed(session, { t: 'error', code: 'unavailable' });
-          return;
+          return { ok: false };
         }
-        const own = found.value;
-        sendSealed(session, {
-          t: 'devices',
-          devices:
-            own === null
-              ? []
-              : [
-                  {
-                    id: own.id,
-                    name: own.name,
-                    pairedAt: own.pairedAt,
-                    lastSeenAt: own.lastSeenAt,
-                  },
-                ],
-        });
-        return;
+        const prior = found.value;
+        return {
+          ok: true,
+          value:
+            prior === null
+              ? null
+              : { id: prior.id, pairedAt: prior.pairedAt },
+        };
+      },
+      async put(record, signal) {
+        const put = await trackWrite(deps.registry.put(record, signal));
+        return put.ok
+          ? { ok: true }
+          : { ok: false, reason: put.error.kind };
+      },
+      async touch(record, signal) {
+        const touched = await trackWrite(
+          deps.registry.touch(record, signal),
+        );
+        return touched.ok
+          ? { ok: true, updated: touched.value }
+          : { ok: false };
+      },
+    },
+    buildPeer: (session, kind, now) => ({
+      // 'pair' keeps the caller's claimed id; 'resume' is pinned to the
+      // id custody already binds to this key.
+      id:
+        kind === 'pair'
+          ? session.deviceId ?? ''
+          : session.registeredId ?? '',
+      name: session.name,
+      pub: session.devPub,
+      fp: session.devFp ?? '',
+      pairedAt: kind === 'pair' ? now : session.pairedAtMs ?? now,
+      lastSeenAt: now,
+      endpoints: endpointsOf(session),
+    }),
+    async ownDeviceRows(session, signal) {
+      const found = await deps.registry.find(
+        session.devFp ?? '',
+        signal,
+      );
+      if (!found.ok) {
+        return { ok: false };
       }
-      case 'sync':
-        sendSealed(session, { t: 'error', code: 'pair-only' });
-        return;
-      case 'bye':
-        killSession(session);
-        return;
-      default:
-        sendSealed(session, { t: 'error', code: 'bad-request' });
-    }
-  }
-
-  /* --------------------------- the host ---------------------------- */
+      const own = found.value;
+      return {
+        ok: true,
+        value:
+          own === null
+            ? []
+            : [
+                {
+                  id: own.id,
+                  name: own.name,
+                  pairedAt: own.pairedAt,
+                  lastSeenAt: own.lastSeenAt,
+                },
+              ],
+      };
+    },
+    welcomeExtra: () => ({
+      host: {
+        id: deps.deviceId,
+        name: deps.name,
+        pub: deps.crypto.identity.pub,
+      },
+    }),
+    onPair: (_session, record) => deps.onPair?.(record),
+    onResume: (_session, record) => deps.onResume?.(record),
+    codeTtlMs: deps.codeTtlMs ?? 120_000,
+    handshakeCap: deps.handshakeCap,
+    sessionCap: deps.sessionCap,
+    maxConnections: deps.maxConnections,
+    handshakeMs: deps.handshakeMs,
+    idleMs: deps.idleMs,
+    maxCodeAttempts: deps.maxCodeAttempts,
+    maxTotalCodeAttempts: deps.maxTotalCodeAttempts,
+  });
 
   function onSocket(socket: SyncSocket): void {
     if (closed) {
       socket.destroy();
       return;
     }
-    if (sessions.size >= maxConnections) {
-      socket.destroy();
-      return;
-    }
-    const session: HostSession = {
-      pump: attachSyncPump({
-        socket,
-        maxPayload: handshakeCap,
-        onFrame: (payload) => {
-          if (session.phase === 'hello') {
-            void onHello(session, payload);
-          } else if (session.phase === 'auth') {
-            void onAuthFrame(session, payload);
-          } else {
-            onOpenFrame(session, payload);
-          }
-        },
-        onClose: () => dropSession(session),
-      }),
-      remoteIp: normalizeSyncIp(socket.remoteAddress ?? ''),
-      cancel: new CancellationSource(),
-      phase: 'hello',
-      codec: null,
-      deviceId: null,
-      devFp: null,
-      devPub: '',
-      name: '',
-      registered: false,
-      registeredId: null,
-      pairedAtMs: null,
-      callerPort: null,
-      advertisedEndpoints: [],
-      handshakeTimer: null,
-      idleTimer: null,
-      ops: Promise.resolve(),
-    };
-    // A socket that never finishes pairing dies instead of idling in
-    // the handshake phase forever.
-    session.handshakeTimer = armTimer(handshakeMs, () =>
-      killSession(session),
-    );
-    sessions.add(session);
+    responder.accept(socket);
   }
 
   return {
@@ -865,25 +437,18 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       const gen = ++generation;
       const starting = startPromise;
       startPromise = null;
-      const doomed = sessions;
-      sessions = new Set();
-      const mint = pairing;
-      pairing = createPairingMint({
-        nowMs,
-        ttlMs: deps.codeTtlMs ?? 120_000,
-        mintCode: deps.mintCode,
-      });
+      // Atomically swap the live session set + remint — sockets a
+      // post-stop generation accepts never land in the doomed set.
+      const doomed = responder.rotateGeneration();
       // Enqueue teardown AFTER any in-flight work — a start() that
       // begins during our await still binds behind this teardown via
       // the shared lifecycle chain, so it can't collide on the
       // acceptor's single native listener.
       const teardown = async (): Promise<void> => {
         await starting;
-        serviceCancel.cancel();
-        serviceCancel = new CancellationSource();
-        mint.expire();
+        responder.expireOffer();
         for (const session of doomed) {
-          killSession(session);
+          responder.kill(session);
         }
         // In-flight custody writes belong to the window this stop is
         // closing — wait them out so registration can't land after
@@ -919,13 +484,11 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
           appError('unavailable', 'sync host: not listening'),
         );
       }
-      const minted = pairing.mint();
       // A fresh offer is a fresh pairing attempt — the operator has
       // re-invited, so the per-code brute-force counters restart too
       // (a locked-out peer would otherwise stay banned forever, even
       // after a deliberate re-pair).
-      badAttempts.clear();
-      totalBadAttempts = 0;
+      const minted = responder.mintOffer();
       return ok({ code: minted.code, expiresAt: minted.expiresAt });
     },
     async close() {
@@ -933,12 +496,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         return;
       }
       closed = true;
-      serviceCancel.cancel();
-      pairing.expire();
-      for (const session of sessions) {
-        killSession(session);
-      }
-      sessions.clear();
+      responder.teardown();
       await drainWrites();
       const bound = listener;
       listener = null;
