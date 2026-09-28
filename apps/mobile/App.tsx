@@ -2242,9 +2242,15 @@ function Main({
     const unPair = host.onPaired(remintShareOffer);
     // A dead advert leaves the offer code-valid but undiscoverable —
     // tell the user rather than imply nearby visibility.
-    const unAdvert = host.onAdvertiseError(() =>
-      setAdvertNotice('sync.advertiseUnavailable'),
-    );
+    const unAdvert = host.onAdvertiseError(() => {
+      setAdvertNotice('sync.advertiseUnavailable');
+      // The advert condition is live NOW — it displaces the retained
+      // (stale) pair-attempt surfaces; a pair attempt that fails
+      // AFTER this still sets pairError fresh and trumps the notice
+      // until the next attempt clears it.
+      setPairError(null);
+      setPairNotice(null);
+    });
     return () => {
       unPair();
       unAdvert();
