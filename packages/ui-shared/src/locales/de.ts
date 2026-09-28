@@ -372,6 +372,9 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'sync.cameraNeeded':
     'kamerazugriff wird benötigt, um den kopplungs-qr-code zu scannen',
   'sync.cameraGrantA11y': 'kamerazugriff erlauben',
+  'sync.pairFailed': 'koppeln fehlgeschlagen',
+  'sync.advertiseUnavailable':
+    'geräte in der nähe nicht auffindbar — teile stattdessen den code',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · engine {label}',
   'sync.sessionsSuffix': ' · sessions {label}',
@@ -497,7 +500,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'error.permission': 'zugriff verweigert — berechtigungen prüfen',
   'error.unexpected': 'unerwartete antwort — erneut versuchen',
   'error.timeout': 'lädt noch — erneut versuchen',
-  'error.busy': 'der anbieter ist beschäftigt — später erneut versuchen',
+  'error.limit': 'über ein limit hinaus — kleiner oder später erneut',
+  'error.transient': 'das wurde unterbrochen — nochmal versuchen',
   'error.plugin': 'ein anbieter-plugin hat sich falsch verhalten',
   'error.rejected': 'der download hat die prüfung nicht bestanden — erneut versuchen',
   'error.capped': 'zu viele streams offen — kurz warten',

@@ -371,6 +371,9 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'sync.expires.minutes': 'expire dans {minutes} min',
   'sync.cameraNeeded': "l'accès à la caméra est requis pour scanner le QR d'appairage",
   'sync.cameraGrantA11y': "autoriser l'accès à la caméra",
+  'sync.pairFailed': 'appairage échoué',
+  'sync.advertiseUnavailable':
+    'découverte à proximité indisponible — partagez le code à la place',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · moteur {label}',
   'sync.sessionsSuffix': ' · sessions {label}',
@@ -498,7 +501,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'error.permission': 'accès refusé — vérifiez les permissions',
   'error.unexpected': 'réponse inattendue — réessayer',
   'error.timeout': 'chargement encore en cours — réessayer',
-  'error.busy': 'le fournisseur est occupé — réessayez dans un moment',
+  'error.limit': 'au-delà d’une limite — réduisez ou réessayez plus tard',
+  'error.transient': 'une interruption est survenue — réessayez',
   'error.plugin': "un plugin fournisseur s'est mal comporté",
   'error.rejected': 'le téléchargement a échoué aux contrôles — réessayez',
   'error.capped': 'trop de flux ouverts — attendez un moment',

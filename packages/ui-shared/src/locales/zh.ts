@@ -351,6 +351,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'sync.expires.minutes': '{minutes} 分钟后过期',
   'sync.cameraNeeded': '需要相机权限以扫描配对二维码',
   'sync.cameraGrantA11y': '授予相机权限',
+  'sync.pairFailed': '配对失败',
+  'sync.advertiseUnavailable': '附近设备发现不可用 — 请改为分享配对码',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · 引擎 {label}',
   'sync.sessionsSuffix': ' · 会话 {label}',
@@ -475,7 +477,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'error.permission': '访问被拒绝 — 检查权限',
   'error.unexpected': '收到了意外的回复 — 重试',
   'error.timeout': '仍在加载 — 重试',
-  'error.busy': '提供方忙 — 稍后再试',
+  'error.limit': '超出限制 — 缩小请求或稍后重试',
+  'error.transient': '操作被中断 — 请重试',
   'error.plugin': '提供方插件行为异常',
   'error.rejected': '下载未通过校验 — 重试',
   'error.capped': '打开的流过多 — 稍等片刻',

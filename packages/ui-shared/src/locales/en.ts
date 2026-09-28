@@ -353,6 +353,9 @@ export const en = {
   'sync.expires.minutes': 'expires in {minutes}m',
   'sync.cameraNeeded': 'camera access is needed to scan the pairing QR',
   'sync.cameraGrantA11y': 'grant camera access',
+  'sync.pairFailed': 'pairing failed',
+  'sync.advertiseUnavailable':
+    'nearby discovery unavailable — share the code instead',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · engine {label}',
   'sync.sessionsSuffix': ' · sessions {label}',
@@ -478,7 +481,8 @@ export const en = {
   'error.permission': 'access was denied — check permissions',
   'error.unexpected': 'got an unexpected reply — try again',
   'error.timeout': 'still loading — try again',
-  'error.busy': 'the provider is busy — try again in a bit',
+  'error.limit': 'over a limit — slim it down or try later',
+  'error.transient': 'something interrupted that — try again',
   'error.plugin': 'a provider plugin misbehaved',
   'error.rejected': 'the download failed its checks — try again',
   'error.capped': 'too many streams open — wait a moment',

@@ -377,6 +377,9 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'sync.cameraNeeded':
     'se necesita acceso a la cámara para escanear el QR de emparejamiento',
   'sync.cameraGrantA11y': 'conceder acceso a la cámara',
+  'sync.pairFailed': 'error al emparejar',
+  'sync.advertiseUnavailable':
+    'descubrimiento de dispositivos cercanos no disponible — comparte el código',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · motor {label}',
   'sync.sessionsSuffix': ' · sesiones {label}',
@@ -504,7 +507,8 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'error.permission': 'acceso denegado — revisa los permisos',
   'error.unexpected': 'respuesta inesperada — inténtalo de nuevo',
   'error.timeout': 'sigue cargando — inténtalo de nuevo',
-  'error.busy': 'el proveedor está ocupado — inténtalo en un rato',
+  'error.limit': 'sobre un límite — hazlo más pequeño o reintenta luego',
+  'error.transient': 'algo lo interrumpió — inténtalo de nuevo',
   'error.plugin': 'un plugin del proveedor se comportó mal',
   'error.rejected': 'la descarga no pasó las comprobaciones — inténtalo de nuevo',
   'error.capped': 'demasiados streams abiertos — espera un momento',

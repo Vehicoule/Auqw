@@ -7,6 +7,10 @@ import type { ErrorKind } from '@auqw/application';
 import { errorText } from './error-text.ts';
 import { setLocale, t } from './i18n.ts';
 import { en } from './locales/en.ts';
+import { de } from './locales/de.ts';
+import { es } from './locales/es.ts';
+import { fr } from './locales/fr.ts';
+import { zh } from './locales/zh.ts';
 
 const ALL_KINDS: readonly ErrorKind[] = [
   'no-result',
@@ -87,11 +91,15 @@ assertEqual(
 );
 assertEqual(
   errorText(appError('transient', 'transient: bot-check')),
+  'something interrupted that — try again',
+);
+assertEqual(
+  errorText(appError('rate-limit', 'rate-limit')),
   'the provider is rate-limiting right now',
 );
 assertEqual(
   errorText(appError('budget-exceeded', 'budget-exceeded')),
-  'the provider is busy — try again in a bit',
+  'over a limit — slim it down or try later',
 );
 assertEqual(
   errorText(appError('unsupported', 'x')),
@@ -110,5 +118,24 @@ assertEqual(
   'the mapper speaks the active locale',
 );
 setLocale('en');
+
+// Per-locale coverage: every `error.*` key en defines must exist and
+// differ in each shipped locale — a missing key silently falls back
+// to English with no other signal.
+const ERROR_KEYS = Object.keys(en).filter((k) => k.startsWith('error.'));
+for (const [tag, locale] of Object.entries({ de, es, fr, zh })) {
+  const table = locale as Readonly<Record<string, unknown>>;
+  for (const key of ERROR_KEYS) {
+    const value = table[key];
+    assert(
+      typeof value === 'string' && value.length > 0,
+      `${tag} is missing ${key}`,
+    );
+    assert(
+      value !== (en as Readonly<Record<string, unknown>>)[key],
+      `${tag} ${key} still carries the English string`,
+    );
+  }
+}
 
 console.log('error-text tests passed');

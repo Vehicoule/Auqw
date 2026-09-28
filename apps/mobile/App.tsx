@@ -47,6 +47,7 @@ import {
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
+  AppError,
   AttemptTrace,
   EntityRef,
   ImportPreview,
@@ -970,7 +971,10 @@ function Main({
     () => syncSurface?.client.status() ?? null,
   );
   const [pairing, setPairing] = useState(false);
-  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairError, setPairError] = useState<AppError | null>(null);
+  // Informational pair-surface notices that aren't errors: localized
+  // message ids rendered in the same banner slot as pairError.
+  const [pairNotice, setPairNotice] = useState<MessageId | null>(null);
   // Symmetric pairing: `share` = this device hosting a QR/code offer;
   // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
   // live only while the sync screen is open — the listener is
@@ -1501,7 +1505,7 @@ function Main({
         loadingMore: fetch?.loadingMore ?? false,
         playingRef,
       }),
-    [state.likes, state.entitySourceRefs, playingRef],
+    [state.likes, state.entitySourceRefs, playingRef, localeTick],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1609,7 +1613,7 @@ function Main({
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults, playingRef]);
+  }, [searchState, localResults, playingRef, localeTick]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
@@ -2036,14 +2040,14 @@ function Main({
         .pair(request, new CancellationSource().signal)
         .then((result) => {
           setPairing(false);
-          setPairError(result.ok ? null : errorText(result.error));
+          setPairError(result.ok ? null : result.error);
         })
         // A thrown pair (adapter crash) must still clear the latch —
         // otherwise `pairing` stays true and every later attempt is
         // dropped on the guard above.
         .catch((thrown: unknown) => {
           setPairing(false);
-          setPairError(errorText(fromUnknown(thrown)));
+          setPairError(fromUnknown(thrown));
         });
     },
     // syncSurface is stable per controller.
@@ -2186,7 +2190,7 @@ function Main({
           return;
         }
         if (!offer.ok) {
-          setPairError(errorText(offer.error));
+          setPairError(offer.error);
           mintFailed();
           return;
         }
@@ -2231,11 +2235,10 @@ function Main({
     const unPair = host.onPaired(remintShareOffer);
     // A dead advert leaves the offer code-valid but undiscoverable —
     // tell the user rather than imply nearby visibility.
-    const unAdvert = host.onAdvertiseError(() =>
-      setPairError(
-        'nearby discovery unavailable — share the code instead',
-      ),
-    );
+    const unAdvert = host.onAdvertiseError(() => {
+      setPairError(null);
+      setPairNotice('sync.advertiseUnavailable');
+    });
     return () => {
       unPair();
       unAdvert();
@@ -2297,7 +2300,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(errorText(started.error));
+        setPairError(started.error);
         return;
       }
       const offer = await host.mintOffer();
@@ -2315,7 +2318,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(errorText(offer.error));
+        setPairError(offer.error);
         return;
       }
       setShare({
@@ -2343,7 +2346,7 @@ function Main({
         endpoint: null,
         expiresAt: null,
       });
-      setPairError('pairing failed');
+      setPairNotice('sync.pairFailed');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller, share.active, share.busy]);
@@ -4113,7 +4116,10 @@ function Main({
             onSyncNow={onSyncNow}
             onUnpair={onUnpair}
             pairing={pairing}
-            pairError={pairError}
+            pairError={
+              errorText(pairError) ??
+              (pairNotice === null ? null : t(pairNotice))
+            }
             share={
               syncSurface?.host === undefined || syncSurface?.host === null
                 ? undefined

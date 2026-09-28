@@ -172,12 +172,12 @@ function App() {
         setBoot({ type: 'ready', controller: created });
       } catch (thrown) {
         if (!disposed) {
+          console.warn('[ui] boot failed', thrown);
           setBoot({
             type: 'failed',
             message:
-              thrown instanceof Error
-                ? thrown.message
-                : t('boot.failedMessage'),
+              errorText(shellToAppError(thrown)) ??
+              t('boot.failedMessage'),
           });
         }
       }
@@ -1386,7 +1386,7 @@ function Main({
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
       }),
-    [state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs, localeTick],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1420,7 +1420,10 @@ function Main({
         })),
     [libraryModel],
   );
-  const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
+  const searchModel = useMemo(
+    () => toSearchModel(searchState),
+    [searchState, localeTick],
+  );
   const homeModel = useMemo(
     () =>
       toHomeModel({
