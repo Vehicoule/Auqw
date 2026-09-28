@@ -1,19 +1,33 @@
-import type {
-  ClockPort,
-  IdPort,
-  LogPort,
-  RandomPort,
-  Result,
-} from '@auqw/application';
-import { appError, err, isSafeNonNegative, ok } from '@auqw/application';
+import type { ClockPort } from './ports/clock.ts';
+import type { IdPort, RandomPort } from './ports/runtime.ts';
+import type { LogPort } from './ports/log.ts';
+import type { Result } from './errors.ts';
+import { appError, err, ok } from './errors.ts';
+import { isSafeNonNegative } from './domain.ts';
+
+// This file is the platform edge: every runtime the apps run on
+// (Node, Electron, Hermes) supplies these globals, but this package's
+// own typecheck is lib-free, so the ambient surface is declared
+// module-scoped rather than pulling in DOM or node types.
+declare const setTimeout: (callback: () => void, ms: number) => unknown;
+declare const clearTimeout: (timer: unknown) => void;
+declare const console: {
+  debug(message: string): void;
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+};
+declare const crypto: { readonly randomUUID: () => string } | undefined;
 
 function cancelledError() {
   return appError('cancelled', 'cancelled');
 }
 
 /**
- * Wall-clock/system shell ports. RN-free (Date, setTimeout, console,
- * optional crypto) so the module also runs under plain Node.
+ * Wall-clock/system shell ports shared by the desktop renderer and
+ * the mobile adapter. Platform-free (Date, setTimeout, console,
+ * optional crypto) so the module also runs under plain Node for
+ * tests.
  */
 export function createClock(): ClockPort {
   return {
@@ -46,9 +60,8 @@ export function createClock(): ClockPort {
  */
 export function createIds(): IdPort {
   const uuid =
-    typeof globalThis.crypto === 'object' &&
-      typeof globalThis.crypto.randomUUID === 'function'
-      ? (): string => globalThis.crypto.randomUUID()
+    typeof crypto === 'object' && typeof crypto.randomUUID === 'function'
+      ? (): string => crypto.randomUUID()
       : null;
   let sequence = 0;
   return {

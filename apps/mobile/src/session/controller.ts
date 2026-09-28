@@ -58,7 +58,7 @@ import {
   createIds,
   createLog,
   createRandom,
-} from '../adapters/runtime.ts';
+} from '@auqw/application';
 import { createSyncEmit } from './sync-emit.ts';
 
 // Metro asset requires must be static literals. All pairs are

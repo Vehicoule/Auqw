@@ -12,7 +12,7 @@ import type { AuqwApi, LocalPickPayload } from '../shared/contract.ts';
 import { MAX_TAGREAD_BATCH } from '../shared/contract.ts';
 import { docUriFor } from '../shared/local-paths.ts';
 import { shellToAppError } from './ipc-errors.ts';
-import { raced } from './race.ts';
+import { raced } from '@auqw/application';
 
 /**
  * `TagReaderPort` over the `tagread:*` + `local:add` + `dialog` IPC

@@ -14,7 +14,7 @@ import type {
   RangeFetchResponse,
   TransferSink,
 } from '@auqw/application';
-import { createClock } from './runtime.ts';
+import { createClock } from '@auqw/application';
 
 /**
  * Progressive range downloader — the iOS provisional player path's

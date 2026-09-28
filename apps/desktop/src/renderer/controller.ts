@@ -44,7 +44,7 @@ import {
   createIds,
   createLog,
   createRandom,
-} from './runtime.ts';
+} from '@auqw/application';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike } from './web-player.ts';

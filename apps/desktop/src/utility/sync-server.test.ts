@@ -25,7 +25,7 @@ import {
   createClock,
   createIds,
   createLog,
-} from '../renderer/runtime.ts';
+} from '@auqw/application';
 import {
   createUtilitySyncEngine,
   type UtilitySyncEngine,

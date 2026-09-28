@@ -7,7 +7,7 @@ import type {
 import { appError, err, ok } from '@auqw/application';
 import type { AuqwApi } from '../shared/contract.ts';
 import { shellToAppError } from './ipc-errors.ts';
-import { raced } from './race.ts';
+import { raced } from '@auqw/application';
 
 /**
  * `MediaTransferPort` over the `transfer:*` IPC surface — the desktop

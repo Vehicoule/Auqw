@@ -1,4 +1,4 @@
-import type { CancellationSignal } from '@auqw/application';
+import type { CancellationSignal } from './cancellation.ts';
 
 /**
  * First-settle-wins race: a port call vs the caller's signal. The

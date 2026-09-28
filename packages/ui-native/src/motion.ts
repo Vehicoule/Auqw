@@ -12,6 +12,15 @@ export {
   PAUSE_RIGHT,
   type Quad,
 } from '@auqw/ui-shared';
+import type { ProgressPathState } from '@auqw/ui-shared';
+
+// The functions below are worklets: they run on reanimated's UI
+// runtime inside useDerivedValue/useAnimatedProps, which cannot call
+// non-workletized cross-package imports — so the math stays here as a
+// twin of @auqw/ui-shared's pure motion helpers rather than being
+// imported from it (same constraint progress.tsx's worklet twins
+// document). The shared ProgressPathState type above is safe to
+// import: types are erased before the worklet transform runs.
 
 function clamp01(value: number): number {
   'worklet';
@@ -62,12 +71,6 @@ export function morphPlayPause(amount: number): {
     right: morphQuad(PLAY_RIGHT, PAUSE_RIGHT, amount),
   };
 }
-
-type ProgressPathState = {
-  readonly dashLength: number;
-  readonly dashOffset: number;
-  readonly opacity: number;
-};
 
 export function progressPathState(
   progress: number,
