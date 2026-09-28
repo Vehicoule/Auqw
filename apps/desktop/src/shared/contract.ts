@@ -750,8 +750,6 @@ export type StreamPortLike = {
   readonly close: () => void;
 };
 
-type UndefinedArgs = undefined;
-
 /**
  * The storage channels forward to the utility process: `begin` pins a
  * transaction id there and every statement runs against it, because a
@@ -819,7 +817,6 @@ export type StorageExecuteArgs = {
   readonly sql: string;
   readonly params: readonly SqlValue[];
 };
-type StorageQueryArgs = StorageExecuteArgs;
 
 export function isStorageExecuteArgs(
   value: unknown,

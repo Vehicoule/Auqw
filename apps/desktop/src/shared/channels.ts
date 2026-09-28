@@ -90,5 +90,3 @@ export const CHANNELS = {
   localPlayback: 'local:playback',
   localSweep: 'local:sweep',
 } as const;
-
-export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

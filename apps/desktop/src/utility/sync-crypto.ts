@@ -15,7 +15,6 @@ import {
   isServerChallenge,
   ok,
   parseEndpoint,
-  type Result,
   type SyncClientCrypto,
   type SyncClientHandshake,
   type SyncFrameCodec,

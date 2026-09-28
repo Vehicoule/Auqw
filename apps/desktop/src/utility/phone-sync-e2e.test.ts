@@ -16,10 +16,8 @@ import {
   SequenceRandom,
 } from '@auqw/application/testing';
 import type {
-  CancellationSignal,
   ClockPort,
   MergeOutcome,
-  Result,
   SyncClientKeys,
   SyncEngine,
   SyncIdentity,
@@ -49,7 +47,6 @@ import {
   fingerprintOf,
   generateIdentity,
   isClientHello,
-  type SyncIdentity as DesktopIdentity,
 } from './sync-crypto.ts';
 import { createSyncService, type SyncService } from './sync-server.ts';
 import { isRecord } from '../shared/check.ts';

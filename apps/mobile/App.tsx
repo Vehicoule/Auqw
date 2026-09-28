@@ -5,7 +5,6 @@ import {
   Clipboard,
   Linking,
   Platform,
-  StyleSheet,
   View,
   useColorScheme,
   useWindowDimensions,
@@ -66,7 +65,6 @@ import {
   ArtworkResolverProvider,
   CollectionScreen,
   CorrectionsScreen,
-  EmptyState,
   EntityScreen,
   ErrorState,
   GalleryScreen,
@@ -192,7 +190,6 @@ const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
  * dead black frame.
  */
 function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
-  const theme = useTheme();
   const [permission, requestPermission] = useCameraPermissions();
   const consumed = useRef(false);
   useEffect(() => {
@@ -857,7 +854,7 @@ function Main({
           void controller.downloads.cancel(existing.downloadId, signal);
           return;
         case 'failed_with_retry':
-          void controller.downloads.retry(existing.downloadId, signal);
+          void controller.downloads.retry(existing.downloadId);
           return;
         case 'available':
           // The 'removing' transition fires before the file is gone —

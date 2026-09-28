@@ -539,7 +539,7 @@ export async function createSessionController(
             return;
           }
           queueRevision = next.queue.revision;
-          void downloads.updatePriorities(new CancellationSource().signal);
+          void downloads.updatePriorities();
         }),
       );
       // dataSync FGS keep-alive: drive the service off the ledger —

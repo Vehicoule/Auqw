@@ -1270,14 +1270,6 @@ export const fixtureImportPreview: ImportPreview = {
 export const fixtureImportPreviewModel: ImportPreviewModel =
   toImportPreviewModel(fixtureImportPreview, 'auqw-library.json');
 
-export const fixtureTransferModel: TransferModel = {
-  exportPhase: 'idle',
-  exportDetail: null,
-  importPhase: 'idle',
-  importDetail: null,
-  preview: null,
-};
-
 export const fixtureTransferModelPreview: TransferModel = {
   exportPhase: 'done',
   exportDetail: 'auqw-library-2023-11-14.json',

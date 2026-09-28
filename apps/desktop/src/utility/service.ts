@@ -1,4 +1,4 @@
-import { isShellError, shellError } from '../shared/errors.ts';
+import { shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { isUtilityResponse } from './validators.ts';

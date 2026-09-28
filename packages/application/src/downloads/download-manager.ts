@@ -388,7 +388,7 @@ export class DownloadManager {
         existing.sourceRef.id === input.sourceRef.id;
       if (sameMapping) {
         if (existing.state === 'failed_with_retry') {
-          const retried = await this.retry(existing.downloadId, signal);
+          const retried = await this.retry(existing.downloadId);
           if (!retried.ok) {
             return retried;
           }
@@ -488,10 +488,7 @@ export class DownloadManager {
   }
 
   /** failed_with_retry → requested (same mapping, resume offset kept). */
-  async retry(
-    downloadId: string,
-    signal: CancellationSignal,
-  ): Promise<Result<void>> {
+  async retry(downloadId: string): Promise<Result<void>> {
     const row = this.#rows.get(downloadId);
     if (row === undefined) {
       return err(appError('not-found', 'no such download'));
@@ -592,7 +589,7 @@ export class DownloadManager {
    * this when the queue changes so a now-playing download jumps the
    * line.
    */
-  async updatePriorities(signal: CancellationSignal): Promise<Result<void>> {
+  async updatePriorities(): Promise<Result<void>> {
     let changed = false;
     for (const [id, row] of this.#rows) {
       if (row.state !== 'requested' && row.state !== 'failed_with_retry') {

@@ -1,5 +1,4 @@
-import { CancellationSource } from '../cancellation.ts';
-import { appError, err, ok, type Result } from '../errors.ts';
+import { appError, err, ok } from '../errors.ts';
 import type {
   SyncClientCrypto,
   SyncClientHandshake,
@@ -19,7 +18,6 @@ import {
 } from '../testing/fakes.ts';
 import {
   createSyncEngine,
-  type SyncDelta,
   type SyncEngine,
 } from './sync-engine.ts';
 import { createSyncClient, type SyncClientDeps } from './sync-client.ts';

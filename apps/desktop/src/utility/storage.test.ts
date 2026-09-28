@@ -511,9 +511,9 @@ export async function run(): Promise<void> {
       'missing dbPath answers unavailable',
     );
 
-    // unknown storage channels still answer not-implemented
+    // unknown storage channels answer invalid-request
     const bogus = await route({ id: 908, channel: 'storage:bogus', args: {} });
-    assert(!bogus.ok && bogus.error.kind === 'not-implemented');
+    assert(!bogus.ok && bogus.error.kind === 'invalid-request');
     assertEqual(bogus.id, 908);
   } finally {
     service.close();

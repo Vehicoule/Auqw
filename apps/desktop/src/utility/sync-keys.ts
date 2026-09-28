@@ -78,11 +78,6 @@ export type SyncKeysOp =
   | { readonly op: 'device-touch'; readonly record: SyncDeviceRecord }
   | { readonly op: 'device-delete'; readonly id: string };
 
-type SyncKeysResult =
-  | { readonly identity: SyncIdentity | null }
-  | { readonly devices: readonly SyncDeviceRecord[]; readonly skipped: number }
-  | null;
-
 /** The custody surface the sync server uses — client or in-memory fake. */
 export interface SyncKeys {
   identityGet(): Promise<SyncIdentity | null>;

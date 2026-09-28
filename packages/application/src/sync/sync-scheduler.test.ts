@@ -1,4 +1,3 @@
-import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal } from '../cancellation.ts';
 import { appError, err, ok } from '../errors.ts';
 import type { AppError, Result } from '../errors.ts';

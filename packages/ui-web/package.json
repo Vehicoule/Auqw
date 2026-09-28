@@ -12,7 +12,6 @@
     "test": "node --experimental-strip-types src/ui-web.test.ts"
   },
   "dependencies": {
-    "@auqw/application": "workspace:*",
     "@auqw/design-tokens": "workspace:*",
     "@auqw/ui-shared": "workspace:*",
     "uqr": "0.1.3"

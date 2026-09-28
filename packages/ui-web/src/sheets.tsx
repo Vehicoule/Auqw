@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';

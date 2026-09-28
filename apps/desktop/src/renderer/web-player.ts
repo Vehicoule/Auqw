@@ -20,7 +20,6 @@ import type {
   StreamMarksResult,
 } from '../shared/contract.ts';
 import { isRecord } from '../shared/check.ts';
-import type { ShellError } from '../shared/errors.ts';
 import {
   attachMseSource,
   MseAborted,

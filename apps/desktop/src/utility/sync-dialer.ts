@@ -346,7 +346,6 @@ export function createSyncDialer(deps: {
 }): SyncDialer {
   async function withClient<T>(
     run: (client: SyncClient) => Promise<Result<T>>,
-    signal?: CancellationSignal,
   ): Promise<Result<T>> {
     const engine = await deps.engine();
     const deviceId = await deps.ownDeviceId();
@@ -397,24 +396,19 @@ export function createSyncDialer(deps: {
 
   return {
     pairTo({ host, port, code, fp, signal }) {
-      return withClient(
-        (client) =>
-          client.pair(
-            {
-              code,
-              endpoints: [formatEndpoint(host, port)],
-              ...(fp !== undefined ? { fp } : {}),
-            },
-            signal,
-          ),
-        signal,
+      return withClient((client) =>
+        client.pair(
+          {
+            code,
+            endpoints: [formatEndpoint(host, port)],
+            ...(fp !== undefined ? { fp } : {}),
+          },
+          signal,
+        ),
       );
     },
     pairPayload(payload, signal) {
-      return withClient(
-        (client) => client.pair({ payload }, signal),
-        signal,
-      );
+      return withClient((client) => client.pair({ payload }, signal));
     },
   };
 }

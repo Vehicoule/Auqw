@@ -389,7 +389,6 @@ export const en = {
   'settings.languageValue.es': 'español',
   'settings.languageValue.fr': 'français',
   'settings.languageValue.zh': '中文',
-  'settings.heading.settings': 'settings',
   'settings.heading.diagnostics': 'diagnostics',
   'settings.heading.sync': 'sync',
   'settings.section.appearance': 'appearance',

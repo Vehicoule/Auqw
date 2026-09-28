@@ -33,8 +33,8 @@ export async function run(): Promise<void> {
   ]) {
     const res = await route({ id: 3, channel, args: {} });
     assert(
-      !res.ok && res.error.kind === 'not-implemented',
-      `${channel} must answer not-implemented`,
+      !res.ok && res.error.kind === 'invalid-request',
+      `${channel} must answer invalid-request`,
     );
     assertEqual(res.id, 3);
   }

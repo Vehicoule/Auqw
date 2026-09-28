@@ -13,7 +13,6 @@ import type {
   PlayerEvent,
   PlaybackIdentity,
 } from '../ports/player.ts';
-import type { PlayerPort } from '../ports/player.ts';
 import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import { isPersistedState } from '../library/library.ts';
