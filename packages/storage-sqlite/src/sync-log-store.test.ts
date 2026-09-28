@@ -347,18 +347,6 @@ async function peerMarksReplace(): Promise<void> {
     'phone-1': {},
     'desk-1': { 'phone-1': 9 },
   });
-  assert(
-    (
-      await syncLog.append(
-        { dropPeerMarkSenders: ['desk-1'] },
-        ctx().context,
-      )
-    ).ok,
-    'drop append resolves',
-  );
-  const trimmed = await syncLog.load(ctx().context);
-  assert(trimmed.ok);
-  assertDeepEqual(trimmed.value.peerMarks, { 'phone-1': {} });
   driver.close();
 }
 

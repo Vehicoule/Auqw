@@ -114,8 +114,7 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'dropEntries' &&
       key !== 'divergenceReplayOffset' &&
       key !== 'divergenceDroppedEmissions' &&
-      key !== 'peerMarks' &&
-      key !== 'dropPeerMarkSenders'
+      key !== 'peerMarks'
     ) {
       return false;
     }
@@ -195,17 +194,6 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
-  if (
-    value['dropPeerMarkSenders'] !== undefined &&
-    !(
-      Array.isArray(value['dropPeerMarkSenders']) &&
-      value['dropPeerMarkSenders'].every(
-        (sender) => typeof sender === 'string' && sender.length <= MAX_DEVICE_ID,
-      )
-    )
-  ) {
-    return false;
-  }
   return true;
 }
 
@@ -231,7 +219,9 @@ function parseFile(raw: string): Parsed {
   let entries: ChangeEntry[] = [];
   const divergence: DivergenceEntry[] = [];
   const watermarks: Record<string, number> = {};
-  const peerMarks: Record<string, SyncCursor> = {};
+  // A Map — not a plain record — so a sender literally named
+  // `__proto__` folds as data, not a prototype write.
+  const peerMarks = new Map<string, SyncCursor>();
   let floor = 0;
   let replayOffset = 0;
   const droppedEmissions = new Set<number>();
@@ -305,14 +295,10 @@ function parseFile(raw: string): Parsed {
     for (const [device, mark] of Object.entries(write.watermarks ?? {})) {
       watermarks[device] = Math.max(watermarks[device] ?? 0, mark);
     }
-    for (const sender of write.dropPeerMarkSenders ?? []) {
-      // Bounded-table evictions delete the whole remembered row.
-      delete peerMarks[sender];
-    }
     for (const [sender, marks] of Object.entries(write.peerMarks ?? {})) {
       // Per-sender row replace — the write carries the whole folded
       // row, so a regressed claim clears what was stored wholesale.
-      peerMarks[sender] = marks;
+      peerMarks.set(sender, marks);
     }
   }
   let deviceId: string;
@@ -339,7 +325,9 @@ function parseFile(raw: string): Parsed {
           ),
         }
         : {}),
-      ...(Object.keys(peerMarks).length > 0 ? { peerMarks } : {}),
+      ...(peerMarks.size > 0
+        ? { peerMarks: Object.fromEntries(peerMarks) }
+        : {}),
     },
   };
 }
