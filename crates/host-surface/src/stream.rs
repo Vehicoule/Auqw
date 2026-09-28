@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{lock, resolve_resource_from, AttemptSummary, HostError, PluginHost};
+use crate::{lock, resolve_resource_from, AttemptSummary, HostError, PluginHost, TypedRequest};
 
 /// A prepared stream session as reported to the player: the opaque
 /// handle plus metadata. The signed URL never crosses this boundary.
@@ -360,307 +360,324 @@ impl PluginHost {
         // commit exactly (tombstone consume, delivery ticket, slot
         // insert, delivered flip) — ownership and `cancel` semantics
         // are indistinguishable from a resolved prepare.
-        if let Ok(Some(info)) = stream.adopt_reusable(&plugin_id, &source_ref) {
-            // A zeroed trace is honest here: no invocation ran for
-            // this request — the session's own phase marks still carry
-            // the minting resolve's timing.
-            let summary = AttemptSummary {
-                request_id: request_id.clone(),
-                steps: 0,
-                http_calls: 0,
-                bytes: 0,
-                fuel_used: 0,
-                elapsed_ms: 0,
-                http_trace: Vec::new(),
-                guest_log: Vec::new(),
-            };
-            let prepared_handles = Arc::clone(&self.prepared_handles);
-            let prepared_delivery = Arc::clone(&self.prepared_delivery);
-            // Admission and slot commit share one critical section
-            // with `start_typed` via `begin_admission`: an id owned by
-            // an in-flight invoke — or already committed for another
-            // adoption — is refused before any ownership claim, so a
-            // request id can never double-register a stream session.
-            // A cancel that lands first tombstones instead (consumed
-            // below); one landing after sees the slot and abandons it.
-            enum Adopt {
-                Owned,
-                Cancelled,
-                Dead,
-            }
-            // `track` precedes the slot insert: a `PreparedSlot` with
-            // `delivered: false` must always imply a live in-flight
-            // count, or `cancel`'s `await_idle` could pass under the
-            // commit and kill a session whose `Prepared` is en route.
-            // Non-adopt outcomes never insert a slot, so the ticket is
-            // simply dropped unused.
-            let ticket = prepared_delivery.track(request_id.clone());
-            let adopt: Result<Adopt, HostError> = (|| {
-                let mut admission = self.begin_admission(&request_id)?;
-                // Consume this id's tombstone under the same critical
-                // section — a `cancel` that outran the slot insert
-                // owns the verdict; the session survives under the
-                // minting request's own ownership slot.
-                if admission.tombstoned {
-                    return Ok(Adopt::Cancelled);
-                }
-                if !stream.is_live(&info.handle) {
-                    return Ok(Adopt::Dead);
-                }
-                admission.prepared.insert(
-                    request_id.clone(),
-                    PreparedSlot {
-                        handle: info.handle.clone(),
-                        delivered: false,
-                    },
-                );
-                Ok(Adopt::Owned)
-            })();
-            match adopt {
-                Err(e) => return Err(e),
-                Ok(Adopt::Owned) => {
-                    self.runtime.spawn(async move {
-                        deliver(
-                            request_id.clone(),
-                            PrepareOutcome::Prepared {
-                                superseded: info.superseded.clone(),
-                                stream: PreparedStream::from(info),
-                                attempt: summary,
-                            },
-                        )
-                        .await;
-                        if let Ok(mut m) = prepared_handles.lock() {
-                            if let Some(slot) = m.get_mut(&request_id) {
-                                slot.delivered = true;
-                            }
-                        }
-                        drop(ticket);
-                    });
-                    return Ok(());
-                }
-                Ok(kind) => {
-                    let cancelled = matches!(kind, Adopt::Cancelled);
-                    self.runtime.spawn(async move {
-                        deliver(
-                            request_id,
-                            PrepareOutcome::Failed {
-                                kind: if cancelled {
-                                    "cancelled".to_string()
-                                } else {
-                                    "not-found".to_string()
-                                },
-                                message: if cancelled {
-                                    "prepare cancelled".to_string()
-                                } else {
-                                    "stream session ended before delivery".to_string()
-                                },
-                                attempt: summary,
-                            },
-                        )
-                        .await;
-                    });
-                    return Ok(());
-                }
-            }
-        }
-        let remint = PluginRemint {
-            plugin,
-            provider: plugin_id.clone(),
-            source_ref: source_ref.clone(),
-            pin_itag: None,
-            prefer: self.prefer.clone(),
-            auth_token: Arc::clone(&self.auth_token),
-            budgets: self.budgets.clone(),
-            http: Arc::clone(&self.http),
-            kv: Arc::clone(&self.kv),
-            pot_provider: Arc::clone(&self.pot_provider_url),
-        };
-        let provider = plugin_id.clone();
+        //
+        // Admission runs BEFORE the registry scan and its reservation
+        // stays held through either commit — `adopt_reusable`
+        // supersedes other unattached sessions, so a request id that
+        // will be rejected (duplicate/tombstoned) must never reach it:
+        // a refused request would still destroy another request's
+        // warm. On an adopt-miss the same admission feeds
+        // `start_typed_admitted`, so the id never goes unreserved.
         let prepared_handles = Arc::clone(&self.prepared_handles);
-        let cancels = Arc::clone(&self.cancels);
-        let cancelled_requests = Arc::clone(&self.cancelled_requests);
         let prepared_delivery = Arc::clone(&self.prepared_delivery);
-        // `prefer` is a key, not a value: absent means "guest default",
-        // never a null that fails payload validation. `access_token`
-        // rides via the `start_typed` merge.
-        let mut payload = serde_json::Map::new();
-        payload.insert("source_ref".to_string(), json!(source_ref));
-        if let Some(prefer) = &self.prefer {
-            payload.insert("prefer".to_string(), json!(prefer));
+        // `track` precedes the slot insert: a `PreparedSlot` with
+        // `delivered: false` must always imply a live in-flight
+        // count, or `cancel`'s `await_idle` could pass under the
+        // commit and kill a session whose `Prepared` is en route.
+        // Non-adopt outcomes never insert a slot, so the ticket is
+        // simply dropped unused.
+        let ticket = prepared_delivery.track(request_id.clone());
+        let mut admission = self.begin_admission(&request_id)?;
+        enum Prep {
+            Owned(auqw_stream::PrepareInfo),
+            Cancelled,
+            Dead,
         }
-        self.start_typed(
-            plugin_id,
-            "playback.resolve".to_string(),
-            Value::Object(payload),
-            request_id,
-            // The delivery registers the `prepared_handles` slot that
-            // owns this id until release — freeing `cancels` first
-            // would open a re-admission gap before the slot lands.
-            true,
-            move |request_id, invocation| async move {
-                let (result, attempt) = invocation.into_parts();
-                let mut summary = AttemptSummary::from(&attempt);
-                // The summary must join by the caller-facing id —
-                // the inner `invoke-N` never leaves this closure.
-                summary.request_id = request_id.clone();
-                // `stream` is moved into the blocking closure below —
-                // keep a clone for the bookkeeping prune.
-                let registry = Arc::clone(&stream);
-                // Counts this delivery's window for `cancel` — see
-                // `PrepareDelivery`. Held until the post-callback flip.
-                let mut delivery_ticket = None;
-                let mut outcome = match result {
-                    Ok(value) => {
-                        // Session creation does file I/O — run it on the
-                        // blocking pool, not a runtime worker shared
-                        // with guest wasm.
-                        let caller_request_id = request_id.clone();
-                        let work = tokio::task::spawn_blocking(move || {
-                            prepare_outcome(
-                                &value,
-                                &stream,
-                                remint,
-                                &attempt,
-                                &caller_request_id,
-                                source_ref,
-                                provider,
-                            )
-                        });
-                        match work.await {
-                            Ok(o) => o,
-                            Err(_) => PrepareOutcome::Failed {
-                                kind: "internal".to_string(),
-                                message: "prepare worker panicked".to_string(),
-                                attempt: summary.clone(),
-                            },
-                        }
-                    }
-                    Err(e) => PrepareOutcome::Failed {
-                        kind: e.kind().to_string(),
-                        message: e.to_string(),
-                        attempt: summary.clone(),
-                    },
-                };
-                // A cancel that outran both `cancels` and the handle
-                // map left a tombstone: the session just produced is
-                // orphaned-on-arrival — abandon it instead of handing
-                // out a live handle nobody will ever release.
-                let mut abandoned = None;
-                if let PrepareOutcome::Prepared {
-                    stream: prepared, ..
-                } = &outcome
-                {
-                    let tombstoned = cancelled_requests
-                        .lock()
-                        .map(|mut m| m.remove(&request_id).is_some())
-                        .unwrap_or(false);
-                    if tombstoned {
-                        let _ = registry.cancel_if_unattached(&prepared.handle);
-                        deliver(
-                            request_id,
-                            PrepareOutcome::Failed {
-                                kind: "cancelled".to_string(),
-                                message: "prepare cancelled".to_string(),
-                                attempt: summary.clone(),
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                    if let Ok(mut m) = prepared_handles.lock() {
-                        // Sessions ended by supersede/evict/expiry saw
-                        // neither cancel nor release — drop their stale
-                        // mappings so the map tracks live handles only.
-                        m.retain(|_, s| s.handle == prepared.handle || registry.is_live(&s.handle));
-                        // A `cancel` that landed while the resolve was
-                        // completing already flipped the token —
-                        // deciding under this lock keeps the paths
-                        // exclusive: a later `cancel` sees the recorded
-                        // handle and abandons via `prepared_handles`,
-                        // while this one abandons directly instead of
-                        // delivering a live `Prepared`. The insert IS
-                        // the delivery commit — `delivered: false`
-                        // tells `cancel` the outcome is committed but
-                        // not yet on the wire, so it consumes the slot
-                        // without releasing the handle out from under
-                        // the listener.
-                        let was_cancelled = cancels
-                            .lock()
-                            .ok()
-                            .and_then(|c| c.get(&request_id).map(|r| r.token.is_cancelled()))
-                            .unwrap_or(false);
-                        // A session that died between `prepare_timed`
-                        // and this commit (cap evict, expiry) must not
-                        // hand out a live-looking handle either — the
-                        // same abandoned path, reported 'not-found'.
-                        let dead = !registry.is_live(&prepared.handle);
-                        if was_cancelled || dead {
-                            // Any tombstone a racing `cancel` parked
-                            // for this id is spent — the failure below
-                            // is this request's outcome, so don't let
-                            // it poison a later request reusing the id.
-                            if let Ok(mut t) = cancelled_requests.lock() {
-                                t.remove(&request_id);
-                            }
-                            abandoned = Some((
-                                prepared.handle.clone(),
-                                if was_cancelled {
-                                    "cancelled"
-                                } else {
-                                    "not-found"
-                                },
-                            ));
-                        } else {
-                            // `track` precedes `insert`: a `Pending`
-                            // slot always implies an in-flight count
-                            // for this request, so a `cancel` that
-                            // sees one waits for this window to close.
-                            delivery_ticket = Some(prepared_delivery.track(request_id.clone()));
-                            m.insert(
-                                request_id.clone(),
-                                PreparedSlot {
-                                    handle: prepared.handle.clone(),
-                                    delivered: false,
-                                },
-                            );
-                        }
-                    }
-                } else if let Ok(mut m) = cancelled_requests.lock() {
-                    // A tombstone for a request that failed on its own
-                    // is spent — don't let it poison a future request
-                    // that happens to reuse the id space.
-                    m.remove(&request_id);
-                }
-                if let Some((handle, kind)) = abandoned {
-                    let _ = registry.cancel_if_unattached(&handle);
-                    outcome = match outcome {
-                        PrepareOutcome::Prepared { attempt, .. } => PrepareOutcome::Failed {
-                            kind: kind.to_string(),
-                            message: match kind {
-                                "cancelled" => "cancelled".to_string(),
-                                _ => "stream session ended before delivery".to_string(),
-                            },
-                            attempt,
+        let prep: Prep = if admission.tombstoned {
+            // A `cancel` that outran the slot insert owns the verdict;
+            // the session survives under the minting request's own
+            // ownership slot.
+            Prep::Cancelled
+        } else {
+            match stream.adopt_reusable(&plugin_id, &source_ref) {
+                Ok(Some(info)) if !stream.is_live(&info.handle) => Prep::Dead,
+                Ok(Some(info)) => {
+                    admission.prepared.insert(
+                        request_id.clone(),
+                        PreparedSlot {
+                            handle: info.handle.clone(),
+                            delivered: false,
                         },
-                        other => other,
-                    };
+                    );
+                    Prep::Owned(info)
                 }
-                deliver(request_id.clone(), outcome).await;
-                // The outcome is on the wire: flip `delivered` so a
-                // later `cancel` may release an unattached handle. A
-                // `cancel` parked mid-delivery stays asleep until the
-                // ticket drops below — `Prepared` always precedes its
-                // own teardown.
-                if delivery_ticket.is_some() {
+                _ => {
+                    // No reusable session — the invoke fallback keeps
+                    // this reservation; the id is never unclaimed.
+                    drop(ticket);
+                    let remint = PluginRemint {
+                        plugin,
+                        provider: plugin_id.clone(),
+                        source_ref: source_ref.clone(),
+                        pin_itag: None,
+                        prefer: self.prefer.clone(),
+                        auth_token: Arc::clone(&self.auth_token),
+                        budgets: self.budgets.clone(),
+                        http: Arc::clone(&self.http),
+                        kv: Arc::clone(&self.kv),
+                        pot_provider: Arc::clone(&self.pot_provider_url),
+                    };
+                    let provider = plugin_id.clone();
+                    let prepared_handles = Arc::clone(&self.prepared_handles);
+                    let cancels = Arc::clone(&self.cancels);
+                    let cancelled_requests = Arc::clone(&self.cancelled_requests);
+                    let prepared_delivery = Arc::clone(&self.prepared_delivery);
+                    // `prefer` is a key, not a value: absent means
+                    // "guest default", never a null that fails payload
+                    // validation. `access_token` rides via the
+                    // `start_typed` merge.
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("source_ref".to_string(), json!(source_ref));
+                    if let Some(prefer) = &self.prefer {
+                        payload.insert("prefer".to_string(), json!(prefer));
+                    }
+                    return self.start_typed_admitted(
+                        TypedRequest {
+                            plugin_id,
+                            capability: "playback.resolve".to_string(),
+                            payload: Value::Object(payload),
+                            request_id,
+                            // The delivery registers the `prepared_handles`
+                            // slot that owns this id until release —
+                            // freeing `cancels` first would open a
+                            // re-admission gap before the slot lands.
+                            is_prepare: true,
+                        },
+                        admission,
+                        move |request_id, invocation| async move {
+                            let (result, attempt) = invocation.into_parts();
+                            let mut summary = AttemptSummary::from(&attempt);
+                            // The summary must join by the caller-facing id —
+                            // the inner `invoke-N` never leaves this closure.
+                            summary.request_id = request_id.clone();
+                            // `stream` is moved into the blocking closure below —
+                            // keep a clone for the bookkeeping prune.
+                            let registry = Arc::clone(&stream);
+                            // Counts this delivery's window for `cancel` — see
+                            // `PrepareDelivery`. Held until the post-callback flip.
+                            let mut delivery_ticket = None;
+                            let mut outcome = match result {
+                                Ok(value) => {
+                                    // Session creation does file I/O — run it on the
+                                    // blocking pool, not a runtime worker shared
+                                    // with guest wasm.
+                                    let caller_request_id = request_id.clone();
+                                    let work = tokio::task::spawn_blocking(move || {
+                                        prepare_outcome(
+                                            &value,
+                                            &stream,
+                                            remint,
+                                            &attempt,
+                                            &caller_request_id,
+                                            source_ref,
+                                            provider,
+                                        )
+                                    });
+                                    match work.await {
+                                        Ok(o) => o,
+                                        Err(_) => PrepareOutcome::Failed {
+                                            kind: "internal".to_string(),
+                                            message: "prepare worker panicked".to_string(),
+                                            attempt: summary.clone(),
+                                        },
+                                    }
+                                }
+                                Err(e) => PrepareOutcome::Failed {
+                                    kind: e.kind().to_string(),
+                                    message: e.to_string(),
+                                    attempt: summary.clone(),
+                                },
+                            };
+                            // A cancel that outran both `cancels` and the handle
+                            // map left a tombstone: the session just produced is
+                            // orphaned-on-arrival — abandon it instead of handing
+                            // out a live handle nobody will ever release.
+                            let mut abandoned = None;
+                            if let PrepareOutcome::Prepared {
+                                stream: prepared, ..
+                            } = &outcome
+                            {
+                                let tombstoned = cancelled_requests
+                                    .lock()
+                                    .map(|mut m| m.remove(&request_id).is_some())
+                                    .unwrap_or(false);
+                                if tombstoned {
+                                    let _ = registry.cancel_if_unattached(&prepared.handle);
+                                    deliver(
+                                        request_id,
+                                        PrepareOutcome::Failed {
+                                            kind: "cancelled".to_string(),
+                                            message: "prepare cancelled".to_string(),
+                                            attempt: summary.clone(),
+                                        },
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                if let Ok(mut m) = prepared_handles.lock() {
+                                    // Sessions ended by supersede/evict/expiry saw
+                                    // neither cancel nor release — drop their stale
+                                    // mappings so the map tracks live handles only.
+                                    m.retain(|_, s| {
+                                        s.handle == prepared.handle || registry.is_live(&s.handle)
+                                    });
+                                    // A `cancel` that landed while the resolve was
+                                    // completing already flipped the token —
+                                    // deciding under this lock keeps the paths
+                                    // exclusive: a later `cancel` sees the recorded
+                                    // handle and abandons via `prepared_handles`,
+                                    // while this one abandons directly instead of
+                                    // delivering a live `Prepared`. The insert IS
+                                    // the delivery commit — `delivered: false`
+                                    // tells `cancel` the outcome is committed but
+                                    // not yet on the wire, so it consumes the slot
+                                    // without releasing the handle out from under
+                                    // the listener.
+                                    let was_cancelled = cancels
+                                        .lock()
+                                        .ok()
+                                        .and_then(|c| {
+                                            c.get(&request_id).map(|r| r.token.is_cancelled())
+                                        })
+                                        .unwrap_or(false);
+                                    // A session that died between `prepare_timed`
+                                    // and this commit (cap evict, expiry) must not
+                                    // hand out a live-looking handle either — the
+                                    // same abandoned path, reported 'not-found'.
+                                    let dead = !registry.is_live(&prepared.handle);
+                                    if was_cancelled || dead {
+                                        // Any tombstone a racing `cancel` parked
+                                        // for this id is spent — the failure below
+                                        // is this request's outcome, so don't let
+                                        // it poison a later request reusing the id.
+                                        if let Ok(mut t) = cancelled_requests.lock() {
+                                            t.remove(&request_id);
+                                        }
+                                        abandoned = Some((
+                                            prepared.handle.clone(),
+                                            if was_cancelled {
+                                                "cancelled"
+                                            } else {
+                                                "not-found"
+                                            },
+                                        ));
+                                    } else {
+                                        // `track` precedes `insert`: a `Pending`
+                                        // slot always implies an in-flight count
+                                        // for this request, so a `cancel` that
+                                        // sees one waits for this window to close.
+                                        delivery_ticket =
+                                            Some(prepared_delivery.track(request_id.clone()));
+                                        m.insert(
+                                            request_id.clone(),
+                                            PreparedSlot {
+                                                handle: prepared.handle.clone(),
+                                                delivered: false,
+                                            },
+                                        );
+                                    }
+                                }
+                            } else if let Ok(mut m) = cancelled_requests.lock() {
+                                // A tombstone for a request that failed on its own
+                                // is spent — don't let it poison a future request
+                                // that happens to reuse the id space.
+                                m.remove(&request_id);
+                            }
+                            if let Some((handle, kind)) = abandoned {
+                                let _ = registry.cancel_if_unattached(&handle);
+                                outcome = match outcome {
+                                    PrepareOutcome::Prepared { attempt, .. } => {
+                                        PrepareOutcome::Failed {
+                                            kind: kind.to_string(),
+                                            message: match kind {
+                                                "cancelled" => "cancelled".to_string(),
+                                                _ => "stream session ended before delivery"
+                                                    .to_string(),
+                                            },
+                                            attempt,
+                                        }
+                                    }
+                                    other => other,
+                                };
+                            }
+                            deliver(request_id.clone(), outcome).await;
+                            // The outcome is on the wire: flip `delivered` so a
+                            // later `cancel` may release an unattached handle. A
+                            // `cancel` parked mid-delivery stays asleep until the
+                            // ticket drops below — `Prepared` always precedes its
+                            // own teardown.
+                            if delivery_ticket.is_some() {
+                                if let Ok(mut m) = prepared_handles.lock() {
+                                    if let Some(slot) = m.get_mut(&request_id) {
+                                        slot.delivered = true;
+                                    }
+                                }
+                                drop(delivery_ticket);
+                            }
+                        },
+                    );
+                }
+            }
+        };
+        drop(admission);
+        // A zeroed trace is honest for both adopt outcomes: no
+        // invocation ran for this request — the session's own phase
+        // marks still carry the minting resolve's timing.
+        let summary = AttemptSummary {
+            request_id: request_id.clone(),
+            steps: 0,
+            http_calls: 0,
+            bytes: 0,
+            fuel_used: 0,
+            elapsed_ms: 0,
+            http_trace: Vec::new(),
+            guest_log: Vec::new(),
+        };
+        match prep {
+            Prep::Owned(info) => {
+                self.runtime.spawn(async move {
+                    deliver(
+                        request_id.clone(),
+                        PrepareOutcome::Prepared {
+                            superseded: info.superseded.clone(),
+                            stream: PreparedStream::from(info),
+                            attempt: summary,
+                        },
+                    )
+                    .await;
                     if let Ok(mut m) = prepared_handles.lock() {
                         if let Some(slot) = m.get_mut(&request_id) {
                             slot.delivered = true;
                         }
                     }
-                    drop(delivery_ticket);
-                }
-            },
-        )
+                    drop(ticket);
+                });
+                Ok(())
+            }
+            kind => {
+                let cancelled = matches!(kind, Prep::Cancelled);
+                self.runtime.spawn(async move {
+                    deliver(
+                        request_id,
+                        PrepareOutcome::Failed {
+                            kind: if cancelled {
+                                "cancelled".to_string()
+                            } else {
+                                "not-found".to_string()
+                            },
+                            message: if cancelled {
+                                "prepare cancelled".to_string()
+                            } else {
+                                "stream session ended before delivery".to_string()
+                            },
+                            attempt: summary,
+                        },
+                    )
+                    .await;
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Attach a consumer at `position` (DataSource open). Returns

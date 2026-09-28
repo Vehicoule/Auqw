@@ -58,6 +58,12 @@ function toStreamSource(resource: PlayableResource): StreamSource {
 const READY_AT_BYTES = 256 * 1024;
 const PREPARE_TTL_MS = 120_000;
 const RESOLVE_DEADLINE_MS = 15_000;
+/**
+ * The seam's own attach rule — `attach` refuses a session whose
+ * signed URL is inside the expiry margin (`expiry_margin`, 60s).
+ * Adoption must not coalesce a record the attach would reject.
+ */
+const ATTACH_EXPIRY_MARGIN_MS = 60_000;
 
 type AttachedRecord = {
   player: AudioPlayer;
@@ -87,6 +93,10 @@ type PreparedRecord = {
   /** The minted session payload as emitted — adopters arriving
    *  post-ready are answered with it verbatim. */
   stream: PreparedStream | null;
+  /** Signed-URL expiry from the minting resolve — the adoption
+   *  freshness gate runs before `stream` exists, so the value lives
+   *  on the record itself. */
+  expiresAtMs: number | null;
   /** Every live request id owning this record — a coalesced prepare
    *  shares the seam's last-owner cancel rule: the record dies only
    *  when its last owner cancels while unattached. */
@@ -320,6 +330,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
         return;
       }
       const first = toStreamSource(resolved.value);
+      record.expiresAtMs = first.expiresAtMs ?? null;
       const remint = async (): Promise<StreamSource> => {
         const again = await provider.resolvePlayback(
           ref,
@@ -449,7 +460,13 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
         record.sourceRef === input.sourceRef &&
         record.failed === null &&
         record.attached === null &&
-        !record.attaching
+        !record.attaching &&
+        // The seam's own freshness rules: a record detached past the
+        // TTL or a URL inside the attach expiry margin is superseded
+        // and re-resolved, never coalesced — `attach` would refuse it.
+        now() - record.detachedAt < PREPARE_TTL_MS &&
+        (record.expiresAtMs === null ||
+          now() + ATTACH_EXPIRY_MARGIN_MS < record.expiresAtMs)
       ) {
         record.owners.set(requestId, input.identity);
         pending.set(requestId, record);
@@ -490,6 +507,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       resumeAtSec: null,
       onBytes: null,
       stream: null,
+      expiresAtMs: null,
       owners: new Map([[requestId, input.identity]]),
     };
     record.onBytes = () => {

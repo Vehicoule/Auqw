@@ -5929,6 +5929,15 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'streamWarmAdoptedPlayFailureFails',
     streamWarmAdoptedPlayFailureFails,
   ],
+  [
+    'setShuffleRetargetsStreamWarm',
+    setShuffleRetargetsStreamWarm,
+  ],
+  [
+    'warmPassRestartsAfterProviderSwitch',
+    warmPassRestartsAfterProviderSwitch,
+  ],
+  ['cancelledWarmSkipsQueuedCommit', cancelledWarmSkipsQueuedCommit],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -7129,6 +7138,151 @@ async function streamWarmAdoptedPlayFailureFails(): Promise<void> {
     readyOf(r).playback.type,
     'failed',
     'attempt ended failed, not silent',
+  );
+}
+
+/** Shuffle re-deals the successor — the stream warm must retarget to
+ *  the new deal immediately, not sit on the old one until the next
+ *  playback tick. */
+async function setShuffleRetargetsStreamWarm(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1]),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const idA = lastPrepareIdentity(r);
+  r.player.emit(statusEvent(idA, 'h-oA', 'playing', 1_000));
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'successor warm issued');
+  assertEqual(warmInput(r).sourceRef, 'yB', 'warm targets the dealt successor');
+  assert(r.player.settlePrewarm(ok('req-wB')), 'pending prewarm');
+  assert((await r.session.setShuffle(true)).ok);
+  await pump();
+  const cancels = calls(r, 'cancelPrepare').map(
+    (c) => (c.input as { requestId: string }).requestId,
+  );
+  assert(cancels.includes('req-wB'), 'old successor warm released');
+  assertEqual(
+    warmInput(r).sourceRef,
+    'yC',
+    'warm retargets to the new dealt successor',
+  );
+}
+
+/** A provider switch mid-pass cancels the batch but must restart it
+ *  under the new selection — otherwise every queued row stays
+ *  unwarmed until some unrelated change re-derives. */
+async function warmPassRestartsAfterProviderSwitch(): Promise<void> {
+  const spotify = new FakeProvider('spotify');
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+        recording('rC', [ref('itunes', 'iC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+    [spotify],
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'window pass in flight on youtube-music',
+  );
+  const switched = await r.session.updateSettings({
+    ...SETTINGS,
+    playbackProvider: 'spotify',
+  });
+  assert(switched.ok);
+  await pump();
+  assert(
+    spotify.calls.some((c) => c.method === 'candidates'),
+    'pass restarts under the switched provider',
+  );
+}
+
+/** A warm whose storage write queued behind another op must not land
+ *  its mapping or pin after the pass was cancelled — speculation is
+ *  over by the time the segment runs. */
+async function cancelledWarmSkipsQueuedCommit(): Promise<void> {
+  let metered = false;
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('itunes', 'iC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => metered,
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  // A connectivity tick re-derives under 'buffering' — oB is already
+  // resolved, so the successor mapper stays out of the way and the
+  // candidates call is the window pass warming rC.
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'warm resolving rC');
+  // Park a write first — the warm's staged commit queues behind it.
+  r.storage.holdNextCommit();
+  const seek = r.session.seekTo(9_000);
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yC', 'Song rC', 'Artist', 300_000)]),
+  );
+  await pump();
+  // Connectivity flips metered while the commit still sits behind the
+  // parked write — the pass is dead before its stage runs.
+  metered = true;
+  r.session.connectivityChanged();
+  await pump();
+  assert(r.storage.settleCommit(ok(undefined)), 'parked write held');
+  await pump();
+  await seek;
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences[2]?.selectedRef,
+    null,
+    'cancelled warm pins no occurrence',
+  );
+  const recC = readyOf(r).recordings.find((x) => x.id === 'rC');
+  assert(
+    (recC?.mappings.length ?? 0) === 0,
+    'cancelled warm commits no mapping',
   );
 }
 

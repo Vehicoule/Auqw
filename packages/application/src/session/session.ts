@@ -4313,6 +4313,11 @@ export class Session {
     this.#maybeMapSuccessor();
     this.#maybeGrowRadio();
     this.#maybeArmRadio();
+    // The warm targets follow the new deal too — the old successor's
+    // stream warm is dropped and the dealt window re-walks behind the
+    // reshuffled cursor.
+    this.#maybeWarmWindow();
+    this.#maybeWarmStream();
     return ok(undefined);
   }
 
@@ -6901,7 +6906,7 @@ export class Session {
     }
     if (this.#warmBatchSource !== null) {
       // A provider switch mid-pass leaves the in-flight row resolving
-      // under the old provider — unwind it; the next `#derived` tick
+      // under the old provider — unwind it; the loop's exit finally
       // restarts the pass routed through the new selection.
       const want = this.#router.providerFor(
         'playback.candidates',
@@ -6924,6 +6929,13 @@ export class Session {
       } finally {
         if (this.#warmBatchSource === source) {
           this.#warmBatchSource = null;
+          // A pass torn down mid-flight (provider switch, a transient
+          // gate flip) leaves its remaining rows unwarmed and nothing
+          // else retriggers it — restart under the current selection.
+          // A pass that ran to completion stays stopped.
+          if (source.signal.cancelled) {
+            this.#maybeWarmWindow();
+          }
         }
       }
     })();
@@ -7120,6 +7132,19 @@ export class Session {
     };
     const occurrenceId = target.occurrenceId;
     const staged = await this.#commitStaged((ready3) => {
+      // The storage tail can queue this write behind another one —
+      // recheck at commit time: a warm cancelled while it waited
+      // (connectivity flip, provider switch, dispose) must not still
+      // land a mapping or pin a queue row.
+      if (
+        source.signal.cancelled ||
+        this.#disposed ||
+        this.#warmBatchSource !== source ||
+        !this.#warmGatesOk(ready3) ||
+        ready3.settings.playbackProvider !== provider.id
+      ) {
+        return err(appError('cancelled', 'warm pass cancelled'));
+      }
       const current = ready3.recordings.find(
         (x) => x.id === target.recordingId,
       );

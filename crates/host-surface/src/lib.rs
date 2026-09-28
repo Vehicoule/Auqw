@@ -312,6 +312,17 @@ struct Admission<'a> {
     tombstoned: bool,
 }
 
+/// One typed start's wire fields, bundled so `start_typed_admitted`
+/// stays inside the argument lint while carrying the caller's
+/// reservation.
+pub(crate) struct TypedRequest {
+    pub plugin_id: String,
+    pub capability: String,
+    pub payload: Value,
+    pub request_id: String,
+    pub is_prepare: bool,
+}
+
 /// Counts deliveries inside their insert→wire→flip window per
 /// request id, so a `cancel` that finds a not-yet-delivered slot waits
 /// only for its own request's delivery instead of every in-flight one
@@ -925,6 +936,41 @@ impl PluginHost {
         F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        let admission = self.begin_admission(&request_id)?;
+        self.start_typed_admitted(
+            TypedRequest {
+                plugin_id,
+                capability,
+                payload,
+                request_id,
+                is_prepare,
+            },
+            admission,
+            deliver,
+        )
+    }
+
+    /// `start_typed` under a reservation the caller already holds —
+    /// `start_prepare`'s invoke fallback carries the same admission it
+    /// ran `adopt_reusable` under, so the request id never goes
+    /// unreserved between the adopt-miss and this insert.
+    fn start_typed_admitted<F, Fut>(
+        &self,
+        request: TypedRequest,
+        mut admission: Admission<'_>,
+        deliver: F,
+    ) -> Result<(), HostError>
+    where
+        F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let TypedRequest {
+            plugin_id,
+            capability,
+            payload,
+            request_id,
+            is_prepare,
+        } = request;
         let plugin = {
             let plugins = lock(&self.plugins)?;
             match plugins.get(&plugin_id) {
@@ -950,33 +996,23 @@ impl PluginHost {
             payload
         };
         let token = CancellationToken::new();
-        // Caller-minted ids must be unique while live: a duplicate
-        // would replace the first invocation's token (and, for
-        // prepare, steal the earlier session's ownership slot) —
-        // reject rather than corrupt. The checks and the reservation
-        // share one critical section across both maps: the adoption
-        // fast-path claims the same id through `begin_admission`, so
-        // an in-flight `LiveRequest` here blocks an adoption and an
-        // adopted `PreparedSlot` there blocks this admission.
-        let generation = {
-            let mut admission = self.begin_admission(&request_id)?;
-            // A tombstoned request starts cancelled — the cancel that
-            // outran the bookkeeping still lands on it.
-            if admission.tombstoned {
-                token.cancel();
-            }
-            let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
-            admission.cancels.insert(
-                request_id.clone(),
-                LiveRequest {
-                    token: token.clone(),
-                    is_prepare,
-                    settled: false,
-                    generation,
-                },
-            );
-            generation
-        };
+        // The caller's reservation is already held — commit this
+        // invocation's `LiveRequest` inside it, then release both
+        // guards before any spawn work.
+        if admission.tombstoned {
+            token.cancel();
+        }
+        let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
+        admission.cancels.insert(
+            request_id.clone(),
+            LiveRequest {
+                token: token.clone(),
+                is_prepare,
+                settled: false,
+                generation,
+            },
+        );
+        drop(admission);
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -1817,5 +1853,66 @@ mod tests {
             Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
             other => panic!("expected RequestInFlight, got {other:?}"),
         }
+    }
+
+    /// Admission must precede `adopt_reusable`: the registry's
+    /// supersede scan is destructive, so a request id that will be
+    /// rejected must never reach it — the refused request would still
+    /// end every *other* unattached session, including the one its
+    /// own first delivery already owns.
+    #[test]
+    fn prepare_rejection_never_supersedes_an_unattached_session() {
+        let (host, reg, _dir) = stream_host("dup-supersede");
+        let id = load_echo(&host);
+        // The first request adopts a warm outright — its delivery
+        // registers the ownership slot that keeps "dup" in flight.
+        mint_warm(&reg, &id, "other");
+        let (tx1, rx1) = deliver_chan();
+        match host.start_prepare(id.clone(), "other".into(), "dup".into(), move |rid, o| {
+            let tx = tx1.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        let (_rid, outcome) = match rx1.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(v) => v,
+            Err(e) => panic!("first outcome: {e}"),
+        };
+        let first = match outcome {
+            PrepareOutcome::Prepared { stream, .. } => stream.handle,
+            _ => panic!("first prepare must deliver a session"),
+        };
+        // Attached, then detached: the session keeps living under the
+        // first request's slot and re-enters the supersedeable set —
+        // an attach→detach beside a fresh warm is the only way two
+        // unattached sessions coexist.
+        if let Err(e) = reg.attach(&first, 0) {
+            panic!("attach: {e}");
+        }
+        let warm = mint_warm(&reg, &id, "vid");
+        if let Err(e) = reg.close(&first) {
+            panic!("close: {e}");
+        }
+        let (tx2, _rx2) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "dup".into(), move |rid, o| {
+            let tx = tx2.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+        assert!(
+            reg.is_live(&first),
+            "a rejected duplicate must not destroy the session it already owns"
+        );
+        assert!(
+            reg.is_live(&warm.handle),
+            "the adopt candidate stays live too"
+        );
     }
 }
