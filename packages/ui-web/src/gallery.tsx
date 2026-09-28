@@ -78,7 +78,7 @@ import {
 } from '@auqw/ui-shared/fixtures';
 import type { PlayerModel } from '@auqw/ui-shared';
 
-function noop() {}
+function noop() { }
 
 function Chip({
   label,
@@ -283,6 +283,7 @@ export function GalleryScreen() {
               row={row}
               onPress={noop}
               onToggleLike={noop}
+              onAddToPlaylist={noop}
               onContext={noop}
             />
           ))}

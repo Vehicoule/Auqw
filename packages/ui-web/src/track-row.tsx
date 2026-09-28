@@ -17,6 +17,12 @@ export type TrackRowProps = {
   readonly badge?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
+  /**
+   * Direct add-to-playlist affordance — the design's row anatomy puts
+   * it on the row, not only behind the context sheet. Reveals on
+   * hover/focus-within like the menu button, so it stays Tab-reachable.
+   */
+  readonly onAddToPlaylist?: (() => void) | undefined;
   readonly onContext?: (() => void) | undefined;
   readonly reorderControls?: 'none' | 'drag' | 'buttons' | undefined;
   readonly onDragStart?: (() => void) | undefined;
@@ -33,6 +39,7 @@ export function TrackRow({
   badge = null,
   onPress,
   onToggleLike,
+  onAddToPlaylist,
   onContext,
   reorderControls = 'none',
   onDragStart,
@@ -159,6 +166,16 @@ export function TrackRow({
           <span className="uw-track-row__chip" title={t('collection.liked')}>
             <Icon name="heart-filled" size={14} color="var(--liked)" />
           </span>
+        )}
+        {onAddToPlaylist !== undefined && (
+          <IconButton
+            icon="list-plus"
+            size={30}
+            iconSize={14}
+            ariaLabel={t('track.a11y.addToPlaylist')}
+            onPress={onAddToPlaylist}
+            className="uw-track-row__add"
+          />
         )}
         {onContext !== undefined && (
           <IconButton

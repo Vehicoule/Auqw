@@ -12,11 +12,17 @@ import {
   LOCAL_PROVIDER,
   ProviderRouter,
   SearchSession,
+  appError,
+  collectSyncDeltaDocs,
   effectiveMapping,
+  err,
   isRefRejected,
   isSyncDelta,
+  ok,
+  parseSyncDeltaDocs,
   previewImport,
   selectionFromSettings,
+  serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
   AppError,
@@ -34,7 +40,6 @@ import type {
   SessionState,
   Settings,
   SourceRef,
-  SyncDelta,
   TrackMetadata,
 } from '@auqw/application';
 import {
@@ -108,7 +113,6 @@ import type {
   SyncStatusResult,
 } from '../shared/contract.ts';
 import type { ThemeSource } from '@auqw/design-tokens/adaptive';
-import { isSyncDeltaDoc } from '../shared/contract.ts';
 import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
@@ -1000,6 +1004,9 @@ function Main({
   }, [localeTick]);
   const importInput = useRef<HTMLInputElement | null>(null);
   const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
+  // Bumping scrolls the inline sync section into view + focuses it —
+  // the 'sync' settings row's navigation target.
+  const [syncFocusTick, setSyncFocusTick] = useState(0);
 
   // LAN sync panel — polled status/devices plus the minted pairing
   // offer while its sheet is open. No push channel exists, so the
@@ -1140,6 +1147,27 @@ function Main({
   const onSyncNow = useCallback(() => {
     void window.auqw.sync.trigger().then(syncRefresh);
   }, [syncRefresh]);
+  // Every dial path settles the same: success retires the sheet like
+  // a dismiss (generation bump so an in-flight offer mint can't land
+  // a stale offer into `pairing` after close); failure surfaces the
+  // typed message under the form.
+  const finishDial = useCallback(() => {
+    setDialing(false);
+    pairSheetGen.current += 1;
+    setPairing(null);
+    setPairSheetOpen(false);
+    syncRefresh();
+  }, [syncRefresh]);
+  const failDial = useCallback((thrown: unknown) => {
+    setDialing(false);
+    setDialError(
+      isShellError(thrown)
+        ? thrown.message
+        : thrown instanceof Error
+          ? thrown.message
+          : 'pairing failed',
+    );
+  }, []);
   const onDialNearby = useCallback(
     (key: string, code: string) => {
       const peer = nearbyPeers.find((entry) => entry.key === key);
@@ -1155,28 +1183,26 @@ function Main({
           code,
           ...(peer.fp !== null ? { fp: peer.fp } : {}),
         })
-        .then(() => {
-          setDialing(false);
-          // Success retires the sheet like a dismiss — bump the
-          // generation so an in-flight offer mint can't land a
-          // stale offer into `pairing` after close.
-          pairSheetGen.current += 1;
-          setPairing(null);
-          setPairSheetOpen(false);
-          syncRefresh();
-        })
-        .catch((thrown: unknown) => {
-          setDialing(false);
-          setDialError(
-            isShellError(thrown)
-              ? thrown.message
-              : thrown instanceof Error
-                ? thrown.message
-                : 'pairing failed',
-          );
-        });
+        .then(finishDial)
+        .catch(failDial);
     },
-    [nearbyPeers, dialing, syncRefresh],
+    [nearbyPeers, dialing, finishDial, failDial],
+          );
+  // The typed join — desktop's counterpart to the mobile PairForm:
+  // code + host + port dial, no camera anywhere in the path.
+  const onPairCode = useCallback(
+    (input: { code: string; host: string; port: number | null }) => {
+      if (input.port === null || dialing) {
+        return;
+      }
+      setDialing(true);
+      setDialError(null);
+      void window.auqw.sync
+        .dial({ host: input.host, port: input.port, code: input.code })
+        .then(finishDial)
+        .catch(failDial);
+    },
+    [dialing, finishDial, failDial],
   );
   const onPastePayload = useCallback(
     (payload: string) => {
@@ -1187,25 +1213,10 @@ function Main({
       setDialError(null);
       void window.auqw.sync
         .dialPayload({ payload })
-        .then(() => {
-          setDialing(false);
-          pairSheetGen.current += 1;
-          setPairing(null);
-          setPairSheetOpen(false);
-          syncRefresh();
-        })
-        .catch((thrown: unknown) => {
-          setDialing(false);
-          setDialError(
-            isShellError(thrown)
-              ? thrown.message
-              : thrown instanceof Error
-                ? thrown.message
-                : 'pairing failed',
-          );
-        });
+        .then(finishDial)
+        .catch(failDial);
     },
-    [dialing, syncRefresh],
+    [dialing, finishDial, failDial],
   );
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
@@ -1259,6 +1270,9 @@ function Main({
   }, [pairSheetOpen, pairing, pairingTick]);
   useEffect(() => {
     if (tab !== 'settings') {
+      // Reset the anchor tick: leaving the tab unmounts the section
+      // ref, and a stale tick would re-scroll on the next mount.
+      setSyncFocusTick(0);
       return;
     }
     syncRefresh();
@@ -1658,14 +1672,31 @@ function Main({
         ?.list()
         .map((s) => ({ sourceId: s.sourceId, label: s.label })),
       downloadCount: downloads.length,
+      // The sync seam is always present on desktop (IPC contract) —
+      // the row navigates to the inline sync section and carries the
+      // same status vocabulary the mobile row does.
+      syncSupported: true,
+      syncLabel:
+        syncStatus === null
+          ? t('sync.status.unavailable')
+          : syncStatus.sessions > 0
+            ? t('sync.status.connectedCount', {
+              count: syncStatus.sessions,
+            })
+            : syncStatus.pairedDevices > 0
+              ? t('sync.status.pairedCount', {
+                count: syncStatus.pairedDevices,
+              })
+              : null,
     });
-    // The inline sync panel below the rows already carries pairing —
-    // the 'sync' navigation row dead-ends on desktop. The artwork
-    // cache budget row does too: desktop keeps no artwork cache.
+    // The artwork cache budget row stays off the desktop list: the
+    // renderer has no application artwork cache — Chromium's image
+    // cache owns artwork memory — so the row would dead-end. The
+    // 'sync' row now navigates to the inline sync section below.
     return {
       ...model,
       rows: model.rows.filter(
-        (row) => row.key !== 'sync' && row.key !== 'artworkCacheBytes',
+        (row) => row.key !== 'artworkCacheBytes',
       ),
     };
   }, [
@@ -1675,6 +1706,7 @@ function Main({
     controller,
     downloads,
     localTick,
+    syncStatus,
     localeTick,
   ]);
   const syncModel = useMemo(
@@ -1691,48 +1723,26 @@ function Main({
 
   const onExportDelta = useCallback(() => {
     void (async () => {
-      // Large logs page over the wire — `more` means follow up with a
-      // cursor covering what the page shipped (exported seqs plus the
-      // exporter's known-absent claims). Every page is itself a valid
-      // SyncDelta, so the clipboard carries one doc or, past the
-      // envelope caps, an array of docs the importer applies in order.
-      const docs: SyncDelta[] = [];
-      const covered: Record<string, number> = {};
-      for (;;) {
+      // Shared paging walk (collectSyncDeltaDocs): `more` pages follow
+      // up with a coverage cursor; the clipboard carries one doc or,
+      // past the envelope caps, an array the importer applies in order.
+      const collected = await collectSyncDeltaDocs(async (cursor) => {
         const page = await window.auqw.sync.deltas({
-          since: JSON.stringify(covered),
+          since: JSON.stringify(cursor),
         });
         if (!isSyncDelta(page.delta)) {
-          return; // a malformed page ships nothing honest
+          return err(
+            appError('invalid-response', 'sync delta page malformed'),
+          );
         }
-        const doc = page.delta;
-        docs.push(doc);
-        let advanced = false;
-        for (const entry of doc.entries) {
-          if (typeof entry.seq !== 'number' || entry.seq < 0) {
-            return;
-          }
-          if (entry.seq > (covered[entry.deviceId] ?? -1)) {
-            covered[entry.deviceId] = entry.seq;
-            advanced = true;
-          }
-        }
-        for (const [dev, seqs] of Object.entries(doc.skipped)) {
-          for (const seq of seqs) {
-            if (seq > (covered[dev] ?? -1)) {
-              covered[dev] = seq;
-              advanced = true;
-            }
-          }
-        }
-        // `more` with no new coverage would re-ask the same window —
-        // ship what the pages gave rather than spin.
-        if (!doc.more || !advanced) {
-          break;
-        }
+        return ok(page.delta);
+      });
+      if (!collected.ok) {
+        reportResult('sync.panel.copyDelta', collected);
+        return;
       }
       await navigator.clipboard.writeText(
-        JSON.stringify(docs.length === 1 ? docs[0] : docs),
+        serializeSyncDeltaDocs(collected.value),
       );
     })().catch(() => undefined);
   }, []);
@@ -1740,17 +1750,11 @@ function Main({
     void navigator.clipboard
       .readText()
       .then(async (text) => {
-        const parsed: unknown = JSON.parse(text);
-        // Multi-page exports land as an array — apply each doc in
-        // order; a single-doc payload applies as before. Validate the
-        // whole batch first: a malformed element must not strand a
-        // partially imported array.
-        const docs: readonly unknown[] = Array.isArray(parsed)
-          ? parsed
-          : [parsed];
-        if (
-          !docs.every((d) => isSyncDelta(d) && isSyncDeltaDoc(d))
-        ) {
+        // Shared parse: single doc or ordered array; the whole batch
+        // validates BEFORE any apply so a malformed element can't
+        // strand a partially imported array.
+        const docs = parseSyncDeltaDocs(text);
+        if (docs === null) {
           return;
         }
         for (const delta of docs) {
@@ -1962,6 +1966,12 @@ function Main({
               refreshLocal();
             }
           });
+        return;
+      }
+      if (key === 'sync') {
+        // The row's destination is the inline sync section — scroll +
+        // focus it rather than opening a separate screen.
+        setSyncFocusTick((n) => n + 1);
         return;
       }
     },
@@ -2885,6 +2895,12 @@ function Main({
             }}
             onRetry={() => runSearch(searchModel.query)}
             onResultPress={onResultPress}
+            onAddToPlaylist={(row) => {
+              const meta = resultMeta.current.get(row.key);
+              if (meta !== undefined) {
+                setPickerFor({ kind: 'metadata', meta });
+              }
+            }}
             onContext={(row) => {
               const meta = resultMeta.current.get(row.key);
               if (meta !== undefined) {
@@ -2912,6 +2928,9 @@ function Main({
             model={libraryModel}
             onPressItem={(id) => void playRecording(id)}
             onToggleLike={(id) => void session.toggleLike(id)}
+            onAddToPlaylist={(id) =>
+              setPickerFor({ kind: 'recording', recordingId: id })
+            }
             onContext={(id) =>
               setActionsFor({ kind: 'recording', recordingId: id })
             }
@@ -2937,6 +2956,7 @@ function Main({
               pushOverlay({ type: 'corrections' })
             }
             sync={syncModel}
+            syncFocusTick={syncFocusTick}
             onPairDevice={onPairDevice}
             onUnpairDevice={onUnpairDevice}
             onSyncNow={onSyncNow}
@@ -2979,6 +2999,9 @@ function Main({
             onPlayAll={() => playCollectionRows(model.rows)}
             onPressItem={(row) => void playRecording(row.recordingId)}
             onToggleLike={(row) => void session.toggleLike(row.recordingId)}
+            onAddToPlaylist={(row) =>
+              setPickerFor({ kind: 'recording', recordingId: row.recordingId })
+            }
             onContext={(row) =>
               setActionsFor({ kind: 'recording', recordingId: row.recordingId })
             }
@@ -3015,6 +3038,12 @@ function Main({
               ]);
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
+            onAddToPlaylist={(entry) =>
+              setPickerFor({
+                kind: 'recording',
+                recordingId: entry.recordingId,
+              })
+            }
             onContext={(entry) =>
               setActionsFor({
                 kind: 'recording',
@@ -3095,6 +3124,12 @@ function Main({
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
                 void session.addAndPlay(meta);
+              }
+            }}
+            onAddToPlaylist={(row) => {
+              const meta = metaFor(row);
+              if (meta !== undefined) {
+                setPickerFor({ kind: 'metadata', meta });
               }
             }}
             onContext={(row) => {
@@ -3524,6 +3559,7 @@ function Main({
                 pinned: peer.fp !== null,
               }))}
               onPairNearby={onDialNearby}
+              onPairCode={onPairCode}
               onPastePayload={onPastePayload}
               dialing={dialing}
               dialError={dialError ?? pairingError}

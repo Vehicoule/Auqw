@@ -33,6 +33,7 @@ export type PlaylistScreenProps = {
   readonly onDelete?: (() => void) | undefined;
   readonly onPressEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onToggleLike?: ((entry: PlaylistEntryModel) => void) | undefined;
+  readonly onAddToPlaylist?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onContext?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onRemoveEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onMoveEntry?:
@@ -73,6 +74,7 @@ export function PlaylistScreen({
   onDelete,
   onPressEntry,
   onToggleLike,
+  onAddToPlaylist,
   onContext,
   onRemoveEntry,
   onMoveEntry,
@@ -266,6 +268,11 @@ export function PlaylistScreen({
                 onToggleLike === undefined
                   ? undefined
                   : () => onToggleLike(entry)
+              }
+              onAddToPlaylist={
+                onAddToPlaylist === undefined
+                  ? undefined
+                  : () => onAddToPlaylist(entry)
               }
               onContext={
                 onContext === undefined ? undefined : () => onContext(entry)

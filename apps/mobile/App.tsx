@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   BackHandler,
+  Clipboard,
   Linking,
   Platform,
   StyleSheet,
@@ -32,12 +33,17 @@ import {
   CancellationSource,
   ProviderRouter,
   SearchSession,
+  appError,
+  collectSyncDeltaDocs,
   effectiveMapping,
+  err,
   formatEndpoint,
   isMatchGate,
   isRefRejected,
+  parseSyncDeltaDocs,
   previewImport,
   selectionFromSettings,
+  serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
   AppError,
@@ -1187,8 +1193,17 @@ function Main({
     readonly busy: boolean;
     readonly code: string | null;
     readonly payload: string | null;
+    /** Primary `host:port` the offer advertises — typed-join display. */
+    readonly endpoint: string | null;
     readonly expiresAt: number | null;
-  }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
+  }>({
+    active: false,
+    busy: false,
+    code: null,
+    payload: null,
+    endpoint: null,
+    expiresAt: null,
+  });
   // Share generations, not a bool: a stale start()/stop() from a
   // dismissed share must not resolve into — or tear down — a NEWER
   // share's listener. Nonzero means "a share attempt owns the host".
@@ -2225,6 +2240,7 @@ function Main({
       busy: false,
       code: null,
       payload: null,
+      endpoint: null,
       expiresAt: null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2247,7 +2263,7 @@ function Main({
       }
       setShare((prev) =>
         prev.active
-          ? { ...prev, code: null, payload: null, expiresAt: null }
+          ? { ...prev, code: null, payload: null, endpoint: null, expiresAt: null }
           : prev,
       );
       shareRetryRef.current += 1;
@@ -2276,6 +2292,7 @@ function Main({
                 ...prev,
                 code: offer.value.code,
                 payload: offer.value.payload,
+              endpoint: offer.value.endpoint,
                 expiresAt: offer.value.expiresAt,
               }
             : prev,
@@ -2346,6 +2363,7 @@ function Main({
         busy: false,
         code: null,
         payload: null,
+        endpoint: null,
         expiresAt: null,
       });
       return;
@@ -2371,6 +2389,7 @@ function Main({
           busy: false,
           code: null,
           payload: null,
+          endpoint: null,
           expiresAt: null,
         });
         setPairError(started.error.message);
@@ -2388,6 +2407,7 @@ function Main({
           busy: false,
           code: null,
           payload: null,
+          endpoint: null,
           expiresAt: null,
         });
         setPairError(offer.error.message);
@@ -2398,6 +2418,7 @@ function Main({
         busy: false,
         code: offer.value.code,
         payload: offer.value.payload,
+        endpoint: offer.value.endpoint,
         expiresAt: offer.value.expiresAt,
       });
       setPairError(null);
@@ -2414,6 +2435,7 @@ function Main({
         busy: false,
         code: null,
         payload: null,
+        endpoint: null,
         expiresAt: null,
       });
       setPairError('pairing failed');
@@ -2458,6 +2480,70 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [controller],
   );
+
+  // Clipboard exchange — RN's core Clipboard covers get/setString on
+  // Android (deprecated upstream but present in 0.86, zero added deps;
+  // see docs/decisions.md). The engine's exportDelta/applyDelta run the
+  // same paging + validation as the desktop IPC path.
+  const onCopyPayload = useCallback(() => {
+    if (share.payload !== null) {
+      Clipboard.setString(share.payload);
+    }
+  }, [share.payload]);
+  const onExportDelta = useCallback(() => {
+    const engine = syncSurface?.engine;
+    if (engine === undefined) {
+      return;
+    }
+    void collectSyncDeltaDocs((cursor) =>
+      engine.exportDelta(cursor, undefined, new CancellationSource().signal),
+    )
+      .then((collected) => {
+        if (!collected.ok) {
+          reportResult('sync.panel.copyDelta', collected);
+          return;
+        }
+        Clipboard.setString(serializeSyncDeltaDocs(collected.value));
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+  const onImportDelta = useCallback(() => {
+    const engine = syncSurface?.engine;
+    if (engine === undefined) {
+      return;
+    }
+    void Clipboard.getString()
+      .then(async (text) => {
+        // Validate the whole batch BEFORE any apply — a malformed
+        // element must not strand a partially imported array.
+        const docs = parseSyncDeltaDocs(text);
+        if (docs === null) {
+          reportResult(
+            'sync.panel.pasteDelta',
+            err(appError('invalid-message', 'clipboard has no delta')),
+          );
+          return;
+        }
+        for (const doc of docs) {
+          const applied = await engine.applyDelta(
+            doc,
+            new CancellationSource().signal,
+          );
+          if (!applied.ok) {
+            reportResult('sync.panel.pasteDelta', applied);
+            return;
+          }
+        }
+      })
+      .catch(() => {
+        reportResult(
+          'sync.panel.pasteDelta',
+          err(appError('unavailable', 'clipboard read failed')),
+        );
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
 
   const playback = state.playback;
   const playing = playback.type === 'playing';
@@ -4106,6 +4192,7 @@ function Main({
                     busy: share.busy,
                     code: share.code,
                     payload: share.payload,
+                    endpoint: share.endpoint,
                     expiresLabel:
                       share.expiresAt === null
                         ? null
@@ -4116,6 +4203,11 @@ function Main({
               syncSurface?.host === undefined || syncSurface?.host === null
                 ? undefined
                 : onShareToggle
+            }
+            onCopyPayload={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : onCopyPayload
             }
             nearbyPeers={
               syncSurface?.discovery === undefined ||
@@ -4138,6 +4230,12 @@ function Main({
               Platform.OS === 'android'
                 ? (onScan) => <SyncScanner onScan={onScan} />
                 : undefined
+            }
+            onExportDelta={
+              syncSurface === null ? undefined : onExportDelta
+            }
+            onImportDelta={
+              syncSurface === null ? undefined : onImportDelta
             }
           />
         );
