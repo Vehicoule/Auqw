@@ -15,11 +15,10 @@ import type { AppError, ErrorKind } from '@auqw/application';
 import { isMatchGate } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
 
-const SILENT: ReadonlySet<ErrorKind> = new Set([
-  'cancelled',
-  'superseded',
-  'released',
-]);
+// Supersession kinds only — 'released' is NOT silent: a live prepare
+// can resolve released when its host drops the request, which strands
+// playback with no other signal.
+const SILENT: ReadonlySet<ErrorKind> = new Set(['cancelled', 'superseded']);
 
 // Exhaustive over ErrorKind — a new taxonomy kind fails typecheck
 // until its copy lands in the `error.*` catalog section.

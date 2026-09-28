@@ -40,11 +40,9 @@ const ALL_KINDS: readonly ErrorKind[] = [
   'internal',
 ];
 
-const SILENT_KINDS: readonly ErrorKind[] = [
-  'cancelled',
-  'superseded',
-  'released',
-];
+// 'released' is deliberately absent: a live prepare can resolve
+// released when its host drops the request — that failure must surface.
+const SILENT_KINDS: readonly ErrorKind[] = ['cancelled', 'superseded'];
 
 // absent input is absent output
 assertEqual(errorText(null), null);
