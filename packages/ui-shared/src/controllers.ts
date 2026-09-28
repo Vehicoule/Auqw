@@ -7,7 +7,7 @@
  * Labels resolve inside the hooks — translated strings are never
  * cached at module scope or they go stale on a locale switch.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
 import type { RepeatMode } from '@auqw/application';
 import { t } from './i18n.ts';
@@ -626,8 +626,37 @@ export type LibraryControls = {
   readonly setDraft: (draft: string) => void;
 };
 
+/**
+ * The locale-free half of the library derivation — which kind filters
+ * the model contains, and the cards filtered + ordered for display.
+ * Kept separate so the hook can memoize it on [cards, filter, sort]
+ * exactly like the original screens did; nothing here calls t().
+ */
+export function librarySortedCards(
+  all: readonly LibraryCardModel[],
+  filter: LibraryKindFilter,
+  sort: LibrarySort,
+): {
+  readonly kindsPresent: readonly (typeof LIBRARY_KIND_FILTERS)[number][];
+  readonly cards: readonly LibraryCardModel[];
+} {
+  const kindsPresent = LIBRARY_KIND_FILTERS.filter((f) =>
+    all.some((card) => card.kind === f.key),
+  );
+  const filtered =
+    filter === 'all' ? all : all.filter((card) => card.kind === filter);
+  return {
+    kindsPresent,
+    cards:
+      sort === 'recent'
+        ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
+        : [...filtered].sort((a, b) => a.title.localeCompare(b.title)),
+  };
+}
+
 export function libraryScreenView(
   model: LibraryModel,
+  { kindsPresent, cards }: ReturnType<typeof librarySortedCards>,
   {
     filter,
     sort,
@@ -652,17 +681,6 @@ export function libraryScreenView(
     onCreatePlaylist,
   }: LibraryScreenHandlers,
 ): LibraryScreenView {
-  const kindsPresent = LIBRARY_KIND_FILTERS.filter((f) =>
-    model.cards.some((card) => card.kind === f.key),
-  );
-  const filtered =
-    filter === 'all'
-      ? model.cards
-      : model.cards.filter((card) => card.kind === filter);
-  const cards =
-    sort === 'recent'
-      ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
-      : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
   return {
     title: t('nav.library'),
     collections: model.collections.map((tile) => ({
@@ -808,8 +826,15 @@ export function useLibraryScreenController({
   const [layout, setLayout] = useState<LibraryLayout>('grid');
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState('');
+  // Same memoization the original screens had: the card slice is
+  // locale-free, so caching it can never serve a stale translation.
+  const sorted = useMemo(
+    () => librarySortedCards(model.cards, filter, sort),
+    [model.cards, filter, sort],
+  );
   return libraryScreenView(
     model,
+    sorted,
     {
       filter,
       sort,

@@ -76,6 +76,7 @@ import {
 import {
   downloadButtonView,
   libraryScreenView,
+  librarySortedCards,
   lyricsPaneView,
   queueReorderButton,
   radioRowView,
@@ -907,10 +908,18 @@ const tap = (s: string) => {
     setDraft: (d) => tap(`draft:${d}`),
     ...over,
   });
-  const view = libraryScreenView(fixtureLibraryModel, controls(), {
-    onOpenCard: (card) => tap(`card:${card.title}`),
-    onCreatePlaylist: (name) => tap(`create:${name}`),
-  });
+  const sliceFor = (c: LibraryControls) =>
+    librarySortedCards(fixtureLibraryModel.cards, c.filter, c.sort);
+  const base = controls();
+  const view = libraryScreenView(
+    fixtureLibraryModel,
+    sliceFor(base),
+    base,
+    {
+      onOpenCard: (card) => tap(`card:${card.title}`),
+      onCreatePlaylist: (name) => tap(`create:${name}`),
+    },
+  );
   assertEqual(view.cards.length, fixtureLibraryModel.cards.length);
   const kinds = fixtureLibraryModel.cards.map((c) => c.kind);
   assertEqual(
@@ -926,14 +935,16 @@ const tap = (s: string) => {
   assertEqual(tapped, 'creating:true', 'new-playlist card opens the field');
 
   const log: string[] = [];
+  const creatingControls = controls({
+    creating: true,
+    draft: 'mix',
+    setDraft: (d) => log.push(`draft:${d}`),
+    setCreating: (c) => log.push(`creating:${c}`),
+  });
   const creating = libraryScreenView(
     fixtureLibraryModel,
-    controls({
-      creating: true,
-      draft: 'mix',
-      setDraft: (d) => log.push(`draft:${d}`),
-      setCreating: (c) => log.push(`creating:${c}`),
-    }),
+    sliceFor(creatingControls),
+    creatingControls,
     { onCreatePlaylist: (name) => log.push(`create:${name}`) },
   );
   assertEqual(creating.newCard, null, 'new card hides while creating');
