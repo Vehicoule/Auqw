@@ -79,6 +79,7 @@ import {
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { MatchOutcome } from '../matching/matching-engine.ts';
+import { extractVersionLabels } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort, RandomPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -2391,7 +2392,11 @@ export class Session {
             artist: meta.artist,
             album: meta.album,
             durationMs: meta.durationMs,
-            versionLabels: [],
+            // Same derivation `recordingFromMetadata` runs — dropping
+            // the catalog row's labels would hard-conflict every
+            // labeled candidate (live, remix, explicit) and skip the
+            // warm a real tap resolves fine.
+            versionLabels: extractVersionLabels(meta.title, meta.explicit),
             isrc: meta.isrc ?? null,
           },
         });

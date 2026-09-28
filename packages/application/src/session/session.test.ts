@@ -5959,6 +5959,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'staleSearchPageMatchDiscarded',
     staleSearchPageMatchDiscarded,
   ],
+  [
+    'labeledSearchRowsResolveIntoStreamWarm',
+    labeledSearchRowsResolveIntoStreamWarm,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -7603,6 +7607,41 @@ async function staleSearchPageMatchDiscarded(): Promise<void> {
     1,
     're-shown row resolves fresh',
   );
+}
+
+/** A labeled catalog row keeps its version labels through the query
+ *  path — an explicit live track matches the same-labeled playback
+ *  candidate instead of hard-conflicting on labels it never carried. */
+async function labeledSearchRowsResolveIntoStreamWarm(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    tracks: [
+      { ...meta('itunes', 'i-live', 'Song (Live)', 'Artist', 300_000), explicit: true },
+    ],
+  });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'labeled catalog row resolving',
+  );
+  r.ytm.settleCandidates(
+    ok([
+      {
+        ...meta('youtube-music', 'y-live', 'Song (Live)', 'Artist', 300_000),
+        explicit: true,
+      },
+    ]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'labeled match mints');
+  assertEqual(warmInput(r).sourceRef, 'y-live', 'labeled ref warmed');
 }
 
 export async function run(): Promise<void> {
