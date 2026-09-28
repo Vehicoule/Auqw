@@ -904,7 +904,9 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         ...base,
         status: 'preparing',
         title: recording?.title ?? t('player.title.preparing'),
-        positionMs: 0,
+        // The queue holds the seek intent the pending 'prepared'
+        // outcome will play from.
+        positionMs: queue.positionMs,
         durationMs: recording?.durationMs ?? null,
         errorMessage: null,
       };
@@ -924,7 +926,9 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         ...base,
         status: 'failed',
         title: recording?.title ?? t('player.title.failed'),
-        positionMs: 0,
+        // A failed attempt parks the occurrence — the queue's
+        // position is where playback resumes on retry.
+        positionMs: queue.positionMs,
         durationMs: recording?.durationMs ?? null,
         errorMessage: playback.error.message,
       };

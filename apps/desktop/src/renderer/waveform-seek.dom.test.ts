@@ -514,6 +514,42 @@ export async function run(): Promise<void> {
         root.unmount();
       });
     }
+
+    // A `step="any"` DOM value lands fractional — the session takes
+    // integer ms, so the release commits the rounded position rather
+    // than being rejected as an invalid position.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 0,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 90_000.6);
+      });
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(seeks.length, 1, 'a fractional drag still commits once');
+      assertEqual(seeks[0], 90_001, 'the committed ms is an integer');
+      await act(async () => {
+        root.unmount();
+      });
+    }
   } finally {
     for (const key of GLOBALS) {
       const prior = saved.get(key);
