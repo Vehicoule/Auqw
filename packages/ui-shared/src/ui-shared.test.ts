@@ -50,6 +50,45 @@ import {
   fixtureSettings,
   fixtureSettingsModel,
 } from './fixtures.ts';
+import {
+  fixtureCorrectionsModel,
+  fixtureCorrectionsModelEmpty,
+  fixtureCorrectionsModelError,
+  fixtureCorrectionsModelLoading,
+  fixtureCorrectionsModelPending,
+  fixtureEntityModel,
+  fixtureEntityModelError,
+  fixtureLibraryModel,
+  fixtureLyricsError,
+  fixtureLyricsPlain,
+  fixtureImportPreviewModel,
+  fixtureLyricsSynced,
+  fixturePlayerBuffering,
+  fixturePlayerFailed,
+  fixturePlayerPlaying,
+  fixtureRadioModels,
+  fixtureSearchStates,
+  fixtureTransferModel,
+  fixtureTransferModelDone,
+  fixtureTransferModelError,
+  fixtureTransferModelPreview,
+} from './fixtures.ts';
+import {
+  downloadButtonView,
+  libraryScreenView,
+  lyricsPaneView,
+  queueReorderButton,
+  radioRowView,
+  stageMetaView,
+  stageModeTabs,
+  useCorrectionsScreenController,
+  useEntityScreenController,
+  useQueueScreenController,
+  useSearchScreenController,
+  useTransferScreenController,
+  useTransportView,
+} from './controllers.ts';
+import type { LibraryControls } from './controllers.ts';
 
 const home = toHomeModel({
   recordings: fixtureRecordings,
@@ -717,5 +756,345 @@ const FLOOR = Math.pow(0.05, 1.2); // normalized floor stub height
   await after;
   assert(live.a === 30, 'the chain still lands writes after a failure');
 }
+
+// ---- controllers -------------------------------------------------------
+// The hook-named controllers that hold no React state are plain
+// derivations — exercised directly here. `libraryScreenView` is the pure
+// half of useLibraryScreenController (the hook only owns the useState
+// slots), so filtering/sorting/bound-action coverage runs in plain node.
+
+let tapped = '';
+const tap = (s: string) => {
+  tapped = s;
+};
+
+// queue
+{
+  const view = useQueueScreenController({
+    queue: fixtureQueueModel,
+    player: fixturePlayerPlaying,
+  });
+  assertEqual(
+    view.countLabel,
+    t('queue.count', { count: fixtureQueueModel.items.length }),
+  );
+  assertEqual(view.current?.title, fixturePlayerPlaying.title);
+  assertEqual(view.current?.playing, true);
+  assertEqual(view.reorder, null, 'reorder hidden without a handler');
+  const armed = queueReorderButton(true, () => tap('reorder'));
+  assertEqual(armed?.a11yLabel, t('queue.reorderDone'));
+  armed?.onPress?.();
+  assertEqual(tapped, 'reorder', 'reorder button calls through');
+}
+
+// corrections — phase dispatch
+{
+  assertEqual(
+    useCorrectionsScreenController({ model: fixtureCorrectionsModelLoading })
+      .body.kind,
+    'loading',
+  );
+  const err = useCorrectionsScreenController({
+    model: fixtureCorrectionsModelError,
+  });
+  assert(err.body.kind === 'error');
+  assertEqual(err.body.hint, fixtureCorrectionsModelError.message);
+  const empty = useCorrectionsScreenController({
+    model: fixtureCorrectionsModelEmpty,
+  });
+  assert(empty.body.kind === 'empty');
+  assert(empty.body.hint === t('corrections.emptyHint.pending'));
+
+  const view = useCorrectionsScreenController({
+    model: fixtureCorrectionsModel,
+    onFilter: (f) => tap(`filter:${f}`),
+    onConfirm: (id, i) => tap(`confirm:${id}:${i}`),
+    onReject: (id) => tap(`reject:${id}`),
+    onUndo: (id) => tap(`undo:${id}`),
+  });
+  assert(view.body.kind === 'rows');
+  assertEqual(
+    view.filters.find((f) => f.value === fixtureCorrectionsModel.filter)
+      ?.selected,
+    true,
+  );
+  view.filters.find((f) => f.value === 'resolved')?.onPress?.();
+  assertEqual(tapped, 'filter:resolved');
+
+  const pendingRow = view.body.rows.find((r) => r.pending);
+  assert(pendingRow !== undefined, 'fixture has a pending review');
+  assertEqual(pendingRow.action.kind, 'reject');
+  assert(
+    pendingRow.candidates.every((c) => c.enabled),
+    'pending candidates are bound',
+  );
+  pendingRow.candidates[0]?.onPress?.();
+  assert(
+    tapped.startsWith(`confirm:${pendingRow.row.reviewId}:`),
+    'confirm carries reviewId + candidate index',
+  );
+
+  const resolvedRow = view.body.rows.find((r) => !r.pending);
+  if (resolvedRow !== undefined) {
+    assertEqual(resolvedRow.action.kind, 'undo');
+    assert(
+      resolvedRow.candidates.every((c) => !c.enabled),
+      'resolved candidates are inert',
+    );
+  }
+
+  // Unbound handlers produce inert, not undefined-shape, rows.
+  const inert = useCorrectionsScreenController({
+    model: fixtureCorrectionsModelPending,
+  });
+  assert(inert.body.kind === 'rows');
+  assert(inert.body.rows.every((r) => r.action.onPress === undefined));
+}
+
+// transfer — row states + footer dispatch
+{
+  const idle = useTransferScreenController({ model: fixtureTransferModel });
+  assertEqual(idle.importBody, null);
+  assertEqual(idle.exportRow.disabled, true, 'no handler disables the row');
+
+  const preview = useTransferScreenController({
+    model: fixtureTransferModelPreview,
+    onExport: () => tap('export'),
+    onPickImportFile: () => tap('pick'),
+    onApplyImport: () => tap('apply'),
+    onResetImport: () => tap('reset'),
+  });
+  assert(preview.importBody !== null);
+  assert(preview.importBody.footer.kind === 'confirm');
+  preview.importBody.footer.onApply?.();
+  assertEqual(tapped, 'apply');
+  assertEqual(preview.exportRow.detail, fixtureTransferModelPreview.exportDetail);
+
+  const done = useTransferScreenController({ model: fixtureTransferModelDone });
+  assert(done.importBody?.footer.kind === 'done');
+  const failed = useTransferScreenController({
+    model: fixtureTransferModelError,
+  });
+  assertEqual(failed.importBody, null, 'no preview means no import body');
+  assertEqual(
+    failed.importRow.detail,
+    fixtureTransferModelError.importDetail,
+    'import row carries the typed detail',
+  );
+  const failedWithPreview = useTransferScreenController({
+    model: {
+      ...fixtureTransferModelError,
+      preview: fixtureImportPreviewModel,
+    },
+  });
+  assert(failedWithPreview.importBody?.footer.kind === 'error');
+}
+
+// library — pure view half covers filtering, sorting, bound actions
+{
+  const controls = (
+    over: Partial<LibraryControls> = {},
+  ): LibraryControls => ({
+    filter: 'all',
+    sort: 'recent',
+    layout: 'grid',
+    creating: false,
+    draft: '',
+    setFilter: (f) => tap(`filter:${f}`),
+    setSort: (s) => tap(`sort:${s}`),
+    setLayout: (l) => tap(`layout:${l}`),
+    setCreating: (c) => tap(`creating:${c}`),
+    setDraft: (d) => tap(`draft:${d}`),
+    ...over,
+  });
+  const view = libraryScreenView(fixtureLibraryModel, controls(), {
+    onOpenCard: (card) => tap(`card:${card.title}`),
+    onCreatePlaylist: (name) => tap(`create:${name}`),
+  });
+  assertEqual(view.cards.length, fixtureLibraryModel.cards.length);
+  const kinds = fixtureLibraryModel.cards.map((c) => c.kind);
+  assertEqual(
+    view.filterOptions.length,
+    1 + new Set(kinds).size,
+    'one chip per kind present in the model',
+  );
+  view.filterOptions[1]?.onPress?.();
+  assert(tapped.startsWith('filter:'), 'kind chips call setFilter');
+  view.sortChip.onPress?.();
+  assertEqual(tapped, 'sort:title', 'sort chip toggles to title order');
+  view.newCard?.onPress?.();
+  assertEqual(tapped, 'creating:true', 'new-playlist card opens the field');
+
+  const log: string[] = [];
+  const creating = libraryScreenView(
+    fixtureLibraryModel,
+    controls({
+      creating: true,
+      draft: 'mix',
+      setDraft: (d) => log.push(`draft:${d}`),
+      setCreating: (c) => log.push(`creating:${c}`),
+    }),
+    { onCreatePlaylist: (name) => log.push(`create:${name}`) },
+  );
+  assertEqual(creating.newCard, null, 'new card hides while creating');
+  creating.nameField?.onSubmit?.('mix');
+  assertEqual(
+    log.join('|'),
+    'create:mix|draft:|creating:false',
+    'submit creates, then clears and closes the field',
+  );
+  creating.nameField?.onCancel?.();
+  assertEqual(
+    log.join('|'),
+    'create:mix|draft:|creating:false|draft:|creating:false',
+    'cancel clears and closes without creating',
+  );
+}
+
+// entity — discriminated phases + gating
+{
+  assertEqual(
+    useEntityScreenController({ model: fixtureEntityModelError }).kind,
+    'error',
+  );
+  const ready = useEntityScreenController({
+    model: fixtureEntityModel,
+    onToggleLike: () => tap('like'),
+  });
+  assert(ready.kind === 'ready');
+  assertEqual(ready.like.icon, 'heart-filled', 'liked model gets filled icon');
+  ready.like.onPress?.();
+  assertEqual(tapped, 'like');
+}
+
+// search — phase dispatch + draft mode
+{
+  const idle = useSearchScreenController({
+    state: fixtureSearchStates[0]!,
+    recents: ['radiohead ok computer'],
+    onRecentPress: (q) => tap(`recent:${q}`),
+  });
+  assert(idle.idle?.kind === 'recents');
+  idle.idle.items[0]?.onPress?.();
+  assertEqual(tapped, 'recent:radiohead ok computer');
+
+  const ready = useSearchScreenController({
+    state: fixtureSearchStates[2]!,
+    onResultPress: (row) => tap(`result:${row.key}`),
+  });
+  assert(ready.resultsHead !== null, 'ready phase gets a results header');
+  assertEqual(ready.results?.rows.length, fixtureSearchStates[2]!.results.length);
+  ready.results?.rows[0]?.onPress?.();
+  assert(tapped.startsWith('result:'), 'result rows bind the row model');
+
+  // A typed-but-uncommitted draft switches the pane to suggestions.
+  const drafting = useSearchScreenController({
+    state: fixtureSearchStates[0]!,
+    query: 'radiohe',
+    suggestions: ['radiohead'],
+    onSuggestionPress: (q) => tap(`suggest:${q}`),
+    onQueryChange: () => {},
+  });
+  assertEqual(drafting.draft, true);
+  assertEqual(drafting.idle, null, 'draft suppresses the recents pane');
+  drafting.suggestions?.items[0]?.onPress?.();
+  assertEqual(tapped, 'suggest:radiohead');
+
+  const failed = useSearchScreenController({
+    state: fixtureSearchStates[4]!,
+    onRetry: () => tap('retry'),
+  });
+  assert(failed.status?.kind === 'error');
+  failed.status.onRetry?.();
+  assertEqual(tapped, 'retry');
+}
+
+// stage pieces
+{
+  const tabs = stageModeTabs(
+    ['player', 'lyrics', 'queue'],
+    'lyrics',
+    (m) => tap(`mode:${m}`),
+  );
+  assertEqual(
+    tabs.map((tab) => tab.key).join(','),
+    'player,lyrics,queue',
+    'order follows the caller',
+  );
+  assertEqual(tabs[1]?.active, true);
+  tabs[2]?.onPress?.();
+  assertEqual(tapped, 'mode:queue');
+
+  const dl = downloadButtonView('failed', () => tap('dl'));
+  assertEqual(dl.icon, 'warn');
+  assertEqual(downloadButtonView('queued', undefined).busy, true);
+  assertEqual(downloadButtonView('stored', undefined).a11yLabel, t('stage.download.storedA11y'));
+
+  assertEqual(
+    radioRowView(fixtureRadioModels[0], undefined, undefined),
+    null,
+    'unarmed radio without a seed action hides the row',
+  );
+  const armedRadio = radioRowView(
+    fixtureRadioModels[1],
+    () => tap('start'),
+    () => tap('stop'),
+  );
+  assert(armedRadio?.armed === true);
+  assert(armedRadio.statusText.length > 0);
+  const failedRadio = radioRowView(
+    fixtureRadioModels[4],
+    () => tap('start'),
+    () => tap('stop'),
+  );
+  assertEqual(failedRadio?.failed, true);
+  assert(
+    failedRadio?.statusText.includes('continuation timed out') ?? false,
+    'failed tail carries its typed message',
+  );
+
+  const meta = stageMetaView(fixturePlayerFailed);
+  assertEqual(meta.errorMessage, fixturePlayerFailed.errorMessage);
+  assertEqual(meta.waveformLoading, false, 'resolved duration draws bars');
+  assertEqual(
+    stageMetaView({ ...fixturePlayerBuffering, status: 'preparing' })
+      .waveformLoading,
+    true,
+    'preparing players show the loading waveform',
+  );
+  assertEqual(
+    stageMetaView({ ...fixturePlayerPlaying, durationMs: null })
+      .waveformLoading,
+    true,
+    'unknown duration shows the loading waveform',
+  );
+
+  const transport = useTransportView({
+    status: 'playing',
+    intentPlaying: true,
+    liked: false,
+    canPrevious: false,
+    canNext: true,
+    repeat: 'one',
+    onToggleLike: () => tap('like'),
+  });
+  assertEqual(transport.playing, true);
+  assertEqual(transport.repeat.icon, 'repeat-one');
+  assertEqual(transport.previous.disabled, true);
+  assertEqual(transport.shuffle.disabled, true, 'unbound shuffle disables');
+  transport.like.onPress?.();
+  assertEqual(tapped, 'like');
+
+  assertEqual(lyricsPaneView(fixtureLyricsError, undefined).kind, 'error');
+  assertEqual(lyricsPaneView(fixtureLyricsPlain, undefined).kind, 'lines');
+  const synced = lyricsPaneView(fixtureLyricsSynced, undefined);
+  assert(synced.kind === 'lines');
+  assert(
+    synced.lines.some((line) => line.color === 'accent'),
+    'synced lyrics highlight the active line',
+  );
+  assertEqual(lyricsPaneView(undefined, undefined).kind, 'empty');
+}
+
 
 console.log('ui-shared tests passed');

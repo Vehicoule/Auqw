@@ -611,26 +611,47 @@ export type LibraryScreenView = {
   } | null;
 };
 
-export function useLibraryScreenController({
-  model,
-  onPressItem,
-  onToggleLike,
-  onAddToPlaylist,
-  onContext,
-  onOpenCollection,
-  onPlayCollection,
-  onOpenCard,
-  onOpenArtist,
-  onCreatePlaylist,
-}: {
-  readonly model: LibraryModel;
-} & LibraryScreenHandlers): LibraryScreenView {
-  const [filter, setFilter] = useState<LibraryKindFilter>('all');
-  const [sort, setSort] = useState<LibrarySort>('recent');
-  const [layout, setLayout] = useState<LibraryLayout>('grid');
-  const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState('');
+/** The library screen's local control state — the hook owns the
+ * slots; the view derivation stays pure for testing. */
+export type LibraryControls = {
+  readonly filter: LibraryKindFilter;
+  readonly sort: LibrarySort;
+  readonly layout: LibraryLayout;
+  readonly creating: boolean;
+  readonly draft: string;
+  readonly setFilter: (filter: LibraryKindFilter) => void;
+  readonly setSort: (sort: LibrarySort) => void;
+  readonly setLayout: (layout: LibraryLayout) => void;
+  readonly setCreating: (creating: boolean) => void;
+  readonly setDraft: (draft: string) => void;
+};
 
+export function libraryScreenView(
+  model: LibraryModel,
+  {
+    filter,
+    sort,
+    layout,
+    creating,
+    draft,
+    setFilter,
+    setSort,
+    setLayout,
+    setCreating,
+    setDraft,
+  }: LibraryControls,
+  {
+    onPressItem,
+    onToggleLike,
+    onAddToPlaylist,
+    onContext,
+    onOpenCollection,
+    onPlayCollection,
+    onOpenCard,
+    onOpenArtist,
+    onCreatePlaylist,
+  }: LibraryScreenHandlers,
+): LibraryScreenView {
   const kindsPresent = LIBRARY_KIND_FILTERS.filter((f) =>
     model.cards.some((card) => card.kind === f.key),
   );
@@ -776,6 +797,34 @@ export function useLibraryScreenController({
   };
 }
 
+export function useLibraryScreenController({
+  model,
+  ...handlers
+}: {
+  readonly model: LibraryModel;
+} & LibraryScreenHandlers): LibraryScreenView {
+  const [filter, setFilter] = useState<LibraryKindFilter>('all');
+  const [sort, setSort] = useState<LibrarySort>('recent');
+  const [layout, setLayout] = useState<LibraryLayout>('grid');
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState('');
+  return libraryScreenView(
+    model,
+    {
+      filter,
+      sort,
+      layout,
+      creating,
+      draft,
+      setFilter,
+      setSort,
+      setLayout,
+      setCreating,
+      setDraft,
+    },
+    handlers,
+  );
+}
 
 // ---- entity -----------------------------------------------------------
 
