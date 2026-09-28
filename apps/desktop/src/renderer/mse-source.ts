@@ -357,7 +357,12 @@ function runSession(
     const consumed = emitCursor - ingestBase;
     if (consumed > 0 && consumed <= ingest.length) {
       // A view, not a copy — ingest is rebuilt on every append anyway.
-      ingest = ingest.subarray(consumed);
+      // A fully consumed buffer keeps a fresh empty array instead — an
+      // empty view would retain the whole backing for the session.
+      ingest =
+        consumed === ingest.length
+          ? new Uint8Array(0)
+          : ingest.subarray(consumed);
       ingestBase += consumed;
     }
   }
