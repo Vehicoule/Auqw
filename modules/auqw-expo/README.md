@@ -26,10 +26,9 @@ generated UniFFI surface; nothing else vendors a second copy.
 
 ## API (src/index.ts)
 
-Host surface: `createHost`, `loadPlugin`, `startResolve`,
-`startRequest`, `cancel`, `runSpin`, `addResolveOutcomeListener`,
-`addRequestOutcomeListener`. `ResolvedResource.url` is a signed stream
-URL — never log it (the native layers log only client/mime/kind).
+Host surface: `createHost`, `loadPlugin`, `startRequest`, `cancel`,
+`addRequestOutcomeListener`. Resolved stream URLs are signed URLs —
+never log them (the native layers log only client/mime/kind).
 
 Player surface (docs/specs/playback.md "PlayerPort transport
 contract"): `prepare` → `onPrepareOutcome`, `play`/`pause`/`seekTo`/

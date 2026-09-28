@@ -11,7 +11,7 @@ import type {
   QueueTransitionReason,
   Result,
 } from '@auqw/application';
-import { appError, err, ok } from '@auqw/application';
+import { appError, appErrorKind, err, ok } from '@auqw/application';
 import type {
   AttemptSummaryPayload,
   AuqwApi,
@@ -56,44 +56,6 @@ export type MediaSessionLike = {
   ): void;
 };
 
-const SLUG_KIND: Readonly<Record<string, ErrorKind>> = {
-  'no-result': 'no-result',
-  'not-applicable': 'not-applicable',
-  unsupported: 'unsupported',
-  'auth-required': 'auth-required',
-  'auth-expired': 'auth-expired',
-  'rate-limit': 'rate-limit',
-  transient: 'transient',
-  'expired-resource': 'expired-resource',
-  'permission-denied': 'permission-denied',
-  'invalid-response': 'invalid-response',
-  timeout: 'timeout',
-  cancelled: 'cancelled',
-  'budget-exceeded': 'budget-exceeded',
-  'guest-trap': 'guest-trap',
-  'invalid-message': 'invalid-message',
-  'artifact-rejected': 'artifact-rejected',
-  'streams-capped': 'streams-capped',
-  released: 'released',
-  superseded: 'superseded',
-  evicted: 'evicted',
-  expired: 'expired',
-  'not-found': 'not-found',
-  unavailable: 'unavailable',
-  'io-error': 'transient',
-  'invalid-request': 'invalid-response',
-  'not-implemented': 'unavailable',
-  'process-crashed': 'unavailable',
-  'corrupt-state': 'internal',
-  internal: 'internal',
-};
-
-function toKind(kind: unknown): ErrorKind {
-  return typeof kind === 'string' && kind in SLUG_KIND
-    ? (SLUG_KIND[kind] as ErrorKind)
-    : 'internal';
-}
-
 /** Stream dead-resource kinds — a failed op with one of these means the
  * registry dropped the session, which the session layer re-prepares. */
 const DEAD_HANDLE_KINDS: ReadonlySet<ErrorKind> = new Set([
@@ -106,7 +68,7 @@ const DEAD_HANDLE_KINDS: ReadonlySet<ErrorKind> = new Set([
 
 function toError(thrown: unknown): AppError {
   if (isRecord(thrown)) {
-    const kind = toKind(thrown['kind']);
+    const kind = appErrorKind(thrown['kind']);
     const message =
       typeof thrown['message'] === 'string' && thrown['message'].length > 0
         ? (thrown['message'] as string)
@@ -535,7 +497,7 @@ export function createWebPlayerPort(deps: {
         // A stale op's failure is not the live attempt's — suppress it
         // rather than label the stream the session already moved to.
         if (gen === opGen && projection === p) {
-          const kind = toKind(outcome.kind);
+          const kind = appErrorKind(outcome.kind);
           status(
             'failed',
             appError(kind, outcome.message ?? 'successor prepare failed'),
@@ -962,7 +924,7 @@ export function createWebPlayerPort(deps: {
             },
           });
         } else {
-          const kind = toKind(outcome.kind);
+          const kind = appErrorKind(outcome.kind);
           emit({
             type: 'prepare',
             requestId,

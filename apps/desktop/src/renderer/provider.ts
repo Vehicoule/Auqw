@@ -20,6 +20,7 @@ import type {
 } from '@auqw/application';
 import {
   appError,
+  appErrorKind,
   err,
   hasExactKeys,
   hasKeys,
@@ -49,55 +50,10 @@ import { createIds } from './runtime.ts';
  */
 export type AuqwHost = AuqwApi['host'];
 
-/**
- * Host-channel error kinds: the plugin taxonomy a guest legitimately
- * emits plus the shell kinds an IPC/preload rejection can carry (the
- * host folds transport failures into the outcome's `kind`). Unknown
- * slugs degrade to `internal`, matching the mobile map.
- */
-const HOST_KIND: Readonly<Record<string, ErrorKind>> = {
-  'no-result': 'no-result',
-  'not-applicable': 'not-applicable',
-  unsupported: 'unsupported',
-  'auth-required': 'auth-required',
-  'auth-expired': 'auth-expired',
-  'rate-limit': 'rate-limit',
-  transient: 'transient',
-  'expired-resource': 'expired-resource',
-  'permission-denied': 'permission-denied',
-  'invalid-response': 'invalid-response',
-  timeout: 'timeout',
-  cancelled: 'cancelled',
-  'budget-exceeded': 'budget-exceeded',
-  'guest-trap': 'guest-trap',
-  'invalid-message': 'invalid-message',
-  'artifact-rejected': 'artifact-rejected',
-  'streams-capped': 'streams-capped',
-  released: 'released',
-  superseded: 'superseded',
-  evicted: 'evicted',
-  expired: 'expired',
-  'not-found': 'not-found',
-  unavailable: 'unavailable',
-  'storage-full': 'storage-full',
-  'io-error': 'transient',
-  'invalid-request': 'invalid-response',
-  'not-implemented': 'unavailable',
-  'process-crashed': 'unavailable',
-  'corrupt-state': 'internal',
-  internal: 'internal',
-};
-
-function hostKind(kind: unknown): ErrorKind {
-  return typeof kind === 'string' && kind in HOST_KIND
-    ? (HOST_KIND[kind] as ErrorKind)
-    : 'internal';
-}
-
 /** A `host.request` rejection is a ShellError-shaped value crossing IPC. */
 function hostError(thrown: unknown): AppError {
   if (isRecord(thrown)) {
-    const kind = hostKind(thrown['kind']);
+    const kind = appErrorKind(thrown['kind']);
     const message =
       typeof thrown['message'] === 'string' && thrown['message'].length > 0
         ? (thrown['message'] as string)
@@ -685,7 +641,7 @@ export function createPluginProvider(
           finish(
             err(
               appError(
-                hostKind(outcome.kind),
+                appErrorKind(outcome.kind),
                 typeof outcome.message === 'string' &&
                   outcome.message.length > 0
                   ? outcome.message
