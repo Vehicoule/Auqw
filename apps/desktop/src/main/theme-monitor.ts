@@ -36,7 +36,7 @@ export interface ThemeSourceEnv {
  * replacement document subscribes afresh and needs the snapshot. The
  * lifecycle mirror is `ipc.ts`'s tx watcher.
  */
-export interface ThemeSender extends NetSender {
+interface ThemeSender extends NetSender {
   on?(
     event: 'destroyed' | 'render-process-gone' | 'did-navigate',
     listener: () => void,
@@ -248,7 +248,7 @@ const PORTAL_ARGS = [
 /** Reads the best available OS palette for this platform; null when no
     source exposes one (the renderer then falls back to the flag). Async
     because the portal leg shells out to gdbus. */
-export async function readPlatformPalette(
+async function readPlatformPalette(
   env: ThemeSourceEnv,
 ): Promise<Palette | null> {
   if (env.platform === 'win32' || env.platform === 'darwin') {

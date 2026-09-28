@@ -62,7 +62,6 @@ import type {
 } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 
-export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
 // Settle dynamics — the CMP deck's spring (StiffnessLow + no bounce): the
 // release keeps the drag's velocity and lands without overshoot.

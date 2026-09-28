@@ -286,9 +286,9 @@ export function IconButton({
   );
 }
 
-export type PillTone = 'accent' | 'soft' | 'outline' | 'warn';
+type PillTone = 'accent' | 'soft' | 'outline' | 'warn';
 
-export type PillButtonProps = {
+type PillButtonProps = {
   readonly label: string;
   readonly onPress?: (() => void) | undefined;
   readonly accessibilityLabel?: string | undefined;

@@ -5,22 +5,22 @@
 // same choreography. Pure functions — unit-tested, no RN imports.
 
 /** Coupled phase: margin/corner morph completes here. */
-export const STAGE_COUPLED_END = 0.18;
+const STAGE_COUPLED_END = 0.18;
 
 /** The collapsed pill is fully faded out at this progress. */
-export const STAGE_PILL_GONE = 0.25;
+const STAGE_PILL_GONE = 0.25;
 
 /** Expanded content finishes its reveal (and input opens) here. */
-export const STAGE_CONTENT_GATE = 0.5;
+const STAGE_CONTENT_GATE = 0.5;
 
 /** Release commit: dragging this fraction of the travel past the start
  *  anchor flips the decision (deck edge — tighter than the generic 0.4). */
-export const STAGE_COMMIT_FRACTION = 0.3;
+const STAGE_COMMIT_FRACTION = 0.3;
 
 /** Fling override: px/s beyond which the release direction wins outright. */
-export const STAGE_FLING_VELOCITY = 600;
+const STAGE_FLING_VELOCITY = 600;
 
-export type StageAnchor = 'expanded' | 'collapsed';
+type StageAnchor = 'expanded' | 'collapsed';
 
 const clamp01 = (v: number): number => {
   'worklet';

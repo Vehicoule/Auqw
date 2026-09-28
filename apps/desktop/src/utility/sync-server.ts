@@ -109,7 +109,7 @@ import {
  * fake healthy status (spec: export/import is the fallback).
  */
 
-export interface SyncAdvertiser {
+interface SyncAdvertiser {
   close(): void;
 }
 
@@ -123,7 +123,7 @@ export type SyncAdvertise = (opts: {
   onError?: () => void;
 }) => SyncAdvertiser;
 
-export type SyncServiceDeps = {
+type SyncServiceDeps = {
   /** Listen host — '0.0.0.0' LAN default; tests pass '127.0.0.1'. */
   readonly host?: string;
   /** 0 = ephemeral (default); a configured port survives restarts. */

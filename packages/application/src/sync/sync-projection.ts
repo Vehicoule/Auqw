@@ -112,12 +112,12 @@ export type SyncProjectionInput = Pick<
 /** A record that can never materialize — the caller typed-logs it.
  * `kind` is 'unknown' when the wire shape itself was rejected — a
  * malformed entry can't name a trusted SyncRecordKind to log. */
-export type ProjectionSkip = {
+type ProjectionSkip = {
   readonly kind: SyncRecordKind | 'unknown';
   readonly reason: 'unmaterializable' | 'invalid';
 };
 
-export type SyncProjection = {
+type SyncProjection = {
   /**
    * Changed sections only. `recordings` rides `recordingsMerge` so a
    * LocalFileSource commit landing between the caller's load and its

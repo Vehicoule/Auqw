@@ -67,7 +67,7 @@ class NodeSyncSocket implements SyncSocket {
   }
 }
 
-export function createNodeSyncSockets(): SyncSocketPort {
+function createNodeSyncSockets(): SyncSocketPort {
   const live = new Set<Socket>();
   return {
     connect({ host, port, timeoutMs, signal }) {
@@ -151,7 +151,7 @@ export function createNodeSyncSockets(): SyncSocketPort {
  * `SyncPeer.deviceId`/`pub` (the welcome's host disclosure); a peer
  * that never sent them can't become a desktop device record at all.
  */
-export function createDesktopSyncDialerKeys(deps: {
+function createDesktopSyncDialerKeys(deps: {
   keys: SyncKeys;
   /** The desktop's own sync-log deviceId (async — engine boot). */
   ownDeviceId: () => Promise<string | null>;

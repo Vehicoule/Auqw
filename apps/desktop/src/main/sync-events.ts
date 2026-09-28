@@ -11,7 +11,7 @@ import type { NetSender } from './net-monitor.ts';
  * net monitor: refcounted attach, destroyed senders drop
  * automatically.
  */
-export interface PushService<E> {
+interface PushService<E> {
   attach(sender: NetSender): void;
   detach(sender: NetSender): void;
   /** Broadcast a validated event to every subscribed sender. */
@@ -59,13 +59,13 @@ function createPushService<E>(channel: string): PushService<E> {
   };
 }
 
-export type AppliedPushService = PushService<SyncAppliedEvent>;
+type AppliedPushService = PushService<SyncAppliedEvent>;
 
 export function createAppliedPushService(): AppliedPushService {
   return createPushService<SyncAppliedEvent>(CHANNELS.syncApplied);
 }
 
-export type NearbyPushService = PushService<SyncNearbyEvent>;
+type NearbyPushService = PushService<SyncNearbyEvent>;
 
 export function createNearbyPushService(): NearbyPushService {
   return createPushService<SyncNearbyEvent>(CHANNELS.syncNearby);

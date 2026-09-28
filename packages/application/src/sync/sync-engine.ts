@@ -98,7 +98,7 @@ export type SyncRecordKind =
   | 'matchReview'
   | 'settings';
 
-export const SYNC_RECORD_KINDS: readonly SyncRecordKind[] = [
+const SYNC_RECORD_KINDS: readonly SyncRecordKind[] = [
   'recording',
   'recordingSourceRef',
   'recordingMapping',
@@ -115,7 +115,7 @@ export const SYNC_RECORD_KINDS: readonly SyncRecordKind[] = [
 
 const SYNC_RECORD_KIND_SET: ReadonlySet<string> = new Set(SYNC_RECORD_KINDS);
 
-export function isSyncRecordKind(value: unknown): value is SyncRecordKind {
+function isSyncRecordKind(value: unknown): value is SyncRecordKind {
   return (
     typeof value === 'string' && SYNC_RECORD_KIND_SET.has(value)
   );
@@ -354,7 +354,7 @@ export type SyncDelta = {
 
 // ---- divergence history ---------------------------------------------------
 
-export type DivergenceSide = {
+type DivergenceSide = {
   readonly deviceId: string;
   readonly hlc: HlcStamp;
   readonly tombstone: boolean;
@@ -380,7 +380,7 @@ export type DivergenceEntry = {
   readonly origin: 'local' | 'remote';
 };
 
-export type DivergenceFilter = {
+type DivergenceFilter = {
   readonly kind?: SyncRecordKind;
   readonly recordId?: string;
 };
@@ -419,7 +419,7 @@ export type MergeOutcome =
   | { readonly type: 'duplicate'; readonly entry: ChangeEntry }
   | { readonly type: 'rejected'; readonly index: number; readonly reason: string };
 
-export type LocalChangeResult = {
+type LocalChangeResult = {
   readonly entry: ChangeEntry;
   readonly outcome: MergeOutcome;
 };
@@ -894,7 +894,7 @@ export function isSyncDelta(value: unknown): value is SyncDelta {
   );
 }
 
-export function isDivergenceSide(value: unknown): value is DivergenceSide {
+function isDivergenceSide(value: unknown): value is DivergenceSide {
   return (
     isRecord(value) &&
     hasExactKeys(value, ['deviceId', 'hlc', 'tombstone', 'value']) &&

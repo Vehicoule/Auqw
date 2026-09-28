@@ -36,7 +36,7 @@ import { fromTag, t, type MessageId } from './i18n.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
-export type TrackRowState = 'available' | 'unavailable' | 'error';
+type TrackRowState = 'available' | 'unavailable' | 'error';
 
 /** Owned-bytes state on a track row — honest download chip. */
 export type DownloadChip =
@@ -60,7 +60,7 @@ export type TrackRowModel = {
   readonly download: DownloadChip | null;
 };
 
-export type PlayerStatus =
+type PlayerStatus =
   | 'preparing'
   | 'buffering'
   | 'playing'
@@ -105,7 +105,7 @@ export type QueueModel = {
   readonly currentOccurrenceId: string | null;
 };
 
-export type SearchPhase =
+type SearchPhase =
   | 'idle'
   | 'loading'
   | 'ready'
@@ -148,7 +148,7 @@ export type HomeModel = {
 
 export type CollectionKey = 'liked' | 'downloads' | 'top50' | 'history';
 
-export type CollectionTileModel = {
+type CollectionTileModel = {
   readonly key: CollectionKey;
   readonly label: string;
   readonly count: number;
@@ -294,7 +294,7 @@ export type StageMode = 'player' | 'lyrics' | 'queue';
  * `instrumental`, and `unavailable` results never receive line
  * highlighting or any synced treatment.
  */
-export type LyricsState =
+type LyricsState =
   | 'loading'
   | 'synced'
   | 'plain'
@@ -424,7 +424,7 @@ export function toRadioModel(radio: RadioTail | null): RadioModel {
 
 // ---- corrections (diagnostics review queue) ------------------------
 
-export type ReviewCandidateModel = {
+type ReviewCandidateModel = {
   /** The index `confirmReview` expects — never renumbered. */
   readonly index: number;
   readonly title: string;
@@ -632,7 +632,7 @@ export function toSyncModel(input: {
 
 // ---- library transfer (export / import) ----------------------------
 
-export type ImportPreviewRowModel = {
+type ImportPreviewRowModel = {
   readonly key: string;
   readonly label: string;
   readonly count: number;
@@ -764,7 +764,7 @@ function albumLabel(recording: Recording): string | null {
   return parts.length === 0 ? null : parts.join(' · ');
 }
 
-export type TrackRowOptions = {
+type TrackRowOptions = {
   readonly key?: string;
   readonly liked?: boolean;
   readonly playing?: boolean;
@@ -823,7 +823,7 @@ export function toSearchRowModel(
   };
 }
 
-export type PlayerModelInput = {
+type PlayerModelInput = {
   readonly playback: SessionPlayback;
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
@@ -927,7 +927,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   }
 }
 
-export type QueueModelInput = {
+type QueueModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
@@ -1725,7 +1725,7 @@ export function toSettingsModel(
  * current one — model order is preserved verbatim and a row added mid-
  * list lands inside whatever group surrounds it.
  */
-export type SettingsGroup = {
+type SettingsGroup = {
   /** The boundary row's key — stable React key for the group. */
   readonly key: string;
   readonly label: string;
@@ -1774,7 +1774,7 @@ export function settingsGroups(
 /* verbatim (kept structural here so ui-web never imports app code).   */
 /* ------------------------------------------------------------------ */
 
-export type SyncStatusInput = {
+type SyncStatusInput = {
   readonly listener:
     | 'starting'
     | 'listening'
@@ -1793,7 +1793,7 @@ export type SyncStatusInput = {
   readonly fingerprint: string | null;
 };
 
-export type SyncDeviceInput = {
+type SyncDeviceInput = {
   readonly id: string;
   readonly name: string;
   readonly pairedAt: number;
@@ -1801,7 +1801,7 @@ export type SyncDeviceInput = {
 };
 
 /** The minted offer `api.sync.pairing()` returns — code + QR payload. */
-export type SyncPairingInput = {
+type SyncPairingInput = {
   readonly payload: string;
   readonly code: string;
   /** Primary `ip:port` — the typed path needs it shown next to the code. */
@@ -1809,7 +1809,7 @@ export type SyncPairingInput = {
   readonly expiresAt: number;
 };
 
-export type SyncDeviceModel = {
+type SyncDeviceModel = {
   readonly id: string;
   readonly name: string;
   /** Relative label — 'paired 2h ago'. */
@@ -1818,7 +1818,7 @@ export type SyncDeviceModel = {
   readonly lastSeenLabel: string;
 };
 
-export type SyncStatusModel = {
+type SyncStatusModel = {
   readonly listenerLabel: string;
   readonly engineLabel: string;
   readonly nameLabel: string;

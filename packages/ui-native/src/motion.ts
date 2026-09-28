@@ -1,4 +1,4 @@
-export type Quad = {
+type Quad = {
   readonly xs: readonly [number, number, number, number];
   readonly ys: readonly [number, number, number, number];
 };
@@ -35,7 +35,7 @@ function lerp(from: number, to: number, t: number): number {
   return from + (to - from) * t;
 }
 
-export function morphQuad(from: Quad, to: Quad, amount: number): Quad {
+function morphQuad(from: Quad, to: Quad, amount: number): Quad {
   'worklet';
 
   const t = clamp01(amount);
@@ -73,7 +73,7 @@ export function morphPlayPause(amount: number): {
   };
 }
 
-export type ProgressPathState = {
+type ProgressPathState = {
   readonly dashLength: number;
   readonly dashOffset: number;
   readonly opacity: number;
