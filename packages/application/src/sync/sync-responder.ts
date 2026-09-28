@@ -261,6 +261,13 @@ function createPairingStore(opts: {
       mintCode: opts.mintCode,
     });
   let mint = fresh();
+  // The mint that served each consumed state — restore binds to that
+  // generation so a swap()ed-out consume can't re-mint into the live
+  // window (a stopped offer would otherwise stay pairable).
+  const consumedBy = new WeakMap<
+    PairingState,
+    ReturnType<typeof createPairingMint>
+  >();
   const badAttempts = new Map<string, number>();
   let totalBadAttempts = 0;
   return {
@@ -272,8 +279,18 @@ function createPairingStore(opts: {
       return minted;
     },
     peek: (code: string) => mint.peek(code),
-    consume: (code: string) => mint.consume(code),
-    restore: (taken: PairingState) => mint.restore(taken),
+    consume: (code: string) => {
+      const taken = mint.consume(code);
+      if (taken !== null) {
+        consumedBy.set(taken, mint);
+      }
+      return taken;
+    },
+    restore: (taken: PairingState) => {
+      if (consumedBy.get(taken) === mint) {
+        mint.restore(taken);
+      }
+    },
     expire: () => mint.expire(),
     locked(remoteIp: string): boolean {
       return (

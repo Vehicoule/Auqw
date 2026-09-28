@@ -1,4 +1,4 @@
-import { appError, err, ok } from '../errors.ts';
+import { appError, err, ok, type Result } from '../errors.ts';
 import type {
   SyncAcceptorPort,
   SyncClientCrypto,
@@ -501,6 +501,45 @@ async function failedPutRestoresMint(): Promise<void> {
   await client.close();
 }
 
+// 6b. stop() swaps the mint generation before a pending custody
+// write settles — the write's failure must not restore the consumed
+// code into the post-stop window (the stopped offer stays dead).
+async function stoppedOfferStaysDead(): Promise<void> {
+  const registry = fakeRegistry();
+  let holdPut = true;
+  let releasePut: (() => void) | undefined;
+  const origPut = registry.put;
+  registry.put = (peer, signal) => {
+    if (holdPut) {
+      return new Promise<Result<void>>((resolve) => {
+        releasePut = () =>
+          resolve(err(appError('unavailable', 'custody write failed')));
+      });
+    }
+    return origPut(peer, signal);
+  };
+  const { host, client } = await rig({ registry });
+  host.mintOffer();
+  const pairing = client.pair({ code: '424242', endpoints: [ENDPOINT] });
+  for (let i = 0; i < 1_000 && releasePut === undefined; i += 1) {
+    await Promise.resolve();
+  }
+  assert(releasePut !== undefined, 'custody write in flight');
+  const stopping = host.stop();
+  releasePut();
+  await stopping;
+  const failed = await pairing;
+  assert(!failed.ok, 'in-flight pair rejects');
+  holdPut = false;
+  const restarted = await host.start();
+  assert(restarted.ok, 'host rebinds after stop');
+  const retry = await client.pair({ code: '424242', endpoints: [ENDPOINT] });
+  assert(!retry.ok, 'stopped offer does not pair after restart');
+  assertEqual(retry.error.kind, 'expired');
+  await host.close();
+  await client.close();
+}
+
 // 7. Resume: a registered caller touches its record (fresh name,
 // endpoint, lastSeen) and fires onResume — the kick hook.
 async function resumeTouchesAndKicks(): Promise<void> {
@@ -569,6 +608,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['attemptBudgetLocks', attemptBudgetLocks],
   ['codePairsExactlyOnce', codePairsExactlyOnce],
   ['failedPutRestoresMint', failedPutRestoresMint],
+  ['stoppedOfferStaysDead', stoppedOfferStaysDead],
   ['resumeTouchesAndKicks', resumeTouchesAndKicks],
   ['resumeUnpairedRejects', resumeUnpairedRejects],
   ['openLoopDevicesAndPairOnly', openLoopDevicesAndPairOnly],
