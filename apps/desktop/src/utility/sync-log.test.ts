@@ -173,6 +173,87 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A compaction write parses, drops entries, and shrinks the file ——
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    const writes: SyncLogWrite[] = [
+      { entries: [entry(1), entry(2), entry(3)] },
+      {
+        dropEntries: [{ deviceId: 'dsk-peer', seq: 2 }],
+        divergenceReplayOffset: 1,
+        divergenceDroppedEmissions: [2],
+      },
+    ];
+    for (const write of writes) {
+      const appended = await opened.value.store.append(write, ctx());
+      assert(appended.ok);
+    }
+    // The drop rewrite must physically remove the line — the file is
+    // the durable log, not just the snapshot.
+    const raw = await readFile(path, 'utf8');
+    assert(raw.includes('"pl-1"'), 'kept entry survived rewrite');
+    assert(!raw.includes('"pl-2"'), 'dropped entry line is gone');
+    const reopened = await openSyncLogStore(path);
+    assert(reopened.ok);
+    if (!reopened.ok) {
+      return;
+    }
+    assertEqual(reopened.value.repaired, false);
+    assertEqual(reopened.value.deviceId, opened.value.deviceId);
+    const loaded = await reopened.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      assertDeepEqual(
+        loaded.value.entries.map((e) => e.seq),
+        [1, 3],
+      );
+      assertEqual(loaded.value.divergenceReplayOffset, 1);
+      assertDeepEqual(loaded.value.divergenceDroppedEmissions, [2]);
+    }
+  }
+
+  // —— Two handles on one log share the write queue ——
+  // A checkpoint's read→rename must never install a snapshot taken
+  // before a concurrently-committed append on another handle.
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const a = await openSyncLogStore(path);
+    const b = await openSyncLogStore(path);
+    assert(a.ok && b.ok);
+    if (!a.ok || !b.ok) {
+      return;
+    }
+    // Interleave appends and a compaction across both handles; every
+    // committed write must be present after the dust settles.
+    const results = await Promise.all([
+      a.value.store.append({ entries: [entry(1), entry(2)] }, ctx()),
+      b.value.store.append({ entries: [entry(3)] }, ctx()),
+      a.value.store.append(
+        { dropEntries: [{ deviceId: 'dsk-peer', seq: 2 }] },
+        ctx(),
+      ),
+      b.value.store.append({ entries: [entry(4)] }, ctx()),
+    ]);
+    for (const result of results) {
+      assert(result.ok, `append failed: ${JSON.stringify(result)}`);
+    }
+    const loaded = await b.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      assertDeepEqual(
+        loaded.value.entries.map((e) => e.seq).sort(),
+        [1, 3, 4],
+      );
+    }
+  }
+
   // —— A torn tail truncates at the first invalid line ——
   {
     const dir = await freshDir();

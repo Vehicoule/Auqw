@@ -2278,6 +2278,175 @@ async function prunedDivergenceNotResurrected(): Promise<void> {
 }
 
 
+async function compactionKeepsRepairPositions(): Promise<void> {
+  // Compaction dropped two loser-emitting entries whose rows were
+  // already pruned. Replay positions must still line up with the
+  // stored floor: with the retired ordinals persisted, the surviving
+  // losers land at their original emit ordinals — the 'v1' row is
+  // missing above the floor and must be rebuilt; without it both
+  // would replay below the floor and the row would be lost
+  // permanently.
+  const peerEntries = [
+    rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+    rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v1', { l: 30, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+  ];
+  // Original emit order: two compacted losers (positions 1,2), then
+  // 'old' (position 3, row kept), then 'v1' (position 4, row lost).
+  const compacted = new FakeSyncLogStore({
+    entries: peerEntries,
+    divergence: [
+      {
+        historyId: 'h-kept',
+        seq: 3,
+        kind: 'recording',
+        recordId: 'r1',
+        field: 'title',
+        loser: {
+          deviceId: 'x',
+          hlc: { l: 10, c: 0 },
+          tombstone: false,
+          value: 'old',
+        },
+        winner: {
+          deviceId: 'x',
+          hlc: { l: 20, c: 0 },
+          tombstone: false,
+          value: 'new',
+        },
+        observedMs: 1_000,
+        origin: 'remote',
+      },
+    ],
+    watermarks: {},
+    divergenceFloor: 3,
+    divergenceDroppedEmissions: [1, 2],
+  });
+  await makeEngine('a', 1_000, compacted);
+  assertEqual(compacted.divergenceRows.length, 2);
+  assertEqual(compacted.divergenceRows[1]?.loser.value, 'v1');
+}
+
+
+async function interleavedCompactionKeepsOrdinals(): Promise<void> {
+  // Ordinal set, not a count: 'old' emitted first in the original
+  // session and the floor pruned its row; a LATER loser's entry was
+  // compacted holding ordinal 2. Replay must land 'old' back on
+  // ordinal 1 — still below the floor — not shifted up past the
+  // floor by the retired position.
+  const interleaved = new FakeSyncLogStore({
+    entries: [
+      rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+      rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+    ],
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 2,
+    divergenceDroppedEmissions: [2],
+  });
+  await makeEngine('a', 1_000, interleaved);
+  assertEqual(interleaved.divergenceRows.length, 0);
+  // The mirror: a survivor whose original ordinal sat ABOVE the
+  // retired one still repairs at its own position — 'v1' held 3,
+  // its row was lost, so exactly it is rebuilt.
+  const survivors = new FakeSyncLogStore({
+    entries: [
+      rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+      rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v1', { l: 30, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+    ],
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 2,
+    divergenceDroppedEmissions: [2],
+  });
+  await makeEngine('a', 1_000, survivors);
+  assertEqual(survivors.divergenceRows.length, 1);
+  assertEqual(survivors.divergenceRows[0]?.loser.value, 'v1');
+}
+
+
+async function failedCompactionKeepsLanes(): Promise<void> {
+  // A transient 'sync-div' append failure must leave the in-memory
+  // lanes whole — the durable delete never landed, so nothing may be
+  // dropped; a later apply replans and commits the same drop.
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Old',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'New',
+  });
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok && docB.value.cursor['a'] === 2);
+  // Hold the entry append, then fail the compaction write that
+  // follows it — applyDelta still resolves (divergence writes are
+  // best-effort) but no lane may shrink.
+  a.store.holdNextAppend();
+  const pending = a.engine.applyDelta(
+    JSON.parse(JSON.stringify(docB.value)) as unknown,
+  );
+  for (let i = 0; i < 200 && a.store.pendingAppends === 0; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(a.store.pendingAppends, 1);
+  assert(a.store.settleAppend(ok(undefined)));
+  a.store.failNextAppend(appError('unavailable', 'disk'));
+  const applied = await pending;
+  assert(applied.ok, 'a failed divergence write stays best-effort');
+  const docA2 = await a.engine.exportDelta();
+  assert(docA2.ok);
+  assertDeepEqual(
+    docA2.value.entries.map((entry) => entry.seq),
+    [1, 2],
+  );
+  // The retried apply replans the same drop and commits it — the
+  // retired emission ordinal lands durably with it.
+  const retried = await a.engine.applyDelta(
+    JSON.parse(JSON.stringify(docB.value)) as unknown,
+  );
+  assert(retried.ok);
+  const docA3 = await a.engine.exportDelta();
+  assert(docA3.ok);
+  assertDeepEqual(docA3.value.entries.map((entry) => entry.seq), [2]);
+  assertDeepEqual(a.store.storedDivergenceDroppedEmissions, [1]);
+}
+
+
+async function equalFrontierValuesSkipDivergence(): Promise<void> {
+  // Equal-valued frontier churn isn't a divergence: a newer entry
+  // displacing (or being dominated by) a same-value candidate moves
+  // no materialized value — the rival path already suppresses those
+  // rows, so the frontier insert must match or every equal-value
+  // rewrite logs a phantom loss.
+  const b = await makeEngine('b');
+  await mustApply(
+    b.engine,
+    delta([
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 10, c: 0 }, 'x'),
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 20, c: 0 }, 'x'),
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 5, c: 0 }, 'x'),
+    ]),
+  );
+  assertEqual(b.engine.divergenceHistory().length, 0);
+  const fields = materialized(b.engine, 'playCount', 'r1');
+  assertEqual(fields?.['lastMs'], 100);
+}
+
+
 async function recordIdsAreInjective(): Promise<void> {
   // Separator-bearing components must not alias distinct claims.
   const a = likeRecordId('track', 'a');
@@ -2391,6 +2560,62 @@ async function sumSaturation(): Promise<void> {
   assertEqual(fields?.['count'], Number.MAX_SAFE_INTEGER);
 }
 
+async function logCompaction(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  // seq1 loses the field's lww merge — merge-dead once seq2 lands.
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Old',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'New',
+  });
+  assertEqual(a.store.entries.length, 2);
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  // b's export advertises its contiguous claim {a: 2}; a applying it
+  // learns every observed peer holds a's seqs 1-2.
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  assertEqual(docB.value.cursor['a'], 2);
+  await mustApply(a.engine, docB.value);
+  // The dead loser drops; the merge-live winner stays so a fresh
+  // peer still materializes the same state.
+  const kept = a.store.entries;
+  assertEqual(kept.length, 1);
+  assertEqual(kept[0]?.seq, 2);
+  assertEqual(a.engine.cursor()['a'], 2);
+  // A fresh peer crosses the dropped seq via a skipped hole and
+  // still materializes the winner.
+  const c = await makeEngine('c', 1_000);
+  const docA2 = await a.engine.exportDelta();
+  assert(docA2.ok);
+  assertDeepEqual(
+    docA2.value.entries.map((entry) => entry.seq),
+    [2],
+  );
+  assertDeepEqual(docA2.value.skipped['a'], [1]);
+  await mustApply(c.engine, docA2.value);
+  assertEqual(materialized(c.engine, 'recording', 'r1')?.['title'], 'New');
+  // Hydrating over the compacted log still restores the local seq
+  // counter — the next write must mint seq 3, not reuse 1.
+  const a2 = await makeEngine('a', 1_000, a.store);
+  const wrote = await mustWrite(a2.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'artist',
+    value: 'Someone',
+  });
+  assertEqual(wrote.seq, 3);
+}
+
 export async function run(): Promise<void> {
   await basicWrites();
   await localWriteValidation();
@@ -2435,8 +2660,13 @@ export async function run(): Promise<void> {
   await localFreezeImmunity();
   await exportLimitZero();
   await prunedDivergenceNotResurrected();
+  await compactionKeepsRepairPositions();
   await recordIdsAreInjective();
   await exportedEntriesFrozen();
   await sumSaturation();
+  await logCompaction();
+  await interleavedCompactionKeepsOrdinals();
+  await failedCompactionKeepsLanes();
+  await equalFrontierValuesSkipDivergence();
   await propertyHarness();
 }

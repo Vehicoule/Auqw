@@ -1324,6 +1324,10 @@ export class FakeSyncLogStore implements SyncLogStore {
   #watermarks: Record<string, number> = {};
   /** Cumulative prune frontier — the largest seq ever capped away. */
   #divergenceFloor = 0;
+  /** Cumulative emissions by compaction-dropped entries (max-fold). */
+  #divergenceReplayOffset = 0;
+  /** Emission ordinals compaction retired (union-fold). */
+  #divergenceDroppedEmissions = new Set<number>();
   #failNextAppend: AppError | null = null;
   #deferNextAppend = false;
   #appendDeferreds: Deferred<Result<void>>[] = [];
@@ -1336,6 +1340,10 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#divergence = [...initial.divergence];
       this.#watermarks = { ...initial.watermarks };
       this.#divergenceFloor = initial.divergenceFloor ?? 0;
+      this.#divergenceReplayOffset = initial.divergenceReplayOffset ?? 0;
+      for (const ordinal of initial.divergenceDroppedEmissions ?? []) {
+        this.#divergenceDroppedEmissions.add(ordinal);
+      }
     }
   }
 
@@ -1383,6 +1391,14 @@ export class FakeSyncLogStore implements SyncLogStore {
     return this.#divergenceFloor;
   }
 
+  get storedDivergenceReplayOffset(): number {
+    return this.#divergenceReplayOffset;
+  }
+
+  get storedDivergenceDroppedEmissions(): readonly number[] {
+    return [...this.#divergenceDroppedEmissions].sort((a, b) => a - b);
+  }
+
   load(context: OperationContext): Promise<Result<SyncLogSnapshot>> {
     this.loads.push(context);
     if (context.signal.cancelled) {
@@ -1398,6 +1414,10 @@ export class FakeSyncLogStore implements SyncLogStore {
           divergence: this.#divergence,
           watermarks: this.#watermarks,
           divergenceFloor: this.#divergenceFloor,
+          divergenceReplayOffset: this.#divergenceReplayOffset,
+          divergenceDroppedEmissions: [...this.#divergenceDroppedEmissions].sort(
+            (a, b) => a - b,
+          ),
         }),
       ),
     );
@@ -1444,13 +1464,46 @@ export class FakeSyncLogStore implements SyncLogStore {
       (write.watermarks !== undefined &&
         !isSyncCursor(write.watermarks)) ||
       (write.dropDivergenceBefore !== undefined &&
-        !isSafeNonNegative(write.dropDivergenceBefore))
+        !isSafeNonNegative(write.dropDivergenceBefore)) ||
+      (write.dropEntries !== undefined &&
+        !write.dropEntries.every(
+          (drop) =>
+            typeof drop.deviceId === 'string' &&
+            isSafeNonNegative(drop.seq),
+        )) ||
+      (write.divergenceReplayOffset !== undefined &&
+        !isSafeNonNegative(write.divergenceReplayOffset)) ||
+      (write.divergenceDroppedEmissions !== undefined &&
+        !write.divergenceDroppedEmissions.every(
+          (ordinal) => isSafeNonNegative(ordinal) && ordinal >= 1,
+        ))
     ) {
       return err(
         appError('invalid-response', 'append batch failed validation'),
       );
     }
     this.writes.push({ write: this.#clone(write), context });
+    if (write.dropEntries !== undefined) {
+      const dropped = new Set(
+        write.dropEntries.map(
+          (drop) => `${drop.deviceId}${drop.seq}`,
+        ),
+      );
+      this.#entries = this.#entries.filter(
+        (entry) => !dropped.has(`${entry.deviceId}${entry.seq}`),
+      );
+    }
+    if (write.divergenceReplayOffset !== undefined) {
+      this.#divergenceReplayOffset = Math.max(
+        this.#divergenceReplayOffset,
+        write.divergenceReplayOffset,
+      );
+    }
+    if (write.divergenceDroppedEmissions !== undefined) {
+      for (const ordinal of write.divergenceDroppedEmissions) {
+        this.#divergenceDroppedEmissions.add(ordinal);
+      }
+    }
     if (write.entries !== undefined) {
       this.#entries.push(...this.#clone(write.entries));
     }

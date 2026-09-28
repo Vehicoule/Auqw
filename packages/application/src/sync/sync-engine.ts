@@ -461,6 +461,22 @@ export type SyncLogSnapshot = {
    * every restart).
    */
   readonly divergenceFloor?: number;
+  /**
+   * Legacy count form of `divergenceDroppedEmissions`: logs written
+   * before emission ordinals were tracked carry only how many
+   * emissions compaction dropped, so hydration assumes they held
+   * positions 1..N and seeds the replay cursor past them.
+   */
+  readonly divergenceReplayOffset?: number;
+  /**
+   * Every emission ordinal log compaction has retired, ascending.
+   * Hydration replays the surviving log to repair rows a failed
+   * append lost; each replayed emission must land back on the
+   * ordinal it originally held — skipping the retired ones — or a
+   * surviving loser whose original position sat below
+   * `divergenceFloor` replays above it and resurrects a pruned row.
+   */
+  readonly divergenceDroppedEmissions?: readonly number[];
 };
 
 export type SyncLogWrite = {
@@ -470,6 +486,33 @@ export type SyncLogWrite = {
   readonly watermarks?: Readonly<Record<string, number>>;
   /** Drops stored divergence rows with seq strictly below this floor. */
   readonly dropDivergenceBefore?: number;
+  /**
+   * Log compaction: durable rows to drop, each identified by its
+   * unique (deviceId, seq). The engine emits drops only for entries
+   * that are merge-dead AND at or below every observed peer's
+   * watermark for the emitting device — live candidates and winning
+   * tombstones always stay so a fresh peer still materializes the
+   * same state; the dropped seqs surface as `skipped` holes on later
+   * exports.
+   */
+  readonly dropEntries?: readonly {
+    readonly deviceId: string;
+    readonly seq: number;
+  }[];
+  /**
+   * Superseded by `divergenceDroppedEmissions` — kept so stores
+   * still parse writes an older build appended. The engine no
+   * longer emits it.
+   */
+  readonly divergenceReplayOffset?: number;
+  /**
+   * Rides with `dropEntries`: the emission ordinals the dropped
+   * entries held, union-folded by the store so hydration can map
+   * each replayed emission back onto the ordinal it originally
+   * occupied. A replayed write is idempotent (INSERT OR IGNORE /
+   * set-union); a stale subset merges into the accumulated set.
+   */
+  readonly divergenceDroppedEmissions?: readonly number[];
 };
 
 /**
@@ -957,15 +1000,20 @@ type FieldCell = {
    */
   value: unknown;
   /**
-   * Candidates newer than the record tombstone. A dead entry never
-   * resurfaces (tombstones only advance), so it is dropped on death —
-   * 'live' holds exactly the entries that could still win. For 'lww'
-   * this is always `[winner]`: if the max-stamp entry ever dies, every
-   * smaller-stamped candidate is dead too, so runner-ups cannot
-   * resurface. For 'max' runner-ups must stay: a larger-but-dead
-   * value must not poison the slot — after a tombstone kills it, the
-   * smaller-but-newer write still wins, which is what makes the
-   * max-merge convergent under reorder.
+   * Candidates newer than the record tombstone that could still win —
+   * the per-partition (stamp, value) frontier. A dead entry never
+   * resurfaces (tombstones only advance), and an entry dominated by a
+   * same-partition candidate that BOTH postdates its stamp and
+   * carries at least its value can never resurface either: any
+   * tombstone that spares it spares the dominator too, so the
+   * dominator would always beat it. For 'lww' this is always
+   * `[winner]` — the max-stamp entry dominates every smaller stamp.
+   * For 'max'/'sum' runner-ups stay only while undominated: a
+   * larger-but-dead value must not poison the slot — after a
+   * tombstone kills it, the smaller-but-newer write still wins, which
+   * is what makes the max-merge convergent under reorder. The bound
+   * is what keeps a grow-only 'sum' component at ~one entry per
+   * device instead of retaining every superseded increment.
    */
   live: ChangeEntry[];
 };
@@ -1086,12 +1134,42 @@ function deepFreezeValue(value: unknown): void {
       return;
     }
     seen.add(node);
+    if (Object.isFrozen(node)) {
+      // A frozen subtree is already transitively frozen (cloneFrozen
+      // output) — re-walking it buys nothing.
+      return;
+    }
     for (const child of Object.values(node)) {
       visit(child);
     }
     Object.freeze(node);
   };
   visit(value);
+}
+
+/**
+ * One-pass JSON clone that freezes each node on the way out —
+ * replaces the stringify/parse round-trip plus separate freeze walk
+ * wire entries used to pay for twice. Only valid for JSON-shaped
+ * values (the entry contract guarantees it), and cyclic input throws
+ * by recursion depth just as `JSON.stringify` throws on it.
+ */
+function cloneFrozen(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const copy: unknown[] = new Array(value.length);
+    for (let i = 0; i < value.length; i += 1) {
+      copy[i] = cloneFrozen(value[i]);
+    }
+    return Object.freeze(copy);
+  }
+  const copy: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    copy[key] = cloneFrozen(child);
+  }
+  return Object.freeze(copy);
 }
 
 export async function createSyncEngine(
@@ -1210,14 +1288,46 @@ export async function createSyncEngine(
   // ---- mutable merge state ------------------------------------------------
 
   const records = new Map<string, RecordState>();
-  /** All accepted entries (winners and losers alike), append order. */
-  const changeLog: ChangeEntry[] = [];
+  /**
+   * All accepted entries (winners and losers alike), indexed per
+   * emitting device and sorted by that device's emission seq — the
+   * same ordering `sync_log`'s UNIQUE(device_id, seq) index already
+   * provides durably. The lanes let exportDelta start each device at
+   * the requester's mark with a binary search and merge the heads in
+   * canonical stamp order, instead of filtering+sorting the whole log
+   * per page per peer.
+   */
+  const logByDevice = new Map<string, ChangeEntry[]>();
+  /**
+   * Entries the merge state still references — field-cell `live`
+   * members and record-winning tombstones. Compaction may drop a
+   * logged entry only once it leaves this set AND every observed
+   * peer's watermark passes its seq.
+   */
+  const mergeLive = new Set<ChangeEntry>();
+  /**
+   * Per-device export dry-tail cache: every logged seq `>= from` on
+   * that device proved retention-retired under `floor`. Valid while
+   * the floor hasn't regressed (floors only rise with the clock) and
+   * the lane's tail hasn't grown — indexEntry drops the entry on any
+   * append for the device.
+   */
+  const retiredTail = new Map<string, { from: number; floor: number }>();
+  /**
+   * The last contiguous watermarks each delta sender advertised —
+   * `peerMarks[sender][src]` is the largest seq that peer provably
+   * holds for `src`. Marks only grow, so each apply max-folds.
+   * Compaction drops an entry only when the per-source MINIMUM across
+   * senders passes it: every peer we have heard from already holds it.
+   */
+  const peerMarks = new Map<string, Map<string, number>>();
   const seen = new Set<string>();
   /**
-   * Per-device emission observation: `seenSeqs[d]` holds every seq
-   * observed from device d (including our own); `contiguous[d]` is the
-   * largest seq with no gap below it. Memory is proportional to the
-   * log — same order as `changeLog` itself.
+   * Per-device emission observation: `seenSeqs[d]` holds only
+   * observed seqs still above the contiguous mark (folded seqs are
+   * deleted as the mark passes them, so the set sizes to open relay
+   * holes, not the log); `contiguous[d]` is the largest seq with no
+   * gap below it.
    */
   const seenSeqs = new Map<string, Set<number>>();
   const contiguous = new Map<string, number>();
@@ -1227,31 +1337,53 @@ export async function createSyncEngine(
   const divergenceSeen = new Set<string>();
   let divergenceSeq = 0;
   /**
-   * Hydrate-replay bookkeeping: `replaySeen` + `repairPos` re-derive
-   * the original emit order so positions line up 1:1 with row seqs;
-   * `divergenceFloor` is the store's cumulative prune frontier —
-   * losers with emit positions below it were intentionally capped
-   * away and must not be rebuilt (that would resurrect pruned history
-   * with fresh seqs and churn the retained window on every restart).
+   * Hydrate-replay bookkeeping: `replaySeen` + the emission-ordinal
+   * state below re-derive the original emit order so each replayed
+   * emission lands on the ordinal it originally held; `divergenceFloor`
+   * is the store's cumulative prune frontier — losers whose ordinal
+   * sits below it were intentionally capped away and must not be
+   * rebuilt (that would resurrect pruned history with fresh seqs and
+   * churn the retained window on every restart).
    */
   const replaySeen = new Set<string>();
-  let repairPos = 0;
+  /**
+   * The original emission ordinal each loser entry produced — set
+   * when the row is emitted (live) or replayed (repair), so
+   * compaction can retire exactly the ordinals the entries it drops
+   * held rather than approximating with a count.
+   */
+  const emittedAt = new Map<ChangeEntry, number>();
+  /**
+   * Emission ordinals compaction retired, sorted — hydrated from
+   * the store's accumulated set. `nextEmissionOrdinal` is the next
+   * unclaimed ordinal; `droppedOrdinalCursor` walks the sorted set
+   * so ordinals the dropped entries held are skipped, landing every
+   * replayed emission back on its original position.
+   */
+  const droppedEmissions: number[] = [];
+  let droppedOrdinalCursor = 0;
+  let nextEmissionOrdinal = 1;
   let divergenceFloor = 0;
   let hlc = new HybridClock();
 
   /**
    * Fold one entry's emission seq into the observed set and advance
    * the device's contiguous mark while buffered successors exist.
+   * Seqs the mark passes are deleted as consumed — only seqs still
+   * waiting on a hole stay buffered.
    */
   function foldSeq(source: string, seq: number): void {
+    let mark = contiguous.get(source) ?? 0;
+    if (seq <= mark) {
+      return; // the mark already claims this seq
+    }
     let set = seenSeqs.get(source);
     if (set === undefined) {
       set = new Set<number>();
       seenSeqs.set(source, set);
     }
     set.add(seq);
-    let mark = contiguous.get(source) ?? 0;
-    while (set.has(mark + 1)) {
+    while (set.delete(mark + 1)) {
       mark += 1;
     }
     contiguous.set(source, mark);
@@ -1341,6 +1473,31 @@ export async function createSyncEngine(
     };
   }
 
+  /** Advance the ordinal cursor past ordinals compaction retired. */
+  function skipRetiredOrdinals(): void {
+    while (true) {
+      const retired = droppedEmissions[droppedOrdinalCursor];
+      if (retired === undefined || retired > nextEmissionOrdinal) {
+        return;
+      }
+      nextEmissionOrdinal = retired + 1;
+      droppedOrdinalCursor += 1;
+    }
+  }
+
+  /**
+   * The ordinal this replayed emission originally held: the next
+   * position compaction never retired, so survivors land back on
+   * their own ordinals — never shifted past or below the floor by
+   * an interleaved drop.
+   */
+  function claimEmissionOrdinal(): number {
+    const ordinal = nextEmissionOrdinal;
+    nextEmissionOrdinal += 1;
+    skipRetiredOrdinals();
+    return ordinal;
+  }
+
   /**
    * `emit`:
    * - true — a live merge: every new loser materializes a row.
@@ -1368,21 +1525,22 @@ export async function createSyncEngine(
     }
     if (emit === 'repair') {
       // Replay emits the same distinct-loser sequence the original
-      // merges produced, so each new position equals the row seq the
-      // event would have received. Stored rows still exist (dedupe);
-      // positions below the floor were intentionally pruned —
+      // merges produced, so each claimed ordinal equals the one the
+      // event first received. Stored rows still exist (dedupe);
+      // ordinals below the floor were intentionally pruned —
       // mark them seen so they are never rebuilt; anything missing
       // above the floor is a lost append worth repairing.
       if (replaySeen.has(key)) {
         return;
       }
       replaySeen.add(key);
-      repairPos += 1;
+      const ordinal = claimEmissionOrdinal();
+      emittedAt.set(loser, ordinal);
       if (divergenceSeen.has(key)) {
         return;
       }
       divergenceSeen.add(key);
-      if (repairPos < divergenceFloor) {
+      if (ordinal < divergenceFloor) {
         return;
       }
     } else {
@@ -1390,6 +1548,7 @@ export async function createSyncEngine(
         return;
       }
       divergenceSeen.add(key);
+      emittedAt.set(loser, divergenceSeq + 1);
     }
     divergenceSeq += 1;
     const at = now() ?? loser.hlc.l;
@@ -1525,6 +1684,71 @@ export async function createSyncEngine(
     return compareEntryTs(candidate, rival) > 0;
   }
 
+  /**
+   * Insert into a cell's live frontier — the minimal candidate set
+   * that can still win. A candidate dominates `entry` when it is in
+   * the same merge partition, postdates its stamp, and carries at
+   * least its value: every tombstone that would spare `entry` also
+   * spares the dominator, so a dominated entry could never resurface
+   * and stays out of the set. Symmetrically, an inserted entry prunes
+   * the same-partition members IT now dominates. Both directions
+   * record the dropped member in divergence like any other loser —
+   * the row's dedupe key suppresses repeats. 'sum' partitions by
+   * emitting device (a device's component winner is its own max);
+   * 'max' takes the whole field as one partition.
+   */
+  function liveInsert(
+    live: ChangeEntry[],
+    entry: ChangeEntry,
+    byDevice: boolean,
+    divs: DivergenceEntry[],
+    emit: boolean | 'repair',
+  ): void {
+    const mine = entry.value;
+    for (const cand of live) {
+      if (
+        (byDevice && cand.deviceId !== entry.deviceId) ||
+        compareEntryTs(cand, entry) <= 0 ||
+        typeof cand.value !== 'number' ||
+        typeof mine !== 'number' ||
+        cand.value < mine
+      ) {
+        continue;
+      }
+      // Dominated: dead weight — the dominator's fate bounds this
+      // entry's under any tombstone order. An equal value isn't a
+      // loss worth a row — the frontier only gained a newer stamp
+      // for what it already showed (same rule as the rival path).
+      if (!jsonEquals(cand.value, mine)) {
+        recordDivergence(divs, entry, cand, emit);
+      }
+      return;
+    }
+    live.push(entry);
+    mergeLive.add(entry);
+    for (let i = live.length - 2; i >= 0; i -= 1) {
+      const cand = live[i];
+      if (
+        cand === undefined ||
+        cand === entry ||
+        (byDevice && cand.deviceId !== entry.deviceId) ||
+        typeof cand.value !== 'number' ||
+        typeof mine !== 'number' ||
+        cand.value > mine ||
+        compareEntryTs(cand, entry) > 0
+      ) {
+        continue;
+      }
+      // Pruned but equal-valued: the candidate leaves the frontier
+      // without a row — no value the merge reports actually moved.
+      if (!jsonEquals(cand.value, mine)) {
+        recordDivergence(divs, cand, entry, emit);
+      }
+      mergeLive.delete(cand);
+      live.splice(i, 1);
+    }
+  }
+
   function reduce(
     entry: ChangeEntry,
     emit: boolean | 'repair',
@@ -1553,6 +1777,7 @@ export async function createSyncEngine(
       }
       if (current !== undefined) {
         recordDivergence(divs, current, entry, emit);
+        mergeLive.delete(current);
       }
       // The newer tombstone kills every live candidate stamped at or
       // below it. A killed winner is displaced; a killed runner-up
@@ -1564,6 +1789,7 @@ export async function createSyncEngine(
         for (const candidate of cell.live) {
           if (compareEntryTs(candidate, entry) <= 0) {
             recordDivergence(divs, candidate, entry, emit);
+            mergeLive.delete(candidate);
           } else {
             survivors.push(candidate);
           }
@@ -1586,6 +1812,7 @@ export async function createSyncEngine(
         }
       }
       record.tombstone = entry;
+      mergeLive.add(entry);
       return {
         outcome: { type: 'applied', entry, displaced: killed },
         divergences: divs,
@@ -1619,18 +1846,15 @@ export async function createSyncEngine(
       if (!jsonEquals(entry.value, rival.value)) {
         recordDivergence(divs, entry, rival, emit);
       }
-      // A live loser still joins the candidates for 'max'/'sum' — it
-      // resurfaces if its rival dies to a later tombstone.
+      // A loser still joins the candidate frontier for 'max'/'sum' —
+      // it resurfaces if its rival dies to a later tombstone. Only
+      // undominated losers join (a dominated one is dead weight);
+      // neither winner nor value can move since the rival stays.
       if (
         cell !== undefined &&
         (rule?.merge === 'max' || rule?.merge === 'sum')
       ) {
-        const live = [...cell.live, entry];
-        const winner = pickWinner(rule, live);
-        cell.live = live;
-        cell.winner = winner;
-        cell.value =
-          rule.merge === 'sum' ? sumValue(live) : winner.value;
+        liveInsert(cell.live, entry, rule.merge === 'sum', divs, emit);
       }
       return {
         outcome: { type: 'superseded', entry, winner: rival },
@@ -1647,14 +1871,26 @@ export async function createSyncEngine(
         recordDivergence(divs, rival, entry, emit);
       }
     }
-    const live = [...(cell?.live ?? []), entry];
-    const winner = pickWinner(rule, live);
-    record.fields.set(entry.field, {
-      winner,
-      live:
-        rule === undefined || rule.merge === 'lww' ? [entry] : live,
-      value: rule?.merge === 'sum' ? sumValue(live) : winner.value,
-    });
+    if (rule === undefined || rule.merge === 'lww') {
+      for (const stale of cell?.live ?? []) {
+        mergeLive.delete(stale);
+      }
+      record.fields.set(entry.field, {
+        winner: entry,
+        live: [entry],
+        value: entry.value,
+      });
+      mergeLive.add(entry);
+    } else {
+      const live = cell?.live ?? [];
+      liveInsert(live, entry, rule.merge === 'sum', divs, emit);
+      const winner = pickWinner(rule, live);
+      record.fields.set(entry.field, {
+        winner,
+        live,
+        value: rule.merge === 'sum' ? sumValue(live) : winner.value,
+      });
+    }
     return {
       outcome: { type: 'applied', entry, displaced },
       divergences: divs,
@@ -1662,6 +1898,38 @@ export async function createSyncEngine(
   }
 
   // ---- persistence --------------------------------------------------------
+
+  /**
+   * Add an accepted entry to its device's seq-sorted lane. Emissions
+   * append in order in the common case; a relayed entry arriving
+   * after a later seq of the same device inserts at its sorted
+   * position, so exportDelta can binary-search "above the mark".
+   */
+  function indexEntry(entry: ChangeEntry): void {
+    seen.add(entryKey(entry));
+    retiredTail.delete(entry.deviceId);
+    let list = logByDevice.get(entry.deviceId);
+    if (list === undefined) {
+      list = [];
+      logByDevice.set(entry.deviceId, list);
+    }
+    const last = list[list.length - 1];
+    if (last === undefined || entry.seq > last.seq) {
+      list.push(entry);
+      return;
+    }
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((list[mid]?.seq ?? 0) < entry.seq) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    list.splice(lo, 0, entry);
+  }
 
   async function appendLog(
     entries: readonly ChangeEntry[],
@@ -1683,18 +1951,37 @@ export async function createSyncEngine(
     // append must never advertise entries this device never accepted.
     commitSeqs(entries, skipped);
     for (const entry of entries) {
-      changeLog.push(entry);
-      seen.add(entryKey(entry));
+      indexEntry(entry);
     }
     return ok(undefined);
   }
 
+  /**
+   * What `planCompaction` computed but has not committed: the
+   * merge-dead entries to drop, the shrunken lanes to install, and
+   * the emission ordinals the dropped entries held.
+   */
+  type CompactionPlan = {
+    readonly dropped: readonly ChangeEntry[];
+    readonly lanes: readonly (readonly [string, ChangeEntry[]])[];
+    readonly ordinals: readonly number[];
+  };
+
+  /**
+   * Persist newly-detected divergence rows and prune the history once
+   * it exceeds its bound. A compaction `plan` rides the same durable
+   * write so the log deletes land atomically with the merge's own
+   * writes — the in-memory lanes drop only after the append commits,
+   * so a transient failure leaves the log intact for the next plan.
+   */
   async function appendDivergence(
     rows: readonly DivergenceEntry[],
+    plan: CompactionPlan | undefined,
     signal: CancellationSignal,
     deadlineMs: number,
   ): Promise<void> {
-    if (rows.length === 0) {
+    const drops = plan?.dropped ?? [];
+    if (rows.length === 0 && drops.length === 0) {
       return;
     }
     let dropBefore: number | undefined;
@@ -1709,10 +1996,23 @@ export async function createSyncEngine(
       }
     }
     const write: SyncLogWrite = {
-      divergence: rows,
+      ...(rows.length > 0 ? { divergence: rows } : {}),
       ...(dropBefore === undefined
         ? {}
         : { dropDivergenceBefore: dropBefore }),
+      ...(drops.length > 0
+        ? {
+          dropEntries: drops.map((entry) => ({
+            deviceId: entry.deviceId,
+            seq: entry.seq,
+          })),
+          // The ordinals the dropped entries held — union-folded
+          // durably so hydrate replay can skip retired positions.
+          ...(plan !== undefined && plan.ordinals.length > 0
+            ? { divergenceDroppedEmissions: plan.ordinals }
+            : {}),
+        }
+        : {}),
     };
     const appended = await call(() =>
       store.append(write, context('sync-div', deadlineMs, signal)),
@@ -1720,6 +2020,108 @@ export async function createSyncEngine(
     if (!appended.ok) {
       warn(`sync divergence history append failed: ${appended.error.kind}`);
       return;
+    }
+    if (plan !== undefined) {
+      commitCompaction(plan);
+    }
+  }
+
+  /**
+   * Fold the sender's advertised contiguous watermarks into the peer
+   * table — `peerMarks[sender][src]` becomes the largest seq the
+   * sender provably holds for `src`. Marks only grow, so a max-fold
+   * keeps the newest claim.
+   */
+  function notePeerCursor(sender: string, cursor: SyncCursor): void {
+    let marks = peerMarks.get(sender);
+    if (marks === undefined) {
+      marks = new Map<string, number>();
+      peerMarks.set(sender, marks);
+    }
+    for (const [src, mark] of Object.entries(cursor)) {
+      marks.set(src, Math.max(mark, marks.get(src) ?? 0));
+    }
+  }
+
+  /**
+   * Drop dead log entries every observed peer already holds. An entry
+   * is compactable once the per-source MINIMUM across all advertised
+   * peer watermarks passes its seq AND no merge state references it.
+   * Merge-live candidates and winning tombstones always stay — a
+   * fresh peer needs them to materialize the same state — while the
+   * dropped seqs surface as `skipped` holes on later exports so a
+   * new device's contiguous cursor still crosses the region. The
+   * local device's newest seq is never dropped: hydration rebuilds
+   * `localSeq` from the max stored row, and losing it would reuse a
+   * seq the log's UNIQUE(device_id, seq) would then swallow.
+   */
+  function planCompaction(): CompactionPlan {
+    const dropped: ChangeEntry[] = [];
+    const lanes: [string, ChangeEntry[]][] = [];
+    const ordinals: number[] = [];
+    if (peerMarks.size === 0) {
+      return { dropped, lanes, ordinals };
+    }
+    for (const [dev, list] of logByDevice) {
+      let floor = Infinity;
+      for (const marks of peerMarks.values()) {
+        const mark = marks.get(dev) ?? 0;
+        if (mark < floor) {
+          floor = mark;
+        }
+      }
+      if (floor <= 0) {
+        // A peer that never claimed this device keeps everything.
+        continue;
+      }
+      let boundary = 0;
+      const keptPrefix: ChangeEntry[] = [];
+      for (; boundary < list.length; boundary += 1) {
+        const entry = list[boundary];
+        if (entry === undefined || entry.seq > floor) {
+          break;
+        }
+        if (
+          mergeLive.has(entry) ||
+          (dev === deviceId && entry.seq === localSeq)
+        ) {
+          keptPrefix.push(entry);
+        } else {
+          dropped.push(entry);
+          // The emission ordinal this entry held retires with it —
+          // recorded durably so replay keeps survivors on their
+          // original ordinals instead of sliding them past the
+          // dropped ones.
+          const ordinal = emittedAt.get(entry);
+          if (ordinal !== undefined && !ordinals.includes(ordinal)) {
+            ordinals.push(ordinal);
+          }
+        }
+      }
+      if (keptPrefix.length !== boundary) {
+        lanes.push([dev, [...keptPrefix, ...list.slice(boundary)]]);
+      }
+    }
+    return { dropped, lanes, ordinals };
+  }
+
+  /**
+   * Apply a compaction plan the store has durably committed: shrink
+   * the lanes and release dedupe/ordinal bookkeeping for the dropped
+   * entries. Runs only after `store.append` succeeds — a transient
+   * failure must leave the log whole so a later plan can retry.
+   */
+  function commitCompaction(plan: CompactionPlan): void {
+    for (const [dev, lane] of plan.lanes) {
+      logByDevice.set(dev, lane);
+    }
+    for (const entry of plan.dropped) {
+      // The seq is below our own contiguous mark too, so a
+      // redelivery re-applies harmlessly (it merges dead again
+      // and is re-dropped) — keeping the key would pin dedupe
+      // memory for every compacted entry forever.
+      seen.delete(entryKey(entry));
+      emittedAt.delete(entry);
     }
   }
 
@@ -1861,11 +2263,9 @@ export async function createSyncEngine(
                 // Own the value: the caller keeps its mutable object,
                 // the engine freezes its clone — same ownership rule
                 // as accepted wire entries.
-                value: JSON.parse(
-                  JSON.stringify(
-                    preNormalized ? input.value : sumComponentFor(input),
-                  ),
-                ) as unknown,
+                value: cloneFrozen(
+                  preNormalized ? input.value : sumComponentFor(input),
+                ),
                 tombstone: false,
                 hlc: stamp,
                 deviceId,
@@ -1894,7 +2294,7 @@ export async function createSyncEngine(
         divs.push(...merged.divergences);
         results.push({ entry, outcome: merged.outcome });
       }
-      await appendDivergence(divs, sig, deadlineMs);
+      await appendDivergence(divs, undefined, sig, deadlineMs);
       return ok(results);
     });
     return cancellable(work, sig);
@@ -1954,24 +2354,44 @@ export async function createSyncEngine(
       // cursor can cross the holes (otherwise a permanently-dropped
       // seq stalls every later page forever).
       const retired = new Map<string, number[]>();
-      /** Log seqs above the requester's mark, per device — the
-       * presence set the gap derivation below is checked against. */
-      const present = new Map<string, Set<number>>();
-      const eligible = changeLog
-        .filter((entry) => {
-          // Per-source contiguous seq: entries at or below the
-          // requester's mark are known-observed and never re-ship.
-          const seenUpTo = since?.[entry.deviceId] ?? 0;
-          if (entry.seq > seenUpTo) {
-            let set = present.get(entry.deviceId);
-            if (set === undefined) {
-              set = new Set<number>();
-              present.set(entry.deviceId, set);
-            }
-            set.add(entry.seq);
-          } else {
-            return false;
+      const noteRetired = (dev: string, seq: number): void => {
+        const list = retired.get(dev);
+        if (list === undefined) {
+          retired.set(dev, [seq]);
+        } else {
+          list.push(seq);
+        }
+      };
+      // Per-device lanes sorted by emission seq: each lane starts at
+      // the requester's mark via binary search and the heads merge in
+      // canonical order, so a page reads only the seqs it ships — no
+      // whole-log scan or global sort.
+      type Lane = {
+        readonly dev: string;
+        readonly list: readonly ChangeEntry[];
+        pos: number;
+        head: ChangeEntry | undefined;
+      };
+      const seek = (lane: Lane): void => {
+        const dry = retiredTail.get(lane.dev);
+        const start = lane.pos;
+        while (lane.pos < lane.list.length) {
+          const entry = lane.list[lane.pos];
+          if (entry === undefined) {
+            break;
           }
+          if (
+            dry !== undefined &&
+            dry.floor <= retainedFloor &&
+            entry.seq >= dry.from
+          ) {
+            // The whole remaining tail proved retired under a floor
+            // this request still honors — no rescan.
+            lane.pos = lane.list.length;
+            lane.head = undefined;
+            return;
+          }
+          lane.pos += 1;
           // History is a bounded window (data.md): a play event
           // beyond the retention window would be pruned on the
           // receiver's next write anyway, so it never ships.
@@ -1981,18 +2401,61 @@ export async function createSyncEngine(
             isPlayEvent(entry.value) &&
             entry.value.playedMs < retainedFloor
           ) {
-            const list = retired.get(entry.deviceId);
-            if (list === undefined) {
-              retired.set(entry.deviceId, [entry.seq]);
-            } else {
-              list.push(entry.seq);
-            }
-            return false;
+            noteRetired(lane.dev, entry.seq);
+            continue;
           }
-          return true;
-        })
-        .sort(compareEntryTs);
-      const entries = eligible.slice(0, bound);
+          lane.head = entry;
+          return;
+        }
+        lane.head = undefined;
+        const first = lane.list[start];
+        if (first !== undefined) {
+          retiredTail.set(lane.dev, {
+            from: first.seq,
+            floor: retainedFloor,
+          });
+        }
+      };
+      const lanes: Lane[] = [];
+      for (const [dev, list] of logByDevice) {
+        const mark = since?.[dev] ?? 0;
+        let lo = 0;
+        let hi = list.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if ((list[mid]?.seq ?? 0) <= mark) {
+            lo = mid + 1;
+          } else {
+            hi = mid;
+          }
+        }
+        if (lo < list.length) {
+          const lane: Lane = { dev, list, pos: lo, head: undefined };
+          seek(lane);
+          lanes.push(lane);
+        }
+      }
+      const entries: ChangeEntry[] = [];
+      while (entries.length < bound) {
+        let best: Lane | undefined;
+        let bestHead: ChangeEntry | undefined;
+        for (const lane of lanes) {
+          const head = lane.head;
+          if (
+            head !== undefined &&
+            (bestHead === undefined || compareEntryTs(head, bestHead) < 0)
+          ) {
+            best = lane;
+            bestHead = head;
+          }
+        }
+        if (best === undefined || bestHead === undefined) {
+          break;
+        }
+        entries.push(bestHead);
+        seek(best);
+      }
+      const more = lanes.some((lane) => lane.head !== undefined);
       // Skipped seqs are listed only up to the largest seq this page
       // ships for that device — beyond-page holes are listed by the
       // page that reaches them. If nothing ships for a device its
@@ -2005,7 +2468,7 @@ export async function createSyncEngine(
         }
       }
       const skipped: Record<string, readonly number[]> = {};
-      for (const [dev, bound] of shippedMax) {
+      for (const [dev, shippedBound] of shippedMax) {
         const mark = since?.[dev] ?? 0;
         const listed = new Set<number>();
         // Seq holes this replica already accounts for — skips learned
@@ -2015,8 +2478,29 @@ export async function createSyncEngine(
         // later page re-ships the same entries. Only seqs at or below
         // this replica's contiguous mark may be claimed absent — a
         // hole above it is unknown, not absent.
-        const accounted = Math.min(bound, contiguous.get(dev) ?? 0);
-        const logSeqs = present.get(dev);
+        const accounted = Math.min(shippedBound, contiguous.get(dev) ?? 0);
+        // The lane already holds every present seq in order — walk
+        // only the (mark, accounted] slice instead of a presence set
+        // built over the whole log.
+        const list = logByDevice.get(dev) ?? [];
+        const present = new Set<number>();
+        let lo = 0;
+        let hi = list.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if ((list[mid]?.seq ?? 0) <= mark) {
+            lo = mid + 1;
+          } else {
+            hi = mid;
+          }
+        }
+        for (let i = lo; i < list.length; i += 1) {
+          const seq = list[i]?.seq;
+          if (seq === undefined || seq > accounted) {
+            break;
+          }
+          present.add(seq);
+        }
         // Emit at most the envelope bound: seqs past it are listed by
         // the page whose higher requester mark reaches them.
         for (
@@ -2024,12 +2508,12 @@ export async function createSyncEngine(
           seq <= accounted && listed.size < MAX_DELTA_ENTRIES;
           seq += 1
         ) {
-          if (logSeqs === undefined || !logSeqs.has(seq)) {
+          if (!present.has(seq)) {
             listed.add(seq);
           }
         }
         for (const seq of retired.get(dev) ?? []) {
-          if (seq > mark && seq <= bound) {
+          if (seq > mark && seq <= shippedBound) {
             listed.add(seq);
           }
         }
@@ -2044,7 +2528,7 @@ export async function createSyncEngine(
         senderDeviceId: deviceId,
         cursor: cursorSnapshot(),
         entries,
-        more: eligible.length > entries.length,
+        more,
         skipped,
       };
       return ok(doc);
@@ -2105,9 +2589,9 @@ export async function createSyncEngine(
         // return, so accepted entries are deep-cloned then frozen —
         // the log, winners map, and divergence sides never alias
         // caller-owned objects. Values are JSON-shaped by the
-        // whitelist contract, so a JSON clone is exact.
-        const owned = JSON.parse(JSON.stringify(raw)) as ChangeEntry;
-        deepFreezeValue(owned);
+        // whitelist contract, so a JSON clone is exact; cloneFrozen
+        // folds the freeze walk into the clone pass.
+        const owned = cloneFrozen(raw) as ChangeEntry;
         valid.push(owned);
       });
       // Canonical order: every device that receives the same set of
@@ -2150,7 +2634,13 @@ export async function createSyncEngine(
       } catch (thrown) {
         return err(fromUnknown(thrown));
       }
-      await appendDivergence(divs, sig, deadlineMs);
+      // The sender's cursor is its own contiguous watermark claim —
+      // once every observed peer advertises a seq as held, a dead log
+      // row below the floor can never be needed again and is dropped
+      // from both the in-memory lanes and durable sync_log.
+      notePeerCursor(doc.senderDeviceId, doc.cursor);
+      const compaction = planCompaction();
+      await appendDivergence(divs, compaction, sig, deadlineMs);
       // Attach the post-merge materialized truth per applied record —
       // projecting from entries alone can't see fields that merged in
       // earlier deltas (a delayed tombstone that lost to newer fields
@@ -2300,11 +2790,27 @@ export async function createSyncEngine(
     !isRecord(snapshot.watermarks) ||
     !isSyncCursor(snapshot.watermarks) ||
     (snapshot.divergenceFloor !== undefined &&
-      !isOptSafeNonNegative(snapshot.divergenceFloor))
+      !isOptSafeNonNegative(snapshot.divergenceFloor)) ||
+    (snapshot.divergenceReplayOffset !== undefined &&
+      !isOptSafeNonNegative(snapshot.divergenceReplayOffset)) ||
+    (snapshot.divergenceDroppedEmissions !== undefined &&
+      (!Array.isArray(snapshot.divergenceDroppedEmissions) ||
+        !snapshot.divergenceDroppedEmissions.every(isEmissionSeq)))
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
   divergenceFloor = snapshot.divergenceFloor ?? 0;
+  droppedEmissions.push(
+    ...new Set(snapshot.divergenceDroppedEmissions ?? []),
+  );
+  droppedEmissions.sort((a, b) => a - b);
+  // Compaction dropped entries that already consumed emission
+  // ordinals — replay resumes at each survivor's own position so
+  // ordinals still line up with the stored divergence floor. The
+  // legacy offset carries only a count (logs written before
+  // ordinals were tracked): treat its positions as the first N.
+  nextEmissionOrdinal = (snapshot.divergenceReplayOffset ?? 0) + 1;
+  skipRetiredOrdinals();
   // Stored divergence rows seed the dedupe set BEFORE replay, so
   // 'repair' emit materializes exactly the rows the store is missing.
   for (const row of snapshot.divergence) {
@@ -2318,8 +2824,7 @@ export async function createSyncEngine(
   let highest: HlcStamp | undefined;
   for (const entry of snapshot.entries) {
     deepFreezeValue(entry);
-    changeLog.push(entry);
-    seen.add(entryKey(entry));
+    indexEntry(entry);
     foldSeq(entry.deviceId, entry.seq);
     if (
       entry.deviceId === deviceId &&

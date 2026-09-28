@@ -7,6 +7,7 @@ import {
   open,
   readFile,
   rename,
+  rm,
   truncate,
 } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -66,6 +67,10 @@ const MAX_DEVICE_ID = 128;
  * MAX_SYNC_DOC_BYTES (1 MiB). 20 MiB covers both producers with margin.
  */
 const MAX_LINE_BYTES = 20 * 1_048_576;
+/** Entries/divergence chunk size when a checkpoint rewrites the file. */
+const REWRITE_CHUNK_BYTES = 1_048_576;
+/** Temp sibling a checkpoint materializes before its atomic rename. */
+const REWRITE_SUFFIX = '.rewrite';
 
 export type OpenedSyncLog = {
   readonly store: SyncLogStore;
@@ -103,7 +108,10 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'entries' &&
       key !== 'divergence' &&
       key !== 'watermarks' &&
-      key !== 'dropDivergenceBefore'
+      key !== 'dropDivergenceBefore' &&
+      key !== 'dropEntries' &&
+      key !== 'divergenceReplayOffset' &&
+      key !== 'divergenceDroppedEmissions'
     ) {
       return false;
     }
@@ -137,6 +145,46 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
+  if (
+    value['dropEntries'] !== undefined &&
+    !(
+      Array.isArray(value['dropEntries']) &&
+      value['dropEntries'].every(
+        (drop) =>
+          isRecord(drop) &&
+          typeof drop['deviceId'] === 'string' &&
+          typeof drop['seq'] === 'number' &&
+          Number.isSafeInteger(drop['seq']) &&
+          drop['seq'] >= 0,
+      )
+    )
+  ) {
+    return false;
+  }
+  if (
+    value['divergenceReplayOffset'] !== undefined &&
+    !(
+      typeof value['divergenceReplayOffset'] === 'number' &&
+      Number.isSafeInteger(value['divergenceReplayOffset']) &&
+      value['divergenceReplayOffset'] >= 0
+    )
+  ) {
+    return false;
+  }
+  if (
+    value['divergenceDroppedEmissions'] !== undefined &&
+    !(
+      Array.isArray(value['divergenceDroppedEmissions']) &&
+      value['divergenceDroppedEmissions'].every(
+        (emission) =>
+          typeof emission === 'number' &&
+          Number.isSafeInteger(emission) &&
+          emission >= 1,
+      )
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -159,10 +207,12 @@ type Parsed =
  * honest boundary rather than guessing.
  */
 function parseFile(raw: string): Parsed {
-  const entries: ChangeEntry[] = [];
+  let entries: ChangeEntry[] = [];
   const divergence: DivergenceEntry[] = [];
   const watermarks: Record<string, number> = {};
   let floor = 0;
+  let replayOffset = 0;
+  const droppedEmissions = new Set<number>();
   let offset = 0;
   const lines = raw.split('\n');
   for (let i = 0; i < lines.length; i++) {
@@ -207,6 +257,23 @@ function parseFile(raw: string): Parsed {
     for (const entry of write.entries ?? []) {
       entries.push(entry);
     }
+    if (write.dropEntries !== undefined && write.dropEntries.length > 0) {
+      // Compaction drops apply in write order — a seq dropped here
+      // may legitimately re-append on a later line (a redelivery),
+      // so the fold cannot defer this filter to the end.
+      const dropped = new Set(
+        write.dropEntries.map((drop) => `${drop.deviceId} ${drop.seq}`),
+      );
+      entries = entries.filter(
+        (entry) => !dropped.has(`${entry.deviceId} ${entry.seq}`),
+      );
+    }
+    if (write.divergenceReplayOffset !== undefined) {
+      replayOffset = Math.max(replayOffset, write.divergenceReplayOffset);
+    }
+    for (const emission of write.divergenceDroppedEmissions ?? []) {
+      droppedEmissions.add(emission);
+    }
     if (write.dropDivergenceBefore !== undefined) {
       floor = Math.max(floor, write.dropDivergenceBefore);
     }
@@ -233,6 +300,14 @@ function parseFile(raw: string): Parsed {
       divergence: kept,
       watermarks,
       ...(floor > 0 ? { divergenceFloor: floor } : {}),
+      ...(replayOffset > 0 ? { divergenceReplayOffset: replayOffset } : {}),
+      ...(droppedEmissions.size > 0
+        ? {
+          divergenceDroppedEmissions: [...droppedEmissions].sort(
+            (a, b) => a - b,
+          ),
+        }
+        : {}),
     },
   };
 }
@@ -249,14 +324,133 @@ async function writeHeader(path: string, deviceId: string): Promise<void> {
 }
 
 /**
+ * Serialize a folded snapshot back into commit-order lines — header,
+ * then entries/divergence in chunks sized well under MAX_LINE_BYTES,
+ * then a metadata line carrying watermarks and both cumulative
+ * scalars (`dropDivergenceBefore`, `divergenceReplayOffset`). Fold
+ * order makes this safe: entries concatenate, marks max-fold, the
+ * dropped-emission set union-folds, and the floor applies globally
+ * regardless of which line carries it.
+ */
+function serializeSnapshot(
+  deviceId: string,
+  snapshot: SyncLogSnapshot,
+): string {
+  const lines: string[] = [JSON.stringify({ v: HEADER_VERSION, deviceId })];
+  const chunk = <T>(
+    items: readonly T[],
+    key: 'entries' | 'divergence' | 'divergenceDroppedEmissions',
+  ) => {
+    let pending: T[] = [];
+    let bytes = 0;
+    const flush = () => {
+      if (pending.length > 0) {
+        lines.push(JSON.stringify({ [key]: pending }));
+        pending = [];
+        bytes = 0;
+      }
+    };
+    for (const item of items) {
+      const size = Buffer.byteLength(JSON.stringify(item), 'utf8') + 1;
+      if (bytes + size > REWRITE_CHUNK_BYTES) {
+        flush();
+      }
+      pending.push(item);
+      bytes += size;
+    }
+    flush();
+  };
+  chunk(snapshot.entries, 'entries');
+  chunk(snapshot.divergence, 'divergence');
+  chunk(snapshot.divergenceDroppedEmissions ?? [], 'divergenceDroppedEmissions');
+  lines.push(
+    JSON.stringify({
+      watermarks: snapshot.watermarks,
+      ...(snapshot.divergenceFloor !== undefined &&
+        snapshot.divergenceFloor > 0
+          ? { dropDivergenceBefore: snapshot.divergenceFloor }
+          : {}),
+      ...(snapshot.divergenceReplayOffset !== undefined &&
+        snapshot.divergenceReplayOffset > 0
+          ? { divergenceReplayOffset: snapshot.divergenceReplayOffset }
+          : {}),
+    }),
+  );
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Crash-safe compaction of the file itself: fold the just-appended
+ * log and swap in a rewritten copy holding only live state. Write the
+ * temp sibling, fsync, atomic rename, then best-effort dir fsync. A
+ * crash before the rename leaves the pre-compaction file — correct,
+ * merely uncompacted — and a crash mid-rename is impossible (rename
+ * is atomic); a leftover temp sibling is inert and cleaned on open.
+ */
+async function checkpoint(
+  path: string,
+  deviceId: string,
+): Promise<Result<void>> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch (thrown) {
+    return err(fromUnknown(thrown));
+  }
+  const parsed = parseFile(raw);
+  if (!parsed.ok) {
+    return err(appError('invalid-response', 'sync log failed to refold'));
+  }
+  const body = serializeSnapshot(deviceId, parsed.snapshot);
+  const tmp = `${path}${REWRITE_SUFFIX}`;
+  try {
+    const handle = await open(tmp, 'w');
+    try {
+      await handle.writeFile(body, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, path);
+  } catch (thrown) {
+    return err(fromUnknown(thrown));
+  }
+  try {
+    const dir = await open(dirname(path), 'r');
+    try {
+      await dir.sync();
+    } finally {
+      await dir.close();
+    }
+  } catch {
+    // Directory fsync is best-effort durability — the rename is
+    // already committed and the temp sibling is cleaned on open.
+  }
+  return ok(undefined);
+}
+
+/**
  * The live store: each append serializes one line through a promise
  * chain (the port sees a queue, never interleaved writes), appends,
  * then fsyncs before resolving — a torn tail is the only failure that
  * survives a crash, and `open` repairs it. `load` re-reads the file so
  * a repair in flight is observed by the next reader.
+ *
+ * A write carrying `dropEntries` additionally checkpoints: without a
+ * rewrite the fold would only shrink the in-memory snapshot while the
+ * file — and every reopen's parse — kept growing. The checkpoint runs
+ * inside the same serialized turn, so it always observes this write.
+ *
+ * Serialization is per PATH, not per handle (`pathTails` below): two
+ * stores opened on the same file share one queue, so a checkpoint's
+ * read→rename can't run between another handle's append and its
+ * fsync — every committed line is present in the fold a rename
+ * installs. A second WRITER PROCESS would still need a lockfile;
+ * plain appends already assume single-writer, so checkpoint does too.
  */
-function createStore(path: string): SyncLogStore {
-  let tail: Promise<unknown> = Promise.resolve();
+const pathTails = new Map<string, Promise<unknown>>();
+
+function createStore(path: string, deviceId: string): SyncLogStore {
   return {
     async load(
       _context: OperationContext,
@@ -298,7 +492,8 @@ function createStore(path: string): SyncLogStore {
           ),
         );
       }
-      const run = tail.then(async (): Promise<Result<void>> => {
+      const run = (pathTails.get(path) ?? Promise.resolve()).then(
+        async (): Promise<Result<void>> => {
         // Recheck after acquiring the serialized turn — the engine can
         // resolve 'cancelled' while this append still queued behind a
         // sibling; a cancelled write must never become durable.
@@ -317,13 +512,22 @@ function createStore(path: string): SyncLogStore {
             await handle.close().catch(() => undefined);
           }
         }
+        if (write.dropEntries !== undefined && write.dropEntries.length > 0) {
+          // The append already committed — a checkpoint failure leaves
+          // a correct (uncompacted) file, so report success and let a
+          // later compaction retry the rewrite.
+          await checkpoint(path, deviceId);
+        }
         return ok(undefined);
       });
       // The chain must absorb failures — a rejected tail would make
       // every later append reject too.
-      tail = run.then(
-        () => undefined,
-        () => undefined,
+      pathTails.set(
+        path,
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
       );
       return run;
     },
@@ -353,6 +557,12 @@ export async function openSyncLogStore(
     exists = false;
   }
 
+  // A checkpoint that crashed before rename leaves an inert temp
+  // sibling — remove it so the directory doesn't collect one per crash.
+  await rm(`${path}${REWRITE_SUFFIX}`, { force: true }).catch(
+    () => undefined,
+  );
+
   if (!exists) {
     const deviceId = mintDeviceId();
     try {
@@ -360,7 +570,7 @@ export async function openSyncLogStore(
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    return ok({ store: createStore(path), deviceId, repaired: false });
+    return ok({ store: createStore(path, deviceId), deviceId, repaired: false });
   }
 
   let raw: string;
@@ -372,7 +582,7 @@ export async function openSyncLogStore(
   const parsed = parseFile(raw);
   if (parsed.ok) {
     return ok({
-      store: createStore(path),
+      store: createStore(path, parsed.deviceId),
       deviceId: parsed.deviceId,
       repaired: false,
     });
@@ -388,7 +598,7 @@ export async function openSyncLogStore(
       } catch (thrown) {
         return err(fromUnknown(thrown));
       }
-      return ok({ store: createStore(path), deviceId, repaired: true });
+      return ok({ store: createStore(path, deviceId), deviceId, repaired: true });
     }
   }
   const deviceId = mintDeviceId();
@@ -398,7 +608,7 @@ export async function openSyncLogStore(
   } catch (thrown) {
     return err(fromUnknown(thrown));
   }
-  return ok({ store: createStore(path), deviceId, repaired: true });
+  return ok({ store: createStore(path, deviceId), deviceId, repaired: true });
 }
 
 function headerDeviceId(raw: string): string | null {

@@ -154,11 +154,49 @@ export class SqliteSyncLogStore implements SyncLogStore {
           }
           divergenceFloor = value;
         }
+        const offsetRows = await conn.query<SqlRow>(
+          `SELECT value FROM sync_meta WHERE key = 'divergence_replay_offset'`,
+          undefined,
+          context.signal,
+        );
+        let divergenceReplayOffset = 0;
+        if (offsetRows.length > 0) {
+          const value = offsetRows[0]?.['value'];
+          if (!isSafeInt(value)) {
+            return err(
+              appError(
+                'invalid-response',
+                'stored divergence replay offset failed validation',
+              ),
+            );
+          }
+          divergenceReplayOffset = value;
+        }
+        const droppedRows = await conn.query<SqlRow>(
+          'SELECT emission FROM sync_divergence_dropped ORDER BY emission',
+          undefined,
+          context.signal,
+        );
+        const divergenceDroppedEmissions: number[] = [];
+        for (const row of droppedRows) {
+          const emission = row['emission'];
+          if (!isSafeInt(emission) || emission < 1) {
+            return err(
+              appError(
+                'invalid-response',
+                'stored dropped emission failed validation',
+              ),
+            );
+          }
+          divergenceDroppedEmissions.push(emission);
+        }
         return ok({
           entries,
           divergence,
           watermarks,
           divergenceFloor,
+          divergenceReplayOffset,
+          divergenceDroppedEmissions,
         });
       }, context.signal);
     } catch (thrown) {
@@ -178,7 +216,17 @@ export class SqliteSyncLogStore implements SyncLogStore {
       (write.watermarks !== undefined &&
         !isSyncCursor(write.watermarks)) ||
       (write.dropDivergenceBefore !== undefined &&
-        !isSafeInt(write.dropDivergenceBefore))
+        !isSafeInt(write.dropDivergenceBefore)) ||
+      (write.dropEntries !== undefined &&
+        !write.dropEntries.every(
+          (drop) => typeof drop.deviceId === 'string' && isSafeInt(drop.seq),
+        )) ||
+      (write.divergenceReplayOffset !== undefined &&
+        !isSafeInt(write.divergenceReplayOffset)) ||
+      (write.divergenceDroppedEmissions !== undefined &&
+        !write.divergenceDroppedEmissions.every(
+          (emission) => isSafeInt(emission) && emission >= 1,
+        ))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -207,6 +255,40 @@ export class SqliteSyncLogStore implements SyncLogStore {
               `INSERT OR IGNORE INTO sync_log (device_id, seq, entry_json)
                VALUES (?, ?, ?)`,
               [entry.deviceId, entry.seq, JSON.stringify(entry)],
+              context.signal,
+            );
+          }
+        }
+        if (write.dropEntries !== undefined) {
+          // Log compaction: drop merge-dead rows every observed peer
+          // already holds, keyed by the table's UNIQUE(device_id, seq).
+          for (const drop of write.dropEntries) {
+            await conn.execute(
+              'DELETE FROM sync_log WHERE device_id = ? AND seq = ?',
+              [drop.deviceId, drop.seq],
+              context.signal,
+            );
+          }
+        }
+        if (write.divergenceReplayOffset !== undefined) {
+          // Cumulative emissions by compacted entries — MAX-folded so
+          // a replayed write is idempotent.
+          await conn.execute(
+            `INSERT INTO sync_meta (key, value)
+             VALUES ('divergence_replay_offset', ?)
+             ON CONFLICT (key) DO UPDATE SET value = MAX(value, excluded.value)`,
+            [write.divergenceReplayOffset],
+            context.signal,
+          );
+        }
+        if (write.divergenceDroppedEmissions !== undefined) {
+          // Emission ordinals the just-dropped entries held —
+          // INSERT OR IGNORE makes a replayed write idempotent.
+          for (const emission of write.divergenceDroppedEmissions) {
+            await conn.execute(
+              `INSERT OR IGNORE INTO sync_divergence_dropped (emission)
+               VALUES (?)`,
+              [emission],
               context.signal,
             );
           }
