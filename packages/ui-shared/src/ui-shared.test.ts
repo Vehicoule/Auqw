@@ -4,9 +4,11 @@
 // prove the package resolves cleanly for a plain node consumer: the
 // mappers import nothing react-native and fixtures stay coherent.
 import {
+  createSerializedWrite,
   formatAgo,
   getLocale,
   languageOptionKey,
+  overlayReducer,
   resolveLocale,
   setLocale,
   settingsGroups,
@@ -16,7 +18,8 @@ import {
   toSettingsModel,
   toSyncPanel,
 } from './index.ts';
-import type { Locale, MessageId } from './index.ts';
+import type { Locale, MessageId, OverlayEntry } from './index.ts';
+import type { Result } from '@auqw/application';
 import {
   shimmerHighlight,
   staggerProgress,
@@ -496,6 +499,146 @@ assert(
     single.every((p) => p === 0.5),
     'a lone peak broadcasts across the row',
   );
+}
+
+// overlayReducer: push/reset/close/dismiss/clear transitions on the
+// overlay screen stack — the shell behavior behind useOverlayStack.
+{
+  type Route = { readonly name: string };
+  const route = (name: string): Route => ({ name });
+  let stack: readonly OverlayEntry<Route>[] = [];
+  stack = overlayReducer(stack, {
+    type: 'push',
+    key: 'ov-1',
+    overlay: route('a'),
+  });
+  stack = overlayReducer(stack, {
+    type: 'push',
+    key: 'ov-2',
+    overlay: route('b'),
+  });
+  stack = overlayReducer(stack, {
+    type: 'push',
+    key: 'ov-3',
+    overlay: route('c'),
+  });
+  assertEqual(stack.length, 3, 'push appends in order');
+  assertEqual(stack[2]?.overlay.name, 'c', 'the last push sits on top');
+
+  // dismiss removes the entry and every screen pushed above it.
+  stack = overlayReducer(stack, { type: 'dismiss', key: 'ov-2' });
+  assertEqual(stack.length, 1, 'dismiss drops the entry and its above');
+  assertEqual(stack[0]?.key, 'ov-1', 'only deeper routes survive');
+  // A stale key is a no-op — same stack reference, nothing sliced.
+  const stale = overlayReducer(stack, { type: 'dismiss', key: 'ov-9' });
+  assert(stale === stack, 'dismissing an unknown key returns the stack');
+
+  stack = overlayReducer(stack, {
+    type: 'push',
+    key: 'ov-4',
+    overlay: route('d'),
+  });
+  stack = overlayReducer(stack, { type: 'close' });
+  assertEqual(stack.length, 1, 'close pops the top route');
+  assertEqual(stack[0]?.key, 'ov-1');
+
+  stack = overlayReducer(stack, {
+    type: 'push',
+    key: 'ov-5',
+    overlay: route('e'),
+  });
+  stack = overlayReducer(stack, {
+    type: 'reset',
+    key: 'ov-6',
+    overlay: route('f'),
+  });
+  assertEqual(stack.length, 1, 'reset replaces the whole stack');
+  assertEqual(stack[0]?.key, 'ov-6');
+
+  stack = overlayReducer(stack, { type: 'clear' });
+  assertEqual(stack.length, 0, 'clear empties the stack');
+}
+
+// createSerializedWrite — the queueSettingsWrite core: submissions
+// land in order, each merging its patch onto the committed base at
+// execution time; a failure neither commits nor wedges the chain.
+{
+  type Shape = { readonly a: number; readonly b: number };
+  let committed: Shape | null = { a: 1, b: 0 };
+  let live: Shape = { a: 0, b: 0 };
+  const written: Shape[] = [];
+  const gates: Array<() => void> = [];
+  let nextResult: Result<unknown> = { ok: true, value: null };
+  const submit = createSerializedWrite<Shape>(
+    (next) => {
+      written.push(next);
+      return new Promise<Result<unknown>>((resolve) => {
+        gates.push(() => resolve(nextResult));
+      });
+    },
+    () => committed,
+    () => live,
+    (next) => {
+      live = next;
+    },
+  );
+  const flush = () => Promise.resolve();
+
+  const first = submit({ a: 10 });
+  const second = submit({ b: 20 });
+  await flush();
+  assertEqual(
+    gates.length,
+    1,
+    'a second write queues behind an unsettled first',
+  );
+  committed = { a: 10, b: 0 }; // the snapshot the first write lands
+  gates[0]?.();
+  await first;
+  await flush();
+  assertEqual(written.length, 2, 'the queued write runs once unblocked');
+  assert(
+    written[1]?.a === 10 && written[1]?.b === 20,
+    'a queued write merges onto the base committed at execution time',
+  );
+  gates[1]?.();
+  await second;
+  const landed = live;
+  assert(
+    landed.a === 10 && landed.b === 20,
+    'live tracks committed writes',
+  );
+
+  // readCommitted === null → the merge base falls back to the live
+  // value; a function patch reads that base at execution time.
+  committed = null;
+  const third = submit((latest) => ({ a: latest.a + 5 }));
+  await flush();
+  assert(
+    written[2]?.a === 15 && written[2]?.b === 20,
+    'a function patch reads the live fallback base',
+  );
+  gates[2]?.();
+  await third;
+
+  // A failed write skips the live update but leaves the chain usable.
+  nextResult = {
+    ok: false,
+    error: { kind: 'transient', message: 'x', retryable: true },
+  };
+  const before = live;
+  const failed = submit({ a: 99 });
+  await flush();
+  gates[3]?.();
+  const failedResult = await failed;
+  assert(!failedResult.ok, 'the failure surfaces to the caller');
+  assert(live === before, 'a failed write leaves the live value alone');
+  nextResult = { ok: true, value: null };
+  const after = submit({ a: 30 });
+  await flush();
+  gates[4]?.();
+  await after;
+  assert(live.a === 30, 'the chain still lands writes after a failure');
 }
 
 console.log('ui-shared tests passed');

@@ -408,6 +408,10 @@ export function useSmoothedPosition(
   return smoothMs;
 }
 
+export type SerializedWrite<T extends object> = (
+  patch: Partial<T> | ((latest: T) => Partial<T>),
+) => Promise<Result<unknown>>;
+
 /**
  * Serialized write chain: every write lands in submission order, and
  * each MERGES ITS PATCH onto the latest committed base at execution
@@ -415,21 +419,52 @@ export function useSmoothedPosition(
  * captured at call time would revert whatever landed in between.
  * `readCommitted` — not React state — supplies the merge base, so
  * writes that never entered the chain (a boot repair, a sync-applied
- * change) are covered; `live` is the last externally observed value,
- * the fallback when `readCommitted` has nothing yet (a not-ready
- * snapshot) and updated again on each committed write.
+ * change) are covered; `readLive` is the last externally observed
+ * value, the fallback when `readCommitted` has nothing yet (a
+ * not-ready snapshot), and `commitLive` records each committed write.
  * A function patch reads the committed base at execution time —
  * the only safe shape for read-modify-write toggles: two quick
  * taps must flip twice, not write the same inverse twice.
+ * The chain survives a failed write — the next submission still runs.
+ */
+export function createSerializedWrite<T extends object>(
+  write: (next: T) => Promise<Result<unknown>>,
+  readCommitted: () => T | null,
+  readLive: () => T,
+  commitLive: (next: T) => void,
+): SerializedWrite<T> {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (patch) => {
+    const run = chain.then(() => {
+      const base = readCommitted() ?? readLive();
+      const next = {
+        ...base,
+        ...(typeof patch === 'function' ? patch(base) : patch),
+      };
+      return write(next).then((result) => {
+        if (result.ok) {
+          commitLive(next);
+        }
+        return result;
+      });
+    });
+    chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
+
+/**
+ * The shell-facing hook: owns the live-value cell and binds the chain
+ * to the caller's latest write/readCommitted callbacks.
  */
 export function useSerializedWrite<T extends object>(
   write: (next: T) => Promise<Result<unknown>>,
   readCommitted: () => T | null,
   live: T,
-): (
-  patch: Partial<T> | ((latest: T) => Partial<T>),
-) => Promise<Result<unknown>> {
-  const chain = useRef<Promise<unknown>>(Promise.resolve());
+): SerializedWrite<T> {
   const latestRef = useRef(live);
   const io = useRef({ write, readCommitted });
   useEffect(() => {
@@ -438,29 +473,17 @@ export function useSerializedWrite<T extends object>(
   useEffect(() => {
     latestRef.current = live;
   }, [live]);
-  return useCallback(
-    (patch: Partial<T> | ((latest: T) => Partial<T>)) => {
-      const run = chain.current.then(() => {
-        const base = io.current.readCommitted() ?? latestRef.current;
-        const next = {
-          ...base,
-          ...(typeof patch === 'function' ? patch(base) : patch),
-        };
-        return io.current.write(next).then((result) => {
-          if (result.ok) {
-            latestRef.current = next;
-          }
-          return result;
-        });
-      });
-      chain.current = run.then(
-        () => undefined,
-        () => undefined,
-      );
-      return run;
-    },
-    [],
+  const [submit] = useState(() =>
+    createSerializedWrite<T>(
+      (next) => io.current.write(next),
+      () => io.current.readCommitted(),
+      () => latestRef.current,
+      (next) => {
+        latestRef.current = next;
+      },
+    ),
   );
+  return submit;
 }
 
 export type OverlayStack<O> = {
@@ -473,6 +496,39 @@ export type OverlayStack<O> = {
   readonly clear: () => void;
 };
 
+export type OverlayCommand<O> =
+  | { readonly type: 'push'; readonly key: string; readonly overlay: O }
+  | { readonly type: 'reset'; readonly key: string; readonly overlay: O }
+  | { readonly type: 'close' }
+  | { readonly type: 'dismiss'; readonly key: string }
+  | { readonly type: 'clear' };
+
+/**
+ * The overlay screen-stack reducer: `push`/`reset` carry a key minted
+ * by the caller (call order survives React batching), `close` pops
+ * the top route — every screen's own back affordance — and `dismiss`
+ * removes a screen and all above it (a no-op on a stale key).
+ */
+export function overlayReducer<O>(
+  stack: readonly OverlayEntry<O>[],
+  command: OverlayCommand<O>,
+): readonly OverlayEntry<O>[] {
+  switch (command.type) {
+    case 'push':
+      return [...stack, { key: command.key, overlay: command.overlay }];
+    case 'reset':
+      return [{ key: command.key, overlay: command.overlay }];
+    case 'close':
+      return stack.slice(0, -1);
+    case 'dismiss': {
+      const index = stack.findIndex((entry) => entry.key === command.key);
+      return index === -1 ? stack : stack.slice(0, index);
+    }
+    case 'clear':
+      return [];
+  }
+}
+
 /**
  * Library-world overlay stack: pushed routes — collection list,
  * playlist editor, provider entity page — rendered as push screens
@@ -484,30 +540,31 @@ export type OverlayStack<O> = {
 export function useOverlayStack<O>(): OverlayStack<O> {
   const [stack, setStack] = useState<readonly OverlayEntry<O>[]>([]);
   const counter = useRef(0);
+  const nextKey = () => `ov-${(counter.current += 1)}`;
   const push = useCallback((next: O) => {
-    counter.current += 1;
-    setStack((stack) => [
-      ...stack,
-      { key: `ov-${counter.current}`, overlay: next },
-    ]);
+    setStack((stack) =>
+      overlayReducer(stack, { type: 'push', key: nextKey(), overlay: next }),
+    );
   }, []);
   const reset = useCallback((next: O) => {
-    counter.current += 1;
-    setStack([{ key: `ov-${counter.current}`, overlay: next }]);
+    setStack((stack) =>
+      overlayReducer(stack, {
+        type: 'reset',
+        key: nextKey(),
+        overlay: next,
+      }),
+    );
   }, []);
   /** Pop the top route — every screen's own back affordance. */
   const close = useCallback(() => {
-    setStack((stack) => stack.slice(0, -1));
+    setStack((stack) => overlayReducer(stack, { type: 'close' }));
   }, []);
   /** Screen-stack dismissal removes a screen and all above it. */
   const dismiss = useCallback((key: string) => {
-    setStack((stack) => {
-      const index = stack.findIndex((entry) => entry.key === key);
-      return index === -1 ? stack : stack.slice(0, index);
-    });
+    setStack((stack) => overlayReducer(stack, { type: 'dismiss', key }));
   }, []);
   const clear = useCallback(() => {
-    setStack([]);
+    setStack((stack) => overlayReducer(stack, { type: 'clear' }));
   }, []);
   const top = stack[stack.length - 1]?.overlay ?? null;
   return { stack, top, push, reset, close, dismiss, clear };
