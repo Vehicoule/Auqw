@@ -173,7 +173,7 @@ export async function run(): Promise<void> {
     }
   }
 
-  // —— A compaction write parses and drops entries on reopen ——
+  // —— A compaction write parses, drops entries, and shrinks the file ——
   {
     const dir = await freshDir();
     const path = join(dir, 'sync-log.jsonl');
@@ -193,12 +193,18 @@ export async function run(): Promise<void> {
       const appended = await opened.value.store.append(write, ctx());
       assert(appended.ok);
     }
+    // The drop rewrite must physically remove the line — the file is
+    // the durable log, not just the snapshot.
+    const raw = await readFile(path, 'utf8');
+    assert(raw.includes('"pl-1"'), 'kept entry survived rewrite');
+    assert(!raw.includes('"pl-2"'), 'dropped entry line is gone');
     const reopened = await openSyncLogStore(path);
     assert(reopened.ok);
     if (!reopened.ok) {
       return;
     }
     assertEqual(reopened.value.repaired, false);
+    assertEqual(reopened.value.deviceId, opened.value.deviceId);
     const loaded = await reopened.value.store.load(ctx());
     assert(loaded.ok);
     if (loaded.ok) {

@@ -7,6 +7,7 @@ import {
   open,
   readFile,
   rename,
+  rm,
   truncate,
 } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -66,6 +67,10 @@ const MAX_DEVICE_ID = 128;
  * MAX_SYNC_DOC_BYTES (1 MiB). 20 MiB covers both producers with margin.
  */
 const MAX_LINE_BYTES = 20 * 1_048_576;
+/** Entries/divergence chunk size when a checkpoint rewrites the file. */
+const REWRITE_CHUNK_BYTES = 1_048_576;
+/** Temp sibling a checkpoint materializes before its atomic rename. */
+const REWRITE_SUFFIX = '.rewrite';
 
 export type OpenedSyncLog = {
   readonly store: SyncLogStore;
@@ -293,13 +298,119 @@ async function writeHeader(path: string, deviceId: string): Promise<void> {
 }
 
 /**
+ * Serialize a folded snapshot back into commit-order lines — header,
+ * then entries/divergence in chunks sized well under MAX_LINE_BYTES,
+ * then a metadata line carrying watermarks and both cumulative
+ * scalars (`dropDivergenceBefore`, `divergenceReplayOffset`). Fold
+ * order makes this safe: entries concatenate, marks max-fold, and the
+ * floor applies globally regardless of which line carries it.
+ */
+function serializeSnapshot(
+  deviceId: string,
+  snapshot: SyncLogSnapshot,
+): string {
+  const lines: string[] = [JSON.stringify({ v: HEADER_VERSION, deviceId })];
+  const chunk = <T>(items: readonly T[], key: 'entries' | 'divergence') => {
+    let pending: T[] = [];
+    let bytes = 0;
+    const flush = () => {
+      if (pending.length > 0) {
+        lines.push(JSON.stringify({ [key]: pending }));
+        pending = [];
+        bytes = 0;
+      }
+    };
+    for (const item of items) {
+      const size = Buffer.byteLength(JSON.stringify(item), 'utf8') + 1;
+      if (bytes + size > REWRITE_CHUNK_BYTES) {
+        flush();
+      }
+      pending.push(item);
+      bytes += size;
+    }
+    flush();
+  };
+  chunk(snapshot.entries, 'entries');
+  chunk(snapshot.divergence, 'divergence');
+  lines.push(
+    JSON.stringify({
+      watermarks: snapshot.watermarks,
+      ...(snapshot.divergenceFloor !== undefined &&
+        snapshot.divergenceFloor > 0
+          ? { dropDivergenceBefore: snapshot.divergenceFloor }
+          : {}),
+      ...(snapshot.divergenceReplayOffset !== undefined &&
+        snapshot.divergenceReplayOffset > 0
+          ? { divergenceReplayOffset: snapshot.divergenceReplayOffset }
+          : {}),
+    }),
+  );
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Crash-safe compaction of the file itself: fold the just-appended
+ * log and swap in a rewritten copy holding only live state. Write the
+ * temp sibling, fsync, atomic rename, then best-effort dir fsync. A
+ * crash before the rename leaves the pre-compaction file — correct,
+ * merely uncompacted — and a crash mid-rename is impossible (rename
+ * is atomic); a leftover temp sibling is inert and cleaned on open.
+ */
+async function checkpoint(
+  path: string,
+  deviceId: string,
+): Promise<Result<void>> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch (thrown) {
+    return err(fromUnknown(thrown));
+  }
+  const parsed = parseFile(raw);
+  if (!parsed.ok) {
+    return err(appError('invalid-response', 'sync log failed to refold'));
+  }
+  const body = serializeSnapshot(deviceId, parsed.snapshot);
+  const tmp = `${path}${REWRITE_SUFFIX}`;
+  try {
+    const handle = await open(tmp, 'w');
+    try {
+      await handle.writeFile(body, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, path);
+  } catch (thrown) {
+    return err(fromUnknown(thrown));
+  }
+  try {
+    const dir = await open(dirname(path), 'r');
+    try {
+      await dir.sync();
+    } finally {
+      await dir.close();
+    }
+  } catch {
+    // Directory fsync is best-effort durability — the rename is
+    // already committed and the temp sibling is cleaned on open.
+  }
+  return ok(undefined);
+}
+
+/**
  * The live store: each append serializes one line through a promise
  * chain (the port sees a queue, never interleaved writes), appends,
  * then fsyncs before resolving — a torn tail is the only failure that
  * survives a crash, and `open` repairs it. `load` re-reads the file so
  * a repair in flight is observed by the next reader.
+ *
+ * A write carrying `dropEntries` additionally checkpoints: without a
+ * rewrite the fold would only shrink the in-memory snapshot while the
+ * file — and every reopen's parse — kept growing. The checkpoint runs
+ * inside the same serialized turn, so it always observes this write.
  */
-function createStore(path: string): SyncLogStore {
+function createStore(path: string, deviceId: string): SyncLogStore {
   let tail: Promise<unknown> = Promise.resolve();
   return {
     async load(
@@ -361,6 +472,12 @@ function createStore(path: string): SyncLogStore {
             await handle.close().catch(() => undefined);
           }
         }
+        if (write.dropEntries !== undefined && write.dropEntries.length > 0) {
+          // The append already committed — a checkpoint failure leaves
+          // a correct (uncompacted) file, so report success and let a
+          // later compaction retry the rewrite.
+          await checkpoint(path, deviceId);
+        }
         return ok(undefined);
       });
       // The chain must absorb failures — a rejected tail would make
@@ -397,6 +514,12 @@ export async function openSyncLogStore(
     exists = false;
   }
 
+  // A checkpoint that crashed before rename leaves an inert temp
+  // sibling — remove it so the directory doesn't collect one per crash.
+  await rm(`${path}${REWRITE_SUFFIX}`, { force: true }).catch(
+    () => undefined,
+  );
+
   if (!exists) {
     const deviceId = mintDeviceId();
     try {
@@ -404,7 +527,7 @@ export async function openSyncLogStore(
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    return ok({ store: createStore(path), deviceId, repaired: false });
+    return ok({ store: createStore(path, deviceId), deviceId, repaired: false });
   }
 
   let raw: string;
@@ -416,7 +539,7 @@ export async function openSyncLogStore(
   const parsed = parseFile(raw);
   if (parsed.ok) {
     return ok({
-      store: createStore(path),
+      store: createStore(path, parsed.deviceId),
       deviceId: parsed.deviceId,
       repaired: false,
     });
@@ -432,7 +555,7 @@ export async function openSyncLogStore(
       } catch (thrown) {
         return err(fromUnknown(thrown));
       }
-      return ok({ store: createStore(path), deviceId, repaired: true });
+      return ok({ store: createStore(path, deviceId), deviceId, repaired: true });
     }
   }
   const deviceId = mintDeviceId();
@@ -442,7 +565,7 @@ export async function openSyncLogStore(
   } catch (thrown) {
     return err(fromUnknown(thrown));
   }
-  return ok({ store: createStore(path), deviceId, repaired: true });
+  return ok({ store: createStore(path, deviceId), deviceId, repaired: true });
 }
 
 function headerDeviceId(raw: string): string | null {
