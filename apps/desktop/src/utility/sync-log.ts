@@ -409,9 +409,17 @@ async function checkpoint(
  * rewrite the fold would only shrink the in-memory snapshot while the
  * file — and every reopen's parse — kept growing. The checkpoint runs
  * inside the same serialized turn, so it always observes this write.
+ *
+ * Serialization is per PATH, not per handle (`pathTails` below): two
+ * stores opened on the same file share one queue, so a checkpoint's
+ * read→rename can't run between another handle's append and its
+ * fsync — every committed line is present in the fold a rename
+ * installs. A second WRITER PROCESS would still need a lockfile;
+ * plain appends already assume single-writer, so checkpoint does too.
  */
+const pathTails = new Map<string, Promise<unknown>>();
+
 function createStore(path: string, deviceId: string): SyncLogStore {
-  let tail: Promise<unknown> = Promise.resolve();
   return {
     async load(
       _context: OperationContext,
@@ -453,7 +461,8 @@ function createStore(path: string, deviceId: string): SyncLogStore {
           ),
         );
       }
-      const run = tail.then(async (): Promise<Result<void>> => {
+      const run = (pathTails.get(path) ?? Promise.resolve()).then(
+        async (): Promise<Result<void>> => {
         // Recheck after acquiring the serialized turn — the engine can
         // resolve 'cancelled' while this append still queued behind a
         // sibling; a cancelled write must never become durable.
@@ -482,9 +491,12 @@ function createStore(path: string, deviceId: string): SyncLogStore {
       });
       // The chain must absorb failures — a rejected tail would make
       // every later append reject too.
-      tail = run.then(
-        () => undefined,
-        () => undefined,
+      pathTails.set(
+        path,
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
       );
       return run;
     },
