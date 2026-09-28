@@ -589,7 +589,15 @@ export class RadioCoordinator {
       this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
       const seeded = await this.#startRadio(ref);
       if (!seeded.ok) {
-        this.#host.logWarn(`auto radio seed failed: ${seeded.error.kind}`);
+        const kind = seeded.error.kind;
+        // superseded/cancelled are routine churn — the arm was
+        // replaced or the serial cancelled mid-flight; the state
+        // already reflects it, so a warn would be noise. Genuine
+        // failures stay logged: an auto-seed is speculative, never
+        // user-visible.
+        if (kind !== 'superseded' && kind !== 'cancelled') {
+          this.#host.logWarn(`auto radio seed failed: ${kind}`);
+        }
       }
       return seeded;
     });
