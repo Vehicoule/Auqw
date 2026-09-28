@@ -213,6 +213,27 @@ export async function run(): Promise<void> {
         0,
         'a cancelled mid-drag commits nothing — the fill snaps back',
       );
+      // The dead pointer's phase must not outlive the disable — a
+      // re-enabled control takes keyboard commits again.
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 10_000,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      await act(async () => {
+        slide(input, 45_000);
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'keyboard input seeks again after re-enable',
+      );
+      assertEqual(seeks[0], 45_000, 'the keyboard commit lands');
       await act(async () => {
         root.unmount();
       });

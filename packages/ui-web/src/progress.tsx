@@ -223,13 +223,18 @@ function useScrubCommit(
     [],
   );
   // A disable landing mid-drag abandons the gesture (pointerup will
-  // never arrive on a disabled input) — restore the real fill.
+  // never arrive on a disabled input) — restore the real fill. The
+  // dead phase can't outlive the disable itself: once the control
+  // re-enables, the pointer's old drag session is gone and keyboard
+  // input must commit again.
   useEffect(() => {
     if (!enabled && pointerPhase.current === 'drag') {
       pointerPhase.current = 'abandoned';
       scrubRef.current = null;
       gestureKey.current = undefined;
       setScrubMs(null);
+    } else if (enabled && pointerPhase.current === 'abandoned') {
+      pointerPhase.current = 'none';
     }
   }, [enabled]);
   // The hold belongs to the track it was committed on — a track
