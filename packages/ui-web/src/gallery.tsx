@@ -75,10 +75,11 @@ import {
   fixtureTransferModelDone,
   fixtureTransferModelError,
   fixtureTransferModelPreview,
+  fixtureWaveformPeaks,
 } from '@auqw/ui-shared/fixtures';
 import type { PlayerModel } from '@auqw/ui-shared';
 
-function noop() {}
+function noop() { }
 
 function Chip({
   label,
@@ -283,6 +284,7 @@ export function GalleryScreen() {
               row={row}
               onPress={noop}
               onToggleLike={noop}
+              onAddToPlaylist={noop}
               onContext={noop}
             />
           ))}
@@ -319,7 +321,12 @@ export function GalleryScreen() {
             <Artwork url={null} size={40} monogram="TC" />
           </div>
           <LinearScrubber positionMs={61_000} durationMs={180_000} onSeek={noop} />
-          <WaveformSeek positionMs={90_000} durationMs={180_000} onSeek={noop} />
+          <WaveformSeek
+            positionMs={90_000}
+            durationMs={180_000}
+            onSeek={noop}
+            peaks={fixtureWaveformPeaks}
+          />
         </Section>
 
         <Section title="states" note="loading · empty · error · unavailable">

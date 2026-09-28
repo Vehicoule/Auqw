@@ -171,9 +171,30 @@ export type AuqwExpoPlayerLike = {
   ): AuqwExpoSubscription;
 };
 
+/** The waveform-peaks extractor surface — Android only; the methods
+ *  are absent on iOS so adapters gate on their presence. */
+export type AuqwPeaksNative = {
+  /**
+   * Decode the stream's own bytes into raw per-window RMS magnitudes —
+   * resolves with `count` flat `[up, down]` pairs (the `PeakWindow`
+   * shape before JS-side normalization). Rejects with coded errors in
+   * the application taxonomy (`unavailable`/`released`/
+   * `budget-exceeded`/`not-applicable`/`invalid-response`/`cancelled`).
+   */
+  waveformPeaks?(
+    requestId: string,
+    handle: string,
+    count: number,
+    maxBytes: number,
+    provisionalCap: boolean,
+  ): Promise<readonly number[]>;
+  waveformPeaksCancel?(requestId: string): void;
+};
+
 /** The whole module: host + player + lifecycle. */
 export type AuqwExpoLike = AuqwExpoHostLike &
-  AuqwExpoPlayerLike & {
+  AuqwExpoPlayerLike &
+  AuqwPeaksNative & {
     createHost(config: AuqwExpoHostConfig): Promise<void>;
     setAuthToken(token: string | null): void;
     /**

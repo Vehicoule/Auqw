@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   BackHandler,
+  Clipboard,
   Linking,
   Platform,
   StyleSheet,
@@ -32,12 +33,18 @@ import {
   CancellationSource,
   ProviderRouter,
   SearchSession,
+  appError,
+  collectSyncDeltaDocs,
   effectiveMapping,
+  err,
+  exportFittedDeltaDoc,
   formatEndpoint,
   isMatchGate,
   isRefRejected,
+  parseSyncDeltaDocs,
   previewImport,
   selectionFromSettings,
+  serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
   AppError,
@@ -135,6 +142,9 @@ import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { activateHomeCard } from './src/session/home-card.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
+import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
+import { useWaveformPeaks } from './src/adapters/use-waveform-peaks.ts';
+import type { PeaksTarget } from './src/adapters/use-waveform-peaks.ts';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
@@ -1191,8 +1201,17 @@ function Main({
     readonly busy: boolean;
     readonly code: string | null;
     readonly payload: string | null;
+    /** Primary `host:port` the offer advertises — typed-join display. */
+    readonly endpoint: string | null;
     readonly expiresAt: number | null;
-  }>({ active: false, busy: false, code: null, payload: null, expiresAt: null });
+  }>({
+    active: false,
+    busy: false,
+    code: null,
+    payload: null,
+    endpoint: null,
+    expiresAt: null,
+  });
   // Share generations, not a bool: a stale start()/stop() from a
   // dismissed share must not resolve into — or tear down — a NEWER
   // share's listener. Nonzero means "a share attempt owns the host".
@@ -1402,6 +1421,16 @@ function Main({
         shuffleOrder: state.shuffleOrder,
       }),
     [state, localeTick],
+  );
+  // Real waveform peaks for the Stage seek — lazy, cached per
+  // recordingId|attemptId (a re-prepared stream never inherits the
+  // attempt it replaced). The port borrows the live stream handle;
+  // Android decodes natively, iOS surfaces 'unavailable' and the
+  // seeded pattern stays either way while pending or on failure.
+  const peaksPort = useMemo(
+    () =>
+      Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
+    [],
   );
   const queueModel = useMemo(() => {
     // Same honesty rule as the library rows: offline + unowned marks
@@ -2229,6 +2258,7 @@ function Main({
       busy: false,
       code: null,
       payload: null,
+      endpoint: null,
       expiresAt: null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2251,7 +2281,7 @@ function Main({
       }
       setShare((prev) =>
         prev.active
-          ? { ...prev, code: null, payload: null, expiresAt: null }
+          ? { ...prev, code: null, payload: null, endpoint: null, expiresAt: null }
           : prev,
       );
       shareRetryRef.current += 1;
@@ -2280,6 +2310,7 @@ function Main({
                 ...prev,
                 code: offer.value.code,
                 payload: offer.value.payload,
+              endpoint: offer.value.endpoint,
                 expiresAt: offer.value.expiresAt,
               }
             : prev,
@@ -2350,6 +2381,7 @@ function Main({
         busy: false,
         code: null,
         payload: null,
+        endpoint: null,
         expiresAt: null,
       });
       return;
@@ -2375,6 +2407,7 @@ function Main({
           busy: false,
           code: null,
           payload: null,
+          endpoint: null,
           expiresAt: null,
         });
         setPairError(started.error.message);
@@ -2392,6 +2425,7 @@ function Main({
           busy: false,
           code: null,
           payload: null,
+          endpoint: null,
           expiresAt: null,
         });
         setPairError(offer.error.message);
@@ -2402,6 +2436,7 @@ function Main({
         busy: false,
         code: offer.value.code,
         payload: offer.value.payload,
+        endpoint: offer.value.endpoint,
         expiresAt: offer.value.expiresAt,
       });
       setPairError(null);
@@ -2418,6 +2453,7 @@ function Main({
         busy: false,
         code: null,
         payload: null,
+        endpoint: null,
         expiresAt: null,
       });
       setPairError('pairing failed');
@@ -2463,7 +2499,99 @@ function Main({
     [controller],
   );
 
+  // Clipboard exchange — RN's core Clipboard covers get/setString on
+  // Android (deprecated upstream but present in 0.86, zero added deps;
+  // see docs/decisions.md). The engine's exportDelta/applyDelta run the
+  // same paging + validation as the desktop IPC path —
+  // exportFittedDeltaDoc adds the byte refit the desktop adapter does,
+  // halving the entry limit until each page fits the wire doc cap.
+  // The export walk is owned: a second tap supersedes the in-flight
+  // one and unmount cancels it — its only output is a late clipboard
+  // write nobody is waiting on.
+  const exportDeltaSource = useRef<CancellationSource | null>(null);
+  useEffect(() => () => exportDeltaSource.current?.cancel(), []);
+  const onCopyPayload = useCallback(() => {
+    if (share.payload !== null) {
+      Clipboard.setString(share.payload);
+    }
+  }, [share.payload]);
+  const onExportDelta = useCallback(() => {
+    const engine = syncSurface?.engine;
+    if (engine === undefined) {
+      return;
+    }
+    exportDeltaSource.current?.cancel();
+    const source = new CancellationSource();
+    exportDeltaSource.current = source;
+    void collectSyncDeltaDocs((cursor) =>
+      exportFittedDeltaDoc(engine.exportDelta, cursor, source.signal),
+    )
+      .then((collected) => {
+        if (exportDeltaSource.current === source) {
+          exportDeltaSource.current = null;
+        }
+        if (!collected.ok) {
+          // A superseded/unmounted walk ends 'cancelled' — that is a
+          // disposal, not a failure worth a toast.
+          if (collected.error.kind !== 'cancelled') {
+            reportResult('sync.panel.copyDelta', collected);
+          }
+          return;
+        }
+        Clipboard.setString(serializeSyncDeltaDocs(collected.value));
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+  const onImportDelta = useCallback(() => {
+    const engine = syncSurface?.engine;
+    if (engine === undefined) {
+      return;
+    }
+    void Clipboard.getString()
+      .then(async (text) => {
+        // Validate the whole batch BEFORE any apply — a malformed
+        // element must not strand a partially imported array.
+        const docs = parseSyncDeltaDocs(text);
+        if (docs === null) {
+          reportResult(
+            'sync.panel.pasteDelta',
+            err(appError('invalid-message', 'clipboard has no delta')),
+          );
+          return;
+        }
+        for (const doc of docs) {
+          const applied = await engine.applyDelta(
+            doc,
+            new CancellationSource().signal,
+          );
+          if (!applied.ok) {
+            reportResult('sync.panel.pasteDelta', applied);
+            return;
+          }
+        }
+      })
+      .catch(() => {
+        reportResult(
+          'sync.panel.pasteDelta',
+          err(appError('unavailable', 'clipboard read failed')),
+        );
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller]);
+
   const playback = state.playback;
+  const peaksTarget: PeaksTarget | null =
+    playback.type === 'buffering' ||
+    playback.type === 'playing' ||
+    playback.type === 'paused'
+      ? {
+          id: `${playback.recordingId}|${playback.identity.attemptId}`,
+          handle: playback.handle,
+          durationMs: playback.durationMs ?? null,
+        }
+      : null;
+  const peaks = useWaveformPeaks(peaksPort, peaksTarget);
   const playing = playback.type === 'playing';
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
@@ -4110,6 +4238,7 @@ function Main({
                     busy: share.busy,
                     code: share.code,
                     payload: share.payload,
+                    endpoint: share.endpoint,
                     expiresLabel:
                       share.expiresAt === null
                         ? null
@@ -4120,6 +4249,11 @@ function Main({
               syncSurface?.host === undefined || syncSurface?.host === null
                 ? undefined
                 : onShareToggle
+            }
+            onCopyPayload={
+              syncSurface?.host === undefined || syncSurface?.host === null
+                ? undefined
+                : onCopyPayload
             }
             nearbyPeers={
               syncSurface?.discovery === undefined ||
@@ -4142,6 +4276,12 @@ function Main({
               Platform.OS === 'android'
                 ? (onScan) => <SyncScanner onScan={onScan} />
                 : undefined
+            }
+            onExportDelta={
+              syncSurface === null ? undefined : onExportDelta
+            }
+            onImportDelta={
+              syncSurface === null ? undefined : onImportDelta
             }
           />
         );
@@ -4279,6 +4419,7 @@ function Main({
                   : undefined
               }
               onSeek={seekToPosition}
+              peaks={peaks}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={radioCapable ? onStartRadio : undefined}
               onStopRadio={onStopRadio}

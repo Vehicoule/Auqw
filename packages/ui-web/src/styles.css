@@ -280,6 +280,7 @@
 .ui-web:not([data-reduced-motion='true']) .uw-mini__play,
 .ui-web:not([data-reduced-motion='true']) .uw-toggle,
 .ui-web:not([data-reduced-motion='true']) .uw-toggle__thumb,
+.ui-web:not([data-reduced-motion='true']) .uw-track-row__add,
 .ui-web:not([data-reduced-motion='true']) .uw-track-row__menu {
   transition:
     background-color var(--motion-state) ease,
@@ -615,11 +616,12 @@
   display: inline-flex;
   align-items: center;
 }
-
+.uw-track-row__add,
 .uw-track-row__menu {
   opacity: 0;
 }
-
+.uw-track-row:hover .uw-track-row__add,
+.uw-track-row:focus-within .uw-track-row__add,
 .uw-track-row:hover .uw-track-row__menu,
 .uw-track-row:focus-within .uw-track-row__menu {
   opacity: 1;
@@ -2489,7 +2491,17 @@
   word-break: break-all;
   opacity: 0.6;
 }
-
+.uw-manual-pair {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  width: 100%;
+  text-align: left;
+  margin-top: var(--spacing-sm);
+}
+.uw-manual-pair .uw-manual-pair__port {
+  flex: 0 0 96px;
+}
 .uw-nearby {
   display: flex;
   flex-direction: column;

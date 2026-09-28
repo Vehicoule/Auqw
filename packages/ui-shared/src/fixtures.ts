@@ -18,7 +18,9 @@ import type {
   Settings,
   SyncClientStatus,
   TrackMetadata,
+  WaveformPeak,
 } from '@auqw/application';
+import { PEAKS_RESOLUTION } from './peaks.ts';
 import type { ThemeName } from '@auqw/design-tokens';
 import {
   toCollectionModel,
@@ -565,6 +567,7 @@ export const fixturePlayerPlaying: PlayerModel = {
   artworkUrl: art('self-aware'),
   positionMs: 97_200,
   durationMs: 180_000,
+  occurrenceId: 'occ-self-aware',
   liked: true,
   canPrevious: false,
   canNext: true,
@@ -1327,6 +1330,33 @@ export const fixturePlatforms: readonly PlatformVariant[] = [
 ];
 
 export const fixtureMotionModes: readonly boolean[] = [false, true];
+
+/**
+ * Deterministic asymmetric peak pairs for gallery renders — the same
+ * contract a decoder-backed port returns after normalization:
+ * normalized [0,1] arms where `up` and `down` genuinely diverge, a
+ * quiet mid-section so the p95 ceiling stays honest, and a silence
+ * run so zero stays zero.
+ */
+export const fixtureWaveformPeaks: readonly WaveformPeak[] = (() => {
+  const peaks: WaveformPeak[] = [];
+  const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+  for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
+    const t = i / (PEAKS_RESOLUTION - 1);
+    if (t >= 0.62 && t < 0.68) {
+      peaks.push({ up: 0, down: 0 });
+      continue;
+    }
+    const swell = t < 0.2 ? 0.3 + t * 2.2 : t < 0.55 ? 0.72 : t < 0.72 ? 0.34 : 0.85;
+    const wobble =
+      0.11 * Math.sin(i * 1.73) + 0.06 * Math.sin(i * 0.31 + 0.7);
+    peaks.push({
+      up: clamp01(swell + wobble),
+      down: clamp01(swell * 0.62 + 0.09 * Math.sin(i * 2.29 + 1.1)),
+    });
+  }
+  return peaks;
+})();
 
 export type GalleryCoverage = {
   readonly sections: readonly string[];

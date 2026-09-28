@@ -25,9 +25,10 @@ import {
   formatRemaining,
   resamplePeaks,
   t,
-  waveformAmplitudes,
   waveformBarLayout,
+  waveformPeaks,
 } from '@auqw/ui-shared';
+import type { WaveformPeak } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -131,7 +132,8 @@ function barExtentW(
 
 function barsPathD(
   xs: readonly number[],
-  amps: readonly number[],
+  ups: readonly number[],
+  downs: readonly number[],
   idx: readonly number[],
   count: number,
   mid: number,
@@ -146,14 +148,11 @@ function barsPathD(
     if (x > maxX) {
       continue;
     }
-    const extent = barExtentW(
-      amps[i] ?? 0,
-      maxExtent,
-      2.4,
-      staggerW(bloom, idx[i] ?? i, count),
-    );
-    d += `M${x.toFixed(2)} ${(mid - extent).toFixed(2)} L${x.toFixed(2)} ${(
-      mid + extent
+    const stagger = staggerW(bloom, idx[i] ?? i, count);
+    const upExtent = barExtentW(ups[i] ?? 0, maxExtent, 2.4, stagger);
+    const downExtent = barExtentW(downs[i] ?? 0, maxExtent, 2.4, stagger);
+    d += `M${x.toFixed(2)} ${(mid - upExtent).toFixed(2)} L${x.toFixed(2)} ${(
+      mid + downExtent
     ).toFixed(2)}`;
   }
   return d;
@@ -243,6 +242,7 @@ export function ArtworkRing({
 function useSeekGesture(
   durationMs: number | null,
   onSeek: ((ms: number) => void) | undefined,
+  onPreview: ((ms: number | null) => void) | undefined,
 ): {
   readonly gesture: ReturnType<typeof Gesture.Pan>;
   readonly onLayout: (e: LayoutChangeEvent) => void;
@@ -254,16 +254,30 @@ function useSeekGesture(
       setWidth(w);
     }
   }, []);
-  const seek = useCallback(
+  const preview = useCallback(
+    (x: number) => {
+      if (durationMs === null || durationMs <= 0) {
+        return;
+      }
+      const ratio = Math.min(1, Math.max(0, x / width));
+      onPreview?.(Math.round(ratio * durationMs));
+    },
+    [durationMs, onPreview, width],
+  );
+  const commit = useCallback(
     (x: number) => {
       if (durationMs === null || durationMs <= 0 || onSeek === undefined) {
+        onPreview?.(null);
         return;
       }
       const ratio = Math.min(1, Math.max(0, x / width));
       onSeek(Math.round(ratio * durationMs));
     },
-    [durationMs, onSeek, width],
+    [durationMs, onPreview, onSeek, width],
   );
+  const cancel = useCallback(() => {
+    onPreview?.(null);
+  }, [onPreview]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -274,12 +288,18 @@ function useSeekGesture(
         .minDistance(0)
         .enabled(enabled)
         .onBegin((e) => {
-          scheduleOnRN(seek, e.x);
+          scheduleOnRN(preview, e.x);
         })
         .onUpdate((e) => {
-          scheduleOnRN(seek, e.x);
+          scheduleOnRN(preview, e.x);
+        })
+        // A cancelled pan clears the preview; only a finished gesture
+        // moves playback — the same commit-on-release rule the
+        // waveform seek and the web range input share.
+        .onFinalize((e, success) => {
+          scheduleOnRN(success ? commit : cancel, e.x);
         }),
-    [enabled, seek],
+    [cancel, commit, enabled, preview],
   );
   return { gesture, onLayout };
 }
@@ -323,6 +343,10 @@ export type LinearScrubberProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /** Identity of the track on the player — scopes the optimistic
+   *  hold so a track change never displays the previous track's
+   *  committed position. */
+  readonly trackKey?: string | null | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -330,12 +354,132 @@ export function LinearScrubber({
   positionMs,
   durationMs,
   onSeek,
+  trackKey,
   style,
 }: LinearScrubberProps) {
   const theme = useTheme();
-  const { gesture, onLayout } = useSeekGesture(durationMs, onSeek);
-  const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
-  const p = progressOf(positionMs, durationMs);
+  const [previewMs, setPreviewMs] = useState<number | null>(null);
+  const [heldMs, setHeldMs] = useState<number | null>(null);
+  const heldBaseline = useRef(0);
+  const positionRef = useRef(positionMs);
+  positionRef.current = positionMs;
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
+  const heldKey = useRef(trackKey);
+  const gestureKey = useRef<string | null | undefined>(undefined);
+  // A pan whose track flipped mid-gesture: its remaining updates
+  // and finalize are dead — previews must not restart a gesture on
+  // the new track or let the release seek it.
+  const gestureDead = useRef(false);
+  const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The first preview of a pan marks the gesture's track — the hold
+  // it may produce belongs to that identity even if a new track
+  // lands before release.
+  const onPreview = useCallback((ms: number | null) => {
+    if (ms === null) {
+      gestureKey.current = undefined;
+      gestureDead.current = false;
+    } else {
+      if (gestureDead.current) {
+        return;
+      }
+      if (gestureKey.current === undefined) {
+        gestureKey.current = trackKeyRef.current;
+      }
+    }
+    setPreviewMs(ms);
+  }, []);
+  // Optimistic fill: the committed target stays shown until the
+  // publish round-trip lands (or the settle timer lapses) — the same
+  // hold the waveform seek applies.
+  const commit = useCallback(
+    (ms: number) => {
+      // A dead gesture's release does nothing but drain it.
+      if (gestureDead.current) {
+        gestureDead.current = false;
+        gestureKey.current = undefined;
+        setPreviewMs(null);
+        return;
+      }
+      // A track change since the pan began abandons the release —
+      // it must not seek the new track to a position the preview
+      // only ever showed on the old one.
+      if (
+        gestureKey.current !== undefined &&
+        gestureKey.current !== trackKeyRef.current
+      ) {
+        gestureKey.current = undefined;
+        setPreviewMs(null);
+        return;
+      }
+      gestureKey.current = undefined;
+      setPreviewMs(null);
+      heldBaseline.current = positionRef.current;
+      heldKey.current = trackKeyRef.current;
+      setHeldMs(ms);
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+      heldTimer.current = setTimeout(() => {
+        heldTimer.current = null;
+        setHeldMs(null);
+      }, 800);
+      onSeek?.(ms);
+    },
+    [onSeek],
+  );
+  useEffect(() => {
+    if (heldMs !== null && positionMs !== heldBaseline.current) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [positionMs, heldMs]);
+  // A track change hides the hold at render regardless — clear the
+  // state + settle timer rather than let them die on the clock, and
+  // drop a mid-flight preview too: the gesture's commit guard makes
+  // the same key check.
+  useEffect(() => {
+    if (heldMs !== null && heldKey.current !== trackKey) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+    if (
+      gestureKey.current !== undefined &&
+      gestureKey.current !== trackKey
+    ) {
+      gestureKey.current = undefined;
+      gestureDead.current = true;
+      setPreviewMs(null);
+    }
+  }, [trackKey, heldMs]);
+  useEffect(
+    () => () => {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+    },
+    [],
+  );
+  const { gesture, onLayout } = useSeekGesture(
+    durationMs,
+    commit,
+    onPreview,
+  );
+  const shownMs =
+    (previewMs !== null &&
+    gestureKey.current === trackKey
+      ? previewMs
+      : null) ??
+    (heldMs !== null && heldKey.current === trackKey ? heldMs : null) ??
+    positionMs;
+  const { onAccessibilityAction } = useSeekA11y(shownMs, durationMs, onSeek);
+  const p = progressOf(shownMs, durationMs);
   return (
     <GestureDetector gesture={gesture}>
       <View
@@ -396,30 +540,35 @@ const WAVE_BAR_GAP = 2.5;
 
 type BarGroup = {
   readonly xs: readonly number[];
-  readonly amps: readonly number[];
+  readonly ups: readonly number[];
+  readonly downs: readonly number[];
   readonly idx: readonly number[];
 };
 
 // Three amplitude terciles → three stroke opacities, so the quieter
-// bars read quieter without one animated component per bar.
+// bars read quieter without one animated component per bar. A bar's
+// loudness is its longer arm.
 function partitionBars(
   xs: readonly number[],
-  amps: readonly number[],
+  peaks: readonly WaveformPeak[],
 ): readonly [BarGroup, BarGroup, BarGroup] {
-  const sorted = [...amps].sort((a, b) => a - b);
+  const sorted = peaks
+    .map((p) => Math.max(p.up, p.down))
+    .sort((a, b) => a - b);
   const t1 = sorted[Math.floor(sorted.length / 3)] ?? Infinity;
   const t2 = sorted[Math.floor((sorted.length * 2) / 3)] ?? Infinity;
   const groups: [BarGroup, BarGroup, BarGroup] = [
-    { xs: [], amps: [], idx: [] },
-    { xs: [], amps: [], idx: [] },
-    { xs: [], amps: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
   ];
   for (let i = 0; i < xs.length; i += 1) {
-    const amp = amps[i] ?? 0;
+    const amp = Math.max(peaks[i]?.up ?? 0, peaks[i]?.down ?? 0);
     const g = amp <= t1 ? 0 : amp <= t2 ? 1 : 2;
     const group = groups[g];
     (group.xs as number[]).push(xs[i] ?? 0);
-    (group.amps as number[]).push(amp);
+    (group.ups as number[]).push(peaks[i]?.up ?? 0);
+    (group.downs as number[]).push(peaks[i]?.down ?? 0);
     (group.idx as number[]).push(i);
   }
   return groups;
@@ -433,13 +582,16 @@ export type WaveformSeekProps = {
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
    * resampled to the bar count. Absent/null keeps the seeded
-   * `waveformAmplitudes` pattern — extraction is lazy, so the seeded
+   * `waveformPeaks` pattern — extraction is lazy, so the seeded
    * bars are both the pending state and the failure fallback.
    */
-  readonly peaks?: readonly number[] | null | undefined;
+  readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly visible?: boolean | undefined;
+  /** Identity of the track on the player — a pan that began on one
+   *  track abandons rather than seeking the next on release. */
+  readonly trackKey?: string | null | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -452,6 +604,7 @@ export function WaveformSeek({
   loading = false,
   labels = true,
   visible = true,
+  trackKey,
   style,
 }: WaveformSeekProps) {
   const theme = useTheme();
@@ -471,21 +624,22 @@ export function WaveformSeek({
     () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
     [width],
   );
-  const amps = useMemo(
+  const bars = useMemo(
     () =>
       peaks !== undefined && peaks !== null && peaks.length > 0
         ? resamplePeaks(peaks, layout.count)
-        : waveformAmplitudes(seed, layout.count),
+        : waveformPeaks(seed, layout.count),
     [peaks, seed, layout.count],
   );
-  const groups = useMemo(() => partitionBars(layout.xs, amps), [layout, amps]);
+  const groups = useMemo(() => partitionBars(layout.xs, bars), [layout, bars]);
   const allBars = useMemo<BarGroup>(
     () => ({
       xs: layout.xs,
-      amps,
+      ups: bars.map((b) => b.up),
+      downs: bars.map((b) => b.down),
       idx: layout.xs.map((_, i) => i),
     }),
-    [layout, amps],
+    [layout, bars],
   );
 
   const fill = useSharedValue(progress);
@@ -542,8 +696,25 @@ export function WaveformSeek({
     }
   }, [isLoading, shimmer, theme.reducedMotion, visible]);
 
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
+  const gestureKey = useRef<string | null | undefined>(undefined);
+  // A pan whose track flipped mid-gesture: its remaining updates
+  // and finalize are dead — previews must not restart a gesture on
+  // the new track or let the release seek it. `gestureDead` guards
+  // the JS side; `dead` stops the worklet from moving the fill.
+  const gestureDead = useRef(false);
+  const dead = useSharedValue(0);
   const preview = useCallback(
     (fraction: number) => {
+      if (gestureDead.current) {
+        return;
+      }
+      // The first preview of a pan marks the track the gesture
+      // began on — a release checks it before seeking.
+      if (!scrubActive.current) {
+        gestureKey.current = trackKeyRef.current;
+      }
       // JS-side scrub flag so the position ticker doesn't fight the finger.
       scrubActive.current = true;
       if (durationMs === null) {
@@ -558,8 +729,37 @@ export function WaveformSeek({
     },
     [durationMs],
   );
+  // A cancelled pan clears the preview and restores the real fill —
+  // only a finished gesture may move playback.
+  const cancelScrub = useCallback(() => {
+    scrubActive.current = false;
+    scrubSec.current = -1;
+    gestureKey.current = undefined;
+    gestureDead.current = false;
+    setScrubMs(null);
+    fill.value = theme.reducedMotion
+      ? latestProgress.current
+      : withTiming(latestProgress.current, {
+          duration: theme.motion.state,
+        });
+  }, [fill, theme.motion.state, theme.reducedMotion]);
   const commit = useCallback(
     (fraction: number) => {
+      // A dead gesture's release does nothing but drain it.
+      if (gestureDead.current) {
+        gestureDead.current = false;
+        return;
+      }
+      // A track change since the pan began abandons the release —
+      // seeking now would move a song the preview never showed.
+      if (
+        gestureKey.current !== undefined &&
+        gestureKey.current !== trackKeyRef.current
+      ) {
+        cancelScrub();
+        return;
+      }
+      gestureKey.current = undefined;
       scrubActive.current = false;
       scrubSec.current = -1;
       setScrubMs(null);
@@ -584,20 +784,22 @@ export function WaveformSeek({
             });
       }, 400);
     },
-    [durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
+    [cancelScrub, durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
   );
-  // A cancelled pan clears the preview and restores the real fill —
-  // only a finished gesture may move playback.
-  const cancelScrub = useCallback(() => {
-    scrubActive.current = false;
-    scrubSec.current = -1;
-    setScrubMs(null);
-    fill.value = theme.reducedMotion
-      ? latestProgress.current
-      : withTiming(latestProgress.current, {
-          duration: theme.motion.state,
-        });
-  }, [fill, theme.motion.state, theme.reducedMotion]);
+  // A track change mid-pan kills the gesture the way a cancelled
+  // pan does — and marks it dead so the still-running pan's later
+  // updates and finalize can't restart it or seek the new track.
+  useEffect(() => {
+    if (
+      scrubActive.current &&
+      gestureKey.current !== undefined &&
+      gestureKey.current !== trackKey
+    ) {
+      cancelScrub();
+      gestureDead.current = true;
+      dead.value = 1;
+    }
+  }, [cancelScrub, dead, trackKey]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -609,6 +811,9 @@ export function WaveformSeek({
         .enabled(enabled)
         .onBegin((e) => {
           'worklet';
+          if (dead.value === 1) {
+            return;
+          }
           const f = Math.min(1, Math.max(0, e.x / width));
           fill.value = f;
           scrubbing.value = 1;
@@ -616,22 +821,27 @@ export function WaveformSeek({
         })
         .onUpdate((e) => {
           'worklet';
+          if (dead.value === 1) {
+            return;
+          }
           const f = Math.min(1, Math.max(0, e.x / width));
           fill.value = f;
           scheduleOnRN(preview, f);
         })
         .onFinalize((e, success) => {
           'worklet';
+          dead.value = 0;
           const f = Math.min(1, Math.max(0, e.x / width));
           scrubbing.value = 0;
           scheduleOnRN(success ? commit : cancelScrub, f);
         }),
-    [cancelScrub, commit, enabled, fill, preview, scrubbing, width],
+    [cancelScrub, commit, dead, enabled, fill, preview, scrubbing, width],
   );
   const dLow = useDerivedValue(() =>
     barsPathD(
       groups[0].xs,
-      groups[0].amps,
+      groups[0].ups,
+      groups[0].downs,
       groups[0].idx,
       layout.count,
       WAVE_MID,
@@ -642,7 +852,8 @@ export function WaveformSeek({
   const dMid = useDerivedValue(() =>
     barsPathD(
       groups[1].xs,
-      groups[1].amps,
+      groups[1].ups,
+      groups[1].downs,
       groups[1].idx,
       layout.count,
       WAVE_MID,
@@ -653,7 +864,8 @@ export function WaveformSeek({
   const dHigh = useDerivedValue(() =>
     barsPathD(
       groups[2].xs,
-      groups[2].amps,
+      groups[2].ups,
+      groups[2].downs,
       groups[2].idx,
       layout.count,
       WAVE_MID,
@@ -667,7 +879,8 @@ export function WaveformSeek({
   const dAll = useDerivedValue(() =>
     barsPathD(
       allBars.xs,
-      allBars.amps,
+      allBars.ups,
+      allBars.downs,
       allBars.idx,
       layout.count,
       WAVE_MID,
@@ -684,7 +897,12 @@ export function WaveformSeek({
     x: shimmer.value * (width + width * 0.16) - width * 0.16,
   }));
 
-  const shownMs = scrubMs ?? positionMs;
+  const shownMs =
+    (scrubMs !== null &&
+    scrubActive.current &&
+    gestureKey.current === trackKey
+      ? scrubMs
+      : null) ?? positionMs;
   return (
     <View style={style}>
       <GestureDetector gesture={gesture}>

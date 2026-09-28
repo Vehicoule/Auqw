@@ -41,10 +41,17 @@ export type SyncScreenProps = {
         readonly busy: boolean;
         readonly code: string | null;
         readonly payload: string | null;
+        /**
+         * `ip:port` the typed-code path dials — same endpoint the
+         * desktop shows beside its code. Null pre-start.
+         */
+        readonly endpoint?: string | null | undefined;
         readonly expiresLabel: string | null;
       }
     | undefined;
   readonly onShareToggle?: (() => void) | undefined;
+  /** Copies the live offer's payload — the desktop's clipboard path. */
+  readonly onCopyPayload?: (() => void) | undefined;
   /**
    * mDNS-discovered pair hosts — tap a row, then type the code that
    * device is showing. `key` is stable for the session.
@@ -69,6 +76,13 @@ export type SyncScreenProps = {
   readonly renderScanner?:
     | ((onScan: (data: string) => void) => ReactNode)
     | undefined;
+  /**
+   * Clipboard delta exchange — the desktop settings panel's copy/
+   * paste pair. Absent means the host has no delta seam; the section
+   * then hides rather than dead-press.
+   */
+  readonly onExportDelta?: (() => void) | undefined;
+  readonly onImportDelta?: (() => void) | undefined;
 };
 
 function Section({
@@ -296,12 +310,74 @@ function PairForm({
   );
 }
 
+/**
+ * The paste fallback for payload pairing — the desktop sheet's raw
+ * paste row, for when neither a camera scan nor a nearby advert is
+ * available (screenshot relayed out-of-band, say).
+ */
+function PayloadPasteForm({
+  disabled,
+  onPairPayload,
+}: {
+  readonly disabled: boolean;
+  readonly onPairPayload?: ((payload: string) => void) | undefined;
+}) {
+  const theme = useTheme();
+  const [draft, setDraft] = useState('');
+  const ready = draft.trim() !== '';
+  return (
+    <View
+      style={{
+        padding: 14,
+        gap: theme.spacing.sm,
+      }}
+    >
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        placeholder={t('sync.form.payload')}
+        placeholderTextColor={theme.colors.textSecondary}
+        autoCapitalize="none"
+        autoCorrect={false}
+        multiline
+        accessibilityLabel={t('sync.form.payloadA11y')}
+        style={[
+          theme.typography.body,
+          {
+            color: theme.colors.textPrimary,
+            paddingVertical: theme.spacing.sm,
+            paddingHorizontal: theme.spacing.screen,
+            borderRadius: theme.radius.control,
+            borderWidth: theme.strokes.hairline,
+            borderColor: theme.colors.hairline,
+            minHeight: 40,
+          },
+        ]}
+      />
+      <PillButton
+        label={t('sync.form.usePayload')}
+        tone="accent"
+        onPress={
+          onPairPayload === undefined || !ready
+            ? undefined
+            : () => onPairPayload(draft.trim())
+        }
+        disabled={onPairPayload === undefined || !ready || disabled}
+        accessibilityLabel={t('sync.form.usePayload')}
+        style={{ alignSelf: 'flex-start' }}
+      />
+    </View>
+  );
+}
+
 function ShareSection({
   share,
   onToggle,
+  onCopyPayload,
 }: {
   readonly share: NonNullable<SyncScreenProps['share']>;
   readonly onToggle?: (() => void) | undefined;
+  readonly onCopyPayload?: (() => void) | undefined;
 }) {
   const theme = useTheme();
   return (
@@ -319,6 +395,18 @@ function ShareSection({
           >
             {share.code}
           </Text>
+          {share.endpoint !== null && share.endpoint !== undefined && (
+            <Text
+              variant="metadata"
+              color="secondary"
+              style={{ textAlign: 'center' }}
+            >
+              {t('pairing.typeHint')}{' '}
+              <Text variant="metadata" color="primary">
+                {share.endpoint}
+              </Text>
+            </Text>
+          )}
           {share.expiresLabel !== null && (
             <Text
               variant="metadata"
@@ -327,6 +415,24 @@ function ShareSection({
             >
               {share.expiresLabel}
             </Text>
+          )}
+          {onCopyPayload !== undefined && (
+            <Pressable
+              onPress={onCopyPayload}
+              accessibilityLabel={t('pairing.copyPayloadA11y')}
+              accessibilityRole="button"
+              style={({ pressed }) => [
+                {
+                  alignSelf: 'flex-start',
+                  paddingVertical: theme.spacing.xs,
+                },
+                pressed && { opacity: 0.6 },
+              ]}
+            >
+              <Text variant="metadata" color="accent">
+                {t('pairing.copyPayload')}
+              </Text>
+            </Pressable>
           )}
         </>
       ) : null}
@@ -480,9 +586,12 @@ export function SyncScreen({
   pairError = null,
   share,
   onShareToggle,
+  onCopyPayload,
   nearbyPeers,
   onPairNearby,
   renderScanner,
+  onExportDelta,
+  onImportDelta,
 }: SyncScreenProps) {
   const theme = useTheme();
   const [scanning, setScanning] = useState(false);
@@ -554,7 +663,11 @@ export function SyncScreen({
 
           {share?.supported === true && (
             <Section title={t('sync.share')}>
-              <ShareSection share={share} onToggle={onShareToggle} />
+              <ShareSection
+                share={share}
+                onToggle={onShareToggle}
+                onCopyPayload={onCopyPayload}
+              />
             </Section>
           )}
 
@@ -629,7 +742,53 @@ export function SyncScreen({
               error={pairError}
               onPairCode={onPairCode}
             />
+            {onPairPayload !== undefined && (
+              <>
+                <Hairline />
+                <PayloadPasteForm
+                  disabled={pairing}
+                  onPairPayload={onPairPayload}
+                />
+              </>
+            )}
           </Section>
+
+          {(onExportDelta !== undefined || onImportDelta !== undefined) && (
+            <Section title={t('sync.panel.deltaExchange')}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  gap: theme.spacing.md,
+                  padding: 14,
+                }}
+              >
+                {onExportDelta !== undefined && (
+                  <Pressable
+                    onPress={onExportDelta}
+                    accessibilityLabel={t('sync.panel.copyDelta')}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [pressed && { opacity: 0.5 }]}
+                  >
+                    <Text variant="metadata" color="accent">
+                      {t('sync.panel.copyDelta')}
+                    </Text>
+                  </Pressable>
+                )}
+                {onImportDelta !== undefined && (
+                  <Pressable
+                    onPress={onImportDelta}
+                    accessibilityLabel={t('sync.panel.pasteDelta')}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [pressed && { opacity: 0.5 }]}
+                  >
+                    <Text variant="metadata" color="accent">
+                      {t('sync.panel.pasteDelta')}
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+          </Section>
+          )}
         </>
       )}
     </ScrollView>

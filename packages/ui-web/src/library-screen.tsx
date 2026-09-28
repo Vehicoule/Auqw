@@ -18,6 +18,7 @@ export type LibraryScreenProps = {
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressItem?: ((recordingId: string) => void) | undefined;
   readonly onToggleLike?: ((recordingId: string) => void) | undefined;
+  readonly onAddToPlaylist?: ((recordingId: string) => void) | undefined;
   readonly onContext?: ((recordingId: string) => void) | undefined;
   readonly onOpenCollection?:
     | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
@@ -204,6 +205,7 @@ export function LibraryScreen({
   scrollEnabled = true,
   onPressItem,
   onToggleLike,
+  onAddToPlaylist,
   onContext,
   onOpenCollection,
   onOpenCard,
@@ -460,6 +462,11 @@ export function LibraryScreen({
                   onToggleLike === undefined
                     ? undefined
                     : () => onToggleLike(item.key)
+                }
+                onAddToPlaylist={
+                  onAddToPlaylist === undefined
+                    ? undefined
+                    : () => onAddToPlaylist(item.key)
                 }
                 onContext={
                   onContext === undefined ? undefined : () => onContext(item.key)

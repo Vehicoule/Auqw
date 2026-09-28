@@ -60,6 +60,7 @@ import type {
   QueueModel,
   RadioModel,
   StageMode,
+  WaveformPeak,
 } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 
@@ -484,6 +485,13 @@ export type StageSheetProps = {
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /**
+   * Real measured waveform peaks (canonical `PEAKS_RESOLUTION`
+   * pairs) for the Stage seek — Android extractor output normalized
+   * JS-side. Absent/null keeps the seeded pattern, which is also
+   * the pending and failure fallback.
+   */
+  readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
   readonly onStopRadio?: (() => void) | undefined;
@@ -529,6 +537,7 @@ export function StageSheet({
   repeat = 'off',
   onCycleRepeat,
   onSeek,
+  peaks,
   onRetryLyrics,
   onStartRadio,
   onStopRadio,
@@ -954,7 +963,9 @@ export function StageSheet({
             positionMs={player.positionMs}
             durationMs={player.durationMs}
             onSeek={onSeek}
+            trackKey={player.occurrenceId}
             seed={`${player.title}|${player.artist ?? ''}`}
+            peaks={peaks}
             loading={player.status === 'preparing' || player.durationMs === null}
             visible={expanded}
           />

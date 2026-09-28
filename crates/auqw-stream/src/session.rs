@@ -864,6 +864,33 @@ impl SessionInner {
         out
     }
 
+    /// Non-demanding read for decorative consumers (waveform peaks):
+    /// serves `position` from already-committed bytes only — no
+    /// fetch-through demand, no parking, no `read_pos` advance, and
+    /// the latched transient error stays for the parked player read
+    /// that owns its report. `Some(vec![])` is a confirmed EOF,
+    /// `Some(bytes)` a hit, `None` an unfetched hole; a terminal
+    /// transition still surfaces its typed error.
+    pub(crate) fn peek(&self, position: u64, max_len: u64) -> Result<Option<Vec<u8>>, StreamError> {
+        if max_len == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let sh = lock(&self.shared)?;
+        if let Some(e) = &sh.terminal {
+            return Err(e.clone());
+        }
+        let mut store = lock(&self.store)?;
+        if store.covers(position) {
+            return Ok(Some(store.read_at(position, max_len)?));
+        }
+        if store.effective_total().is_some_and(|t| position >= t)
+            || sh.eof_below.is_some_and(|b| position >= b)
+        {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(None)
+    }
+
     /// Serve `position` from the store under `shared` (store is the
     /// inner lock). `Some(vec![])` is EOF, `Some(bytes)` a hit,
     /// `None` a hole.
