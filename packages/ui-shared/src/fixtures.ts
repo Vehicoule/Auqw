@@ -567,6 +567,7 @@ export const fixturePlayerPlaying: PlayerModel = {
   artworkUrl: art('self-aware'),
   positionMs: 97_200,
   durationMs: 180_000,
+  occurrenceId: 'occ-self-aware',
   liked: true,
   canPrevious: false,
   canNext: true,

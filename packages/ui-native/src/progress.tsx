@@ -343,6 +343,10 @@ export type LinearScrubberProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /** Identity of the track on the player — scopes the optimistic
+   *  hold so a track change never displays the previous track's
+   *  committed position. */
+  readonly trackKey?: string | null | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -350,6 +354,7 @@ export function LinearScrubber({
   positionMs,
   durationMs,
   onSeek,
+  trackKey,
   style,
 }: LinearScrubberProps) {
   const theme = useTheme();
@@ -358,7 +363,22 @@ export function LinearScrubber({
   const heldBaseline = useRef(0);
   const positionRef = useRef(positionMs);
   positionRef.current = positionMs;
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
+  const heldKey = useRef(trackKey);
+  const gestureKey = useRef<string | null | undefined>(undefined);
   const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The first preview of a pan marks the gesture's track — the hold
+  // it may produce belongs to that identity even if a new track
+  // lands before release.
+  const onPreview = useCallback((ms: number | null) => {
+    if (ms === null) {
+      gestureKey.current = undefined;
+    } else if (gestureKey.current === undefined) {
+      gestureKey.current = trackKeyRef.current;
+    }
+    setPreviewMs(ms);
+  }, []);
   // Optimistic fill: the committed target stays shown until the
   // publish round-trip lands (or the settle timer lapses) — the same
   // hold the waveform seek applies.
@@ -366,6 +386,11 @@ export function LinearScrubber({
     (ms: number) => {
       setPreviewMs(null);
       heldBaseline.current = positionRef.current;
+      heldKey.current =
+        gestureKey.current !== undefined
+          ? gestureKey.current
+          : trackKeyRef.current;
+      gestureKey.current = undefined;
       setHeldMs(ms);
       if (heldTimer.current !== null) {
         clearTimeout(heldTimer.current);
@@ -387,6 +412,17 @@ export function LinearScrubber({
       setHeldMs(null);
     }
   }, [positionMs, heldMs]);
+  // A track change hides the hold at render regardless — clear the
+  // state + settle timer rather than let them die on the clock.
+  useEffect(() => {
+    if (heldMs !== null && heldKey.current !== trackKey) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [trackKey, heldMs]);
   useEffect(
     () => () => {
       if (heldTimer.current !== null) {
@@ -398,9 +434,12 @@ export function LinearScrubber({
   const { gesture, onLayout } = useSeekGesture(
     durationMs,
     commit,
-    setPreviewMs,
+    onPreview,
   );
-  const shownMs = previewMs ?? heldMs ?? positionMs;
+  const shownMs =
+    previewMs ??
+    (heldMs !== null && heldKey.current === trackKey ? heldMs : null) ??
+    positionMs;
   const { onAccessibilityAction } = useSeekA11y(shownMs, durationMs, onSeek);
   const p = progressOf(shownMs, durationMs);
   return (

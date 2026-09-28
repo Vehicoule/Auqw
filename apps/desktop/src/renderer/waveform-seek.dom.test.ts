@@ -296,6 +296,53 @@ export async function run(): Promise<void> {
         root.unmount();
       });
     }
+
+    // The optimistic hold is scoped to the track it was committed on:
+    // a track change while the hold is live renders the new track's
+    // real position, never the previous track's committed ms.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      const render = (trackKey: string, positionMs: number, durationMs: number) =>
+        createElement(WaveformSeek, {
+          positionMs,
+          durationMs,
+          trackKey,
+          labels: false,
+          onSeek: (ms) => seeks.push(ms),
+        });
+      await act(async () => {
+        root.render(render('occ-a', 0, 180_000));
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 120_000);
+      });
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(seeks.length, 1, 'the commit fired');
+      assertEqual(input.value, '120000', 'the fill holds the committed ms');
+      // The track changes under a live hold: the new track shows its
+      // own position at once — no stale seek range, no old fill.
+      await act(async () => {
+        root.render(render('occ-b', 0, 90_000));
+      });
+      assertEqual(
+        input.value,
+        '0',
+        'the new track renders its own position, not the held ms',
+      );
+      await act(async () => {
+        root.unmount();
+      });
+    }
   } finally {
     for (const key of GLOBALS) {
       const prior = saved.get(key);

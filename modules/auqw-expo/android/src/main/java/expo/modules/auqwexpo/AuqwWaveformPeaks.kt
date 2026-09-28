@@ -379,8 +379,17 @@ internal class AuqwWaveformPeaks(
               if (buf !== null) {
                 buf.position(info.offset)
                 buf.limit(info.offset + info.size)
-                pcmOut?.write(buf)
-                pcmBytes += info.size
+                // A file channel may short-write — keep draining the
+                // buffer so pcmBytes only ever counts bytes on disk.
+                while (buf.hasRemaining()) {
+                  val n = pcmOut?.write(buf) ?: 0
+                  if (n <= 0) {
+                    throw CodedException(
+                      "unavailable", "peak spill file write stalled", null
+                    )
+                  }
+                  pcmBytes += n
+                }
               }
             }
             decoder.releaseOutputBuffer(outIdx, false)

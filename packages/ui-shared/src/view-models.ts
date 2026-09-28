@@ -84,6 +84,9 @@ export type PlayerModel = {
   readonly artworkUrl: string | null;
   readonly positionMs: number;
   readonly durationMs: number | null;
+  /** Identity of the queue occurrence on the player — surfaces key
+   *  per-track transient state (optimistic scrub holds) on it. */
+  readonly occurrenceId: string | null;
   readonly liked: boolean;
   readonly canPrevious: boolean;
   readonly canNext: boolean;
@@ -881,6 +884,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const recordingId = playback.recordingId;
   const recording = recordingId === null ? undefined : byId.get(recordingId);
   const base = {
+    occurrenceId: activeId,
     artist: recording?.artist ?? null,
     albumLabel: recording === undefined ? null : albumLabel(recording),
     artworkUrl:

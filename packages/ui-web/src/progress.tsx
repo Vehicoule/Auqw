@@ -149,6 +149,7 @@ function useScrubCommit(
   positionMs: number,
   durationMs: number | null,
   onSeek: ((ms: number) => void) | undefined,
+  trackKey: string | null | undefined,
 ): {
   readonly enabled: boolean;
   readonly shownMs: number;
@@ -164,7 +165,11 @@ function useScrubCommit(
   const scrubRef = useRef<number | null>(null);
   const positionRef = useRef(positionMs);
   positionRef.current = positionMs;
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
   const heldBaseline = useRef(0);
+  const heldKey = useRef(trackKey);
+  const gestureKey = useRef<string | null | undefined>(undefined);
   const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const commit = useCallback(
@@ -173,6 +178,13 @@ function useScrubCommit(
       scrubRef.current = null;
       setScrubMs(null);
       heldBaseline.current = positionRef.current;
+      // The hold belongs to the track the gesture began on — a
+      // mid-drag track change commits nothing on the new track.
+      heldKey.current =
+        gestureKey.current !== undefined
+          ? gestureKey.current
+          : trackKeyRef.current;
+      gestureKey.current = undefined;
       setHeldMs(ms);
       if (heldTimer.current !== null) {
         clearTimeout(heldTimer.current);
@@ -212,14 +224,28 @@ function useScrubCommit(
     if (!enabled && dragging.current) {
       dragging.current = false;
       scrubRef.current = null;
+      gestureKey.current = undefined;
       setScrubMs(null);
     }
   }, [enabled]);
+  // The hold belongs to the track it was committed on — a track
+  // change renders `positionMs` below regardless, but clear the
+  // state + settle timer rather than let them die on the clock.
+  useEffect(() => {
+    if (heldMs !== null && heldKey.current !== trackKey) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [trackKey, heldMs]);
 
   const onScrubStart = useCallback(() => {
     if (enabled) {
       dragging.current = true;
       scrubRef.current = null;
+      gestureKey.current = trackKeyRef.current;
     }
   }, [enabled]);
   const onScrubValue = useCallback(
@@ -246,6 +272,7 @@ function useScrubCommit(
         // preview must be dropped before any fallback is consulted.
         dragging.current = false;
         scrubRef.current = null;
+        gestureKey.current = undefined;
         setScrubMs(null);
         return;
       }
@@ -253,9 +280,11 @@ function useScrubCommit(
     },
     [commit],
   );
+  const shownHeld =
+    heldMs !== null && heldKey.current === trackKey ? heldMs : null;
   return {
     enabled,
-    shownMs: scrubMs ?? heldMs ?? positionMs,
+    shownMs: scrubMs ?? shownHeld ?? positionMs,
     onScrubStart,
     onScrubValue,
     onScrubEnd,
@@ -266,6 +295,10 @@ export type LinearScrubberProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /** Identity of the track on the player — scopes the optimistic
+   *  hold so a track change never displays the previous track's
+   *  committed position. */
+  readonly trackKey?: string | null | undefined;
   readonly className?: string | undefined;
 };
 
@@ -276,9 +309,10 @@ export function LinearScrubber({
   positionMs,
   durationMs,
   onSeek,
+  trackKey,
   className,
 }: LinearScrubberProps) {
-  const scrub = useScrubCommit(positionMs, durationMs, onSeek);
+  const scrub = useScrubCommit(positionMs, durationMs, onSeek, trackKey);
   const { enabled, shownMs } = scrub;
   const p = progressOf(shownMs, durationMs);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -387,6 +421,10 @@ export type WaveformSeekProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
   readonly onSeek?: ((ms: number) => void) | undefined;
+  /** Identity of the track on the player — scopes the optimistic
+   *  hold so a track change never displays the previous track's
+   *  committed position. */
+  readonly trackKey?: string | null | undefined;
   readonly seed?: string | undefined;
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
@@ -406,6 +444,7 @@ export function WaveformSeek({
   positionMs,
   durationMs,
   onSeek,
+  trackKey,
   seed = 'auqw',
   peaks,
   loading = false,
@@ -416,7 +455,7 @@ export function WaveformSeek({
   const rootRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(320);
   const [hover, setHover] = useState<number | null>(null);
-  const scrub = useScrubCommit(positionMs, durationMs, onSeek);
+  const scrub = useScrubCommit(positionMs, durationMs, onSeek, trackKey);
   useLayoutEffect(() => {
     const el = rootRef.current;
     if (el === null || typeof ResizeObserver === 'undefined') {
