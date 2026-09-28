@@ -14,7 +14,7 @@
       "id": "youtube-music",
       "version": "0.4.4",
       "abi": "0.3.0",
-      "digest": "sha256:d4462661ec4eb8e1b4581924be45767725179c0b54d94a5a5a27b930008c83a4",
+      "digest": "sha256:8ace88c311ca672e1b3fb4e5fdcc2da735c19c9be1a9c7cc9b4047609877a492",
       "source": "release:../auqw-plugins/releases/youtube-music/0.4.4"
     },
     {
