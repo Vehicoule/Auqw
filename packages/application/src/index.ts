@@ -3,7 +3,6 @@ export * from './cancellation.ts';
 export * from './domain.ts';
 export * from './race.ts';
 export * from './retry.ts';
-export * from './race.ts';
 export * from './ports/provider.ts';
 export * from './ports/player.ts';
 export * from './ports/storage.ts';
