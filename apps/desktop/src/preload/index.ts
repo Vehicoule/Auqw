@@ -59,6 +59,7 @@ import type {
   StorageBeginResult,
   StorageExecuteResult,
   StorageQueryResult,
+  StorageStatement,
   StreamPortLike,
   SyncAppliedEvent,
   SyncDialArgs,
@@ -306,6 +307,15 @@ const api: AuqwApi = {
         CHANNELS.storageExecute,
         { txId, sql, params },
         isStorageExecuteResult,
+      ),
+    execMany: (
+      txId: string,
+      statements: readonly StorageStatement[],
+    ): Promise<void> =>
+      invoke(
+        CHANNELS.storageExecMany,
+        { txId, statements },
+        isUndefinedResult,
       ),
     query: (
       txId: string,

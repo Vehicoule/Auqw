@@ -21,7 +21,6 @@ import type {
   Playlist,
   PlaylistEntry,
   QueueSnapshot,
-  Recording,
   Result,
   Settings,
   SourceMapping,
@@ -43,16 +42,19 @@ import type {
   SqliteConnection,
   SqliteDriver,
   SqlRow,
-  SqlValue,
 } from './driver.ts';
 import { enqueueDriverTransaction } from './transaction-queue.ts';
+import {
+  ATTEMPT_CAP,
+  decodeRecordingRows,
+  planCommit,
+  rowTools,
+} from './commit.ts';
 import {
   CURRENT_SCHEMA_VERSION,
   KNOWN_SCHEMA_OBJECTS,
   MIGRATIONS,
 } from './migrations.ts';
-
-const ATTEMPT_CAP = 500;
 
 // Names SQLite collides within — tables, views, and indexes share
 // one namespace; triggers are separate. The version-zero probe
@@ -96,10 +98,6 @@ function invalidData(): AppError {
   return appError('invalid-response', 'stored data failed validation');
 }
 
-function invalidBatch(): AppError {
-  return appError('invalid-response', 'commit batch failed validation');
-}
-
 function invalidImport(): AppError {
   return appError('invalid-response', 'import document failed validation');
 }
@@ -130,7 +128,7 @@ function cancelledError(): AppError {
  * SQLite-backed StoragePort. Platform-neutral: a driver supplies the
  * connection/transaction boundary; no SQLite runtime is bundled here.
  * The database is the only source of truth — there is no in-memory
- * cache, and every commit rewrites the coherent core state inside one
+ * cache, and every commit writes its row-level delta inside one
  * transaction so an interrupted write can never leave partials.
  */
 export class SqliteStorage implements StoragePort {
@@ -391,474 +389,12 @@ export class SqliteStorage implements StoragePort {
     try {
       return await this.#transaction(async (conn) => {
         this.#check(signal);
-        const current = await this.#readState(conn, signal);
-        if (!current.ok) {
-          return current;
-        }
-        if (
-          batch.recordings !== undefined &&
-          batch.recordingsMerge !== undefined
-        ) {
-          return err(
-            appError(
-              'internal',
-              'commit: recordings and recordingsMerge are exclusive',
-            ),
-          );
-        }
-        // `recordingsMerge` applies to the rows just read inside THIS
-        // transaction — a read-modify-write that cannot drop a
-        // session write queued between a caller's own load and commit.
-        const merged: PersistedState = {
-          recordings:
-            batch.recordingsMerge !== undefined
-              ? batch.recordingsMerge(current.value.recordings)
-              : (batch.recordings ?? current.value.recordings),
-          likes: batch.likes ?? current.value.likes,
-          entities: batch.entities ?? current.value.entities,
-          entitySourceRefs:
-            batch.entitySourceRefs ?? current.value.entitySourceRefs,
-          playlists: batch.playlists ?? current.value.playlists,
-          playlistEntries:
-            batch.playlistEntries ?? current.value.playlistEntries,
-          playHistory: batch.playHistory ?? current.value.playHistory,
-          playCounts: batch.playCounts ?? current.value.playCounts,
-          matchReviews: batch.matchReviews ?? current.value.matchReviews,
-          lyricsCache: batch.lyricsCache ?? current.value.lyricsCache,
-          artworkCache:
-            batch.artworkCache ?? current.value.artworkCache,
-          downloads: batch.downloads ?? current.value.downloads,
-          localSources:
-            batch.localSources ?? current.value.localSources,
-          localFiles: batch.localFiles ?? current.value.localFiles,
-          queue: batch.queue ?? current.value.queue,
-          settings: batch.settings ?? current.value.settings,
-        };
-        const attempts = batch.attempts ?? [];
-        // Validate the entire resulting document before any mutation.
-        if (!isPersistedState(merged)) {
-          return err(invalidBatch());
-        }
-        if (!attempts.every(isAttemptTrace)) {
-          return err(invalidBatch());
+        const planned = await planCommit(conn, batch, signal);
+        if (!planned.ok) {
+          return planned;
         }
         this.#check(signal);
-        // Each section rewrites its own tables; sections whose rows
-        // foreign-key into a rewritten parent ride along (SQLite FKs
-        // are immediate, so dependents must be deleted first and
-        // reinserted from the merged document).
-        const recordingsTouched =
-          batch.recordings !== undefined ||
-          batch.recordingsMerge !== undefined;
-        const rewrite = {
-          queueState: batch.queue !== undefined,
-          queueOccurrences:
-            batch.queue !== undefined || recordingsTouched,
-          playlistEntries:
-            batch.playlistEntries !== undefined ||
-            batch.playlists !== undefined ||
-            recordingsTouched,
-          playlists: batch.playlists !== undefined,
-          playHistory:
-            batch.playHistory !== undefined ||
-            recordingsTouched,
-          playCounts:
-            batch.playCounts !== undefined ||
-            recordingsTouched,
-          matchReviews:
-            batch.matchReviews !== undefined ||
-            recordingsTouched,
-          lyricsCache:
-            batch.lyricsCache !== undefined ||
-            recordingsTouched,
-          entitySourceRefs:
-            batch.entitySourceRefs !== undefined ||
-            batch.entities !== undefined,
-          entities: batch.entities !== undefined,
-          likes: batch.likes !== undefined,
-          recordings: recordingsTouched,
-          artworkCache: batch.artworkCache !== undefined,
-          downloads:
-            batch.downloads !== undefined ||
-            recordingsTouched,
-          localFiles:
-            batch.localFiles !== undefined ||
-            batch.localSources !== undefined ||
-            recordingsTouched,
-          localSources: batch.localSources !== undefined,
-          settings: batch.settings !== undefined,
-        };
-        const deletes: readonly (readonly [boolean, string])[] = [
-          [rewrite.queueOccurrences, 'DELETE FROM queue_occurrences'],
-          [rewrite.playlistEntries, 'DELETE FROM playlist_entries'],
-          [rewrite.playHistory, 'DELETE FROM play_history'],
-          [rewrite.playCounts, 'DELETE FROM play_counts'],
-          [rewrite.matchReviews, 'DELETE FROM match_reviews'],
-          [rewrite.lyricsCache, 'DELETE FROM lyrics_cache'],
-          [rewrite.downloads, 'DELETE FROM downloads'],
-          [rewrite.localFiles, 'DELETE FROM local_files'],
-          [rewrite.localSources, 'DELETE FROM local_sources'],
-          [rewrite.likes, 'DELETE FROM likes'],
-          [rewrite.entitySourceRefs, 'DELETE FROM entity_source_refs'],
-          [rewrite.entities, 'DELETE FROM entities'],
-          [rewrite.playlists, 'DELETE FROM playlists'],
-          [rewrite.recordings, 'DELETE FROM mappings'],
-          [rewrite.recordings, 'DELETE FROM source_refs'],
-          [rewrite.recordings, 'DELETE FROM recordings'],
-          [rewrite.queueState, 'DELETE FROM queue_state'],
-          [rewrite.settings, 'DELETE FROM settings'],
-          [rewrite.artworkCache, 'DELETE FROM artwork_cache'],
-        ];
-        for (const [enabled, statement] of deletes) {
-          if (enabled) {
-            await conn.execute(statement, undefined, signal);
-          }
-        }
-        this.#check(signal);
-        if (rewrite.recordings) {
-          for (const recording of merged.recordings) {
-            await conn.execute(
-              `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [
-                recording.id,
-                recording.title,
-                recording.artist,
-                recording.album,
-                recording.durationMs,
-                recording.releaseYear,
-                JSON.stringify(recording.artwork),
-                recording.explicit === null
-                  ? null
-                  : recording.explicit
-                    ? 1
-                    : 0,
-                recording.genre,
-                recording.isrc,
-                JSON.stringify(recording.versionLabels),
-                recording.provenance,
-              ],
-              signal,
-            );
-            for (const [ordinal, ref] of recording.sourceRefs.entries()) {
-              await conn.execute(
-                `INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
-                 VALUES (?, ?, ?, 'track', ?)`,
-                [recording.id, ordinal, ref.provider, ref.id],
-                signal,
-              );
-            }
-            for (const [ordinal, mapping] of recording.mappings.entries()) {
-              await conn.execute(
-                `INSERT INTO mappings (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
-                 VALUES (?, ?, ?, 'track', ?, ?, ?, ?)`,
-                [
-                  recording.id,
-                  ordinal,
-                  mapping.ref.provider,
-                  mapping.ref.id,
-                  mapping.status,
-                  mapping.matchedAtMs,
-                  JSON.stringify(mapping.evidence),
-                ],
-                signal,
-              );
-            }
-          }
-        }
-        if (rewrite.entities) {
-          for (const entity of merged.entities) {
-            await conn.execute(
-              `INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                entity.entityId,
-                entity.kind,
-                entity.title,
-                entity.artistName,
-                entity.artwork.length === 0
-                  ? null
-                  : JSON.stringify(entity.artwork),
-                entity.createdMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.entitySourceRefs) {
-          for (const ref of merged.entitySourceRefs) {
-            await conn.execute(
-              `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
-               VALUES (?, ?, ?)`,
-              [ref.entityId, ref.provider, JSON.stringify(ref.ref)],
-              signal,
-            );
-          }
-        }
-        if (rewrite.playlists) {
-          for (const playlist of merged.playlists) {
-            await conn.execute(
-              `INSERT INTO playlists (playlist_id, name, created_ms, updated_ms)
-               VALUES (?, ?, ?, ?)`,
-              [
-                playlist.playlistId,
-                playlist.name,
-                playlist.createdMs,
-                playlist.updatedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.playlistEntries) {
-          for (const entry of merged.playlistEntries) {
-            await conn.execute(
-              `INSERT INTO playlist_entries (entry_id, playlist_id, recording_id, position, selected_ref_json, added_ms)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                entry.entryId,
-                entry.playlistId,
-                entry.recordingId,
-                entry.position,
-                entry.selectedRef === null
-                  ? null
-                  : JSON.stringify(entry.selectedRef),
-                entry.addedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.likes) {
-          for (const like of merged.likes) {
-            await conn.execute(
-              `INSERT INTO likes (entity_kind, target_id, liked_ms)
-               VALUES (?, ?, ?)`,
-              [like.entityKind, like.targetId, like.likedAtMs],
-              signal,
-            );
-          }
-        }
-        if (rewrite.playHistory) {
-          for (const event of merged.playHistory) {
-            await conn.execute(
-              `INSERT INTO play_history (event_id, recording_id, occurrence_id, played_ms, listened_ms)
-               VALUES (?, ?, ?, ?, ?)`,
-              [
-                event.eventId,
-                event.recordingId,
-                event.occurrenceId,
-                event.playedMs,
-                event.listenedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.playCounts) {
-          for (const count of merged.playCounts) {
-            await conn.execute(
-              `INSERT INTO play_counts (recording_id, count, last_ms)
-               VALUES (?, ?, ?)`,
-              [count.recordingId, count.count, count.lastMs],
-              signal,
-            );
-          }
-        }
-        if (rewrite.matchReviews) {
-          for (const review of merged.matchReviews) {
-            await conn.execute(
-              `INSERT INTO match_reviews (review_id, recording_id, candidates_json, status, resolution_json, created_ms, resolved_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [
-                review.reviewId,
-                review.recordingId,
-                JSON.stringify(review.candidates),
-                review.status,
-                review.resolution === null
-                  ? null
-                  : JSON.stringify(review.resolution),
-                review.createdMs,
-                review.resolvedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.lyricsCache) {
-          for (const entry of merged.lyricsCache) {
-            await conn.execute(
-              `INSERT INTO lyrics_cache (recording_id, provider, kind, payload_json, fetched_ms, provider_version)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                entry.recordingId,
-                entry.provider,
-                entry.kind,
-                JSON.stringify(entry.payload),
-                entry.fetchedMs,
-                // Three-way encoding: NULL = pre-versioning row,
-                // '' = recorded null provenance (a versionless
-                // provider's write), else the version string.
-                // Manifest versions are never empty, so '' is free.
-                entry.providerVersion === undefined
-                  ? null
-                  : (entry.providerVersion ?? ''),
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.artworkCache) {
-          for (const entry of merged.artworkCache) {
-            await conn.execute(
-              `INSERT INTO artwork_cache (url, file_path, bytes, last_accessed_ms)
-               VALUES (?, ?, ?, ?)`,
-              [
-                entry.url,
-                entry.filePath,
-                entry.bytes,
-                entry.lastAccessedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.downloads) {
-          for (const download of merged.downloads) {
-            await conn.execute(
-              `INSERT INTO downloads (download_id, recording_id, provider, source_ref_json, file_path, bytes, state, committed_offset, checksum, mime, itag, expires_at_ms, error_json, priority, requested_ms, downloaded_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [
-                download.downloadId,
-                download.recordingId,
-                download.provider,
-                JSON.stringify(download.sourceRef),
-                download.filePath,
-                download.bytes,
-                download.state,
-                download.committedOffset,
-                download.checksum,
-                download.mime,
-                download.itag,
-                download.expiresAtMs,
-                download.error === null
-                  ? null
-                  : JSON.stringify(download.error),
-                download.priority,
-                download.requestedMs,
-                download.downloadedMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.localSources) {
-          for (const source of merged.localSources) {
-            await conn.execute(
-              `INSERT INTO local_sources (source_id, tree_uri, label, added_ms, last_scan_ms)
-               VALUES (?, ?, ?, ?, ?)`,
-              [
-                source.sourceId,
-                source.treeUri,
-                source.label,
-                source.addedMs,
-                source.lastScanMs,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.localFiles) {
-          for (const file of merged.localFiles) {
-            await conn.execute(
-              `INSERT INTO local_files (file_id, source_id, doc_id, size, fingerprint, modified_ms, title, artist, album, duration_ms, genre, recording_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [
-                file.fileId,
-                file.sourceId,
-                file.docId,
-                file.size,
-                file.fingerprint,
-                file.modifiedMs,
-                file.title,
-                file.artist,
-                file.album,
-                file.durationMs,
-                file.genre,
-                file.recordingId,
-              ],
-              signal,
-            );
-          }
-        }
-        this.#check(signal);
-        if (rewrite.queueState) {
-          await conn.execute(
-            `INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
-             VALUES (1, ?, ?, ?, ?, ?)`,
-            [
-              merged.queue.revision,
-              merged.queue.currentOccurrenceId,
-              merged.queue.positionMs,
-              merged.queue.mode,
-              merged.queue.blockedError === undefined
-                ? null
-                : JSON.stringify(merged.queue.blockedError),
-            ],
-            signal,
-          );
-        }
-        if (rewrite.queueOccurrences) {
-          for (const [ordinal, occurrence] of merged.queue.occurrences
-            .entries()) {
-            await conn.execute(
-              `INSERT INTO queue_occurrences (occurrence_id, ordinal, recording_id, selected_provider, selected_kind, selected_source_id)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                occurrence.occurrenceId,
-                ordinal,
-                occurrence.recordingId,
-                occurrence.selectedRef?.provider ?? null,
-                occurrence.selectedRef === null ? null : 'track',
-                occurrence.selectedRef?.id ?? null,
-              ],
-              signal,
-            );
-          }
-        }
-        if (rewrite.settings) {
-          await conn.execute(
-            `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              merged.settings.catalogProvider,
-              merged.settings.playbackProvider,
-              merged.settings.storefront,
-              merged.settings.qualityKbps,
-              merged.settings.theme,
-              merged.settings.prefetch ? 1 : 0,
-              merged.settings.lyricsProvider ?? null,
-              merged.settings.radioProvider ?? null,
-              merged.settings.artworkCacheBytes ?? null,
-              merged.settings.downloadMetered === true ? 1 : 0,
-              merged.settings.language ?? null,
-            ],
-            signal,
-          );
-        }
-        this.#check(signal);
-        for (const trace of attempts) {
-          await conn.execute(
-            'INSERT INTO attempt_traces (request_id, trace_json) VALUES (?, ?)',
-            [trace.requestId, JSON.stringify(trace)],
-            signal,
-          );
-        }
-        await conn.execute(
-          `DELETE FROM attempt_traces WHERE seq NOT IN (SELECT seq FROM attempt_traces ORDER BY seq DESC LIMIT ${ATTEMPT_CAP})`,
-          undefined,
-          signal,
-        );
+        await conn.executeAll(planned.value, signal);
         this.#check(signal);
         return ok(undefined);
       }, signal);
@@ -1323,156 +859,28 @@ function decodeState(rows: TableRows): PersistedState | null {
     return null;
   }
   let bad = false;
-  const fail = (): void => {
+  const tools = rowTools(() => {
     bad = true;
-  };
-  const reqStr = (value: SqlValue | undefined): string =>
-    typeof value === 'string' ? value : (fail(), '');
-  const reqNonEmpty = (value: SqlValue | undefined): string => {
-    const str = reqStr(value);
-    if (str.length === 0) {
-      fail();
-    }
-    return str;
-  };
-  const optStr = (value: SqlValue | undefined): string | null =>
-    value === null || typeof value === 'string' ? value : (fail(), null);
-  const reqInt = (value: SqlValue | undefined): number =>
-    typeof value === 'number' && Number.isSafeInteger(value)
-      ? value
-      : (fail(), 0);
-  const reqNonNegInt = (value: SqlValue | undefined): number => {
-    const num = reqInt(value);
-    if (num < 0) {
-      fail();
-    }
-    return num;
-  };
-  const optInt = (value: SqlValue | undefined): number | null =>
-    value === null
-      ? null
-      : typeof value === 'number' && Number.isSafeInteger(value)
-        ? value
-        : (fail(), null);
-  const optBool = (value: SqlValue | undefined): boolean | null =>
-    value === null
-      ? null
-      : value === 1
-        ? true
-        : value === 0
-          ? false
-          : (fail(), null);
-  const reqBool = (value: SqlValue | undefined): boolean =>
-    value === 1 ? true : value === 0 ? false : (fail(), false);
-  const json = (value: SqlValue | undefined): unknown => {
-    if (typeof value !== 'string') {
-      fail();
-      return null;
-    }
-    try {
-      return JSON.parse(value);
-    } catch {
-      fail();
-      return null;
-    }
-  };
-
-  // Recording ids first so every dependent row can be verified against
-  // them; duplicate recording rows are rejected even without the PK.
-  const recordingIds = new Set<string>();
-  for (const row of recordingRows) {
-    const id = reqStr(row['id']);
-    if (recordingIds.has(id)) {
-      fail();
-    }
-    recordingIds.add(id);
-  }
-
-  // source_refs: ordered by (recording_id, ordinal); ordinals must be
-  // contiguous from 0 per recording, ids must name a real recording,
-  // and (provider, kind, source_id) must be unique per recording.
-  const refsByRecording = new Map<string, SourceRef[]>();
-  const refOrdinals = new Map<string, number>();
-  const seenRefs = new Map<string, Set<string>>();
-  for (const row of refRows) {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    if (row['kind'] !== 'track') {
-      fail();
-    }
-    const ordinal = reqNonNegInt(row['ordinal']);
-    const expected = refOrdinals.get(recordingId) ?? 0;
-    if (ordinal !== expected) {
-      fail();
-    }
-    refOrdinals.set(recordingId, expected + 1);
-    const provider = reqNonEmpty(row['provider']);
-    const sourceId = reqNonEmpty(row['source_id']);
-    const ref: SourceRef = { provider, kind: 'track', id: sourceId };
-    const seen = seenRefs.get(recordingId) ?? new Set<string>();
-    const key = `${provider} track ${sourceId}`;
-    if (seen.has(key)) {
-      fail();
-    }
-    seen.add(key);
-    seenRefs.set(recordingId, seen);
-    const list = refsByRecording.get(recordingId) ?? [];
-    list.push(ref);
-    refsByRecording.set(recordingId, list);
-  }
-  const mappingsByRecording = new Map<string, SourceMapping[]>();
-  const mappingOrdinals = new Map<string, number>();
-  for (const row of mappingRows) {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    if (row['kind'] !== 'track') {
-      fail();
-    }
-    const ordinal = reqNonNegInt(row['ordinal']);
-    const expected = mappingOrdinals.get(recordingId) ?? 0;
-    if (ordinal !== expected) {
-      fail();
-    }
-    mappingOrdinals.set(recordingId, expected + 1);
-    const mapping: SourceMapping = {
-      ref: {
-        provider: reqNonEmpty(row['provider']),
-        kind: 'track',
-        id: reqNonEmpty(row['source_id']),
-      },
-      status: row['status'] as SourceMapping['status'],
-      matchedAtMs: reqNonNegInt(row['matched_at_ms']),
-      evidence: json(row['evidence_json']) as SourceMapping['evidence'],
-    };
-    const list = mappingsByRecording.get(recordingId) ?? [];
-    list.push(mapping);
-    mappingsByRecording.set(recordingId, list);
-  }
-  const recordings: Recording[] = recordingRows.map((row) => {
-    const id = reqStr(row['id']);
-    return {
-      id,
-      title: reqStr(row['title']),
-      artist: optStr(row['artist']),
-      album: optStr(row['album']),
-      durationMs: optInt(row['duration_ms']),
-      releaseYear: optInt(row['release_year']),
-      artwork: json(row['artwork_json']) as Recording['artwork'],
-      explicit: optBool(row['explicit']),
-      genre: optStr(row['genre']),
-      isrc: optStr(row['isrc']),
-      versionLabels: json(
-        row['version_labels_json'],
-      ) as Recording['versionLabels'],
-      sourceRefs: refsByRecording.get(id) ?? [],
-      mappings: mappingsByRecording.get(id) ?? [],
-      provenance: row['provenance'] as Recording['provenance'],
-    };
   });
+  const {
+    fail,
+    reqStr,
+    reqNonEmpty,
+    optStr,
+    reqInt,
+    reqNonNegInt,
+    optInt,
+    optBool,
+    reqBool,
+    json,
+  } = tools;
+
+  const { recordings, recordingIds } = decodeRecordingRows(
+    tools,
+    recordingRows,
+    refRows,
+    mappingRows,
+  );
   // likes: polymorphic target_id — 'track' names a recording,
   // 'album'/'artist' name an entity (checked after entity decode).
   const likeKeys = new Set<string>();

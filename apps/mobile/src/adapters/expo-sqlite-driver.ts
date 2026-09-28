@@ -127,6 +127,15 @@ export async function createExpoSqliteDriver(
           }
           return rows;
         },
+        // The batch is already multi-row INSERTs from the planner —
+        // one awaited `runAsync` per statement keeps ordering cheap.
+        async executeAll(statements, statementSignal) {
+          checkCancelled(statementSignal ?? signal);
+          for (const statement of statements) {
+            checkCancelled(statementSignal ?? signal);
+            await db.runAsync(statement.sql, [...statement.params]);
+          }
+        },
       };
       await db.execAsync('BEGIN IMMEDIATE');
       try {

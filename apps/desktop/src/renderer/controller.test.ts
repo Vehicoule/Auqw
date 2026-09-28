@@ -170,6 +170,7 @@ function fakeApi(): Rig {
         rollback: () => Promise.reject(new Error('seam: inject storage')),
         cancel: () => Promise.reject(new Error('seam: inject storage')),
         execute: () => Promise.reject(new Error('seam: inject storage')),
+        execMany: () => Promise.reject(new Error('seam: inject storage')),
         query: () => Promise.reject(new Error('seam: inject storage')),
         backup: () => Promise.reject(new Error('seam: inject storage')),
         dropBackup: () => Promise.reject(new Error('seam: inject storage')),

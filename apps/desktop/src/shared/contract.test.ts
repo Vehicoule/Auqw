@@ -4,6 +4,7 @@ import {
   isStorageBackupArgs,
   isStorageBeginArgs,
   isStorageBeginResult,
+  isStorageExecManyArgs,
   isStorageExecuteArgs,
   isStorageExecuteResult,
   isStorageQueryResult,
@@ -63,6 +64,63 @@ export function run(): void {
   );
   assert(!isStorageExecuteArgs({ ...exec, extra: 1 }), 'extra key rejected');
   assert(!isStorageExecuteArgs('sql'), 'non-record rejected');
+
+  // storage:execMany args — a batch of {sql, params} statements
+  const many = {
+    txId: 'tx',
+    statements: [
+      { sql: 'DELETE FROM t WHERE id = ?', params: ['a'] },
+      { sql: 'INSERT INTO t VALUES (?, ?)', params: ['a', 1] },
+    ],
+  };
+  assert(isStorageExecManyArgs(many), 'execMany args pass');
+  assert(
+    isStorageExecManyArgs({ ...many, statements: [] }),
+    'empty batch passes',
+  );
+  assert(
+    !isStorageExecManyArgs({ ...many, statements: 'x' }),
+    'non-array statements rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({ txId: 'tx' }),
+    'missing statements rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({
+      ...many,
+      statements: [{ sql: 'SELECT 1', params: [], extra: 1 }],
+    }),
+    'statement extra key rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({
+      ...many,
+      statements: [{ sql: 'SELECT 1' }],
+    }),
+    'statement missing params rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({
+      ...many,
+      statements: [{ sql: 'SELECT 1', params: [Number.NaN] }],
+    }),
+    'bad statement param rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({
+      ...many,
+      statements: Array.from({ length: 4_097 }, () => ({
+        sql: 'SELECT 1',
+        params: [],
+      })),
+    }),
+    'over-long batch rejected',
+  );
+  assert(
+    !isStorageExecManyArgs({ ...many, extra: 1 }),
+    'execMany extra key rejected',
+  );
 
   // storage:begin result
   assert(isStorageBeginResult({ txId: 'tx-1' }), 'begin result passes');

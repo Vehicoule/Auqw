@@ -5,12 +5,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   StorageBackupArgs,
+  StorageExecManyArgs,
   StorageExecuteArgs,
   StorageTxArgs,
 } from '../shared/contract.ts';
 import {
   isStorageBackupArgs,
   isStorageBeginArgs,
+  isStorageExecManyArgs,
   isStorageExecuteArgs,
   isStorageQueryArgs,
   isStorageTxArgs,
@@ -322,6 +324,48 @@ export function createStorageService(
     }
   }
 
+  /**
+   * A commit's write plan in one call: every statement is gated
+   * before any of them runs, then each runs in order inside the
+   * pinned tx — a mid-batch failure still leaves the renderer's
+   * rollback to undo the partial write. The loop yields between
+   * sub-batches so a queued storage:cancel lands mid-batch instead
+   * of waiting out the whole chunk.
+   */
+  async function execMany(args: StorageExecManyArgs): Promise<unknown> {
+    const tx = requireTx(args.txId);
+    if (tx.cancelled) {
+      throw shellError('cancelled', 'transaction cancelled');
+    }
+    for (const statement of args.statements) {
+      checkStatement(statement.sql);
+    }
+    const opened = database();
+    try {
+      for (const [index, statement] of args.statements.entries()) {
+        const prepared = opened.prepare(statement.sql);
+        prepared.setReadBigInts(true);
+        prepared.run(...statement.params);
+        if ((index + 1) % 64 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          if (tx.cancelled) {
+            throw shellError('cancelled', 'transaction cancelled');
+          }
+          // Lifecycle rollback for a dead renderer can close the tx
+          // under a suspended batch — without this the remaining
+          // statements would run in autocommit (or inside the next
+          // tx's BEGIN) and persist despite the rollback.
+          if (openTxs.get(args.txId) !== tx) {
+            throw shellError('cancelled', 'transaction closed mid-batch');
+          }
+        }
+      }
+      return undefined;
+    } catch (thrown) {
+      rethrowStorage('storage execMany failed', thrown);
+    }
+  }
+
   function query(args: StorageExecuteArgs): unknown {
     const tx = requireTx(args.txId);
     if (tx.cancelled) {
@@ -413,6 +457,11 @@ export function createStorageService(
         CHANNELS.storageExecute,
         isStorageExecuteArgs,
         execute,
+      ),
+      [CHANNELS.storageExecMany]: guarded(
+        CHANNELS.storageExecMany,
+        isStorageExecManyArgs,
+        execMany,
       ),
       [CHANNELS.storageQuery]: guarded(
         CHANNELS.storageQuery,

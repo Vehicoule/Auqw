@@ -79,6 +79,156 @@ export async function run(): Promise<void> {
     assertDeepEqual(got.result, { rows: [{ name: null }] });
     await call(CHANNELS.storageCommit, { txId: tx2 });
 
+    // execMany runs its statements in order inside the tx — one call
+    // lands a delete + multi-row insert + update
+    const txBatch = await begin();
+    const batched = await call(CHANNELS.storageExecMany, {
+      txId: txBatch,
+      statements: [
+        { sql: `DELETE FROM items WHERE name = 'gamma'`, params: [] },
+        {
+          sql: 'INSERT INTO items (name) VALUES (?), (?)',
+          params: ['b1', 'b2'],
+        },
+        { sql: `UPDATE items SET name = ? WHERE name = 'b1'`, params: ['b1x'] },
+      ],
+    });
+    assert(batched.ok && batched.result === undefined, 'execMany resolves');
+    const batchRows = await query(
+      txBatch,
+      `SELECT name FROM items WHERE name IN ('gamma', 'b1', 'b1x', 'b2') ORDER BY name`,
+    );
+    assert(batchRows.ok);
+    assertDeepEqual(batchRows.result, {
+      rows: [{ name: 'b1x' }, { name: 'b2' }],
+    });
+    // the gate scans every statement before any runs — a poisoned tail
+    // must not run the batch's leading statements either
+    const gatedBatch = await call(CHANNELS.storageExecMany, {
+      txId: txBatch,
+      statements: [
+        { sql: `INSERT INTO items (name) VALUES ('sneaky')`, params: [] },
+        { sql: 'ATTACH DATABASE x AS y', params: [] },
+      ],
+    });
+    assert(
+      !gatedBatch.ok && gatedBatch.error.kind === 'invalid-request',
+      'execMany refuses a gated tail statement',
+    );
+    const sneaky = await query(
+      txBatch,
+      `SELECT COUNT(*) AS n FROM items WHERE name = 'sneaky'`,
+    );
+    assert(sneaky.ok);
+    assertDeepEqual(
+      sneaky.result,
+      { rows: [{ n: 0 }] },
+      'gate refusal ran nothing from the batch',
+    );
+    // a mid-batch constraint failure surfaces io-error; the tx still
+    // rolls back so the partial prefix lands nothing
+    const brokeBatch = await call(CHANNELS.storageExecMany, {
+      txId: txBatch,
+      statements: [
+        { sql: `INSERT INTO items (name) VALUES ('prefix')`, params: [] },
+        { sql: `INSERT INTO items (id) VALUES (1)`, params: [] },
+      ],
+    });
+    assert(
+      !brokeBatch.ok && brokeBatch.error.kind === 'io-error',
+      'mid-batch failure surfaces io-error',
+    );
+    await call(CHANNELS.storageRollback, { txId: txBatch });
+    const txAfter = await begin();
+    const prefixCheck = await query(
+      txAfter,
+      `SELECT COUNT(*) AS n FROM items WHERE name IN ('sneaky', 'prefix')`,
+    );
+    assert(prefixCheck.ok);
+    assertDeepEqual(
+      prefixCheck.result,
+      { rows: [{ n: 0 }] },
+      'rolled-back batch left nothing',
+    );
+    // unknown/cancelled txs reject the batch the same as a statement
+    const unknownBatch = await call(CHANNELS.storageExecMany, {
+      txId: 'no-such-tx',
+      statements: [],
+    });
+    assert(!unknownBatch.ok && unknownBatch.error.kind === 'invalid-request');
+    await call(CHANNELS.storageCommit, { txId: txAfter });
+    const deadBatch = await begin();
+    await call(CHANNELS.storageCancel, { txId: deadBatch });
+    const cancelledBatch = await call(CHANNELS.storageExecMany, {
+      txId: deadBatch,
+      statements: [{ sql: 'SELECT 1', params: [] }],
+    });
+    assert(
+      !cancelledBatch.ok && cancelledBatch.error.kind === 'cancelled',
+      'execMany on cancelled tx answers cancelled',
+    );
+    await call(CHANNELS.storageRollback, { txId: deadBatch });
+
+    // a cancel landing mid-chunk interrupts the batch — the handler
+    // yields between 64-statement sub-batches and re-checks the flag
+    const midTx = await begin();
+    const midFlight = call(CHANNELS.storageExecMany, {
+      txId: midTx,
+      statements: Array.from({ length: 130 }, (_, i) => ({
+        sql: 'INSERT INTO items (name) VALUES (?)',
+        params: [`mid-${i}`],
+      })),
+    });
+    await call(CHANNELS.storageCancel, { txId: midTx });
+    const midResult = await midFlight;
+    assert(
+      !midResult.ok && midResult.error.kind === 'cancelled',
+      'mid-batch cancel interrupts the chunk',
+    );
+    await call(CHANNELS.storageRollback, { txId: midTx });
+    const midCheck = await begin();
+    const midRows = await query(
+      midCheck,
+      `SELECT COUNT(*) AS n FROM items WHERE name LIKE 'mid-%'`,
+    );
+    assert(midRows.ok);
+    assertDeepEqual(
+      midRows.result,
+      { rows: [{ n: 0 }] },
+      'interrupted batch rolled back clean',
+    );
+    await call(CHANNELS.storageCommit, { txId: midCheck });
+
+    // a rollback landing mid-chunk (lifecycle cleanup for a dead
+    // renderer) aborts the batch — the rest must not write in
+    // autocommit on the released connection
+    const lifeTx = await begin();
+    const lifeFlight = call(CHANNELS.storageExecMany, {
+      txId: lifeTx,
+      statements: Array.from({ length: 130 }, (_, i) => ({
+        sql: 'INSERT INTO items (name) VALUES (?)',
+        params: [`life-${i}`],
+      })),
+    });
+    await call(CHANNELS.storageRollback, { txId: lifeTx });
+    const lifeResult = await lifeFlight;
+    assert(
+      !lifeResult.ok && lifeResult.error.kind === 'cancelled',
+      'mid-batch rollback aborts the chunk',
+    );
+    const lifeCheck = await begin();
+    const lifeRows = await query(
+      lifeCheck,
+      `SELECT COUNT(*) AS n FROM items WHERE name LIKE 'life-%'`,
+    );
+    assert(lifeRows.ok);
+    assertDeepEqual(
+      lifeRows.result,
+      { rows: [{ n: 0 }] },
+      'rolled-back prefix persisted nothing',
+    );
+    await call(CHANNELS.storageCommit, { txId: lifeCheck });
+
     // rollback discards
     const tx3 = await begin();
     await execute(tx3, 'INSERT INTO items (name) VALUES (?)', ['dropped']);
@@ -185,6 +335,22 @@ export async function run(): Promise<void> {
       [CHANNELS.storageExecute, { txId: held, sql: 'SELECT 1', params: [Number.NaN] }],
       [CHANNELS.storageExecute, { txId: held, sql: 'SELECT 1', params: [undefined] }],
       [CHANNELS.storageQuery, { txId: held, sql: 'SELECT 1', params: [false] }],
+      [
+        CHANNELS.storageExecMany,
+        { txId: held, statements: 'not-array' },
+      ],
+      [
+        CHANNELS.storageExecMany,
+        { txId: held, statements: [{ sql: 'SELECT 1', params: [true] }] },
+      ],
+      [
+        CHANNELS.storageExecMany,
+        { txId: held, statements: [{ sql: 'SELECT 1' }] },
+      ],
+      [
+        CHANNELS.storageExecMany,
+        { txId: held, statements: [], extra: 1 },
+      ],
       [CHANNELS.storageCommit, { txId: '' }],
       [CHANNELS.storageBackup, { tag: '../escape' }],
       [CHANNELS.storageBackup, { tag: 'has space' }],
