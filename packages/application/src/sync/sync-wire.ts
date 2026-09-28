@@ -642,7 +642,7 @@ export function wireRejectReason(reason: string): AppError {
 
 /* ------------------------------ the pump --------------------------- */
 
-type WireCloseReason = 'peer' | 'error' | 'oversize' | 'local';
+export type WireCloseReason = 'peer' | 'error' | 'oversize' | 'local';
 
 export type SyncWirePump = {
   /** false when the payload exceeds the phase cap or the pump is dead. */
