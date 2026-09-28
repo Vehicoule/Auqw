@@ -14,7 +14,10 @@ type ContainerKind = 'webm' | 'mp4' | 'unsupported';
 
 type SniffResult =
   | { readonly kind: 'need-more' }
-  | { readonly kind: 'ok'; readonly container: 'webm' | 'mp4' }
+  | {
+      readonly kind: 'ok';
+      readonly container: Exclude<ContainerKind, 'unsupported'>;
+    }
   | { readonly kind: 'unsupported' };
 
 /** EBML / WebM magic. */
@@ -227,6 +230,25 @@ function isClusterAt(buf: Uint8Array, off: number): boolean {
     return false;
   }
   return readElementId(buf, off + 4 + size.length) !== null;
+}
+
+/** A candidate signature's full check spans its 4-byte id + size vint
+ * (≤8) + first-child element id (≤4) — inside this tail of the buffer
+ * the check can't conclude, so a scan cursor must leave it for the
+ * next pass. */
+const CLUSTER_CHECK_TAIL = 4 + 8 + 4 - 1;
+
+/** Next header-shaped Cluster signature at or past `from` — indexOf
+ * jumps between candidate bytes instead of walking every offset. */
+function findClusterSig(buf: Uint8Array, from: number): number {
+  let pos = buf.indexOf(0x1f, from);
+  while (pos !== -1 && pos + 4 <= buf.length) {
+    if (isClusterAt(buf, pos)) {
+      return pos;
+    }
+    pos = buf.indexOf(0x1f, pos + 1);
+  }
+  return -1;
 }
 
 /**
@@ -443,16 +465,34 @@ type CarveResult =
  * one). Walks sibling elements forward, collecting cluster/moof starts
  * and any Cues element it passes — used once the container is known;
  * `carve` is only for the initial file-head classification.
+ *
+ * The walk is resumable across appends: `start` is the previous pass's
+ * `resume` (the first element whose extent wasn't decided), and
+ * `sigStart` continues a stalled unknown-size signature search from
+ * `sigResume` rather than re-scanning from the element head. `resume`
+ * is always an element start — an mp4 `styp` still awaiting its moof
+ * counts as undecided, so the walk re-reads it to rebuild the anchor.
  */
 export function boundaryScan(
   buf: Uint8Array,
   container: 'webm' | 'mp4',
   segDataStart: number,
   scaleMs: number,
-): { readonly boundaries: number[]; readonly cues: WebmCue[] } {
+  start = 0,
+  sigStart = -1,
+): {
+  readonly boundaries: number[];
+  readonly cues: WebmCue[];
+  /** First undecided element offset — the next call's `start`. */
+  readonly resume: number;
+  /** Signature-search progress inside an open unknown-size element —
+   * the next call's `sigStart`, or -1 when the walk didn't stall in one. */
+  readonly sigResume: number;
+} {
   const boundaries: number[] = [];
   const cues: WebmCue[] = [];
-  let pos = 0;
+  let sigResume = -1;
+  let pos = start;
   if (container === 'webm') {
     while (pos < buf.length) {
       const element = readElementId(buf, pos);
@@ -473,21 +513,27 @@ export function boundaryScan(
         continue;
       }
       if (element.id === WEBM_CUES && !size.unknown) {
+        if (dataStart + size.value > buf.length) {
+          // Cues is content-parsed — leave it undecided until its
+          // payload completes rather than committing a torn index.
+          break;
+        }
         for (const cue of parseCues(buf, dataStart, size.value, segDataStart)) {
           cues.push({ mediaMs: cue.mediaMs * scaleMs, byte: cue.byte });
         }
       }
       if (size.unknown) {
-        let scan = dataStart;
-        let found = -1;
-        while (scan + 4 <= buf.length) {
-          if (isClusterAt(buf, scan)) {
-            found = scan;
-            break;
-          }
-          scan += 1;
-        }
+        // An open-ended element runs to its parent's end — a Cluster's
+        // terminator is the next sibling Cluster. The search resumes
+        // where the last pass stalled instead of re-walking payload.
+        const found = findClusterSig(buf, Math.max(dataStart, sigStart));
         if (found === -1) {
+          // A signature inside the check tail may not have had its
+          // whole header arrive yet — leave it for the next pass.
+          sigResume = Math.max(
+            dataStart,
+            buf.length - CLUSTER_CHECK_TAIL,
+          );
           break;
         }
         pos = found;
@@ -495,10 +541,15 @@ export function boundaryScan(
       }
       pos = dataStart + size.value;
     }
-    return { boundaries, cues };
+    return { boundaries, cues, resume: pos, sigResume };
   }
   let pendingStyp = -1;
   while (pos + 8 <= buf.length) {
+    if (u32be(buf, pos) === 0) {
+      // A size-0 box claims the stream's remaining bytes — its end is
+      // undecidable, so the walk can't commit past it.
+      break;
+    }
     const box = readBox(buf, pos);
     if (box === null) {
       break;
@@ -512,7 +563,12 @@ export function boundaryScan(
     }
     pos += box.size;
   }
-  return { boundaries, cues };
+  return {
+    boundaries,
+    cues,
+    resume: pendingStyp >= 0 ? pendingStyp : pos,
+    sigResume,
+  };
 }
 
 /**

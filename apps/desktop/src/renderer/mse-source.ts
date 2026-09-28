@@ -221,7 +221,6 @@ export function attachMseSource(deps: {
         readyReject = reject;
         sessionDestroy = runSession(
           deps.mime,
-          deps.mse,
           media,
           url,
           port,
@@ -243,7 +242,6 @@ export function attachMseSource(deps: {
 
 function runSession(
   mime: string,
-  mse: MseFactories,
   media: MediaSourceLike,
   url: string,
   port: StreamPortLike,
@@ -255,6 +253,12 @@ function runSession(
   let ingest = new Uint8Array(0);
   let ingestBase = 0;
   let emitCursor = 0;
+  // boundaryScan resume points, in the same absolute byte space as
+  // ingestBase/emitCursor so they survive trims: the element walk
+  // restarts at the first undecided element, and sigCursor continues
+  // an open unknown-size signature search (-1 = none in flight).
+  let scanCursor = 0;
+  let sigCursor = -1;
   const pending: PendingUnit[] = [];
   let journal: JournalEntry[] = [];
   let cues: readonly WebmCue[] = [];
@@ -352,7 +356,13 @@ function runSession(
   function trimIngest(): void {
     const consumed = emitCursor - ingestBase;
     if (consumed > 0 && consumed <= ingest.length) {
-      ingest = ingest.slice(consumed);
+      // A view, not a copy — ingest is rebuilt on every append anyway.
+      // A fully consumed buffer keeps a fresh empty array instead — an
+      // empty view would retain the whole backing for the session.
+      ingest =
+        consumed === ingest.length
+          ? new Uint8Array(0)
+          : ingest.subarray(consumed);
       ingestBase += consumed;
     }
   }
@@ -386,6 +396,8 @@ function runSession(
       ingest = ingest.slice(off);
       ingestBase += off;
       emitCursor = ingestBase;
+      scanCursor = ingestBase;
+      sigCursor = -1;
       resync = false;
     }
     if (container === null) {
@@ -408,14 +420,27 @@ function runSession(
       segDataStart = result.segDataStart;
       scaleMs = result.scaleMs;
       emitCursor = ingestBase;
+      scanCursor = ingestBase;
+      sigCursor = -1;
       if (result.cues.length > 0) {
         cues = result.cues;
       }
     }
     // Steady state: the ingest head is a segment boundary by
     // construction (emitCursor only lands on one) — scan siblings, not
-    // the file-head parser, or mid-stream data would misclassify.
-    const scan = boundaryScan(ingest, container, segDataStart, scaleMs);
+    // the file-head parser, or mid-stream data would misclassify. The
+    // walk resumes where the last pass stalled instead of re-scanning
+    // the whole open tail per chunk.
+    const scan = boundaryScan(
+      ingest,
+      container,
+      segDataStart,
+      scaleMs,
+      Math.max(0, scanCursor - ingestBase),
+      sigCursor < 0 ? -1 : Math.max(0, sigCursor - ingestBase),
+    );
+    scanCursor = ingestBase + scan.resume;
+    sigCursor = scan.sigResume < 0 ? -1 : ingestBase + scan.sigResume;
     if (scan.cues.length > 0) {
       cues = scan.cues;
     }
@@ -779,6 +804,8 @@ function runSession(
     ingest = new Uint8Array(0);
     ingestBase = byte;
     emitCursor = byte;
+    scanCursor = byte;
+    sigCursor = -1;
     eof = false;
     // The pump zeroes its credit on seek — granted-but-undelivered
     // bytes under the old epoch are gone on both sides.
