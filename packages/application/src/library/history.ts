@@ -132,6 +132,18 @@ export type TopPlayed = {
 };
 
 /**
+ * Rank order for play counts: count desc, lastMs desc, recordingId
+ * asc — the published Top 50 ordering.
+ */
+function rankPlayCount(a: PlayCount, b: PlayCount): number {
+  return (
+    b.count - a.count ||
+    b.lastMs - a.lastMs ||
+    (a.recordingId < b.recordingId ? -1 : a.recordingId > b.recordingId ? 1 : 0)
+  );
+}
+
+/**
  * The Top 50 view: `play_counts` ranked by count desc, ties broken by
  * lastMs desc then recordingId asc, joined to their recordings.
  * Unresolvable ids are dropped rather than ranked.
@@ -145,21 +157,76 @@ export function topPlayed(
     throw new TypeError('limit must be a positive safe integer');
   }
   const byId = new Map(recordings.map((r) => [r.id, r]));
-  const ranked = [...playCounts].sort(
-    (a, b) =>
-      b.count - a.count ||
-      b.lastMs - a.lastMs ||
-      (a.recordingId < b.recordingId
-        ? -1
-        : a.recordingId > b.recordingId
-          ? 1
-          : 0),
-  );
-  const rows: TopPlayed[] = [];
-  for (const entry of ranked) {
-    if (rows.length >= limit) {
-      break;
+  // A bounded min-heap of the `limit` best resolvable counts: the
+  // root is the worst kept entry, so a better candidate evicts it —
+  // O(n log limit) instead of sorting the whole aggregate.
+  const heap: PlayCount[] = [];
+  const siftUp = (index: number): void => {
+    let i = index;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      const p = heap[parent];
+      const c = heap[i];
+      if (p === undefined || c === undefined || rankPlayCount(p, c) >= 0) {
+        break;
+      }
+      heap[parent] = c;
+      heap[i] = p;
+      i = parent;
     }
+  };
+  const siftDown = (index: number): void => {
+    let i = index;
+    for (;;) {
+      const left = i * 2 + 1;
+      const right = left + 1;
+      let smallest = i;
+      const l = heap[left];
+      const r = heap[right];
+      const s = heap[smallest];
+      if (l !== undefined && s !== undefined && rankPlayCount(l, s) > 0) {
+        smallest = left;
+      }
+      const next = heap[smallest];
+      if (
+        r !== undefined &&
+        next !== undefined &&
+        rankPlayCount(r, next) > 0
+      ) {
+        smallest = right;
+      }
+      if (smallest === i) {
+        break;
+      }
+      const moved = heap[smallest];
+      const self = heap[i];
+      if (moved === undefined || self === undefined) {
+        break;
+      }
+      heap[i] = moved;
+      heap[smallest] = self;
+      i = smallest;
+    }
+  };
+  for (const entry of playCounts) {
+    // Unresolvable ids drop out of the competition — matching the
+    // sort-then-drop behavior exactly for every limit.
+    if (!byId.has(entry.recordingId)) {
+      continue;
+    }
+    if (heap.length < limit) {
+      heap.push(entry);
+      siftUp(heap.length - 1);
+      continue;
+    }
+    const worst = heap[0];
+    if (worst !== undefined && rankPlayCount(entry, worst) < 0) {
+      heap[0] = entry;
+      siftDown(0);
+    }
+  }
+  const rows: TopPlayed[] = [];
+  for (const entry of heap.sort(rankPlayCount)) {
     const recording = byId.get(entry.recordingId);
     if (recording !== undefined) {
       rows.push({

@@ -1020,12 +1020,42 @@ function playlistEntriesFor(
     .sort((a, b) => a.position - b.position);
 }
 
-function entityRefFor(
+const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
+
+/**
+ * All playlist entries bucketed by playlist, each bucket sorted by
+ * position — one pass for models that need every playlist's entries
+ * instead of a filter+sort per playlist.
+ */
+function playlistEntriesByPlaylist(
+  entries: readonly PlaylistEntry[],
+): Map<string, PlaylistEntry[]> {
+  const byPlaylist = new Map<string, PlaylistEntry[]>();
+  for (const entry of entries) {
+    const bucket = byPlaylist.get(entry.playlistId);
+    if (bucket === undefined) {
+      byPlaylist.set(entry.playlistId, [entry]);
+    } else {
+      bucket.push(entry);
+    }
+  }
+  for (const bucket of byPlaylist.values()) {
+    bucket.sort((a, b) => a.position - b.position);
+  }
+  return byPlaylist;
+}
+
+/** entityId → ref lookup — one pass for models resolving many refs. */
+function entityRefMap(
   refs: readonly EntitySourceRef[],
-  entityId: string,
-): EntityRef | null {
-  const hit = refs.find((s) => s.entityId === entityId);
-  return hit === undefined ? null : hit.ref;
+): Map<string, EntityRef> {
+  const map = new Map<string, EntityRef>();
+  for (const ref of refs) {
+    if (!map.has(ref.entityId)) {
+      map.set(ref.entityId, ref.ref);
+    }
+  }
+  return map;
 }
 
 /** The app-side entity an EntityRef resolves to, when materialized. */
@@ -1114,12 +1144,14 @@ export function toLibraryModel(input: {
 
   // Ownable grid: user playlists plus liked album/artist entities.
   const entityLikes = likedEntityIds(input.likes);
+  const entriesByPlaylist = playlistEntriesByPlaylist(
+    input.playlistEntries,
+  );
+  const refByEntity = entityRefMap(input.entitySourceRefs);
   const cards: LibraryCardModel[] = [];
   for (const playlist of input.playlists) {
-    const entries = playlistEntriesFor(
-      input.playlistEntries,
-      playlist.playlistId,
-    );
+    const entries =
+      entriesByPlaylist.get(playlist.playlistId) ?? EMPTY_ENTRIES;
     const first = entries[0];
     const artworkRecording =
       first === undefined ? undefined : byId.get(first.recordingId);
@@ -1155,7 +1187,7 @@ export function toLibraryModel(input: {
       artworkUrl: pickArtworkUrl(entity.artwork),
       sortMs: entity.createdMs,
       playlistId: null,
-      entityRef: entityRefFor(input.entitySourceRefs, entity.entityId),
+      entityRef: refByEntity.get(entity.entityId) ?? null,
       entityId: entity.entityId,
     });
   }
@@ -1175,7 +1207,7 @@ export function toLibraryModel(input: {
       key: `entity-${entity.entityId}`,
       name: entity.title,
       artworkUrl: pickArtworkUrl(entity.artwork),
-      entityRef: entityRefFor(input.entitySourceRefs, entity.entityId),
+      entityRef: refByEntity.get(entity.entityId) ?? null,
     });
   }
   for (const item of items) {

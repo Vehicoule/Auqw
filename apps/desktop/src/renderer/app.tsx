@@ -363,6 +363,16 @@ function Main({
   readonly state: ReadySession;
 }) {
   const { session } = controller;
+  // Playback position rides the session's light channel — status
+  // ticks that only move position no longer publish whole state, so
+  // the position read subscribes here instead of through `state`.
+  const subscribePosition = useCallback(
+    (listener: () => void) => session.subscribePosition(listener),
+    [session],
+  );
+  const positionMs = useSyncExternalStore(subscribePosition, () =>
+    session.positionMs(),
+  );
   const [tab, setTab] = useState('home');
   // Desktop keeps the player in the Stage column — always mounted,
   // collapsible from the world toolbar. Replaces the sheet's expanded
@@ -485,6 +495,25 @@ function Main({
   const usageApplied = useRef(0);
   const usageLastProbe = useRef(0);
   const usageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const downloadsLast = useRef(0);
+  const downloadsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshDownloads = useCallback(() => {
+    // Progress events fire per transferred chunk — the list snapshot
+    // gets the same ~1 Hz trailing throttle as the statfs probe below.
+    const now = Date.now();
+    const gap = now - downloadsLast.current;
+    if (gap < 1_000) {
+      if (downloadsTimer.current === null) {
+        downloadsTimer.current = setTimeout(() => {
+          downloadsTimer.current = null;
+          refreshDownloads();
+        }, 1_000 - gap);
+      }
+      return;
+    }
+    downloadsLast.current = now;
+    setDownloads(controller.downloads.list());
+  }, [controller]);
   const refreshUsage = useCallback(() => {
     // The subscribe path fires per progress chunk — a statfs probe on
     // each one is hundreds of scans per download. Throttle to ~1 Hz
@@ -516,7 +545,7 @@ function Main({
     setDownloads(controller.downloads.list());
     refreshUsage();
     const unsubscribe = controller.downloads.subscribe(() => {
-      setDownloads(controller.downloads.list());
+      refreshDownloads();
       refreshUsage();
     });
     return () => {
@@ -525,8 +554,12 @@ function Main({
         clearTimeout(usageTimer.current);
         usageTimer.current = null;
       }
+      if (downloadsTimer.current !== null) {
+        clearTimeout(downloadsTimer.current);
+        downloadsTimer.current = null;
+      }
     };
-  }, [controller, refreshUsage]);
+  }, [controller, refreshUsage, refreshDownloads]);
 
   const refreshLocal = useCallback(() => {
     setLocalTick((t) => t + 1);
@@ -1162,18 +1195,41 @@ function Main({
     return () => source.cancel();
   }, [tab, controller, session]);
 
-  const player = useMemo(
-    () =>
-      toPlayerModel({
-        playback: state.playback,
-        queue: state.queue,
-        recordings: state.recordings,
-        likes: state.likes,
-        repeat: state.repeat,
-        shuffleOrder: state.shuffleOrder,
-      }),
-    [state, localeTick],
-  );
+  // Published snapshots keep stable refs for unchanged sections, so
+  // model memos key on the slices they read — a queue-only publish
+  // no longer rebuilds the library model, and position-only ticks
+  // (which skip the state channel entirely) flow through positionMs.
+  const player = useMemo(() => {
+    const model = toPlayerModel({
+      playback: state.playback,
+      queue: state.queue,
+      recordings: state.recordings,
+      likes: state.likes,
+      repeat: state.repeat,
+      shuffleOrder: state.shuffleOrder,
+    });
+    // The model's position is a publish-time read — overlay the live
+    // tick value so the transport position moves between publishes.
+    if (
+      model !== null &&
+      (model.status === 'buffering' ||
+        model.status === 'playing' ||
+        model.status === 'paused') &&
+      model.positionMs !== positionMs
+    ) {
+      return { ...model, positionMs };
+    }
+    return model;
+  }, [
+    state.playback,
+    state.queue,
+    state.recordings,
+    state.likes,
+    state.repeat,
+    state.shuffleOrder,
+    positionMs,
+    localeTick,
+  ]);
   const queueModel = useMemo(
     () =>
       toQueueModel({
@@ -1185,7 +1241,7 @@ function Main({
             ? new Set(state.queue.occurrences.map((o) => o.recordingId))
             : undefined,
       }),
-    [state, online, localeTick],
+    [state.queue, state.recordings, state.likes, online, localeTick],
   );
   const libraryModel = useMemo(() => {
     const model = toLibraryModel({
@@ -1249,7 +1305,21 @@ function Main({
         downloads: model.collectionRows.downloads.map(mark),
       },
     };
-  }, [state, online, downloads, localeTick]);
+  }, [
+    state.recordings,
+    state.likes,
+    state.playlists,
+    state.playlistEntries,
+    state.playHistory,
+    state.playCounts,
+    state.entities,
+    state.entitySourceRefs,
+    state.playback,
+    online,
+    downloads,
+    controller,
+    localeTick,
+  ]);
   const playlistModelFor = useCallback(
     (playlistId: string) => {
       const model = toPlaylistModel({
@@ -1284,7 +1354,16 @@ function Main({
         })),
       };
     },
-    [state, online, localeTick],
+    [
+      state.playlists,
+      state.playlistEntries,
+      state.recordings,
+      state.likes,
+      state.playback,
+      online,
+      controller,
+      localeTick,
+    ],
   );
   const entityModelFor = useCallback(
     (fetch: EntityFetch | null) =>
@@ -1344,7 +1423,13 @@ function Main({
             ? t('home.subline.empty')
             : t('home.subline.likes', { count: state.likes.length }),
       }),
-    [state, searchState, localeTick],
+    [
+      state.recordings,
+      state.likes,
+      state.playback,
+      searchState,
+      localeTick,
+    ],
   );
   // Suggestion cards key by `${provider}:${id}` — provider refs, not
   // materialized recording ids — so a press needs the TrackMetadata
@@ -1373,7 +1458,13 @@ function Main({
       persistenceDetail: state.persistenceError?.message ?? null,
       pendingReviews,
     }),
-    [state, controller, attempts, pendingReviews, localeTick],
+    [
+      state.persistenceError,
+      controller,
+      attempts,
+      pendingReviews,
+      localeTick,
+    ],
   );
   const settingsModel = useMemo(() => {
     const model = toSettingsModel(state.settings, diagnostics, {
@@ -1519,10 +1610,12 @@ function Main({
   // would land on — an owned target still advances offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
-      const { occurrences, currentOccurrenceId, positionMs } =
-        state.queue;
+      const { occurrences, currentOccurrenceId } = state.queue;
+      // Position ticks ride the light channel now — read it live,
+      // not from the (possibly position-stale) published snapshot.
+      const positionMs = session.positionMs();
       const walk =
-        state.type === 'ready' && state.shuffleOrder !== null
+        state.shuffleOrder !== null
           ? state.shuffleOrder
           : occurrences.map((o) => o.occurrenceId);
       const pos =
@@ -1530,10 +1623,7 @@ function Main({
       if (pos < 0) {
         return;
       }
-      const wraps =
-        state.type === 'ready' &&
-        state.repeat === 'all' &&
-        walk.length > 0;
+      const wraps = state.repeat === 'all' && walk.length > 0;
       const targetId =
         method === 'next'
           ? pos + 1 < walk.length
@@ -1556,7 +1646,13 @@ function Main({
       }
       void (method === 'next' ? session.next() : session.previous());
     },
-    [session, state, canPlay],
+    [
+      session,
+      state.queue,
+      state.shuffleOrder,
+      state.repeat,
+      canPlay,
+    ],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
@@ -1917,7 +2013,7 @@ function Main({
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
     return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-  }, [state, currentRecordingId]);
+  }, [state.queue, state.recordings, currentRecordingId]);
 
   // The row-action seed: a metadata row seeds its own ref; a library
   // row seeds its first source ref. Gate matches the op's target.
