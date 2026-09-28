@@ -1325,7 +1325,7 @@ export class FakeSyncLogStore implements SyncLogStore {
   #divergence: DivergenceEntry[] = [];
   #watermarks: Record<string, number> = {};
   /** Per-sender peer-mark rows — last write replaces a sender's row. */
-  #peerMarks: Record<string, SyncCursor> = {};
+  #peerMarks = new Map<string, SyncCursor>();
   /** Cumulative prune frontier — the largest seq ever capped away. */
   #divergenceFloor = 0;
   /** Cumulative emissions by compaction-dropped entries (max-fold). */
@@ -1343,7 +1343,11 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#entries = [...initial.entries];
       this.#divergence = [...initial.divergence];
       this.#watermarks = { ...initial.watermarks };
-      this.#peerMarks = this.#clone(initial.peerMarks ?? {});
+      for (const [sender, marks] of Object.entries(
+        initial.peerMarks ?? {},
+      )) {
+        this.#peerMarks.set(sender, this.#clone(marks));
+      }
       this.#divergenceFloor = initial.divergenceFloor ?? 0;
       this.#divergenceReplayOffset = initial.divergenceReplayOffset ?? 0;
       for (const ordinal of initial.divergenceDroppedEmissions ?? []) {
@@ -1393,7 +1397,7 @@ export class FakeSyncLogStore implements SyncLogStore {
   }
 
   get storedPeerMarks(): Readonly<Record<string, SyncCursor>> {
-    return this.#clone(this.#peerMarks);
+    return this.#clone(Object.fromEntries(this.#peerMarks));
   }
 
   get storedDivergenceFloor(): number {
@@ -1427,7 +1431,7 @@ export class FakeSyncLogStore implements SyncLogStore {
           divergenceDroppedEmissions: [...this.#divergenceDroppedEmissions].sort(
             (a, b) => a - b,
           ),
-          peerMarks: this.#peerMarks,
+          peerMarks: Object.fromEntries(this.#peerMarks),
         }),
       ),
     );
@@ -1487,11 +1491,7 @@ export class FakeSyncLogStore implements SyncLogStore {
         !write.divergenceDroppedEmissions.every(
           (ordinal) => isSafeNonNegative(ordinal) && ordinal >= 1,
         )) ||
-      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks)) ||
-      (write.dropPeerMarkSenders !== undefined &&
-        !write.dropPeerMarkSenders.every(
-          (sender) => typeof sender === 'string',
-        ))
+      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks))
     ) {
       return err(
         appError('invalid-response', 'append batch failed validation'),
@@ -1533,14 +1533,9 @@ export class FakeSyncLogStore implements SyncLogStore {
         }
       }
     }
-    if (write.dropPeerMarkSenders !== undefined) {
-      for (const sender of write.dropPeerMarkSenders) {
-        delete this.#peerMarks[sender];
-      }
-    }
     if (write.peerMarks !== undefined) {
       for (const [sender, marks] of Object.entries(write.peerMarks)) {
-        this.#peerMarks[sender] = this.#clone(marks);
+        this.#peerMarks.set(sender, this.#clone(marks));
       }
     }
     if (write.dropDivergenceBefore !== undefined) {

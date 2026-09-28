@@ -357,7 +357,6 @@ export async function run(): Promise<void> {
     for (const write of [
       { peerMarks: { 'dsk-b': { 'dsk-a': 2 }, 'dsk-c': { 'dsk-a': 4 } } },
       { peerMarks: { 'dsk-b': {} } },
-      { dropPeerMarkSenders: ['dsk-c'] },
     ] as const) {
       const appended = await opened.value.store.append(write, ctx());
       assert(appended.ok);
@@ -370,7 +369,10 @@ export async function run(): Promise<void> {
     const loaded = await reopened.value.store.load(ctx());
     assert(loaded.ok);
     if (loaded.ok) {
-      assertDeepEqual(loaded.value.peerMarks, { 'dsk-b': {} });
+      assertDeepEqual(loaded.value.peerMarks, {
+        'dsk-b': {},
+        'dsk-c': { 'dsk-a': 4 },
+      });
     }
   }
 

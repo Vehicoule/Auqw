@@ -529,16 +529,11 @@ export type SyncLogWrite = {
    * write carries the sender's whole folded row so a live claim that
    * regresses a persisted row clears it wholesale — a rebuilt peer
    * must never merge fresh claims into what its lost instance held.
+   * On `applyDelta` the row rides the entries append itself, so a
+   * peer's presence lands atomically with the delta that carried its
+   * claim — an apply can only ack once the mark is durable.
    */
   readonly peerMarks?: Readonly<Record<string, SyncCursor>>;
-  /**
-   * Senders whose durable peer-mark rows this write removes: the
-   * bounded table emits them when a new claim evicts the
-   * least-recently-claimed senders. Deleting a row only forfeits the
-   * compaction pin a remembered peer carried — it can never credit a
-   * claim — so drops stay safe when replayed or delayed.
-   */
-  readonly dropPeerMarkSenders?: readonly string[];
 };
 
 /**
@@ -633,15 +628,6 @@ const MAX_RECORD_ID = 1024;
 const MAX_FIELD = 64;
 const MAX_DELTA_ENTRIES = 10_000;
 const MAX_CURSOR_DEVICES = 512;
-/**
- * The peer-mark table's sender bound. Distinct senders accumulate
- * over a device's lifetime (a reinstall mints a fresh deviceId), so
- * past the cap new claims evict the least-recently-claimed senders —
- * an eviction only forfeits a compaction pin, never credits a mark.
- * Matching the wire bound keeps every persisted table inside
- * `isPeerMarks`'s sender limit.
- */
-const MAX_PEER_MARK_SENDERS = MAX_CURSOR_DEVICES;
 /** Bounded loser history — diagnostics surfaces stay small. */
 export const DIVERGENCE_HISTORY_LIMIT = 500;
 
@@ -935,16 +921,18 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
 
 /**
  * The durable peer-mark table's shape: senders keyed by device id,
- * each row the sender's last advertised cursor. Sender count and row
- * bounds match the wire's so a corrupt snapshot can't mint unbounded
- * peer state.
+ * each row the sender's last advertised cursor. Rows keep the wire's
+ * source bound; the sender count is deliberately unbounded — the
+ * table is the floor that protects every remembered peer, so evicting
+ * a sender would let compaction drop entries it never received. A
+ * hard cap needs protocol-level peer retirement, which the wire does
+ * not carry.
  */
 export function isPeerMarks(
   value: unknown,
 ): value is Readonly<Record<string, SyncCursor>> {
   return (
     isRecord(value) &&
-    Object.keys(value).length <= MAX_CURSOR_DEVICES &&
     Object.keys(value).every((sender) => isString(sender, MAX_DEVICE_ID)) &&
     Object.values(value).every(isSyncCursor)
   );
@@ -1397,12 +1385,6 @@ export async function createSyncEngine(
    * it still needed to catch up.
    */
   const dirtyPeerMarkSenders = new Set<string>();
-  /**
-   * Senders evicted from the bounded table whose durable rows still
-   * await a delete. They ride the next peer-marks write; a pending
-   * drop simply never lands while writes keep failing.
-   */
-  const droppedPeerMarkSenders = new Set<string>();
   const seen = new Set<string>();
   /**
    * Per-device emission observation: `seenSeqs[d]` holds only
@@ -2018,10 +2000,18 @@ export async function createSyncEngine(
     skipped: Record<string, readonly number[]> | undefined,
     signal: CancellationSignal,
     deadlineMs: number,
+    peerMark?: { sender: string; marks: SyncCursor },
   ): Promise<Result<void>> {
     const write: SyncLogWrite = {
       entries,
       watermarks: prospectiveMarks(entries, skipped),
+      // The delta sender's folded claim rides the entries append — a
+      // peer's presence is durable iff the apply that carried it
+      // acked, so a restart can never forget a peer whose entries the
+      // log accepted while its mark sat uncommitted.
+      ...(peerMark === undefined
+        ? {}
+        : { peerMarks: { [peerMark.sender]: peerMark.marks } }),
     };
     const appended = await call(() =>
       store.append(write, context('sync-app', deadlineMs, signal)),
@@ -2034,6 +2024,9 @@ export async function createSyncEngine(
     commitSeqs(entries, skipped);
     for (const entry of entries) {
       indexEntry(entry);
+    }
+    if (peerMark !== undefined) {
+      dirtyPeerMarkSenders.delete(peerMark.sender);
     }
     return ok(undefined);
   }
@@ -2052,18 +2045,17 @@ export async function createSyncEngine(
   /**
    * Persist newly-detected divergence rows and prune the history once
    * it exceeds its bound. A compaction `plan` and pending peer-mark
-   * state ride the same durable write so the log deletes, the
-   * watermark claims, and the evicted senders' deletes land
-   * atomically with the merge's own writes — the in-memory lanes
-   * drop only after the append commits, so a transient failure
-   * leaves the log intact for the next plan.
+   * rows ride the same durable write so the log deletes and the
+   * watermark claims land atomically with the merge's own writes —
+   * the in-memory lanes drop only after the append commits, so a
+   * transient failure leaves the log intact for the next plan.
    *
    * Every pending peer-mark row re-issues on EVERY write — an
    * append is best-effort, so a sender stays flagged
    * (`dirtyPeerMarkSenders`) until a write carrying its row
-   * confirms, and evicted senders (`droppedPeerMarkSenders`) keep
-   * their delete pending the same way. Retries need no fresh claim:
-   * an unchanged cursor still emits the dirty rows here.
+   * confirms. Retries need no fresh claim: an unchanged cursor still
+   * emits the dirty rows here, and one sender's apply retries rows
+   * another sender left pending.
    */
   async function appendDivergence(
     rows: readonly DivergenceEntry[],
@@ -2072,20 +2064,16 @@ export async function createSyncEngine(
     deadlineMs: number,
   ): Promise<void> {
     const drops = plan?.dropped ?? [];
-    const pendingRows: Record<string, SyncCursor> = {};
+    // A Map — not a plain record — so a device literally named
+    // `__proto__` lands as data instead of mutating a prototype.
+    const pendingRows = new Map<string, SyncCursor>();
     for (const sender of dirtyPeerMarkSenders) {
       const row = peerMarks.get(sender);
       if (row !== undefined) {
-        pendingRows[sender] = Object.fromEntries(row);
+        pendingRows.set(sender, Object.fromEntries(row));
       }
     }
-    const pendingDrops = [...droppedPeerMarkSenders];
-    if (
-      rows.length === 0 &&
-      drops.length === 0 &&
-      Object.keys(pendingRows).length === 0 &&
-      pendingDrops.length === 0
-    ) {
+    if (rows.length === 0 && drops.length === 0 && pendingRows.size === 0) {
       return;
     }
     let dropBefore: number | undefined;
@@ -2117,11 +2105,8 @@ export async function createSyncEngine(
             : {}),
         }
         : {}),
-      ...(Object.keys(pendingRows).length > 0
-        ? { peerMarks: pendingRows }
-        : {}),
-      ...(pendingDrops.length > 0
-        ? { dropPeerMarkSenders: pendingDrops }
+      ...(pendingRows.size > 0
+        ? { peerMarks: Object.fromEntries(pendingRows) }
         : {}),
     };
     const appended = await call(() =>
@@ -2131,14 +2116,11 @@ export async function createSyncEngine(
       warn(`sync divergence history append failed: ${appended.error.kind}`);
       return;
     }
-    // The write confirmed — retire the pending state it carried.
-    // Ops serialize, so nothing could re-fold or re-evict between
-    // the snapshot above and this clearing.
-    for (const sender of Object.keys(pendingRows)) {
+    // The write confirmed — retire the pending rows it carried.
+    // Ops serialize, so nothing could re-fold between the snapshot
+    // above and this clearing.
+    for (const sender of pendingRows.keys()) {
       dirtyPeerMarkSenders.delete(sender);
-    }
-    for (const sender of pendingDrops) {
-      droppedPeerMarkSenders.delete(sender);
     }
     if (plan !== undefined) {
       commitCompaction(plan);
@@ -2153,44 +2135,21 @@ export async function createSyncEngine(
    * hydrate-restored staleness: whatever the durable table
    * remembered, the claims observed this session now govern.
    *
-   * Bounds: the table holds at most MAX_PEER_MARK_SENDERS senders —
-   * a new sender past it evicts the least-recently-claimed rows
-   * (stalest first, then the oldest-claim live row; iteration order
-   * tracks recency) — and a folded row holds at most
-   * MAX_CURSOR_DEVICES sources, keeping the largest marks. Either
-   * bound only forfeits a floor contribution: an evicted sender or
-   * dropped source contributes 0, which delays cleanup without ever
-   * crediting a claim.
+   * Bounds: a folded row holds at most MAX_CURSOR_DEVICES sources,
+   * keeping the largest marks — an ignored source contributes 0,
+   * which only delays that lane's cleanup without crediting a claim.
+   * The sender count stays unbounded on purpose: a sender's row is
+   * what stops compaction dropping entries that peer never received,
+   * so evicting one is a data-loss direction, and a safe cap would
+   * need protocol-level peer retirement the wire does not carry.
    */
   function notePeerCursor(sender: string, cursor: SyncCursor): void {
     let advanced = stalePeers.delete(sender);
-    // A pending delete from an earlier eviction supersedes — the
-    // fresh live claim writes its own row instead.
-    droppedPeerMarkSenders.delete(sender);
     let marks = peerMarks.get(sender);
     if (marks === undefined) {
-      while (
-        peerMarks.size + stalePeers.size >= MAX_PEER_MARK_SENDERS
-      ) {
-        const victim =
-          stalePeers.values().next().value ??
-          peerMarks.keys().next().value;
-        if (victim === undefined) {
-          break;
-        }
-        stalePeers.delete(victim);
-        peerMarks.delete(victim);
-        dirtyPeerMarkSenders.delete(victim);
-        droppedPeerMarkSenders.add(victim);
-      }
       marks = new Map<string, number>();
       peerMarks.set(sender, marks);
       advanced = true;
-    } else {
-      // Re-insert to move the sender to the map's tail — iteration
-      // order then tracks least-recently-claimed for eviction.
-      peerMarks.delete(sender);
-      peerMarks.set(sender, marks);
     }
     for (const [src, mark] of Object.entries(cursor)) {
       const current = marks.get(src) ?? 0;
@@ -2800,7 +2759,25 @@ export async function createSyncEngine(
         }
       }
 
-      const appended = await appendLog(fresh, doc.skipped, sig, deadlineMs);
+      // The sender's cursor is its own contiguous watermark claim —
+      // folded before the entries append so the row rides that same
+      // durable write: a peer's presence lands atomically with the
+      // delta carrying its claim, and an apply that can't persist the
+      // mark errors out rather than acking without it. Once every
+      // observed peer advertises a seq as held, a dead log row below
+      // the floor can never be needed again and is dropped from both
+      // the in-memory lanes and durable sync_log.
+      notePeerCursor(doc.senderDeviceId, doc.cursor);
+      const foldedRow = peerMarks.get(doc.senderDeviceId);
+      const appended = await appendLog(
+        fresh,
+        doc.skipped,
+        sig,
+        deadlineMs,
+        foldedRow === undefined
+          ? undefined
+          : { sender: doc.senderDeviceId, marks: Object.fromEntries(foldedRow) },
+      );
       if (!appended.ok) {
         return err(appended.error);
       }
@@ -2817,14 +2794,6 @@ export async function createSyncEngine(
       } catch (thrown) {
         return err(fromUnknown(thrown));
       }
-      // The sender's cursor is its own contiguous watermark claim —
-      // once every observed peer advertises a seq as held, a dead log
-      // row below the floor can never be needed again and is dropped
-      // from both the in-memory lanes and durable sync_log. The
-      // folded row re-persists via the same write, retrying until a
-      // store append confirms it so a restart remembers which peers
-      // still owe a fresh claim.
-      notePeerCursor(doc.senderDeviceId, doc.cursor);
       const compaction = planCompaction();
       await appendDivergence(divs, compaction, sig, deadlineMs);
       // Attach the post-merge materialized truth per applied record —

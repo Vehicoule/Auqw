@@ -197,7 +197,9 @@ export class SqliteSyncLogStore implements SyncLogStore {
           undefined,
           context.signal,
         );
-        const peerMarks: Record<string, SyncCursor> = {};
+        // A Map — not a plain record — so a stored sender literally
+        // named `__proto__` folds as data, not a prototype write.
+        const peerMarks = new Map<string, SyncCursor>();
         for (const row of peerMarkRows) {
           const sender = row['sender'];
           let marks: unknown;
@@ -219,9 +221,10 @@ export class SqliteSyncLogStore implements SyncLogStore {
               ),
             );
           }
-          peerMarks[sender] = marks;
+          peerMarks.set(sender, marks);
         }
-        if (!isPeerMarks(peerMarks)) {
+        const peerMarksTable = Object.fromEntries(peerMarks);
+        if (!isPeerMarks(peerMarksTable)) {
           return err(
             appError(
               'invalid-response',
@@ -236,7 +239,7 @@ export class SqliteSyncLogStore implements SyncLogStore {
           divergenceFloor,
           divergenceReplayOffset,
           divergenceDroppedEmissions,
-          peerMarks,
+          peerMarks: peerMarksTable,
         });
       }, context.signal);
     } catch (thrown) {
@@ -267,11 +270,7 @@ export class SqliteSyncLogStore implements SyncLogStore {
         !write.divergenceDroppedEmissions.every(
           (emission) => isSafeInt(emission) && emission >= 1,
         )) ||
-      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks)) ||
-      (write.dropPeerMarkSenders !== undefined &&
-        !write.dropPeerMarkSenders.every(
-          (sender) => typeof sender === 'string',
-        ))
+      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -354,17 +353,6 @@ export class SqliteSyncLogStore implements SyncLogStore {
               `INSERT INTO sync_watermarks (device_id, mark) VALUES (?, ?)
                ON CONFLICT (device_id) DO UPDATE SET mark = MAX(mark, excluded.mark)`,
               [device, mark],
-              context.signal,
-            );
-          }
-        }
-        if (write.dropPeerMarkSenders !== undefined) {
-          // Bounded-table evictions delete the whole remembered row —
-          // forfeiting only the compaction pin, never a claim.
-          for (const sender of write.dropPeerMarkSenders) {
-            await conn.execute(
-              'DELETE FROM sync_peer_marks WHERE sender = ?',
-              [sender],
               context.signal,
             );
           }

@@ -2575,27 +2575,48 @@ async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
     return realAppend(write, context);
   };
   const a = await makeEngine('a', 1_000, store);
+  armed = true;
+  // The sender's mark rides the entries append itself, so a failed
+  // write refuses the whole apply rather than acking with the peer's
+  // presence still only in memory — after a restart the table would
+  // remember nothing about 'b' and compaction could drop entries it
+  // still needed to catch up.
+  const refused = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: { a: 1 },
+  });
+  assert(!refused.ok, 'apply fails when the mark cannot commit');
+  assert(a.store.storedPeerMarks['b'] === undefined);
   await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 1 } });
   assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  assert(
+    a.store.writes.some(
+      (w) =>
+        w.write.entries !== undefined &&
+        w.write.peerMarks?.['b'] !== undefined,
+    ),
+    'the mark rode the entries append',
+  );
+  // A mark update that fails to persist stays flagged and re-issues
+  // on any later write — even another sender's divergence append.
   armed = true;
-  // The peer-mark write fails — the folded row must stay pending
-  // rather than being silently forgotten, or a restart would
-  // remember nothing about 'b' and compaction could drop entries
-  // the peer still needed to catch up.
-  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  const refused2 = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: { a: 2 },
+  });
+  assert(!refused2.ok);
   assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
-  // An unchanged cursor still retries the pending row — the flag
-  // only clears when a write carrying it confirms.
-  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 1 } });
   assertDeepEqual(a.store.storedPeerMarks['b'], { a: 2 });
+  assertDeepEqual(a.store.storedPeerMarks['c'], { a: 1 });
 }
 
-async function peerMarkTableEvictsLeastRecent(): Promise<void> {
+async function peerMarkTableAcceptsUnboundedSenders(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   // Distinct senders accumulate over a device's lifetime — the table
-  // must bound them: past the cap the least-recently-claimed rows
-  // evict, keeping the durable table inside isPeerMarks' sender
-  // bound so a restart can always hydrate.
+  // must NOT bound them: a sender's row is what stops compaction
+  // dropping entries that peer still needs, so every heard sender
+  // stays and a restart hydrates whatever was stored.
   for (let i = 0; i < 515; i++) {
     await mustApply(a.engine, {
       ...delta([], `dev-${i}`),
@@ -2603,16 +2624,11 @@ async function peerMarkTableEvictsLeastRecent(): Promise<void> {
     });
   }
   const stored = a.store.storedPeerMarks;
-  assert(
-    Object.keys(stored).length <= 512,
-    `stored table must stay bounded, got ${Object.keys(stored).length}`,
-  );
-  assert(stored['dev-0'] === undefined, 'oldest claim evicted');
-  assert(stored['dev-2'] === undefined, 'third claim evicted');
-  assertDeepEqual(stored['dev-3'], { a: 4 });
+  assertEqual(Object.keys(stored).length, 515);
+  assertDeepEqual(stored['dev-0'], { a: 1 });
   assertDeepEqual(stored['dev-514'], { a: 515 });
-  // The persisted table stayed inside the bound a load validates —
-  // a restart hydrates instead of wedging sync startup.
+  // The persisted table is exactly the shape the earlier sender cap
+  // rejected: a restart must hydrate all 515 rows, not wedge startup.
   await makeEngine('a', 2_000, a.store);
 }
 
@@ -2636,6 +2652,18 @@ async function peerMarkRowClamps(): Promise<void> {
   assert(row['src-599'] === 1599, 'largest marks kept');
   assert(row['src-88'] === 89, 'above-minimum marks kept');
   assert(row['src-0'] === undefined, 'smallest mark displaced');
+}
+
+async function peerMarkSenderNamedProto(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A device id colliding with the object-prototype key must persist
+  // as data — a plain-record accumulator would mutate its prototype
+  // and silently drop the peer from the durable table.
+  await mustApply(a.engine, {
+    ...delta([], '__proto__'),
+    cursor: { a: 1 },
+  });
+  assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
 }
 
 async function logCompaction(): Promise<void> {
@@ -2874,7 +2902,8 @@ export async function run(): Promise<void> {
   await peerMarksSurviveRestart();
   await rebuiltPeerDropsStaleMarks();
   await peerMarkWriteRetriesUntilDurable();
-  await peerMarkTableEvictsLeastRecent();
+  await peerMarkTableAcceptsUnboundedSenders();
   await peerMarkRowClamps();
+  await peerMarkSenderNamedProto();
   await propertyHarness();
 }
