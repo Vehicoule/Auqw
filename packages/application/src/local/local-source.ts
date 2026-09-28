@@ -132,6 +132,13 @@ export class LocalFileSource {
   #sources: LocalSource[];
   #files: LocalFile[];
   #recordings: Recording[];
+  /**
+   * `uriFor` materialized once per commit: render paths call it per
+   * row, so they read this index (O(1)) instead of scanning the file
+   * index per lookup. Swapped whole whenever `#sources`/`#files`
+   * change — never mutated in place.
+   */
+  #uriByRecording: Map<string, string>;
   /** Serializes scans: at most one per source at a time. */
   readonly #scans = new Map<string, Promise<unknown>>();
   /** Serializes every write to the owned sections — a commit merges
@@ -154,6 +161,7 @@ export class LocalFileSource {
     this.#sources = [...state.localSources];
     this.#files = [...state.localFiles];
     this.#recordings = [...state.recordings];
+    this.#uriByRecording = this.#indexUris();
   }
 
   /**
@@ -178,15 +186,41 @@ export class LocalFileSource {
    * no live file row serves the recording (offline-fail path).
    */
   uriFor(recordingId: string): string | null {
-    const row = this.#files.find((f) => f.recordingId === recordingId);
-    if (row === undefined) {
-      return null;
+    return this.#uriByRecording.get(recordingId) ?? null;
+  }
+
+  /**
+   * The playable-URI index itself for per-row render paths — same
+   * truth as `uriFor`, O(1) per recording, stable identity between
+   * commits so callers can hoist it out of row loops.
+   */
+  uriMap(): ReadonlyMap<string, string> {
+    return this.#uriByRecording;
+  }
+
+  /**
+   * First file row per recording wins, same as `uriFor`'s `find`;
+   * a row whose source vanished resolves nothing (the null case).
+   */
+  #indexUris(): Map<string, string> {
+    const treeBySource = new Map(
+      this.#sources.map((s) => [s.sourceId, s.treeUri]),
+    );
+    const map = new Map<string, string>();
+    for (const row of this.#files) {
+      if (map.has(row.recordingId)) {
+        continue;
+      }
+      const treeUri = treeBySource.get(row.sourceId);
+      if (treeUri === undefined) {
+        continue;
+      }
+      map.set(
+        row.recordingId,
+        this.#tagReader.docUri(treeUri, row.docId),
+      );
     }
-    const source = this.#sources.find((s) => s.sourceId === row.sourceId);
-    if (source === undefined) {
-      return null;
-    }
-    return this.#tagReader.docUri(source.treeUri, row.docId);
+    return map;
   }
 
   /**
@@ -347,6 +381,7 @@ export class LocalFileSource {
       }
       this.#sources = next.sources;
       this.#files = next.files;
+      this.#uriByRecording = this.#indexUris();
       if (applied !== null) {
         this.#recordings = applied;
       }
